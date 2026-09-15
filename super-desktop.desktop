@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Super Desktop
+GenericName=Sticky Notes & AI Terminals
+Comment=Overlay workspace with sticky notes and AI agent terminals for Omarchy
+Exec=/home/gladimdim/.local/bin/super-desktop toggle
+Icon=utilities-terminal
+Terminal=false
+Type=Application
+Categories=Utility;Development;ConsoleOnly;
+Keywords=notes;terminal;ai;agents;omarchy;hyprland;overlay;
+StartupNotify=false

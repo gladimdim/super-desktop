@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# SUPER DESKTOP - Launch wrapper
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Ensure GTK4 Layer Shell library is preloaded
+LAYER_SHELL_LIB="/usr/lib/libgtk4-layer-shell.so"
+if [[ -f "$LAYER_SHELL_LIB" ]]; then
+    if [[ ":$LD_PRELOAD:" != *":$LAYER_SHELL_LIB:"* ]]; then
+        export LD_PRELOAD="$LAYER_SHELL_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+fi
+
+# Ensure repository root is on PYTHONPATH
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+
+# Execute Python main module
+exec python3 -m super_desktop.main "$@"
