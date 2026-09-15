@@ -38,6 +38,10 @@ class SuperDesktopWindow(Gtk.ApplicationWindow):
         self.screen_width: int = 2560
         self.screen_height: int = 1600
 
+        # Frame-tick synchronized drag tracking (prevents event flood at 1000Hz mouse polling)
+        self._drag_pending: Dict[Gtk.Widget, tuple] = {}
+        self._drag_tick_active: bool = False
+
         self._init_layer_shell()
         self._init_ui()
         self._load_saved_items()
@@ -266,11 +270,29 @@ class SuperDesktopWindow(Gtk.ApplicationWindow):
     # ================= Drag & State Updates ================= #
 
     def _on_item_drag_update(self, widget: Gtk.Widget, new_x: float, new_y: float) -> None:
-        clamped_x = max(10, min(self.screen_width - 80, new_x))
-        clamped_y = max(70, min(self.screen_height - 60, new_y))
-        self.canvas.move(widget, clamped_x, clamped_y)
+        clamped_x = max(10.0, min(float(self.screen_width - 80), new_x))
+        clamped_y = max(70.0, min(float(self.screen_height - 60), new_y))
+        self._drag_pending[widget] = (clamped_x, clamped_y)
+        if not self._drag_tick_active:
+            self._drag_tick_active = True
+            self.canvas.add_tick_callback(self._on_drag_tick)
+
+    def _on_drag_tick(self, widget: Gtk.Widget, frame_clock: Gdk.FrameClock) -> bool:
+        if not self._drag_pending:
+            self._drag_tick_active = False
+            return False
+        pending = list(self._drag_pending.items())
+        self._drag_pending.clear()
+        for w, (px, py) in pending:
+            self.canvas.move(w, px, py)
+        return True
 
     def _on_item_drag_end(self, widget: Gtk.Widget) -> None:
+        # Flush any pending drag position immediately
+        if widget in self._drag_pending:
+            px, py = self._drag_pending.pop(widget)
+            self.canvas.move(widget, px, py)
+
         if isinstance(widget, StickyNote):
             self.state_mgr.upsert_note(widget.note_data)
         elif isinstance(widget, MiniTerminalCard):
