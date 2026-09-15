@@ -4,21 +4,22 @@ Entry point and CLI controller for SUPER DESKTOP.
 Implements Unix domain socket IPC for instantaneous toggling via Hyprland shortcuts (SUPER + SHIFT + Q).
 """
 
+import os
+import sys
+
+# Ensure LD_PRELOAD is active before GTK is imported
+LAYER_SHELL_LIB = "/usr/lib/libgtk4-layer-shell.so"
+if os.path.exists(LAYER_SHELL_LIB) and LAYER_SHELL_LIB not in os.environ.get("LD_PRELOAD", ""):
+    new_env = dict(os.environ)
+    new_env["LD_PRELOAD"] = f"{LAYER_SHELL_LIB}:{os.environ.get('LD_PRELOAD', '')}".strip(":")
+    os.execve(sys.executable, [sys.executable] + sys.argv, new_env)
+
 import argparse
 import json
-import os
 import socket
-import sys
 import threading
 import time
 from typing import Optional
-
-# Ensure LD_PRELOAD is present for GTK4 LayerShell
-LAYER_SHELL_LIB = "/usr/lib/libgtk4-layer-shell.so"
-if os.path.exists(LAYER_SHELL_LIB):
-    current_preload = os.environ.get("LD_PRELOAD", "")
-    if LAYER_SHELL_LIB not in current_preload:
-        os.environ["LD_PRELOAD"] = f"{LAYER_SHELL_LIB}:{current_preload}".strip(":")
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -68,17 +69,53 @@ class SuperDesktopApp(Gtk.Application):
         self.sock_path = get_socket_path()
         self._server_sock: Optional[socket.socket] = None
         self._running = True
+        self._last_toggle_time: float = 0.0
 
     def do_activate(self) -> None:
+        # Keep daemon alive even when overlay window is closed
+        self.hold()
         apply_styles()
-        if not self.window:
-            self.window = SuperDesktopWindow(self)
-            self._start_ipc_server()
+        self._start_ipc_server()
 
         if self.start_visible:
-            self.window.show_overlay()
+            self.show_overlay()
+
+    def show_overlay(self) -> None:
+        """Create and display overlay window."""
+        if self.window is not None:
+            return
+
+        self.window = SuperDesktopWindow(self, on_request_close=self.hide_overlay)
+        self.window.present()
+        self.window.start_slide_in_animation()
+
+    def hide_overlay(self) -> None:
+        """Animate out and destroy overlay window to free compositor layer."""
+        if self.window is None:
+            return
+
+        win_to_close = self.window
+
+        def _on_finish():
+            if self.window == win_to_close:
+                self.window.close()
+                self.window = None
+
+        win_to_close.start_slide_out_animation(on_finish=_on_finish)
+
+    def toggle_overlay(self) -> bool:
+        """Toggle overlay between visible and hidden with debounce protection."""
+        now = time.time()
+        if now - self._last_toggle_time < 0.45:  # 450ms debounce
+            return self.window is not None
+        self._last_toggle_time = now
+
+        if self.window is not None:
+            self.hide_overlay()
+            return False
         else:
-            self.window.set_visible(False)
+            self.show_overlay()
+            return True
 
     def _start_ipc_server(self) -> None:
         """Start background Unix socket listener thread."""
@@ -126,38 +163,42 @@ class SuperDesktopApp(Gtk.Application):
         parts = cmd_line.split()
         cmd = parts[0].lower() if parts else "toggle"
 
-        if not self.window:
-            return json.dumps({"ok": False, "error": "window_not_ready"})
-
         if cmd == "toggle":
-            is_vis = self.window.toggle_overlay()
+            is_vis = self.toggle_overlay()
             return json.dumps({"ok": True, "visible": is_vis})
         elif cmd == "show":
-            self.window.show_overlay()
+            self.show_overlay()
             return json.dumps({"ok": True, "visible": True})
         elif cmd == "hide":
-            self.window.hide_overlay()
+            self.hide_overlay()
             return json.dumps({"ok": True, "visible": False})
         elif cmd == "status":
+            is_vis = self.window is not None
+            notes_count = len(self.window.note_widgets) if self.window else 0
+            terminals_count = len(self.window.terminal_widgets) if self.window else 0
+            terms = [
+                {"id": t.term_id, "agent": t.agent_type, "session": t.session_name}
+                for t in (self.window.terminal_widgets if self.window else [])
+            ]
             return json.dumps({
                 "ok": True,
-                "visible": self.window.is_overlay_visible,
-                "notes_count": len(self.window.note_widgets),
-                "terminals_count": len(self.window.terminal_widgets),
-                "terminals": [
-                    {"id": t.term_id, "agent": t.agent_type, "session": t.session_name}
-                    for t in self.window.terminal_widgets
-                ],
+                "visible": is_vis,
+                "notes_count": notes_count,
+                "terminals_count": terminals_count,
+                "terminals": terms,
             })
         elif cmd == "add-note":
+            self.show_overlay()
             text = " ".join(parts[1:]) if len(parts) > 1 else "New note..."
             note = self.window.create_new_note(text=text)
             return json.dumps({"ok": True, "note_id": note.note_id})
         elif cmd == "add-term":
+            self.show_overlay()
             agent = parts[1] if len(parts) > 1 else "shell"
             term = self.window.create_new_terminal(agent_type=agent)
             return json.dumps({"ok": True, "terminal_id": term.term_id, "session": term.session_name})
         elif cmd in ("quit", "kill"):
+            self.release()
             GLib.idle_add(lambda: self.quit())
             return json.dumps({"ok": True, "action": "quitting"})
 
@@ -190,7 +231,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # If action is 'daemon' or 'start', run GUI in foreground
     if args.action in ("daemon", "start"):
         app = SuperDesktopApp(start_visible=(args.action == "start"))
         app.run([])
@@ -222,25 +262,17 @@ def main() -> None:
 
     # Daemon not running
     if args.action in ("toggle", "show"):
-        # Spawn daemon in background and show
         import subprocess
-        python_bin = sys.executable
         script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         bin_script = os.path.join(script_dir, "bin", "super-desktop")
 
-        env = dict(os.environ)
-        if os.path.exists(LAYER_SHELL_LIB):
-            env["LD_PRELOAD"] = f"{LAYER_SHELL_LIB}:{env.get('LD_PRELOAD', '')}".strip(":")
-
         subprocess.Popen(
-            [python_bin, "-m", "super_desktop.main", "daemon"],
+            [bin_script, "daemon"],
             cwd=script_dir,
-            env=env,
             start_new_session=True,
         )
 
-        # Wait briefly for socket and toggle
-        for _ in range(25):
+        for _ in range(30):
             time.sleep(0.08)
             resp = send_ipc_command("show")
             if resp:
