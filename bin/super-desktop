@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SUPER DESKTOP - Launch wrapper
+# SUPER DESKTOP - Native Rust / Python launcher
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
@@ -12,8 +12,12 @@ if [[ -f "$LAYER_SHELL_LIB" ]]; then
     fi
 fi
 
-# Ensure repository root is on PYTHONPATH
-export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
+# Prefer high-performance compiled Rust native binary (685KB, 240Hz frame-tick dragging)
+RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"
+if [[ -x "$RUST_BIN" ]]; then
+    exec "$RUST_BIN" "$@"
+fi
 
-# Execute Python main module
+# Fallback to Python module
+export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
 exec python3 -m super_desktop.main "$@"

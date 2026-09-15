@@ -1,0 +1,87 @@
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteData {
+    pub id: String,
+    pub text: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub color: String,
+    pub updated_at: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalData {
+    pub id: String,
+    pub session_name: String,
+    pub agent_type: String,
+    pub command: String,
+    pub x: i32,
+    pub y: i32,
+    pub created_at: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppState {
+    pub notes: Vec<NoteData>,
+    pub terminals: Vec<TerminalData>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            notes: vec![NoteData {
+                id: "welcome_note".to_string(),
+                text: "✨ Welcome to SUPER DESKTOP (Rust Edition)!\n\n• Shortcut: SUPER + SHIFT + Q to show / hide.\n• Drag: Grab any header to reposition smoothly!\n• Double-click background to create a new note.\n• Double-click terminal cards to open in fullscreen foot.\n• Built in Rust for maximum 240Hz responsiveness.".to_string(),
+                x: 80,
+                y: 140,
+                width: 300,
+                height: 230,
+                color: "yellow".to_string(),
+                updated_at: 0.0,
+            }],
+            terminals: Vec::new(),
+        }
+    }
+}
+
+fn get_home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+pub fn get_state_path() -> PathBuf {
+    let mut path = get_home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    path.push(".config");
+    path.push("super-desktop");
+    let _ = fs::create_dir_all(&path);
+    path.push("state.json");
+    path
+}
+
+pub fn load_state() -> AppState {
+    let path = get_state_path();
+    if path.exists() {
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(state) = serde_json::from_str::<AppState>(&content) {
+                return state;
+            }
+        }
+    }
+    let default_state = AppState::default();
+    save_state(&default_state);
+    default_state
+}
+
+pub fn save_state(state: &AppState) {
+    let path = get_state_path();
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let temp_path = path.with_extension("tmp");
+        if fs::write(&temp_path, json).is_ok() {
+            let _ = fs::rename(temp_path, path);
+        }
+    }
+}
