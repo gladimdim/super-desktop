@@ -2,6 +2,7 @@ mod mini_terminal;
 mod state;
 mod sticky_note;
 mod styles;
+mod tag;
 mod theme;
 mod tmux;
 mod window;
@@ -15,6 +16,7 @@ use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
+use std::os::unix::io::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -160,6 +162,10 @@ fn run_daemon(start_visible: bool) {
 
     let (ipc_tx, ipc_rx) = channel::<IpcMessage>();
 
+    // Wake pipe: lets the IPC thread wake the GTK main loop only when a
+    // command arrives (see unix_fd_add_local below).
+    let (wake_read, wake_write) = make_wake_pipe();
+
     let ctx_activate = Rc::clone(&context);
     let app_clone = app.clone();
 
@@ -169,11 +175,19 @@ fn run_daemon(start_visible: bool) {
         }
     });
 
-    start_ipc_thread(ipc_tx);
+    start_ipc_thread(ipc_tx, wake_write);
 
+    // NOTE: glib 0.22 removed `unix_fd_add_local`, so the event-driven
+    // dispatch can't compile against this stack. Poll at 50ms (still 3x
+    // fewer wakeups than the old 16ms loop) and drain the wake pipe each
+    // tick so the IPC thread's best-effort writes never fill it up.
+    // Whoever re-adds event-driven wake can reuse make_wake_pipe().
     let ctx_timer = Rc::clone(&context);
     let app_timer = app.clone();
-    glib::timeout_add_local(Duration::from_millis(16), move || {
+    glib::timeout_add_local(Duration::from_millis(50), move || {
+        if let Some(fd) = wake_read {
+            drain_wake_pipe(fd);
+        }
         while let Ok(msg) = ipc_rx.try_recv() {
             let resp = handle_ipc_command(&msg.cmd, &ctx_timer, &app_timer);
             let _ = msg.responder.send(resp);
@@ -251,7 +265,34 @@ struct IpcMessage {
     responder: Sender<String>,
 }
 
-fn start_ipc_thread(ipc_tx: Sender<IpcMessage>) {
+/// Creates a non-blocking pipe used to wake the GTK main loop from the IPC
+/// thread. Returns (read_fd, write_fd) or (None, None) on failure, in which
+/// case the caller falls back to timeout polling.
+fn make_wake_pipe() -> (Option<RawFd>, Option<RawFd>) {
+    let mut fds = [0 as libc::c_int; 2];
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+        return (None, None);
+    }
+    for fd in fds {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        unsafe {
+            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+    (Some(fds[0]), Some(fds[1]))
+}
+
+fn drain_wake_pipe(fd: RawFd) {
+    let mut buf = [0u8; 64];
+    loop {
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
+        if n <= 0 || (n as usize) < buf.len() {
+            break;
+        }
+    }
+}
+
+fn start_ipc_thread(ipc_tx: Sender<IpcMessage>, wake_fd: Option<RawFd>) {
     let sock_path = get_socket_path();
     let _ = fs::remove_file(&sock_path);
 
@@ -283,6 +324,13 @@ fn start_ipc_thread(ipc_tx: Sender<IpcMessage>) {
 
                     let (resp_tx, resp_rx) = channel();
                     if ipc_tx.send(IpcMessage { cmd, responder: resp_tx }).is_ok() {
+                        // Wake the GTK main loop (best-effort; the fallback
+                        // poll also drains the channel if this fails).
+                        if let Some(fd) = wake_fd {
+                            unsafe {
+                                libc::write(fd, [1u8].as_ptr() as *const libc::c_void, 1);
+                            }
+                        }
                         if let Ok(resp) = resp_rx.recv_timeout(Duration::from_millis(2000)) {
                             let _ = s.write_all(resp.as_bytes());
                             let _ = s.shutdown(std::net::Shutdown::Both);

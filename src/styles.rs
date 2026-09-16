@@ -48,7 +48,7 @@ window.super-desktop-window {{
     padding: 5px 12px;
     font-size: 12px;
     font-weight: 600;
-    transition: all 180ms ease;
+    transition: background-color 150ms ease, border-color 150ms ease;
 }}
 
 .hud-button:hover {{
@@ -84,16 +84,25 @@ window.super-desktop-window {{
     background-color: {note_bg};
     border: 1px solid {note_border};
     border-radius: 14px;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.25);
-    transition: box-shadow 200ms ease;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+    transition: border-color 150ms ease;
 }}
 
 .sticky-note:hover {{
-    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.6), 0 0 14px {term_hover_glow};
+    border-color: {accent};
 }}
 
 .sticky-note:focus-within {{
-    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.6), 0 0 0 2px {accent};
+    border-color: {accent};
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45), 0 0 0 2px {accent};
+}}
+
+/* Perf: while a card is dragged at 120Hz, kill every animated effect so
+   each frame is a plain translated blit with no shadow re-raster. */
+.sticky-note.dragging,
+.mini-terminal.dragging {{
+    transition: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
 }}
 
 .note-header {{
@@ -125,13 +134,61 @@ window.super-desktop-window {{
     border-radius: 6px;
     font-size: 11px;
     opacity: 0.85;
-    transition: opacity 150ms ease, background-color 150ms ease, color 150ms ease;
+    transition: opacity 150ms ease, background-color 150ms ease;
 }}
 
 .note-header-btn:hover {{
     opacity: 1.0;
     color: {bright_foreground};
     background-color: {btn_hover_bg};
+}}
+
+/* ================= Group Color Tags (notes + terminals) ================= */
+.tag-dot {{
+    min-width: 14px;
+    min-height: 14px;
+    border-radius: 9999px;
+    padding: 0;
+    border: 1.5px solid {btn_border};
+}}
+
+.tag-dot:hover {{
+    border-color: {bright_foreground};
+}}
+
+.tag-dot-none {{
+    background-color: transparent;
+    border-style: dashed;
+    opacity: 0.55;
+}}
+
+.tag-dot-1 {{ background-color: #f87171; border-color: #f87171; }}
+.tag-dot-2 {{ background-color: #fb923c; border-color: #fb923c; }}
+.tag-dot-3 {{ background-color: #facc15; border-color: #facc15; }}
+.tag-dot-4 {{ background-color: #4ade80; border-color: #4ade80; }}
+.tag-dot-5 {{ background-color: #22d3ee; border-color: #22d3ee; }}
+.tag-dot-6 {{ background-color: #60a5fa; border-color: #60a5fa; }}
+.tag-dot-7 {{ background-color: #c084fc; border-color: #c084fc; }}
+.tag-dot-8 {{ background-color: #f472b6; border-color: #f472b6; }}
+
+.tag-pop-box {{
+    padding: 8px;
+}}
+
+.tag-swatch {{
+    min-width: 22px;
+    min-height: 22px;
+    border-radius: 9999px;
+    padding: 0;
+}}
+
+.tag-swatch:hover {{
+    border-color: #ffffff;
+}}
+
+.tag-swatch.tag-selected {{
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.45);
 }}
 
 .note-content-area {{
@@ -163,29 +220,29 @@ window.super-desktop-window {{
     background-color: {term_card_bg};
     border-radius: 14px;
     padding: 0;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55), 0 0 1px {term_card_border};
-    transition: box-shadow 180ms ease;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+    transition: border-color 150ms ease;
 }}
 
 .mini-terminal:hover {{
-    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.65), 0 0 14px {term_hover_glow};
+    border-color: {accent};
 }}
 
 .mini-terminal:focus-within {{
-    box-shadow: 0 14px 42px rgba(0, 0, 0, 0.7), 0 0 0 1.5px {accent};
+    border-color: {accent};
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1.5px {accent};
 }}
 
 .mini-terminal.term-expanded {{
-    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.72), 0 0 0 1px {term_expand_glow};
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 0 1px {term_expand_glow};
 }}
 
 .mini-terminal.term-resizing,
 .mini-terminal.term-compact.term-resizing {{
-    opacity: 0.45;
-    box-shadow: 0 14px 42px rgba(0, 0, 0, 0.7), 0 0 24px {term_hover_glow};
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
     outline: 2.5px dashed {accent};
     outline-offset: 2px;
-    transition: opacity 120ms ease;
+    transition: none;
 }}
 
 /* ================= Window Resize Ghost & Rulers ================= */
@@ -193,7 +250,7 @@ window.super-desktop-window {{
     border: 3.5px dashed {accent};
     border-radius: 14px;
     background-color: {ghost_bg};
-    box-shadow: 0 0 36px {ghost_shadow}, 0 0 0 1.5px rgba(0, 0, 0, 0.85), inset 0 0 24px {ghost_inset};
+    box-shadow: 0 0 18px {ghost_shadow}, 0 0 0 1.5px rgba(0, 0, 0, 0.85);
 }}
 
 .term-resize-ghost.ghost-icon {{
@@ -202,7 +259,7 @@ window.super-desktop-window {{
     border-width: 3.5px;
     border-style: dashed;
     background-color: {ghost_icon_bg};
-    box-shadow: 0 0 36px {ghost_icon_shadow}, 0 0 0 1.5px rgba(0, 0, 0, 0.85), inset 0 0 24px {ghost_icon_inset};
+    box-shadow: 0 0 18px {ghost_icon_shadow}, 0 0 0 1.5px rgba(0, 0, 0, 0.85);
 }}
 
 .term-ghost-label {{
@@ -211,19 +268,17 @@ window.super-desktop-window {{
     font-size: 14px;
     font-weight: 800;
     letter-spacing: 0.5px;
-    text-shadow: 0 0 12px {ghost_shadow};
     background-color: {ghost_label_bg};
     border-radius: 10px;
     padding: 8px 18px;
     border: 2px solid {ghost_label_border};
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75), 0 0 14px {ghost_shadow};
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
 }}
 
 .term-resize-ghost.ghost-icon .term-ghost-label {{
     color: {bright_blue};
-    text-shadow: 0 0 12px {ghost_icon_shadow};
     border-color: {ghost_icon_border};
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.75), 0 0 14px {ghost_icon_shadow};
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
 }}
 
 .mini-terminal.term-compact {{
@@ -359,7 +414,7 @@ window.super-desktop-window {{
     padding: 3px 6px;
     border-radius: 6px;
     font-size: 11px;
-    transition: all 150ms ease;
+    transition: background-color 150ms ease;
 }}
 
 .term-btn:hover {{
@@ -427,16 +482,12 @@ window.super-desktop-window {{
         note_content_bg = theme.rgba_dark_bg(0.90),
         selection = theme.selection,
         term_card_bg = theme.rgba_dark_bg(0.94),
-        term_card_border = theme.rgba_muted(0.40),
-        term_hover_glow = theme.rgba_accent(0.25),
         term_expand_glow = theme.rgba_accent(0.35),
         ghost_bg = theme.rgba_dark_bg(0.60),
         ghost_shadow = theme.rgba_accent(0.55),
-        ghost_inset = theme.rgba_accent(0.20),
         bright_blue = theme.bright_blue,
         ghost_icon_bg = theme.rgba_darker_bg(0.70),
         ghost_icon_shadow = OmarchyTheme::hex_to_rgba(&theme.bright_blue, 0.60),
-        ghost_icon_inset = OmarchyTheme::hex_to_rgba(&theme.bright_blue, 0.22),
         font_family = theme.font_family,
         ghost_label_bg = theme.rgba_darker_bg(0.88),
         ghost_label_border = theme.rgba_accent(0.85),

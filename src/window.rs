@@ -12,15 +12,25 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::mini_terminal::{expanded_rect, MiniTerminalCard, CARD_HEIGHT, CARD_WIDTH};
-use crate::state::{load_state, save_state, AppState, NoteData, TerminalData};
+use crate::state::{load_state, AppState, NoteData, TerminalData};
 use crate::sticky_note::StickyNote;
 use crate::tmux::{create_session, kill_session};
 
+#[derive(Clone, Copy)]
 struct Trajectory {
     sx: f64,
     sy: f64,
     tx: f64,
     ty: f64,
+}
+
+/// Sets the HUD counts label only when the text actually changed.
+/// Unconditional set_label() queues a relayout of the HUD bar.
+fn set_counts_label(badge: &Label, notes: usize, terms: usize) {
+    let text = format!("{} Notes • {} Terminals", notes, terms);
+    if badge.label().as_str() != text.as_str() {
+        badge.set_label(&text);
+    }
 }
 
 pub struct SuperDesktopWindow {
@@ -301,6 +311,7 @@ impl SuperDesktopWindow {
             height: 200,
             color: "omarchy".to_string(),
             updated_at: now as f64 / 1000.0,
+            tag: 0,
         };
 
         self.spawn_note_widget(data, true);
@@ -321,6 +332,11 @@ impl SuperDesktopWindow {
 
         let canvas_for_tick = canvas.clone();
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
+            // Perf: .dragging disables hover transitions/shadows (see CSS)
+            // so the note paints cheaply while it moves at 120Hz.
+            if !widget.has_css_class("dragging") {
+                widget.add_css_class("dragging");
+            }
             let cx = x.clamp(10.0, (sw - 80) as f64);
             let cy = y.clamp(70.0, (sh - 60) as f64);
             drag_pending_update.borrow_mut().insert(widget, (cx, cy));
@@ -349,6 +365,7 @@ impl SuperDesktopWindow {
         let drag_pending_note_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
         let on_drag_end = move |widget: gtk4::Widget, data: &NoteData| {
+            widget.remove_css_class("dragging");
             drag_pending_note_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
             final_data.x = final_data.x.clamp(10, sw - 80);
@@ -360,7 +377,11 @@ impl SuperDesktopWindow {
             } else {
                 s.notes.push(final_data);
             }
-            save_state(&s);
+            // Perf: serialize + write the JSON off the main thread so the
+            // drag-end frame completes within the 8.3ms 120Hz budget.
+            let snapshot = s.clone();
+            drop(s);
+            crate::state::save_state_async(snapshot);
         };
 
         let canvas_del = canvas.clone();
@@ -375,8 +396,12 @@ impl SuperDesktopWindow {
                 canvas_del.remove(&note.container);
                 let mut s = state_del.borrow_mut();
                 s.notes.retain(|n| n.id != id);
-                save_state(&s);
-                hud_del.set_label(&format!("{} Notes • {} Terminals", cards.len(), term_len));
+                let snapshot = s.clone();
+                drop(s);
+                crate::state::save_state_async(snapshot);
+                let n = cards.len();
+                drop(cards);
+                set_counts_label(&hud_del, n, term_len);
             }
         };
 
@@ -386,7 +411,11 @@ impl SuperDesktopWindow {
             if let Some(n) = s.notes.iter_mut().find(|n| n.id == data.id) {
                 *n = data.clone();
             }
-            save_state(&s);
+            // Perf: typing already debounces 300ms; the remaining JSON
+            // serialize + file write goes to a worker thread.
+            let snapshot = s.clone();
+            drop(s);
+            crate::state::save_state_async(snapshot);
         };
 
         let canvas_raise = canvas.clone();
@@ -410,7 +439,7 @@ impl SuperDesktopWindow {
 
         if save {
             self.state.borrow_mut().notes.push(note_data.clone());
-            save_state(&self.state.borrow());
+            crate::state::save_state_async(self.state.borrow().clone());
         }
 
         let note = StickyNote::new(
@@ -445,6 +474,7 @@ impl SuperDesktopWindow {
             restored_height: CARD_HEIGHT,
             iconified: false,
             created_at: 0.0,
+            tag: 0,
         };
 
         self.spawn_terminal_widget(data, true);
@@ -465,6 +495,11 @@ impl SuperDesktopWindow {
 
         let canvas_for_tick = canvas.clone();
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
+            // Perf: .dragging disables hover transitions/shadows (see CSS)
+            // so the card paints cheaply while it moves at 120Hz.
+            if !widget.has_css_class("dragging") {
+                widget.add_css_class("dragging");
+            }
             let cx = x.clamp(10.0, (sw - 80) as f64);
             let cy = y.clamp(70.0, (sh - 60) as f64);
             drag_pending_update.borrow_mut().insert(widget, (cx, cy));
@@ -493,6 +528,7 @@ impl SuperDesktopWindow {
         let drag_pending_term_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
         let on_drag_end = move |widget: gtk4::Widget, data: &TerminalData| {
+            widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
             final_data.x = final_data.x.clamp(10, sw - 80);
@@ -504,7 +540,10 @@ impl SuperDesktopWindow {
             } else {
                 s.terminals.push(final_data);
             }
-            save_state(&s);
+            // Perf: keep the drag-end frame inside the 8.3ms 120Hz budget.
+            let snapshot = s.clone();
+            drop(s);
+            crate::state::save_state_async(snapshot);
         };
 
         let terminal_cards_toggle = Rc::clone(&term_cards);
@@ -534,8 +573,12 @@ impl SuperDesktopWindow {
                 canvas_del.remove(&card.container);
                 let mut s = state_del.borrow_mut();
                 s.terminals.retain(|t| t.session_name != sess);
-                save_state(&s);
-                hud_del.set_label(&format!("{} Notes • {} Terminals", notes_len, cards.len()));
+                let snapshot = s.clone();
+                drop(s);
+                crate::state::save_state_async(snapshot);
+                let n = cards.len();
+                drop(cards);
+                set_counts_label(&hud_del, notes_len, n);
             }
         };
 
@@ -544,36 +587,69 @@ impl SuperDesktopWindow {
 
         if save {
             self.state.borrow_mut().terminals.push(term_data.clone());
-            save_state(&self.state.borrow());
+            crate::state::save_state_async(self.state.borrow().clone());
         }
 
         let ghost = self.ghost_box.clone();
         let ghost_lbl = self.ghost_label.clone();
         let canvas_ghost = canvas.clone();
+        // Perf: resize motion events arrive far faster than the 120Hz frame
+        // clock. Coalesce them here: skip no-op updates and only touch
+        // size-request / label / CSS classes when that aspect changed.
+        // Each of those calls queues a relayout/restyle otherwise.
+        let ghost_last: Rc<RefCell<Option<(f64, f64, i32, i32, bool)>>> =
+            Rc::new(RefCell::new(None));
+        let ghost_last_show = Rc::clone(&ghost_last);
         let on_resize_ghost = move |x: f64, y: f64, w: i32, h: i32, is_icon: bool| {
-            let is_first = !ghost.is_visible();
-            if is_first {
+            let qx = x.round();
+            let qy = y.round();
+            if let Some((lx, ly, lw, lh, li)) = *ghost_last_show.borrow() {
+                if lx == qx && ly == qy && lw == w && lh == h && li == is_icon {
+                    return;
+                }
+            }
+            let prev = ghost_last_show.borrow().clone();
+            let pos_changed = prev.map(|(lx, ly, _, _, _)| lx != qx || ly != qy).unwrap_or(true);
+            let size_changed = prev.map(|(_, _, lw, lh, _)| lw != w || lh != h).unwrap_or(true);
+            let mode_changed = prev.map(|(_, _, _, _, li)| li != is_icon).unwrap_or(true);
+            *ghost_last_show.borrow_mut() = Some((qx, qy, w, h, is_icon));
+
+            if !ghost.is_visible() {
                 if ghost.parent().is_some() {
                     canvas_ghost.remove(&ghost);
                 }
-                canvas_ghost.put(&ghost, x, y);
-            } else {
-                canvas_ghost.move_(&ghost, x, y);
+                canvas_ghost.put(&ghost, qx, qy);
+            } else if pos_changed {
+                canvas_ghost.move_(&ghost, qx, qy);
             }
             ghost.set_visible(true);
-            ghost.set_size_request(w, h);
-            if is_icon {
-                ghost.add_css_class("ghost-icon");
-                ghost_lbl.set_label("🗕 128 × 128 (Icon)");
+            if size_changed {
+                ghost.set_size_request(w, h);
+            }
+            if mode_changed {
+                if is_icon {
+                    ghost.add_css_class("ghost-icon");
+                } else {
+                    ghost.remove_css_class("ghost-icon");
+                }
+            }
+            let text = if is_icon {
+                "🗕 128 × 128 (Icon)".to_string()
             } else {
-                ghost.remove_css_class("ghost-icon");
-                ghost_lbl.set_label(&format!("💻 {w} × {h} (Terminal)"));
+                format!("💻 {w} × {h} (Terminal)")
+            };
+            if ghost_lbl.label().as_str() != text.as_str() {
+                ghost_lbl.set_label(&text);
             }
         };
 
         let ghost_end = self.ghost_box.clone();
+        let ghost_last_hide = Rc::clone(&ghost_last);
         let on_resize_end = move || {
-            ghost_end.set_visible(false);
+            *ghost_last_hide.borrow_mut() = None;
+            if ghost_end.is_visible() {
+                ghost_end.set_visible(false);
+            }
         };
 
         let canvas_raise = canvas.clone();
@@ -671,7 +747,9 @@ impl SuperDesktopWindow {
                 *t = term.data.borrow().clone();
             }
         }
-        save_state(&s);
+        let snapshot = s.clone();
+        drop(s);
+        crate::state::save_state_async(snapshot);
     }
 
     pub fn start_slide_in(&self) {
@@ -698,7 +776,15 @@ impl SuperDesktopWindow {
         *self.animating.borrow_mut() = true;
         let start_time = Instant::now();
         let duration = 0.26;
-        let trajs_rc = Rc::clone(&self.anim_trajectories);
+        // Perf: snapshot to a Vec once. Iterating the HashMap + comparing
+        // against the canvas (two ref/unref pairs per widget per frame)
+        // showed up in profiles at 120Hz; a plain parent check is enough
+        // since these widgets are only ever parented to the canvas.
+        let frames: Vec<(gtk4::Widget, Trajectory)> = trajs
+            .iter()
+            .map(|(w, t)| (w.clone(), *t))
+            .collect();
+        drop(trajs);
         let anim_rc = Rc::clone(&self.animating);
         let canvas = self.canvas.clone();
 
@@ -707,8 +793,8 @@ impl SuperDesktopWindow {
             let progress = (elapsed / duration).min(1.0);
             let factor = 1.0 - (1.0 - progress).powi(3);
 
-            for (widget, traj) in trajs_rc.borrow().iter() {
-                if widget.parent().as_ref() == Some(canvas.upcast_ref()) {
+            for (widget, traj) in frames.iter() {
+                if widget.parent().is_some() {
                     let cx = traj.sx + (traj.tx - traj.sx) * factor;
                     let cy = traj.sy + (traj.ty - traj.sy) * factor;
                     canvas.move_(widget, cx, cy);
@@ -717,8 +803,8 @@ impl SuperDesktopWindow {
 
             if progress >= 1.0 {
                 *anim_rc.borrow_mut() = false;
-                for (widget, traj) in trajs_rc.borrow().iter() {
-                    if widget.parent().as_ref() == Some(canvas.upcast_ref()) {
+                for (widget, traj) in frames.iter() {
+                    if widget.parent().is_some() {
                         canvas.move_(widget, traj.tx, traj.ty);
                     }
                 }
@@ -750,7 +836,12 @@ impl SuperDesktopWindow {
         *self.animating.borrow_mut() = true;
         let start_time = Instant::now();
         let duration = 0.14;
-        let trajs_rc = Rc::clone(&self.anim_trajectories);
+        // Perf: same snapshot trick as slide-in (see above).
+        let frames: Vec<(gtk4::Widget, Trajectory)> = trajs
+            .iter()
+            .map(|(w, t)| (w.clone(), *t))
+            .collect();
+        drop(trajs);
         let anim_rc = Rc::clone(&self.animating);
         let canvas = self.canvas.clone();
         let on_finish_rc = Rc::new(on_finish);
@@ -760,8 +851,8 @@ impl SuperDesktopWindow {
             let progress = (elapsed / duration).min(1.0);
             let factor = progress.powi(2);
 
-            for (widget, traj) in trajs_rc.borrow().iter() {
-                if widget.parent().as_ref() == Some(canvas.upcast_ref()) {
+            for (widget, traj) in frames.iter() {
+                if widget.parent().is_some() {
                     let cx = traj.tx + (traj.sx - traj.tx) * factor;
                     let cy = traj.ty + (traj.sy - traj.ty) * factor;
                     canvas.move_(widget, cx, cy);
@@ -802,7 +893,7 @@ impl SuperDesktopWindow {
     fn update_counts(&self) {
         let n_notes = self.note_cards.borrow().len();
         let n_terms = self.terminal_cards.borrow().len();
-        self.hud_badge.set_label(&format!("{} Notes • {} Terminals", n_notes, n_terms));
+        set_counts_label(&self.hud_badge, n_notes, n_terms);
     }
 
 
@@ -924,6 +1015,7 @@ mod tests {
             height: 150,
             color: "omarchy".to_string(),
             updated_at: 0.0,
+            tag: 0,
         };
         let note2_data = NoteData {
             id: "n2".to_string(),
@@ -934,6 +1026,7 @@ mod tests {
             height: 150,
             color: "omarchy".to_string(),
             updated_at: 0.0,
+            tag: 0,
         };
 
         let note1 = StickyNote::new(note1_data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {});

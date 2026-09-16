@@ -8,7 +8,11 @@ use vte4::prelude::*;
 use vte4::{PtyFlags, Terminal as VteTerminal};
 
 use crate::state::TerminalData;
-use crate::tmux::{ensure_session, get_agent_config, get_preview, inspect_status, tmux_bin};
+use crate::tmux::{
+    capture_pane_text, ensure_session, extract_composer_draft, extract_last_prompt,
+    get_agent_config, get_opencode_session_id, get_opencode_user_text_by_id, get_preview,
+    inspect_status, tmux_bin, truncate_prompt_title,
+};
 
 pub const CARD_WIDTH: i32 = 380;
 pub const CARD_HEIGHT: i32 = 240;
@@ -42,6 +46,10 @@ pub struct MiniTerminalCard {
     _screen_h: i32,
     header: gtk4::Box,
     footer: gtk4::Box,
+    title_label: Label,
+    title_prefix: String,
+    /// Cached opencode session id for the USER-text DB lookup (None = unresolved yet).
+    opencode_session: Rc<RefCell<Option<String>>>,
     status_badge: Label,
     refresh_in_flight: Rc<Cell<bool>>,
     compact_status: Label,
@@ -157,8 +165,33 @@ impl MiniTerminalCard {
         grip.add_css_class("note-header-grip");
         header.append(&grip);
 
+        // Group color tag dots (header + icon bar, kept in sync).
+        // Click a dot -> 8-color picker popover, no text.
+        let tag_sync: Rc<RefCell<Vec<glib::WeakRef<Button>>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let tag_data = Rc::clone(&data);
+        let tag_root = root.downgrade();
+        let tag_save = Rc::clone(&on_drag_end);
+        let tag_sync_h = Rc::clone(&tag_sync);
+        let header_tag = crate::tag::make_tag_dot(data.borrow().tag, move |next| {
+            tag_data.borrow_mut().tag = next;
+            for w in tag_sync_h.borrow().iter() {
+                if let Some(b) = w.upgrade() {
+                    crate::tag::apply_tag(&b, next);
+                }
+            }
+            if let Some(r) = tag_root.upgrade() {
+                tag_save(r.upcast(), &tag_data.borrow());
+            }
+        });
+        tag_sync.borrow_mut().push(header_tag.downgrade());
+        header.append(&header_tag);
+
         let title = Label::new(Some(&format!("{} {}", cfg.icon, cfg.name)));
         title.add_css_class("term-title");
+        title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        title.set_max_width_chars(32);
+        title.set_halign(Align::Start);
         header.append(&title);
 
         let status_badge = Label::new(Some("● IDLE"));
@@ -278,6 +311,25 @@ impl MiniTerminalCard {
         compact_status.set_valign(Align::Center);
         compact_top_bar.append(&compact_status);
 
+        // Group color tag dot for 128x128 icon mode (synced with header dot)
+        let tag_data_c = Rc::clone(&data);
+        let tag_root_c = root.downgrade();
+        let tag_save_c = Rc::clone(&on_drag_end);
+        let tag_sync_c = Rc::clone(&tag_sync);
+        let compact_tag = crate::tag::make_tag_dot(data.borrow().tag, move |next| {
+            tag_data_c.borrow_mut().tag = next;
+            for w in tag_sync_c.borrow().iter() {
+                if let Some(b) = w.upgrade() {
+                    crate::tag::apply_tag(&b, next);
+                }
+            }
+            if let Some(r) = tag_root_c.upgrade() {
+                tag_save_c(r.upcast(), &tag_data_c.borrow());
+            }
+        });
+        tag_sync.borrow_mut().push(compact_tag.downgrade());
+        compact_top_bar.append(&compact_tag);
+
         let top_bar_spacer = gtk4::Box::new(Orientation::Horizontal, 0);
         top_bar_spacer.set_hexpand(true);
         compact_top_bar.append(&top_bar_spacer);
@@ -316,6 +368,8 @@ impl MiniTerminalCard {
         resize_handle.set_cursor_from_name(Some("se-resize"));
         root.add_overlay(&resize_handle);
 
+        let title_prefix = format!("{} {}", cfg.icon, cfg.name);
+        let opencode_session = Rc::new(RefCell::new(None));
         let card = Self {
             container: root,
             data: Rc::clone(&data),
@@ -324,6 +378,9 @@ impl MiniTerminalCard {
             _screen_h: screen_h,
             header,
             footer,
+            title_label: title.clone(),
+            title_prefix,
+            opencode_session,
             status_badge,
             refresh_in_flight: Rc::new(Cell::new(false)),
             compact_status,
@@ -356,8 +413,13 @@ impl MiniTerminalCard {
             if let Some(c) = container_weak_hover.upgrade() {
                 on_raise_hover(c.upcast());
             }
+            // Perf: grabbing focus re-triggers :focus-within CSS + cursor
+            // redraw, so skip it when the VTE is already focused. During a
+            // 120Hz drag across cards this fires constantly.
             if let Some(t) = vte_hover.borrow().as_ref() {
-                t.grab_focus();
+                if !t.has_focus() {
+                    t.grab_focus();
+                }
             }
         });
         card.container.add_controller(hover);
@@ -628,7 +690,11 @@ impl MiniTerminalCard {
             }
             if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
-                root_update.add_css_class("term-resizing");
+                // Perf: add_css_class forces a restyle; only do it once per
+                // gesture instead of on every motion event.
+                if !root_update.has_css_class("term-resizing") {
+                    root_update.add_css_class("term-resizing");
+                }
             }
             let (sw0, sh0) = *start_size_update.borrow();
             let raw_w = sw0 + offset_x as i32;
@@ -905,6 +971,10 @@ impl MiniTerminalCard {
         let compact_status = self.compact_status.downgrade();
         let preview_label = self.preview_label.downgrade();
         let meta_label = self.meta_label.downgrade();
+        let title_label = self.title_label.downgrade();
+        let title_prefix = self.title_prefix.clone();
+        let opencode_cache = Rc::clone(&self.opencode_session);
+        let cached_oc_id: Option<String> = opencode_cache.borrow().clone();
         let in_flight = Rc::downgrade(&self.refresh_in_flight);
         self.refresh_in_flight.set(true);
 
@@ -915,9 +985,30 @@ impl MiniTerminalCard {
             let handle = gtk4::gio::spawn_blocking(move || {
                 let status = inspect_status(&sess_name, &agent_type);
                 let preview = preview_lines.map(|lines| get_preview(&sess_name, lines));
-                (status, preview)
+                // Single screen capture feeds both detectors. Priority for the
+                // title is strictly USER-entered text:
+                //   1. composer draft (typed, not yet submitted),
+                //   2. last submitted user message (opencode session DB),
+                //   3. shell-history prompt (`~ ❯ cmd` on plain shells),
+                //   4. default `icon + agent name` (never agent output).
+                let screen = capture_pane_text(&sess_name);
+                let history = screen
+                    .as_deref()
+                    .and_then(extract_last_prompt)
+                    .map(|s| truncate_prompt_title(&s));
+                let draft = screen.as_deref().and_then(extract_composer_draft);
+                let mut oc_id = cached_oc_id;
+                let db_text = if agent_type == "opencode" && draft.is_none() {
+                    if oc_id.is_none() {
+                        oc_id = get_opencode_session_id(&sess_name);
+                    }
+                    oc_id.as_deref().and_then(get_opencode_user_text_by_id)
+                } else {
+                    None
+                };
+                (status, preview, history, draft, db_text, oc_id)
             });
-            let Ok((status_info, preview)) = handle.await else {
+            let Ok((status_info, preview, history, draft, db_text, oc_id)) = handle.await else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -939,6 +1030,18 @@ impl MiniTerminalCard {
                     meta.set_label(&meta_text);
                 }
             }
+
+            if let Some(title) = title_label.upgrade() {
+                let user_text = draft.or(db_text).or(history);
+                let new_title = format_card_title(&title_prefix, user_text.as_deref());
+                if title.label().as_str() != new_title {
+                    title.set_label(&new_title);
+                    title.set_tooltip_text(Some(&new_title));
+                }
+            }
+            if opencode_cache.borrow().is_none() {
+                *opencode_cache.borrow_mut() = oc_id;
+            }
             if let Some(flag) = in_flight.upgrade() {
                 flag.set(false);
             }
@@ -951,6 +1054,15 @@ fn status_view_texts(status: &str) -> (&'static str, &'static str, &'static str)
         "BUSY" | "WORKING" => ("● WORKING", "●", "status-busy"),
         "EXITED" => ("○ EXITED", "○", "status-exited"),
         _ => ("● IDLE", "●", "status-idle"),
+    }
+}
+
+/// Build the header title: `prefix` (`icon + agent name`) plus the last
+/// prompt snippet when available. Keeps the default prefix when prompt is None/empty.
+fn format_card_title(prefix: &str, last_prompt: Option<&str>) -> String {
+    match last_prompt {
+        Some(prompt) if !prompt.trim().is_empty() => format!("{prefix} • {prompt}"),
+        _ => prefix.to_string(),
     }
 }
 
@@ -995,7 +1107,7 @@ fn spawn_vte(
     term.set_input_enabled(true);
     term.set_scroll_on_keystroke(true);
     term.set_scroll_on_output(true);
-    term.set_scrollback_lines(8000);
+    term.set_scrollback_lines(5000);
     term.add_css_class("term-vte");
     term.set_can_focus(true);
     term.set_focusable(true);
@@ -1028,7 +1140,9 @@ fn spawn_vte(
     let term_weak = term.downgrade();
     term_hover.connect_enter(move |_, _, _| {
         if let Some(t) = term_weak.upgrade() {
-            t.grab_focus();
+            if !t.has_focus() {
+                t.grab_focus();
+            }
         }
     });
     term.add_controller(term_hover);
@@ -1267,5 +1381,16 @@ mod tests {
         assert_eq!(status_view_texts("EXITED"), ("○ EXITED", "○", "status-exited"));
         assert_eq!(status_view_texts("IDLE"), ("● IDLE", "●", "status-idle"));
         assert_eq!(status_view_texts("weird"), ("● IDLE", "●", "status-idle"));
+    }
+
+    #[test]
+    fn test_format_card_title_with_and_without_prompt() {
+        assert_eq!(
+            format_card_title("⚡ Claude Code", Some("fix login bug")),
+            "⚡ Claude Code • fix login bug"
+        );
+        assert_eq!(format_card_title("⚡ Claude Code", None), "⚡ Claude Code");
+        assert_eq!(format_card_title("⚡ Claude Code", Some("")), "⚡ Claude Code");
+        assert_eq!(format_card_title("⚡ Claude Code", Some("   ")), "⚡ Claude Code");
     }
 }

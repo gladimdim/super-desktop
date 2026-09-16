@@ -12,6 +12,9 @@ pub struct NoteData {
     pub height: i32,
     pub color: String,
     pub updated_at: f64,
+    /// Group color tag: 0 = none, 1..=8 = palette index (see crate::tag).
+    #[serde(default)]
+    pub tag: u8,
 }
 
 fn default_term_width() -> i32 {
@@ -41,6 +44,9 @@ pub struct TerminalData {
     #[serde(default)]
     pub iconified: bool,
     pub created_at: f64,
+    /// Group color tag: 0 = none, 1..=8 = palette index (see crate::tag).
+    #[serde(default)]
+    pub tag: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +67,7 @@ impl Default for AppState {
                 height: 230,
                 color: "omarchy".to_string(),
                 updated_at: 0.0,
+                tag: 0,
             }],
             terminals: Vec::new(),
         }
@@ -102,4 +109,19 @@ pub fn save_state(state: &AppState) {
             let _ = fs::rename(temp_path, path);
         }
     }
+}
+
+/// Non-blocking variant for hot paths (drag-end, typing, resize-end).
+/// Cloning + JSON serialization + file I/O all happen on a background
+/// thread so the 120Hz frame clock on the main thread never stalls.
+pub fn save_state_async(state: AppState) {
+    std::thread::spawn(move || {
+        let path = get_state_path();
+        if let Ok(json) = serde_json::to_string_pretty(&state) {
+            let temp_path = path.with_extension("tmp");
+            if fs::write(&temp_path, json).is_ok() {
+                let _ = fs::rename(temp_path, path);
+            }
+        }
+    });
 }

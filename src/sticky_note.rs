@@ -55,6 +55,15 @@ impl StickyNote {
         grip.add_css_class("note-header-grip");
         header.append(&grip);
 
+        // Group color tag dot (click -> 8-color picker, no text)
+        let data_tag = Rc::clone(&data);
+        let on_change_tag = Rc::clone(&on_change_rc);
+        let tag_dot = crate::tag::make_tag_dot(data.borrow().tag, move |next| {
+            data_tag.borrow_mut().tag = next;
+            on_change_tag(&data_tag.borrow());
+        });
+        header.append(&tag_dot);
+
         let title = Label::new(Some("Note"));
         title.set_hexpand(true);
         title.set_halign(Align::Start);
@@ -94,23 +103,29 @@ impl StickyNote {
         let data_text = Rc::clone(&data);
         let on_change_text = Rc::clone(&on_change_rc);
         let timer_id: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+        let buffer_weak = buffer.downgrade();
 
-        buffer.connect_changed(move |buf| {
+        // Perf: never touch buffer contents on the keystroke path itself.
+        // Just restart a 300ms trailing timer; the full O(n) text copy
+        // happens once the user pauses, inside the timer callback.
+        buffer.connect_changed(move |_| {
             if let Some(source) = timer_id.borrow_mut().take() {
                 source.remove();
             }
 
-            let start = buf.start_iter();
-            let end = buf.end_iter();
-            let text = buf.text(&start, &end, false).to_string();
-
             let data_clone = Rc::clone(&data_text);
             let on_change_clone = Rc::clone(&on_change_text);
             let timer_clone = Rc::clone(&timer_id);
+            let buf_weak = buffer_weak.clone();
 
             let source = glib::timeout_add_local(std::time::Duration::from_millis(300), move || {
-                data_clone.borrow_mut().text = text.clone();
-                on_change_clone(&data_clone.borrow());
+                if let Some(buf) = buf_weak.upgrade() {
+                    let text = buf
+                        .text(&buf.start_iter(), &buf.end_iter(), false)
+                        .to_string();
+                    data_clone.borrow_mut().text = text;
+                    on_change_clone(&data_clone.borrow());
+                }
                 *timer_clone.borrow_mut() = None;
                 glib::ControlFlow::Break
             });
