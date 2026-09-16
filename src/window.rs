@@ -153,6 +153,16 @@ impl SuperDesktopWindow {
         for (agent_key, label) in agents {
             let btn = Button::with_label(label);
             btn.add_css_class("hud-button");
+            let tooltip = match agent_key {
+                "antigravity" => "Launch Antigravity CLI (--dangerously-skip-permissions)",
+                "claude" => "Launch Claude Code (--dangerously-skip-permissions)",
+                "codex" => "Launch OpenAI Codex (--dangerously-bypass-approvals-and-sandbox)",
+                "opencode" => "Launch OpenCode (--auto)",
+                "grok" => "Launch Grok CLI (--dangerously-skip-permissions)",
+                "shell" => "Launch Terminal Shell",
+                _ => "Launch Terminal",
+            };
+            btn.set_tooltip_text(Some(tooltip));
             let win_w = Rc::downgrade(&win_rc);
             let a_key = agent_key.to_string();
             btn.connect_clicked(move |_| {
@@ -248,7 +258,7 @@ impl SuperDesktopWindow {
 
         // Periodic status refresh
         let win_w = Rc::downgrade(&win_rc);
-        glib::timeout_add_local(std::time::Duration::from_millis(1500), move || {
+        glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
             if let Some(w) = win_w.upgrade() {
                 w.periodic_refresh();
                 glib::ControlFlow::Continue
@@ -261,16 +271,17 @@ impl SuperDesktopWindow {
     }
 
     fn load_items(&self) {
-        let notes: Vec<NoteData> = self.state.borrow().notes.clone();
-        for note_data in notes {
-            self.spawn_note_widget(note_data, false);
-        }
-
         let terminals: Vec<TerminalData> = self.state.borrow().terminals.clone();
         for term_data in terminals {
             self.spawn_terminal_widget(term_data, false);
         }
 
+        let notes: Vec<NoteData> = self.state.borrow().notes.clone();
+        for note_data in notes {
+            self.spawn_note_widget(note_data, false);
+        }
+
+        self.raise_all_notes();
         self.update_counts();
     }
 
@@ -378,6 +389,22 @@ impl SuperDesktopWindow {
             save_state(&s);
         };
 
+        let canvas_raise = canvas.clone();
+        let note_cards_raise = Rc::clone(&note_cards);
+        let note_id = note_data.id.clone();
+        let on_raise = move |widget: gtk4::Widget| {
+            if let Some(last) = canvas_raise.last_child() {
+                if &last != &widget {
+                    widget.insert_after(&canvas_raise, Some(&last));
+                }
+            }
+            let mut cards = note_cards_raise.borrow_mut();
+            if let Some(pos) = cards.iter().position(|c| c.data.borrow().id == note_id) {
+                let note = cards.remove(pos);
+                cards.push(note);
+            }
+        };
+
         let x = note_data.x;
         let y = note_data.y;
 
@@ -386,7 +413,14 @@ impl SuperDesktopWindow {
             save_state(&self.state.borrow());
         }
 
-        let note = StickyNote::new(note_data, on_drag_update, on_drag_end, on_delete, on_change);
+        let note = StickyNote::new(
+            note_data,
+            on_drag_update,
+            on_drag_end,
+            on_delete,
+            on_change,
+            on_raise,
+        );
         canvas.put(&note.container, x as f64, y as f64);
         note_cards.borrow_mut().push(note);
     }
@@ -542,6 +576,22 @@ impl SuperDesktopWindow {
             ghost_end.set_visible(false);
         };
 
+        let canvas_raise = canvas.clone();
+        let term_cards_raise = Rc::clone(&term_cards);
+        let sess_name = term_data.session_name.clone();
+        let on_raise = move |widget: gtk4::Widget| {
+            if let Some(last) = canvas_raise.last_child() {
+                if &last != &widget {
+                    widget.insert_after(&canvas_raise, Some(&last));
+                }
+            }
+            let mut cards = term_cards_raise.borrow_mut();
+            if let Some(pos) = cards.iter().position(|c| c.data.borrow().session_name == sess_name) {
+                let card = cards.remove(pos);
+                cards.push(card);
+            }
+        };
+
         let card = MiniTerminalCard::new(
             term_data,
             on_drag_update,
@@ -550,6 +600,7 @@ impl SuperDesktopWindow {
             on_close,
             on_resize_ghost,
             on_resize_end,
+            on_raise,
             sw,
             sh,
         );
@@ -754,6 +805,11 @@ impl SuperDesktopWindow {
         self.hud_badge.set_label(&format!("{} Notes • {} Terminals", n_notes, n_terms));
     }
 
+
+    pub fn raise_all_notes(&self) {
+        raise_notes_on_canvas(&self.canvas, &self.note_cards.borrow());
+    }
+
     pub fn reload_theme(&self) {
         let theme = crate::styles::reload_styles();
         for card in self.terminal_cards.borrow().iter() {
@@ -769,6 +825,16 @@ impl SuperDesktopWindow {
             card.refresh_status();
         }
         self.update_counts();
+    }
+}
+
+fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[crate::sticky_note::StickyNote]) {
+    for note in notes {
+        if let Some(last) = canvas.last_child() {
+            if &last != &note.container {
+                note.container.insert_after(canvas, Some(&last));
+            }
+        }
     }
 }
 
@@ -830,4 +896,77 @@ fn apply_terminal_expand(
     } else {
         KeyboardMode::OnDemand
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes() {
+        let _ = gtk4::init();
+        let canvas = Fixed::new();
+
+        // Create terminal container 1 (icon/mini terminal)
+        let term1 = gtk4::Box::new(Orientation::Vertical, 0);
+        // Create terminal container 2 (another icon/terminal)
+        let term2 = gtk4::Box::new(Orientation::Vertical, 0);
+        canvas.put(&term1, 10.0, 10.0);
+        canvas.put(&term2, 20.0, 20.0);
+
+        // Create sticky notes
+        let note1_data = NoteData {
+            id: "n1".to_string(),
+            text: "Note 1".to_string(),
+            x: 50,
+            y: 50,
+            width: 200,
+            height: 150,
+            color: "omarchy".to_string(),
+            updated_at: 0.0,
+        };
+        let note2_data = NoteData {
+            id: "n2".to_string(),
+            text: "Note 2".to_string(),
+            x: 100,
+            y: 100,
+            width: 200,
+            height: 150,
+            color: "omarchy".to_string(),
+            updated_at: 0.0,
+        };
+
+        let note1 = StickyNote::new(note1_data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {});
+        let note2 = StickyNote::new(note2_data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {});
+
+        canvas.put(&note1.container, 50.0, 50.0);
+        canvas.put(&note2.container, 100.0, 100.0);
+
+        // Initially: notes were added after term1 and term2
+        assert_eq!(canvas.last_child().as_ref(), Some(note2.container.upcast_ref::<gtk4::Widget>()));
+
+        // Focus terminal 1! Focused terminal must be rendered above any other icon AND even sticky notes!
+        if let Some(last) = canvas.last_child() {
+            if &last != term1.upcast_ref::<gtk4::Widget>() {
+                term1.insert_after(&canvas, Some(&last));
+            }
+        }
+        // Terminal 1 is now the last child (topmost rendered widget)
+        assert_eq!(canvas.last_child().as_ref(), Some(term1.upcast_ref::<gtk4::Widget>()));
+
+        // Now focus terminal 2 (an icon/terminal)!
+        if let Some(last) = canvas.last_child() {
+            if &last != term2.upcast_ref::<gtk4::Widget>() {
+                term2.insert_after(&canvas, Some(&last));
+            }
+        }
+        // Terminal 2 is now on top of terminal 1 AND on top of all sticky notes!
+        assert_eq!(canvas.last_child().as_ref(), Some(term2.upcast_ref::<gtk4::Widget>()));
+
+        // Now simulate expanding terminal 1 (remove and put to expand to overlay)
+        canvas.remove(&term1);
+        canvas.put(&term1, 0.0, 0.0);
+        // Expanded terminal 1 is at the top of the canvas, above any other icon and even sticky notes!
+        assert_eq!(canvas.last_child().as_ref(), Some(term1.upcast_ref::<gtk4::Widget>()));
+    }
 }

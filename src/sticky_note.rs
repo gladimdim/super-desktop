@@ -1,5 +1,5 @@
 use gtk4::prelude::*;
-use gtk4::{glib, Align, Button, GestureDrag, Label, Orientation, PolicyType, ScrolledWindow, TextView, WrapMode};
+use gtk4::{glib, Align, Button, GestureClick, GestureDrag, Label, Orientation, PolicyType, ScrolledWindow, TextView, WrapMode};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -11,26 +11,41 @@ pub struct StickyNote {
 }
 
 impl StickyNote {
-    pub fn new<FDragUpdate, FDragEnd, FDelete, FChange>(
+    pub fn new<FDragUpdate, FDragEnd, FDelete, FChange, FRaise>(
         note_data: NoteData,
         on_drag_update: FDragUpdate,
         on_drag_end: FDragEnd,
         on_delete: FDelete,
         on_change: FChange,
+        on_raise: FRaise,
     ) -> Self
     where
         FDragUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
         FDragEnd: Fn(gtk4::Widget, &NoteData) + 'static,
         FDelete: Fn(String) + 'static,
         FChange: Fn(&NoteData) + 'static,
+        FRaise: Fn(gtk4::Widget) + 'static,
     {
         let data = Rc::new(RefCell::new(note_data));
         let on_drag_end = Rc::new(on_drag_end);
         let on_change_rc = Rc::new(on_change);
+        let on_raise_rc = Rc::new(on_raise);
         let container = gtk4::Box::new(Orientation::Vertical, 0);
 
         container.set_size_request(data.borrow().width, data.borrow().height);
         container.add_css_class("sticky-note");
+
+        // Click to raise note above all other widgets
+        let click = GestureClick::new();
+        click.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let container_weak_click = container.downgrade();
+        let on_raise_click = Rc::clone(&on_raise_rc);
+        click.connect_pressed(move |_, _, _, _| {
+            if let Some(c) = container_weak_click.upgrade() {
+                on_raise_click(c.upcast());
+            }
+        });
+        container.add_controller(click);
 
         // Header
         let header = gtk4::Box::new(Orientation::Horizontal, 6);
@@ -115,7 +130,12 @@ impl StickyNote {
         let data_drag = Rc::clone(&data);
         let start_pos_begin = Rc::clone(&start_pos);
         let grab_offset_begin = Rc::clone(&grab_offset);
+        let container_weak_drag = container.downgrade();
+        let on_raise_drag = Rc::clone(&on_raise_rc);
         drag.connect_drag_begin(move |gesture, _, _| {
+            if let Some(c) = container_weak_drag.upgrade() {
+                on_raise_drag(c.upcast());
+            }
             let dx = data_drag.borrow().x as f64;
             let dy = data_drag.borrow().y as f64;
             *start_pos_begin.borrow_mut() = (dx, dy);

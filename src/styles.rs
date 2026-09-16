@@ -257,6 +257,16 @@ window.super-desktop-window {{
 .term-compact-status {{
     font-size: 11px;
     padding: 0;
+    background: transparent;
+    border: none;
+}}
+
+.term-compact-status.status-idle,
+.term-compact-status.status-active,
+.term-compact-status.status-busy,
+.term-compact-status.status-exited {{
+    background-color: transparent;
+    border: none;
 }}
 
 .term-compact-actions {{
@@ -322,6 +332,12 @@ window.super-desktop-window {{
     background-color: {status_active_bg};
     color: {bright_green};
     border: 1px solid {status_active_border};
+}}
+
+.status-idle {{
+    background-color: {status_idle_bg};
+    color: {bright_green};
+    border: 1px solid {status_idle_border};
 }}
 
 .status-busy {{
@@ -440,6 +456,8 @@ window.super-desktop-window {{
         bright_green = theme.bright_green,
         status_active_bg = OmarchyTheme::hex_to_rgba(&theme.green, 0.18),
         status_active_border = OmarchyTheme::hex_to_rgba(&theme.green, 0.35),
+        status_idle_bg = OmarchyTheme::hex_to_rgba(&theme.green, 0.18),
+        status_idle_border = OmarchyTheme::hex_to_rgba(&theme.green, 0.35),
         bright_yellow = theme.bright_yellow,
         status_busy_bg = OmarchyTheme::hex_to_rgba(&theme.yellow, 0.18),
         status_busy_border = OmarchyTheme::hex_to_rgba(&theme.yellow, 0.35),

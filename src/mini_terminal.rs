@@ -1,8 +1,8 @@
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, Button, GestureClick, GestureDrag, Label, Orientation, Overlay};
-use std::cell::RefCell;
+use gtk4::{Align, Button, EventControllerFocus, GestureClick, GestureDrag, Label, Orientation, Overlay};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use vte4::prelude::*;
 use vte4::{PtyFlags, Terminal as VteTerminal};
@@ -43,6 +43,7 @@ pub struct MiniTerminalCard {
     header: gtk4::Box,
     footer: gtk4::Box,
     status_badge: Label,
+    refresh_in_flight: Rc<Cell<bool>>,
     compact_status: Label,
     preview_label: Label,
     icon_box: gtk4::Box,
@@ -64,7 +65,7 @@ pub struct MiniTerminalCard {
 }
 
 impl MiniTerminalCard {
-    pub fn new<FDragUpdate, FDragEnd, FToggle, FClose, FResizeGhost, FResizeEnd>(
+    pub fn new<FDragUpdate, FDragEnd, FToggle, FClose, FResizeGhost, FResizeEnd, FRaise>(
         mut term_data: TerminalData,
         on_drag_update: FDragUpdate,
         on_drag_end: FDragEnd,
@@ -72,6 +73,7 @@ impl MiniTerminalCard {
         on_close: FClose,
         on_resize_ghost: FResizeGhost,
         on_resize_end: FResizeEnd,
+        on_raise: FRaise,
         screen_w: i32,
         screen_h: i32,
     ) -> Self
@@ -82,6 +84,7 @@ impl MiniTerminalCard {
         FClose: Fn(String) + 'static,
         FResizeGhost: Fn(f64, f64, i32, i32, bool) + 'static,
         FResizeEnd: Fn() + 'static,
+        FRaise: Fn(gtk4::Widget) + 'static,
     {
         if term_data.iconified {
             term_data.width = ICON_SIZE;
@@ -109,9 +112,34 @@ impl MiniTerminalCard {
         let on_drag_end = Rc::new(on_drag_end);
         let on_resize_ghost = Rc::new(on_resize_ghost);
         let on_resize_end = Rc::new(on_resize_end);
+        let on_raise_rc = Rc::new(on_raise);
         let visual_pos = Rc::new(RefCell::new((data.borrow().x as f64, data.borrow().y as f64)));
 
         let root = Overlay::new();
+
+        // Raise on click anywhere on container
+        let click_raise = GestureClick::new();
+        click_raise.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let container_weak_click = root.downgrade();
+        let on_raise_click = Rc::clone(&on_raise_rc);
+        click_raise.connect_pressed(move |_, _, _, _| {
+            if let Some(c) = container_weak_click.upgrade() {
+                on_raise_click(c.upcast());
+            }
+        });
+        root.add_controller(click_raise);
+
+        // Raise when focus enters container or any child widget (like VTE terminal)
+        let focus_raise = EventControllerFocus::new();
+        let container_weak_focus = root.downgrade();
+        let on_raise_focus = Rc::clone(&on_raise_rc);
+        focus_raise.connect_enter(move |_| {
+            if let Some(c) = container_weak_focus.upgrade() {
+                on_raise_focus(c.upcast());
+            }
+        });
+        root.add_controller(focus_raise);
+
         let body = gtk4::Box::new(Orientation::Vertical, 0);
 
         let agent_type = data.borrow().agent_type.clone();
@@ -133,9 +161,9 @@ impl MiniTerminalCard {
         title.add_css_class("term-title");
         header.append(&title);
 
-        let status_badge = Label::new(Some("● ACTIVE"));
+        let status_badge = Label::new(Some("● IDLE"));
         status_badge.add_css_class("term-status-badge");
-        status_badge.add_css_class("status-active");
+        status_badge.add_css_class("status-idle");
         status_badge.set_hexpand(true);
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
@@ -245,7 +273,7 @@ impl MiniTerminalCard {
 
         let compact_status = Label::new(Some("●"));
         compact_status.add_css_class("term-compact-status");
-        compact_status.add_css_class("status-active");
+        compact_status.add_css_class("status-idle");
         compact_status.set_halign(Align::Start);
         compact_status.set_valign(Align::Center);
         compact_top_bar.append(&compact_status);
@@ -297,6 +325,7 @@ impl MiniTerminalCard {
             header,
             footer,
             status_badge,
+            refresh_in_flight: Rc::new(Cell::new(false)),
             compact_status,
             preview_label,
             icon_box,
@@ -316,6 +345,22 @@ impl MiniTerminalCard {
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
         };
+
+        // Hover-focus: entering the card raises it and focuses VTE,
+        // exactly like clicking inside the terminal.
+        let hover = gtk4::EventControllerMotion::new();
+        let container_weak_hover = card.container.downgrade();
+        let vte_hover = Rc::clone(&card.vte);
+        let on_raise_hover = Rc::clone(&on_raise_rc);
+        hover.connect_enter(move |_, _, _| {
+            if let Some(c) = container_weak_hover.upgrade() {
+                on_raise_hover(c.upcast());
+            }
+            if let Some(t) = vte_hover.borrow().as_ref() {
+                t.grab_focus();
+            }
+        });
+        card.container.add_controller(hover);
 
         // Actions
         let iconify_action: Rc<dyn Fn()> = {
@@ -533,6 +578,7 @@ impl MiniTerminalCard {
             Rc::clone(&card.visual_pos),
             Rc::clone(&on_drag_update),
             Rc::clone(&on_drag_end),
+            Rc::clone(&on_raise_rc),
             false,
         );
         attach_move_drag(
@@ -543,6 +589,7 @@ impl MiniTerminalCard {
             Rc::clone(&card.visual_pos),
             Rc::clone(&on_drag_update),
             Rc::clone(&on_drag_end),
+            Rc::clone(&on_raise_rc),
             true,
         );
 
@@ -553,9 +600,14 @@ impl MiniTerminalCard {
         let data_begin = Rc::clone(&card.data);
         let root_begin = card.container.clone();
         let on_ghost_begin = Rc::clone(&on_resize_ghost);
+        let on_raise_resize = Rc::clone(&on_raise_rc);
+        let root_weak_resize = card.container.downgrade();
         let resize_drag = GestureDrag::new();
         resize_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
         resize_drag.connect_drag_begin(move |_, _, _| {
+            if let Some(r) = root_weak_resize.upgrade() {
+                on_raise_resize(r.upcast());
+            }
             if *expanded_resize.borrow() {
                 return;
             }
@@ -567,7 +619,6 @@ impl MiniTerminalCard {
 
         let expanded_update = Rc::clone(&card.expanded);
         let start_size_update = Rc::clone(&start_size);
-        let handle_w = card.resize_handle.clone();
         let root_update = card.container.clone();
         let data_update = Rc::clone(&card.data);
         let on_ghost_update = Rc::clone(&on_resize_ghost);
@@ -591,12 +642,6 @@ impl MiniTerminalCard {
 
             let (cx, cy) = (data_update.borrow().x as f64, data_update.borrow().y as f64);
             on_ghost_update(cx, cy, final_w, final_h, should_iconify);
-
-            if should_iconify {
-                handle_w.set_tooltip_text(Some("Release to iconify (128×128)"));
-            } else {
-                handle_w.set_tooltip_text(Some(&format!("{final_w}×{final_h} (release to resize)")));
-            }
         });
 
         let expanded_end = Rc::clone(&card.expanded);
@@ -842,42 +887,89 @@ impl MiniTerminalCard {
     }
 
     pub fn refresh_status(&self) {
+        if self.refresh_in_flight.get() {
+            return;
+        }
+
         let sess_name = self.data.borrow().session_name.clone();
         let agent_type = self.data.borrow().agent_type.clone();
-        let status_info = inspect_status(&sess_name, &agent_type);
-
-        for cls in &["status-active", "status-busy", "status-exited"] {
-            self.status_badge.remove_css_class(cls);
-            self.compact_status.remove_css_class(cls);
-        }
-
-        match status_info.status {
-            "BUSY" => {
-                self.status_badge.add_css_class("status-busy");
-                self.compact_status.add_css_class("status-busy");
-                self.status_badge.set_label("● WORKING");
-            }
-            "EXITED" => {
-                self.status_badge.add_css_class("status-exited");
-                self.compact_status.add_css_class("status-exited");
-                self.status_badge.set_label("○ EXITED");
-            }
-            _ => {
-                self.status_badge.add_css_class("status-active");
-                self.compact_status.add_css_class("status-active");
-                self.status_badge.set_label("● ACTIVE");
-            }
-        }
-
-        if self.vte.borrow().is_none() && !self.is_compact() {
+        let want_preview = self.vte.borrow().is_none() && !self.is_compact();
+        let preview_lines = if want_preview {
             let h = self.data.borrow().height;
-            let lines = ((h - 70) / 13).clamp(6, 28) as usize;
-            let preview = get_preview(&sess_name, lines);
-            self.preview_label.set_label(&preview);
-        }
+            Some(((h - 70) / 13).clamp(6, 28) as usize)
+        } else {
+            None
+        };
 
-        self.meta_label
-            .set_label(&format!("PID: {} • {}", status_info.pid, status_info.cmd));
+        let status_badge = self.status_badge.downgrade();
+        let compact_status = self.compact_status.downgrade();
+        let preview_label = self.preview_label.downgrade();
+        let meta_label = self.meta_label.downgrade();
+        let in_flight = Rc::downgrade(&self.refresh_in_flight);
+        self.refresh_in_flight.set(true);
+
+        glib::MainContext::default().spawn_local(async move {
+            if in_flight.upgrade().is_none() {
+                return;
+            }
+            let handle = gtk4::gio::spawn_blocking(move || {
+                let status = inspect_status(&sess_name, &agent_type);
+                let preview = preview_lines.map(|lines| get_preview(&sess_name, lines));
+                (status, preview)
+            });
+            let Ok((status_info, preview)) = handle.await else {
+                if let Some(flag) = in_flight.upgrade() {
+                    flag.set(false);
+                }
+                return;
+            };
+
+            if let (Some(badge), Some(compact)) = (status_badge.upgrade(), compact_status.upgrade()) {
+                apply_status_view(&badge, &compact, status_info.status);
+            }
+
+            if let (Some(label), Some(meta)) = (preview_label.upgrade(), meta_label.upgrade()) {
+                if let Some(preview) = preview.as_deref() {
+                    if label.label().as_str() != preview {
+                        label.set_label(preview);
+                    }
+                }
+                let meta_text = format!("PID: {} • {}", status_info.pid, status_info.cmd);
+                if meta.label() != meta_text {
+                    meta.set_label(&meta_text);
+                }
+            }
+            if let Some(flag) = in_flight.upgrade() {
+                flag.set(false);
+            }
+        });
+    }
+}
+
+fn status_view_texts(status: &str) -> (&'static str, &'static str, &'static str) {
+    match status {
+        "BUSY" | "WORKING" => ("● WORKING", "●", "status-busy"),
+        "EXITED" => ("○ EXITED", "○", "status-exited"),
+        _ => ("● IDLE", "●", "status-idle"),
+    }
+}
+
+fn apply_status_view(badge: &Label, compact: &Label, status: &str) {
+    let (badge_text, compact_text, css_class) = status_view_texts(status);
+    let changed = badge.label().as_str() != badge_text || compact.label().as_str() != compact_text;
+    if changed {
+        for cls in ["status-active", "status-idle", "status-busy", "status-exited"] {
+            if badge.has_css_class(cls) {
+                badge.remove_css_class(cls);
+            }
+            if compact.has_css_class(cls) {
+                compact.remove_css_class(cls);
+            }
+        }
+        badge.add_css_class(css_class);
+        compact.add_css_class(css_class);
+        badge.set_label(badge_text);
+        compact.set_label(compact_text);
     }
 }
 
@@ -931,6 +1023,15 @@ fn spawn_vte(
         }
     });
     term.add_controller(term_click);
+
+    let term_hover = gtk4::EventControllerMotion::new();
+    let term_weak = term.downgrade();
+    term_hover.connect_enter(move |_, _, _| {
+        if let Some(t) = term_weak.upgrade() {
+            t.grab_focus();
+        }
+    });
+    term.add_controller(term_hover);
 
     let session = data.borrow().session_name.clone();
     let agent_type = data.borrow().agent_type.clone();
@@ -1010,7 +1111,7 @@ fn apply_layout(
     }
 }
 
-fn attach_move_drag<FUpdate, FEnd>(
+fn attach_move_drag<FUpdate, FEnd, FRaise>(
     source: &impl IsA<gtk4::Widget>,
     root: &Overlay,
     data: Rc<RefCell<TerminalData>>,
@@ -1018,10 +1119,12 @@ fn attach_move_drag<FUpdate, FEnd>(
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_drag_update: Rc<FUpdate>,
     on_drag_end: Rc<FEnd>,
+    on_raise: Rc<FRaise>,
     iconified_only: bool,
 ) where
     FUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
     FEnd: Fn(gtk4::Widget, &TerminalData) + 'static,
+    FRaise: Fn(gtk4::Widget) + 'static,
 {
     let drag = GestureDrag::new();
     let start_pos = Rc::new(RefCell::new((0.0, 0.0)));
@@ -1032,12 +1135,17 @@ fn attach_move_drag<FUpdate, FEnd>(
     let grab_offset_begin = Rc::clone(&grab_offset);
     let visual_begin = Rc::clone(&visual_pos);
     let expanded_begin = Rc::clone(&expanded);
+    let root_weak_drag = root.downgrade();
+    let on_raise_drag = Rc::clone(&on_raise);
     drag.connect_drag_begin(move |gesture, _, _| {
         if iconified_only && !data_begin.borrow().iconified {
             return;
         }
         if !iconified_only && data_begin.borrow().iconified {
             return;
+        }
+        if let Some(r) = root_weak_drag.upgrade() {
+            on_raise_drag(r.upcast());
         }
         let (init_x, init_y) = if *expanded_begin.borrow() {
             *visual_begin.borrow()
@@ -1128,4 +1236,36 @@ fn attach_move_drag<FUpdate, FEnd>(
     });
 
     source.add_controller(drag);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expanded_rect_centered() {
+        let (x, y, w, h) = expanded_rect(1920, 1080);
+        assert_eq!(w, 1536.0);
+        assert_eq!(h, 864.0);
+        assert_eq!(x, 192.0);
+        assert_eq!(y, 108.0);
+    }
+
+    #[test]
+    fn test_clamp_card_size_bounds() {
+        let (w, h) = clamp_card_size(10, 10, 1920, 1080);
+        assert_eq!((w, h), (MIN_CARD_WIDTH, MIN_CARD_HEIGHT));
+        let (w, h) = clamp_card_size(99999, 99999, 1920, 1080);
+        assert_eq!(w, 1344);
+        assert_eq!(h, 810);
+    }
+
+    #[test]
+    fn test_status_view_texts_mapping() {
+        assert_eq!(status_view_texts("WORKING"), ("● WORKING", "●", "status-busy"));
+        assert_eq!(status_view_texts("BUSY"), ("● WORKING", "●", "status-busy"));
+        assert_eq!(status_view_texts("EXITED"), ("○ EXITED", "○", "status-exited"));
+        assert_eq!(status_view_texts("IDLE"), ("● IDLE", "●", "status-idle"));
+        assert_eq!(status_view_texts("weird"), ("● IDLE", "●", "status-idle"));
+    }
 }

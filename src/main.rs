@@ -74,7 +74,8 @@ fn main() {
         return;
     }
 
-    if let Some(resp) = send_ipc_command(action) {
+    let full_cmd = if args.len() > 1 { args[1..].join(" ") } else { "toggle".to_string() };
+    if let Some(resp) = send_ipc_command(&full_cmd) {
         if action == "status" {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
                 let vis = val["visible"].as_bool().unwrap_or(false);
@@ -147,6 +148,7 @@ fn run_daemon(start_visible: bool) {
         .flags(gtk4::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
+    let _ = app.register(gtk4::gio::Cancellable::NONE);
     std::mem::forget(app.hold());
     ensure_omarchy_theme_hook();
     apply_styles();
@@ -283,6 +285,7 @@ fn start_ipc_thread(ipc_tx: Sender<IpcMessage>) {
                     if ipc_tx.send(IpcMessage { cmd, responder: resp_tx }).is_ok() {
                         if let Ok(resp) = resp_rx.recv_timeout(Duration::from_millis(2000)) {
                             let _ = s.write_all(resp.as_bytes());
+                            let _ = s.shutdown(std::net::Shutdown::Both);
                         }
                     }
                 }
