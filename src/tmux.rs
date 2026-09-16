@@ -92,6 +92,63 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
 }
 
+fn is_shell_command(cmd: &str) -> bool {
+    let base = cmd
+        .split_whitespace()
+        .next()
+        .and_then(|s| s.rsplit('/').next())
+        .unwrap_or("");
+    matches!(base, "bash" | "zsh" | "fish" | "sh" | "dash")
+}
+
+fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
+    if markers.iter().any(|m| base.contains(m)) {
+        base.to_string()
+    } else {
+        format!("{base} {flag}")
+    }
+}
+
+/// Resolve the command used to (re)create a tmux session when the previous
+/// one is gone, e.g. after a laptop reboot: the tmux server dies with it,
+/// but every supported agent persists its conversations to disk continuously
+/// (Claude: ~/.claude/projects, Codex: ~/.codex/sessions, OpenCode: its
+/// session store, Aider: .aider.chat.history.md), so relaunching with the
+/// agent's native resume mechanism restores the conversation automatically.
+///
+/// This is intentionally "continue most recent": exact per-terminal session
+/// IDs can't be tracked reliably (all cards share $HOME as cwd), so with
+/// several cards of the same agent each restored card continues that agent's
+/// latest session. Use /clear (or rename/fork) inside the agent if a card
+/// should start over instead.
+///
+/// Agents without a non-interactive resume mechanism (shell, antigravity,
+/// grok, unknown) relaunch fresh, exactly like before. An explicit shell
+/// command is never decorated with agent flags.
+pub fn resolve_resume_command(agent_type: &str, custom: Option<&str>) -> String {
+    let base = resolve_command(agent_type, custom);
+    if is_shell_command(&base) {
+        return base;
+    }
+    match agent_type {
+        // `claude --continue` resumes the most recent session for the cwd.
+        "claude" => append_resume_flag(&base, "--continue", &["--continue", "--resume"]),
+        // `opencode --continue` continues the last session in the TUI.
+        "opencode" => append_resume_flag(&base, "--continue", &["--continue", "--session"]),
+        // Codex resumes via subcommand: `codex resume --last`
+        // (--last is scoped to the cwd, which is always $HOME here).
+        // Global flags before the subcommand parse fine under clap.
+        "codex" => append_resume_flag(&base, "resume --last", &["resume"]),
+        // Aider restores prior chat history for the repo on startup.
+        "aider" => append_resume_flag(
+            &base,
+            "--restore-chat-history",
+            &["--restore-chat-history"],
+        ),
+        _ => base,
+    }
+}
+
 pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String, String) {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let session_name = format!("sd_term_{}", now % 1000000);
@@ -131,7 +188,11 @@ pub fn ensure_session(session_name: &str, agent_type: &str, custom_command: Opti
         .unwrap_or(false);
 
     if !exists {
-        let cmd = resolve_command(agent_type, custom_command);
+        // Reboot survival: the tmux server is gone, but agent CLIs persist
+        // conversations to disk continuously, so recreate with the agent's
+        // native resume mechanism (see resolve_resume_command). Brand-new
+        // terminals in create_session() still launch fresh.
+        let cmd = resolve_resume_command(agent_type, custom_command);
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let _ = Command::new("tmux")
             .args([
@@ -615,7 +676,15 @@ pub fn extract_composer_draft(captured: &str) -> Option<String> {
     let start = div_idx.saturating_sub(7);
     let mut draft_parts: Vec<String> = Vec::new();
     for line in &lines[start..div_idx] {
-        let t = line.trim().trim_start_matches(['┃', '│', '|', ' ']).trim();
+        let trimmed = line.trim();
+        // Only bordered lines belong to the composer box interior. This
+        // excludes the `▣ Build · …` activity status line sitting right
+        // above the box, which would otherwise leak agent/model info
+        // ("Build · Muse Spark …") into the title.
+        if !trimmed.starts_with(['┃', '│']) {
+            continue;
+        }
+        let t = trimmed.trim_start_matches(['┃', '│', '|', ' ']).trim();
         if t.is_empty() {
             continue;
         }
@@ -1024,8 +1093,22 @@ mod tests {
         let busy = "┃\n┃\n┃\n┃  Build auto · Muse Spark 1.3 Free OpenCode Zen · high\n╹▀▀▀▀▀▀▀▀▀▀\n ⬝⬝■■  esc interrupt   131.5K (13%)  ctrl+p commands\n";
         assert_eq!(extract_composer_draft(busy), None);
 
+        // Activity status line above the box must not leak into the title.
+        let with_status = " ▣  Build · Muse Spark 1.3 Free · 28m 26s\n┃\n┃\n┃\n┃  Build auto · Muse Spark 1.3 Free OpenCode Zen · high\n╹▀▀▀▀▀▀▀▀▀▀\n";
+        assert_eq!(extract_composer_draft(with_status), None);
+
         // No divider at all (plain shell screen).
         assert_eq!(extract_composer_draft("~/project ❯ cargo test\n"), None);
+    }
+
+    #[test]
+    fn test_extract_composer_draft_status_plus_real_draft() {
+        // Status line above the box is skipped; the real bordered draft wins.
+        let screen = " ▣  Build · Muse Spark 1.3 Free · 28m 26s\n┃\n┃  can you restore the setup\n┃\n┃  Build auto · Muse Spark 1.3 Free OpenCode Zen · high\n╹▀▀▀▀▀▀▀▀▀▀\n";
+        assert_eq!(
+            extract_composer_draft(screen).as_deref(),
+            Some("can you restore the setup")
+        );
     }
 
     #[test]
@@ -1107,6 +1190,129 @@ mod tests {
         assert_eq!(assign_opencode_sessions(&panes, &sessions)[0].1, None);
         let sessions = vec![("s1".to_string(), 970)];
         assert!(assign_opencode_sessions(&panes, &sessions)[0].1.is_some());
+    }
+
+    #[test]
+    fn test_resolve_resume_command_per_agent() {
+        // Deterministic: explicit binary paths, no `which` dependence.
+        let claude = resolve_resume_command("claude", Some("/usr/bin/claude"));
+        assert!(claude.ends_with("--continue"), "got: {claude}");
+        assert!(claude.contains("--dangerously-skip-permissions"));
+
+        let codex = resolve_resume_command("codex", Some("/usr/bin/codex"));
+        assert!(codex.ends_with("resume --last"), "got: {codex}");
+        assert!(codex.contains("--dangerously-bypass-approvals-and-sandbox"));
+
+        let opencode = resolve_resume_command("opencode", Some("/usr/bin/opencode"));
+        assert!(opencode.ends_with("--continue"), "got: {opencode}");
+        assert!(opencode.contains("--auto"));
+
+        let aider = resolve_resume_command("aider", Some("/usr/bin/aider"));
+        assert!(aider.ends_with("--restore-chat-history"), "got: {aider}");
+        assert!(aider.contains("--yes-always"));
+
+        // No resume mechanism -> fresh launch unchanged.
+        assert_eq!(resolve_resume_command("shell", Some("/bin/bash")), "/bin/bash");
+        let grok = resolve_resume_command("grok", Some("/usr/bin/grok"));
+        assert!(
+            !grok.contains("resume") && !grok.contains("continue"),
+            "got: {grok}"
+        );
+        let agy = resolve_resume_command("antigravity", Some("/usr/bin/agy"));
+        assert!(
+            !agy.contains("resume") && !agy.contains("continue"),
+            "got: {agy}"
+        );
+    }
+
+    #[test]
+    fn test_resolve_resume_command_idempotent_and_shell_safe() {
+        // Already-resuming commands are returned untouched (no flag pile-up).
+        assert_eq!(
+            resolve_resume_command(
+                "claude",
+                Some("/usr/bin/claude --dangerously-skip-permissions --continue")
+            ),
+            "/usr/bin/claude --dangerously-skip-permissions --continue"
+        );
+        let codex_resumed =
+            resolve_resume_command("codex", Some("/usr/bin/codex resume --last"));
+        assert!(codex_resumed.contains("resume --last"));
+        assert_eq!(codex_resumed.matches("resume").count(), 1);
+        // Explicit shells are never decorated, even for resumable agents.
+        assert_eq!(
+            resolve_resume_command("claude", Some("/bin/bash")),
+            "/bin/bash"
+        );
+        assert_eq!(
+            resolve_resume_command("opencode", Some("/bin/zsh")),
+            "/bin/zsh"
+        );
+    }
+
+    fn pane_cmdline(sess: &str) -> Option<String> {
+        let out = Command::new("tmux")
+            .args(["display-message", "-p", "-t", sess, "#{pane_pid}"])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+        Some(
+            raw.iter()
+                .map(|b| if *b == 0 { ' ' } else { *b as char })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_ensure_session_recreates_with_resume_command() {
+        // End-to-end reboot simulation: kill the tmux session, then verify
+        // ensure_session() recreates it with the agent's resume command.
+        // python3 tolerates trailing CLI flags (they land in sys.argv) and
+        // sleeps, so the pane stays alive long enough to inspect.
+        let has_tmux = Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        let has_py = Command::new("which")
+            .arg("python3")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_tmux || !has_py {
+            return;
+        }
+        for (sess, agent, marker) in [
+            ("test_sd_resume_claude", "claude", "--continue"),
+            ("test_sd_resume_codex", "codex", "resume --last"),
+        ] {
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", sess])
+                .output();
+            ensure_session(
+                sess,
+                agent,
+                Some("python3 -c 'import time; time.sleep(30)'"),
+            );
+            let mut ok = false;
+            for _ in 0..40 {
+                if let Some(cmdline) = pane_cmdline(sess) {
+                    if cmdline.contains(marker) && cmdline.contains("sleep") {
+                        ok = true;
+                        break;
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = Command::new("tmux")
+                .args(["kill-session", "-t", sess])
+                .output();
+            assert!(ok, "recreated {sess} should run the resume command");
+        }
     }
 }
 
