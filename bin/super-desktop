@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# SUPER DESKTOP - Native Rust / Python launcher
+# SUPER DESKTOP - Pure Native Rust Launcher
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
 
-# Ensure GTK4 Layer Shell library is preloaded
+# Ensure GTK4 Layer Shell library is preloaded if present
 LAYER_SHELL_LIB="/usr/lib/libgtk4-layer-shell.so"
 if [[ -f "$LAYER_SHELL_LIB" ]]; then
     if [[ ":$LD_PRELOAD:" != *":$LAYER_SHELL_LIB:"* ]]; then
@@ -12,12 +12,10 @@ if [[ -f "$LAYER_SHELL_LIB" ]]; then
     fi
 fi
 
-# Prefer high-performance compiled Rust native binary (685KB, 240Hz frame-tick dragging)
 RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"
-if [[ -x "$RUST_BIN" ]]; then
-    exec "$RUST_BIN" "$@"
+if [[ ! -x "$RUST_BIN" ]]; then
+    echo "Building SUPER DESKTOP (release binary)..." >&2
+    cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
 fi
 
-# Fallback to Python module
-export PYTHONPATH="$SCRIPT_DIR:$PYTHONPATH"
-exec python3 -m super_desktop.main "$@"
+exec "$RUST_BIN" "$@"

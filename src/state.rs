@@ -14,6 +14,14 @@ pub struct NoteData {
     pub updated_at: f64,
 }
 
+fn default_term_width() -> i32 {
+    380
+}
+
+fn default_term_height() -> i32 {
+    240
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalData {
     pub id: String,
@@ -22,6 +30,16 @@ pub struct TerminalData {
     pub command: String,
     pub x: i32,
     pub y: i32,
+    #[serde(default = "default_term_width")]
+    pub width: i32,
+    #[serde(default = "default_term_height")]
+    pub height: i32,
+    #[serde(default = "default_term_width")]
+    pub restored_width: i32,
+    #[serde(default = "default_term_height")]
+    pub restored_height: i32,
+    #[serde(default)]
+    pub iconified: bool,
     pub created_at: f64,
 }
 
@@ -36,12 +54,12 @@ impl Default for AppState {
         Self {
             notes: vec![NoteData {
                 id: "welcome_note".to_string(),
-                text: "✨ Welcome to SUPER DESKTOP (Rust Edition)!\n\n• Shortcut: SUPER + SHIFT + Q to show / hide.\n• Drag: Grab any header to reposition smoothly!\n• Double-click background to create a new note.\n• Double-click terminal cards to open in fullscreen foot.\n• Built in Rust for maximum 240Hz responsiveness.".to_string(),
+                text: "✨ Welcome to SUPER DESKTOP (Rust Edition)!\n\n• Shortcut: SUPER + SHIFT + Q to show / hide.\n• Drag: Grab any header to reposition smoothly!\n• Double-click background to create a new note.\n• Double-click a terminal card to expand it to 80% inside the overlay.\n• Double-click the header (or 🗕) to collapse it back.\n• Built in Rust for maximum 240Hz responsiveness.".to_string(),
                 x: 80,
                 y: 140,
                 width: 300,
                 height: 230,
-                color: "yellow".to_string(),
+                color: "omarchy".to_string(),
                 updated_at: 0.0,
             }],
             terminals: Vec::new(),

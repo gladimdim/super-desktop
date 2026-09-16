@@ -2,6 +2,7 @@ mod mini_terminal;
 mod state;
 mod sticky_note;
 mod styles;
+mod theme;
 mod tmux;
 mod window;
 
@@ -91,6 +92,23 @@ fn main() {
             } else {
                 println!("{}", resp);
             }
+        } else if action == "reload-theme" || action == "refresh-theme" {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
+                let name = val["theme"].as_str().unwrap_or("Unknown");
+                let mode = val["mode"].as_str().unwrap_or("dark");
+                println!("SUPER DESKTOP: Theme reloaded -> {} ({})", name, mode);
+            } else {
+                println!("{}", resp);
+            }
+        } else if action == "theme" {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
+                let name = val["theme"].as_str().unwrap_or("Unknown");
+                let mode = val["mode"].as_str().unwrap_or("dark");
+                let accent = val["accent"].as_str().unwrap_or("");
+                println!("SUPER DESKTOP Active Theme: {} ({}) [Accent: {}]", name, mode, accent);
+            } else {
+                println!("{}", resp);
+            }
         } else {
             println!("SUPER DESKTOP (Rust): {}", resp);
         }
@@ -130,6 +148,7 @@ fn run_daemon(start_visible: bool) {
         .build();
 
     std::mem::forget(app.hold());
+    ensure_omarchy_theme_hook();
     apply_styles();
 
     let context = Rc::new(RefCell::new(AppContext {
@@ -163,7 +182,28 @@ fn run_daemon(start_visible: bool) {
     app_clone.run_with_args::<&str>(&[]);
 }
 
+fn ensure_omarchy_theme_hook() {
+    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let hook_dir = PathBuf::from(&home).join(".config/omarchy/hooks/theme-set.d");
+    let hook_file = hook_dir.join("super-desktop");
+    if !hook_file.exists() {
+        let _ = fs::create_dir_all(&hook_dir);
+        let content = "#!/usr/bin/env bash\nsuper-desktop reload-theme >/dev/null 2>&1 || true\n";
+        if fs::write(&hook_file, content).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(&hook_file, fs::Permissions::from_mode(0o755));
+            }
+        }
+    }
+}
+
 fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
+    if theme::check_theme_changed() {
+        styles::reload_styles();
+    }
+
     if ctx.borrow().window.is_some() {
         return;
     }
@@ -294,6 +334,17 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
                 win.create_new_terminal(agent, None, None, None);
             }
             json!({ "ok": true }).to_string()
+        }
+        "reload-theme" | "refresh-theme" | "theme-reload" => {
+            let t = styles::reload_styles();
+            if let Some(win) = ctx.borrow().window.as_ref() {
+                win.reload_theme();
+            }
+            json!({ "ok": true, "theme": t.name, "mode": t.mode }).to_string()
+        }
+        "theme" => {
+            let t = theme::current_theme();
+            json!({ "ok": true, "theme": t.name, "mode": t.mode, "accent": t.accent, "background": t.background }).to_string()
         }
         "kill" | "quit" => {
             app.quit();

@@ -11,10 +11,10 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::mini_terminal::MiniTerminalCard;
+use crate::mini_terminal::{expanded_rect, MiniTerminalCard, CARD_HEIGHT, CARD_WIDTH};
 use crate::state::{load_state, save_state, AppState, NoteData, TerminalData};
 use crate::sticky_note::StickyNote;
-use crate::tmux::{create_session, kill_session, launch_fullscreen};
+use crate::tmux::{create_session, kill_session};
 
 struct Trajectory {
     sx: f64,
@@ -26,6 +26,8 @@ struct Trajectory {
 pub struct SuperDesktopWindow {
     pub window: ApplicationWindow,
     canvas: Fixed,
+    ghost_box: gtk4::Box,
+    ghost_label: Label,
     state: Rc<RefCell<AppState>>,
     note_cards: Rc<RefCell<Vec<StickyNote>>>,
     terminal_cards: Rc<RefCell<Vec<MiniTerminalCard>>>,
@@ -71,6 +73,21 @@ impl SuperDesktopWindow {
         canvas.set_vexpand(true);
         root_overlay.set_child(Some(&canvas));
 
+        let ghost_box = gtk4::Box::new(Orientation::Vertical, 0);
+        ghost_box.add_css_class("term-resize-ghost");
+        ghost_box.set_can_target(false);
+        ghost_box.set_visible(false);
+
+        let ghost_label = Label::new(None);
+        ghost_label.add_css_class("term-ghost-label");
+        ghost_label.set_halign(Align::Center);
+        ghost_label.set_valign(Align::Center);
+        ghost_label.set_vexpand(true);
+        ghost_label.set_hexpand(true);
+        ghost_box.append(&ghost_label);
+
+        canvas.put(&ghost_box, 0.0, 0.0);
+
         let state = Rc::new(RefCell::new(load_state()));
         let note_cards = Rc::new(RefCell::new(Vec::new()));
         let terminal_cards = Rc::new(RefCell::new(Vec::new()));
@@ -97,6 +114,8 @@ impl SuperDesktopWindow {
         let win_rc = Rc::new(Self {
             window,
             canvas,
+            ghost_box,
+            ghost_label,
             state,
             note_cards,
             terminal_cards,
@@ -198,10 +217,24 @@ impl SuperDesktopWindow {
         let win_w = Rc::downgrade(&win_rc);
         key_ctrl.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::Escape {
+                if let Some(w) = win_w.upgrade() {
+                    if let Some(focused) = gtk4::prelude::RootExt::focus(&w.window) {
+                        let type_name = focused.type_().name();
+                        if type_name.contains("Terminal") || focused.has_css_class("term-vte") {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
+                }
                 on_close_key();
                 return glib::Propagation::Stop;
             } else if state.contains(gdk::ModifierType::CONTROL_MASK) && (key == gdk::Key::n || key == gdk::Key::N) {
                 if let Some(w) = win_w.upgrade() {
+                    if let Some(focused) = gtk4::prelude::RootExt::focus(&w.window) {
+                        let type_name = focused.type_().name();
+                        if type_name.contains("Terminal") || focused.has_css_class("term-vte") {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
                     w.create_new_note(None, None, "");
                 }
                 return glib::Propagation::Stop;
@@ -255,7 +288,7 @@ impl SuperDesktopWindow {
             y: ny,
             width: 260,
             height: 200,
-            color: "yellow".to_string(),
+            color: "omarchy".to_string(),
             updated_at: now as f64 / 1000.0,
         };
 
@@ -270,7 +303,7 @@ impl SuperDesktopWindow {
         let hud_badge = self.hud_badge.clone();
         let term_len = self.terminal_cards.borrow().len();
 
-        let drag_pending = Rc::clone(&self.drag_pending);
+        let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
         let sw = self.screen_width;
         let sh = self.screen_height;
@@ -279,11 +312,11 @@ impl SuperDesktopWindow {
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
             let cx = x.clamp(10.0, (sw - 80) as f64);
             let cy = y.clamp(70.0, (sh - 60) as f64);
-            drag_pending.borrow_mut().insert(widget, (cx, cy));
+            drag_pending_update.borrow_mut().insert(widget, (cx, cy));
 
             if !*drag_tick_active.borrow() {
                 *drag_tick_active.borrow_mut() = true;
-                let dp = Rc::clone(&drag_pending);
+                let dp = Rc::clone(&drag_pending_update);
                 let dta = Rc::clone(&drag_tick_active);
                 let c = canvas_for_tick.clone();
 
@@ -301,13 +334,20 @@ impl SuperDesktopWindow {
             }
         };
 
+        let canvas_note_end = canvas.clone();
+        let drag_pending_note_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
-        let on_drag_end = move |_widget: gtk4::Widget, data: &NoteData| {
+        let on_drag_end = move |widget: gtk4::Widget, data: &NoteData| {
+            drag_pending_note_end.borrow_mut().remove(&widget);
+            let mut final_data = data.clone();
+            final_data.x = final_data.x.clamp(10, sw - 80);
+            final_data.y = final_data.y.clamp(70, sh - 60);
+            canvas_note_end.move_(&widget, final_data.x as f64, final_data.y as f64);
             let mut s = state_end.borrow_mut();
-            if let Some(n) = s.notes.iter_mut().find(|n| n.id == data.id) {
-                *n = data.clone();
+            if let Some(n) = s.notes.iter_mut().find(|n| n.id == final_data.id) {
+                *n = final_data;
             } else {
-                s.notes.push(data.clone());
+                s.notes.push(final_data);
             }
             save_state(&s);
         };
@@ -365,6 +405,11 @@ impl SuperDesktopWindow {
             command: cmd_run,
             x: nx,
             y: ny,
+            width: CARD_WIDTH,
+            height: CARD_HEIGHT,
+            restored_width: CARD_WIDTH,
+            restored_height: CARD_HEIGHT,
+            iconified: false,
             created_at: 0.0,
         };
 
@@ -379,7 +424,7 @@ impl SuperDesktopWindow {
         let hud_badge = self.hud_badge.clone();
         let notes_len = self.note_cards.borrow().len();
 
-        let drag_pending = Rc::clone(&self.drag_pending);
+        let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
         let sw = self.screen_width;
         let sh = self.screen_height;
@@ -388,11 +433,11 @@ impl SuperDesktopWindow {
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
             let cx = x.clamp(10.0, (sw - 80) as f64);
             let cy = y.clamp(70.0, (sh - 60) as f64);
-            drag_pending.borrow_mut().insert(widget, (cx, cy));
+            drag_pending_update.borrow_mut().insert(widget, (cx, cy));
 
             if !*drag_tick_active.borrow() {
                 *drag_tick_active.borrow_mut() = true;
-                let dp = Rc::clone(&drag_pending);
+                let dp = Rc::clone(&drag_pending_update);
                 let dta = Rc::clone(&drag_tick_active);
                 let c = canvas_for_tick.clone();
 
@@ -410,21 +455,36 @@ impl SuperDesktopWindow {
             }
         };
 
+        let canvas_term_end = canvas.clone();
+        let drag_pending_term_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
-        let on_drag_end = move |_widget: gtk4::Widget, data: &TerminalData| {
+        let on_drag_end = move |widget: gtk4::Widget, data: &TerminalData| {
+            drag_pending_term_end.borrow_mut().remove(&widget);
+            let mut final_data = data.clone();
+            final_data.x = final_data.x.clamp(10, sw - 80);
+            final_data.y = final_data.y.clamp(70, sh - 60);
+            canvas_term_end.move_(&widget, final_data.x as f64, final_data.y as f64);
             let mut s = state_end.borrow_mut();
-            if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == data.session_name) {
-                *t = data.clone();
+            if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == final_data.session_name) {
+                *t = final_data;
             } else {
-                s.terminals.push(data.clone());
+                s.terminals.push(final_data);
             }
             save_state(&s);
         };
 
-        let win = self.window.clone();
+        let terminal_cards_toggle = Rc::clone(&term_cards);
+        let canvas_toggle = canvas.clone();
+        let window_toggle = self.window.clone();
         let on_double_click = move |data: &TerminalData| {
-            launch_fullscreen(&data.session_name, &data.agent_type);
-            win.close();
+            apply_terminal_expand(
+                &terminal_cards_toggle,
+                &canvas_toggle,
+                &window_toggle,
+                sw,
+                sh,
+                &data.session_name,
+            );
         };
 
         let canvas_del = canvas.clone();
@@ -453,12 +513,63 @@ impl SuperDesktopWindow {
             save_state(&self.state.borrow());
         }
 
-        let card = MiniTerminalCard::new(term_data, on_drag_update, on_drag_end, on_double_click, on_close);
+        let ghost = self.ghost_box.clone();
+        let ghost_lbl = self.ghost_label.clone();
+        let canvas_ghost = canvas.clone();
+        let on_resize_ghost = move |x: f64, y: f64, w: i32, h: i32, is_icon: bool| {
+            let is_first = !ghost.is_visible();
+            if is_first {
+                if ghost.parent().is_some() {
+                    canvas_ghost.remove(&ghost);
+                }
+                canvas_ghost.put(&ghost, x, y);
+            } else {
+                canvas_ghost.move_(&ghost, x, y);
+            }
+            ghost.set_visible(true);
+            ghost.set_size_request(w, h);
+            if is_icon {
+                ghost.add_css_class("ghost-icon");
+                ghost_lbl.set_label("🗕 128 × 128 (Icon)");
+            } else {
+                ghost.remove_css_class("ghost-icon");
+                ghost_lbl.set_label(&format!("💻 {w} × {h} (Terminal)"));
+            }
+        };
+
+        let ghost_end = self.ghost_box.clone();
+        let on_resize_end = move || {
+            ghost_end.set_visible(false);
+        };
+
+        let card = MiniTerminalCard::new(
+            term_data,
+            on_drag_update,
+            on_drag_end,
+            on_double_click,
+            on_close,
+            on_resize_ghost,
+            on_resize_end,
+            sw,
+            sh,
+        );
         canvas.put(&card.container, x as f64, y as f64);
         term_cards.borrow_mut().push(card);
     }
 
     pub fn auto_arrange(&self) {
+        for term in self.terminal_cards.borrow().iter() {
+            if term.is_expanded() {
+                term.collapse();
+                self.canvas.move_(
+                    &term.container,
+                    term.data.borrow().x as f64,
+                    term.data.borrow().y as f64,
+                );
+            }
+        }
+        self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+
         let start_y = 110.0;
         let gap = 20.0;
 
@@ -479,15 +590,19 @@ impl SuperDesktopWindow {
         }
 
         // Terminals right
-        let mut col_x = (self.screen_width - 320) as f64;
+        let mut col_right = (self.screen_width - 30) as f64;
         let mut curr_y = start_y;
+        let mut col_width = 0.0;
         for term in self.terminal_cards.borrow().iter() {
-            let w = 290.0;
-            let h = 185.0;
-            if curr_y + h > (self.screen_height - 60) as f64 {
-                col_x -= w + gap;
+            let w = term.data.borrow().width as f64;
+            let h = term.data.borrow().height as f64;
+            if curr_y + h > (self.screen_height - 60) as f64 && curr_y > start_y {
+                col_right -= col_width + gap;
                 curr_y = start_y;
+                col_width = 0.0;
             }
+            let col_x = col_right - w;
+            col_width = col_width.max(w);
             term.data.borrow_mut().x = col_x as i32;
             term.data.borrow_mut().y = curr_y as i32;
             self.canvas.move_(&term.container, col_x, curr_y);
@@ -523,10 +638,7 @@ impl SuperDesktopWindow {
         }
 
         for term in self.terminal_cards.borrow().iter() {
-            let tx = term.data.borrow().x as f64;
-            let ty = term.data.borrow().y as f64;
-            let w = 290.0;
-            let h = 185.0;
+            let (tx, ty, w, h) = terminal_slide_geom(term, self.screen_width, self.screen_height);
             let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
             self.canvas.move_(&term.container, sx, sy);
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
@@ -545,15 +657,19 @@ impl SuperDesktopWindow {
             let factor = 1.0 - (1.0 - progress).powi(3);
 
             for (widget, traj) in trajs_rc.borrow().iter() {
-                let cx = traj.sx + (traj.tx - traj.sx) * factor;
-                let cy = traj.sy + (traj.ty - traj.sy) * factor;
-                canvas.move_(widget, cx, cy);
+                if widget.parent().as_ref() == Some(canvas.upcast_ref()) {
+                    let cx = traj.sx + (traj.tx - traj.sx) * factor;
+                    let cy = traj.sy + (traj.ty - traj.sy) * factor;
+                    canvas.move_(widget, cx, cy);
+                }
             }
 
             if progress >= 1.0 {
                 *anim_rc.borrow_mut() = false;
                 for (widget, traj) in trajs_rc.borrow().iter() {
-                    canvas.move_(widget, traj.tx, traj.ty);
+                    if widget.parent().as_ref() == Some(canvas.upcast_ref()) {
+                        canvas.move_(widget, traj.tx, traj.ty);
+                    }
                 }
                 return glib::ControlFlow::Break;
             }
@@ -574,10 +690,7 @@ impl SuperDesktopWindow {
                 trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
             }
             for term in self.terminal_cards.borrow().iter() {
-                let tx = term.data.borrow().x as f64;
-                let ty = term.data.borrow().y as f64;
-                let w = 290.0;
-                let h = 185.0;
+                let (tx, ty, w, h) = terminal_slide_geom(term, self.screen_width, self.screen_height);
                 let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
                 trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
             }
@@ -597,9 +710,11 @@ impl SuperDesktopWindow {
             let factor = progress.powi(2);
 
             for (widget, traj) in trajs_rc.borrow().iter() {
-                let cx = traj.tx + (traj.sx - traj.tx) * factor;
-                let cy = traj.ty + (traj.sy - traj.ty) * factor;
-                canvas.move_(widget, cx, cy);
+                if widget.parent().as_ref() == Some(canvas.upcast_ref()) {
+                    let cx = traj.tx + (traj.sx - traj.tx) * factor;
+                    let cy = traj.ty + (traj.sy - traj.ty) * factor;
+                    canvas.move_(widget, cx, cy);
+                }
             }
 
             if progress >= 1.0 {
@@ -639,10 +754,80 @@ impl SuperDesktopWindow {
         self.hud_badge.set_label(&format!("{} Notes • {} Terminals", n_notes, n_terms));
     }
 
+    pub fn reload_theme(&self) {
+        let theme = crate::styles::reload_styles();
+        for card in self.terminal_cards.borrow().iter() {
+            card.apply_theme(&theme);
+        }
+    }
+
     fn periodic_refresh(&self) {
+        if crate::theme::check_theme_changed() {
+            self.reload_theme();
+        }
         for card in self.terminal_cards.borrow().iter() {
             card.refresh_status();
         }
         self.update_counts();
     }
+}
+
+fn terminal_slide_geom(term: &MiniTerminalCard, sw: i32, sh: i32) -> (f64, f64, f64, f64) {
+    let (w, h) = term.size(sw, sh);
+    if term.is_expanded() {
+        let (x, y, _, _) = expanded_rect(sw, sh);
+        (x, y, w, h)
+    } else {
+        (term.data.borrow().x as f64, term.data.borrow().y as f64, w, h)
+    }
+}
+
+fn apply_terminal_expand(
+    terminal_cards: &Rc<RefCell<Vec<MiniTerminalCard>>>,
+    canvas: &gtk4::Fixed,
+    window: &ApplicationWindow,
+    sw: i32,
+    sh: i32,
+    session_name: &str,
+) {
+    let cards = terminal_cards.borrow();
+    let currently_expanded = cards
+        .iter()
+        .find(|c| c.data.borrow().session_name == session_name)
+        .map(|c| c.is_expanded())
+        .unwrap_or(false);
+    let will_expand = !currently_expanded;
+
+    for card in cards.iter() {
+        let sess = card.data.borrow().session_name.clone();
+        if sess == session_name {
+            if will_expand {
+                card.expand(sw, sh);
+                let (x, y, _, _) = expanded_rect(sw, sh);
+                canvas.remove(&card.container);
+                canvas.put(&card.container, x, y);
+                card.focus_terminal();
+            } else {
+                card.collapse();
+                canvas.move_(
+                    &card.container,
+                    card.data.borrow().x as f64,
+                    card.data.borrow().y as f64,
+                );
+            }
+        } else if card.is_expanded() {
+            card.collapse();
+            canvas.move_(
+                &card.container,
+                card.data.borrow().x as f64,
+                card.data.borrow().y as f64,
+            );
+        }
+    }
+
+    window.set_keyboard_mode(if will_expand {
+        KeyboardMode::Exclusive
+    } else {
+        KeyboardMode::OnDemand
+    });
 }

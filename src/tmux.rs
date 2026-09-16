@@ -1,4 +1,4 @@
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub struct AgentConfig {
@@ -96,6 +96,34 @@ pub fn kill_session(session_name: &str) {
         .output();
 }
 
+pub fn ensure_session(session_name: &str, agent_type: &str, custom_command: Option<&str>) {
+    let exists = Command::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !exists {
+        let cmd = resolve_command(agent_type, custom_command);
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let _ = Command::new("tmux")
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                &home,
+                "-x",
+                "120",
+                "-y",
+                "35",
+                &cmd,
+            ])
+            .output();
+    }
+}
+
 pub fn get_preview(session_name: &str, lines: usize) -> String {
     if let Ok(output) = Command::new("tmux")
         .args(["capture-pane", "-p", "-t", session_name, "-S", &format!("-{}", lines * 3)])
@@ -125,6 +153,7 @@ pub fn get_preview(session_name: &str, lines: usize) -> String {
     "Session offline or ended.".to_string()
 }
 
+#[allow(dead_code)]
 pub struct SessionStatus {
     pub status: &'static str,
     pub label: &'static str,
@@ -194,21 +223,14 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
     }
 }
 
-pub fn launch_fullscreen(session_name: &str, title: &str) {
-    let _ = Command::new("foot")
-        .args([
-            "-F",
-            "-a",
-            "super-desktop-terminal",
-            "-T",
-            &format!("SUPER DESKTOP - {}", title),
-            "tmux",
-            "attach-session",
-            "-t",
-            session_name,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+pub fn tmux_bin() -> String {
+    if let Ok(output) = Command::new("which").arg("tmux").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return s;
+            }
+        }
+    }
+    "tmux".to_string()
 }

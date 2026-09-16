@@ -12,6 +12,14 @@ HYPRLAND_LUA="$HOME/.config/hypr/hyprland.lua"
 
 echo "=== Installing SUPER DESKTOP ==="
 
+if ! pkg-config --exists vte-2.91-gtk4 2>/dev/null; then
+    echo "Installing vte4 (GTK4 terminal widget for in-overlay agent sessions)..."
+    omarchy pkg add vte4 || echo "Warning: could not install vte4 automatically. Run: omarchy pkg add vte4"
+fi
+
+echo "Building native Rust binary (release)..."
+cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+
 # 1. Ensure ~/.local/bin exists and symlink executable
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$CONFIG_DIR"
@@ -52,7 +60,20 @@ if [[ -f "$HYPRLAND_LUA" ]]; then
     fi
 fi
 
-# 5. Reload Hyprland and validate
+# 5. Install Omarchy theme-set hook for instant theme synchronization
+HOOK_DIR="$HOME/.config/omarchy/hooks/theme-set.d"
+HOOK_FILE="$HOOK_DIR/super-desktop"
+mkdir -p "$HOOK_DIR"
+cat << 'EOF' > "$HOOK_FILE"
+#!/usr/bin/env bash
+if which super-desktop >/dev/null 2>&1; then
+    super-desktop reload-theme >/dev/null 2>&1 || true
+fi
+EOF
+chmod +x "$HOOK_FILE"
+echo "✓ Installed Omarchy theme hook to $HOOK_FILE"
+
+# 6. Reload Hyprland and validate
 if which hyprctl >/dev/null 2>&1; then
     echo "Reloading Hyprland configuration..."
     hyprctl reload >/dev/null || true

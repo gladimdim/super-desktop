@@ -5,8 +5,6 @@ use std::rc::Rc;
 
 use crate::state::NoteData;
 
-pub const COLOR_PALETTE: &[&str] = &["yellow", "mint", "sky", "rose", "purple", "dark"];
-
 pub struct StickyNote {
     pub container: gtk4::Box,
     pub data: Rc<RefCell<NoteData>>,
@@ -27,12 +25,12 @@ impl StickyNote {
         FChange: Fn(&NoteData) + 'static,
     {
         let data = Rc::new(RefCell::new(note_data));
+        let on_drag_end = Rc::new(on_drag_end);
+        let on_change_rc = Rc::new(on_change);
         let container = gtk4::Box::new(Orientation::Vertical, 0);
 
-        let initial_color = data.borrow().color.clone();
         container.set_size_request(data.borrow().width, data.borrow().height);
         container.add_css_class("sticky-note");
-        container.add_css_class(&format!("note-{}", initial_color));
 
         // Header
         let header = gtk4::Box::new(Orientation::Horizontal, 6);
@@ -47,32 +45,6 @@ impl StickyNote {
         title.set_halign(Align::Start);
         title.add_css_class("note-header-title");
         header.append(&title);
-
-        // Color button
-        let color_btn = Button::with_label("🎨");
-        color_btn.set_tooltip_text(Some("Change Color"));
-        color_btn.add_css_class("note-header-btn");
-
-        let container_weak = container.downgrade();
-        let data_color = Rc::clone(&data);
-        let on_change_rc = Rc::new(on_change);
-        let on_change_color = Rc::clone(&on_change_rc);
-
-        color_btn.connect_clicked(move |_| {
-            if let Some(c) = container_weak.upgrade() {
-                let current_color = data_color.borrow().color.clone();
-                let next_idx = (COLOR_PALETTE.iter().position(|&col| col == current_color).unwrap_or(0) + 1)
-                    % COLOR_PALETTE.len();
-                let next_color = COLOR_PALETTE[next_idx];
-
-                c.remove_css_class(&format!("note-{}", current_color));
-                c.add_css_class(&format!("note-{}", next_color));
-
-                data_color.borrow_mut().color = next_color.to_string();
-                on_change_color(&data_color.borrow());
-            }
-        });
-        header.append(&color_btn);
 
         // Delete button
         let delete_btn = Button::with_label("✕");
@@ -138,32 +110,67 @@ impl StickyNote {
         // Drag gesture
         let drag = GestureDrag::new();
         let start_pos = Rc::new(RefCell::new((0.0, 0.0)));
+        let grab_offset: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
 
         let data_drag = Rc::clone(&data);
         let start_pos_begin = Rc::clone(&start_pos);
-        drag.connect_drag_begin(move |_, _, _| {
-            *start_pos_begin.borrow_mut() = (data_drag.borrow().x as f64, data_drag.borrow().y as f64);
+        let grab_offset_begin = Rc::clone(&grab_offset);
+        drag.connect_drag_begin(move |gesture, _, _| {
+            let dx = data_drag.borrow().x as f64;
+            let dy = data_drag.borrow().y as f64;
+            *start_pos_begin.borrow_mut() = (dx, dy);
+            *grab_offset_begin.borrow_mut() = gesture
+                .current_event()
+                .and_then(|e| e.position())
+                .map(|(mx, my)| (mx - dx, my - dy));
         });
 
         let container_weak = container.downgrade();
         let start_pos_update = Rc::clone(&start_pos);
-        drag.connect_drag_update(move |_, offset_x, offset_y| {
+        let grab_offset_update = Rc::clone(&grab_offset);
+        let data_drag_update = Rc::clone(&data);
+        drag.connect_drag_update(move |gesture, offset_x, offset_y| {
+            if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+            }
             if let Some(c) = container_weak.upgrade() {
-                let (sx, sy) = *start_pos_update.borrow();
-                on_drag_update(c.upcast(), sx + offset_x, sy + offset_y);
+                let (nx, ny) = match (
+                    *grab_offset_update.borrow(),
+                    gesture.current_event().and_then(|e| e.position()),
+                ) {
+                    (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
+                    _ => {
+                        let (sx, sy) = *start_pos_update.borrow();
+                        (sx + offset_x, sy + offset_y)
+                    }
+                };
+                data_drag_update.borrow_mut().x = nx.round() as i32;
+                data_drag_update.borrow_mut().y = ny.round() as i32;
+                on_drag_update(c.upcast(), nx, ny);
             }
         });
 
         let container_weak = container.downgrade();
         let data_drag_end = Rc::clone(&data);
         let start_pos_end = Rc::clone(&start_pos);
-        drag.connect_drag_end(move |_, offset_x, offset_y| {
+        let grab_offset_end = Rc::clone(&grab_offset);
+        let on_drag_end = Rc::clone(&on_drag_end);
+        drag.connect_drag_end(move |gesture, offset_x, offset_y| {
             if let Some(c) = container_weak.upgrade() {
-                let (sx, sy) = *start_pos_end.borrow();
-                let nx = (sx + offset_x) as i32;
-                let ny = (sy + offset_y) as i32;
-                data_drag_end.borrow_mut().x = nx;
-                data_drag_end.borrow_mut().y = ny;
+                let (nx, ny) = match (
+                    *grab_offset_end.borrow(),
+                    gesture.current_event().and_then(|e| e.position()),
+                ) {
+                    (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
+                    _ => {
+                        let (sx, sy) = *start_pos_end.borrow();
+                        (sx + offset_x, sy + offset_y)
+                    }
+                };
+                let rx = nx.round() as i32;
+                let ry = ny.round() as i32;
+                data_drag_end.borrow_mut().x = rx;
+                data_drag_end.borrow_mut().y = ry;
                 on_drag_end(c.upcast(), &data_drag_end.borrow());
             }
         });
