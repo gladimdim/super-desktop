@@ -1,3 +1,4 @@
+mod brand;
 mod mini_terminal;
 mod state;
 mod sticky_note;

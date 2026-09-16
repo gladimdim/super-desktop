@@ -29,6 +29,13 @@ chmod +x "$BIN_SRC"
 ln -sf "$BIN_SRC" "$BIN_DST"
 echo "✓ Symlinked executable to $BIN_DST"
 
+# 1b. Install vendored toolbar logos (company SVGs)
+if [[ -d "$SCRIPT_DIR/assets" ]]; then
+    mkdir -p "$CONFIG_DIR/assets"
+    cp -r "$SCRIPT_DIR/assets/." "$CONFIG_DIR/assets/"
+    echo "✓ Installed toolbar assets to $CONFIG_DIR/assets"
+fi
+
 # 2. Install desktop entry
 sed "s|/home/gladimdim/.local/bin/super-desktop|$BIN_DST|g" "$SCRIPT_DIR/super-desktop.desktop" > "$APP_DST"
 echo "✓ Installed desktop entry to $APP_DST"

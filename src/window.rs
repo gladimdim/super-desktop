@@ -2,8 +2,8 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Button, EventControllerKey, Fixed, GestureClick, Label,
-    Orientation, Overlay, Separator,
+    Align, Application, ApplicationWindow, Button, EventControllerKey, Fixed, GestureClick, Image,
+    Label, Orientation, Overlay, Separator,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
@@ -48,6 +48,8 @@ pub struct SuperDesktopWindow {
     drag_tick_active: Rc<RefCell<bool>>,
     anim_trajectories: Rc<RefCell<HashMap<gtk4::Widget, Trajectory>>>,
     animating: Rc<RefCell<bool>>,
+    /// Toolbar brand icons as (image widget, agent key) for theme-aware refresh.
+    brand_images: Rc<RefCell<Vec<(Image, String)>>>,
 }
 
 impl SuperDesktopWindow {
@@ -120,6 +122,7 @@ impl SuperDesktopWindow {
         let drag_tick_active = Rc::new(RefCell::new(false));
         let anim_trajectories = Rc::new(RefCell::new(HashMap::new()));
         let animating = Rc::new(RefCell::new(false));
+        let brand_images: Rc<RefCell<Vec<(Image, String)>>> = Rc::new(RefCell::new(Vec::new()));
 
         let win_rc = Rc::new(Self {
             window,
@@ -136,6 +139,7 @@ impl SuperDesktopWindow {
             drag_tick_active,
             anim_trajectories,
             animating,
+            brand_images: Rc::clone(&brand_images),
         });
 
         // + Note Button
@@ -150,19 +154,31 @@ impl SuperDesktopWindow {
         });
         hud.append(&btn_note);
 
-        // Agents
+        // Agents (company logo + name; emoji label if the SVG is missing)
         let agents = [
-            ("antigravity", "🌌 Antigravity"),
-            ("claude", "⚡ Claude"),
-            ("codex", "🤖 Codex"),
-            ("opencode", "🔮 OpenCode"),
-            ("grok", "🚀 Grok"),
-            ("shell", "💻 Shell"),
+            ("antigravity", "Antigravity", "🌌"),
+            ("claude", "Claude", "⚡"),
+            ("codex", "Codex", "🤖"),
+            ("opencode", "OpenCode", "🔮"),
+            ("grok", "Grok", "🚀"),
+            ("shell", "Shell", "💻"),
         ];
 
-        for (agent_key, label) in agents {
-            let btn = Button::with_label(label);
+        let light_theme = crate::theme::current_theme().mode == "light";
+        for (agent_key, name, emoji) in agents {
+            let btn = Button::new();
             btn.add_css_class("hud-button");
+            if let Some(logo) = crate::brand::logo_path(agent_key, light_theme) {
+                let row = gtk4::Box::new(Orientation::Horizontal, 6);
+                let img = Image::from_file(&logo);
+                img.set_pixel_size(crate::brand::BRAND_ICON_SIZE);
+                row.append(&img);
+                row.append(&Label::new(Some(name)));
+                btn.set_child(Some(&row));
+                brand_images.borrow_mut().push((img, agent_key.to_string()));
+            } else {
+                btn.set_label(&format!("{emoji} {name}"));
+            }
             let tooltip = match agent_key {
                 "antigravity" => "Launch Antigravity CLI (--dangerously-skip-permissions)",
                 "claude" => "Launch Claude Code (--dangerously-skip-permissions)",
@@ -905,6 +921,13 @@ impl SuperDesktopWindow {
         let theme = crate::styles::reload_styles();
         for card in self.terminal_cards.borrow().iter() {
             card.apply_theme(&theme);
+        }
+        // Swap monochrome toolbar logos for the new mode (light/dark).
+        let light_theme = theme.mode == "light";
+        for (img, agent) in self.brand_images.borrow().iter() {
+            if let Some(logo) = crate::brand::logo_path(agent, light_theme) {
+                img.set_from_file(Some(logo));
+            }
         }
     }
 
