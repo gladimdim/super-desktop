@@ -12,9 +12,24 @@ HYPRLAND_LUA="$HOME/.config/hypr/hyprland.lua"
 
 echo "=== Installing SUPER DESKTOP ==="
 
+# Check for cargo
+if ! command -v cargo &> /dev/null; then
+    echo "Rust/Cargo is not installed. Installing rustup..."
+    if [ -t 1 ]; then
+        omarchy pkg add rustup || echo "Warning: could not install rustup automatically."
+    else
+        echo "Warning: Not running in a terminal, please manually install rustup: omarchy pkg add rustup"
+    fi
+fi
+
+# Check for vte4
 if ! pkg-config --exists vte-2.91-gtk4 2>/dev/null; then
     echo "Installing vte4 (GTK4 terminal widget for in-overlay agent sessions)..."
-    omarchy pkg add vte4 || echo "Warning: could not install vte4 automatically. Run: omarchy pkg add vte4"
+    if [ -t 1 ]; then
+        omarchy pkg add vte4 || echo "Warning: could not install vte4 automatically."
+    else
+        echo "Warning: Not running in a terminal, please manually install vte4: omarchy pkg add vte4"
+    fi
 fi
 
 echo "Building native Rust binary (release)..."
@@ -37,34 +52,34 @@ if [[ -d "$SCRIPT_DIR/assets" ]]; then
 fi
 
 # 2. Install desktop entry
-sed "s|/home/gladimdim/.local/bin/super-desktop|$BIN_DST|g" "$SCRIPT_DIR/super-desktop.desktop" > "$APP_DST"
+sed "s|^Exec=.*|Exec=$BIN_DST toggle|g" "$SCRIPT_DIR/super-desktop.desktop" > "$APP_DST"
 echo "✓ Installed desktop entry to $APP_DST"
 
 # 3. Add Hyprland keybinding to ~/.config/hypr/bindings.lua
-if [[ -f "$BINDINGS_LUA" ]]; then
-    if ! grep -q "super-desktop toggle" "$BINDINGS_LUA"; then
-        echo "" >> "$BINDINGS_LUA"
-        echo "-- SUPER DESKTOP: Sticky notes and AI agent terminal overlay" >> "$BINDINGS_LUA"
-        echo 'o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-        echo 'o.bind("SUPER + SHIFT + Cyrillic_shorti", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-        echo 'o.bind("SUPER + SHIFT + Cyrillic_SHORTI", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-        echo 'o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-        echo "✓ Added SUPER + SHIFT + Q bindings to $BINDINGS_LUA"
-    else
-        echo "✓ Hyprland keybinding already present in $BINDINGS_LUA"
-    fi
+mkdir -p "$(dirname "$BINDINGS_LUA")"
+touch "$BINDINGS_LUA"
+if ! grep -q "super-desktop toggle" "$BINDINGS_LUA"; then
+    echo "" >> "$BINDINGS_LUA"
+    echo "-- SUPER DESKTOP: Sticky notes and AI agent terminal overlay" >> "$BINDINGS_LUA"
+    echo 'o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
+    echo 'o.bind("SUPER + SHIFT + Cyrillic_shorti", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
+    echo 'o.bind("SUPER + SHIFT + Cyrillic_SHORTI", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
+    echo 'o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
+    echo "✓ Added SUPER + SHIFT + Q bindings to $BINDINGS_LUA"
+else
+    echo "✓ Hyprland keybinding already present in $BINDINGS_LUA"
 fi
 
 # 4. Add Layer Rule for blur effect to ~/.config/hypr/hyprland.lua
-if [[ -f "$HYPRLAND_LUA" ]]; then
-    if ! grep -q "super-desktop" "$HYPRLAND_LUA"; then
-        echo "" >> "$HYPRLAND_LUA"
-        echo "-- Super Desktop overlay blur effect" >> "$HYPRLAND_LUA"
-        echo 'hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })' >> "$HYPRLAND_LUA"
-        echo "✓ Added layer rule to $HYPRLAND_LUA"
-    else
-        echo "✓ Hyprland layer rule already present in $HYPRLAND_LUA"
-    fi
+mkdir -p "$(dirname "$HYPRLAND_LUA")"
+touch "$HYPRLAND_LUA"
+if ! grep -q "super-desktop" "$HYPRLAND_LUA"; then
+    echo "" >> "$HYPRLAND_LUA"
+    echo "-- Super Desktop overlay blur effect" >> "$HYPRLAND_LUA"
+    echo 'hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })' >> "$HYPRLAND_LUA"
+    echo "✓ Added layer rule to $HYPRLAND_LUA"
+else
+    echo "✓ Hyprland layer rule already present in $HYPRLAND_LUA"
 fi
 
 # 5. Install Omarchy theme-set hook for instant theme synchronization
