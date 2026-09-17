@@ -116,25 +116,54 @@ fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
 /// session store, Aider: .aider.chat.history.md), so relaunching with the
 /// agent's native resume mechanism restores the conversation automatically.
 ///
-/// This is intentionally "continue most recent": exact per-terminal session
-/// IDs can't be tracked reliably (all cards share $HOME as cwd), so with
-/// several cards of the same agent each restored card continues that agent's
-/// latest session. Use /clear (or rename/fork) inside the agent if a card
-/// should start over instead.
+/// OPENCODE ISOLATION: when `agent_session_id` (persisted per card, see
+/// `TerminalData::agent_session_id`) is known, resume THAT exact session via
+/// `opencode --session <id>` so N cards never share one conversation.
+/// Without a stored id we fall back to `--continue --fork`: `--fork` clones
+/// the latest session into an independent copy, so even legacy cards (created
+/// before ids were persisted) diverge instead of live-sharing one session
+/// where Ctrl+C / output in one card leaks into all others.
 ///
 /// Agents without a non-interactive resume mechanism (shell, antigravity,
 /// grok, unknown) relaunch fresh, exactly like before. An explicit shell
 /// command is never decorated with agent flags.
+#[allow(dead_code)]
 pub fn resolve_resume_command(agent_type: &str, custom: Option<&str>) -> String {
+    resolve_resume_command_with_session(agent_type, custom, None)
+}
+
+/// Same as `resolve_resume_command` but honours a persisted per-card agent
+/// session id (currently used for opencode).
+pub fn resolve_resume_command_with_session(
+    agent_type: &str,
+    custom: Option<&str>,
+    agent_session_id: Option<&str>,
+) -> String {
     let base = resolve_command(agent_type, custom);
     if is_shell_command(&base) {
         return base;
     }
+    // Exact per-card resume wins over "latest" heuristics.
+    if agent_type == "opencode" {
+        if let Some(id) = agent_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+            if base.contains("--session") {
+                return base;
+            }
+            return format!("{base} --session {id}");
+        }
+    }
     match agent_type {
         // `claude --continue` resumes the most recent session for the cwd.
         "claude" => append_resume_flag(&base, "--continue", &["--continue", "--resume"]),
-        // `opencode --continue` continues the last session in the TUI.
-        "opencode" => append_resume_flag(&base, "--continue", &["--continue", "--session"]),
+        // `opencode --continue --fork` clones the latest session into an
+        // independent copy (no stored id to address directly). Plain
+        // `--continue` without `--fork` would attach every restored card to
+        // the SAME live session: output/Ctrl+C mixing across cards.
+        "opencode" => {
+            let with_continue =
+                append_resume_flag(&base, "--continue", &["--continue", "--session"]);
+            append_resume_flag(&with_continue, "--fork", &["--fork"])
+        }
         // Codex resumes via subcommand: `codex resume --last`
         // (--last is scoped to the cwd, which is always $HOME here).
         // Global flags before the subcommand parse fine under clap.
@@ -150,8 +179,7 @@ pub fn resolve_resume_command(agent_type: &str, custom: Option<&str>) -> String 
 }
 
 pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String, String) {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
-    let session_name = format!("sd_term_{}", now % 1000000);
+    let session_name = unique_session_name();
     let cmd = resolve_command(agent_type, custom_command);
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
 
@@ -174,25 +202,78 @@ pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String
     (session_name, cmd)
 }
 
+/// True when a tmux session with this name already exists on the server.
+pub fn session_exists(session_name: &str) -> bool {
+    Command::new("tmux")
+        .args(["has-session", "-t", session_name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Generate a tmux session name that cannot collide with a live session.
+///
+/// The old scheme (`millis % 1_000_000`) wrapped every ~16 minutes AND
+/// collided when two cards were created within the same millisecond: the
+/// second `tmux new-session -d -s <dup>` silently failed and the new card
+/// attached to the OLD session, so Ctrl+C / output in one card leaked into
+/// the other. Full millis + pid + random suffix + existence check fixes it.
+pub fn unique_session_name() -> String {
+    for _ in 0..20 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        // Cheap randomness without new deps: nanos + pid mix.
+        let nano = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let rand = (nano ^ (std::process::id() << 8)) % 46656;
+        let candidate = format!("sd_term_{now}_{rand:04x}");
+        if !session_exists(&candidate) {
+            return candidate;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    // Practically unreachable fallback.
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("sd_term_{now}_{}", std::process::id())
+}
+
 pub fn kill_session(session_name: &str) {
     let _ = Command::new("tmux")
         .args(["kill-session", "-t", session_name])
         .output();
 }
 
+#[allow(dead_code)]
 pub fn ensure_session(session_name: &str, agent_type: &str, custom_command: Option<&str>) {
-    let exists = Command::new("tmux")
-        .args(["has-session", "-t", session_name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    ensure_session_with_agent_id(session_name, agent_type, custom_command, None)
+}
 
-    if !exists {
+/// Same as `ensure_session` but resumes a persisted per-card agent session
+/// (opencode `--session <id>`) so rebooted cards stay isolated 1:1.
+pub fn ensure_session_with_agent_id(
+    session_name: &str,
+    agent_type: &str,
+    custom_command: Option<&str>,
+    agent_session_id: Option<&str>,
+) {
+    if session_exists(session_name) {
+        return;
+    }
+
+    {
         // Reboot survival: the tmux server is gone, but agent CLIs persist
         // conversations to disk continuously, so recreate with the agent's
         // native resume mechanism (see resolve_resume_command). Brand-new
         // terminals in create_session() still launch fresh.
-        let cmd = resolve_resume_command(agent_type, custom_command);
+        let cmd =
+            resolve_resume_command_with_session(agent_type, custom_command, agent_session_id);
         let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let _ = Command::new("tmux")
             .args([
@@ -518,7 +599,9 @@ pub fn tmux_bin() -> String {
 }
 
 /// Max characters of the last prompt shown in the terminal card title.
-pub const PROMPT_TITLE_MAX_CHARS: usize = 30;
+/// Long enough to fill the whole header; the label ellipsizes the visual
+/// overflow, the full text stays in the tooltip.
+pub const PROMPT_TITLE_MAX_CHARS: usize = 120;
 
 /// Capture the visible text of a tmux pane (TUI apps like opencode run
 /// fullscreen, so this is the current screen, not scrollback history).
@@ -1064,14 +1147,14 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_prompt_title_caps_at_30() {
+    fn test_truncate_prompt_title_caps_length() {
         let short = "fix bug";
         assert_eq!(truncate_prompt_title(short), "fix bug");
-        let long = "this is a very long prompt that definitely exceeds thirty chars";
+        let long = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua enim";
         let out = truncate_prompt_title(long);
-        assert_eq!(out.chars().count(), 30);
+        assert_eq!(out.chars().count(), PROMPT_TITLE_MAX_CHARS);
         assert!(out.ends_with('…'));
-        assert!(out.starts_with("this is a very long prompt"));
+        assert!(out.starts_with("lorem ipsum dolor sit amet"));
     }
 
     #[test]
@@ -1204,8 +1287,21 @@ mod tests {
         assert!(codex.contains("--dangerously-bypass-approvals-and-sandbox"));
 
         let opencode = resolve_resume_command("opencode", Some("/usr/bin/opencode"));
-        assert!(opencode.ends_with("--continue"), "got: {opencode}");
+        // No stored id -> forked continue (isolated copy, never shared live).
+        assert!(opencode.contains("--continue"), "got: {opencode}");
+        assert!(opencode.ends_with("--fork"), "got: {opencode}");
         assert!(opencode.contains("--auto"));
+
+        // Stored per-card id -> exact session resume.
+        let opencode_exact = resolve_resume_command_with_session(
+            "opencode",
+            Some("/usr/bin/opencode"),
+            Some("ses_abc123"),
+        );
+        assert!(
+            opencode_exact.ends_with("--session ses_abc123"),
+            "got: {opencode_exact}"
+        );
 
         let aider = resolve_resume_command("aider", Some("/usr/bin/aider"));
         assert!(aider.ends_with("--restore-chat-history"), "got: {aider}");
@@ -1239,6 +1335,12 @@ mod tests {
             resolve_resume_command("codex", Some("/usr/bin/codex resume --last"));
         assert!(codex_resumed.contains("resume --last"));
         assert_eq!(codex_resumed.matches("resume").count(), 1);
+        // Opencode fallback is idempotent: no flag pile-up on second reboot.
+        let oc_once = resolve_resume_command("opencode", Some("/usr/bin/opencode"));
+        let oc_twice = resolve_resume_command("opencode", Some(&oc_once));
+        assert_eq!(oc_once, oc_twice, "got: {oc_twice}");
+        assert_eq!(oc_twice.matches("--fork").count(), 1);
+        assert_eq!(oc_twice.matches("--continue").count(), 1);
         // Explicit shells are never decorated, even for resumable agents.
         assert_eq!(
             resolve_resume_command("claude", Some("/bin/bash")),
@@ -1313,6 +1415,35 @@ mod tests {
                 .output();
             assert!(ok, "recreated {sess} should run the resume command");
         }
+    }
+
+    #[test]
+    fn test_unique_session_names_never_collide() {
+        // Rapid creation (same-millisecond) must still yield distinct names:
+        // the old `millis % 1_000_000` scheme attached both cards to one tmux
+        // session, mixing output/Ctrl+C across terminals.
+        let mut names = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let n = unique_session_name();
+            assert!(n.starts_with("sd_term_"), "got: {n}");
+            assert!(names.insert(n.clone()), "duplicate session name: {n}");
+        }
+    }
+
+    #[test]
+    fn test_resume_with_stored_opencode_session() {
+        let cmd = resolve_resume_command_with_session(
+            "opencode",
+            Some("/usr/bin/opencode --auto"),
+            Some("ses_f51a6ff90ffe11x52WFauyf57C"),
+        );
+        assert!(cmd.contains("--session ses_f51a6ff90ffe11x52WFauyf57C"));
+        assert!(!cmd.contains("--continue"), "got: {cmd}");
+        assert!(!cmd.contains("--fork"), "got: {cmd}");
+        // Empty/blank stored ids fall back to forked continue.
+        let fallback =
+            resolve_resume_command_with_session("opencode", Some("/usr/bin/opencode"), Some("  "));
+        assert!(fallback.contains("--continue") && fallback.contains("--fork"));
     }
 }
 

@@ -191,6 +191,119 @@ window.super-desktop-window {{
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.45);
 }}
 
+/* ================= Provider Usage Hover Card ================= */
+popover.usage-pop {{
+    background-color: {hud_bg};
+    border: 1px solid {hud_border};
+    border-radius: 14px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 1px {hud_glow};
+    padding: 0;
+}}
+
+popover.usage-pop > contents {{
+    background-color: transparent;
+    border-radius: 14px;
+    padding: 0;
+}}
+
+.usage-pop-box {{
+    padding: 10px 12px 12px 12px;
+}}
+
+/* Header pill: the HUD button mirrored, so the card reads as the button
+   itself unfolding downward. */
+.usage-head {{
+    background-color: {btn_bg};
+    border: 1px solid {btn_border};
+    border-radius: 9999px;
+    padding: 5px 12px;
+}}
+
+.usage-head-name {{
+    color: {foreground};
+    font-size: 12px;
+    font-weight: 700;
+}}
+
+separator.usage-sep {{
+    background-color: {term_hdr_divider};
+    min-height: 1px;
+    margin: 2px 0;
+}}
+
+.usage-launch {{
+    color: {dark_foreground};
+    font-size: 11px;
+    font-style: italic;
+}}
+
+.usage-title {{
+    color: {accent};
+    font-weight: 800;
+    font-size: 13px;
+}}
+
+.usage-tier {{
+    background-color: {badge_bg};
+    color: {accent};
+    border-radius: 9999px;
+    padding: 2px 9px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+.usage-status {{
+    color: {bright_foreground};
+    font-size: 12px;
+    font-weight: 600;
+}}
+
+.usage-limit-label {{
+    color: {foreground};
+    font-size: 12px;
+    font-weight: 600;
+}}
+
+.usage-left {{
+    font-size: 12px;
+    font-weight: 800;
+}}
+
+.usage-left.ok {{ color: {usage_ok}; }}
+.usage-left.warn {{ color: {usage_warn}; }}
+.usage-left.crit {{ color: {usage_crit}; }}
+
+progressbar.usage-bar > trough {{
+    min-height: 6px;
+    border-radius: 9999px;
+    background-color: {usage_trough};
+    border: none;
+}}
+
+progressbar.usage-bar > trough > progress {{
+    min-height: 6px;
+    border-radius: 9999px;
+}}
+
+progressbar.usage-bar.ok > trough > progress {{ background-color: {usage_ok}; }}
+progressbar.usage-bar.warn > trough > progress {{ background-color: {usage_warn}; }}
+progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}; }}
+
+.usage-meta {{
+    color: {light_foreground};
+    font-size: 11px;
+}}
+
+.usage-warn {{
+    color: {usage_warn};
+    font-size: 11px;
+}}
+
+.usage-src {{
+    color: {dark_foreground};
+    font-size: 10px;
+}}
+
 .note-content-area {{
     background-color: {note_content_bg};
     padding: 8px 12px 12px 12px;
@@ -516,6 +629,10 @@ window.super-desktop-window {{
         status_exited_border = theme.rgba_muted(0.35),
         preview_border = theme.rgba_muted(0.25),
         preview_text = theme.bright_cyan,
+        usage_ok = theme.bright_green,
+        usage_warn = theme.bright_yellow,
+        usage_crit = theme.bright_red,
+        usage_trough = theme.rgba_muted(0.25),
     )
 }
 

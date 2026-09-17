@@ -2,8 +2,8 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Button, EventControllerKey, Fixed, GestureClick, Image,
-    Label, Orientation, Overlay, Separator,
+    Align, Application, ApplicationWindow, Button, EventControllerKey, EventControllerMotion,
+    Fixed, GestureClick, Image, Label, Orientation, Overlay, Popover, PositionType, Separator,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
@@ -11,9 +11,12 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::mini_terminal::{expanded_rect, MiniTerminalCard, CARD_HEIGHT, CARD_WIDTH};
+use crate::mini_terminal::{
+    clamp_card_size, expanded_rect, MiniTerminalCard, NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
+};
 use crate::state::{load_state, AppState, NoteData, TerminalData};
 use crate::sticky_note::StickyNote;
+use crate::tag::DEFAULT_TERMINAL_TAG;
 use crate::tmux::{create_session, kill_session};
 
 #[derive(Clone, Copy)]
@@ -84,6 +87,14 @@ impl SuperDesktopWindow {
         canvas.set_hexpand(true);
         canvas.set_vexpand(true);
         root_overlay.set_child(Some(&canvas));
+
+        // Launcher connection hover card: floats centered above notes and
+        // terminals, toggled by the 📱 HUD button (never a separate window).
+        let launcher_panel = crate::launcher_settings::build_launcher_panel();
+        launcher_panel.widget.set_visible(false);
+        launcher_panel.widget.set_halign(Align::Center);
+        launcher_panel.widget.set_valign(Align::Center);
+        root_overlay.add_overlay(&launcher_panel.widget);
 
         let ghost_box = gtk4::Box::new(Orientation::Vertical, 0);
         ghost_box.add_css_class("term-resize-ghost");
@@ -188,7 +199,13 @@ impl SuperDesktopWindow {
                 "shell" => "Launch Terminal Shell",
                 _ => "Launch Terminal",
             };
-            btn.set_tooltip_text(Some(tooltip));
+            let has_usage = crate::usage::usage_id_for_agent(agent_key).is_some();
+            if !has_usage {
+                // Usage buttons render their launch hint inside the hover
+                // card instead, so the native tooltip never double-renders
+                // on top of it.
+                btn.set_tooltip_text(Some(tooltip));
+            }
             let win_w = Rc::downgrade(&win_rc);
             let a_key = agent_key.to_string();
             btn.connect_clicked(move |_| {
@@ -196,6 +213,46 @@ impl SuperDesktopWindow {
                     w.create_new_terminal(&a_key, None, None, None);
                 }
             });
+
+            // Hover usage card: Omarchy quota/tokens in a popover that hangs
+            // flush under the provider button, headed by the button itself.
+            if let Some(usage_id) = crate::usage::usage_id_for_agent(agent_key) {
+                let pop = Popover::new();
+                pop.add_css_class("usage-pop");
+                pop.set_position(PositionType::Bottom);
+                pop.set_has_arrow(false);
+                pop.set_offset(0, 4);
+                pop.set_autohide(false);
+                pop.set_can_focus(false);
+                pop.set_parent(&btn);
+
+                let motion = EventControllerMotion::new();
+                let pop_enter = pop.clone();
+                let card = crate::usage::UsageCardInfo {
+                    usage_id,
+                    agent_key,
+                    display_name: name,
+                    emoji,
+                    light_theme,
+                };
+                motion.connect_enter(move |_, _, _| {
+                    // Rebuilt on every hover so numbers are fresh from disk.
+                    let content = crate::usage::build_usage_content(&card);
+                    pop_enter.set_child(Some(&content));
+                    pop_enter.popup();
+                });
+                let pop_leave = pop.clone();
+                motion.connect_leave(move |_| {
+                    pop_leave.popdown();
+                });
+                btn.add_controller(motion);
+
+                // Don't leave a stale hover card behind after launching.
+                let pop_click = pop.clone();
+                btn.connect_clicked(move |_| {
+                    pop_click.popdown();
+                });
+            }
             hud.append(&btn);
         }
 
@@ -218,8 +275,14 @@ impl SuperDesktopWindow {
         let btn_launcher = Button::with_label("📱 Launcher");
         btn_launcher.set_tooltip_text(Some("Launcher connection: bridge status, IPs, PIN"));
         btn_launcher.add_css_class("hud-button");
+        let panel_w = launcher_panel.widget.clone();
+        let panel_refresh = Rc::clone(&launcher_panel.refresh);
         btn_launcher.connect_clicked(move |_| {
-            crate::launcher_settings::show_launcher_settings();
+            let show = !panel_w.is_visible();
+            panel_w.set_visible(show);
+            if show {
+                panel_refresh();
+            }
         });
         hud.append(&btn_launcher);
 
@@ -483,8 +546,22 @@ impl SuperDesktopWindow {
         let (sess, cmd_run) = create_session(agent_type, cmd);
         let idx = self.terminal_cards.borrow().len();
 
-        let nx = x.unwrap_or((self.screen_width - 340 - (idx as i32 % 3) * 310).max(400));
-        let ny = y.unwrap_or(140 + (idx as i32 % 3) * 200);
+        // Default size for a new harness: 1024x768, clamped to the screen.
+        let (def_w, def_h) =
+            clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, self.screen_width, self.screen_height);
+        // Center on screen; cascade slightly so stacked harnesses don't overlap exactly.
+        let cascade = (idx as i32 % 5) * 32;
+        let cx = ((self.screen_width - def_w) / 2 + cascade)
+            .clamp(10, (self.screen_width - def_w - 10).max(10));
+        let cy = ((self.screen_height - def_h) / 2 + cascade)
+            .clamp(70, (self.screen_height - def_h - 10).max(70));
+
+        let nx = x.unwrap_or(cx);
+        let ny = y.unwrap_or(cy);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
 
         let data = TerminalData {
             id: sess.clone(),
@@ -493,13 +570,14 @@ impl SuperDesktopWindow {
             command: cmd_run,
             x: nx,
             y: ny,
-            width: CARD_WIDTH,
-            height: CARD_HEIGHT,
-            restored_width: CARD_WIDTH,
-            restored_height: CARD_HEIGHT,
+            width: def_w,
+            height: def_h,
+            restored_width: def_w,
+            restored_height: def_h,
             iconified: false,
-            created_at: 0.0,
-            tag: 0,
+            created_at: now,
+            tag: DEFAULT_TERMINAL_TAG,
+            agent_session_id: None,
         };
 
         self.spawn_terminal_widget(data, true);
@@ -693,6 +771,23 @@ impl SuperDesktopWindow {
             }
         };
 
+        let state_sess = Rc::clone(&state);
+        let on_session_persist = move |updated: &TerminalData| {
+            let mut s = state_sess.borrow_mut();
+            if let Some(slot) = s
+                .terminals
+                .iter_mut()
+                .find(|t| t.session_name == updated.session_name)
+            {
+                // Only the agent mapping changed here; keep geometry from the
+                // live card to avoid clobbering an in-progress drag/resize.
+                slot.agent_session_id = updated.agent_session_id.clone();
+                let snapshot = s.clone();
+                drop(s);
+                crate::state::save_state_async(snapshot);
+            }
+        };
+
         let card = MiniTerminalCard::new(
             term_data,
             on_drag_update,
@@ -702,6 +797,7 @@ impl SuperDesktopWindow {
             on_resize_ghost,
             on_resize_end,
             on_raise,
+            on_session_persist,
             sw,
             sh,
         );

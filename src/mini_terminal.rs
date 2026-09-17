@@ -9,13 +9,15 @@ use vte4::{PtyFlags, Terminal as VteTerminal};
 
 use crate::state::TerminalData;
 use crate::tmux::{
-    capture_pane_text, ensure_session, extract_composer_draft, extract_last_prompt,
-    get_agent_config, get_opencode_session_id, get_opencode_user_text_by_id, get_preview,
-    inspect_status, tmux_bin, truncate_prompt_title,
+    capture_pane_text, ensure_session_with_agent_id, extract_composer_draft,
+    extract_last_prompt, get_agent_config, get_opencode_session_id,
+    get_opencode_user_text_by_id, get_preview, inspect_status, tmux_bin, truncate_prompt_title,
 };
 
 pub const CARD_WIDTH: i32 = 380;
 pub const CARD_HEIGHT: i32 = 240;
+pub const NEW_TERM_WIDTH: i32 = 1024;
+pub const NEW_TERM_HEIGHT: i32 = 768;
 pub const MIN_CARD_WIDTH: i32 = 320;
 pub const MIN_CARD_HEIGHT: i32 = 180;
 pub const ICON_SIZE: i32 = 128;
@@ -70,10 +72,11 @@ pub struct MiniTerminalCard {
     vte: Rc<RefCell<Option<VteTerminal>>>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
+    on_session_persist: Rc<dyn Fn(&TerminalData)>,
 }
 
 impl MiniTerminalCard {
-    pub fn new<FDragUpdate, FDragEnd, FToggle, FClose, FResizeGhost, FResizeEnd, FRaise>(
+    pub fn new<FDragUpdate, FDragEnd, FToggle, FClose, FResizeGhost, FResizeEnd, FRaise, FSessionSave>(
         mut term_data: TerminalData,
         on_drag_update: FDragUpdate,
         on_drag_end: FDragEnd,
@@ -82,6 +85,7 @@ impl MiniTerminalCard {
         on_resize_ghost: FResizeGhost,
         on_resize_end: FResizeEnd,
         on_raise: FRaise,
+        on_session_persist: FSessionSave,
         screen_w: i32,
         screen_h: i32,
     ) -> Self
@@ -93,6 +97,7 @@ impl MiniTerminalCard {
         FResizeGhost: Fn(f64, f64, i32, i32, bool) + 'static,
         FResizeEnd: Fn() + 'static,
         FRaise: Fn(gtk4::Widget) + 'static,
+        FSessionSave: Fn(&TerminalData) + 'static,
     {
         if term_data.iconified {
             term_data.width = ICON_SIZE;
@@ -190,14 +195,15 @@ impl MiniTerminalCard {
         let title = Label::new(Some(&format!("{} {}", cfg.icon, cfg.name)));
         title.add_css_class("term-title");
         title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        title.set_max_width_chars(32);
+        title.set_single_line_mode(true);
+        // Take every spare pixel up to the status badge; overflow ellipsizes.
+        title.set_hexpand(true);
         title.set_halign(Align::Start);
         header.append(&title);
 
         let status_badge = Label::new(Some("● IDLE"));
         status_badge.add_css_class("term-status-badge");
         status_badge.add_css_class("status-idle");
-        status_badge.set_hexpand(true);
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
 
@@ -369,7 +375,10 @@ impl MiniTerminalCard {
         root.add_overlay(&resize_handle);
 
         let title_prefix = format!("{} {}", cfg.icon, cfg.name);
-        let opencode_session = Rc::new(RefCell::new(None));
+        // Seed from persisted state so rebooted cards resume the SAME agent
+        // session without waiting for the DB mapping to re-resolve.
+        let opencode_session = Rc::new(RefCell::new(data.borrow().agent_session_id.clone()));
+        let on_session_persist: Rc<dyn Fn(&TerminalData)> = Rc::new(on_session_persist);
         let card = Self {
             container: root,
             data: Rc::clone(&data),
@@ -401,6 +410,7 @@ impl MiniTerminalCard {
             vte,
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
+            on_session_persist: Rc::clone(&on_session_persist),
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -975,6 +985,13 @@ impl MiniTerminalCard {
         let title_prefix = self.title_prefix.clone();
         let opencode_cache = Rc::clone(&self.opencode_session);
         let cached_oc_id: Option<String> = opencode_cache.borrow().clone();
+        // Fall back to the persisted id (loaded from state.json at startup)
+        // when the in-memory cache is still empty.
+        let cached_oc_id = cached_oc_id.or_else(|| self.data.borrow().agent_session_id.clone());
+        let data_weak = Rc::downgrade(&self.data);
+        let data_snapshot: Option<TerminalData> =
+            data_weak.upgrade().map(|d| d.borrow().clone());
+        let on_persist = Rc::clone(&self.on_session_persist);
         let in_flight = Rc::downgrade(&self.refresh_in_flight);
         self.refresh_in_flight.set(true);
 
@@ -1040,7 +1057,23 @@ impl MiniTerminalCard {
                 }
             }
             if opencode_cache.borrow().is_none() {
-                *opencode_cache.borrow_mut() = oc_id;
+                *opencode_cache.borrow_mut() = oc_id.clone();
+            }
+            // Persist the tmux-pane -> opencode-session mapping to state.json
+            // on first resolution so a later reboot can resume THIS card with
+            // `opencode --session <id>` instead of sharing the latest session.
+            if let Some(new_id) = oc_id {
+                let needs_save = data_snapshot
+                    .as_ref()
+                    .map(|d| d.agent_session_id.as_deref() != Some(new_id.as_str()))
+                    .unwrap_or(true);
+                if needs_save {
+                    if let Some(d) = data_weak.upgrade() {
+                        d.borrow_mut().agent_session_id = Some(new_id.clone());
+                        let snapshot = d.borrow().clone();
+                        on_persist(&snapshot);
+                    }
+                }
             }
             if let Some(flag) = in_flight.upgrade() {
                 flag.set(false);
@@ -1150,13 +1183,25 @@ fn spawn_vte(
     let session = data.borrow().session_name.clone();
     let agent_type = data.borrow().agent_type.clone();
     let cmd = data.borrow().command.clone();
-    ensure_session(&session, &agent_type, Some(&cmd));
+    let agent_session_id = data.borrow().agent_session_id.clone();
+    ensure_session_with_agent_id(
+        &session,
+        &agent_type,
+        Some(&cmd),
+        agent_session_id.as_deref(),
+    );
 
     let tmux = tmux_bin();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let argv = [tmux.as_str(), "-2", "attach-session", "-t", session.as_str()];
 
     let mut env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
+    // Attaching from inside a tmux client nests sessions and routes input to
+    // the OUTER session, so output/Ctrl+C leaks across cards. The daemon is
+    // normally spawned by Hyprland (no TMUX), but unsets make dev launches
+    // (`... daemon` from a terminal) safe too.
+    env_map.remove("TMUX");
+    env_map.remove("TMUX_PANE");
     env_map.insert("TERM".to_string(), "xterm-256color".to_string());
     env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
     let env: Vec<String> = env_map

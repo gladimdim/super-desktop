@@ -47,6 +47,12 @@ pub struct TerminalData {
     /// Group color tag: 0 = none, 1..=8 = palette index (see crate::tag).
     #[serde(default)]
     pub tag: u8,
+    /// Persisted agent-side session id (e.g. opencode `ses_...`).
+    /// Used on reboot to resume THIS card's conversation with
+    /// `opencode --session <id>` instead of `--continue` (which would make
+    /// every card share the single latest session for the cwd).
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -739,3 +739,64 @@ pub fn open_pairing_window() -> Result<u64, String> {
         Err("bridge refused".to_string())
     }
 }
+
+// ---------- firewall (UFW) ----------
+
+fn firewall_marker_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".local/state/omarchy/harness-bridge/firewall_open")
+}
+
+/// (label, unlock_button_enabled). Non-root readable; falls back to our own
+/// marker when the rules file can't be read.
+pub fn firewall_summary() -> (String, bool) {
+    let conf = fs::read_to_string("/etc/ufw/ufw.conf").unwrap_or_default();
+    let enabled = conf.lines().any(|l| l.trim() == "ENABLED=yes");
+    if !enabled {
+        return ("Firewall off — nothing to unlock".to_string(), false);
+    }
+    match fs::read_to_string("/etc/ufw/user.rules") {
+        Ok(rules) => {
+            let open = rules
+                .lines()
+                .any(|l| l.contains("--dport 8759") && l.contains("ACCEPT"));
+            if open {
+                ("Port 8759/tcp open ✓".to_string(), false)
+            } else {
+                ("UFW is blocking port 8759".to_string(), true)
+            }
+        }
+        Err(_) => {
+            if let Ok(stamp) = fs::read_to_string(firewall_marker_path()) {
+                (
+                    format!("Port 8759 allowed ✓ ({})", stamp.trim()),
+                    false,
+                )
+            } else {
+                (
+                    "Firewall state unknown — Unlock to be sure".to_string(),
+                    true,
+                )
+            }
+        }
+    }
+}
+
+/// Allow 8759/tcp via a polkit password prompt. Writes our marker on success.
+pub fn unlock_firewall() -> Result<String, String> {
+    let out = Command::new("pkexec")
+        .args(["ufw", "allow", "8759/tcp"])
+        .output()
+        .map_err(|e| format!("pkexec failed to start: {e}"))?;
+    if out.status.success() {
+        let _ = fs::write(firewall_marker_path(), utc_now_iso());
+        Ok("Port 8759/tcp allowed ✓".to_string())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if err.is_empty() {
+            Err("unlock cancelled or failed".to_string())
+        } else {
+            Err(err)
+        }
+    }
+}
