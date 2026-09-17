@@ -121,6 +121,12 @@ super-desktop add-term shell
 
 # Зупинити фоновий демон
 super-desktop kill
+
+# Міст для OmarchyAILauncher: віддає sd_term_* сесії по LAN/Tailscale (порт 8759)
+super-desktop harness-bridge --port=8759
+
+# Разовий JSON-дамп сесій без сервера (для дебагу)
+super-desktop harnesses
 ```
 
 ---

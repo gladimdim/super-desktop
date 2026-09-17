@@ -1,4 +1,5 @@
 mod brand;
+mod bridge;
 mod mini_terminal;
 mod state;
 mod sticky_note;
@@ -6,6 +7,7 @@ mod styles;
 mod tag;
 mod theme;
 mod tmux;
+mod usage;
 mod window;
 
 use gtk4::gio::prelude::{ApplicationExt, ApplicationExtManual};
@@ -65,6 +67,24 @@ fn main() {
 
     if action == "daemon" || action == "start" {
         run_daemon(action == "start");
+        return;
+    }
+
+    if action == "harness-bridge" || action == "bridge" {
+        let mut port = bridge::BRIDGE_PORT;
+        for a in args.iter().skip(2) {
+            if let Some(v) = a.strip_prefix("--port=") {
+                port = v.parse().unwrap_or(bridge::BRIDGE_PORT);
+            } else if let Ok(v) = a.parse::<u16>() {
+                port = v;
+            }
+        }
+        bridge::serve(port);
+        return;
+    }
+
+    if action == "harnesses" {
+        bridge::print_once();
         return;
     }
 
