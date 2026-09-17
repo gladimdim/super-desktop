@@ -169,26 +169,54 @@ fn state_path() -> PathBuf {
     dir.join("config.json")
 }
 
+/// Exactly `n` bytes from the CSPRNG. Never `fs::read` /dev/urandom —
+/// it is an infinite stream and `read` would block forever.
+fn urandom_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    let ok = fs::File::open("/dev/urandom")
+        .ok()
+        .and_then(|mut f| {
+            use std::io::Read as _;
+            f.read_exact(&mut buf).ok()
+        })
+        .is_some();
+    if ok {
+        buf
+    } else {
+        // Bare-metal fallback: time + pid mix (never blocks).
+        let t = now_epoch().to_bits().to_le_bytes();
+        let p = std::process::id().to_le_bytes();
+        (0..n)
+            .map(|i| t[i % 8] ^ p[i % 4] ^ (i as u8).wrapping_mul(31))
+            .collect()
+    }
+}
+
 fn random_hex(bytes: usize) -> String {
-    fs::read("/dev/urandom")
-        .unwrap_or_else(|_| vec![0u8; bytes])
-        .iter()
-        .take(bytes)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    urandom_bytes(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn new_pin() -> String {
-    let data = fs::read("/dev/urandom").unwrap_or(vec![1, 2, 3, 4]);
-    let n = ((data.first().copied().unwrap_or(1) as u32) << 8
-        | (data.get(1).copied().unwrap_or(0) as u32))
-        % 9000
-        + 1000;
+    let data = urandom_bytes(2);
+    let n = ((data[0] as u32) << 8 | (data[1] as u32)) % 9000 + 1000;
     format!("{n:04}")
 }
 
 struct PairState {
     cfg: BridgeConfig,
+    mtime: f64,
+}
+
+fn config_mtime() -> f64 {
+    fs::metadata(state_path())
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs_f64())
+        })
+        .unwrap_or(0.0)
 }
 
 impl PairState {
@@ -197,7 +225,7 @@ impl PairState {
         let mut cfg: BridgeConfig = fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or(BridgeConfig {
+            .unwrap_or_else(|| BridgeConfig {
                 paired_tokens: vec![],
                 pin: new_pin(),
                 pairing_open_until: 0.0,
@@ -205,9 +233,16 @@ impl PairState {
         if cfg.pin.len() != 4 {
             cfg.pin = new_pin();
         }
-        let state = Self { cfg };
+        let state = Self {
+            cfg,
+            mtime: 0.0,
+        };
         state.save();
-        state
+        let mtime = config_mtime();
+        Self {
+            cfg: state.cfg,
+            mtime,
+        }
     }
 
     fn save(&self) {
@@ -217,7 +252,40 @@ impl PairState {
         }
     }
 
-    fn valid(&self, token: &str) -> bool {
+    /// Pick up config.json edits made by another process (e.g. a fresh PIN
+    /// written from the overlay settings while the bridge keeps running).
+    /// Tokens minted in-memory are unioned in so nothing is lost.
+    fn refresh(&mut self) {
+        let m = config_mtime();
+        if m == 0.0 || m == self.mtime {
+            return;
+        }
+        if let Some(disk) = fs::read_to_string(state_path())
+            .ok()
+            .and_then(|c| serde_json::from_str::<BridgeConfig>(&c).ok())
+        {
+            let mut tokens = disk.paired_tokens;
+            for t in &self.cfg.paired_tokens {
+                if !tokens.contains(t) {
+                    tokens.push(t.clone());
+                }
+            }
+            let pin = if disk.pin.len() == 4 {
+                disk.pin
+            } else {
+                self.cfg.pin.clone()
+            };
+            self.cfg = BridgeConfig {
+                paired_tokens: tokens,
+                pin,
+                pairing_open_until: disk.pairing_open_until,
+            };
+        }
+        self.mtime = config_mtime();
+    }
+
+    fn valid(&mut self, token: &str) -> bool {
+        self.refresh();
         !token.is_empty() && self.cfg.paired_tokens.iter().any(|t| t == token)
     }
 }
@@ -229,7 +297,7 @@ fn pair_state() -> &'static Mutex<PairState> {
 
 // ---------- network helpers ----------
 
-fn lan_ip() -> String {
+pub fn lan_ip() -> String {
     UdpSocket::bind("0.0.0.0:0")
         .ok()
         .and_then(|s| {
@@ -239,7 +307,7 @@ fn lan_ip() -> String {
         .unwrap_or_else(|| "127.0.0.1".to_string())
 }
 
-fn hostname() -> String {
+pub fn hostname() -> String {
     Command::new("hostname")
         .output()
         .ok()
@@ -378,7 +446,7 @@ fn handle_client(mut stream: TcpStream) {
             let ok = local
                 || pair_state()
                     .lock()
-                    .map(|s| s.valid(&bearer(&req.headers)))
+                    .map(|mut s| s.valid(&bearer(&req.headers)))
                     .unwrap_or(false);
             if !ok {
                 return respond(
@@ -409,6 +477,7 @@ fn handle_client(mut stream: TcpStream) {
                 );
             }
             if let Ok(mut s) = pair_state().lock() {
+                s.refresh();
                 s.cfg.pairing_open_until = now_epoch() + PAIR_WINDOW_SECS;
                 s.save();
             }
@@ -430,6 +499,7 @@ fn handle_client(mut stream: TcpStream) {
                 .to_string();
             let mut out: Option<(String, String)> = None;
             if let Ok(mut s) = pair_state().lock() {
+                s.refresh();
                 if !pin.is_empty() && pin == s.cfg.pin {
                     let tok = random_hex(24);
                     s.cfg.paired_tokens.push(tok.clone());
@@ -502,4 +572,170 @@ pub fn print_once() {
         }))
         .unwrap_or_default()
     );
+}
+
+// ---------- overlay-facing helpers (used by the ⚙ Launcher settings panel) ----------
+
+/// First IPv4 from `tailscale ip -4`, if Tailscale is up.
+pub fn tailscale_ip() -> Option<String> {
+    let out = Command::new("tailscale").args(["ip", "-4"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .find(|l| !l.is_empty())
+}
+
+/// True when a bridge answers on loopback (this laptop).
+pub fn bridge_running(port: u16) -> bool {
+    bridge_ping_body(port).is_some()
+}
+
+fn bridge_ping_body(port: u16) -> Option<String> {
+    let mut s = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}").parse().ok()?,
+        Duration::from_secs(2),
+    )
+    .ok()?;
+    s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    s.write_all(b"GET /api/v1/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .ok()?;
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).ok()?;
+    resp.split_once("\r\n\r\n").map(|(_, b)| b.to_string())
+}
+
+/// Start `super-desktop harness-bridge` detached. No-op when already running.
+pub fn start_bridge() -> Result<(), String> {
+    if bridge_running(BRIDGE_PORT) {
+        return Err("already running".to_string());
+    }
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    Command::new(exe)
+        .arg("harness-bridge")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    for _ in 0..25 {
+        if bridge_running(BRIDGE_PORT) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("started but not responding".to_string())
+}
+
+/// Stop a locally running bridge.
+pub fn stop_bridge() -> Result<(), String> {
+    let st = Command::new("pkill")
+        .args(["-f", "super-desktop harness-bridge"])
+        .status()
+        .map_err(|e| e.to_string())?;
+    // pkill exits 1 when nothing matched — that means already stopped.
+    if st.code() == Some(1) {
+        return Ok(());
+    }
+    if !st.success() {
+        return Err(format!("pkill exited {}", st.code().unwrap_or(-1)));
+    }
+    for _ in 0..20 {
+        if !bridge_running(BRIDGE_PORT) {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err("still responding".to_string())
+}
+
+/// Current pairing PIN (fresh from disk, so external edits are visible).
+pub fn read_pin() -> String {
+    let cfg: Option<BridgeConfig> = fs::read_to_string(state_path())
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok());
+    match cfg.map(|c| c.pin) {
+        Some(p) if p.len() == 4 => p,
+        _ => pair_state()
+            .lock()
+            .map(|mut s| {
+                s.refresh();
+                s.cfg.pin.clone()
+            })
+            .unwrap_or_else(|_| "----".to_string()),
+    }
+}
+
+/// Generate and persist a fresh PIN (takes effect immediately, even if the
+/// bridge keeps running, via PairState::refresh).
+pub fn rotate_pin() -> String {
+    let pin = new_pin();
+    if let Ok(mut s) = pair_state().lock() {
+        s.refresh();
+        s.cfg.pin = pin.clone();
+        s.save();
+        s.mtime = config_mtime();
+    } else {
+        // Bridge never ran in this process: write through the file directly.
+        let mut cfg: BridgeConfig = fs::read_to_string(state_path())
+            .ok()
+            .and_then(|c| serde_json::from_str(&c).ok())
+            .unwrap_or_else(|| BridgeConfig {
+                paired_tokens: vec![],
+                pin: pin.clone(),
+                pairing_open_until: 0.0,
+            });
+        cfg.pin = pin.clone();
+        let _ = fs::write(
+            state_path(),
+            serde_json::to_string_pretty(&cfg).unwrap_or_default(),
+        );
+    }
+    pin
+}
+
+/// Seconds left on the laptop pairing window (0 = closed).
+pub fn pairing_seconds_left() -> u64 {
+    let cfg: Option<BridgeConfig> = fs::read_to_string(state_path())
+        .ok()
+        .and_then(|c| serde_json::from_str(&c).ok());
+    let until = cfg.map(|c| c.pairing_open_until).unwrap_or(0.0);
+    let left = until - now_epoch();
+    if left > 0.0 {
+        left as u64
+    } else {
+        0
+    }
+}
+
+/// Open the 120s pairing window via loopback. Returns seconds remaining.
+pub fn open_pairing_window() -> Result<u64, String> {
+    let mut s = TcpStream::connect(("127.0.0.1", BRIDGE_PORT))
+        .map_err(|_| "bridge not running — start it first".to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
+    let body = "{}";
+    let req = format!(
+        "POST /api/v1/pair/open HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    s.write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let mut resp = String::new();
+    s.read_to_string(&mut resp)
+        .map_err(|e| e.to_string())?;
+    let body = resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| "bad bridge response".to_string())?;
+    if v.get("status").and_then(|x| x.as_str()) == Some("open") {
+        Ok(v
+            .get("secondsRemaining")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(120))
+    } else {
+        Err("bridge refused".to_string())
+    }
 }

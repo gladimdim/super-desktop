@@ -1,5 +1,6 @@
 mod brand;
 mod bridge;
+mod launcher_settings;
 mod mini_terminal;
 mod state;
 mod sticky_note;

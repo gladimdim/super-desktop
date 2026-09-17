@@ -214,6 +214,15 @@ impl SuperDesktopWindow {
         });
         hud.append(&btn_arrange);
 
+        // Launcher connection settings (IP / port / PIN for the Android app)
+        let btn_launcher = Button::with_label("📱 Launcher");
+        btn_launcher.set_tooltip_text(Some("Launcher connection: bridge status, IPs, PIN"));
+        btn_launcher.add_css_class("hud-button");
+        btn_launcher.connect_clicked(move |_| {
+            crate::launcher_settings::show_launcher_settings();
+        });
+        hud.append(&btn_launcher);
+
         // Close
         let btn_close = Button::with_label("✕ Hide");
         btn_close.set_tooltip_text(Some("Hide Super Desktop [SUPER + SHIFT + Q or Esc]"));
