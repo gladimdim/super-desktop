@@ -16,8 +16,8 @@ use crate::tmux::{
 
 pub const CARD_WIDTH: i32 = 380;
 pub const CARD_HEIGHT: i32 = 240;
-pub const NEW_TERM_WIDTH: i32 = 1024;
-pub const NEW_TERM_HEIGHT: i32 = 768;
+pub const NEW_TERM_WIDTH: i32 = 640;
+pub const NEW_TERM_HEIGHT: i32 = 480;
 pub const MIN_CARD_WIDTH: i32 = 320;
 pub const MIN_CARD_HEIGHT: i32 = 180;
 pub const ICON_SIZE: i32 = 128;
@@ -1408,6 +1408,14 @@ mod tests {
         assert_eq!(h, 864.0);
         assert_eq!(x, 192.0);
         assert_eq!(y, 108.0);
+    }
+
+    #[test]
+    fn test_new_terminal_default_size_is_640x480() {
+        assert_eq!((NEW_TERM_WIDTH, NEW_TERM_HEIGHT), (640, 480));
+        // Unclamped on a typical screen.
+        let (w, h) = clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, 1920, 1080);
+        assert_eq!((w, h), (640, 480));
     }
 
     #[test]

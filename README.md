@@ -30,6 +30,7 @@
   - 🤖 **OpenAI Codex** (`codex`)
   - 🔮 **OpenCode** (`opencode`)
   - 🚀 **Grok CLI** (`grok`)
+  - 🧭 **Reasonix** (`reasonix code`, або `npx -y reasonix code` без глобальної інсталяції)
   - 🧠 **Aider** (`aider`)
   - 💻 **Bash / Zsh Shell**
 - **Живий статус**:
@@ -117,6 +118,7 @@ super-desktop add-term antigravity
 super-desktop add-term codex
 super-desktop add-term opencode
 super-desktop add-term grok
+super-desktop add-term reasonix
 super-desktop add-term shell
 
 # Зупинити фоновий демон

@@ -6,6 +6,10 @@ pub struct AgentConfig {
     pub icon: &'static str,
     pub commands: &'static [&'static str],
     pub default_args: &'static [&'static str],
+    /// npm package name for harnesses that are commonly run ad hoc through
+    /// `npx <package>` instead of being installed on PATH. Only consulted
+    /// when none of `commands` resolves (see `resolve_command`).
+    pub npx_package: Option<&'static str>,
 }
 
 pub fn get_agent_config(agent_type: &str) -> AgentConfig {
@@ -15,44 +19,69 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
             icon: "🌌",
             commands: &["agy", "antigravity"],
             default_args: &["--dangerously-skip-permissions"],
+            npx_package: None,
         },
         "claude" => AgentConfig {
             name: "Claude Code",
             icon: "⚡",
             commands: &["claude"],
             default_args: &["--dangerously-skip-permissions"],
+            npx_package: None,
         },
         "codex" => AgentConfig {
             name: "OpenAI Codex",
             icon: "🤖",
             commands: &["codex"],
             default_args: &["--dangerously-bypass-approvals-and-sandbox"],
+            npx_package: None,
         },
         "opencode" => AgentConfig {
             name: "OpenCode",
             icon: "🔮",
             commands: &["opencode"],
             default_args: &["--auto"],
+            npx_package: None,
         },
         "grok" => AgentConfig {
             name: "Grok CLI",
             icon: "🚀",
             commands: &["grok"],
             default_args: &["--dangerously-skip-permissions"],
+            npx_package: None,
         },
         "aider" => AgentConfig {
             name: "Aider",
             icon: "🧠",
             commands: &["aider"],
             default_args: &["--yes-always"],
+            npx_package: None,
+        },
+        // `code` opens Reasonix' interactive coding session. Deliberately no
+        // permission flag: Reasonix keeps its own `workspace-write` sandbox
+        // (in-workspace writes approved, everything else asked in the card).
+        "reasonix" => AgentConfig {
+            name: "Reasonix",
+            icon: "🧭",
+            commands: &["reasonix"],
+            default_args: &["code"],
+            npx_package: Some("reasonix"),
         },
         _ => AgentConfig {
             name: "Terminal",
             icon: "💻",
             commands: &["bash"],
             default_args: &[],
+            npx_package: None,
         },
     }
+}
+
+/// `npx -y <package> <args…>`. `-y` keeps npx from stopping on its
+/// "Ok to proceed?" install prompt the first time the package is fetched.
+fn npx_fallback_command(package: &str, args: &[&str]) -> String {
+    let mut parts = vec!["npx".to_string(), "-y".to_string(), package.to_string()];
+    parts.extend(args.iter().map(|a| (*a).to_string()));
+    parts.join(" ")
 }
 
 pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
@@ -89,6 +118,19 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
             }
         }
     }
+    // Harness that ships on npm but has no binary on PATH (e.g. Reasonix is
+    // usually run as `npx reasonix code`): launch it through npx rather than
+    // silently degrading the card to a bare shell.
+    if let Some(package) = cfg.npx_package {
+        let has_npx = Command::new("which")
+            .arg("npx")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if has_npx {
+            return npx_fallback_command(package, cfg.default_args);
+        }
+    }
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
 }
 
@@ -113,8 +155,9 @@ fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
 /// one is gone, e.g. after a laptop reboot: the tmux server dies with it,
 /// but every supported agent persists its conversations to disk continuously
 /// (Claude: ~/.claude/projects, Codex: ~/.codex/sessions, OpenCode: its
-/// session store, Aider: .aider.chat.history.md), so relaunching with the
-/// agent's native resume mechanism restores the conversation automatically.
+/// session store, Reasonix: ~/.reasonix/projects, Aider:
+/// .aider.chat.history.md), so relaunching with the agent's native resume
+/// mechanism restores the conversation automatically.
 ///
 /// OPENCODE ISOLATION: when `agent_session_id` (persisted per card, see
 /// `TerminalData::agent_session_id`) is known, resume THAT exact session via
@@ -174,8 +217,37 @@ pub fn resolve_resume_command_with_session(
             "--restore-chat-history",
             &["--restore-chat-history"],
         ),
+        // Reasonix resumes the most recent session with `--continue`; `--copy`
+        // then works on a clone, so restored cards never attach to one shared
+        // live session (reasonix's equivalent of opencode's `--fork`).
+        "reasonix" => {
+            let with_continue =
+                append_resume_flag(&base, "--continue", &["--continue", "--resume"]);
+            append_resume_flag(&with_continue, "--copy", &["--copy"])
+        }
         _ => base,
     }
+}
+
+/// Pin a harness session so the tmux client rendering it exits together with
+/// the session instead of being re-homed to a different one.
+///
+/// Every card here is exactly one tmux client (`tmux attach-session` inside one
+/// VTE). What a client does when its session is destroyed comes from the user's
+/// tmux config, and omarchy ships `set -g detach-on-destroy off`: with it a
+/// client whose session dies does NOT exit, it is switched to the next session.
+/// A card that lost its session then starts rendering a DIFFERENT harness (the
+/// same output as that other card), and the next Ctrl-C typed there destroys
+/// that other harness — closing one harness looked like all of them closing.
+///
+/// `detach-on-destroy` is a session option (tmux >= 3.2), so it is pinned on
+/// our own sessions only. While the user's global config keeps its value, older
+/// tmux versions reject the per-session form; the call then fails and the
+/// previous behaviour remains instead of us mutating the server options.
+fn exit_client_with_session(session_name: &str) {
+    let _ = Command::new("tmux")
+        .args(["set-option", "-t", session_name, "detach-on-destroy", "on"])
+        .output();
 }
 
 pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String, String) {
@@ -198,6 +270,8 @@ pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String
             &cmd,
         ])
         .output();
+
+    exit_client_with_session(&session_name);
 
     (session_name, cmd)
 }
@@ -264,6 +338,10 @@ pub fn ensure_session_with_agent_id(
     agent_session_id: Option<&str>,
 ) {
     if session_exists(session_name) {
+        // Sessions created by an older build (or a plain `tmux new-session`)
+        // may still inherit `detach-on-destroy off` from the user's config;
+        // re-pin on every startup so restored cards can't adopt a neighbour.
+        exit_client_with_session(session_name);
         return;
     }
 
@@ -291,6 +369,8 @@ pub fn ensure_session_with_agent_id(
             ])
             .output();
     }
+
+    exit_client_with_session(session_name);
 }
 
 pub fn get_preview(session_name: &str, lines: usize) -> String {
@@ -1108,6 +1188,84 @@ mod tests {
     }
 
     #[test]
+    fn test_reasonix_command_uses_code_and_no_permission_flag() {
+        // Reasonix keeps its own `workspace-write` sandbox, so — unlike every
+        // other AI harness here — no permission flag may be appended.
+        let custom = resolve_command("reasonix", Some("/custom/bin/reasonix"));
+        assert_eq!(custom, "/custom/bin/reasonix code");
+
+        // A caller-supplied command that already names `code` is left alone.
+        assert_eq!(
+            resolve_command("reasonix", Some("npx -y reasonix code")),
+            "npx -y reasonix code"
+        );
+    }
+
+    #[test]
+    fn test_reasonix_resume_mirrors_opencode_fork() {
+        assert_eq!(
+            resolve_resume_command("reasonix", Some("/custom/bin/reasonix")),
+            "/custom/bin/reasonix code --continue --copy"
+        );
+        // Existing resume flags are never duplicated; the missing half is added.
+        assert_eq!(
+            resolve_resume_command("reasonix", Some("/custom/bin/reasonix code --continue")),
+            "/custom/bin/reasonix code --continue --copy"
+        );
+        // `--copy` alone gets completed with the missing `--continue`
+        // (order follows the caller's command line, so assert on the flags).
+        let only_copy =
+            resolve_resume_command("reasonix", Some("/custom/bin/reasonix code --copy"));
+        assert_eq!(only_copy.matches("--continue").count(), 1, "got: {only_copy}");
+        assert_eq!(only_copy.matches("--copy").count(), 1, "got: {only_copy}");
+    }
+
+    #[test]
+    fn test_npx_fallback_avoids_install_prompt() {
+        // `-y` keeps a card from blocking on npx's "Ok to proceed?" prompt.
+        assert_eq!(
+            npx_fallback_command("reasonix", &["code"]),
+            "npx -y reasonix code"
+        );
+        assert_eq!(
+            npx_fallback_command("reasonix", &["code", "--continue"]),
+            "npx -y reasonix code --continue"
+        );
+    }
+
+    #[test]
+    fn test_only_reasonix_declares_an_npx_fallback() {
+        for agent in ["claude", "codex", "opencode", "grok", "aider", "shell"] {
+            assert!(
+                get_agent_config(agent).npx_package.is_none(),
+                "{agent} must not fall back to npx"
+            );
+        }
+        assert_eq!(get_agent_config("reasonix").npx_package, Some("reasonix"));
+    }
+
+    #[test]
+    fn test_reasonix_resolution_prefers_path_then_npx() {
+        // Whichever way Reasonix is installed, a card must never degrade to a
+        // bare shell while `npx` is available.
+        let resolved = resolve_command("reasonix", None);
+        let has = |cmd: &str| {
+            Command::new("which")
+                .arg(cmd)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
+        if has("reasonix") {
+            assert!(resolved.ends_with("code"), "got: {resolved}");
+        } else if has("npx") {
+            assert_eq!(resolved, "npx -y reasonix code");
+        } else {
+            assert_eq!(resolved, std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()));
+        }
+    }
+
+    #[test]
     fn test_extract_last_prompt_tui_markers() {
         // Plain (non-bordered) TUI prompt and shell prompt are user input.
         let pane = "Welcome to Claude\n> fix the login bug please\n";
@@ -1428,6 +1586,98 @@ mod tests {
             assert!(n.starts_with("sd_term_"), "got: {n}");
             assert!(names.insert(n.clone()), "duplicate session name: {n}");
         }
+    }
+
+    /// Read tmux option output: `tmux show-options <args>`.
+    fn show_option(args: &[&str]) -> String {
+        let out = Command::new("tmux")
+            .args(["show-options"])
+            .args(args)
+            .output()
+            .expect("tmux show-options");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Session-local value of `detach-on-destroy`; empty when the session has
+    /// no override of its own (i.e. it inherits the user's global setting).
+    fn session_detach_on_destroy(sess: &str) -> String {
+        show_option(&["-t", sess, "-v", "detach-on-destroy"])
+    }
+
+    /// Kills the listed sessions on drop so a failing assertion cannot leak
+    /// harness sessions into the user's running tmux server.
+    struct SessionCleanup(Vec<String>);
+
+    impl Drop for SessionCleanup {
+        fn drop(&mut self) {
+            for name in &self.0 {
+                let _ = Command::new("tmux")
+                    .args(["kill-session", "-t", name])
+                    .output();
+            }
+        }
+    }
+
+    #[test]
+    fn test_client_exits_with_its_own_session() {
+        // Regression: with `set -g detach-on-destroy off` (omarchy's tmux
+        // default) a client whose session is destroyed is switched to another
+        // session instead of exiting. Each card here owns one tmux client, so a
+        // card that lost its session rendered a DIFFERENT harness and the next
+        // Ctrl-C typed into it killed that harness: closing one harness looked
+        // like all of them closing. Sessions we create must pin the option
+        // per session, without touching the user's global value.
+        //
+        // Start the server first: it (and its global options, i.e. the user's
+        // config) only exist once a session has been created.
+        let probe = "test_sd_detach_on_destroy_probe";
+        let mut cleanup = SessionCleanup(vec![probe.to_string()]);
+        let _ = Command::new("tmux")
+            .args(["new-session", "-d", "-s", probe, "-c", "/tmp", "/usr/bin/bash"])
+            .output();
+        let global_before = show_option(&["-gv", "detach-on-destroy"]);
+        assert!(
+            !global_before.is_empty(),
+            "tmux server must be reachable for this test"
+        );
+
+        // tmux < 3.2 kept detach-on-destroy as a server option, where the
+        // per-session form is rejected; the fix is then a no-op (and so is
+        // this test).
+        let _ = Command::new("tmux")
+            .args(["set-option", "-t", probe, "detach-on-destroy", "off"])
+            .output();
+        if session_detach_on_destroy(probe).is_empty() {
+            eprintln!("skipping: this tmux has no session-scoped detach-on-destroy");
+            return;
+        }
+
+        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"));
+        cleanup.0.push(sess.clone());
+        assert_eq!(
+            session_detach_on_destroy(&sess),
+            "on",
+            "new harness session must pin detach-on-destroy"
+        );
+        assert_eq!(
+            show_option(&["-gv", "detach-on-destroy"]),
+            global_before,
+            "the user's global tmux config must stay untouched"
+        );
+
+        // Restored/legacy sessions (or ones created before this fix) inherit
+        // the config value; startup must re-pin them too.
+        let _ = Command::new("tmux")
+            .args(["set-option", "-t", &sess, "detach-on-destroy", "off"])
+            .output();
+        assert_eq!(session_detach_on_destroy(&sess), "off");
+        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None);
+        assert_eq!(
+            session_detach_on_destroy(&sess),
+            "on",
+            "restored harness session must be re-pinned"
+        );
+        assert_eq!(show_option(&["-gv", "detach-on-destroy"]), global_before);
     }
 
     #[test]

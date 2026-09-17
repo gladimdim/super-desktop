@@ -42,8 +42,17 @@ pub struct SuperDesktopWindow {
     ghost_box: gtk4::Box,
     ghost_label: Label,
     state: Rc<RefCell<AppState>>,
-    note_cards: Rc<RefCell<Vec<StickyNote>>>,
-    terminal_cards: Rc<RefCell<Vec<MiniTerminalCard>>>,
+    /// Cards live behind `Rc` so callers can snapshot the list and drop the
+    /// `RefCell` borrow before touching GTK.
+    ///
+    /// GTK delivers signals (pointer/focus enter, unmap, child-exit, ...)
+    /// synchronously from inside our own `remove`/`expand`/`focus` calls, and
+    /// those signals re-enter our handlers. Any borrow of these lists that is
+    /// still alive across such a call makes the re-entrant handler panic with
+    /// "RefCell already borrowed"; release builds use `panic = "abort"`, so
+    /// that panic kills the whole daemon.
+    note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>>,
+    terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
     hud_badge: Label,
     screen_width: i32,
     screen_height: i32,
@@ -112,8 +121,9 @@ impl SuperDesktopWindow {
         canvas.put(&ghost_box, 0.0, 0.0);
 
         let state = Rc::new(RefCell::new(load_state()));
-        let note_cards = Rc::new(RefCell::new(Vec::new()));
-        let terminal_cards = Rc::new(RefCell::new(Vec::new()));
+        let note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>> = Rc::new(RefCell::new(Vec::new()));
+        let terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>> =
+            Rc::new(RefCell::new(Vec::new()));
 
         let hud = gtk4::Box::new(Orientation::Horizontal, 10);
         hud.add_css_class("hud-bar");
@@ -172,6 +182,7 @@ impl SuperDesktopWindow {
             ("codex", "Codex", "🤖"),
             ("opencode", "OpenCode", "🔮"),
             ("grok", "Grok", "🚀"),
+            ("reasonix", "Reasonix", "🧭"),
             ("shell", "Shell", "💻"),
         ];
 
@@ -196,6 +207,7 @@ impl SuperDesktopWindow {
                 "codex" => "Launch OpenAI Codex (--dangerously-bypass-approvals-and-sandbox)",
                 "opencode" => "Launch OpenCode (--auto)",
                 "grok" => "Launch Grok CLI (--dangerously-skip-permissions)",
+                "reasonix" => "Launch Reasonix (reasonix code, else npx -y reasonix code)",
                 "shell" => "Launch Terminal Shell",
                 _ => "Launch Terminal",
             };
@@ -478,19 +490,26 @@ impl SuperDesktopWindow {
         let hud_del = hud_badge.clone();
 
         let on_delete = move |id: String| {
-            let mut cards = note_cards_del.borrow_mut();
-            if let Some(pos) = cards.iter().position(|c| c.data.borrow().id == id) {
-                let note = cards.remove(pos);
-                canvas_del.remove(&note.container);
-                let mut s = state_del.borrow_mut();
-                s.notes.retain(|n| n.id != id);
-                let snapshot = s.clone();
-                drop(s);
-                crate::state::save_state_async(snapshot);
-                let n = cards.len();
-                drop(cards);
-                set_counts_label(&hud_del, n, term_len);
-            }
+            // Take the note out of the shared list and drop the borrow BEFORE
+            // touching GTK: `canvas.remove` unmaps the note subtree, which
+            // emits pointer/focus signals that re-enter the raise handler.
+            let note = {
+                let mut cards = note_cards_del.borrow_mut();
+                cards
+                    .iter()
+                    .position(|c| c.data.borrow().id == id)
+                    .map(|pos| cards.remove(pos))
+            };
+            let Some(note) = note else { return };
+
+            canvas_del.remove(&note.container);
+            let mut s = state_del.borrow_mut();
+            s.notes.retain(|n| n.id != id);
+            let snapshot = s.clone();
+            drop(s);
+            crate::state::save_state_async(snapshot);
+            let n = note_cards_del.borrow().len();
+            set_counts_label(&hud_del, n, term_len);
         };
 
         let state_change = Rc::clone(&state);
@@ -515,7 +534,13 @@ impl SuperDesktopWindow {
                     widget.insert_after(&canvas_raise, Some(&last));
                 }
             }
-            let mut cards = note_cards_raise.borrow_mut();
+            // GTK can call this while another handler is still holding the
+            // list borrow (e.g. during a widget removal). The z-order above
+            // already happened, so just skip the bookkeeping instead of
+            // panicking on an active borrow.
+            let Ok(mut cards) = note_cards_raise.try_borrow_mut() else {
+                return;
+            };
             if let Some(pos) = cards.iter().position(|c| c.data.borrow().id == note_id) {
                 let note = cards.remove(pos);
                 cards.push(note);
@@ -539,14 +564,14 @@ impl SuperDesktopWindow {
             on_raise,
         );
         canvas.put(&note.container, x as f64, y as f64);
-        note_cards.borrow_mut().push(note);
+        note_cards.borrow_mut().push(Rc::new(note));
     }
 
     pub fn create_new_terminal(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>) {
         let (sess, cmd_run) = create_session(agent_type, cmd);
         let idx = self.terminal_cards.borrow().len();
 
-        // Default size for a new harness: 1024x768, clamped to the screen.
+        // Default size for a new harness: 640x480, clamped to the screen.
         let (def_w, def_h) =
             clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, self.screen_width, self.screen_height);
         // Center on screen; cascade slightly so stacked harnesses don't overlap exactly.
@@ -670,19 +695,29 @@ impl SuperDesktopWindow {
 
         let on_close = move |sess: String| {
             kill_session(&sess);
-            let mut cards = term_cards_del.borrow_mut();
-            if let Some(pos) = cards.iter().position(|c| c.data.borrow().session_name == sess) {
-                let card = cards.remove(pos);
-                canvas_del.remove(&card.container);
-                let mut s = state_del.borrow_mut();
-                s.terminals.retain(|t| t.session_name != sess);
-                let snapshot = s.clone();
-                drop(s);
-                crate::state::save_state_async(snapshot);
-                let n = cards.len();
-                drop(cards);
-                set_counts_label(&hud_del, notes_len, n);
-            }
+            // Pull the card out of the shared list and drop the borrow BEFORE
+            // touching GTK. `canvas.remove` unparents the whole card subtree
+            // (VTE included), and that unmap emits pointer/focus-enter signals
+            // which synchronously re-enter the raise handler of the remaining
+            // cards. Holding the list borrow across it aborted the daemon with
+            // "RefCell already borrowed" (see the field docs above).
+            let card = {
+                let mut cards = term_cards_del.borrow_mut();
+                cards
+                    .iter()
+                    .position(|c| c.data.borrow().session_name == sess)
+                    .map(|pos| cards.remove(pos))
+            };
+            let Some(card) = card else { return };
+
+            canvas_del.remove(&card.container);
+            let mut s = state_del.borrow_mut();
+            s.terminals.retain(|t| t.session_name != sess);
+            let snapshot = s.clone();
+            drop(s);
+            crate::state::save_state_async(snapshot);
+            let n = term_cards_del.borrow().len();
+            set_counts_label(&hud_del, notes_len, n);
         };
 
         let x = term_data.x;
@@ -764,7 +799,13 @@ impl SuperDesktopWindow {
                     widget.insert_after(&canvas_raise, Some(&last));
                 }
             }
-            let mut cards = term_cards_raise.borrow_mut();
+            // GTK can call this while another handler is still holding the
+            // list borrow (e.g. during a widget removal). The z-order above
+            // already happened, so just skip the bookkeeping instead of
+            // panicking on an active borrow.
+            let Ok(mut cards) = term_cards_raise.try_borrow_mut() else {
+                return;
+            };
             if let Some(pos) = cards.iter().position(|c| c.data.borrow().session_name == sess_name) {
                 let card = cards.remove(pos);
                 cards.push(card);
@@ -802,11 +843,17 @@ impl SuperDesktopWindow {
             sh,
         );
         canvas.put(&card.container, x as f64, y as f64);
-        term_cards.borrow_mut().push(card);
+        term_cards.borrow_mut().push(Rc::new(card));
     }
 
     pub fn auto_arrange(&self) {
-        for term in self.terminal_cards.borrow().iter() {
+        // Snapshot the cards (cheap `Rc` clones) and drop both list borrows
+        // before moving anything: `collapse`/`move_` emit signals that
+        // re-enter the raise handlers.
+        let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
+
+        for term in terms.iter() {
             if term.is_expanded() {
                 term.collapse();
                 self.canvas.move_(
@@ -824,7 +871,7 @@ impl SuperDesktopWindow {
         // Notes left
         let mut col_x = 60.0;
         let mut curr_y = start_y;
-        for note in self.note_cards.borrow().iter() {
+        for note in notes.iter() {
             let w = note.data.borrow().width as f64;
             let h = note.data.borrow().height as f64;
             if curr_y + h > (self.screen_height - 60) as f64 {
@@ -841,7 +888,7 @@ impl SuperDesktopWindow {
         let mut col_right = (self.screen_width - 30) as f64;
         let mut curr_y = start_y;
         let mut col_width = 0.0;
-        for term in self.terminal_cards.borrow().iter() {
+        for term in terms.iter() {
             let w = term.data.borrow().width as f64;
             let h = term.data.borrow().height as f64;
             if curr_y + h > (self.screen_height - 60) as f64 && curr_y > start_y {
@@ -858,12 +905,12 @@ impl SuperDesktopWindow {
         }
 
         let mut s = self.state.borrow_mut();
-        for note in self.note_cards.borrow().iter() {
+        for note in notes.iter() {
             if let Some(n) = s.notes.iter_mut().find(|n| n.id == note.data.borrow().id) {
                 *n = note.data.borrow().clone();
             }
         }
-        for term in self.terminal_cards.borrow().iter() {
+        for term in terms.iter() {
             if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == term.data.borrow().session_name) {
                 *t = term.data.borrow().clone();
             }
@@ -877,7 +924,12 @@ impl SuperDesktopWindow {
         let mut trajs = self.anim_trajectories.borrow_mut();
         trajs.clear();
 
-        for note in self.note_cards.borrow().iter() {
+        // Snapshot the cards so the list borrows are released before the
+        // `move_` calls below (which can re-enter the raise handlers).
+        let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
+        let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+
+        for note in notes.iter() {
             let tx = note.data.borrow().x as f64;
             let ty = note.data.borrow().y as f64;
             let w = note.data.borrow().width as f64;
@@ -887,7 +939,7 @@ impl SuperDesktopWindow {
             trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
 
-        for term in self.terminal_cards.borrow().iter() {
+        for term in terms.iter() {
             let (tx, ty, w, h) = terminal_slide_geom(term, self.screen_width, self.screen_height);
             let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
             self.canvas.move_(&term.container, sx, sy);
@@ -939,7 +991,12 @@ impl SuperDesktopWindow {
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
         let mut trajs = self.anim_trajectories.borrow_mut();
         if trajs.is_empty() {
-            for note in self.note_cards.borrow().iter() {
+            // Snapshot both lists so the borrows are gone while the
+            // trajectories are computed (see `start_slide_in`).
+            let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
+            let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+
+            for note in notes.iter() {
                 let tx = note.data.borrow().x as f64;
                 let ty = note.data.borrow().y as f64;
                 let w = note.data.borrow().width as f64;
@@ -947,7 +1004,7 @@ impl SuperDesktopWindow {
                 let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
                 trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
             }
-            for term in self.terminal_cards.borrow().iter() {
+            for term in terms.iter() {
                 let (tx, ty, w, h) = terminal_slide_geom(term, self.screen_width, self.screen_height);
                 let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
                 trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
@@ -1019,12 +1076,16 @@ impl SuperDesktopWindow {
 
 
     pub fn raise_all_notes(&self) {
-        raise_notes_on_canvas(&self.canvas, &self.note_cards.borrow());
+        let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
+        raise_notes_on_canvas(&self.canvas, &notes);
     }
 
     pub fn reload_theme(&self) {
         let theme = crate::styles::reload_styles();
-        for card in self.terminal_cards.borrow().iter() {
+        // Snapshot before restyling: `apply_theme` touches VTE/fonts, which
+        // can emit signals back into our handlers.
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        for card in cards.iter() {
             card.apply_theme(&theme);
         }
         // Swap monochrome toolbar logos for the new mode (light/dark).
@@ -1040,14 +1101,15 @@ impl SuperDesktopWindow {
         if crate::theme::check_theme_changed() {
             self.reload_theme();
         }
-        for card in self.terminal_cards.borrow().iter() {
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        for card in cards.iter() {
             card.refresh_status();
         }
         self.update_counts();
     }
 }
 
-fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[crate::sticky_note::StickyNote]) {
+fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[Rc<crate::sticky_note::StickyNote>]) {
     for note in notes {
         if let Some(last) = canvas.last_child() {
             if &last != &note.container {
@@ -1068,14 +1130,18 @@ fn terminal_slide_geom(term: &MiniTerminalCard, sw: i32, sh: i32) -> (f64, f64, 
 }
 
 fn apply_terminal_expand(
-    terminal_cards: &Rc<RefCell<Vec<MiniTerminalCard>>>,
+    terminal_cards: &Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
     canvas: &gtk4::Fixed,
     window: &ApplicationWindow,
     sw: i32,
     sh: i32,
     session_name: &str,
 ) {
-    let cards = terminal_cards.borrow();
+    // Snapshot the list (cheap `Rc` clones) and release the borrow before the
+    // expand/collapse/focus/unparent calls below: those emit pointer- and
+    // focus-enter signals that re-enter the raise handlers, which would panic
+    // if a list borrow were still alive.
+    let cards: Vec<Rc<MiniTerminalCard>> = terminal_cards.borrow().clone();
     let currently_expanded = cards
         .iter()
         .find(|c| c.data.borrow().session_name == session_name)

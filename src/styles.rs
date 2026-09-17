@@ -473,6 +473,7 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 .agent-card-opencode {{ border: 1.5px solid {agent_cyan}; }}
 .agent-card-grok {{ border: 1.5px solid {agent_magenta}; }}
 .agent-card-aider {{ border: 1.5px solid {agent_bright_magenta}; }}
+.agent-card-reasonix {{ border: 1.5px solid {agent_bright_blue}; }}
 .agent-card-shell {{ border: 1.5px solid {agent_shell}; }}
 
 .term-header {{
@@ -614,6 +615,7 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
         agent_cyan = OmarchyTheme::hex_to_rgba(&theme.cyan, 0.70),
         agent_magenta = OmarchyTheme::hex_to_rgba(&theme.magenta, 0.70),
         agent_bright_magenta = OmarchyTheme::hex_to_rgba(&theme.bright_magenta, 0.70),
+        agent_bright_blue = OmarchyTheme::hex_to_rgba(&theme.bright_blue, 0.70),
         agent_shell = theme.rgba_muted(0.55),
         term_hdr_bg = theme.rgba_lighter_bg(0.85),
         term_hdr_divider = theme.rgba_muted(0.30),

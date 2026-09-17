@@ -36,6 +36,9 @@ pub fn logo_filename(agent: &str, light_theme: bool) -> Option<&'static str> {
         } else {
             "grok-white.svg"
         }),
+        // No vendored mark for Reasonix yet, so the HUD falls back to the
+        // emoji label (see the agent table in window.rs).
+        "reasonix" => None,
         "shell" | "bash" | "terminal" => Some(if light_theme {
             "shell-black.svg"
         } else {
