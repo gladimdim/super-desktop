@@ -18,7 +18,8 @@ use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
-use std::process::Command;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use crate::state::load_state;
 use crate::tmux::{
     capture_pane_text, extract_last_prompt, get_agent_config, get_composer_draft,
     get_opencode_session_id, get_opencode_user_text_by_id, inspect_status, truncate_prompt_title,
+    SessionStatus,
 };
 
 pub const BRIDGE_PORT: u16 = 8759;
@@ -36,6 +38,9 @@ const PAIR_WINDOW_SECS: f64 = 120.0;
 fn utc_now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
+
+/// `(fetched_at, value)` for `tailscale_ip`; see the TTL there.
+static TAILSCALE_CACHE: Mutex<Option<(f64, Option<String>)>> = Mutex::new(None);
 
 fn now_epoch() -> f64 {
     std::time::SystemTime::now()
@@ -97,24 +102,39 @@ fn last_user_text(session: &str, agent_type: &str) -> Option<String> {
         .map(|s| truncate_prompt_title(&s))
 }
 
+/// Hex colour of a super-desktop group tag (0 = untagged).
+///
+/// One source of truth: the same palette the desktop dots use (`tag::TAG_COLORS`,
+/// mirrored as `.tag-dot-N` in styles.rs).
+fn tag_color(tag: u8) -> Option<&'static str> {
+    let n = crate::tag::normalize_tag(tag);
+    if n == crate::tag::TAG_NONE {
+        None
+    } else {
+        crate::tag::TAG_COLORS.get(n as usize - 1).copied()
+    }
+}
+
 pub fn collect_harnesses() -> Vec<serde_json::Value> {
     let state = load_state();
-    let meta: HashMap<String, (String, String)> = state
+    // agent type, fallback command and the user's group colour (super-desktop's
+    // 8-swatch tag) for every session we know about.
+    let meta: HashMap<String, (String, String, u8)> = state
         .terminals
         .iter()
         .map(|t| {
             (
                 t.session_name.clone(),
-                (t.agent_type.clone(), t.command.clone()),
+                (t.agent_type.clone(), t.command.clone(), t.tag),
             )
         })
         .collect();
     let mut out = vec![];
     for session in live_sessions() {
-        let (agent_type, cmd_fallback) = meta
+        let (agent_type, cmd_fallback, tag) = meta
             .get(&session)
             .cloned()
-            .unwrap_or_else(|| ("shell".to_string(), String::new()));
+            .unwrap_or_else(|| ("shell".to_string(), String::new(), 0));
         let cfg = get_agent_config(&agent_type);
         let status = inspect_status(&session, &agent_type);
         let screen = capture_pane_text(&session).unwrap_or_default();
@@ -144,6 +164,11 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             "lastPrompt": last_user_text(&session, &agent_type),
             "composerDraft": get_composer_draft(&session),
             "preview": lines[start..].join("\n"),
+            // Group colour: the same 8-swatch tag the desktop card shows, so a
+            // phone row can be coloured identically (`tagColor` is null when
+            // the card has no tag).
+            "tag": tag,
+            "tagColor": tag_color(tag),
             "updatedAt": utc_now_iso(),
         }));
     }
@@ -308,6 +333,14 @@ pub fn lan_ip() -> String {
 }
 
 pub fn hostname() -> String {
+    // /proc read instead of forking `hostname`: the launcher panel is filled on
+    // the window-build path, where every fork/exec costs tens of milliseconds.
+    if let Ok(raw) = fs::read_to_string("/proc/sys/kernel/hostname") {
+        let name = raw.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
     Command::new("hostname")
         .output()
         .ok()
@@ -412,6 +445,190 @@ fn bearer(headers: &HashMap<String, String>) -> String {
     }
 }
 
+/// Bearer-token or loopback authorization (same rule as `/api/v1/harnesses`).
+fn authorize(req: &Request, local: bool) -> bool {
+    local
+        || pair_state()
+            .lock()
+            .map(|mut s| s.valid(&bearer(&req.headers)))
+            .unwrap_or(false)
+}
+
+/// Complete a WebSocket upgrade; `false` when this is not a WS request (the
+/// caller then answers with plain HTTP).
+fn ws_upgrade(stream: &mut TcpStream, req: &Request) -> bool {
+    let upgrade = req
+        .headers
+        .get("upgrade")
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+    if !upgrade {
+        return false;
+    }
+    let Some(key) = req.headers.get("sec-websocket-key") else {
+        return false;
+    };
+    crate::ws::handshake(stream, key).is_ok()
+}
+
+/// How long one push stream may live before the client is asked to reconnect.
+const STREAM_MAX_SECS: u64 = 1800;
+
+/// Drain any frames the client sent without blocking.
+///
+/// Returns false when the peer went away (EOF or a Close frame), true when it
+/// is still there — including a Ping, which is answered so picky clients stay
+/// happy. A read timeout just means "nothing to read".
+fn ws_client_alive(stream: &mut TcpStream) -> bool {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1)));
+    match crate::ws::read_frame(stream) {
+        Ok(None) | Ok(Some(crate::ws::Frame::Close)) => false,
+        Ok(Some(crate::ws::Frame::Ping(payload))) => crate::ws::write_pong(stream, &payload).is_ok(),
+        Ok(Some(_)) => true,
+        Err(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+        ),
+    }
+}
+
+/// Push the full `/harnesses` document once a second.
+///
+/// Liveness comes from writes: a client that vanished makes the write (or the
+/// 5s write timeout) fail, which ends the thread — no reader thread needed.
+fn stream_harness_list(mut stream: TcpStream) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
+    while std::time::Instant::now() < deadline {
+        if !ws_client_alive(&mut stream) {
+            return;
+        }
+        let document = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "timestamp": utc_now_iso(),
+            "harnesses": collect_harnesses(),
+        });
+        if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+    let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
+}
+
+/// Push one harness's live pane output (~2 frames/s) until the session dies.
+///
+/// The first frame doubles as the "attached" signal; the phone renders `tail`
+/// in its terminal screen and stops when `status` turns `EXITED`.
+fn stream_one_harness(mut stream: TcpStream, id: &str) {
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
+    let (agent_type, tag) = session_meta(id);
+    let mut previous: Option<String> = None;
+    while std::time::Instant::now() < deadline {
+        if !ws_client_alive(&mut stream) {
+            return;
+        }
+        let alive = crate::tmux::session_alive(id);
+        let status = if alive {
+            inspect_status(id, &agent_type)
+        } else {
+            SessionStatus {
+                status: "EXITED",
+                label: "○ EXITED",
+                pid: String::new(),
+                cmd: String::new(),
+            }
+        };
+        let frame = serde_json::json!({
+            "id": id,
+            "agentType": agent_type,
+            "status": status.status,
+            "label": status.label,
+            "tag": tag,
+            "tagColor": tag_color(tag),
+            "tail": if alive { capture_pane_text(id) } else { None },
+            "updatedAt": utc_now_iso(),
+        })
+        .to_string();
+        if previous.as_deref() != Some(frame.as_str()) {
+            if crate::ws::write_text(&mut stream, &frame).is_err() {
+                return;
+            }
+            previous = Some(frame);
+        }
+        if !alive {
+            let _ = crate::ws::write_close(&mut stream, 1000, "session ended");
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
+}
+
+/// Agent type + group tag of a session, from the desktop state file.
+fn session_meta(session: &str) -> (String, u8) {
+    load_state()
+        .terminals
+        .iter()
+        .find(|t| t.session_name == session)
+        .map(|t| (t.agent_type.clone(), t.tag))
+        .unwrap_or_else(|| ("shell".to_string(), 0))
+}
+
+/// `POST /api/v1/harnesses/<id>/keys` — type into a harness from the phone.
+///
+/// Body: `{"text": "ls -la", "enter": true}`. `text` is optional (so the phone
+/// can send a bare Return, or a control byte such as `\u0003` for Ctrl-C).
+fn handle_keys(stream: &mut TcpStream, req: &Request, id: &str, local: bool) {
+    if !authorize(req, local) {
+        return respond(
+            stream,
+            401,
+            "Unauthorized",
+            &serde_json::json!({"status": "error", "error": "not_paired"}),
+        );
+    }
+    if !crate::tmux::session_alive(id) {
+        return respond(
+            stream,
+            404,
+            "Not Found",
+            &serde_json::json!({"status": "error", "error": "no_such_session"}),
+        );
+    }
+    let body: serde_json::Value = match serde_json::from_str(&req.body) {
+        Ok(value) => value,
+        Err(_) => {
+            return respond(
+                stream,
+                400,
+                "Bad Request",
+                &serde_json::json!({"status": "error", "error": "bad_json"}),
+            )
+        }
+    };
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let enter = body.get("enter").and_then(|v| v.as_bool()).unwrap_or(true);
+    if text.len() > 4096 {
+        return respond(
+            stream,
+            413,
+            "Payload Too Large",
+            &serde_json::json!({"status": "error", "error": "text_too_long"}),
+        );
+    }
+    match crate::tmux::send_keys(id, text, enter) {
+        Ok(()) => respond(stream, 200, "OK", &serde_json::json!({"status": "ok"})),
+        Err(e) => respond(
+            stream,
+            500,
+            "Internal Server Error",
+            &serde_json::json!({"status": "error", "error": e}),
+        ),
+    }
+}
+
 fn is_loopback(peer: &str) -> bool {
     peer.starts_with("127.0.0.1") || peer.starts_with("[::1]") || peer.starts_with("::1")
 }
@@ -426,8 +643,43 @@ fn handle_client(mut stream: TcpStream) {
         None => return,
     };
     let local = is_loopback(&peer);
+    let path = req.path.split('?').next().unwrap_or("").to_string();
 
-    match (req.method.as_str(), req.path.as_str()) {
+    // Dynamic harness routes: /api/v1/harnesses/<id>/stream (WebSocket, live
+    // pane output) and /api/v1/harnesses/<id>/keys (phone → harness input).
+    // Only our own `sd_term_*` sessions are addressable, so a paired phone
+    // cannot type into unrelated tmux sessions.
+    if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
+        if let Some((id, action)) = rest.rsplit_once('/') {
+            if id.starts_with("sd_term_") {
+                match (req.method.as_str(), action) {
+                    ("GET", "stream") => {
+                        if !authorize(&req, local) {
+                            return respond(
+                                &mut stream,
+                                401,
+                                "Unauthorized",
+                                &serde_json::json!({"status": "error", "error": "not_paired"}),
+                            );
+                        }
+                        return match ws_upgrade(&mut stream, &req) {
+                            true => stream_one_harness(stream, id),
+                            false => respond(
+                                &mut stream,
+                                400,
+                                "Bad Request",
+                                &serde_json::json!({"status": "error", "error": "expected_websocket"}),
+                            ),
+                        };
+                    }
+                    ("POST", "keys") => return handle_keys(&mut stream, &req, id, local),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    match (req.method.as_str(), path.as_str()) {
         ("GET", "/api/v1/ping") => respond(
             &mut stream,
             200,
@@ -466,6 +718,26 @@ fn handle_client(mut stream: TcpStream) {
                     "harnesses": collect_harnesses(),
                 }),
             );
+        }
+        // PROTOCOL.md: full document on connect, then on every change (1s poll).
+        ("GET", "/api/v1/harnesses/stream") => {
+            if !authorize(&req, local) {
+                return respond(
+                    &mut stream,
+                    401,
+                    "Unauthorized",
+                    &serde_json::json!({"status": "error", "error": "not_paired"}),
+                );
+            }
+            if !ws_upgrade(&mut stream, &req) {
+                return respond(
+                    &mut stream,
+                    400,
+                    "Bad Request",
+                    &serde_json::json!({"status": "error", "error": "expected_websocket"}),
+                );
+            }
+            stream_harness_list(stream);
         }
         ("POST", "/api/v1/pair/open") => {
             if !local {
@@ -553,6 +825,18 @@ pub fn serve(port: u16) {
         }
     };
     println!("{SERVICE_NAME} on 0.0.0.0:{port} (lan {})", lan_ip());
+    // Advertise for the launcher's NSD lookup (OmarchyAILauncher/PROTOCOL.md).
+    // On a worker thread: confirming the record with `avahi-browse` takes a
+    // moment, and discovery must never delay serving requests.
+    std::thread::spawn(move || {
+        if !publish_mdns(port) {
+            eprintln!(
+                "{SERVICE_NAME}: mDNS {MDNS_SERVICE_TYPE} not advertised (avahi-utils missing?) — \
+                 the launcher can still be pointed at {}:{port} manually",
+                lan_ip()
+            );
+        }
+    });
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
@@ -561,6 +845,147 @@ pub fn serve(port: u16) {
             Err(e) => eprintln!("accept error: {e}"),
         }
     }
+}
+
+/// mDNS service type the launcher browses for (OmarchyAILauncher/PROTOCOL.md).
+pub const MDNS_SERVICE_TYPE: &str = "_omarchy-harness._tcp";
+
+/// Protocol version advertised in the TXT record (`ver=1`).
+const MDNS_PROTOCOL_TXT_VERSION: u32 = 1;
+
+/// Publish `_omarchy-harness._tcp` through the system Avahi daemon.
+///
+/// Discovery is a convenience: without avahi-utils the bridge serves exactly as
+/// before and the launcher can be pointed at the LAN/Tailscale address by hand,
+/// so every failure here is logged, not fatal. Returns true once the record is
+/// confirmed on the network.
+///
+/// The publisher's lifetime is tied to this process through a pipe: the wrapper
+/// shell keeps the write end as its stdin and kills `avahi-publish-service`
+/// when it closes, so the advertisement disappears with the bridge — including
+/// a SIGKILL — instead of pointing at a dead port.
+pub fn publish_mdns(port: u16) -> bool {
+    let host = hostname();
+    let name = format!("{SERVICE_NAME} on {host}");
+    let txt_host = format!("host={host}");
+    // Names are const/hostname, but they can contain spaces, so quote them.
+    let script = format!(
+        "avahi-publish-service -s '{name}' {MDNS_SERVICE_TYPE} {port} \
+         ver={MDNS_PROTOCOL_TXT_VERSION} '{txt_host}' & publisher=$!; \
+         cat >/dev/null; kill $publisher 2>/dev/null; wait $publisher 2>/dev/null"
+    );
+
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(&script).stdin(Stdio::piped());
+    match log_file_append().and_then(|file| file.try_clone().ok().map(|clone| (file, clone))) {
+        Some((out, err)) => {
+            command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        None => {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("{SERVICE_NAME}: cannot run avahi-publish-service: {e}");
+            let _ = fs::remove_file(mdns_state_path());
+            return false;
+        }
+    };
+    // Deliberately leak the write end of the pipe (and the child handle): both
+    // must outlive this call for as long as the bridge process lives.
+    std::mem::forget(child.stdin.take());
+    std::mem::forget(child);
+
+    let advertised = mdns_advertised(port);
+    if advertised {
+        let state = serde_json::json!({
+            "service": MDNS_SERVICE_TYPE,
+            "port": port,
+            "host": host,
+            "ver": MDNS_PROTOCOL_TXT_VERSION,
+        });
+        let _ = fs::write(mdns_state_path(), state.to_string());
+    } else {
+        let _ = fs::remove_file(mdns_state_path());
+    }
+    advertised
+}
+
+/// Ask the local resolver whether our record is on the network yet.
+///
+/// `avahi-browse -rtp` prints one `=` line per resolved service; we look for one
+/// with our service type and port. Missing avahi-browse is reported as "not
+/// advertised" — the panel then tells the user to enter the IP manually.
+fn mdns_advertised(port: u16) -> bool {
+    // Avahi registers asynchronously, so poll briefly: checking once raced the
+    // daemon and reported "not advertised" for a record that was about to
+    // appear (which then kept the state file / panel out of sync).
+    for _ in 0..6 {
+        if browse_once(port) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    false
+}
+
+/// Single `avahi-browse -rtp` sweep for our own record.
+fn browse_once(port: u16) -> bool {
+    let out = Command::new("avahi-browse")
+        .args(["-rtp", MDNS_SERVICE_TYPE])
+        .output();
+    let Ok(out) = out else { return false };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|line| browse_line_matches(line, port))
+}
+
+/// Does one `avahi-browse -p` line resolve OUR service on OUR port?
+///
+/// Resolve lines look like
+/// `=;wlo1;IPv4;Name\032With\032Spaces;_omarchy-harness._tcp;local;host.local;192.168.50.219;8759;"ver=1"`.
+fn browse_line_matches(line: &str, port: u16) -> bool {
+    if !line.starts_with('=') {
+        return false;
+    }
+    let fields: Vec<&str> = line.split(';').collect();
+    // 4 = service type, 8 = port (6 = host, 7 = address, 9 = TXT).
+    fields.get(4) == Some(&MDNS_SERVICE_TYPE)
+        && fields.get(8).and_then(|p| p.parse::<u16>().ok()) == Some(port)
+}
+
+/// State file the 📱 panel reads to show whether discovery is live.
+fn mdns_state_path() -> PathBuf {
+    state_path().with_file_name("mdns.json")
+}
+
+/// `host:port` from the mDNS state file, when the bridge advertised itself.
+fn mdns_advertised_port() -> Option<u16> {
+    let raw = fs::read_to_string(mdns_state_path()).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value.get("port")?.as_u64().map(|p| p as u16)
+}
+
+/// Line the launcher panel shows for discovery.
+pub fn mdns_summary(bridge_online: bool) -> String {
+    if !bridge_online {
+        return format!("{MDNS_SERVICE_TYPE} · bridge offline");
+    }
+    match mdns_advertised_port() {
+        Some(port) => format!("{MDNS_SERVICE_TYPE} · advertised :{port}"),
+        None => format!("{MDNS_SERVICE_TYPE} · not advertised — use the IP above"),
+    }
+}
+
+/// Bridge log opened for append (the banner there is written at spawn time).
+fn log_file_append() -> Option<fs::File> {
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(bridge_log_path())
+        .ok()
 }
 
 /// One-shot JSON dump for `super-desktop harnesses`.
@@ -578,6 +1003,24 @@ pub fn print_once() {
 
 /// First IPv4 from `tailscale ip -4`, if Tailscale is up.
 pub fn tailscale_ip() -> Option<String> {
+    // `tailscale ip` asks tailscaled over its socket and takes ~100ms, and the
+    // panel refresh runs while it is open: cache briefly.
+    const TTL_SECS: f64 = 30.0;
+    if let Ok(cache) = TAILSCALE_CACHE.lock() {
+        if let Some((at, value)) = cache.as_ref() {
+            if now_epoch() - at < TTL_SECS {
+                return value.clone();
+            }
+        }
+    }
+    let value = tailscale_ip_uncached();
+    if let Ok(mut cache) = TAILSCALE_CACHE.lock() {
+        *cache = Some((now_epoch(), value.clone()));
+    }
+    value
+}
+
+fn tailscale_ip_uncached() -> Option<String> {
     let out = Command::new("tailscale").args(["ip", "-4"]).output().ok()?;
     if !out.status.success() {
         return None;
@@ -607,48 +1050,177 @@ fn bridge_ping_body(port: u16) -> Option<String> {
     resp.split_once("\r\n\r\n").map(|(_, b)| b.to_string())
 }
 
-/// Start `super-desktop harness-bridge` detached. No-op when already running.
+/// Start `super-desktop harness-bridge` detached.
+///
+/// Idempotent: a bridge that already answers counts as success (`Ok`), so the
+/// panel's ▶ button never reports a healthy bridge as an error.
+///
+/// Self-healing: a bridge process can be alive but wedged (its ping no longer
+/// answers) while still holding the port, which used to make every later start
+/// fail on bind — silently, because the child's output went to /dev/null. Such
+/// a process is replaced here (pkill only matches our own
+/// `super-desktop harness-bridge`), and a port held by anything else is
+/// reported by name.
+///
+/// The child's banner/errors are captured in `bridge.log` (next to the bridge
+/// config) and its tail is folded into the error string, so the 📱 panel can
+/// show WHY a start failed instead of doing nothing.
 pub fn start_bridge() -> Result<(), String> {
     if bridge_running(BRIDGE_PORT) {
-        return Err("already running".to_string());
+        return Ok(());
     }
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    Command::new(exe)
+    if port_taken(BRIDGE_PORT) {
+        // Something is on our port: if it is a wedged bridge of ours, drop it
+        // and take the port over; otherwise say who holds it.
+        let _ = stop_bridge();
+        if bridge_running(BRIDGE_PORT) {
+            return Ok(());
+        }
+        if port_taken(BRIDGE_PORT) {
+            return Err(format!(
+                "port {BRIDGE_PORT} is held by another process — check `ss -ltnp | grep {BRIDGE_PORT}`"
+            ));
+        }
+    }
+
+    let exe = bridge_exe()?;
+    // The log is a diagnostic, never a precondition: on a read-only state dir
+    // the bridge must still start (it would otherwise fail with a confusing
+    // "Read-only file system" instead of serving).
+    let log = fs::File::create(bridge_log_path()).ok();
+    let log_err = log.as_ref().and_then(|f| f.try_clone().ok());
+
+    let mut command = Command::new(&exe);
+    command
         .arg("harness-bridge")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        // Stable argv[0]: `stop_bridge()` and a user's `pkill` match on
+        // "super-desktop harness-bridge" whichever path we re-executed.
+        .arg0("super-desktop")
+        .stdin(Stdio::null());
+    match (log, log_err) {
+        (Some(out), Some(err)) => {
+            command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
+        }
+        _ => {
+            command.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+    }
+    command
         .spawn()
-        .map_err(|e| e.to_string())?;
-    for _ in 0..25 {
+        .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+
+    // The first start of a desktop session can be slow (cold binary, busy box).
+    for _ in 0..50 {
         if bridge_running(BRIDGE_PORT) {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("started but not responding".to_string())
+    Err(match bridge_log_tail() {
+        Some(line) => format!("bridge did not answer on :{BRIDGE_PORT} — {line}"),
+        None => format!("bridge did not answer on :{BRIDGE_PORT}"),
+    })
+}
+
+/// Path of a super-desktop binary able to re-exec `harness-bridge`.
+///
+/// `current_exe()` first, but checked for existence: a rebuild that replaced
+/// the binary on disk leaves the running daemon pointing at a path that no
+/// longer resolves, and spawning it would fail with a bare ENOENT nobody ever
+/// sees. `/proc/self/exe` always resolves to the running image, so it is the
+/// fallback that survives that case; PATH comes last.
+fn bridge_exe() -> Result<PathBuf, String> {
+    let proc_exe = PathBuf::from("/proc/self/exe");
+    let path_var = std::env::var("PATH").unwrap_or_default();
+    let candidates = std::env::current_exe()
+        .ok()
+        .into_iter()
+        .chain([proc_exe])
+        .chain(
+            path_var
+                .split(':')
+                .filter(|dir| !dir.is_empty())
+                .map(|dir| PathBuf::from(dir).join("super-desktop")),
+        );
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err("cannot find a super-desktop binary to spawn the bridge with".to_string())
+}
+
+/// True when some process accepts connections on `port` (loopback).
+///
+/// Says nothing about whether it is *our* bridge — see `start_bridge`.
+fn port_taken(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(300),
+    )
+    .is_ok()
+}
+
+/// Log the detached bridge writes its banner and bind errors to.
+fn bridge_log_path() -> PathBuf {
+    let mut path = state_path();
+    path.set_file_name("bridge.log");
+    path
+}
+
+/// Last non-empty line of the bridge log: its banner, or the bind error that
+/// killed the process.
+fn bridge_log_tail() -> Option<String> {
+    let text = fs::read_to_string(bridge_log_path()).ok()?;
+    text.lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| line.trim().to_string())
 }
 
 /// Stop a locally running bridge.
+///
+/// Escalates to SIGKILL: a wedged bridge can ignore (or be stopped for)
+/// SIGTERM, and one that keeps holding the port is exactly what makes every
+/// later start fail. Success means the port is free again, not merely "quiet".
 pub fn stop_bridge() -> Result<(), String> {
-    let st = Command::new("pkill")
-        .args(["-f", "super-desktop harness-bridge"])
-        .status()
-        .map_err(|e| e.to_string())?;
     // pkill exits 1 when nothing matched — that means already stopped.
-    if st.code() == Some(1) {
+    if pkill_bridge(&["-f", "super-desktop harness-bridge"])? == 1 {
         return Ok(());
     }
-    if !st.success() {
-        return Err(format!("pkill exited {}", st.code().unwrap_or(-1)));
+    if wait_port_free() {
+        return Ok(());
     }
+    let _ = pkill_bridge(&["-9", "-f", "super-desktop harness-bridge"]);
+    if wait_port_free() {
+        return Ok(());
+    }
+    Err(format!(
+        "port {BRIDGE_PORT} is still held after SIGKILL — check `ss -ltnp | grep {BRIDGE_PORT}`"
+    ))
+}
+
+fn pkill_bridge(args: &[&str]) -> Result<i32, String> {
+    let st = Command::new("pkill")
+        .args(args)
+        .status()
+        .map_err(|e| e.to_string())?;
+    if st.success() || st.code() == Some(1) {
+        Ok(st.code().unwrap_or(0))
+    } else {
+        Err(format!("pkill exited {}", st.code().unwrap_or(-1)))
+    }
+}
+
+/// Wait for the bridge port to be released (up to ~2s).
+fn wait_port_free() -> bool {
     for _ in 0..20 {
-        if !bridge_running(BRIDGE_PORT) {
-            return Ok(());
+        if !port_taken(BRIDGE_PORT) {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("still responding".to_string())
+    false
 }
 
 /// Current pairing PIN (fresh from disk, so external edits are visible).
@@ -798,5 +1370,84 @@ pub fn unlock_firewall() -> Result<String, String> {
         } else {
             Err(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_port_taken_follows_the_listener() {
+        // Occupy an ephemeral port, then release it: `start_bridge` relies on
+        // this to tell "free" from "someone (maybe a wedged bridge) is there".
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_taken(port), "listening port must read as taken");
+        drop(listener);
+        assert!(!port_taken(port), "released port must read as free");
+    }
+
+    #[test]
+    fn test_bridge_exe_is_spawnable() {
+        // Whatever we pick must exist: a rebuild that replaced the running
+        // binary used to leave `current_exe()` pointing at a dead path.
+        let exe = bridge_exe().expect("a super-desktop binary must be found");
+        assert!(exe.is_file(), "{} is not a file", exe.display());
+    }
+
+    #[test]
+    fn test_tag_color_follows_the_desktop_palette() {
+        // The phone paints rows with the same swatch the desktop card shows.
+        assert_eq!(tag_color(0), None, "untagged cards have no colour");
+        assert_eq!(tag_color(9), None, "out-of-range tags fall back to none");
+        assert_eq!(tag_color(5), Some("#22d3ee"), "cyan (the default tag)");
+        assert_eq!(tag_color(1), Some("#f87171"));
+        assert_eq!(tag_color(crate::tag::DEFAULT_TERMINAL_TAG), Some("#22d3ee"));
+        // Every palette entry resolves to a hex colour.
+        for n in 1..=crate::tag::TAG_COUNT {
+            assert!(tag_color(n).is_some_and(|c| c.starts_with('#') && c.len() == 7));
+        }
+    }
+
+    #[test]
+    fn test_browse_lines_identify_our_service() {
+        // Real `avahi-browse -rtp` output (spaces escaped in the name).
+        let line = r#"=";tailscale0;IPv4;Harness\032Probe;_omarchy-harness._tcp;local;gladimdim-b9.local;100.67.193.30;8759;"ver=1" "host=gladimdim-b9""#;
+        assert!(browse_line_matches(line, 8759));
+        // Other ports, other services and the browse `+` lines do not count.
+        assert!(!browse_line_matches(line, 8760));
+        assert!(!browse_line_matches(
+            "=;wlo1;IPv4;x;_other._tcp;local;h.local;10.0.0.1;8759;",
+            8759
+        ));
+        assert!(!browse_line_matches(
+            "+;wlo1;IPv4;x;_omarchy-harness._tcp;local",
+            8759
+        ));
+    }
+
+    #[test]
+    fn test_mdns_state_sits_next_to_the_bridge_config() {
+        assert_eq!(mdns_state_path().file_name().unwrap(), "mdns.json");
+        assert_eq!(mdns_state_path().parent(), state_path().parent());
+    }
+
+    #[test]
+    fn test_mdns_summary_reports_offline_bridge() {
+        let text = mdns_summary(false);
+        assert!(text.starts_with(MDNS_SERVICE_TYPE), "got: {text}");
+        assert!(text.contains("bridge offline"), "got: {text}");
+    }
+
+    #[test]
+    fn test_bridge_log_sits_next_to_the_bridge_config() {
+        let log = bridge_log_path();
+        assert_eq!(log.file_name().unwrap(), "bridge.log");
+        assert_eq!(
+            log.parent(),
+            state_path().parent(),
+            "the bridge log belongs in the harness-bridge state dir"
+        );
     }
 }

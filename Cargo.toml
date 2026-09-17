@@ -19,4 +19,7 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-strip = true
+# Keep the symbol table: a panic here aborts the daemon, and the crash log's
+# backtrace (src/crashlog.rs) is only useful if frames can be named. DWARF
+# debuginfo is still dropped.
+strip = "debuginfo"

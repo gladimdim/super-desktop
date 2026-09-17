@@ -572,6 +572,277 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     font-style: italic;
     opacity: 0.8;
 }}
+
+/* ================= Launcher Connection Panel ================= */
+/* Same card chrome as terminals/notes (`mini-terminal` + `term-header`), but
+   the body is a stack of numbered section cards so each concern — bridge,
+   firewall, addresses, pairing, phone steps — reads as its own little panel. */
+.launcher-panel {{
+    border: 1px solid {hud_border};
+}}
+
+.launcher-head-badge {{
+    background-color: {badge_bg};
+    border-radius: 9px;
+    padding: 3px 8px;
+    font-size: 15px;
+}}
+
+.launcher-subtitle {{
+    color: {dark_foreground};
+    font-size: 10px;
+    font-weight: 500;
+    margin-top: 1px;
+}}
+
+.launcher-scroll,
+.launcher-scroll > viewport {{
+    background: transparent;
+}}
+
+.launcher-body {{
+    padding: 12px 14px 14px 14px;
+}}
+
+.launcher-section {{
+    background-color: {launcher_section_bg};
+    border: 1px solid {launcher_section_border};
+    border-radius: 12px;
+    padding: 9px 12px 11px 12px;
+}}
+
+.launcher-section-num {{
+    background-color: {badge_bg};
+    color: {accent};
+    border-radius: 9999px;
+    min-width: 17px;
+    min-height: 15px;
+    padding: 1px 0;
+    font-size: 10px;
+    font-weight: 800;
+}}
+
+.launcher-section-title {{
+    color: {accent};
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+}}
+
+.launcher-status-text {{
+    color: {light_foreground};
+    font-size: 11.5px;
+}}
+
+.launcher-row {{
+    padding: 3px 0;
+}}
+
+.launcher-key {{
+    color: {dark_foreground};
+    font-size: 11.5px;
+    font-weight: 600;
+}}
+
+.launcher-value {{
+    color: {bright_foreground};
+    font-family: '{font_family}', monospace;
+    font-size: 11.5px;
+}}
+
+separator.launcher-sep {{
+    background-color: {term_hdr_divider};
+    min-height: 1px;
+}}
+
+.launcher-note {{
+    color: {bright_yellow};
+    font-size: 10.5px;
+}}
+
+/* Failed start/stop: the overlay is the only place the user sees it */
+.launcher-note-error {{
+    color: {bright_red};
+    font-weight: 700;
+}}
+
+.launcher-hint,
+.launcher-footer {{
+    color: {dark_foreground};
+    font-size: 10px;
+    font-style: italic;
+}}
+
+.launcher-actions {{
+    margin-top: 2px;
+}}
+
+/* Buttons keep the HUD pill language, sized for a panel */
+.launcher-btn {{
+    background-color: {btn_bg};
+    color: {foreground};
+    border: 1px solid {btn_border};
+    border-radius: 9px;
+    padding: 6px 12px;
+    font-size: 11.5px;
+    font-weight: 600;
+    transition: background-color 150ms ease, border-color 150ms ease;
+}}
+
+.launcher-btn:hover {{
+    background-color: {btn_hover_bg};
+    color: {bright_foreground};
+    border-color: {accent};
+}}
+
+.launcher-btn-primary {{
+    background-color: {badge_bg};
+    color: {accent};
+    border-color: {accent};
+}}
+
+.launcher-btn-danger {{
+    background-color: {danger_bg};
+    color: {bright_red};
+    border-color: {danger_border};
+}}
+
+.launcher-btn-danger:hover {{
+    background-color: {danger_border};
+    color: #ffffff;
+}}
+
+/* The PIN is the one value the user retypes on the phone: own panel + accent */
+.launcher-pin-box {{
+    background-color: {launcher_pin_bg};
+    border: 1px dashed {accent};
+    border-radius: 10px;
+    padding: 6px 12px;
+}}
+
+.launcher-pin-label {{
+    color: {dark_foreground};
+    font-size: 10px;
+    font-weight: 800;
+    letter-spacing: 0.8px;
+}}
+
+.launcher-pin-value {{
+    color: {accent};
+    font-family: '{font_family}', monospace;
+    font-size: 27px;
+    font-weight: 800;
+    letter-spacing: 6px;
+}}
+
+.launcher-window-state {{
+    font-size: 11px;
+}}
+
+.launcher-window-open {{
+    color: {bright_yellow};
+    font-weight: 700;
+}}
+
+.launcher-window-closed {{
+    color: {dark_foreground};
+}}
+
+/* Bridge state chips, mirroring .status-active / .status-exited */
+.launcher-online {{
+    background-color: {status_active_bg};
+    color: {bright_green};
+    border: 1px solid {status_active_border};
+}}
+
+.launcher-offline {{
+    background-color: {status_exited_bg};
+    color: {light_foreground};
+    border: 1px solid {status_exited_border};
+}}
+
+/* ================= Harness Settings Panel ================= */
+/* Second overlay card, same chrome as the launcher panel; rows read
+   `[logo] name …… resolved command [ON/OFF]`. */
+.harness-panel {{
+    border: 1px solid {hud_border};
+}}
+
+.harness-rows {{
+    margin-top: 2px;
+}}
+
+.harness-row {{
+    padding: 4px 0;
+}}
+
+.harness-icon {{
+    font-size: 13px;
+}}
+
+.harness-name {{
+    color: {foreground};
+    font-size: 12px;
+    font-weight: 700;
+}}
+
+.harness-cmd {{
+    color: {dark_foreground};
+    font-family: '{font_family}', monospace;
+    font-size: 10.5px;
+}}
+
+.harness-toggle {{
+    background-color: {btn_bg};
+    color: {light_foreground};
+    border: 1px solid {btn_border};
+    border-radius: 9999px;
+    padding: 3px 12px;
+    min-width: 52px;
+    font-size: 10.5px;
+    font-weight: 800;
+    letter-spacing: 0.6px;
+    transition: background-color 150ms ease, border-color 150ms ease;
+}}
+
+.harness-toggle:hover {{
+    background-color: {btn_hover_bg};
+    border-color: {accent};
+}}
+
+/* Same chip language as .launcher-online / .launcher-offline */
+.harness-toggle-on {{
+    background-color: {status_active_bg};
+    color: {bright_green};
+    border: 1px solid {status_active_border};
+}}
+
+.harness-toggle-off {{
+    background-color: {status_exited_bg};
+    color: {dark_foreground};
+    border: 1px solid {status_exited_border};
+}}
+
+/* Numbered phone steps */
+.launcher-step {{
+    padding: 2px 0;
+}}
+
+.launcher-step-num {{
+    background-color: {launcher_step_bg};
+    color: {light_foreground};
+    border-radius: 9999px;
+    min-width: 16px;
+    min-height: 14px;
+    padding: 1px 0;
+    font-size: 9.5px;
+    font-weight: 700;
+}}
+
+.launcher-step-text {{
+    color: {foreground};
+    font-size: 11px;
+}}
 "#,
         win_bg = theme.rgba_darker_bg(0.72),
         hud_bg = theme.rgba_dark_bg(0.92),
@@ -617,6 +888,10 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
         agent_bright_magenta = OmarchyTheme::hex_to_rgba(&theme.bright_magenta, 0.70),
         agent_bright_blue = OmarchyTheme::hex_to_rgba(&theme.bright_blue, 0.70),
         agent_shell = theme.rgba_muted(0.55),
+        launcher_section_bg = theme.rgba_darker_bg(0.35),
+        launcher_section_border = theme.rgba_muted(0.25),
+        launcher_pin_bg = theme.rgba_darker_bg(0.55),
+        launcher_step_bg = theme.rgba_muted(0.25),
         term_hdr_bg = theme.rgba_lighter_bg(0.85),
         term_hdr_divider = theme.rgba_muted(0.30),
         bright_green = theme.bright_green,
@@ -682,4 +957,108 @@ pub fn reload_styles() -> OmarchyTheme {
     });
 
     theme
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[test]
+    fn test_generated_css_parses_without_errors() {
+        // GTK is single-threaded, so the parse assertions run in their own
+        // process (see `crate::gtk_test`).
+        crate::gtk_test::run_in_child_process("styles::tests::css_gtk_parses_cleanly");
+    }
+
+    #[test]
+    fn css_gtk_parses_cleanly() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        // A single bad property silently drops its rule at runtime, which is
+        // how the launcher panel would quietly lose its chrome. Parse the
+        // generated stylesheet and fail on any CSS parser complaint.
+        let _ = gtk4::init();
+        let css = generate_css(&current_theme());
+        let provider = CssProvider::new();
+        let errors: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        {
+            let errors = Rc::clone(&errors);
+            provider.connect_parsing_error(move |_, _section, err| {
+                errors.borrow_mut().push(err.to_string());
+            });
+        }
+        provider.load_from_string(&css);
+
+        let errors = errors.borrow();
+        assert!(
+            errors.is_empty(),
+            "generated CSS must parse cleanly, got: {errors:#?}"
+        );
+        drop(errors);
+
+        // Sanity check the wiring: a genuinely broken rule must be reported,
+        // otherwise this test would pass no matter what the stylesheet says.
+        let bogus = CssProvider::new();
+        let caught: Rc<RefCell<usize>> = Rc::new(RefCell::new(0));
+        {
+            let caught = Rc::clone(&caught);
+            bogus.connect_parsing_error(move |_, _, _| *caught.borrow_mut() += 1);
+        }
+        bogus.load_from_string(".launcher-panel { border-radius: not-a-length; }");
+        assert!(
+            *caught.borrow() > 0,
+            "CSS parsing-error hook is not wired up"
+        );
+    }
+
+    #[test]
+    fn test_launcher_panel_styles_exist() {
+        let css = generate_css(&current_theme());
+        for class in [
+            "launcher-panel",
+            "launcher-section",
+            "launcher-section-num",
+            "launcher-section-title",
+            "launcher-key",
+            "launcher-value",
+            "launcher-btn",
+            "launcher-pin-box",
+            "launcher-pin-value",
+            "launcher-step-num",
+            "launcher-online",
+            "launcher-offline",
+            "launcher-note",
+            "launcher-note-error",
+        ] {
+            assert!(
+                css.contains(&format!(".{class}")),
+                "missing CSS rule for .{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_harness_settings_panel_styles_exist() {
+        // The ⚙ panel is built from the shared `.launcher-section` chrome plus
+        // these; a typo in either turns a row into unstyled text.
+        let css = generate_css(&current_theme());
+        for class in [
+            "harness-panel",
+            "harness-rows",
+            "harness-row",
+            "harness-name",
+            "harness-cmd",
+            "harness-toggle",
+            "harness-toggle-on",
+            "harness-toggle-off",
+        ] {
+            assert!(
+                css.contains(&format!(".{class}")),
+                "missing CSS rule for .{class}"
+            );
+        }
+    }
 }

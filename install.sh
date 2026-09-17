@@ -70,6 +70,16 @@ else
     echo "✓ Hyprland keybinding already present in $BINDINGS_LUA"
 fi
 
+# 3b. Keep the daemon warm so the shortcut does not have to spawn it.
+# `daemon` (not `start`) comes up hidden: the overlay is only built on the
+# first toggle, but the process, GTK and the IPC socket are already there.
+if ! grep -q "super-desktop daemon" "$BINDINGS_LUA"; then
+    echo 'o.exec_on_start("super-desktop daemon")' >> "$BINDINGS_LUA"
+    echo "✓ Added warm daemon autostart to $BINDINGS_LUA"
+else
+    echo "✓ Warm daemon autostart already present in $BINDINGS_LUA"
+fi
+
 # 4. Add Layer Rule for blur effect to ~/.config/hypr/hyprland.lua
 mkdir -p "$(dirname "$HYPRLAND_LUA")"
 touch "$HYPRLAND_LUA"

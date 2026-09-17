@@ -40,6 +40,45 @@ pub fn clamp_card_size(w: i32, h: i32, screen_w: i32, screen_h: i32) -> (i32, i3
     )
 }
 
+/// Each card remembers two independent spots: the expanded card position
+/// (`x`/`y`) and the iconified position (`icon_x`/`icon_y`). This returns the
+/// spot the widget should occupy right now, so minimizing/restoring can jump
+/// between them without either one clobbering the other.
+pub fn displayed_pos(data: &TerminalData) -> (f64, f64) {
+    if data.iconified {
+        (
+            data.icon_x.unwrap_or(data.x) as f64,
+            data.icon_y.unwrap_or(data.y) as f64,
+        )
+    } else {
+        (data.x as f64, data.y as f64)
+    }
+}
+
+/// Records a card position in the slot matching its current mode, so moving an
+/// icon can never overwrite the expanded card position (and vice versa).
+pub fn set_displayed_pos(data: &mut TerminalData, x: i32, y: i32) {
+    if data.iconified {
+        data.icon_x = Some(x);
+        data.icon_y = Some(y);
+    } else {
+        data.x = x;
+        data.y = y;
+    }
+}
+
+/// A card that was never moved as an icon seeds its icon spot from the card
+/// position on the first minimize, so the icon does not jump; after that the
+/// saved icon spot is where every minimize returns to.
+fn seed_icon_pos(data: &mut TerminalData) {
+    if data.icon_x.is_none() {
+        data.icon_x = Some(data.x);
+    }
+    if data.icon_y.is_none() {
+        data.icon_y = Some(data.y);
+    }
+}
+
 pub struct MiniTerminalCard {
     pub container: Overlay,
     pub data: Rc<RefCell<TerminalData>>,
@@ -126,7 +165,7 @@ impl MiniTerminalCard {
         let on_resize_ghost = Rc::new(on_resize_ghost);
         let on_resize_end = Rc::new(on_resize_end);
         let on_raise_rc = Rc::new(on_raise);
-        let visual_pos = Rc::new(RefCell::new((data.borrow().x as f64, data.borrow().y as f64)));
+        let visual_pos = Rc::new(RefCell::new(displayed_pos(&data.borrow())));
 
         let root = Overlay::new();
 
@@ -469,6 +508,8 @@ impl MiniTerminalCard {
                     d.width = ICON_SIZE;
                     d.height = ICON_SIZE;
                     d.iconified = true;
+                    // Minimizing returns to the remembered icon spot.
+                    seed_icon_pos(&mut d);
                     compact_restore_btn.set_tooltip_text(Some(&format!(
                         "Expand to larger size ({}×{})",
                         d.restored_width, d.restored_height
@@ -686,7 +727,8 @@ impl MiniTerminalCard {
             let d = data_begin.borrow();
             *start_size_begin.borrow_mut() = (d.width, d.height);
             root_begin.add_css_class("term-resizing");
-            on_ghost_begin(d.x as f64, d.y as f64, d.width, d.height, d.iconified);
+            let (gx, gy) = displayed_pos(&d);
+            on_ghost_begin(gx, gy, d.width, d.height, d.iconified);
         });
 
         let expanded_update = Rc::clone(&card.expanded);
@@ -759,6 +801,16 @@ impl MiniTerminalCard {
 
             {
                 let mut d = data_end.borrow_mut();
+                // Corner-resize can cross the icon threshold in either
+                // direction; keep the two remembered spots straight.
+                if should_iconify && !d.iconified {
+                    seed_icon_pos(&mut d);
+                } else if !should_iconify && d.iconified {
+                    // The icon just grew back into a card: the card now sits
+                    // where the icon was (the icon spot stays saved).
+                    d.x = d.icon_x.unwrap_or(d.x);
+                    d.y = d.icon_y.unwrap_or(d.y);
+                }
                 d.width = final_w;
                 d.height = final_h;
                 d.iconified = should_iconify;
@@ -877,7 +929,7 @@ impl MiniTerminalCard {
             return;
         }
         *self.expanded.borrow_mut() = false;
-        *self.visual_pos.borrow_mut() = (self.data.borrow().x as f64, self.data.borrow().y as f64);
+        *self.visual_pos.borrow_mut() = displayed_pos(&self.data.borrow());
 
         let iconified = self.data.borrow().iconified;
         if iconified {
@@ -1309,8 +1361,10 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
         let (init_x, init_y) = if *expanded_begin.borrow() {
             *visual_begin.borrow()
         } else {
+            // Drag from wherever the card is actually drawn (icon spot when
+            // minimized), otherwise the icon would jump on first motion.
             let d = data_begin.borrow();
-            (d.x as f64, d.y as f64)
+            displayed_pos(&d)
         };
         *start_pos_begin.borrow_mut() = (init_x, init_y);
         *grab_offset_begin.borrow_mut() = gesture
@@ -1351,8 +1405,7 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
                 }
             };
             *visual_update.borrow_mut() = (nx, ny);
-            data_update.borrow_mut().x = nx.round() as i32;
-            data_update.borrow_mut().y = ny.round() as i32;
+            set_displayed_pos(&mut data_update.borrow_mut(), nx.round() as i32, ny.round() as i32);
             on_update(c.upcast(), nx, ny);
         }
     });
@@ -1387,8 +1440,7 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
             };
             let nx = nx_f.round() as i32;
             let ny = ny_f.round() as i32;
-            data_end.borrow_mut().x = nx;
-            data_end.borrow_mut().y = ny;
+            set_displayed_pos(&mut data_end.borrow_mut(), nx, ny);
             *visual_end.borrow_mut() = (nx as f64, ny as f64);
             on_end(c.upcast(), &data_end.borrow());
         }
@@ -1400,6 +1452,75 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn term_data(iconified: bool) -> TerminalData {
+        TerminalData {
+            id: "t".to_string(),
+            session_name: "s".to_string(),
+            agent_type: "shell".to_string(),
+            command: "/usr/bin/bash".to_string(),
+            x: 100,
+            y: 200,
+            width: CARD_WIDTH,
+            height: CARD_HEIGHT,
+            restored_width: CARD_WIDTH,
+            restored_height: CARD_HEIGHT,
+            iconified,
+            icon_x: None,
+            icon_y: None,
+            created_at: 0.0,
+            tag: 0,
+            agent_session_id: None,
+        }
+    }
+
+    #[test]
+    fn test_icon_keeps_its_own_position() {
+        // A card that was never minimized draws at the card position.
+        let mut d = term_data(false);
+        assert_eq!(displayed_pos(&d), (100.0, 200.0));
+
+        // First minimize seeds the icon spot where the card was (no jump).
+        d.iconified = true;
+        seed_icon_pos(&mut d);
+        assert_eq!(displayed_pos(&d), (100.0, 200.0));
+
+        // Dragging the icon moves only the icon spot.
+        set_displayed_pos(&mut d, 500, 300);
+        assert_eq!((d.x, d.y), (100, 200));
+        assert_eq!(displayed_pos(&d), (500.0, 300.0));
+
+        // Restoring returns the card to its own spot.
+        d.iconified = false;
+        assert_eq!(displayed_pos(&d), (100.0, 200.0));
+
+        // Moving the card leaves the remembered icon spot alone, so the next
+        // minimize goes back to it.
+        set_displayed_pos(&mut d, 900, 400);
+        assert_eq!((d.x, d.y), (900, 400));
+        assert_eq!((d.icon_x, d.icon_y), (Some(500), Some(300)));
+        d.iconified = true;
+        assert_eq!(displayed_pos(&d), (500.0, 300.0));
+    }
+
+    #[test]
+    fn test_icon_position_round_trips_and_defaults_to_card_position() {
+        // State files written before icon_x/icon_y existed must still load.
+        let legacy = r#"{"id":"t","session_name":"s","agent_type":"shell",
+            "command":"bash","x":10,"y":20,"created_at":0.0}"#;
+        let mut old: TerminalData = serde_json::from_str(legacy).unwrap();
+        assert_eq!((old.icon_x, old.icon_y), (None, None));
+        old.iconified = true;
+        assert_eq!(displayed_pos(&old), (10.0, 20.0));
+
+        // New fields survive a save/load cycle.
+        let mut d = term_data(true);
+        set_displayed_pos(&mut d, 42, 43);
+        let json = serde_json::to_string(&d).unwrap();
+        let back: TerminalData = serde_json::from_str(&json).unwrap();
+        assert_eq!((back.icon_x, back.icon_y), (Some(42), Some(43)));
+        assert_eq!((back.x, back.y), (100, 200));
+    }
 
     #[test]
     fn test_expanded_rect_centered() {
@@ -1447,3 +1568,4 @@ mod tests {
         assert_eq!(format_card_title("⚡ Claude Code", Some("   ")), "⚡ Claude Code");
     }
 }
+

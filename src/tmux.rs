@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -84,6 +85,143 @@ fn npx_fallback_command(package: &str, args: &[&str]) -> String {
     parts.join(" ")
 }
 
+/// Harness types a card can be launched for, in top-bar order.
+///
+/// This is the single source of truth for "what super-desktop can run"; the
+/// settings panel narrows it down to what is actually installed, and the HUD
+/// builds one (possibly hidden) launch button per entry.
+pub const HARNESS_KEYS: &[&str] = &[
+    "antigravity",
+    "claude",
+    "codex",
+    "opencode",
+    "grok",
+    "reasonix",
+    "aider",
+    "shell",
+];
+
+/// A harness type that resolves on this machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessInfo {
+    /// Canonical agent key, i.e. `TerminalData::agent_type`.
+    pub key: &'static str,
+    /// Display name (`get_agent_config`), e.g. "Claude Code".
+    pub name: &'static str,
+    /// Emoji used when the brand SVG is missing.
+    pub icon: &'static str,
+    /// What a card launched for this harness would run, resolved here:
+    /// `/usr/bin/claude --dangerously-skip-permissions`,
+    /// `npx -y reasonix code`, …
+    pub command: String,
+}
+
+/// `which <cmd>` → absolute path, or `None` when it is not on PATH.
+///
+/// Done in-process instead of shelling out: harness detection alone asks ~12
+/// times per window build, and forking `which` costs tens of milliseconds on a
+/// loaded machine — that dominated the time between the shortcut and the
+/// overlay appearing.
+fn which(cmd: &str) -> Option<String> {
+    if cmd.is_empty() {
+        return None;
+    }
+    if cmd.contains('/') {
+        let p = Path::new(cmd);
+        return is_executable(p).then(|| cmd.to_string());
+    }
+    which_in_path(cmd, &std::env::var_os("PATH")?)
+}
+
+/// PATH lookup split out of `which` so it can be tested without mutating the
+/// process-wide environment (which other tests spawn processes from).
+fn which_in_path(cmd: &str, path: &std::ffi::OsStr) -> Option<String> {
+    for dir in std::env::split_paths(path) {
+        let candidate = dir.join(cmd);
+        if is_executable(&candidate) {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    // `symlink_metadata` first is pointless: a broken symlink must report false.
+    match std::fs::metadata(path) {
+        Ok(m) => m.is_file() && m.permissions().mode() & 0o111 != 0,
+        Err(_) => false,
+    }
+}
+
+fn with_default_args(path: &str, args: &[&str]) -> String {
+    if args.is_empty() {
+        path.to_string()
+    } else {
+        format!("{} {}", path, args.join(" "))
+    }
+}
+
+/// Command to launch `key` here, or `None` when nothing resolves — i.e. the
+/// harness is not available on this machine.
+///
+/// Mirrors `resolve_command`'s order (PATH → `npx` package → shell) but keeps
+/// the "nothing found" case instead of falling back to `$SHELL`, so the
+/// settings panel only ever offers harnesses that really exist.
+pub fn detect_harness_command(key: &str) -> Option<String> {
+    let cfg = get_agent_config(key);
+
+    for cmd in harness_candidates(key) {
+        if let Some(path) = which(cmd) {
+            return Some(with_default_args(&path, cfg.default_args));
+        }
+    }
+    // Harnesses that commonly run through `npx` (Reasonix) are available as
+    // soon as npx is, exactly like `resolve_command` assumes.
+    if let Some(package) = cfg.npx_package {
+        if which("npx").is_some() {
+            return Some(npx_fallback_command(package, cfg.default_args));
+        }
+    }
+    if key == "shell" {
+        if let Ok(shell) = std::env::var("SHELL") {
+            if std::path::Path::new(&shell).is_file() {
+                return Some(shell);
+            }
+        }
+    }
+    None
+}
+
+/// Binaries that can serve `key`, in preference order.
+///
+/// A terminal card is happy with any POSIX shell this box actually has; the
+/// other harnesses only accept their own binary.
+fn harness_candidates(key: &str) -> &'static [&'static str] {
+    if key == "shell" {
+        &["bash", "zsh", "fish", "sh"]
+    } else {
+        get_agent_config(key).commands
+    }
+}
+
+/// Every harness installed on this machine, in `HARNESS_KEYS` order.
+pub fn detect_harnesses() -> Vec<HarnessInfo> {
+    HARNESS_KEYS
+        .iter()
+        .filter_map(|key| {
+            let command = detect_harness_command(key)?;
+            let cfg = get_agent_config(key);
+            Some(HarnessInfo {
+                key,
+                name: cfg.name,
+                icon: cfg.icon,
+                command,
+            })
+        })
+        .collect()
+}
+
 pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
     let cfg = get_agent_config(agent_type);
     if let Some(cmd) = custom {
@@ -105,29 +243,15 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
         return trimmed.to_string();
     }
     for cmd in cfg.commands {
-        if let Ok(output) = Command::new("which").arg(cmd).output() {
-            if output.status.success() {
-                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !s.is_empty() {
-                    if cfg.default_args.is_empty() {
-                        return s;
-                    } else {
-                        return format!("{} {}", s, cfg.default_args.join(" "));
-                    }
-                }
-            }
+        if let Some(path) = which(cmd) {
+            return with_default_args(&path, cfg.default_args);
         }
     }
     // Harness that ships on npm but has no binary on PATH (e.g. Reasonix is
     // usually run as `npx reasonix code`): launch it through npx rather than
     // silently degrading the card to a bare shell.
     if let Some(package) = cfg.npx_package {
-        let has_npx = Command::new("which")
-            .arg("npx")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if has_npx {
+        if which("npx").is_some() {
             return npx_fallback_command(package, cfg.default_args);
         }
     }
@@ -244,10 +368,32 @@ pub fn resolve_resume_command_with_session(
 /// our own sessions only. While the user's global config keeps its value, older
 /// tmux versions reject the per-session form; the call then fails and the
 /// previous behaviour remains instead of us mutating the server options.
-fn exit_client_with_session(session_name: &str) {
+fn pin_client_exit(session_name: &str) {
     let _ = Command::new("tmux")
         .args(["set-option", "-t", session_name, "detach-on-destroy", "on"])
         .output();
+}
+
+/// Existence + the pinned-client flag of one session, in a single `tmux` call:
+/// `Some(true)` = exists and already pins `detach-on-destroy on`, `Some(false)`
+/// = exists but still inherits the global setting, `None` = no such session.
+fn session_state(session_name: &str) -> Option<bool> {
+    let out = Command::new("tmux")
+        .args([
+            "list-sessions",
+            "-F",
+            "#{session_name}::#{detach-on-destroy}",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once("::")?;
+        (name.trim() == session_name).then(|| value.trim() == "on")
+    })
 }
 
 pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String, String) {
@@ -271,7 +417,7 @@ pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String
         ])
         .output();
 
-    exit_client_with_session(&session_name);
+    pin_client_exit(&session_name);
 
     (session_name, cmd)
 }
@@ -337,12 +483,20 @@ pub fn ensure_session_with_agent_id(
     custom_command: Option<&str>,
     agent_session_id: Option<&str>,
 ) {
-    if session_exists(session_name) {
-        // Sessions created by an older build (or a plain `tmux new-session`)
-        // may still inherit `detach-on-destroy off` from the user's config;
-        // re-pin on every startup so restored cards can't adopt a neighbour.
-        exit_client_with_session(session_name);
-        return;
+    // One `tmux` call answers both questions this function needs: does the
+    // session exist, and is `detach-on-destroy` already pinned? Every fork/exec
+    // is tens of milliseconds on a loaded machine, and this runs once per card
+    // while the overlay is being built.
+    match session_state(session_name) {
+        // Already there and already pinned: nothing to do.
+        Some(true) => return,
+        // Exists but still inheriting the user's `detach-on-destroy off`
+        // (sessions made by an older build, or a plain `tmux new-session`).
+        Some(false) => {
+            pin_client_exit(session_name);
+            return;
+        }
+        None => {}
     }
 
     {
@@ -370,7 +524,40 @@ pub fn ensure_session_with_agent_id(
             .output();
     }
 
-    exit_client_with_session(session_name);
+    pin_client_exit(session_name);
+}
+
+/// Type `text` into a live session (phone → harness), optionally followed by
+/// Return.
+///
+/// `-l` sends the text literally, so quotes, pipes and globs reach the pane as
+/// written instead of being interpreted by tmux, and `--` stops a message that
+/// begins with a dash from being read as a flag.
+pub fn send_keys(session_name: &str, text: &str, enter: bool) -> Result<(), String> {
+    if !text.is_empty() {
+        let out = Command::new("tmux")
+            .args(["send-keys", "-t", session_name, "-l", "--", text])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+    }
+    if enter {
+        let out = Command::new("tmux")
+            .args(["send-keys", "-t", session_name, "Enter"])
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+        }
+    }
+    Ok(())
+}
+
+/// True when tmux still knows this session.
+pub fn session_alive(session_name: &str) -> bool {
+    session_exists(session_name)
 }
 
 pub fn get_preview(session_name: &str, lines: usize) -> String {
@@ -667,15 +854,8 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
 }
 
 pub fn tmux_bin() -> String {
-    if let Ok(output) = Command::new("which").arg("tmux").output() {
-        if output.status.success() {
-            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !s.is_empty() {
-                return s;
-            }
-        }
-    }
-    "tmux".to_string()
+    // In-process lookup: this runs once per card at window build.
+    which("tmux").unwrap_or_else(|| "tmux".to_string())
 }
 
 /// Max characters of the last prompt shown in the terminal card title.
@@ -1125,7 +1305,7 @@ mod tests {
 
     #[test]
     fn test_agent_idle_detection() {
-        if Command::new("which").arg("agy").output().map(|o| o.status.success()).unwrap_or(false) {
+        if which("agy").is_some() {
             let sess = "test_sd_tmux_agy_idle_test";
             let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
             let _ = Command::new("tmux").args(["new-session", "-d", "-s", sess, "agy"]).output();
@@ -1185,6 +1365,69 @@ mod tests {
         // Custom shell does not get AI flags
         let custom_bash = resolve_command("antigravity", Some("/bin/bash"));
         assert_eq!(custom_bash, "/bin/bash");
+    }
+
+    /// The one `tmux` call that replaced `session_exists` + a separate
+    /// `set-option` probe on the window-build path.
+    #[test]
+    fn test_session_state_reports_existence_and_pin_in_one_call() {
+        let has_tmux = Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_tmux {
+            return;
+        }
+        let sess = "test_sd_session_state_probe";
+        let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
+        let _ = Command::new("tmux")
+            .args(["new-session", "-d", "-s", sess, "-c", "/tmp", "/usr/bin/bash"])
+            .output();
+
+        assert_eq!(session_state("test_sd_session_state_missing"), None);
+        // Inherits the server config until pinned.
+        let _ = Command::new("tmux")
+            .args(["set-option", "-t", sess, "detach-on-destroy", "off"])
+            .output();
+        assert_eq!(session_state(sess), Some(false));
+        pin_client_exit(sess);
+        assert_eq!(session_state(sess), Some(true));
+
+        let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
+        assert_eq!(session_state(sess), None);
+    }
+
+    #[test]
+    fn test_which_lookup_is_in_process_and_needs_an_executable_bit() {
+        let dir = std::env::temp_dir().join(format!("sd-which-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let file = dir.join("sd_fake_harness");
+        std::fs::write(&file, "#!/bin/sh\n").expect("write fake harness");
+
+        let path_var = dir.as_os_str();
+        assert_eq!(
+            which_in_path("sd_fake_harness", path_var),
+            None,
+            "a non-executable file must not resolve"
+        );
+
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x");
+        }
+        assert_eq!(
+            which_in_path("sd_fake_harness", path_var).as_deref(),
+            file.to_str(),
+            "an executable on PATH must resolve to its absolute path"
+        );
+        assert_eq!(which_in_path("sd_not_installed_xyz", path_var), None);
+        assert_eq!(which("/definitely/not/here"), None);
+        assert!(which(file.to_str().unwrap()).is_some(), "explicit paths are checked as-is");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1250,11 +1493,7 @@ mod tests {
         // bare shell while `npx` is available.
         let resolved = resolve_command("reasonix", None);
         let has = |cmd: &str| {
-            Command::new("which")
-                .arg(cmd)
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
+            which(cmd).is_some()
         };
         if has("reasonix") {
             assert!(resolved.ends_with("code"), "got: {resolved}");
@@ -1538,11 +1777,7 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
-        let has_py = Command::new("which")
-            .arg("python3")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let has_py = which("python3").is_some();
         if !has_tmux || !has_py {
             return;
         }
@@ -1678,6 +1913,57 @@ mod tests {
             "restored harness session must be re-pinned"
         );
         assert_eq!(show_option(&["-gv", "detach-on-destroy"]), global_before);
+    }
+
+    #[test]
+    fn test_harness_candidates_prefer_own_binary() {
+        // A harness is only detected through its own binary…
+        assert_eq!(harness_candidates("claude"), ["claude"]);
+        assert_eq!(harness_candidates("antigravity"), ["agy", "antigravity"]);
+        // …while a terminal card accepts any POSIX shell on the box.
+        let shell = harness_candidates("shell");
+        assert!(shell.contains(&"bash") && shell.contains(&"zsh") && shell.contains(&"fish"));
+    }
+
+    #[test]
+    fn test_detected_harnesses_are_really_launchable() {
+        // Whatever the settings panel offers must resolve to something that
+        // exists here, and must agree with what a card would run.
+        for info in detect_harnesses() {
+            let bin = info.command.split_whitespace().next().unwrap_or_default();
+            assert!(
+                std::path::Path::new(bin).is_file() || bin == "npx",
+                "{} resolved to a command that is not here: {}",
+                info.key,
+                info.command
+            );
+            assert_eq!(detect_harness_command(info.key).as_deref(), Some(info.command.as_str()));
+            assert!(HARNESS_KEYS.contains(&info.key), "{} is not a supported harness", info.key);
+        }
+        // Detection is a filter of the declared order, never a reordering.
+        let keys: Vec<&str> = detect_harnesses().iter().map(|h| h.key).collect();
+        let expected: Vec<&str> = HARNESS_KEYS
+            .iter()
+            .copied()
+            .filter(|k| keys.contains(k))
+            .collect();
+        assert_eq!(keys, expected);
+        assert!(keys.len() <= HARNESS_KEYS.len());
+    }
+
+    #[test]
+    fn test_supported_harnesses_all_have_their_own_config() {
+        // Every key shown in the top bar / settings panel needs its own agent
+        // config; falling through to the `_` arm would label it "Terminal".
+        for key in HARNESS_KEYS {
+            let cfg = get_agent_config(key);
+            assert!(!cfg.name.is_empty() && !cfg.icon.is_empty(), "{key} has no label");
+            if *key != "shell" {
+                assert_ne!(cfg.name, "Terminal", "{key} needs its own AgentConfig arm");
+            }
+        }
+        // A terminal card can always be launched, even on a bash-less box.
+        assert!(detect_harness_command("shell").is_some());
     }
 
     #[test]

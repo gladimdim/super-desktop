@@ -3,7 +3,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Button, EventControllerKey, EventControllerMotion,
-    Fixed, GestureClick, Image, Label, Orientation, Overlay, Popover, PositionType, Separator,
+    Fixed, Image, Label, Orientation, Overlay, Popover, PositionType, Separator,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
@@ -12,7 +12,8 @@ use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::mini_terminal::{
-    clamp_card_size, expanded_rect, MiniTerminalCard, NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
+    clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, MiniTerminalCard,
+    NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
 };
 use crate::state::{load_state, AppState, NoteData, TerminalData};
 use crate::sticky_note::StickyNote;
@@ -62,6 +63,15 @@ pub struct SuperDesktopWindow {
     animating: Rc<RefCell<bool>>,
     /// Toolbar brand icons as (image widget, agent key) for theme-aware refresh.
     brand_images: Rc<RefCell<Vec<(Image, String)>>>,
+    /// Rebuilds the ⚙ settings panel (detection + brand logos for the new
+    /// light/dark mode) after a theme switch.
+    settings_refresh: Rc<dyn Fn()>,
+    /// Floating panels (📱 launcher, ⚙ settings) inside `root_overlay`; hidden
+    /// with the window so they cannot reappear on the next show.
+    overlay_panels: Vec<gtk4::Widget>,
+    /// Bumped by `show_again`; a slide-out that finishes afterwards must not
+    /// unmap the window again (hide → show inside the 140ms animation).
+    show_token: std::cell::Cell<u64>,
 }
 
 impl SuperDesktopWindow {
@@ -125,6 +135,33 @@ impl SuperDesktopWindow {
         let terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>> =
             Rc::new(RefCell::new(Vec::new()));
 
+        // Top-bar harness launch buttons, keyed by agent type: the ⚙ settings
+        // panel shows/hides them, so every button is built once and visibility
+        // is just `set_visible` (no HUD rebuild).
+        let harness_buttons: Rc<RefCell<Vec<(String, Button)>>> =
+            Rc::new(RefCell::new(Vec::new()));
+        let settings_panel = crate::harness_settings::build_harness_settings_panel(
+            Rc::clone(&state),
+            Rc::new({
+                let state = Rc::clone(&state);
+                let harness_buttons = Rc::clone(&harness_buttons);
+                move |keys: Vec<String>| {
+                    let snapshot = {
+                        let mut s = state.borrow_mut();
+                        s.visible_harnesses = Some(keys.clone());
+                        s.clone()
+                    };
+                    crate::state::save_state_async(snapshot);
+                    for (key, btn) in harness_buttons.borrow().iter() {
+                        btn.set_visible(keys.iter().any(|k| k == key));
+                    }
+                }
+            }),
+        );
+        settings_panel.widget.set_visible(false);
+        settings_panel.widget.set_halign(Align::Center);
+        settings_panel.widget.set_valign(Align::Center);
+
         let hud = gtk4::Box::new(Orientation::Horizontal, 10);
         hud.add_css_class("hud-bar");
 
@@ -161,11 +198,17 @@ impl SuperDesktopWindow {
             anim_trajectories,
             animating,
             brand_images: Rc::clone(&brand_images),
+            settings_refresh: Rc::clone(&settings_panel.refresh),
+            overlay_panels: vec![
+                launcher_panel.widget.clone(),
+                settings_panel.widget.clone(),
+            ],
+            show_token: std::cell::Cell::new(0),
         });
 
         // + Note Button
         let btn_note = Button::with_label("📝 + Note");
-        btn_note.set_tooltip_text(Some("Create Sticky Note (or double-click background)"));
+        btn_note.set_tooltip_text(Some("Create Sticky Note"));
         btn_note.add_css_class("hud-button");
         let win_w = Rc::downgrade(&win_rc);
         btn_note.connect_clicked(move |_| {
@@ -175,19 +218,19 @@ impl SuperDesktopWindow {
         });
         hud.append(&btn_note);
 
-        // Agents (company logo + name; emoji label if the SVG is missing)
-        let agents = [
-            ("antigravity", "Antigravity", "🌌"),
-            ("claude", "Claude", "⚡"),
-            ("codex", "Codex", "🤖"),
-            ("opencode", "OpenCode", "🔮"),
-            ("grok", "Grok", "🚀"),
-            ("reasonix", "Reasonix", "🧭"),
-            ("shell", "Shell", "💻"),
-        ];
+        // Agents (company logo + name; emoji label if the SVG is missing).
+        // Driven by `HARNESS_KEYS` so the launch buttons and the ⚙ settings
+        // panel can never disagree about what this app can run; the visible
+        // subset comes from the stored selection ∩ what is installed here.
+        let detected = crate::tmux::detect_harnesses();
+        let visible_keys = crate::harness_settings::resolve_visible(
+            win_rc.state.borrow().visible_harnesses.as_deref(),
+            &detected,
+        );
 
         let light_theme = crate::theme::current_theme().mode == "light";
-        for (agent_key, name, emoji) in agents {
+        for agent_key in crate::tmux::HARNESS_KEYS.iter().copied() {
+            let (name, emoji) = harness_label(agent_key);
             let btn = Button::new();
             btn.add_css_class("hud-button");
             if let Some(logo) = crate::brand::logo_path(agent_key, light_theme) {
@@ -208,8 +251,8 @@ impl SuperDesktopWindow {
                 "opencode" => "Launch OpenCode (--auto)",
                 "grok" => "Launch Grok CLI (--dangerously-skip-permissions)",
                 "reasonix" => "Launch Reasonix (reasonix code, else npx -y reasonix code)",
-                "shell" => "Launch Terminal Shell",
-                _ => "Launch Terminal",
+                "aider" => "Launch Aider (--yes-always)",
+                _ => "Launch Terminal Shell",
             };
             let has_usage = crate::usage::usage_id_for_agent(agent_key).is_some();
             if !has_usage {
@@ -265,7 +308,11 @@ impl SuperDesktopWindow {
                     pop_click.popdown();
                 });
             }
+            btn.set_visible(visible_keys.iter().any(|k| k == agent_key));
             hud.append(&btn);
+            harness_buttons
+                .borrow_mut()
+                .push((agent_key.to_string(), btn));
         }
 
         let sep2 = Separator::new(Orientation::Vertical);
@@ -298,6 +345,23 @@ impl SuperDesktopWindow {
         });
         hud.append(&btn_launcher);
 
+        // Harness settings: which launch buttons the top bar shows
+        let btn_settings = Button::with_label("⚙ Settings");
+        btn_settings.set_tooltip_text(Some("Choose which harnesses appear in the top bar"));
+        btn_settings.add_css_class("hud-button");
+        let settings_w = settings_panel.widget.clone();
+        let settings_refresh = Rc::clone(&settings_panel.refresh);
+        btn_settings.connect_clicked(move |_| {
+            let show = !settings_w.is_visible();
+            settings_w.set_visible(show);
+            if show {
+                // Re-detect here: a harness installed while the app runs
+                // shows up the next time the panel is opened.
+                settings_refresh();
+            }
+        });
+        hud.append(&btn_settings);
+
         // Close
         let btn_close = Button::with_label("✕ Hide");
         btn_close.set_tooltip_text(Some("Hide Super Desktop [SUPER + SHIFT + Q or Esc]"));
@@ -319,17 +383,8 @@ impl SuperDesktopWindow {
         hud.set_margin_top(18);
         root_overlay.add_overlay(&hud);
 
-        // Backdrop double-click
-        let click = GestureClick::new();
-        let win_w = Rc::downgrade(&win_rc);
-        click.connect_released(move |_, n_press, x, y| {
-            if n_press == 2 {
-                if let Some(w) = win_w.upgrade() {
-                    w.create_new_note(Some(x as i32), Some(y as i32), "");
-                }
-            }
-        });
-        win_rc.canvas.add_controller(click);
+        // Added after the HUD so the settings card floats above it.
+        root_overlay.add_overlay(&settings_panel.widget);
 
         // Esc key
         let key_ctrl = EventControllerKey::new();
@@ -370,7 +425,11 @@ impl SuperDesktopWindow {
         let win_w = Rc::downgrade(&win_rc);
         glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
             if let Some(w) = win_w.upgrade() {
-                w.periodic_refresh();
+                // Off screen there is nothing to update: per-card status probes
+                // are pure `tmux` processes, so skip them while hidden.
+                if w.window.is_visible() {
+                    w.periodic_refresh();
+                }
                 glib::ControlFlow::Continue
             } else {
                 glib::ControlFlow::Break
@@ -600,6 +659,8 @@ impl SuperDesktopWindow {
             restored_width: def_w,
             restored_height: def_h,
             iconified: false,
+            icon_x: None,
+            icon_y: None,
             created_at: now,
             tag: DEFAULT_TERMINAL_TAG,
             agent_session_id: None,
@@ -659,9 +720,17 @@ impl SuperDesktopWindow {
             widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
-            final_data.x = final_data.x.clamp(10, sw - 80);
-            final_data.y = final_data.y.clamp(70, sh - 60);
-            canvas_term_end.move_(&widget, final_data.x as f64, final_data.y as f64);
+            // The icon and the expanded card have separate remembered spots;
+            // clamp and snap to whichever one this card is currently in.
+            if final_data.iconified {
+                final_data.icon_x = Some(final_data.icon_x.unwrap_or(final_data.x).clamp(10, sw - 80));
+                final_data.icon_y = Some(final_data.icon_y.unwrap_or(final_data.y).clamp(70, sh - 60));
+            } else {
+                final_data.x = final_data.x.clamp(10, sw - 80);
+                final_data.y = final_data.y.clamp(70, sh - 60);
+            }
+            let (px, py) = displayed_pos(&final_data);
+            canvas_term_end.move_(&widget, px, py);
             let mut s = state_end.borrow_mut();
             if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == final_data.session_name) {
                 *t = final_data;
@@ -720,8 +789,10 @@ impl SuperDesktopWindow {
             set_counts_label(&hud_del, notes_len, n);
         };
 
-        let x = term_data.x;
-        let y = term_data.y;
+        // Restored cards reappear wherever their current mode lives: an
+        // iconified card belongs at its remembered icon spot, not at the
+        // expanded card position.
+        let (x, y) = displayed_pos(&term_data);
 
         if save {
             self.state.borrow_mut().terminals.push(term_data.clone());
@@ -842,7 +913,7 @@ impl SuperDesktopWindow {
             sw,
             sh,
         );
-        canvas.put(&card.container, x as f64, y as f64);
+        canvas.put(&card.container, x, y);
         term_cards.borrow_mut().push(Rc::new(card));
     }
 
@@ -856,11 +927,8 @@ impl SuperDesktopWindow {
         for term in terms.iter() {
             if term.is_expanded() {
                 term.collapse();
-                self.canvas.move_(
-                    &term.container,
-                    term.data.borrow().x as f64,
-                    term.data.borrow().y as f64,
-                );
+                let (px, py) = displayed_pos(&term.data.borrow());
+                self.canvas.move_(&term.container, px, py);
             }
         }
         self.window.set_keyboard_mode(KeyboardMode::OnDemand);
@@ -898,8 +966,9 @@ impl SuperDesktopWindow {
             }
             let col_x = col_right - w;
             col_width = col_width.max(w);
-            term.data.borrow_mut().x = col_x as i32;
-            term.data.borrow_mut().y = curr_y as i32;
+            // Arrange writes the spot of whichever form is on screen (icons and
+            // cards keep separate positions).
+            set_displayed_pos(&mut term.data.borrow_mut(), col_x as i32, curr_y as i32);
             self.canvas.move_(&term.container, col_x, curr_y);
             curr_y += h + gap;
         }
@@ -1095,6 +1164,51 @@ impl SuperDesktopWindow {
                 img.set_from_file(Some(logo));
             }
         }
+        // The settings card keeps its own logo images: re-detect + re-render
+        // them for the new mode (it re-reads the stored selection too).
+        (self.settings_refresh)();
+    }
+
+    /// Re-map a window that was hidden with `hide_now`.
+    ///
+    /// Every card, VTE and `tmux attach` client is still alive, so the overlay
+    /// is back on screen within a frame — instead of the full rebuild (state
+    /// load, panels, one `tmux` exec per card, ~30 forks) that used to sit
+    /// between the shortcut and the overlay appearing.
+    pub fn show_again(&self) {
+        self.show_token.set(self.show_token.get().wrapping_add(1));
+        self.window.present();
+        self.window.set_visible(true);
+        // Re-assert keyboard interactivity: typing in a card flips it to
+        // Exclusive (see `apply_terminal_expand`), and a re-mapped layer surface
+        // must not come back without it.
+        self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+        self.start_slide_in();
+        // Card statuses went stale while off screen (the periodic refresh is
+        // paused then); this refreshes them on worker threads.
+        self.periodic_refresh();
+    }
+
+    /// Token to hand back to `hide_if_unchanged` when a slide-out starts.
+    pub fn current_show_token(&self) -> u64 {
+        self.show_token.get()
+    }
+
+    /// Hide once the slide-out finished — unless the overlay was shown again
+    /// while it was animating, in which case the unmap would undo that show.
+    pub fn hide_if_unchanged(&self, token: u64) {
+        if self.show_token.get() == token {
+            self.hide_now();
+        }
+    }
+
+    /// Unmap the window but keep the whole widget tree alive for the next show.
+    fn hide_now(&self) {
+        // Floating panels must not come back with the window.
+        for panel in &self.overlay_panels {
+            panel.set_visible(false);
+        }
+        self.window.set_visible(false);
     }
 
     fn periodic_refresh(&self) {
@@ -1106,6 +1220,20 @@ impl SuperDesktopWindow {
             card.refresh_status();
         }
         self.update_counts();
+    }
+}
+
+/// Short top-bar label + emoji fallback for a harness key.
+fn harness_label(key: &str) -> (&'static str, &'static str) {
+    match key {
+        "antigravity" => ("Antigravity", "🌌"),
+        "claude" => ("Claude", "⚡"),
+        "codex" => ("Codex", "🤖"),
+        "opencode" => ("OpenCode", "🔮"),
+        "grok" => ("Grok", "🚀"),
+        "reasonix" => ("Reasonix", "🧭"),
+        "aider" => ("Aider", "🧠"),
+        _ => ("Shell", "💻"),
     }
 }
 
@@ -1125,7 +1253,8 @@ fn terminal_slide_geom(term: &MiniTerminalCard, sw: i32, sh: i32) -> (f64, f64, 
         let (x, y, _, _) = expanded_rect(sw, sh);
         (x, y, w, h)
     } else {
-        (term.data.borrow().x as f64, term.data.borrow().y as f64, w, h)
+        let (px, py) = displayed_pos(&term.data.borrow());
+        (px, py, w, h)
     }
 }
 
@@ -1159,20 +1288,16 @@ fn apply_terminal_expand(
                 canvas.put(&card.container, x, y);
                 card.focus_terminal();
             } else {
+                // Collapsing returns the card to the spot of its current form
+                // (the icon spot when it is minimized).
                 card.collapse();
-                canvas.move_(
-                    &card.container,
-                    card.data.borrow().x as f64,
-                    card.data.borrow().y as f64,
-                );
+                let (px, py) = displayed_pos(&card.data.borrow());
+                canvas.move_(&card.container, px, py);
             }
         } else if card.is_expanded() {
             card.collapse();
-            canvas.move_(
-                &card.container,
-                card.data.borrow().x as f64,
-                card.data.borrow().y as f64,
-            );
+            let (px, py) = displayed_pos(&card.data.borrow());
+            canvas.move_(&card.container, px, py);
         }
     }
 

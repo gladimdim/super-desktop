@@ -1,5 +1,7 @@
 mod brand;
 mod bridge;
+mod crashlog;
+mod harness_settings;
 mod launcher_settings;
 mod mini_terminal;
 mod state;
@@ -10,6 +12,46 @@ mod theme;
 mod tmux;
 mod usage;
 mod window;
+mod ws;
+
+/// Test-only helper for the GTK-dependent tests.
+///
+/// GTK may only be used from the first thread that ever initialized it, but
+/// libtest runs every test on its own thread — so a second GTK test in the same
+/// process fails with "Attempted to initialize GTK from two different threads"
+/// / "GTK may only be used from the main thread". A GTK assertion therefore
+/// re-runs this test binary in a child process filtered to just that one test.
+#[cfg(test)]
+pub mod gtk_test {
+    pub const CHILD_ENV: &str = "SUPER_DESKTOP_GTK_TEST_CHILD";
+
+    /// Run `inner_test` (full path, e.g. `styles::tests::css_gtk_inner`) alone
+    /// in a fresh process, and fail this test when the child fails.
+    pub fn run_in_child_process(inner_test: &str) {
+        assert!(
+            !is_child(),
+            "run_in_child_process must not be called from the child process"
+        );
+        let exe = std::env::current_exe().expect("current test executable");
+        let out = std::process::Command::new(exe)
+            .args(["--exact", inner_test, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env("RUST_TEST_THREADS", "1")
+            .output()
+            .expect("spawn child test process");
+        assert!(
+            out.status.success(),
+            "GTK test `{inner_test}` failed in its own process:\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+    }
+
+    /// True inside that child process, where the GTK assertions may run.
+    pub fn is_child() -> bool {
+        std::env::var(CHILD_ENV).is_ok()
+    }
+}
 
 use gtk4::gio::prelude::{ApplicationExt, ApplicationExtManual};
 use gtk4::glib;
@@ -33,36 +75,116 @@ use std::time::{Duration, Instant};
 use styles::apply_styles;
 use window::SuperDesktopWindow;
 
-fn get_socket_path() -> PathBuf {
-    let runtime_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
-    PathBuf::from(runtime_dir).join("super-desktop.sock")
+fn runtime_dir() -> PathBuf {
+    env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
 }
 
-fn send_ipc_command(cmd: &str) -> Option<String> {
-    let sock_path = get_socket_path();
+fn get_socket_path() -> PathBuf {
+    socket_path_in(&runtime_dir())
+}
+
+/// Pure path helper: tests point this at a private dir instead of mutating
+/// `XDG_RUNTIME_DIR`, which is process-wide (and would leak into any child
+/// process a test spawns, including GTK ones).
+fn socket_path_in(runtime_dir: &std::path::Path) -> PathBuf {
+    runtime_dir.join("super-desktop.sock")
+}
+
+/// Outcome of talking to the daemon over the Unix socket.
+///
+/// The distinction matters: a daemon that is merely busy must never be treated
+/// as "no daemon", because the caller then spawns a SECOND daemon. Every new
+/// daemon used to unlink and re-bind the socket path, so the duplicate stole the
+/// socket from the daemon whose overlay was on screen — that window could no
+/// longer be hidden (every `toggle` reached the other process) and Ctrl-C /
+/// [SUPER+SHIFT+Q] looked like "hide, then show again".
+enum Ipc {
+    /// The daemon answered.
+    Reply(String),
+    /// Nothing is listening: it is safe to start one.
+    NoDaemon,
+    /// A listener exists but did not answer in time. Do NOT start a second one.
+    Stalled,
+}
+
+fn ipc_request(cmd: &str) -> Ipc {
+    ipc_request_at(&get_socket_path(), cmd)
+}
+
+fn ipc_request_at(sock_path: &std::path::Path, cmd: &str) -> Ipc {
     if !sock_path.exists() {
-        return None;
+        return Ipc::NoDaemon;
     }
 
-    if let Ok(mut stream) = UnixStream::connect(&sock_path) {
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
-        let _ = stream.write_all(format!("{}\n", cmd.trim()).as_bytes());
-
-        let mut resp = String::new();
-        if stream.read_to_string(&mut resp).is_ok() {
-            return Some(resp.trim().to_string());
+    let mut stream = match UnixStream::connect(sock_path) {
+        Ok(s) => s,
+        // Connection refused: the file is a leftover from a daemon that is
+        // gone. Clear it so the daemon we start can bind cleanly.
+        Err(_) => {
+            let _ = fs::remove_file(sock_path);
+            return Ipc::NoDaemon;
         }
-    }
+    };
 
-    None
+    // Longer than the daemon's own 2s wait for the GTK thread, so a slow
+    // answer is never mistaken for "no daemon". The socket file is left alone
+    // here: the listener behind it is alive.
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.write_all(format!("{}\n", cmd.trim()).as_bytes());
+
+    let mut resp = String::new();
+    match stream.read_to_string(&mut resp) {
+        Ok(_) if !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
+        _ => Ipc::Stalled,
+    }
+}
+
+/// Safety net for the duplicate-daemon bug: remember which socket file this
+/// process bound and quit as soon as the path stops pointing at it.
+///
+/// Even with the liveness probe in `start_ipc_thread`, an older build (or a
+/// future mistake) can replace the socket file We would then be a daemon whose
+/// window is on screen but unreachable — exactly the "it hides and immediately
+/// shows again" state. Dying closes our window, so at most one overlay survives.
+fn watch_socket_ownership(sock_path: &PathBuf) {
+    use std::os::unix::fs::MetadataExt;
+
+    let Ok(own_ino) = fs::metadata(sock_path).map(|m| m.ino()) else {
+        return;
+    };
+    let path = sock_path.clone();
+
+    glib::timeout_add_local(Duration::from_secs(1), move || {
+        let still_ours = fs::metadata(&path).map(|m| m.ino()).ok() == Some(own_ino);
+        if !still_ours {
+            // Leave the socket file alone: it belongs to whoever replaced us.
+            eprintln!(
+                "SUPER DESKTOP: another daemon took over {} — exiting so only one overlay is on screen",
+                path.display()
+            );
+            std::process::exit(0);
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 struct AppContext {
+    /// Kept for the whole daemon lifetime once built: hiding only unmaps it
+    /// (see `hide_window`), so showing again costs no rebuild.
     window: Option<Rc<SuperDesktopWindow>>,
+    /// Whether the overlay is currently mapped. `window.is_some()` is not the
+    /// same thing any more — a hidden window stays alive on purpose.
+    shown: bool,
     last_toggle: Instant,
 }
 
 fn main() {
+    // First thing: release builds abort on panic and the daemon's stderr goes
+    // to /dev/null, so without this a crash leaves no readable trace.
+    crashlog::install_panic_hook();
+
     let args: Vec<String> = env::args().collect();
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
 
@@ -90,16 +212,27 @@ fn main() {
     }
 
     if action == "kill" {
-        if let Some(resp) = send_ipc_command("kill") {
-            println!("SUPER DESKTOP: {}", resp);
-        } else {
-            println!("SUPER DESKTOP: Daemon not running.");
+        match ipc_request("kill") {
+            Ipc::Reply(resp) => println!("SUPER DESKTOP: {resp}"),
+            _ => println!("SUPER DESKTOP: Daemon not running."),
         }
         return;
     }
 
     let full_cmd = if args.len() > 1 { args[1..].join(" ") } else { "toggle".to_string() };
-    if let Some(resp) = send_ipc_command(&full_cmd) {
+    let resp = match ipc_request(&full_cmd) {
+        Ipc::Reply(resp) => Some(resp),
+        Ipc::Stalled => {
+            // A daemon is alive but busy: starting another one would orphan the
+            // overlay it is showing (the second process rebinds the socket).
+            eprintln!(
+                "SUPER DESKTOP: daemon is up but did not answer `{full_cmd}` in time — try again"
+            );
+            std::process::exit(2);
+        }
+        Ipc::NoDaemon => None,
+    };
+    if let Some(resp) = resp {
         if action == "status" {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
                 let vis = val["visible"].as_bool().unwrap_or(false);
@@ -152,9 +285,22 @@ fn main() {
 
         for _ in 0..25 {
             thread::sleep(Duration::from_millis(60));
-            if send_ipc_command("show").is_some() {
-                println!("SUPER DESKTOP (Rust): Started and Shown");
-                return;
+            // `Stalled` counts as "answered by something": the daemon we
+            // spawned exits when it finds a live one instead of stealing the
+            // socket (see start_ipc_thread), so never spawn a second process
+            // from this loop.
+            match ipc_request("show") {
+                Ipc::Reply(_) => {
+                    println!("SUPER DESKTOP (Rust): Started and Shown");
+                    return;
+                }
+                Ipc::Stalled => {
+                    eprintln!(
+                        "SUPER DESKTOP: a daemon is already running and busy — not starting another"
+                    );
+                    std::process::exit(2);
+                }
+                Ipc::NoDaemon => {}
             }
         }
         eprintln!("Error: Failed to launch SUPER DESKTOP daemon");
@@ -179,6 +325,7 @@ fn run_daemon(start_visible: bool) {
 
     let context = Rc::new(RefCell::new(AppContext {
         window: None,
+        shown: false,
         last_toggle: Instant::now() - Duration::from_secs(10),
     }));
 
@@ -197,16 +344,33 @@ fn run_daemon(start_visible: bool) {
         }
     });
 
+    // After the socket bind: a duplicate daemon exits inside `start_ipc_thread`
+    // (see its liveness probe) and must not look like a run in the crash log.
+    crashlog::note_start(if start_visible { "daemon (visible)" } else { "daemon" });
     start_ipc_thread(ipc_tx, wake_write);
 
-    // NOTE: glib 0.22 removed `unix_fd_add_local`, so the event-driven
-    // dispatch can't compile against this stack. Poll at 50ms (still 3x
-    // fewer wakeups than the old 16ms loop) and drain the wake pipe each
-    // tick so the IPC thread's best-effort writes never fill it up.
-    // Whoever re-adds event-driven wake can reuse make_wake_pipe().
+    // Warm the UI right after start, never on the startup path: startup stays
+    // fast (the socket is up first) and by the time a human presses the
+    // shortcut the overlay is already built.
+    {
+        let ctx_warm = Rc::clone(&context);
+        let app_warm = app.clone();
+        glib::timeout_add_local_once(Duration::from_millis(60), move || {
+            warm_window(&ctx_warm, &app_warm);
+        });
+    }
+
+    // NOTE: glib 0.22 removed `unix_fd_add_local`, so the event-driven dispatch
+    // can't compile against this stack (gio lost `UnixInputStream` too, so the
+    // wake pipe has no GSource). Poll instead, and drain the pipe each tick so
+    // the IPC thread's best-effort writes never fill it up.
+    //
+    // 10ms, not the 50ms this used to be: the poll interval is pure latency on
+    // every shortcut press (the daemon only sees a `toggle` on the next tick),
+    // and a tick is a pipe read plus a channel `try_recv` — a few microseconds.
     let ctx_timer = Rc::clone(&context);
     let app_timer = app.clone();
-    glib::timeout_add_local(Duration::from_millis(50), move || {
+    glib::timeout_add_local(Duration::from_millis(10), move || {
         if let Some(fd) = wake_read {
             drain_wake_pipe(fd);
         }
@@ -237,13 +401,31 @@ fn ensure_omarchy_theme_hook() {
     }
 }
 
-fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
+/// Returns whether the overlay is on screen afterwards. `false` only happens
+/// when there is no display to draw on.
+fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
+    // No display (a daemon started from a bare shell, a test runner, a session
+    // without Wayland): building widgets would dereference NULL deep inside
+    // GTK. That is the one SIGSEGV this program has produced — see the
+    // 2026-09-17 18:39 core dump — so refuse loudly instead of crashing.
+    if gtk4::gdk::Display::default().is_none() {
+        crashlog::note("no display available; skipping window build");
+        eprintln!("SUPER DESKTOP: no display — cannot show the overlay");
+        return false;
+    }
+
     if theme::check_theme_changed() {
         styles::reload_styles();
     }
 
-    if ctx.borrow().window.is_some() {
-        return;
+    // Already built: re-map it. Rebuilding the whole UI (state load, panels,
+    // harness detection, one `tmux` exec per card plus a VTE and an attach
+    // client each) took ~1.5s on a loaded machine — that was the delay between
+    // the shortcut and the overlay appearing.
+    if let Some(win) = live_window(ctx) {
+        win.show_again();
+        ctx.borrow_mut().shown = true;
+        return true;
     }
 
     let ctx_close = Rc::clone(ctx);
@@ -254,26 +436,69 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
     win.window.present();
     win.start_slide_in();
     ctx.borrow_mut().window = Some(win);
+    ctx.borrow_mut().shown = true;
+    true
+}
+
+/// Snapshot the live window, if any, **without holding the `RefCell` borrow**.
+///
+/// Load-bearing detail: `if let Some(win) = ctx.borrow().window.clone() { … }`
+/// keeps the read borrow alive until the end of the whole `if let` block, so a
+/// `ctx.borrow_mut()` inside it panics with `BorrowMutError` — and release
+/// builds use `panic = "abort"`, so that panic kills the daemon.
+fn live_window(ctx: &Rc<RefCell<AppContext>>) -> Option<Rc<SuperDesktopWindow>> {
+    ctx.borrow().window.clone()
+}
+
+/// Build the overlay without mapping it, so the first `toggle` only has to
+/// present it (`show_window` reuses any window it finds).
+///
+/// Trade-off, chosen deliberately: the widget tree, one VTE + `tmux attach`
+/// client per card and any missing tmux session come up with the daemon, even
+/// if the overlay is never opened — in exchange for an instant first shortcut.
+fn warm_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
+    if live_window(ctx).is_some() {
+        return;
+    }
+    if gtk4::gdk::Display::default().is_none() {
+        // See `show_window`: without a display GTK crashes during widget
+        // construction, and the warm-up runs unattended at daemon start.
+        crashlog::note("no display available; skipping window warm-up");
+        return;
+    }
+    if theme::check_theme_changed() {
+        styles::reload_styles();
+    }
+    let ctx_close = Rc::clone(ctx);
+    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close));
+    // Not presented: the window stays unmapped until the first show.
+    ctx.borrow_mut().window = Some(win);
 }
 
 fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
-    let win_opt = ctx.borrow_mut().window.take();
-    if let Some(win) = win_opt {
-        let win_clone = Rc::clone(&win);
-        win.start_slide_out(move || {
-            win_clone.window.close();
-        });
-    }
+    let win = match live_window(ctx) {
+        Some(win) => win,
+        None => return,
+    };
+    ctx.borrow_mut().shown = false;
+    // Slide out, then unmap: the widget tree, the VTE terminals and their tmux
+    // attach clients stay alive, so the next show is instant. The token makes a
+    // show that lands during the animation win over this unmap.
+    let token = win.current_show_token();
+    let win_hide = Rc::clone(&win);
+    win.start_slide_out(move || win_hide.hide_if_unchanged(token));
 }
 
 fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     let now = Instant::now();
     if now.duration_since(ctx.borrow().last_toggle) < Duration::from_millis(450) {
-        return ctx.borrow().window.is_some();
+        // Debounced repeat (Hyprland matches both the keysym and the keycode
+        // binding): report the current state, do not toggle again.
+        return ctx.borrow().shown;
     }
     ctx.borrow_mut().last_toggle = now;
 
-    if ctx.borrow().window.is_some() {
+    if ctx.borrow().shown {
         hide_window(ctx);
         false
     } else {
@@ -314,17 +539,49 @@ fn drain_wake_pipe(fd: RawFd) {
     }
 }
 
+/// Bind the daemon's control socket, refusing to take over a live daemon's.
+///
+/// Two daemons on one machine is the failure that made [SUPER + SHIFT + Q] look
+/// broken: this function used to `remove_file` the socket path unconditionally
+/// and bind a fresh one, so the newer process silently owned the socket while
+/// the older process kept its overlay window on screen — every later `toggle`
+/// reached the new process, so the visible window could not be hidden any more.
+/// Now a live daemon is probed first; if it answers, this process exits instead.
 fn start_ipc_thread(ipc_tx: Sender<IpcMessage>, wake_fd: Option<RawFd>) {
     let sock_path = get_socket_path();
+
+    match ipc_request("status") {
+        Ipc::Reply(resp) => {
+            eprintln!(
+                "SUPER DESKTOP: another daemon is already running (status: {resp}) — exiting instead of taking over its socket"
+            );
+            std::process::exit(0);
+        }
+        Ipc::Stalled => {
+            // A listener is behind the path, it just did not answer in time.
+            // Taking the socket now would orphan the overlay it is showing.
+            eprintln!(
+                "SUPER DESKTOP: another daemon is already running but busy — exiting instead of taking over its socket"
+            );
+            std::process::exit(0);
+        }
+        Ipc::NoDaemon => {}
+    }
+
+    // No live listener: any file left behind is stale.
     let _ = fs::remove_file(&sock_path);
 
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("Failed to bind IPC socket: {}", e);
-            return;
+            // Without the socket this process would still open an overlay
+            // window that nothing can control — leave instead.
+            eprintln!("Failed to bind IPC socket: {e}");
+            std::process::exit(1);
         }
     };
+
+    watch_socket_ownership(&sock_path);
 
     let running = Arc::new(AtomicBool::new(true));
     let r_clone = Arc::clone(&running);
@@ -374,15 +631,15 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             json!({ "ok": true, "visible": vis }).to_string()
         }
         "show" => {
-            show_window(ctx, app);
-            json!({ "ok": true, "visible": true }).to_string()
+            let shown = show_window(ctx, app);
+            json!({ "ok": shown, "visible": shown }).to_string()
         }
         "hide" => {
             hide_window(ctx);
             json!({ "ok": true, "visible": false }).to_string()
         }
         "status" => {
-            let is_vis = ctx.borrow().window.is_some();
+            let is_vis = ctx.borrow().shown;
             let state = state::load_state();
             json!({
                 "ok": true,
@@ -420,9 +677,77 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             json!({ "ok": true, "theme": t.name, "mode": t.mode, "accent": t.accent, "background": t.background }).to_string()
         }
         "kill" | "quit" => {
-            app.quit();
+            // Drop the socket first so the next `toggle` spawns a fresh daemon
+            // instead of connecting to a corpse, then really leave: the app is
+            // `hold()`-ed (see run_daemon) so `app.quit()` alone can keep the
+            // process alive with no window — which is how a "killed" daemon
+            // used to stay around holding the socket.
+            let _ = fs::remove_file(get_socket_path());
+            glib::timeout_add_local_once(Duration::from_millis(150), || std::process::exit(0));
             json!({ "ok": true, "action": "quitting" }).to_string()
         }
         _ => json!({ "ok": false, "error": format!("unknown_command: {}", action) }).to_string(),
+    }
+}
+
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// Private dir so this test can never touch the user's real daemon.
+    fn private_runtime_dir(tag: &str) -> PathBuf {
+        let dir = env::temp_dir().join(format!("sd-ipc-{}-{tag}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp runtime dir");
+        dir
+    }
+
+    /// The three outcomes decide whether the caller starts a daemon, and only
+    /// `NoDaemon` may. Getting this wrong is what left a second daemon holding
+    /// the socket while the first one's overlay stayed on screen.
+    #[test]
+    fn test_ipc_outcomes_never_report_a_live_daemon_as_absent() {
+        let dir = private_runtime_dir("outcomes");
+        let sock_path = socket_path_in(&dir);
+
+        // 1. Nothing at the path at all.
+        assert!(matches!(ipc_request_at(&sock_path, "status"), Ipc::NoDaemon));
+
+        // 2. Leftover file from a daemon that is gone: the connect fails, the
+        //    file is cleared (so a freshly spawned daemon can bind) and the
+        //    caller is told to start one.
+        fs::write(&sock_path, b"").expect("write stale socket file");
+        assert!(matches!(ipc_request_at(&sock_path, "status"), Ipc::NoDaemon));
+        assert!(!sock_path.exists(), "a stale socket file must be removed");
+
+        // 3. Live daemon: answers -> Reply; alive but silent -> Stalled.
+        let listener = UnixListener::bind(&sock_path).expect("bind fake daemon");
+        let server = thread::spawn(move || {
+            let mut first = true;
+            for stream in listener.incoming().take(2) {
+                let Ok(mut s) = stream else { continue };
+                let mut buf = [0u8; 64];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let cmd = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+                if first && cmd == "status" {
+                    first = false;
+                    let _ = s.write_all(br#"{"ok":true}"#);
+                }
+                // Every later connection is read, then closed silently.
+            }
+        });
+
+        assert!(
+            matches!(ipc_request_at(&sock_path, "status"), Ipc::Reply(r) if r == r#"{"ok":true}"#),
+            "a live daemon's answer must come back as Reply"
+        );
+        assert!(
+            matches!(ipc_request_at(&sock_path, "status"), Ipc::Stalled),
+            "a live daemon that stays silent must not look like NoDaemon"
+        );
+        server.join().expect("fake daemon thread");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
