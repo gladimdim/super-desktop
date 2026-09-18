@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SUPER DESKTOP — hidden overlay workspace for Omarchy</title>
+<meta name="description" content="SUPER DESKTOP: a hidden overlay workspace for Hyprland/Omarchy with sticky notes and mini AI-terminal windows. Press SUPER + SHIFT + Q.">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel2: #1a2030;
+    --text: #e6e9f0;
+    --muted: #9aa3b5;
+    --accent: #22d3ee;
+    --accent2: #a78bfa;
+    --border: #262e42;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #16202f 0%, var(--bg) 60%) fixed, var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px 80px; }
+  header.hero { text-align: center; padding: 72px 20px 36px; }
+  .bolt { font-size: 64px; }
+  h1 { font-size: 44px; margin: 12px 0 8px; letter-spacing: -1px; }
+  h1 .grad {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .tagline { font-size: 19px; color: var(--muted); max-width: 640px; margin: 0 auto; }
+  .cta { margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 12px 26px; border-radius: 999px;
+    text-decoration: none; font-weight: 600; font-size: 16px;
+    border: 1px solid var(--border);
+  }
+  .btn.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #06121a; border: none; }
+  .btn.ghost { color: var(--text); background: var(--panel); }
+  .kbd {
+    display: inline-block; padding: 3px 12px; border-radius: 8px;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-bottom-width: 3px; font-family: ui-monospace, monospace; font-size: 15px;
+  }
+  section { margin-top: 56px; }
+  h2 { font-size: 28px; letter-spacing: -0.5px; margin-bottom: 6px; }
+  .sub { color: var(--muted); margin-top: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-top: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 17px; }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .harness-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+  .harness {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 999px; padding: 8px 16px 8px 10px; font-size: 14.5px;
+  }
+  .harness img { width: 22px; height: 22px; }
+  table.keys { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 15px; }
+  table.keys td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  table.keys td:first-child { white-space: nowrap; width: 220px; }
+  pre {
+    background: #070a10; border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 18px; overflow-x: auto; font-size: 14px; line-height: 1.7;
+  }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre .c { color: #5b6577; }
+  .note {
+    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    border-radius: 10px; padding: 14px 18px; margin-top: 16px; font-size: 15px; color: var(--muted);
+  }
+  .note strong { color: var(--text); }
+  footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
+  footer a { color: var(--accent); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="bolt">⚡</div>
+    <h1>SUPER <span class="grad">DESKTOP</span></h1>
+    <p class="tagline">A hidden overlay workspace for Hyprland / Omarchy — sticky notes and mini AI-terminal windows that slide in from the screen edges and vanish without a trace.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/gladimdim/super-desktop">GitHub repo</a>
+      <a class="btn ghost" href="https://github.com/gladimdim/super-desktop#readme">Install guide</a>
+    </div>
+    <p style="margin-top:22px"><span class="kbd">SUPER + SHIFT + Q</span></p>
+  </header>
+
+  <section>
+    <h2>What is this?</h2>
+    <p class="sub">A second, invisible desktop on top of your Omarchy workspace. Press the shortcut — notes and AI terminals glide in. Press it again — your desktop is completely clean. Everything keeps running in background tmux.</p>
+    <div class="grid">
+      <div class="card"><h3>📝 Sticky notes</h3><p>Click and type. Notes follow your Omarchy theme, autosave, drag, resize, and take group color tags.</p></div>
+      <div class="card"><h3>💻 AI terminals</h3><p>Live mini-terminals running coding agents. Iconify to 128×128, ghost-resize, expand to 80% of the screen.</p></div>
+      <div class="card"><h3>🪄 True overlay</h3><p>Hidden means hidden — nothing occupies Hyprland workspaces. Slide-in animations plus background blur.</p></div>
+      <div class="card"><h3>🎨 Native theming</h3><p>Colors, fonts, and terminal palette come from the active Omarchy theme and sync instantly on switch.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Supported AI harnesses</h2>
+    <p class="sub">Only harnesses actually installed on the machine are offered in the top bar.</p>
+    <div class="harness-row">
+      <span class="harness"><img src="logos/anthropic-white.svg" alt="">Claude Code</span>
+      <span class="harness"><img src="logos/openai-white.svg" alt="">OpenAI Codex</span>
+      <span class="harness"><img src="logos/opencode-light.svg" alt="">OpenCode</span>
+      <span class="harness"><img src="logos/grok-white.svg" alt="">Grok CLI</span>
+      <span class="harness"><img src="logos/google.svg" alt="">Antigravity</span>
+      <span class="harness"><img src="logos/shell-white.svg" alt="">Aider · Reasonix · Shell</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Keybindings</h2>
+    <table class="keys">
+      <tr><td><span class="kbd">SUPER + SHIFT + Q</span></td><td><strong>Show / hide SUPER DESKTOP</strong> (EN + UK layouts)</td></tr>
+      <tr><td><span class="kbd">Esc</span></td><td>Hide the overlay</td></tr>
+      <tr><td><span class="kbd">Ctrl + N</span> / <span class="kbd">Ctrl + T</span></td><td>New note / new terminal</td></tr>
+      <tr><td>Double-click terminal</td><td>Expand to 80% / collapse back</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>Install (humans, 2 minutes)</h2>
+    <pre><code><span class="c"># On your Omarchy machine, in a terminal:</span>
+git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
+cd ~/GitHub/super-desktop
+./install.sh
+<span class="c"># then press SUPER + SHIFT + Q</span></code></pre>
+    <div class="note"><strong>🤖 Are you an AI assistant</strong> installing this for your human? Don't improvise — the repo README has a dedicated <a href="https://github.com/gladimdim/super-desktop#readme">step-by-step AI install section</a> (preconditions, verification, hard rules, troubleshooting).</div>
+  </section>
+
+  <section>
+    <h2>Useful commands</h2>
+    <pre><code>super-desktop toggle          <span class="c"># show / hide</span>
+super-desktop status          <span class="c"># visible? notes / terminals count</span>
+super-desktop add-note "Buy milk"
+super-desktop add-term claude <span class="c"># + antigravity, codex, opencode, grok, reasonix, aider, shell</span>
+super-desktop reload-theme
+./rebuild.sh                  <span class="c"># rebuild after updates (in repo dir)</span></code></pre>
+  </section>
+
+  <footer>
+    Built in Rust (GTK4 · LayerShell · VTE · tmux) for Omarchy &amp; Hyprland.<br>
+    <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a> · MIT-style open source — issues and PRs welcome.
+  </footer>
+
+</div>
+</body>
+</html>

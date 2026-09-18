@@ -1,5 +1,9 @@
 # ⚡ SUPER DESKTOP
 
+> 🌐 **Live site: [gladimdim.github.io/super-desktop](https://gladimdim.github.io/super-desktop/)**
+>
+> **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
+
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 > Press `SUPER + SHIFT + Q` — notes and AI terminals slide in from the screen edges. Press it again — everything disappears and your normal desktop is completely clean. All sessions keep running in background tmux.
 
