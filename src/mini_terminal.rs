@@ -10,8 +10,8 @@ use vte4::{PtyFlags, Terminal as VteTerminal};
 use crate::state::TerminalData;
 use crate::tmux::{
     capture_pane_text, ensure_session_with_agent_id, extract_composer_draft,
-    extract_last_prompt, get_agent_config, get_opencode_session_id,
-    get_opencode_user_text_by_id, get_preview, inspect_status, tmux_bin, truncate_prompt_title,
+    extract_last_prompt, get_agent_config, get_opencode_user_text_by_id,
+    get_preview, inspect_status, resolve_own_opencode_id, tmux_bin, truncate_prompt_title,
 };
 
 pub const CARD_WIDTH: i32 = 380;
@@ -91,6 +91,10 @@ pub struct MiniTerminalCard {
     title_prefix: String,
     /// Cached opencode session id for the USER-text DB lookup (None = unresolved yet).
     opencode_session: Rc<RefCell<Option<String>>>,
+    /// Next time the cached id may be re-resolved against live tmux/DB state.
+    /// A guess made before a neighbouring console closed otherwise sticks
+    /// forever and keeps showing that console's prompt in this card's title.
+    oc_recheck_at: Rc<RefCell<std::time::Instant>>,
     status_badge: Label,
     refresh_in_flight: Rc<Cell<bool>>,
     compact_status: Label,
@@ -429,6 +433,9 @@ impl MiniTerminalCard {
             title_label: title.clone(),
             title_prefix,
             opencode_session,
+            // Recheck immediately on the first refresh so a stale persisted
+            // guess heals fast, then at most every 30s.
+            oc_recheck_at: Rc::new(RefCell::new(std::time::Instant::now())),
             status_badge,
             refresh_in_flight: Rc::new(Cell::new(false)),
             compact_status,
@@ -1040,6 +1047,20 @@ impl MiniTerminalCard {
         // Fall back to the persisted id (loaded from state.json at startup)
         // when the in-memory cache is still empty.
         let cached_oc_id = cached_oc_id.or_else(|| self.data.borrow().agent_session_id.clone());
+        // Re-resolve the mapping at most every 30s (immediately on the first
+        // refresh). A guess made before a neighbouring console closed
+        // otherwise sticks forever, showing that console's prompt here.
+        // Skipped entirely for non-opencode cards: no tmux/DB probing.
+        let need_resolve = agent_type == "opencode" && {
+            let mut slot = self.oc_recheck_at.borrow_mut();
+            let now = std::time::Instant::now();
+            if cached_oc_id.is_none() || now >= *slot {
+                *slot = now + std::time::Duration::from_secs(30);
+                true
+            } else {
+                false
+            }
+        };
         let data_weak = Rc::downgrade(&self.data);
         let data_snapshot: Option<TerminalData> =
             data_weak.upgrade().map(|d| d.borrow().clone());
@@ -1066,11 +1087,18 @@ impl MiniTerminalCard {
                     .and_then(extract_last_prompt)
                     .map(|s| truncate_prompt_title(&s));
                 let draft = screen.as_deref().and_then(extract_composer_draft);
+                // `resolve_own_opencode_id` only ever returns THIS pane's own
+                // session (own `--session` flag, else a claims-aware match),
+                // so `db_text` is the prompt typed INTO this harness — never
+                // another terminal's input. A stale cached guess heals here.
                 let mut oc_id = cached_oc_id;
-                let db_text = if agent_type == "opencode" && draft.is_none() {
-                    if oc_id.is_none() {
-                        oc_id = get_opencode_session_id(&sess_name);
+                if need_resolve {
+                    let fresh = resolve_own_opencode_id(&sess_name, oc_id.as_deref());
+                    if fresh != oc_id {
+                        oc_id = fresh;
                     }
+                }
+                let db_text = if agent_type == "opencode" && draft.is_none() {
                     oc_id.as_deref().and_then(get_opencode_user_text_by_id)
                 } else {
                     None
@@ -1108,12 +1136,13 @@ impl MiniTerminalCard {
                     title.set_tooltip_text(Some(&new_title));
                 }
             }
-            if opencode_cache.borrow().is_none() {
+            if *opencode_cache.borrow() != oc_id {
                 *opencode_cache.borrow_mut() = oc_id.clone();
             }
             // Persist the tmux-pane -> opencode-session mapping to state.json
-            // on first resolution so a later reboot can resume THIS card with
-            // `opencode --session <id>` instead of sharing the latest session.
+            // on first resolution (and when a stale guess heals) so a later
+            // reboot resumes THIS card with `opencode --session <id>` instead
+            // of sharing the latest session.
             if let Some(new_id) = oc_id {
                 let needs_save = data_snapshot
                     .as_ref()

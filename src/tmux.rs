@@ -1113,26 +1113,118 @@ fn sqlite_query(db: &std::path::Path, sql: &str) -> Option<String> {
     }
 }
 
-/// Map a super-desktop tmux session to its opencode session id.
+/// Read `/proc/<pid>/cmdline` as a space-joined string (`None` when the
+/// process is gone or unreadable).
+fn read_cmdline(pid: u32) -> Option<String> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(
+        raw.iter()
+            .map(|b| if *b == 0 { ' ' } else { *b as char })
+            .collect(),
+    )
+}
+
+/// Pure helper: pull `--session <id>` / `--session=<id>` out of a cmdline
+/// string (testable).
+pub fn extract_session_flag(cmdline: &str) -> Option<String> {
+    let mut words = cmdline.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "--session" {
+            return words.next().filter(|s| !s.is_empty()).map(|s| s.to_string());
+        }
+        if let Some(id) = w.strip_prefix("--session=") {
+            if !id.is_empty() {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Deterministic per-pane opencode session id: walk the pane's process tree
+/// looking for an opencode process launched with `--session <id>`.
 ///
-/// super-desktop launches the agent command at card creation, so the
-/// opencode session is born shortly AFTER the tmux session (TUI + provider
-/// init lag is typically 10-60s). Because several same-directory cards are
-/// often created a minute apart, per-pane "nearest time" matching would
-/// shift every card onto its neighbour's session — instead ALL live
-/// `sd_term_*` panes and same-directory opencode sessions are matched
-/// chronologically 1:1 (`assign_opencode_sessions`). Tolerance 10 min.
-/// Returns None when opencode storage is unavailable or nothing matches.
-///
-/// NOTE: `/new` inside opencode (or restarting the agent in the same pane),
-/// and sessions left behind by deleted cards, can skew the ranking; the
-/// live composer draft still works in those cases.
-pub fn get_opencode_session_id(session_name: &str) -> Option<String> {
-    let cwd = tmux_display(session_name, "#{pane_current_path}")?;
-    let created: i64 = tmux_display(session_name, "#{session_created}")?
-        .parse()
-        .ok()?;
-    // All live super-desktop panes, oldest first.
+/// Reboot-resumed cards are relaunched exactly that way (see
+/// `resolve_resume_command_with_session`), so this is ground truth for the
+/// prompt typed INTO this pane's harness — it can never shift onto a
+/// neighbour's session when other consoles open or close, unlike
+/// chronological matching.
+pub fn pane_opencode_session_flag(pane_pid: u32) -> Option<String> {
+    if pane_pid == 0 {
+        return None;
+    }
+    let mut stack = vec![pane_pid];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(pid) = stack.pop() {
+        if !seen.insert(pid) {
+            continue;
+        }
+        if let Some(cmd) = read_cmdline(pid) {
+            let base = cmd
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.rsplit('/').next())
+                .unwrap_or("");
+            if base == "opencode" {
+                if let Some(id) = extract_session_flag(&cmd) {
+                    return Some(id);
+                }
+            }
+        }
+        stack.extend(get_direct_children(pid));
+    }
+    None
+}
+
+/// `session_name -> (agent_type, persisted agent_session_id)` for every card
+/// in `state.json`. Lets the opencode matcher tell harness panes apart
+/// without depending on process state.
+fn state_terminal_info() -> std::collections::HashMap<String, (String, Option<String>)> {
+    let mut out = std::collections::HashMap::new();
+    let path = crate::state::get_state_path();
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if content.is_empty() {
+        return out;
+    }
+    let v: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return out,
+    };
+    if let Some(terms) = v.get("terminals").and_then(|t| t.as_array()) {
+        for t in terms {
+            let name = t
+                .get("session_name")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let agent = t
+                .get("agent_type")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            let sid = t
+                .get("agent_session_id")
+                .and_then(|s| s.as_str())
+                .map(|s| s.to_string());
+            out.insert(name, (agent, sid));
+        }
+    }
+    out
+}
+
+/// Live `sd_term_*` panes that may own an opencode session: only panes whose
+/// card is an opencode harness participate. Shell/reasonix/… cards must never
+/// consume an opencode session in the chronological assignment — that stole a
+/// neighbour's session and surfaced its prompt in the wrong card's title.
+/// Panes unknown to `state.json` are kept (nothing proves they are not
+/// opencode).
+fn opencode_panes_live() -> Option<Vec<(String, i64)>> {
     let list_out = Command::new("tmux")
         .args(["list-sessions", "-F", "#{session_name}|#{session_created}"])
         .output()
@@ -1140,7 +1232,7 @@ pub fn get_opencode_session_id(session_name: &str) -> Option<String> {
     if !list_out.status.success() {
         return None;
     }
-    let mut panes: Vec<(String, i64)> = String::from_utf8_lossy(&list_out.stdout)
+    let panes: Vec<(String, i64)> = String::from_utf8_lossy(&list_out.stdout)
         .lines()
         .filter_map(|l| {
             let mut p = l.splitn(2, '|');
@@ -1153,14 +1245,19 @@ pub fn get_opencode_session_id(session_name: &str) -> Option<String> {
             }
         })
         .collect();
+    let mut panes = keep_opencode_panes(&panes, &state_terminal_info());
     panes.sort_by_key(|(_, t)| *t);
-    let first = panes.iter().map(|(_, t)| *t).min().unwrap_or(created);
+    Some(panes)
+}
 
+/// All same-directory opencode sessions born at/after `not_before` (seconds),
+/// oldest first.
+fn opencode_sessions_since(cwd: &str, not_before: i64) -> Option<Vec<(String, i64)>> {
     let db = opencode_db_path()?;
     let sql = format!(
         "SELECT id, time_created FROM session WHERE directory = '{}' AND time_created/1000 >= {} ORDER BY time_created;",
-        sql_escape(&cwd),
-        first - 30
+        sql_escape(cwd),
+        not_before
     );
     let rows = sqlite_query(&db, &sql)?;
     let mut sessions: Vec<(String, i64)> = rows
@@ -1173,15 +1270,216 @@ pub fn get_opencode_session_id(session_name: &str) -> Option<String> {
         })
         .collect();
     sessions.sort_by_key(|(_, t)| *t);
+    Some(sessions)
+}
 
-    assign_opencode_sessions(&panes, &sessions)
+/// `session_name -> pane_pid` for every live pane, in a single `tmux` call.
+fn live_pane_pids() -> Option<std::collections::HashMap<String, u32>> {
+    let out = Command::new("tmux")
+        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut map = std::collections::HashMap::new();
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut p = line.split_whitespace();
+        if let (Some(name), Some(pid)) = (p.next(), p.next()) {
+            if name.starts_with("sd_term_") {
+                if let Ok(pid) = pid.parse::<u32>() {
+                    map.insert(name.to_string(), pid);
+                }
+            }
+        }
+    }
+    Some(map)
+}
+
+/// Deterministic ownership map: `tmux pane -> opencode session id` for panes
+/// whose own process tree carries `--session <id>` (reboot-resumed cards are
+/// launched exactly that way). Ground truth that never shifts when other
+/// consoles open or close.
+fn flag_claims(pids: &std::collections::HashMap<String, u32>) -> std::collections::HashMap<String, String> {
+    pids.iter()
+        .filter_map(|(name, pid)| {
+            pane_opencode_session_flag(*pid).map(|id| (name.clone(), id))
+        })
+        .collect()
+}
+
+/// Pure helper: drop panes whose session is deterministically known (they are
+/// satisfied and must not shift the chronological ranking of the rest), plus
+/// their owned sessions from the candidates.
+pub fn drop_determined_panes(
+    panes: &[(String, i64)],
+    sessions: &[(String, i64)],
+    flags: &std::collections::HashMap<String, String>,
+) -> (Vec<(String, i64)>, Vec<(String, i64)>) {
+    let owned: std::collections::HashSet<&str> =
+        flags.values().map(|s| s.as_str()).collect();
+    let free_panes = panes
+        .iter()
+        .filter(|(name, _)| !flags.contains_key(name))
+        .cloned()
+        .collect();
+    let free_sessions = sessions
+        .iter()
+        .filter(|(id, _)| !owned.contains(id.as_str()))
+        .cloned()
+        .collect();
+    (free_panes, free_sessions)
+}
+
+/// Pure helper: keep only panes that may own an opencode session — panes
+/// whose card is an opencode harness, plus panes unknown to `state.json`
+/// (nothing proves they are not opencode). Shell/reasonix/… cards must never
+/// consume an opencode session in the chronological assignment.
+pub fn keep_opencode_panes(
+    panes: &[(String, i64)],
+    info: &std::collections::HashMap<String, (String, Option<String>)>,
+) -> Vec<(String, i64)> {
+    panes
+        .iter()
+        .filter(|(name, _)| {
+            info.get(name)
+                .map(|(agent, _)| agent == "opencode")
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect()
+}
+
+/// Pure heal policy for `resolve_own_opencode_id`: adopt heuristic match `q`
+/// (born `q_birth`) over persisted `p` (born `p_birth`, if known) for a pane
+/// born at `created` only when `q` was born strictly nearer to the pane —
+/// the signature of a stale guess made before a neighbouring console closed.
+/// A persisted id whose birth is unknown (pre-reboot ground truth outside
+/// the live window, or garbage) is always kept: its DB lookup either hits
+/// the card's own old session or yields nothing (and the title falls back to
+/// the pane's own text — never another console's prompt).
+pub fn should_adopt_heuristic_match(
+    p_birth: Option<i64>,
+    q_birth: i64,
+    created: i64,
+) -> bool {
+    match p_birth {
+        Some(pb) => (q_birth - created).abs() < (pb - created).abs(),
+        None => false,
+    }
+}
+
+/// Heuristic match for a pane with no deterministic id: chronological 1:1
+/// assignment over live OPENCODE panes, minus panes/sessions deterministically
+/// owned via `--session` flags. Returns the matched id plus its birth
+/// (seconds) for the heal policy in `resolve_own_opencode_id`.
+fn heuristic_opencode_match(
+    session_name: &str,
+    flags: &std::collections::HashMap<String, String>,
+) -> Option<(String, i64)> {
+    let cwd = tmux_display(session_name, "#{pane_current_path}")?;
+    let created: i64 = tmux_display(session_name, "#{session_created}")?
+        .parse()
+        .ok()?;
+    let panes = opencode_panes_live()?;
+    if !panes.iter().any(|(n, _)| n == session_name) {
+        return None;
+    }
+    let first = panes.iter().map(|(_, t)| *t).min().unwrap_or(created);
+    let sessions = opencode_sessions_since(&cwd, first - 30)?;
+    let (free_panes, free_sessions) = drop_determined_panes(&panes, &sessions, flags);
+
+    assign_opencode_sessions(&free_panes, &free_sessions)
         .into_iter()
         .find(|(pane, _)| pane == session_name)
         .and_then(|(_, sess)| sess)
         .filter(|(id, t)| {
             !id.is_empty() && (*t - created).abs() <= 600 && *t >= created - 30
         })
-        .map(|(id, _)| id)
+}
+
+/// Birth (seconds) of one opencode session id, or `None` when it is not in
+/// the local store (pre-reboot ground truth pruned from the query window, or
+/// garbage that can safely never match).
+fn opencode_session_birth(session_id: &str) -> Option<i64> {
+    let db = opencode_db_path()?;
+    let sql = format!(
+        "SELECT time_created FROM session WHERE id = '{}' LIMIT 1;",
+        sql_escape(session_id)
+    );
+    let row = sqlite_query(&db, &sql)?;
+    row.parse::<i64>().ok().map(|ms| ms / 1000)
+}
+
+/// Resolve the opencode session id OWNED by this tmux pane — i.e. the session
+/// behind the prompt typed INTO this card's harness, never a neighbour's.
+///
+/// Layers, most-trusted first:
+/// 1. `--session <id>` in the pane's own process tree (reboot-resumed cards
+///    are launched exactly that way) — deterministic ground truth.
+/// 2. Claims-aware chronological match over live OPENCODE panes (flag-owned
+///    pane/session pairs leave the ranking entirely; other harness types
+///    never participate).
+/// 3. `persisted` fallback (pre-reboot ground truth older than the live
+///    window).
+///
+/// Heal policy when the heuristic `q` disagrees with `persisted` `p`: adopt
+/// `q` only when `q` was born strictly nearer to this pane than `p` was —
+/// the signature of a stale guess made before a neighbouring console closed
+/// and shifted the ranking. Otherwise keep `p`: it is either ground truth
+/// older than any live session (reboot resume — a newer `q` there belongs to
+/// somebody else) or an id whose DB lookup yields nothing, in which case the
+/// title safely falls back to this pane's own text.
+pub fn resolve_own_opencode_id(
+    session_name: &str,
+    persisted: Option<&str>,
+) -> Option<String> {
+    let flags = flag_claims(&live_pane_pids().unwrap_or_default());
+    if let Some(id) = flags.get(session_name) {
+        return Some(id.clone());
+    }
+    let clean_persisted = persisted.map(str::trim).filter(|s| !s.is_empty());
+    let q = heuristic_opencode_match(session_name, &flags);
+    match (clean_persisted, q) {
+        (_, None) => clean_persisted.map(str::to_string),
+        (None, Some((id, _))) => Some(id),
+        (Some(p), Some((qid, _))) if qid == p => Some(p.to_string()),
+        (Some(p), Some((qid, qb))) => {
+            let created: i64 = tmux_display(session_name, "#{session_created}")?
+                .parse()
+                .ok()?;
+            let pb = opencode_session_birth(p)?;
+            if should_adopt_heuristic_match(Some(pb), qb, created) {
+                Some(qid)
+            } else {
+                Some(p.to_string())
+            }
+        }
+    }
+}
+
+/// Map a super-desktop tmux session to its opencode session id.
+///
+/// super-desktop launches the agent command at card creation, so the
+/// opencode session is born shortly AFTER the tmux session (TUI + provider
+/// init lag is typically 10-60s). Same-directory opencode cards are matched
+/// chronologically 1:1 (`assign_opencode_sessions`). Tolerance 10 min.
+/// Returns None when opencode storage is unavailable or nothing matches.
+///
+/// Only live OPENCODE panes participate (other harness types never consume a
+/// session), and pane/session pairs deterministically owned via `--session`
+/// flags leave the ranking entirely — otherwise closing one console shifted
+/// every surviving card onto its neighbour's session and its prompt showed
+/// in the wrong title.
+/// Prefer `resolve_own_opencode_id` when the card's persisted id is known: it
+/// adds the deterministic `--session` fast path plus a heal policy for stale
+/// guesses.
+///
+/// NOTE: `/new` inside opencode (or restarting the agent in the same pane),
+/// and sessions left behind by deleted cards, can skew the ranking; the
+/// live composer draft still works in those cases.
+pub fn get_opencode_session_id(session_name: &str) -> Option<String> {
+    resolve_own_opencode_id(session_name, None)
 }
 
 /// Pure helper: chronological 1:1 assignment of tmux panes to opencode
@@ -1647,6 +1945,127 @@ mod tests {
                 Some("ses_dedup".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn test_extract_session_flag() {
+        assert_eq!(
+            extract_session_flag("/usr/bin/opencode --auto --session ses_abc123"),
+            Some("ses_abc123".to_string())
+        );
+        assert_eq!(
+            extract_session_flag("/usr/bin/opencode --session=ses_xyz --auto"),
+            Some("ses_xyz".to_string())
+        );
+        assert_eq!(extract_session_flag("/usr/bin/opencode --auto"), None);
+        assert_eq!(extract_session_flag("/usr/bin/opencode --session"), None);
+        assert_eq!(extract_session_flag("/usr/bin/opencode --session="), None);
+        assert_eq!(extract_session_flag("/usr/bin/bash"), None);
+    }
+
+    #[test]
+    fn test_keep_opencode_panes_drops_other_harnesses() {
+        // Regression: a reasonix card consumed an opencode session in the
+        // chronological assignment, shifting an opencode card onto its
+        // neighbour's session — the neighbour's prompt then showed in the
+        // wrong card's title.
+        let panes = vec![
+            ("sd_term_a".to_string(), 1000),
+            ("sd_term_r".to_string(), 1100),
+            ("sd_term_b".to_string(), 1200),
+            ("sd_term_unknown".to_string(), 1300),
+        ];
+        let mut info = std::collections::HashMap::new();
+        info.insert("sd_term_a".to_string(), ("opencode".to_string(), None));
+        info.insert(
+            "sd_term_r".to_string(),
+            ("reasonix".to_string(), None),
+        );
+        info.insert("sd_term_b".to_string(), ("opencode".to_string(), None));
+        info.insert("sd_term_shell".to_string(), ("shell".to_string(), None));
+        let kept = keep_opencode_panes(&panes, &info);
+        let names: Vec<&str> = kept.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["sd_term_a", "sd_term_b", "sd_term_unknown"]);
+    }
+
+    #[test]
+    fn test_non_opencode_pane_cannot_steal_opencode_session() {
+        // The reported bug, end to end at the pure level: panes A (opencode),
+        // R (reasonix) and B (opencode) created in that order; opencode
+        // sessions S1/S2/S3 born right after each *opencode* pane (TUI lag).
+        // With R participating, R steals S2 and B shifts onto S3 (another
+        // console's session); filtered to opencode panes, A→S1 and B→S2.
+        let panes = vec![
+            ("sd_term_a".to_string(), 1000),
+            ("sd_term_r".to_string(), 1100),
+            ("sd_term_b".to_string(), 1200),
+        ];
+        let sessions = vec![
+            ("s1".to_string(), 1020),
+            ("s2".to_string(), 1237),
+            ("s3".to_string(), 1300),
+        ];
+        // Old behaviour (all panes participate): R steals S2, B lands on S3.
+        let all = assign_opencode_sessions(&panes, &sessions);
+        let id_of_all = |pane: &str| {
+            all.iter()
+                .find(|(p, _)| p == pane)
+                .and_then(|(_, s)| s.as_ref().map(|(id, _)| id.as_str()))
+        };
+        assert_eq!(id_of_all("sd_term_r"), Some("s2"));
+        assert_eq!(id_of_all("sd_term_b"), Some("s3"));
+        // Fixed behaviour: only opencode panes participate.
+        let mut info = std::collections::HashMap::new();
+        info.insert("sd_term_a".to_string(), ("opencode".to_string(), None));
+        info.insert("sd_term_r".to_string(), ("reasonix".to_string(), None));
+        info.insert("sd_term_b".to_string(), ("opencode".to_string(), None));
+        let filtered = keep_opencode_panes(&panes, &info);
+        let got = assign_opencode_sessions(&filtered, &sessions);
+        let id_of = |pane: &str| {
+            got.iter()
+                .find(|(p, _)| p == pane)
+                .and_then(|(_, s)| s.as_ref().map(|(id, _)| id.clone()))
+        };
+        assert_eq!(id_of("sd_term_a").as_deref(), Some("s1"));
+        assert_eq!(id_of("sd_term_b").as_deref(), Some("s2"));
+    }
+
+    #[test]
+    fn test_drop_determined_panes() {
+        // Flag-owned pairs leave the ranking entirely: the satisfied pane no
+        // longer shifts its neighbours, and its session cannot be stolen.
+        let panes = vec![
+            ("a".to_string(), 1000),
+            ("b".to_string(), 1200),
+        ];
+        let sessions = vec![
+            ("s1".to_string(), 1020),
+            ("s2".to_string(), 1237),
+        ];
+        let mut flags = std::collections::HashMap::new();
+        flags.insert("a".to_string(), "s1".to_string());
+        let (free_panes, free_sessions) = drop_determined_panes(&panes, &sessions, &flags);
+        assert_eq!(free_panes, vec![("b".to_string(), 1200)]);
+        assert_eq!(free_sessions, vec![("s2".to_string(), 1237)]);
+        let got = assign_opencode_sessions(&free_panes, &free_sessions);
+        assert_eq!(
+            got[0].1.as_ref().map(|(id, _)| id.as_str()),
+            Some("s2")
+        );
+    }
+
+    #[test]
+    fn test_should_adopt_heuristic_match() {
+        // Stale guess S3 (+305s) vs nearer live match S2 (+37s): adopt.
+        assert!(should_adopt_heuristic_match(Some(7305), 7037, 7000));
+        // Persisted is nearer: keep.
+        assert!(!should_adopt_heuristic_match(Some(7037), 7305, 7000));
+        // Tie is not "strictly nearer": keep (no flapping).
+        assert!(!should_adopt_heuristic_match(Some(7100), 6900, 7000));
+        // Unknown birth (pre-reboot ground truth or garbage): always keep.
+        // A newer heuristic hit there belongs to somebody else, and garbage
+        // safely yields no DB text (own-pane text wins instead).
+        assert!(!should_adopt_heuristic_match(None, 7037, 7000));
     }
 
     #[test]

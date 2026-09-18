@@ -26,8 +26,8 @@ use std::time::Duration;
 use crate::state::load_state;
 use crate::tmux::{
     capture_pane_text, extract_last_prompt, get_agent_config, get_composer_draft,
-    get_opencode_session_id, get_opencode_user_text_by_id, inspect_status, truncate_prompt_title,
-    SessionStatus,
+    get_opencode_user_text_by_id, inspect_status, resolve_own_opencode_id,
+    truncate_prompt_title, SessionStatus,
 };
 
 pub const BRIDGE_PORT: u16 = 8759;
@@ -83,14 +83,16 @@ fn live_sessions() -> Vec<String> {
     sessions.into_iter().map(|(n, _)| n).collect()
 }
 
-fn last_user_text(session: &str, agent_type: &str) -> Option<String> {
+fn last_user_text(session: &str, agent_type: &str, persisted: Option<&str>) -> Option<String> {
     // Priority mirrors mini_terminal.rs refresh_status(): composer draft,
-    // then exact opencode DB text, then pane-scrape heuristic.
+    // then exact opencode DB text, then pane-scrape heuristic. The DB id is
+    // resolved to the session OWNED by this pane (own `--session` flag, else
+    // a claims-aware match), so a closed console's prompt never leaks here.
     if let Some(draft) = get_composer_draft(session) {
         return Some(draft);
     }
     if agent_type == "opencode" {
-        if let Some(id) = get_opencode_session_id(session) {
+        if let Some(id) = resolve_own_opencode_id(session, persisted) {
             if let Some(text) = get_opencode_user_text_by_id(&id) {
                 return Some(text);
             }
@@ -117,24 +119,30 @@ fn tag_color(tag: u8) -> Option<&'static str> {
 
 pub fn collect_harnesses() -> Vec<serde_json::Value> {
     let state = load_state();
-    // agent type, fallback command and the user's group colour (super-desktop's
-    // 8-swatch tag) for every session we know about.
-    let meta: HashMap<String, (String, String, u8)> = state
+    // agent type, fallback command, persisted agent session id and the user's
+    // group colour (super-desktop's 8-swatch tag) for every session we know
+    // about.
+    let meta: HashMap<String, (String, String, Option<String>, u8)> = state
         .terminals
         .iter()
         .map(|t| {
             (
                 t.session_name.clone(),
-                (t.agent_type.clone(), t.command.clone(), t.tag),
+                (
+                    t.agent_type.clone(),
+                    t.command.clone(),
+                    t.agent_session_id.clone(),
+                    t.tag,
+                ),
             )
         })
         .collect();
     let mut out = vec![];
     for session in live_sessions() {
-        let (agent_type, cmd_fallback, tag) = meta
+        let (agent_type, cmd_fallback, persisted_sid, tag) = meta
             .get(&session)
             .cloned()
-            .unwrap_or_else(|| ("shell".to_string(), String::new(), 0));
+            .unwrap_or_else(|| ("shell".to_string(), String::new(), None, 0));
         let cfg = get_agent_config(&agent_type);
         let status = inspect_status(&session, &agent_type);
         let screen = capture_pane_text(&session).unwrap_or_default();
@@ -161,7 +169,7 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             "label": status.label,
             "pid": status.pid,
             "cmd": cmd,
-            "lastPrompt": last_user_text(&session, &agent_type),
+            "lastPrompt": last_user_text(&session, &agent_type, persisted_sid.as_deref()),
             "composerDraft": get_composer_draft(&session),
             "preview": lines[start..].join("\n"),
             // Group colour: the same 8-swatch tag the desktop card shows, so a
