@@ -55,17 +55,46 @@ fi
 sed "s|^Exec=.*|Exec=$BIN_DST toggle|g" "$SCRIPT_DIR/super-desktop.desktop" > "$APP_DST"
 echo "✓ Installed desktop entry to $APP_DST"
 
-# 3. Add Hyprland keybinding to ~/.config/hypr/bindings.lua
+# 3. Add the overlay's toggle binding to ~/.config/hypr/bindings.lua.
+#
+# Everything between the two markers below belongs to the app: the overlay's
+# ⚙ Settings panel rewrites this block when the user records another shortcut,
+# and finds it again by the markers. src/shortcut.rs holds the same two strings
+# (MANAGED_BEGIN/MANAGED_END) — change them in both places or in neither.
+BIND_MARKER='-- >>> super-desktop shortcut (managed by the overlay settings) >>>'
 mkdir -p "$(dirname "$BINDINGS_LUA")"
 touch "$BINDINGS_LUA"
-if ! grep -q "super-desktop toggle" "$BINDINGS_LUA"; then
-    echo "" >> "$BINDINGS_LUA"
-    echo "-- SUPER DESKTOP: Sticky notes and AI agent terminal overlay" >> "$BINDINGS_LUA"
-    echo 'o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-    echo 'o.bind("SUPER + SHIFT + Cyrillic_shorti", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-    echo 'o.bind("SUPER + SHIFT + Cyrillic_SHORTI", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-    echo 'o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle")' >> "$BINDINGS_LUA"
-    echo "✓ Added SUPER + SHIFT + Q bindings to $BINDINGS_LUA"
+if ! grep -qF "$BIND_MARKER" "$BINDINGS_LUA"; then
+    # Older runs appended loose o.bind(...) lines together with the
+    # hl.unbind(...) lines that cleared the way for them. Drop those first:
+    # otherwise a re-run leaves two blocks fighting over the same shortcut (and
+    # the unbinds, which can outlive their bind, would keep an unused key dead).
+    if grep -qF "super-desktop toggle" "$BINDINGS_LUA"; then
+        BINDINGS_TMP="$(mktemp)"
+        grep -v -F \
+            -e "super-desktop toggle" \
+            -e '-- SUPER DESKTOP: Sticky notes and AI agent terminal overlay' \
+            -e 'hl.unbind("SUPER + SHIFT + q")' \
+            -e 'hl.unbind("SUPER + SHIFT + Cyrillic_shorti")' \
+            -e 'hl.unbind("SUPER + SHIFT + Cyrillic_SHORTI")' \
+            -e 'hl.unbind("SUPER + SHIFT + code:24")' \
+            "$BINDINGS_LUA" > "$BINDINGS_TMP" || true
+        cat "$BINDINGS_TMP" > "$BINDINGS_LUA" # in place: keeps mode and owner
+        rm -f "$BINDINGS_TMP"
+        echo "✓ Migrated the loose super-desktop bind lines in $BINDINGS_LUA"
+    fi
+    cat >> "$BINDINGS_LUA" << 'EOF'
+
+-- >>> super-desktop shortcut (managed by the overlay settings) >>>
+-- Set in the overlay: ⚙ Settings → Keyboard shortcut.
+-- Rewritten there on every change; edits inside this block are lost.
+hl.unbind("SUPER + SHIFT + Q")
+o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")
+hl.unbind("SUPER + SHIFT + code:24")
+o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle")
+-- <<< super-desktop shortcut <<<
+EOF
+    echo "✓ Added the SUPER + SHIFT + Q binding to $BINDINGS_LUA"
 else
     echo "✓ Hyprland keybinding already present in $BINDINGS_LUA"
 fi

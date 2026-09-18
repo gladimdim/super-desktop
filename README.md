@@ -16,7 +16,10 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize, and group color tags.
 - **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize freely with ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
+- **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
+- **⌨ Your own shortcut** — `SUPER + SHIFT + Q` out of the box. Open ⚙ Settings, click **Record**, press any combination you like — `SUPER`/`CTRL`/`ALT` plus a key, or an `F1`–`F12` key on its own: it is captured, remembered in `state.json` and written into Hyprland's config (plus its `code:` form, so a layout switch does not break it).
 - **🎨 Native Omarchy theming** — colors, fonts, and terminal palette are read from the active Omarchy theme and update instantly when you switch themes (no restart).
+- **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
 - **🔌 Phone bridge (optional)** — exposes your harness sessions over LAN/Tailscale (port 8759, mDNS `_omarchy-harness._tcp`) for the OmarchyAILauncher Android app.
 
 ### Supported AI harnesses
@@ -38,11 +41,13 @@ Only harnesses actually installed on the machine are offered (⚙ Settings panel
 
 | Combo | Action |
 |---|---|
-| `SUPER + SHIFT + Q` | **Show / hide SUPER DESKTOP** (works in EN + UK layouts) |
+| `SUPER + SHIFT + Q` | **Show / hide SUPER DESKTOP** — works in EN + UK layouts. Change it in ⚙ Settings → *Show / hide shortcut* |
 | `Esc` | Hide SUPER DESKTOP |
+| Pointer in the top-left corner, held 2s | Show / hide SUPER DESKTOP (8×8 px zone, no keyboard involved) |
 | `Ctrl + N` | New note |
 | `Ctrl + T` | New terminal |
 | Double-click terminal/header | Expand to 80% / collapse back |
+| Click the 📁 folder field | Choose the working directory for new harness cards (`Enter` = home, `▾` = folders used before) |
 
 ### CLI quick reference
 
@@ -56,7 +61,7 @@ super-desktop kill            # stop the background daemon
 super-desktop harnesses       # one-shot JSON dump of sessions (debug)
 ```
 
-State lives in `~/.config/super-desktop/state.json`. Rebuild after updates with `./rebuild.sh`.
+State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Rebuild after updates with `./rebuild.sh`.
 
 ---
 
@@ -87,7 +92,7 @@ cd ~/GitHub/super-desktop
 3. Symlinks `~/.local/bin/super-desktop` → `bin/super-desktop` (a launcher that `LD_PRELOAD`s `libgtk4-layer-shell.so` and execs `target/release/super-desktop`; it auto-builds if the binary is missing).
 4. Copies `assets/` → `~/.config/super-desktop/assets/`.
 5. Installs the desktop entry `~/.local/share/applications/super-desktop.desktop`.
-6. Appends to `~/.config/hypr/bindings.lua`: `o.bind("SUPER + SHIFT + Q", …)` (+ UK-layout variants) and `o.exec_on_start("super-desktop daemon")`. Skips lines that already exist — safe to re-run.
+6. Writes the toggle binding into a marked block in `~/.config/hypr/bindings.lua` — `hl.unbind` + `o.bind("SUPER + SHIFT + Q", …)` plus the `code:24` form that keeps it working on the UK/Cyrillic layouts — and `o.exec_on_start("super-desktop daemon")`. Migrates and skips what is already there, so re-running is safe. Everything between the two markers belongs to the app: the ⚙ Settings panel rewrites that block when the user records another shortcut (see `src/shortcut.rs`).
 7. Appends the blur rule to `~/.config/hypr/hyprland.lua`: `hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })`.
 8. Installs the theme hook `~/.config/omarchy/hooks/theme-set.d/super-desktop` (runs `super-desktop reload-theme` on theme switch).
 9. `hyprctl reload` + `hyprctl configerrors` validation.
@@ -100,12 +105,12 @@ super-desktop harnesses     # expect: valid JSON (likely empty list on fresh ins
 hyprctl configerrors        # expect: ok (no errors)
 ```
 
-Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay must appear. Create one shell card (`super-desktop add-term shell`) and toggle twice.
+Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay must appear. Create one shell card (`super-desktop add-term shell`) and toggle twice. If the user wants another shortcut, do not hand-edit it for them: tell them to open ⚙ Settings → *Show / hide shortcut* → **Record** and press it (that also rewrites the managed block).
 
 ### 3. Hard rules — do NOT break the user's system
 
 - **Never edit anything under `/usr/share/omarchy/`** (package-owned; reading is fine). User config lives only in `~/.config/`.
-- **Hyprland bindings**: only append via `o.bind(...)` / `o.rebind(...)` in `~/.config/hypr/bindings.lua`. After any Hyprland Lua change run `hyprctl reload` + `hyprctl configerrors` until clean.
+- **Hyprland bindings**: only append via `o.bind(...)` / `o.rebind(...)` in `~/.config/hypr/bindings.lua`, and leave the marked super-desktop shortcut block alone — `install.sh` writes it and the ⚙ Settings recorder rewrites it (`src/shortcut.rs` holds the markers). After any Hyprland Lua change run `hyprctl reload` + `hyprctl configerrors` until clean.
 - **Singleton daemon**: exactly one `super-desktop daemon` may run (Unix socket `$XDG_RUNTIME_DIR/super-desktop.sock`). Never start a second one. To restart: `super-desktop kill`, then start one daemon (or just run `./rebuild.sh`, which handles kill → build → start → verify).
 - **Stale socket**: if `status` says "Daemon not running" but a socket file lingers with no process behind it, remove the file and start the daemon. (`rebuild.sh` does this automatically.)
 - **Rebuilding after code changes**: always use `./rebuild.sh` from the repo (release build + Hyprland reload + daemon restart + status check). Use `./rebuild.sh --no-daemon` for build-only.
@@ -118,7 +123,10 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 |---|---|
 | `Daemon not running` after reboot/login | Start it: `super-desktop daemon` runs hidden (autostart line in `bindings.lua` covers future logins) |
 | Overlay shows but immediately hides / toggle misbehaves | Two daemons are running — `pkill -f 'super-desktop.*daemon'`, remove stale socket, start exactly one |
-| `SUPER + SHIFT + Q` does nothing | `grep super-desktop ~/.config/hypr/bindings.lua`; re-run `./install.sh`; `hyprctl reload`; `hyprctl configerrors` |
+| The hot corner does nothing | `hyprctl layers | grep sd-hotcorner` — the 8x8 corner surface must be there, on the overlay layer. It is an input zone, not a visible one: it paints 1/255 black, which is what keeps GTK from treating it as click-through (see `src/hotcorner.rs`). |
+| The toggle shortcut does nothing | `grep -A4 'super-desktop shortcut' ~/.config/hypr/bindings.lua` — the managed block must hold the combination you expect; re-run `./install.sh`; `hyprctl reload`; `hyprctl configerrors` |
+| A shortcut recorded in ⚙ Settings does nothing | Opening ⚙ Settings → *Record* parks Hyprland in a throwaway submap, so any combination is captured even if a bind already owns it; the new bind then needs a reload. Check `hyprctl configerrors`, then re-record. |
+| Global shortcuts stopped working after using ⚙ Settings → *Record* | The recorder releases the submap on Esc, on Cancel and after 10s. If it was killed mid-recording: `hyprctl dispatch 'hl.dsp.submap("reset")'` |
 | Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk-layer-shell pkg-config`, then `./rebuild.sh` |
 | Build fails: no `cargo` | `omarchy pkg add rustup`, open a new shell, then `./install.sh` |
 | Theme changes don't restyle the overlay | Check `~/.config/omarchy/hooks/theme-set.d/super-desktop` is executable; run `super-desktop reload-theme` manually |
@@ -148,11 +156,13 @@ super-desktop status
 │   ├── mini_terminal.rs     # AI-terminal card (iconify/resize/expand, VTE attach, title from OWN session only)
 │   ├── tmux.rs              # tmux session lifecycle + owned-session resolution (flag → claims-aware match → persisted)
 │   ├── state.rs             # state.json persistence (notes, terminals, agent_session_id per card)
+│   ├── shortcut.rs          # toggle-shortcut recorder: combo spelling, capture guard, bindings.lua block
+│   ├── hotcorner.rs         # top-left hot corner: 8x8 pointer-only surface + dwell detector
 │   ├── bridge.rs            # harness-bridge (LAN/Tailscale JSON for the phone app) + harnesses dump
 │   ├── theme.rs / styles.rs # Omarchy theme parsing + GTK4 CSS generation
 │   ├── sticky_note.rs       # Sticky note widget
 │   ├── tag.rs / brand.rs    # group color tags, agent brand assets
-│   ├── harness_settings.rs / launcher_settings.rs  # settings panels
+│   ├── harness_settings.rs / launcher_settings.rs  # ⚙ settings (shortcut + top bar) / 📱 launcher panel
 │   ├── usage.rs / ws.rs     # usage stats, misc helpers
 │   └── crashlog.rs          # panic hook (release builds abort; crashes leave a trace)
 ├── assets/                  # vendored toolbar logos → ~/.config/super-desktop/assets/
@@ -162,4 +172,4 @@ super-desktop status
 └── super-desktop.desktop    # desktop entry template
 ```
 
-Key invariants for contributors: one daemon per machine; one tmux client per card with per-session `detach-on-destroy on`; card titles may only ever reflect the prompt typed **into that card's own harness** (see `resolve_own_opencode_id`); run `cargo test` before every rebuild.
+Key invariants for contributors: one daemon per machine; one tmux client per card with per-session `detach-on-destroy on`; card titles may only ever reflect the prompt typed **into that card's own harness** (see `resolve_own_opencode_id`); the toggle shortcut is only ever written inside the marked block in `bindings.lua` (see `src/shortcut.rs`); the hot corner must stay a pointer gesture — never a key grab, and never more than a few pixels wide (see `src/hotcorner.rs`); run `cargo test` before every rebuild.

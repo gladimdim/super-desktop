@@ -1265,15 +1265,21 @@ fn spawn_vte(
     let agent_type = data.borrow().agent_type.clone();
     let cmd = data.borrow().command.clone();
     let agent_session_id = data.borrow().agent_session_id.clone();
+    // The folder this card was created in (the top bar's field at that time),
+    // not the field's current value: every harness scopes its resume and its
+    // history to the cwd, so a card restored elsewhere would come back
+    // attached to a different project. Cards from before this existed have
+    // `None` and keep the old behaviour ($HOME).
+    let cwd = crate::tmux::resolve_workspace_dir(data.borrow().workspace_dir.as_deref());
     ensure_session_with_agent_id(
         &session,
         &agent_type,
         Some(&cmd),
         agent_session_id.as_deref(),
+        Some(&cwd),
     );
 
     let tmux = tmux_bin();
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let argv = [tmux.as_str(), "-2", "attach-session", "-t", session.as_str()];
 
     let mut env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
@@ -1293,7 +1299,7 @@ fn spawn_vte(
 
     term.spawn_async(
         PtyFlags::DEFAULT,
-        Some(home.as_str()),
+        Some(cwd.as_str()),
         &argv,
         &env_refs,
         glib::SpawnFlags::DEFAULT,
@@ -1500,6 +1506,7 @@ mod tests {
             created_at: 0.0,
             tag: 0,
             agent_session_id: None,
+            workspace_dir: None,
         }
     }
 

@@ -1,28 +1,54 @@
-//! ⚙ Harness settings panel for the overlay HUD.
+//! ⚙ Settings panel for the overlay HUD.
 //!
 //! A floating card that lives INSIDE the super-desktop layer-shell overlay
-//! (centered above notes and terminals) — never a separate Hyprland window. It
-//! lists the harnesses that actually resolve on THIS machine (see
-//! `tmux::detect_harnesses`) and lets the user pick which of them appear as
-//! launch buttons in the top bar.
+//! (centered above notes and terminals) — never a separate Hyprland window. Two
+//! things live here:
+//!
+//! 1. **Show / hide shortcut** — a recorder: click Record, press a combination,
+//!    and it becomes the Hyprland binding for `super-desktop toggle`. Capture,
+//!    spelling and the Hyprland side live in `crate::shortcut`; this file owns
+//!    the widget state machine and every way out of a recording.
+//! 2. **Top bar launch buttons** — the harnesses that actually resolve on THIS
+//!    machine (see `tmux::detect_harnesses`), each with a show/hide toggle.
 //!
 //! Same visual language as the 📱 launcher panel: `mini-terminal` +
 //! `term-header` card chrome whose body is a stack of numbered
 //! `.launcher-section` panels (chrome helpers shared with `launcher_settings`).
-//! Colours, radii and spacing live in `styles.rs` (see the "Harness Settings
-//! Panel" block) — this file only builds widgets and reads detection.
+//! Colours, radii and spacing live in `styles.rs` — this file only builds
+//! widgets, reads detection and drives the recorder.
 //!
 //! The selection itself is owned by the window: this panel reads it, reports
-//! changes through `on_change` and re-detects every time it is opened.
+//! changes through `on_change` (harnesses) and `on_shortcut_change` (shortcut)
+//! and re-detects every time it is opened.
 
+use gtk4::gdk;
+use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{pango, Align, Box, Button, Image, Label, Orientation, PolicyType, ScrolledWindow};
-use std::cell::RefCell;
+use gtk4::{
+    pango, Align, Box, Button, EventControllerKey, Image, Label, Orientation, PolicyType,
+    PropagationPhase, ScrolledWindow,
+};
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use crate::launcher_settings::{chip, section_card};
+use crate::shortcut::{Capture, CaptureGuard};
 use crate::state::AppState;
 use crate::tmux::{detect_harnesses, HarnessInfo};
+
+/// How long a recording may stay armed before it cancels itself. The recorder
+/// holds the keyboard (see `shortcut::begin_capture`), so "the user clicked
+/// Record and walked away" has to end on its own.
+const RECORD_WATCHDOG: Duration = Duration::from_millis(10_000);
+/// The watchdog is checked by a 250ms tick, not by a timer of its own.
+const RECORD_TICK: Duration = Duration::from_millis(250);
+
+/// The one way out of a recording; `None` keeps the note as it is.
+type StopRecording = Rc<dyn Fn(Option<&str>)>;
+/// Commits a captured combination together with its physical (X11) keycode.
+type CommitShortcut = Rc<dyn Fn(&str, u32)>;
+
 
 /// Floating card + its refresh handle. The overlay adds `widget` centered and
 /// toggles visibility; `refresh` re-detects the harnesses on this machine and
@@ -137,11 +163,16 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
     (row, btn)
 }
 
-/// Build the panel. `on_change` receives the new full selection (harness keys,
-/// in detection order) whenever the user flips a row or a bulk button.
+/// Build the panel.
+///
+/// `on_change` receives the new full selection (harness keys, in detection
+/// order) whenever the user flips a row or a bulk button;
+/// `on_shortcut_change` receives a freshly recorded key combination once it has
+/// been written into Hyprland's config.
 pub fn build_harness_settings_panel(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<dyn Fn(Vec<String>)>,
+    on_shortcut_change: Rc<dyn Fn(String)>,
 ) -> HarnessSettingsPanel {
     let outer = Box::new(Orientation::Vertical, 0);
     outer.add_css_class("mini-terminal");
@@ -160,10 +191,10 @@ pub fn build_harness_settings_panel(
     let titles = Box::new(Orientation::Vertical, 0);
     titles.set_hexpand(true);
     titles.set_valign(Align::Center);
-    let title = Label::new(Some("Harness settings"));
+    let title = Label::new(Some("Settings"));
     title.add_css_class("term-title");
     title.set_halign(Align::Start);
-    let subtitle = Label::new(Some("Top bar launch buttons"));
+    let subtitle = Label::new(Some("Shortcut · top bar launch buttons"));
     subtitle.add_css_class("launcher-subtitle");
     subtitle.set_halign(Align::Start);
     titles.append(&title);
@@ -187,8 +218,48 @@ pub fn build_harness_settings_panel(
     let root = Box::new(Orientation::Vertical, 10);
     root.add_css_class("launcher-body");
 
-    // ---- 1 · harnesses installed here, each with a show/hide toggle ----
-    let (head, body) = section_card(&root, "1", "Harnesses on this machine");
+    // ---- 1 · the overlay's own show / hide shortcut ----
+    //
+    // Recording seizes the keyboard for a few seconds (`shortcut::begin_capture`
+    // parks Hyprland in a throw-away submap so no global bind can eat the key),
+    // so every exit — Esc, the button turning into Cancel, the watchdog, the
+    // panel being closed, the panel being reopened — funnels through
+    // `stop_recording`, which is also the only thing that releases the guard.
+    let (_, body) = section_card(&root, "1", "Show / hide shortcut");
+    let combo_label = Label::new(None);
+    combo_label.add_css_class("shortcut-combo");
+    combo_label.set_valign(Align::Center);
+    combo_label.set_xalign(0.0);
+    combo_label.set_hexpand(true);
+    combo_label.set_selectable(true);
+    combo_label.set_tooltip_text(Some("Written to ~/.config/hypr/bindings.lua"));
+
+    let btn_record = Button::with_label("⏺ Record");
+    btn_record.set_tooltip_text(Some("Press the key combination you want to use"));
+    btn_record.add_css_class("launcher-btn");
+    btn_record.add_css_class("launcher-btn-primary");
+    btn_record.set_valign(Align::Center);
+
+    let combo_row = Box::new(Orientation::Horizontal, 10);
+    combo_row.add_css_class("shortcut-row");
+    combo_row.append(&combo_label);
+    combo_row.append(&btn_record);
+    body.append(&combo_row);
+
+    let shortcut_note = Label::new(None);
+    shortcut_note.add_css_class("launcher-note");
+    shortcut_note.set_xalign(0.0);
+    shortcut_note.set_wrap(true);
+    shortcut_note.set_visible(false);
+    body.append(&shortcut_note);
+    let shortcut_hint = Label::new(None);
+    shortcut_hint.add_css_class("launcher-hint");
+    shortcut_hint.set_xalign(0.0);
+    shortcut_hint.set_wrap(true);
+    body.append(&shortcut_hint);
+
+    // ---- 2 · harnesses installed here, each with a show/hide toggle ----
+    let (head, body) = section_card(&root, "2", "Harnesses on this machine");
     let count_chip = chip("…");
     head.append(&count_chip);
 
@@ -216,8 +287,8 @@ pub fn build_harness_settings_panel(
     summary.set_wrap(true);
     body.append(&summary);
 
-    // ---- 2 · bulk actions ----
-    let (_, body) = section_card(&root, "2", "Top bar");
+    // ---- 3 · bulk actions ----
+    let (_, body) = section_card(&root, "3", "Top bar");
     let actions = Box::new(Orientation::Horizontal, 8);
     actions.add_css_class("launcher-actions");
     let btn_all = Button::with_label("✓ Show all");
@@ -254,6 +325,227 @@ pub fn build_harness_settings_panel(
     scroll.set_vexpand(true);
     scroll.set_hexpand(true);
     outer.append(&scroll);
+
+    // ---- shortcut recorder ----
+    // `armed` holds the keymap guard for exactly as long as the listener is
+    // live: dropping it is what gives the user their global shortcuts back.
+    let recording = Rc::new(Cell::new(false));
+    let armed: Rc<RefCell<Option<CaptureGuard>>> = Rc::new(RefCell::new(None));
+
+    // Paint the combo and the Record/Cancel button from `recording`.
+    let paint_recorder: Rc<dyn Fn()> = {
+        let recording = Rc::clone(&recording);
+        let state = Rc::clone(&state);
+        let combo_label = combo_label.clone();
+        let btn_record = btn_record.clone();
+        let shortcut_hint = shortcut_hint.clone();
+        Rc::new(move || {
+            if recording.get() {
+                combo_label.set_text("Press your combination…");
+                combo_label.add_css_class("shortcut-recording");
+                btn_record.set_label("✕ Cancel");
+                btn_record.remove_css_class("launcher-btn-primary");
+                btn_record.add_css_class("launcher-btn-danger");
+                shortcut_hint.set_text(
+                    "Listening — global shortcuts are paused until you press one. \
+                     Esc keeps the current combination.",
+                );
+            } else {
+                combo_label.set_text(&crate::shortcut::current_combo(
+                    state.borrow().toggle_shortcut.as_deref(),
+                ));
+                combo_label.remove_css_class("shortcut-recording");
+                btn_record.set_label("⏺ Record");
+                btn_record.remove_css_class("launcher-btn-danger");
+                btn_record.add_css_class("launcher-btn-primary");
+                shortcut_hint.set_text(
+                    "Click Record, then press the combination you want — SUPER/CTRL/ALT \
+                     plus a key, or F1-F12 on their own. Global shortcuts pause while \
+                     recording, so any combination can be captured.",
+                );
+            }
+        })
+    };
+
+    // The one way out of a recording. `message` is the outcome to show (None
+    // keeps whatever is already there) — every cancel path calls this.
+    let stop_recording: StopRecording = {
+        let recording = Rc::clone(&recording);
+        let armed = Rc::clone(&armed);
+        let paint = Rc::clone(&paint_recorder);
+        let shortcut_note = shortcut_note.clone();
+        Rc::new(move |message: Option<&str>| {
+            // Release first: this is what un-pauses the user's shortcuts.
+            if let Some(guard) = armed.borrow_mut().take() {
+                guard.end();
+            }
+            let was_recording = recording.replace(false);
+            if let Some(message) = message {
+                shortcut_note.remove_css_class("launcher-note-error");
+                shortcut_note.set_text(message);
+                shortcut_note.set_visible(true);
+            } else {
+                shortcut_note.set_visible(false);
+            }
+            if was_recording {
+                paint();
+            }
+        })
+    };
+
+    // A captured combination: leave the recording, then write it to Hyprland.
+    let commit_shortcut: CommitShortcut = {
+        let state = Rc::clone(&state);
+        let on_shortcut_change = Rc::clone(&on_shortcut_change);
+        let stop_recording = Rc::clone(&stop_recording);
+        let paint = Rc::clone(&paint_recorder);
+        let shortcut_note = shortcut_note.clone();
+        Rc::new(move |combo: &str, keycode: u32| {
+            stop_recording(None);
+            let (message, failed) = match crate::shortcut::apply_combo(combo, Some(keycode)) {
+                Ok(applied) => {
+                    {
+                        let mut s = state.borrow_mut();
+                        s.toggle_shortcut = Some(applied.combo.clone());
+                    }
+                    let snapshot = state.borrow().clone();
+                    crate::state::save_state_async(snapshot);
+                    on_shortcut_change(applied.combo.clone());
+                    match (applied.warning, applied.conflict) {
+                        (Some(warning), _) => (format!("⚠ {warning}"), true),
+                        (None, Some(other)) => (
+                            format!("● {combo} toggles SUPER DESKTOP — it used to run “{other}”."),
+                            false,
+                        ),
+                        (None, None) => (format!("● {combo} toggles SUPER DESKTOP."), false),
+                    }
+                }
+                Err(e) => (format!("⚠ {e}"), true),
+            };
+            // Restyle from scratch: an outcome shown after an earlier failure
+            // must not inherit the red left over from it.
+            shortcut_note.remove_css_class("launcher-note-error");
+            if failed {
+                shortcut_note.add_css_class("launcher-note-error");
+            }
+            shortcut_note.set_text(&message);
+            shortcut_note.set_visible(true);
+            paint();
+        })
+    };
+
+    let start_recording: Rc<dyn Fn()> = {
+        let recording = Rc::clone(&recording);
+        let armed = Rc::clone(&armed);
+        let paint = Rc::clone(&paint_recorder);
+        let shortcut_note = shortcut_note.clone();
+        let btn_record = btn_record.clone();
+        Rc::new(move || {
+            if recording.get() {
+                return;
+            }
+            // The keys have to reach THIS surface: clicking Record focuses the
+            // button, and with it the panel the capture controller sits on.
+            btn_record.grab_focus();
+            let guard = crate::shortcut::begin_capture();
+            // Without the guard Hyprland keeps handling the shortcuts it owns
+            // before they ever reach this window, so say so instead of letting
+            // the user press a taken combination and watch nothing happen.
+            let unguarded = !guard.armed();
+            *armed.borrow_mut() = Some(guard);
+            recording.set(true);
+            shortcut_note.set_visible(false);
+            if unguarded {
+                shortcut_note.add_css_class("launcher-note-error");
+                shortcut_note.set_text(
+                    "Could not pause Hyprland's own shortcuts — a combination that is \
+                     already bound will not reach this window.",
+                );
+                shortcut_note.set_visible(true);
+            }
+            paint();
+        })
+    };
+
+    // The listener. Capture phase, on the whole panel: it must see the keys
+    // before the widget the user last clicked, and before the window's own Esc
+    // handler — while recording, Esc cancels the recording, it does not hide
+    // the overlay.
+    let key_ctrl = EventControllerKey::new();
+    key_ctrl.set_propagation_phase(PropagationPhase::Capture);
+    {
+        let recording = Rc::clone(&recording);
+        let stop_recording = Rc::clone(&stop_recording);
+        let commit_shortcut = Rc::clone(&commit_shortcut);
+        let shortcut_note = shortcut_note.clone();
+        key_ctrl.connect_key_pressed(move |_, key, keycode, mods| {
+            if !recording.get() {
+                return glib::Propagation::Proceed;
+            }
+            if key == gdk::Key::Escape {
+                stop_recording(Some("Recording cancelled — the shortcut is unchanged."));
+                return glib::Propagation::Stop;
+            }
+            match crate::shortcut::interpret(key, mods) {
+                Capture::Combo(combo) => {
+                    commit_shortcut(&combo, keycode);
+                    glib::Propagation::Stop
+                }
+                Capture::NeedsModifier => {
+                    shortcut_note.add_css_class("launcher-note-error");
+                    shortcut_note.set_text(
+                        "Hold SUPER, CTRL or ALT with the key — or use F1-F12 on their own.",
+                    );
+                    shortcut_note.set_visible(true);
+                    glib::Propagation::Stop
+                }
+                Capture::Waiting => glib::Propagation::Stop,
+            }
+        });
+    }
+    outer.add_controller(key_ctrl);
+
+    btn_record.connect_clicked({
+        let recording = Rc::clone(&recording);
+        let start_recording = Rc::clone(&start_recording);
+        let stop_recording = Rc::clone(&stop_recording);
+        move |_| {
+            if recording.get() {
+                stop_recording(Some("Recording cancelled — the shortcut is unchanged."));
+            } else {
+                start_recording();
+            }
+        }
+    });
+
+    // Two ways out of a recording nobody finishes: the panel/overlay going
+    // away, and the watchdog. Both matter because the recorder holds the
+    // keyboard — a stuck recording is a desktop with no working shortcuts.
+    {
+        let recording = Rc::clone(&recording);
+        let stop_recording = Rc::clone(&stop_recording);
+        let panel = outer.downgrade();
+        let mut armed_ticks = 0u32;
+        let max_ticks = (RECORD_WATCHDOG.as_millis() / RECORD_TICK.as_millis()).max(1) as u32;
+        glib::timeout_add_local(RECORD_TICK, move || {
+            let Some(panel) = panel.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if !recording.get() {
+                armed_ticks = 0;
+                return glib::ControlFlow::Continue;
+            }
+            armed_ticks += 1;
+            // `is_mapped`, not `is_visible`: hiding the whole overlay unmaps the
+            // window without ever touching the panel's own visibility flag.
+            if !panel.is_mapped() {
+                stop_recording(Some("Recording cancelled — the panel was closed."));
+            } else if armed_ticks >= max_ticks {
+                stop_recording(Some("No combination captured — try again."));
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     // ---- shared state: selection, detection order, row buttons ----
     let selection: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -305,7 +597,14 @@ pub fn build_harness_settings_panel(
         let paint = Rc::clone(&paint);
         let apply = Rc::clone(&apply);
         let state = Rc::clone(&state);
+        // Reopening (or restyling on a theme switch) must never leave a
+        // recording armed with the keyboard held.
+        let stop_recording = Rc::clone(&stop_recording);
+        let paint_recorder = Rc::clone(&paint_recorder);
         Rc::new(move || {
+            stop_recording(None);
+            paint_recorder();
+
             let detected = detect_harnesses();
             let light_theme = crate::theme::current_theme().mode == "light";
 
@@ -437,11 +736,36 @@ mod tests {
         let app_state = Rc::new(RefCell::new(AppState::default()));
         let seen: Rc<RefCell<Vec<Vec<String>>>> = Rc::new(RefCell::new(Vec::new()));
         let seen_cb = Rc::clone(&seen);
+        let shortcut_changes: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let shortcut_cb = Rc::clone(&shortcut_changes);
         let panel = build_harness_settings_panel(
             Rc::clone(&app_state),
             Rc::new(move |keys: Vec<String>| seen_cb.borrow_mut().push(keys)),
+            Rc::new(move |combo: String| shortcut_cb.borrow_mut().push(combo)),
         );
         (panel.refresh)();
+
+        // Three numbered sections: shortcut, harnesses, top bar.
+        assert_eq!(count_class(&panel.widget, "launcher-section"), 3);
+        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 3);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 3);
+
+        // The recorder shows the shipped shortcut until one is recorded, and
+        // switches to the stored one as soon as state.json has it. Note what
+        // this test must NOT do: click Record. That would arm the real keymap
+        // guard and park the shortcuts of the machine running the tests (see
+        // `shortcut::begin_capture`).
+        let record = find_buttons(&panel.widget, "launcher-btn")
+            .into_iter()
+            .find(|b| b.label().as_deref() == Some("⏺ Record"))
+            .expect("the shortcut section must offer a Record button");
+        assert_eq!(combo_text(&panel.widget), crate::shortcut::DEFAULT_COMBO);
+        assert!(shortcut_changes.borrow().is_empty(), "nothing recorded yet");
+
+        app_state.borrow_mut().toggle_shortcut = Some("SUPER + SHIFT + K".to_string());
+        (panel.refresh)();
+        assert_eq!(combo_text(&panel.widget), "SUPER + SHIFT + K");
+        assert_eq!(record.label().as_deref(), Some("⏺ Record"));
 
         // One toggle row per detected harness, all ON by default.
         let toggles = find_buttons(&panel.widget, "harness-toggle");
@@ -477,6 +801,36 @@ mod tests {
         assert!(toggles[1..]
             .iter()
             .all(|b| b.label().as_deref() == Some("ON")));
+    }
+
+    /// Every widget carrying `class` in the subtree rooted at `w`.
+    fn find_widgets(w: &gtk4::Widget, class: &str) -> Vec<gtk4::Widget> {
+        let mut out = Vec::new();
+        if w.has_css_class(class) {
+            out.push(w.clone());
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            out.extend(find_widgets(&c, class));
+            child = c.next_sibling();
+        }
+        out
+    }
+
+    /// How many widgets carry `class` in the subtree rooted at `w`.
+    fn count_class(w: &gtk4::Widget, class: &str) -> usize {
+        find_widgets(w, class).len()
+    }
+
+    /// The text of the recorder's combo label.
+    fn combo_text(w: &gtk4::Widget) -> String {
+        let found = find_widgets(w, "shortcut-combo");
+        assert_eq!(found.len(), 1, "exactly one combo label");
+        found[0]
+            .downcast_ref::<Label>()
+            .expect("combo label is a Label")
+            .label()
+            .to_string()
     }
 
     /// Every button carrying `class` in the subtree rooted at `w`.

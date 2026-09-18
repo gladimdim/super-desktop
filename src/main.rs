@@ -2,8 +2,11 @@ mod brand;
 mod bridge;
 mod crashlog;
 mod harness_settings;
+mod hotcorner;
+mod jev;
 mod launcher_settings;
 mod mini_terminal;
+mod shortcut;
 mod state;
 mod sticky_note;
 mod styles;
@@ -12,6 +15,7 @@ mod theme;
 mod tmux;
 mod usage;
 mod window;
+mod workspace_bar;
 mod ws;
 
 /// Test-only helper for the GTK-dependent tests.
@@ -58,7 +62,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::Application;
 use serde_json::json;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -178,6 +182,10 @@ struct AppContext {
     /// same thing any more — a hidden window stays alive on purpose.
     shown: bool,
     last_toggle: Instant,
+    /// "The pointer is parked in the top-left corner zone", written by the
+    /// corner surface while the overlay is hidden and by the overlay window
+    /// itself while it is visible (see `hotcorner`).
+    hot_inside: Rc<Cell<bool>>,
 }
 
 fn main() {
@@ -327,6 +335,7 @@ fn run_daemon(start_visible: bool) {
         window: None,
         shown: false,
         last_toggle: Instant::now() - Duration::from_secs(10),
+        hot_inside: Rc::new(Cell::new(false)),
     }));
 
     let (ipc_tx, ipc_rx) = channel::<IpcMessage>();
@@ -338,7 +347,24 @@ fn run_daemon(start_visible: bool) {
     let ctx_activate = Rc::clone(&context);
     let app_clone = app.clone();
 
+    // The hot corner has to outlive every hide/show of the overlay, so its
+    // surface is spawned once, here: a window cannot be presented before the
+    // application is running, and keeping it in this handler is what keeps it
+    // mapped.
+    let hot_corner: Rc<RefCell<Option<hotcorner::HotCorner>>> = Rc::new(RefCell::new(None));
     app.connect_activate(move |application| {
+        if hot_corner.borrow().is_none() {
+            let hot_inside = Rc::clone(&ctx_activate.borrow().hot_inside);
+            let ctx_toggle = Rc::clone(&ctx_activate);
+            let app_toggle = application.clone();
+            *hot_corner.borrow_mut() = hotcorner::HotCorner::spawn(
+                application,
+                hot_inside,
+                move || {
+                    toggle_window(&ctx_toggle, &app_toggle);
+                },
+            );
+        }
         if start_visible {
             show_window(&ctx_activate, application);
         }
@@ -429,9 +455,8 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     }
 
     let ctx_close = Rc::clone(ctx);
-    let win = SuperDesktopWindow::new(app, move || {
-        hide_window(&ctx_close);
-    });
+    let hot_inside = Rc::clone(&ctx.borrow().hot_inside);
+    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside);
 
     win.window.present();
     win.start_slide_in();
@@ -470,7 +495,8 @@ fn warm_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
         styles::reload_styles();
     }
     let ctx_close = Rc::clone(ctx);
-    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close));
+    let hot_inside = Rc::clone(&ctx.borrow().hot_inside);
+    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside);
     // Not presented: the window stays unmapped until the first show.
     ctx.borrow_mut().window = Some(win);
 }

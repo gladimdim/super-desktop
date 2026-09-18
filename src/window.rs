@@ -6,7 +6,7 @@ use gtk4::{
     Fixed, Image, Label, Orientation, Overlay, Popover, PositionType, Separator,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -35,6 +35,15 @@ fn set_counts_label(badge: &Label, notes: usize, terms: usize) {
     if badge.label().as_str() != text.as_str() {
         badge.set_label(&text);
     }
+}
+
+/// Show the stored toggle shortcut in the HUD: the trailing hint label and the
+/// Hide button's tooltip. Called once at build time and again whenever the ⚙
+/// Settings panel records a new combination.
+fn paint_shortcut_hints(hint: &Label, btn_close: &Button, state: &AppState) {
+    let combo = crate::shortcut::current_combo(state.toggle_shortcut.as_deref());
+    hint.set_text(&format!("[{combo}]"));
+    btn_close.set_tooltip_text(Some(&format!("Hide Super Desktop [{combo} or Esc]")));
 }
 
 pub struct SuperDesktopWindow {
@@ -69,13 +78,26 @@ pub struct SuperDesktopWindow {
     /// Floating panels (📱 launcher, ⚙ settings) inside `root_overlay`; hidden
     /// with the window so they cannot reappear on the next show.
     overlay_panels: Vec<gtk4::Widget>,
+    /// The workspace field's ▾ list. A popover is its own Wayland surface, so
+    /// hiding the window does not dismiss it: it must be popped down
+    /// explicitly, or it stays on screen over an empty desktop.
+    ws_popover: Popover,
     /// Bumped by `show_again`; a slide-out that finishes afterwards must not
     /// unmap the window again (hide → show inside the 140ms animation).
     show_token: std::cell::Cell<u64>,
 }
 
 impl SuperDesktopWindow {
-    pub fn new<FClose: Fn() + 'static>(app: &Application, on_request_close: FClose) -> Rc<Self> {
+    /// `hot_inside` is the daemon's shared "pointer is in the top-left corner
+    /// zone" flag: this window is full-screen and therefore sees every pointer
+    /// move while it is visible, which is the half of the hot-corner gesture the
+    /// corner surface cannot provide once the overlay covers it (see
+    /// `crate::hotcorner`).
+    pub fn new<FClose: Fn() + 'static>(
+        app: &Application,
+        on_request_close: FClose,
+        hot_inside: Rc<Cell<bool>>,
+    ) -> Rc<Self> {
         let window = ApplicationWindow::new(app);
 
         window.init_layer_shell();
@@ -140,6 +162,18 @@ impl SuperDesktopWindow {
         // is just `set_visible` (no HUD rebuild).
         let harness_buttons: Rc<RefCell<Vec<(String, Button)>>> =
             Rc::new(RefCell::new(Vec::new()));
+
+        // HUD pieces the ⚙ panel writes to when the shortcut changes. They are
+        // built here (and appended to `hud` further down) so the panel's
+        // callback can capture them.
+        let on_close_rc = Rc::new(on_request_close);
+        let btn_close = Button::with_label("✕ Hide");
+        btn_close.add_css_class("hud-button");
+        btn_close.add_css_class("hud-button-danger");
+        let hint = Label::new(None);
+        hint.add_css_class("hud-shortcut");
+        paint_shortcut_hints(&hint, &btn_close, &state.borrow());
+
         let settings_panel = crate::harness_settings::build_harness_settings_panel(
             Rc::clone(&state),
             Rc::new({
@@ -157,6 +191,24 @@ impl SuperDesktopWindow {
                     }
                 }
             }),
+            Rc::new({
+                // The panel has already written the binding into
+                // bindings.lua and reloaded Hyprland; all that is left is to
+                // remember the choice and to stop the HUD advertising the old
+                // combination.
+                let state = Rc::clone(&state);
+                let hint = hint.clone();
+                let btn_close = btn_close.clone();
+                move |combo: String| {
+                    let snapshot = {
+                        let mut s = state.borrow_mut();
+                        s.toggle_shortcut = Some(combo);
+                        s.clone()
+                    };
+                    paint_shortcut_hints(&hint, &btn_close, &snapshot);
+                    crate::state::save_state_async(snapshot);
+                }
+            }),
         );
         settings_panel.widget.set_visible(false);
         settings_panel.widget.set_halign(Align::Center);
@@ -168,6 +220,16 @@ impl SuperDesktopWindow {
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
         brand.add_css_class("hud-title");
         hud.append(&brand);
+
+        // Workspace folder: the directory new harness cards start in. It sits
+        // right after the brand so the folder in use is the first thing read
+        // when a card is launched (see workspace_bar for why `~` is a bad
+        // default once several agents run at once).
+        let workspace_bar = crate::workspace_bar::build_workspace_bar(
+            Rc::clone(&state),
+            Rc::new(crate::state::save_state_async),
+        );
+        hud.append(&workspace_bar.widget);
 
         let hud_badge = Label::new(Some("0 Notes • 0 Agents"));
         hud_badge.add_css_class("hud-badge");
@@ -203,6 +265,7 @@ impl SuperDesktopWindow {
                 launcher_panel.widget.clone(),
                 settings_panel.widget.clone(),
             ],
+            ws_popover: workspace_bar.popover.clone(),
             show_token: std::cell::Cell::new(0),
         });
 
@@ -362,20 +425,14 @@ impl SuperDesktopWindow {
         });
         hud.append(&btn_settings);
 
-        // Close
-        let btn_close = Button::with_label("✕ Hide");
-        btn_close.set_tooltip_text(Some("Hide Super Desktop [SUPER + SHIFT + Q or Esc]"));
-        btn_close.add_css_class("hud-button");
-        btn_close.add_css_class("hud-button-danger");
-        let on_close_rc = Rc::new(on_request_close);
+        // Close (its tooltip already names the current shortcut — see
+        // `paint_shortcut_hints`).
         let on_close_btn = Rc::clone(&on_close_rc);
         btn_close.connect_clicked(move |_| {
             on_close_btn();
         });
         hud.append(&btn_close);
 
-        let hint = Label::new(Some("[SUPER + SHIFT + Q]"));
-        hint.add_css_class("hud-shortcut");
         hud.append(&hint);
 
         hud.set_halign(Align::Center);
@@ -390,8 +447,15 @@ impl SuperDesktopWindow {
         let key_ctrl = EventControllerKey::new();
         let on_close_key = Rc::clone(&on_close_rc);
         let win_w = Rc::downgrade(&win_rc);
+        let ws_popover = workspace_bar.popover.clone();
         key_ctrl.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::Escape {
+                // An open folder list is the innermost thing Esc can dismiss:
+                // closing the whole overlay here would lose the typed path.
+                if ws_popover.is_visible() {
+                    ws_popover.popdown();
+                    return glib::Propagation::Stop;
+                }
                 if let Some(w) = win_w.upgrade() {
                     if let Some(focused) = gtk4::prelude::RootExt::focus(&w.window) {
                         let type_name = focused.type_().name();
@@ -418,7 +482,38 @@ impl SuperDesktopWindow {
         });
         win_rc.window.add_controller(key_ctrl);
 
+        // Hot corner, visible half: feed the shared flag from pointer moves over
+        // the overlay itself. Passive — an `EventControllerMotion` observes and
+        // never consumes, so the drag/resize controllers are unaffected.
+        let corner_motion = EventControllerMotion::new();
+        // Capture phase, not bubbling: the overlay is a full screen of widgets
+        // (canvas, notes, terminal cards), each with its own controllers, and a
+        // bubbling controller only ever sees events whose target bubbles up to
+        // it. Capturing runs this one before any child, so the flag follows the
+        // pointer wherever it is over the overlay — which is what makes the
+        // visible -> hidden half of the gesture work.
+        corner_motion.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        {
+            let hot_inside = Rc::clone(&hot_inside);
+            corner_motion.connect_enter(move |_, x, y| {
+                hot_inside.set(x < crate::hotcorner::CORNER_PX && y < crate::hotcorner::CORNER_PX);
+            });
+        }
+        {
+            let hot_inside = Rc::clone(&hot_inside);
+            corner_motion.connect_motion(move |_, x, y| {
+                let inside = x < crate::hotcorner::CORNER_PX && y < crate::hotcorner::CORNER_PX;
+                hot_inside.set(inside);
+            });
+        }
+        win_rc.window.add_controller(corner_motion);
+
         win_rc.window.set_child(Some(&root_overlay));
+        // Nothing in the HUD takes focus by itself. Without this GTK focuses the
+        // first focusable widget on every show — now the workspace field — so
+        // opening the overlay would put the caret in the folder path and let
+        // stray keystrokes edit it. Focus follows what the user clicks.
+        vte4::GtkWindowExt::set_focus(&win_rc.window, None::<&gtk4::Widget>);
         win_rc.load_items();
 
         // Periodic status refresh
@@ -627,7 +722,10 @@ impl SuperDesktopWindow {
     }
 
     pub fn create_new_terminal(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>) {
-        let (sess, cmd_run) = create_session(agent_type, cmd);
+        // The folder from the top bar field: this card's harness starts there,
+        // and keeps it for its whole life (see TerminalData::workspace_dir).
+        let workspace_dir = crate::state::effective_workspace_dir(&self.state.borrow());
+        let (sess, cmd_run) = create_session(agent_type, cmd, Some(&workspace_dir));
         let idx = self.terminal_cards.borrow().len();
 
         // Default size for a new harness: 640x480, clamped to the screen.
@@ -664,6 +762,7 @@ impl SuperDesktopWindow {
             created_at: now,
             tag: DEFAULT_TERMINAL_TAG,
             agent_session_id: None,
+            workspace_dir: Some(workspace_dir),
         };
 
         self.spawn_terminal_widget(data, true);
@@ -1208,6 +1307,9 @@ impl SuperDesktopWindow {
         for panel in &self.overlay_panels {
             panel.set_visible(false);
         }
+        // …and neither may the workspace list, which is not part of the
+        // overlay's widget tree (it is its own popup surface).
+        self.ws_popover.popdown();
         self.window.set_visible(false);
     }
 

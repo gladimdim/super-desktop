@@ -15,6 +15,24 @@ window.super-desktop-window {{
     background-color: {win_bg};
 }}
 
+/* ============== Hot corner (almost-invisible input surface) ============== */
+/* The 8x8 layer surface in the top-left corner that receives the pointer for
+   the hot-corner gesture (see hotcorner.rs).
+
+   It paints 1/255 of black — not `transparent`, on purpose, and this is
+   measured, not stylistic: GTK treats a FULLY transparent window as
+   click-through, so it both refuses the pointer (no dwell, no gesture) and
+   ignores the size request (the surface silently becomes 200x200, which would
+   then swallow clicks far outside the corner). An 8-bit alpha of 1 is the
+   smallest value that is not zero, so this is the least ink that keeps the
+   surface real: a 0.4% darkening over 8x8 pixels, invisible on any wallpaper,
+   and it must stay that way — 0.002 still rounds to nothing. */
+window.sd-hot-corner {{
+    background-color: rgba(0, 0, 0, 0.004);
+    background-image: none;
+    box-shadow: none;
+}}
+
 /* ================= Top Floating HUD Bar ================= */
 .hud-bar {{
     background-color: {hud_bg};
@@ -77,6 +95,134 @@ window.super-desktop-window {{
     color: {dark_foreground};
     font-size: 11px;
     font-weight: 500;
+}}
+
+/* ================= Top Bar: Workspace Folder Field ================= */
+/* The folder new harness cards start in, plus its ▾ re-use history. */
+.ws-bar {{
+    margin-left: 2px;
+}}
+
+.ws-icon {{
+    color: {dark_foreground};
+    font-size: 12px;
+}}
+
+entry.ws-entry {{
+    background-color: {btn_bg};
+    color: {foreground};
+    border: 1px solid {btn_border};
+    border-radius: 9999px;
+    padding: 2px 12px;
+    min-height: 22px;
+    font-size: 12px;
+    font-weight: 600;
+    transition: border-color 150ms ease;
+}}
+
+entry.ws-entry:focus {{
+    border-color: {accent};
+}}
+
+/* The text is not a folder that exists: keep the old folder in use and say so
+   instead of starting cards somewhere the user did not ask for. */
+entry.ws-entry.ws-entry-invalid {{
+    border-color: {bright_red};
+    color: {bright_red};
+}}
+
+.ws-menu-btn {{
+    background-color: {btn_bg};
+    color: {foreground};
+    border: 1px solid {btn_border};
+    border-radius: 9999px;
+    padding: 2px 8px;
+    min-height: 0;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+.ws-menu-btn:hover {{
+    background-color: {btn_hover_bg};
+    color: {bright_foreground};
+    border-color: {accent};
+}}
+
+popover.ws-pop {{
+    background-color: {hud_bg};
+    border: 1px solid {hud_border};
+    border-radius: 12px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 1px {hud_glow};
+    padding: 0;
+}}
+
+popover.ws-pop > contents {{
+    background-color: transparent;
+    border-radius: 12px;
+    padding: 0;
+}}
+
+.ws-pop-box {{
+    padding: 6px;
+    min-width: 280px;
+}}
+
+.ws-row-pick {{
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    padding: 4px 6px;
+    border-radius: 8px;
+}}
+
+.ws-row-pick:hover {{
+    background-color: {btn_hover_bg};
+}}
+
+.ws-row-mark {{
+    color: {accent};
+    font-size: 11px;
+    font-weight: 700;
+    min-width: 10px;
+}}
+
+.ws-row-name {{
+    color: {foreground};
+    font-size: 12px;
+    font-weight: 700;
+}}
+
+/* The folder currently in use stands out from the rest of the history. */
+.ws-row-active .ws-row-name {{
+    color: {accent};
+}}
+
+.ws-row-path {{
+    color: {dark_foreground};
+    font-size: 11px;
+    font-weight: 500;
+}}
+
+.ws-del {{
+    background-color: transparent;
+    border: none;
+    box-shadow: none;
+    color: {dark_foreground};
+    padding: 2px 6px;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+.ws-del:hover {{
+    background-color: {danger_bg};
+    color: {bright_red};
+}}
+
+.ws-empty {{
+    color: {dark_foreground};
+    font-size: 11px;
+    padding: 4px 6px;
 }}
 
 /* ================= Sticky Notes ================= */
@@ -761,6 +907,33 @@ separator.launcher-sep {{
     border: 1px solid {status_exited_border};
 }}
 
+/* ============ Shortcut recorder (⚙ Settings · section 1) ============ */
+/* The recorded combination reads as a key, not as body text: mono, boxed and
+   selectable, so it can be compared with the HUD hint at a glance. */
+.shortcut-row {{
+    margin-top: 2px;
+}}
+
+.shortcut-combo {{
+    background-color: {launcher_pin_bg};
+    color: {bright_foreground};
+    border: 1px solid {launcher_section_border};
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-family: '{font_family}', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}}
+
+/* Armed: whatever is pressed next becomes the shortcut. */
+.shortcut-recording {{
+    color: {bright_yellow};
+    border: 1px solid {accent};
+    font-style: italic;
+    font-weight: 600;
+}}
+
 /* ================= Harness Settings Panel ================= */
 /* Second overlay card, same chrome as the launcher panel; rows read
    `[logo] name …… resolved command [ON/OFF]`. */
@@ -1055,6 +1228,70 @@ mod tests {
             "harness-toggle-on",
             "harness-toggle-off",
         ] {
+            assert!(
+                css.contains(&format!(".{class}")),
+                "missing CSS rule for .{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_workspace_field_styles_exist() {
+        // The top bar's folder field + its ▾ history; an unstyled entry would
+        // paint with the bare GTK theme colours on top of the HUD pill.
+        let css = generate_css(&current_theme());
+        for class in [
+            "ws-bar",
+            "ws-icon",
+            "ws-entry",
+            "ws-entry-invalid",
+            "ws-menu-btn",
+            "ws-pop",
+            "ws-pop-box",
+            "ws-row-pick",
+            "ws-row-name",
+            "ws-row-path",
+            "ws-row-mark",
+            "ws-row-active",
+            "ws-del",
+            "ws-empty",
+        ] {
+            assert!(
+                css.contains(&format!(".{class}")),
+                "missing CSS rule for .{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_hot_corner_styles_exist() {
+        // The corner surface is an input area, not a visual one: without this
+        // rule GTK paints the window background and the user gets a stray
+        // rectangle in the corner of the screen.
+        let css = generate_css(&current_theme());
+        assert!(
+            css.contains("window.sd-hot-corner"),
+            "missing the transparent hot-corner rule"
+        );
+        // 1/255 of black, NOT `transparent`: a fully transparent layer surface
+        // is click-through in GTK and loses both the pointer and its size
+        // (see the comment on the rule).
+        assert!(
+            css.contains("background-color: rgba(0, 0, 0, 0.004)"),
+            "the hot corner must stay (just about) invisible, got:\n{css}"
+        );
+        assert!(
+            !css.contains("window.sd-hot-corner {{\n    background-color: transparent"),
+            "a fully transparent hot corner receives no pointer events"
+        );
+    }
+
+    #[test]
+    fn test_shortcut_recorder_styles_exist() {
+        // Section 1 of the ⚙ panel: a boxed combination plus its armed state.
+        // Unstyled, the recorder looks like a stray line of text.
+        let css = generate_css(&current_theme());
+        for class in ["shortcut-row", "shortcut-combo", "shortcut-recording"] {
             assert!(
                 css.contains(&format!(".{class}")),
                 "missing CSS rule for .{class}"

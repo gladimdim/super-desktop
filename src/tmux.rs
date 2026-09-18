@@ -332,7 +332,8 @@ pub fn resolve_resume_command_with_session(
             append_resume_flag(&with_continue, "--fork", &["--fork"])
         }
         // Codex resumes via subcommand: `codex resume --last`
-        // (--last is scoped to the cwd, which is always $HOME here).
+        // (--last is scoped to the cwd — the card's workspace folder, see
+        // TerminalData::workspace_dir).
         // Global flags before the subcommand parse fine under clap.
         "codex" => append_resume_flag(&base, "resume --last", &["resume"]),
         // Aider restores prior chat history for the repo on startup.
@@ -396,10 +397,33 @@ fn session_state(session_name: &str) -> Option<bool> {
     })
 }
 
-pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String, String) {
+/// The directory a harness session runs in: the requested folder when it is a
+/// real directory, otherwise the home directory.
+///
+/// Silently falling back matters because this value comes from a config file
+/// and from the top bar: a deleted checkout or an unmounted drive must still
+/// produce a working terminal rather than a session that starts nowhere.
+pub fn resolve_workspace_dir(requested: Option<&str>) -> String {
+    requested
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && Path::new(d).is_dir())
+        .map(str::to_string)
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string()))
+}
+
+/// Start a harness session in `workspace_dir` (`None` = the home directory).
+///
+/// The directory is passed to `tmux new-session -c`, so the harness — and
+/// everything it derives from the process cwd, including Reasonix's workspace
+/// write lease — is scoped to that folder instead of `$HOME`.
+pub fn create_session(
+    agent_type: &str,
+    custom_command: Option<&str>,
+    workspace_dir: Option<&str>,
+) -> (String, String) {
     let session_name = unique_session_name();
     let cmd = resolve_command(agent_type, custom_command);
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let cwd = resolve_workspace_dir(workspace_dir);
 
     let _ = Command::new("tmux")
         .args([
@@ -408,7 +432,7 @@ pub fn create_session(agent_type: &str, custom_command: Option<&str>) -> (String
             "-s",
             &session_name,
             "-c",
-            &home,
+            &cwd,
             "-x",
             "120",
             "-y",
@@ -471,17 +495,34 @@ pub fn kill_session(session_name: &str) {
 }
 
 #[allow(dead_code)]
-pub fn ensure_session(session_name: &str, agent_type: &str, custom_command: Option<&str>) {
-    ensure_session_with_agent_id(session_name, agent_type, custom_command, None)
+pub fn ensure_session(
+    session_name: &str,
+    agent_type: &str,
+    custom_command: Option<&str>,
+    workspace_dir: Option<&str>,
+) {
+    ensure_session_with_agent_id(
+        session_name,
+        agent_type,
+        custom_command,
+        None,
+        workspace_dir,
+    )
 }
 
 /// Same as `ensure_session` but resumes a persisted per-card agent session
 /// (opencode `--session <id>`) so rebooted cards stay isolated 1:1.
+///
+/// `workspace_dir` is the folder this card was created in (see
+/// `TerminalData::workspace_dir`), not the top bar's current value: resume is
+/// cwd-scoped for every harness, so a restored card must come back where it
+/// was working.
 pub fn ensure_session_with_agent_id(
     session_name: &str,
     agent_type: &str,
     custom_command: Option<&str>,
     agent_session_id: Option<&str>,
+    workspace_dir: Option<&str>,
 ) {
     // One `tmux` call answers both questions this function needs: does the
     // session exist, and is `detach-on-destroy` already pinned? Every fork/exec
@@ -506,7 +547,7 @@ pub fn ensure_session_with_agent_id(
         // terminals in create_session() still launch fresh.
         let cmd =
             resolve_resume_command_with_session(agent_type, custom_command, agent_session_id);
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let cwd = resolve_workspace_dir(workspace_dir);
         let _ = Command::new("tmux")
             .args([
                 "new-session",
@@ -514,7 +555,7 @@ pub fn ensure_session_with_agent_id(
                 "-s",
                 session_name,
                 "-c",
-                &home,
+                &cwd,
                 "-x",
                 "120",
                 "-y",
@@ -2211,6 +2252,7 @@ mod tests {
                 sess,
                 agent,
                 Some("python3 -c 'import time; time.sleep(30)'"),
+                None,
             );
             let mut ok = false;
             for _ in 0..40 {
@@ -2273,6 +2315,110 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_workspace_dir_prefers_a_real_folder() {
+        // Pure: no tmux needed.
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        assert_eq!(resolve_workspace_dir(None), home);
+        assert_eq!(resolve_workspace_dir(Some("")), home);
+        assert_eq!(resolve_workspace_dir(Some("   ")), home);
+        // A folder that no longer exists (deleted checkout, unmounted drive)
+        // must not produce a session that starts nowhere.
+        assert_eq!(resolve_workspace_dir(Some("/definitely/gone/xyz")), home);
+        assert_eq!(resolve_workspace_dir(Some("/tmp")), "/tmp");
+    }
+
+    #[test]
+    fn test_harness_sessions_start_in_the_workspace_folder() {
+        // The whole point of the top bar's workspace field: a harness card must
+        // actually run in that folder, because every agent scopes its own
+        // history/resume to the cwd — and Reasonix keys its workspace write
+        // lease on it, which is what makes parallel cards collide at `$HOME`.
+        let has_tmux = Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_tmux {
+            return;
+        }
+
+        let dir = std::env::temp_dir().join(format!("sd-workspace-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let dir_s = std::fs::canonicalize(&dir)
+            .unwrap_or(dir.clone())
+            .to_string_lossy()
+            .into_owned();
+
+        let pane_dir = |sess: &str| -> Option<String> {
+            for _ in 0..40 {
+                if let Some(p) = tmux_display(sess, "#{pane_current_path}") {
+                    // The pane reports the path it physically started in.
+                    let resolved = std::fs::canonicalize(p.trim())
+                        .map(|c| c.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| p.trim().to_string());
+                    if resolved == dir_s {
+                        return Some(resolved);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            None
+        };
+
+        // 1. A new card runs in the folder from the top bar.
+        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), Some(&dir_s));
+        let mut cleanup = SessionCleanup(vec![sess.clone()]);
+        assert_eq!(
+            pane_dir(&sess).as_deref(),
+            Some(dir_s.as_str()),
+            "a new harness must start in the workspace folder, not $HOME"
+        );
+
+        // 2. The same card after a tmux server restart (reboot) resumes in that
+        //    same folder — resuming in another cwd would attach the card to a
+        //    different history.
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &sess])
+            .output();
+        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None, Some(&dir_s));
+        assert_eq!(
+            pane_dir(&sess).as_deref(),
+            Some(dir_s.as_str()),
+            "a restored harness must resume in its own folder"
+        );
+
+        // 3. With nothing configured the old behaviour stands: $HOME.
+        let (sess_home, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        cleanup.0.push(sess_home.clone());
+        let home_s = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let home_s = std::fs::canonicalize(&home_s)
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or(home_s);
+        let pane_home = {
+            let mut found = None;
+            for _ in 0..40 {
+                if let Some(p) = tmux_display(&sess_home, "#{pane_current_path}") {
+                    found = Some(
+                        std::fs::canonicalize(p.trim())
+                            .map(|c| c.to_string_lossy().into_owned())
+                            .unwrap_or_else(|_| p.trim().to_string()),
+                    );
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            found
+        };
+        assert_eq!(
+            pane_home.as_deref(),
+            Some(home_s.as_str()),
+            "an unset folder must still start in $HOME"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_client_exits_with_its_own_session() {
         // Regression: with `set -g detach-on-destroy off` (omarchy's tmux
         // default) a client whose session is destroyed is switched to another
@@ -2306,7 +2452,7 @@ mod tests {
             return;
         }
 
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"));
+        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
         cleanup.0.push(sess.clone());
         assert_eq!(
             session_detach_on_destroy(&sess),
@@ -2325,7 +2471,7 @@ mod tests {
             .args(["set-option", "-t", &sess, "detach-on-destroy", "off"])
             .output();
         assert_eq!(session_detach_on_destroy(&sess), "off");
-        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None);
+        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None, None);
         assert_eq!(
             session_detach_on_destroy(&sess),
             "on",
