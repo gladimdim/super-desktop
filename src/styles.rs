@@ -103,6 +103,14 @@ window.sd-hot-corner {{
     margin-left: 2px;
 }}
 
+.ws-subtitle {{
+    color: {dark_foreground};
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.15px;
+    padding: 0 2px 1px 2px;
+}}
+
 .ws-icon {{
     color: {dark_foreground};
     font-size: 12px;
@@ -113,9 +121,10 @@ entry.ws-entry {{
     color: {foreground};
     border: 1px solid {btn_border};
     border-radius: 9999px;
-    padding: 2px 12px;
-    min-height: 22px;
-    font-size: 12px;
+    padding: 3px 10px;
+    min-height: 28px;
+    min-width: 0;
+    font-size: 13px;
     font-weight: 600;
     transition: border-color 150ms ease;
 }}
@@ -197,6 +206,16 @@ popover.ws-pop > contents {{
     color: {accent};
 }}
 
+/* ↑/↓ highlight in the autocomplete list. */
+.ws-row-selected {{
+    background-color: {badge_bg};
+    border-radius: 8px;
+}}
+
+.ws-row-selected .ws-row-name {{
+    color: {accent};
+}}
+
 .ws-row-path {{
     color: {dark_foreground};
     font-size: 11px;
@@ -249,6 +268,15 @@ popover.ws-pop > contents {{
 .mini-terminal.dragging {{
     transition: none;
     box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}}
+
+/* Slide-in/out runs on the frame clock (up to the monitor Hz). Dropping the
+   shadow while cards are flying saves a GSK blur per widget per frame. */
+.sliding .sticky-note,
+.sliding .mini-terminal,
+.sliding .hud-bar {{
+    transition: none;
+    box-shadow: none;
 }}
 
 .note-header {{
@@ -1242,6 +1270,7 @@ mod tests {
         let css = generate_css(&current_theme());
         for class in [
             "ws-bar",
+            "ws-subtitle",
             "ws-icon",
             "ws-entry",
             "ws-entry-invalid",
@@ -1253,7 +1282,9 @@ mod tests {
             "ws-row-path",
             "ws-row-mark",
             "ws-row-active",
+            "ws-row-selected",
             "ws-del",
+            "sliding",
             "ws-empty",
         ] {
             assert!(

@@ -2,14 +2,15 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Button, EventControllerKey, EventControllerMotion,
-    Fixed, Image, Label, Orientation, Overlay, Popover, PositionType, Separator,
+    Align, Application, ApplicationWindow, Button, EventControllerFocus, EventControllerKey,
+    EventControllerMotion, Fixed, Image, Label, Orientation, Overlay, Popover, PositionType,
+    Separator,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mini_terminal::{
     clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, MiniTerminalCard,
@@ -26,6 +27,73 @@ struct Trajectory {
     sy: f64,
     tx: f64,
     ty: f64,
+}
+
+/// Critically-damped spring (rad/s). Settle time is about 4/ω.
+/// Appear is a touch slower so high-refresh screens get more in-between frames.
+const SLIDE_OMEGA_IN: f64 = 15.0;
+/// Hide is stiffer so a reverse during appear still clears the screen promptly.
+const SLIDE_OMEGA_OUT: f64 = 20.0;
+/// Initial speed (progress / second) when starting from rest. A spring at v=0
+/// eases in; this impulse makes the first frames shoot in from the edge.
+const SLIDE_LAUNCH_IN: f64 = 5.5;
+const SLIDE_LAUNCH_OUT: f64 = 7.5;
+const SLIDE_SETTLE_X: f64 = 0.0015;
+const SLIDE_SETTLE_V: f64 = 0.025;
+/// Resting gap between the top of the overlay and the HUD pill.
+const HUD_REST_MARGIN: i32 = 18;
+/// Extra pixels past the HUD's own height so it is fully off-screen at progress 0.
+const HUD_OFFSCREEN_PAD: f64 = 40.0;
+/// Fallback HUD height before GTK has allocated it, so the first frame still
+/// starts above the screen instead of at rest.
+const HUD_MIN_HEIGHT: i32 = 56;
+
+/// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
+/// Motion is a critically damped spring sampled on the GTK frame clock (the
+/// Wayland surface's vsync: 60–240 Hz). Reversing only changes the target;
+/// position and velocity stay, so there is no jump.
+struct SlideAnim {
+    /// Bumped when a new tick callback is armed so a stale one exits.
+    gen: Cell<u64>,
+    progress: Cell<f64>,
+    velocity: Cell<f64>,
+    appear: Cell<bool>,
+    running: Cell<bool>,
+    /// Previous `FrameClock::frame_time` (µs). 0 = first frame of this run.
+    last_us: Cell<i64>,
+}
+
+impl SlideAnim {
+    fn new() -> Self {
+        Self {
+            gen: Cell::new(0),
+            progress: Cell::new(0.0),
+            velocity: Cell::new(0.0),
+            appear: Cell::new(true),
+            running: Cell::new(false),
+            last_us: Cell::new(0),
+        }
+    }
+}
+
+/// Exact step of a critically damped spring (`ζ = 1`) toward `target`.
+///
+/// Analytical, not Euler: a missed vsync (large `dt`) cannot overshoot or
+/// explode, and reversing mid-flight only changes `target`.
+fn spring_step(x: f64, v: f64, target: f64, dt: f64, omega: f64) -> (f64, f64) {
+    if dt <= 0.0 || omega <= 0.0 {
+        return (x, v);
+    }
+    let a = x - target;
+    let b = v + omega * a;
+    let e = (-omega * dt).exp();
+    let a2 = (a + b * dt) * e;
+    let v2 = (b - omega * (a + b * dt)) * e;
+    (target + a2, v2)
+}
+
+fn spring_settled(x: f64, v: f64, target: f64) -> bool {
+    (x - target).abs() < SLIDE_SETTLE_X && v.abs() < SLIDE_SETTLE_V
 }
 
 /// Sets the HUD counts label only when the text actually changed.
@@ -63,13 +131,16 @@ pub struct SuperDesktopWindow {
     /// that panic kills the whole daemon.
     note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>>,
     terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
+    hud: gtk4::Box,
     hud_badge: Label,
     screen_width: i32,
     screen_height: i32,
     drag_pending: Rc<RefCell<HashMap<gtk4::Widget, (f64, f64)>>>,
     drag_tick_active: Rc<RefCell<bool>>,
     anim_trajectories: Rc<RefCell<HashMap<gtk4::Widget, Trajectory>>>,
-    animating: Rc<RefCell<bool>>,
+    slide: Rc<SlideAnim>,
+    /// Called when a hide slide reaches the edge, unless a show reversed it.
+    on_slide_hidden: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
     /// Toolbar brand icons as (image widget, agent key) for theme-aware refresh.
     brand_images: Rc<RefCell<Vec<(Image, String)>>>,
     /// Rebuilds the ⚙ settings panel (detection + brand logos for the new
@@ -241,7 +312,8 @@ impl SuperDesktopWindow {
         let drag_pending = Rc::new(RefCell::new(HashMap::new()));
         let drag_tick_active = Rc::new(RefCell::new(false));
         let anim_trajectories = Rc::new(RefCell::new(HashMap::new()));
-        let animating = Rc::new(RefCell::new(false));
+        let slide = Rc::new(SlideAnim::new());
+        let on_slide_hidden: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
         let brand_images: Rc<RefCell<Vec<(Image, String)>>> = Rc::new(RefCell::new(Vec::new()));
 
         let win_rc = Rc::new(Self {
@@ -252,13 +324,15 @@ impl SuperDesktopWindow {
             state,
             note_cards,
             terminal_cards,
+            hud: hud.clone(),
             hud_badge,
             screen_width,
             screen_height,
             drag_pending,
             drag_tick_active,
             anim_trajectories,
-            animating,
+            slide,
+            on_slide_hidden,
             brand_images: Rc::clone(&brand_images),
             settings_refresh: Rc::clone(&settings_panel.refresh),
             overlay_panels: vec![
@@ -268,6 +342,29 @@ impl SuperDesktopWindow {
             ws_popover: workspace_bar.popover.clone(),
             show_token: std::cell::Cell::new(0),
         });
+
+        // The overlay is OnDemand so an unfocused HUD does not eat desktop
+        // keys. GtkEntry on a layer-shell surface only receives those keys
+        // when the surface is Exclusive, so flip for as long as the folder
+        // field holds focus (same as an expanded terminal card).
+        {
+            let focus = EventControllerFocus::new();
+            let win = win_rc.window.clone();
+            let terms = Rc::clone(&win_rc.terminal_cards);
+            focus.connect_enter(move |_| {
+                win.set_keyboard_mode(KeyboardMode::Exclusive);
+            });
+            let win = win_rc.window.clone();
+            focus.connect_leave(move |_| {
+                let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
+                win.set_keyboard_mode(if any_expanded {
+                    KeyboardMode::Exclusive
+                } else {
+                    KeyboardMode::OnDemand
+                });
+            });
+            workspace_bar.entry.add_controller(focus);
+        }
 
         // + Note Button
         let btn_note = Button::with_label("📝 + Note");
@@ -435,10 +532,30 @@ impl SuperDesktopWindow {
 
         hud.append(&hint);
 
-        hud.set_halign(Align::Center);
+        // On the canvas, not an Overlay child: Overlay+margin_top reallocates
+        // the pill every frame and squashes the harness buttons. Fixed.move_
+        // translates the whole bar as one widget, same as the cards.
+        hud.set_hexpand(false);
+        hud.set_vexpand(false);
+        hud.set_halign(Align::Start);
         hud.set_valign(Align::Start);
-        hud.set_margin_top(18);
-        root_overlay.add_overlay(&hud);
+        let (hud_w, _) = hud_measured_size(&hud);
+        let hud_x = (win_rc.screen_width as f64 - hud_w) * 0.5;
+        win_rc.canvas.put(&hud, hud_x, HUD_REST_MARGIN as f64);
+        raise_canvas_child(&win_rc.canvas, &hud);
+
+        {
+            let canvas_hud = win_rc.canvas.clone();
+            let slide_hud = Rc::clone(&win_rc.slide);
+            let sw = win_rc.screen_width;
+            hud.connect_notify_local(Some("width"), move |h, _| {
+                if slide_hud.running.get() || slide_hud.progress.get() < 0.5 {
+                    return;
+                }
+                let (w, _) = hud_measured_size(h);
+                canvas_hud.move_(h, (sw as f64 - w) * 0.5, HUD_REST_MARGIN as f64);
+            });
+        }
 
         // Added after the HUD so the settings card floats above it.
         root_overlay.add_overlay(&settings_panel.widget);
@@ -546,6 +663,7 @@ impl SuperDesktopWindow {
         }
 
         self.raise_all_notes();
+        raise_canvas_child(&self.canvas, &self.hud);
         self.update_counts();
     }
 
@@ -680,6 +798,7 @@ impl SuperDesktopWindow {
         };
 
         let canvas_raise = canvas.clone();
+        let hud_raise = self.hud.clone();
         let note_cards_raise = Rc::clone(&note_cards);
         let note_id = note_data.id.clone();
         let on_raise = move |widget: gtk4::Widget| {
@@ -688,6 +807,7 @@ impl SuperDesktopWindow {
                     widget.insert_after(&canvas_raise, Some(&last));
                 }
             }
+            raise_canvas_child(&canvas_raise, &hud_raise);
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
             // already happened, so just skip the bookkeeping instead of
@@ -719,6 +839,7 @@ impl SuperDesktopWindow {
         );
         canvas.put(&note.container, x as f64, y as f64);
         note_cards.borrow_mut().push(Rc::new(note));
+        raise_canvas_child(&canvas, &self.hud);
     }
 
     pub fn create_new_terminal(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>) {
@@ -961,6 +1082,7 @@ impl SuperDesktopWindow {
         };
 
         let canvas_raise = canvas.clone();
+        let hud_raise = self.hud.clone();
         let term_cards_raise = Rc::clone(&term_cards);
         let sess_name = term_data.session_name.clone();
         let on_raise = move |widget: gtk4::Widget| {
@@ -969,6 +1091,7 @@ impl SuperDesktopWindow {
                     widget.insert_after(&canvas_raise, Some(&last));
                 }
             }
+            raise_canvas_child(&canvas_raise, &hud_raise);
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
             // already happened, so just skip the bookkeeping instead of
@@ -1014,6 +1137,7 @@ impl SuperDesktopWindow {
         );
         canvas.put(&card.container, x, y);
         term_cards.borrow_mut().push(Rc::new(card));
+        raise_canvas_child(&canvas, &self.hud);
     }
 
     pub fn auto_arrange(&self) {
@@ -1089,11 +1213,42 @@ impl SuperDesktopWindow {
     }
 
     pub fn start_slide_in(&self) {
+        self.ensure_slide_trajectories(!self.slide.running.get());
+        if !self.slide.running.get() {
+            // Idle and hidden: park cards at the edge so the appear starts
+            // off-screen. Mid-flight reverse must not do this — it would jump.
+            self.slide.progress.set(0.0);
+            self.slide.velocity.set(SLIDE_LAUNCH_IN);
+            self.paint_slide(0.0);
+        }
+        self.slide.appear.set(true);
+        self.canvas.add_css_class("sliding");
+        self.ensure_slide_tick();
+    }
+
+    pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
+        self.ensure_slide_trajectories(false);
+        *self.on_slide_hidden.borrow_mut() = Some(Rc::new(on_finish));
+        if !self.slide.running.get() {
+            // Idle and shown: start from rest with an outward impulse.
+            // Mid-flight reverse keeps current progress *and* velocity.
+            self.slide.progress.set(1.0);
+            self.slide.velocity.set(-SLIDE_LAUNCH_OUT);
+        }
+        self.slide.appear.set(false);
+        self.canvas.add_css_class("sliding");
+        self.ensure_slide_tick();
+    }
+
+    /// Fill rest/edge positions. `reset` rebuilds them (fresh show). A reverse
+    /// keeps the existing pair so the cards stay on the same path.
+    fn ensure_slide_trajectories(&self, reset: bool) {
         let mut trajs = self.anim_trajectories.borrow_mut();
+        if !reset && !trajs.is_empty() {
+            return;
+        }
         trajs.clear();
 
-        // Snapshot the cards so the list borrows are released before the
-        // `move_` calls below (which can re-enter the raise handlers).
         let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
         let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
 
@@ -1101,139 +1256,98 @@ impl SuperDesktopWindow {
             let tx = note.data.borrow().x as f64;
             let ty = note.data.borrow().y as f64;
             let w = note.data.borrow().width as f64;
-            let h = note.data.borrow().height as f64;
-            let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
-            self.canvas.move_(&note.container, sx, sy);
+            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width as f64);
             trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
-
         for term in terms.iter() {
-            let (tx, ty, w, h) = terminal_slide_geom(term, self.screen_width, self.screen_height);
-            let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
-            self.canvas.move_(&term.container, sx, sy);
+            let (tx, ty, w, _) = terminal_slide_geom(term, self.screen_width, self.screen_height);
+            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width as f64);
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
 
-        *self.animating.borrow_mut() = true;
-        let start_time = Instant::now();
-        let duration = 0.26;
-        // Perf: snapshot to a Vec once. Iterating the HashMap + comparing
-        // against the canvas (two ref/unref pairs per widget per frame)
-        // showed up in profiles at 120Hz; a plain parent check is enough
-        // since these widgets are only ever parented to the canvas.
-        let frames: Vec<(gtk4::Widget, Trajectory)> = trajs
+        let (hw, hh) = hud_measured_size(&self.hud);
+        let (tx, ty, sx, sy) = hud_slide_pose(hw, hh, self.screen_width as f64);
+        trajs.insert(self.hud.clone().upcast(), Trajectory { sx, sy, tx, ty });
+        raise_canvas_child(&self.canvas, &self.hud);
+    }
+
+    fn paint_slide(&self, progress: f64) {
+        let trajs = self.anim_trajectories.borrow();
+        for (widget, traj) in trajs.iter() {
+            paint_slide_widget(&self.canvas, widget, *traj, progress);
+        }
+    }
+
+    fn ensure_slide_tick(&self) {
+        if self.slide.running.get() {
+            // Already in flight: the next vsync reads the flipped target and
+            // the spring turns around from the current velocity.
+            return;
+        }
+        self.slide.running.set(true);
+        self.slide.last_us.set(0);
+        let gen = self.slide.gen.get().wrapping_add(1);
+        self.slide.gen.set(gen);
+
+        let frames: Vec<(gtk4::Widget, Trajectory)> = self
+            .anim_trajectories
+            .borrow()
             .iter()
             .map(|(w, t)| (w.clone(), *t))
             .collect();
-        drop(trajs);
-        let anim_rc = Rc::clone(&self.animating);
+        let slide = Rc::clone(&self.slide);
         let canvas = self.canvas.clone();
+        let on_hidden = Rc::clone(&self.on_slide_hidden);
 
-        self.canvas.add_tick_callback(move |_, _| {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let progress = (elapsed / duration).min(1.0);
-            let factor = 1.0 - (1.0 - progress).powi(3);
-
-            for (widget, traj) in frames.iter() {
-                if widget.parent().is_some() {
-                    let cx = traj.sx + (traj.tx - traj.sx) * factor;
-                    let cy = traj.sy + (traj.ty - traj.sy) * factor;
-                    canvas.move_(widget, cx, cy);
-                }
+        // Tick the window, not the canvas: the layer-shell surface owns the
+        // GDK frame clock, which Hyprland drives at the monitor refresh rate.
+        // `add_tick_callback` is vsync; a glib timeout would cap us at 10–16ms.
+        self.window.add_tick_callback(move |_, clock| {
+            if slide.gen.get() != gen {
+                return glib::ControlFlow::Break;
             }
-
-            if progress >= 1.0 {
-                *anim_rc.borrow_mut() = false;
+            let now = clock.frame_time();
+            let prev = slide.last_us.get();
+            slide.last_us.set(now);
+            // First frame: paint the current pose, do not fake a 1/240s step
+            // that would hitch on a 60 Hz panel or skip on a 240 Hz one.
+            let dt = if prev == 0 {
+                0.0
+            } else {
+                ((now - prev) as f64 / 1_000_000.0).clamp(0.0, 0.05)
+            };
+            let appear = slide.appear.get();
+            let target = if appear { 1.0 } else { 0.0 };
+            let omega = if appear { SLIDE_OMEGA_IN } else { SLIDE_OMEGA_OUT };
+            let (progress, velocity) = spring_step(
+                slide.progress.get(),
+                slide.velocity.get(),
+                target,
+                dt,
+                omega,
+            );
+            if spring_settled(progress, velocity, target) {
+                slide.progress.set(target);
+                slide.velocity.set(0.0);
+                slide.running.set(false);
                 for (widget, traj) in frames.iter() {
-                    if widget.parent().is_some() {
-                        canvas.move_(widget, traj.tx, traj.ty);
+                    paint_slide_widget(&canvas, widget, *traj, target);
+                }
+                canvas.remove_css_class("sliding");
+                if !appear {
+                    if let Some(cb) = on_hidden.borrow().clone() {
+                        cb();
                     }
                 }
                 return glib::ControlFlow::Break;
             }
-
-            glib::ControlFlow::Continue
-        });
-    }
-
-    pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
-        let mut trajs = self.anim_trajectories.borrow_mut();
-        if trajs.is_empty() {
-            // Snapshot both lists so the borrows are gone while the
-            // trajectories are computed (see `start_slide_in`).
-            let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
-            let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
-
-            for note in notes.iter() {
-                let tx = note.data.borrow().x as f64;
-                let ty = note.data.borrow().y as f64;
-                let w = note.data.borrow().width as f64;
-                let h = note.data.borrow().height as f64;
-                let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
-                trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
-            }
-            for term in terms.iter() {
-                let (tx, ty, w, h) = terminal_slide_geom(term, self.screen_width, self.screen_height);
-                let (sx, sy) = self.calc_edge_start(tx, ty, w, h);
-                trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
-            }
-        }
-
-        *self.animating.borrow_mut() = true;
-        let start_time = Instant::now();
-        let duration = 0.14;
-        // Perf: same snapshot trick as slide-in (see above).
-        let frames: Vec<(gtk4::Widget, Trajectory)> = trajs
-            .iter()
-            .map(|(w, t)| (w.clone(), *t))
-            .collect();
-        drop(trajs);
-        let anim_rc = Rc::clone(&self.animating);
-        let canvas = self.canvas.clone();
-        let on_finish_rc = Rc::new(on_finish);
-
-        self.canvas.add_tick_callback(move |_, _| {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let progress = (elapsed / duration).min(1.0);
-            let factor = progress.powi(2);
-
+            slide.progress.set(progress);
+            slide.velocity.set(velocity);
             for (widget, traj) in frames.iter() {
-                if widget.parent().is_some() {
-                    let cx = traj.tx + (traj.sx - traj.tx) * factor;
-                    let cy = traj.ty + (traj.sy - traj.ty) * factor;
-                    canvas.move_(widget, cx, cy);
-                }
+                paint_slide_widget(&canvas, widget, *traj, progress);
             }
-
-            if progress >= 1.0 {
-                *anim_rc.borrow_mut() = false;
-                on_finish_rc();
-                return glib::ControlFlow::Break;
-            }
-
             glib::ControlFlow::Continue
         });
-    }
-
-    fn calc_edge_start(&self, tx: f64, ty: f64, w: f64, h: f64) -> (f64, f64) {
-        let sw = self.screen_width as f64;
-        let sh = self.screen_height as f64;
-
-        let d_left = tx;
-        let d_right = sw - (tx + w);
-        let d_top = ty;
-        let d_bottom = sh - (ty + h);
-
-        let min_d = d_left.min(d_right).min(d_top).min(d_bottom);
-        if min_d == d_left {
-            (-w - 40.0, ty)
-        } else if min_d == d_right {
-            (sw + 40.0, ty)
-        } else if min_d == d_top {
-            (tx, -h - 40.0)
-        } else {
-            (tx, sh + 40.0)
-        }
     }
 
     fn update_counts(&self) {
@@ -1246,6 +1360,7 @@ impl SuperDesktopWindow {
     pub fn raise_all_notes(&self) {
         let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
         raise_notes_on_canvas(&self.canvas, &notes);
+        raise_canvas_child(&self.canvas, &self.hud);
     }
 
     pub fn reload_theme(&self) {
@@ -1349,6 +1464,53 @@ fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[Rc<crate::sticky_note::S
     }
 }
 
+fn paint_slide_widget(canvas: &Fixed, widget: &gtk4::Widget, traj: Trajectory, factor: f64) {
+    if widget.parent().is_some() {
+        let cx = traj.sx + (traj.tx - traj.sx) * factor;
+        let cy = traj.sy + (traj.ty - traj.sy) * factor;
+        canvas.move_(widget, cx, cy);
+    }
+}
+
+/// Off-screen pose for a card or icon: nearest of the left or right edge,
+/// same Y. Corner (top-left, bottom-right, …) only decides which side is
+/// nearer — cards never slide up or down.
+fn card_slide_offscreen(tx: f64, ty: f64, w: f64, screen_w: f64) -> (f64, f64) {
+    let mid = tx + w * 0.5;
+    let sx = if mid < screen_w * 0.5 {
+        -w - 40.0
+    } else {
+        screen_w + 40.0
+    };
+    (sx, ty)
+}
+
+fn raise_canvas_child(canvas: &Fixed, widget: &impl gtk4::glib::object::IsA<gtk4::Widget>) {
+    let widget = widget.as_ref();
+    if let Some(last) = canvas.last_child() {
+        if &last != widget {
+            widget.insert_after(canvas, Some(&last));
+        }
+    }
+}
+
+fn hud_measured_size(hud: &gtk4::Box) -> (f64, f64) {
+    let (_, nat_w, _, _) = hud.measure(Orientation::Horizontal, -1);
+    let (_, nat_h, _, _) = hud.measure(Orientation::Vertical, -1);
+    let w = hud.width().max(nat_w).max(1) as f64;
+    let h = hud.height().max(nat_h).max(HUD_MIN_HEIGHT) as f64;
+    (w, h)
+}
+
+/// Rest pose (centred under the top) and off-screen pose (same X, above the
+/// overlay) for the toolbar as a single translated widget.
+fn hud_slide_pose(hud_w: f64, hud_h: f64, screen_w: f64) -> (f64, f64, f64, f64) {
+    let tx = ((screen_w - hud_w) * 0.5).max(0.0);
+    let ty = HUD_REST_MARGIN as f64;
+    let sy = -hud_h - HUD_OFFSCREEN_PAD;
+    (tx, ty, tx, sy)
+}
+
 fn terminal_slide_geom(term: &MiniTerminalCard, sw: i32, sh: i32) -> (f64, f64, f64, f64) {
     let (w, h) = term.size(sw, sh);
     if term.is_expanded() {
@@ -1413,6 +1575,59 @@ fn apply_terminal_expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_card_slide_goes_to_the_nearest_left_or_right_edge() {
+        let sw = 2560.0;
+        // Top-left corner → left, Y unchanged.
+        let (sx, sy) = card_slide_offscreen(80.0, 40.0, 128.0, sw);
+        assert!(sx < 0.0, "left-half card must leave to the left, got {sx}");
+        assert_eq!(sy, 40.0);
+        // Bottom-right corner → right, Y unchanged.
+        let (sx, sy) = card_slide_offscreen(2200.0, 1400.0, 380.0, sw);
+        assert!(sx > sw, "right-half card must leave to the right, got {sx}");
+        assert_eq!(sy, 1400.0);
+        // Top-right icon → right, not up.
+        let (sx, sy) = card_slide_offscreen(2400.0, 20.0, 128.0, sw);
+        assert!(sx > sw);
+        assert_eq!(sy, 20.0);
+    }
+
+    #[test]
+    fn test_hud_slides_straight_up_from_its_rest_pose() {
+        let (tx, ty, sx, sy) = hud_slide_pose(400.0, 48.0, 2560.0);
+        assert_eq!(sx, tx, "toolbar must not drift sideways");
+        assert_eq!(ty, HUD_REST_MARGIN as f64);
+        assert!(sy < 0.0 && sy <= -48.0, "hidden toolbar sits fully above the overlay, sy={sy}");
+        assert!((tx - (2560.0 - 400.0) * 0.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_spring_reverses_without_a_position_jump() {
+        let (x, v) = spring_step(0.0, SLIDE_LAUNCH_IN, 1.0, 1.0 / 240.0, SLIDE_OMEGA_IN);
+        assert!(x > 0.0 && x < 1.0, "one 240 Hz frame must advance, got {x}");
+
+        // Reverse: same pose, new target. One frame later we are still near x,
+        // not teleported to 1.0 or 0.0.
+        let (x2, v2) = spring_step(x, v, 0.0, 1.0 / 240.0, SLIDE_OMEGA_OUT);
+        assert!(
+            (x2 - x).abs() < 0.05,
+            "a reverse must not jump, {x} -> {x2}"
+        );
+        assert!(v2 < v, "target 0 must decelerate / reverse velocity, {v} -> {v2}");
+
+        let (frozen_x, frozen_v) = spring_step(0.4, 1.1, 1.0, 0.0, SLIDE_OMEGA_IN);
+        assert_eq!((frozen_x, frozen_v), (0.4, 1.1));
+
+        let (mut x, mut v) = (0.0, SLIDE_LAUNCH_IN);
+        for _ in 0..240 {
+            (x, v) = spring_step(x, v, 1.0, 1.0 / 240.0, SLIDE_OMEGA_IN);
+        }
+        assert!(
+            spring_settled(x, v, 1.0) || (x - 1.0).abs() < 0.02,
+            "must settle on-canvas in ~1s at 240 Hz, x={x} v={v}"
+        );
+    }
 
     #[test]
     fn test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes() {

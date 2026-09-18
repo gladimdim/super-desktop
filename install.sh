@@ -89,9 +89,9 @@ if ! grep -qF "$BIND_MARKER" "$BINDINGS_LUA"; then
 -- Set in the overlay: ⚙ Settings → Keyboard shortcut.
 -- Rewritten there on every change; edits inside this block are lost.
 hl.unbind("SUPER + SHIFT + Q")
-o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")
+o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle", { release = true })
 hl.unbind("SUPER + SHIFT + code:24")
-o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle")
+o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle", { release = true })
 -- <<< super-desktop shortcut <<<
 EOF
     echo "✓ Added the SUPER + SHIFT + Q binding to $BINDINGS_LUA"

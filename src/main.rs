@@ -74,7 +74,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use styles::apply_styles;
 use window::SuperDesktopWindow;
@@ -181,7 +181,6 @@ struct AppContext {
     /// Whether the overlay is currently mapped. `window.is_some()` is not the
     /// same thing any more — a hidden window stays alive on purpose.
     shown: bool,
-    last_toggle: Instant,
     /// "The pointer is parked in the top-left corner zone", written by the
     /// corner surface while the overlay is hidden and by the overlay window
     /// itself while it is visible (see `hotcorner`).
@@ -334,9 +333,13 @@ fn run_daemon(start_visible: bool) {
     let context = Rc::new(RefCell::new(AppContext {
         window: None,
         shown: false,
-        last_toggle: Instant::now() - Duration::from_secs(10),
         hot_inside: Rc::new(Cell::new(false)),
     }));
+
+    // Older installs bound the shortcut on press (which repeats while held).
+    // Upgrade in place to a release-bind so a held key is one toggle, not a
+    // strobe, and a second tap during the slide-in can reverse immediately.
+    shortcut::ensure_release_toggle();
 
     let (ipc_tx, ipc_rx) = channel::<IpcMessage>();
 
@@ -400,10 +403,14 @@ fn run_daemon(start_visible: bool) {
         if let Some(fd) = wake_read {
             drain_wake_pipe(fd);
         }
+        // Drain the whole tick first. The keysym bind and the `code:` bind both
+        // fire on one key-release, so two `toggle` commands can be waiting at
+        // once — handling them in order would show then hide in a single frame.
+        let mut batch = Vec::new();
         while let Ok(msg) = ipc_rx.try_recv() {
-            let resp = handle_ipc_command(&msg.cmd, &ctx_timer, &app_timer);
-            let _ = msg.responder.send(resp);
+            batch.push(msg);
         }
+        dispatch_ipc_batch(batch, &ctx_timer, &app_timer);
         glib::ControlFlow::Continue
     });
 
@@ -516,14 +523,9 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
 }
 
 fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
-    let now = Instant::now();
-    if now.duration_since(ctx.borrow().last_toggle) < Duration::from_millis(450) {
-        // Debounced repeat (Hyprland matches both the keysym and the keycode
-        // binding): report the current state, do not toggle again.
-        return ctx.borrow().shown;
-    }
-    ctx.borrow_mut().last_toggle = now;
-
+    // No time debounce: a tap during the slide-in must reverse immediately.
+    // Same-tick duplicate toggles (keysym + `code:` bind on one release) are
+    // collapsed in `dispatch_ipc_batch` instead.
     if ctx.borrow().shown {
         hide_window(ctx);
         false
@@ -531,6 +533,41 @@ fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
         show_window(ctx, app);
         true
     }
+}
+
+/// Handle every IPC message that arrived in one GTK tick.
+///
+/// Consecutive `toggle` commands collapse to a single toggle: Hyprland runs
+/// both the keysym bind and the layout-proof `code:` bind on the same
+/// key-release, and two toggles in one frame would cancel each other. Real
+/// second taps arrive on a later tick (the bind is on release, so it cannot
+/// repeat while the key is held).
+fn dispatch_ipc_batch(
+    batch: Vec<IpcMessage>,
+    ctx: &Rc<RefCell<AppContext>>,
+    app: &Application,
+) {
+    let mut pending_toggles: Vec<IpcMessage> = Vec::new();
+    let flush_toggles = |group: Vec<IpcMessage>| {
+        if group.is_empty() {
+            return;
+        }
+        let vis = toggle_window(ctx, app);
+        let resp = json!({ "ok": true, "visible": vis }).to_string();
+        for msg in group {
+            let _ = msg.responder.send(resp.clone());
+        }
+    };
+    for msg in batch {
+        if msg.cmd.trim() == "toggle" {
+            pending_toggles.push(msg);
+        } else {
+            flush_toggles(std::mem::take(&mut pending_toggles));
+            let resp = handle_ipc_command(&msg.cmd, ctx, app);
+            let _ = msg.responder.send(resp);
+        }
+    }
+    flush_toggles(pending_toggles);
 }
 
 struct IpcMessage {

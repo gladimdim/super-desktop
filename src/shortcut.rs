@@ -50,6 +50,11 @@ pub const MANAGED_END: &str = "-- <<< super-desktop shortcut <<<";
 const BIND_DESCRIPTION: &str = "Super Desktop";
 /// The command our bind runs; the only thing that identifies a line as ours.
 const TOGGLE_COMMAND: &str = "super-desktop toggle";
+/// Hyprland `bindr`: fire once on key *release*. A press-bind repeats for as
+/// long as the key is held, which is what made the overlay strobe unless we
+/// ignored toggles — and ignoring them made a second tap during the slide-in
+/// do nothing. Release does not repeat.
+const BIND_RELEASE: &str = "{ release = true }";
 
 /// Combinations older `install.sh` runs claimed for the toggle.
 ///
@@ -161,9 +166,7 @@ pub fn managed_block(combo: &str, keycode: Option<u32>) -> String {
     // before this file would win over the bind below.
     for variant in combo_variants(combo, keycode) {
         out.push_str(&format!("hl.unbind(\"{variant}\")\n"));
-        out.push_str(&format!(
-            "o.bind(\"{variant}\", \"{BIND_DESCRIPTION}\", \"{TOGGLE_COMMAND}\")\n"
-        ));
+        out.push_str(&format!("{}\n", toggle_bind_lua(&variant)));
     }
     out.push_str(MANAGED_END);
     out.push('\n');
@@ -350,6 +353,68 @@ pub fn apply_combo_at(
 /// [`apply_combo_at`] against this machine's `bindings.lua` and `hyprctl`.
 pub fn apply_combo(combo: &str, keycode: Option<u32>) -> Result<Applied, String> {
     apply_combo_at(&bindings_path(), "hyprctl", combo, keycode)
+}
+
+/// One `o.bind` line: description, toggle command, fire on key-release.
+fn toggle_bind_lua(variant: &str) -> String {
+    format!(
+        "o.bind(\"{variant}\", \"{BIND_DESCRIPTION}\", \"{TOGGLE_COMMAND}\", {BIND_RELEASE})"
+    )
+}
+
+/// True when every overlay-toggle bind in `lua` already fires on release.
+fn toggle_binds_use_release(lua: &str) -> bool {
+    let mut saw = false;
+    for line in lua.lines() {
+        let trimmed = line.trim();
+        if !is_toggle_bind(trimmed) {
+            continue;
+        }
+        saw = true;
+        if !trimmed.contains("release") {
+            return false;
+        }
+    }
+    saw
+}
+
+/// `code:N` from a managed toggle bind, if the file still has one.
+fn parse_bind_keycode(lua: &str) -> Option<u32> {
+    for line in lua.lines() {
+        if !is_toggle_bind(line.trim()) {
+            continue;
+        }
+        let Some(rest) = line.split("code:").nth(1) else {
+            continue;
+        };
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<u32>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// Rewrite the live `bindings.lua` so the overlay toggle is a release-bind.
+///
+/// Older installs bound on press (and the daemon then had to ignore repeats).
+/// Idempotent: if the file already uses `{ release = true }`, this is a no-op
+/// and does not reload Hyprland.
+pub fn ensure_release_toggle() {
+    let path = bindings_path();
+    let Ok(existing) = fs::read_to_string(&path) else {
+        return;
+    };
+    if !existing.contains(TOGGLE_COMMAND) || toggle_binds_use_release(&existing) {
+        return;
+    }
+    let combo = current_combo(
+        crate::state::load_state()
+            .toggle_shortcut
+            .as_deref(),
+    );
+    let keycode = parse_bind_keycode(&existing);
+    let _ = apply_combo(&combo, keycode);
 }
 
 /// Arms the keymap guard for one recording and restores it however the
@@ -710,7 +775,7 @@ o.exec_on_start(\"super-desktop daemon\")
         // and Cyrillic layouts). F5 is F5 everywhere, so there is nothing to add.
         let updated = rewrite_bindings(LEGACY_LUA, "F5", Some(71));
         assert!(
-            updated.contains(r#"o.bind("F5", "Super Desktop", "super-desktop toggle")"#),
+            updated.contains(&toggle_bind_lua("F5")),
             "got:\n{updated}"
         );
         assert!(updated.contains(r#"hl.unbind("F5")"#), "got:\n{updated}");
@@ -752,12 +817,8 @@ o.exec_on_start(\"super-desktop daemon\")
         assert!(updated.contains("o.exec_on_start(\"super-desktop daemon\")"));
 
         // The physical key is bound too, so a layout switch keeps working.
-        assert!(updated.contains(
-            "o.bind(\"SUPER + SHIFT + K\", \"Super Desktop\", \"super-desktop toggle\")"
-        ));
-        assert!(updated.contains(
-            "o.bind(\"SUPER + SHIFT + code:45\", \"Super Desktop\", \"super-desktop toggle\")"
-        ));
+        assert!(updated.contains(&toggle_bind_lua("SUPER + SHIFT + K")));
+        assert!(updated.contains(&toggle_bind_lua("SUPER + SHIFT + code:45")));
         assert!(
             updated.ends_with(&format!("{MANAGED_END}\n")),
             "got:\n{updated}"
@@ -776,7 +837,7 @@ o.exec_on_start(\"super-desktop daemon\")
         let other = rewrite_bindings(&once, "CTRL + ALT + T", None);
         assert_eq!(other.matches(TOGGLE_COMMAND).count(), 1, "got:\n{other}");
         assert!(other
-            .contains("o.bind(\"CTRL + ALT + T\", \"Super Desktop\", \"super-desktop toggle\")"));
+            .contains(&toggle_bind_lua("CTRL + ALT + T")));
         assert!(!other.contains("SUPER + SHIFT + K"));
         assert_eq!(rewrite_bindings(&other, "CTRL + ALT + T", None), other);
     }
@@ -803,7 +864,7 @@ hl.unbind(\"SUPER + SHIFT + X\")
     fn test_rewrite_creates_the_block_in_a_file_that_has_none() {
         let updated = rewrite_bindings("", "SUPER + SHIFT + K", None);
         assert!(updated.starts_with(MANAGED_BEGIN), "got:\n{updated}");
-        assert!(updated.contains("o.bind(\"SUPER + SHIFT + K\""));
+        assert!(updated.contains(&toggle_bind_lua("SUPER + SHIFT + K")));
         assert!(!updated.contains("code:"));
     }
 
@@ -887,9 +948,7 @@ bindd
         assert_eq!(applied.warning, None);
 
         let written = fs::read_to_string(&bindings).expect("read bindings");
-        assert!(written.contains(
-            "o.bind(\"SUPER + SHIFT + K\", \"Super Desktop\", \"super-desktop toggle\")"
-        ));
+        assert!(written.contains(&toggle_bind_lua("SUPER + SHIFT + K")));
         assert!(!written.contains("Cyrillic_shorti"));
         // The mode the user's file had is kept.
         assert_eq!(
@@ -1001,5 +1060,36 @@ bindd
         );
         assert!(installer.contains(TOGGLE_COMMAND));
         assert!(installer.contains(DEFAULT_COMBO));
+        assert!(
+            installer.contains("release = true"),
+            "install.sh must bind on key-release so holding the shortcut does not repeat"
+        );
+    }
+
+    #[test]
+    fn test_toggle_bind_is_a_release_bind() {
+        let block = managed_block("SUPER + SHIFT + K", Some(45));
+        assert!(toggle_binds_use_release(&block));
+        assert!(block.contains(BIND_RELEASE));
+        assert_eq!(parse_bind_keycode(&block), Some(45));
+
+        let press = r#"o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")"#;
+        assert!(!toggle_binds_use_release(press));
+        assert_eq!(parse_bind_keycode(press), None);
+    }
+
+    #[test]
+    fn test_rewrite_upgrades_a_press_bind_to_release() {
+        let press = format!(
+            "{MANAGED_BEGIN}\no.bind(\"SUPER + SHIFT + Q\", \"Super Desktop\", \"super-desktop toggle\")\n{MANAGED_END}\n"
+        );
+        let updated = rewrite_bindings(&press, "SUPER + SHIFT + Q", Some(24));
+        assert!(toggle_binds_use_release(&updated));
+        assert!(updated.contains(&toggle_bind_lua("SUPER + SHIFT + Q")));
+        assert_eq!(
+            rewrite_bindings(&updated, "SUPER + SHIFT + Q", Some(24)),
+            updated,
+            "a release-bind rewrite must be idempotent"
+        );
     }
 }
