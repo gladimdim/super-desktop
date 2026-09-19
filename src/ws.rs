@@ -62,6 +62,9 @@ pub fn read_frame<R: Read>(input: &mut R) -> io::Result<Option<Frame>> {
     }
     let opcode = header[0] & 0x0F;
     let masked = header[1] & 0x80 != 0;
+    if !masked || header[0] & 0x80 == 0 || header[0] & 0x70 != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "masked unfragmented frame required"));
+    }
     let mut len = (header[1] & 0x7F) as u64;
     if len == 126 {
         let mut buf = [0u8; 2];
@@ -72,7 +75,7 @@ pub fn read_frame<R: Read>(input: &mut R) -> io::Result<Option<Frame>> {
         input.read_exact(&mut buf)?;
         len = u64::from_be_bytes(buf);
     }
-    if len > 1 << 20 {
+    if len > 16384 || (opcode >= 8 && len > 125) {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
     }
     let mut mask = [0u8; 4];

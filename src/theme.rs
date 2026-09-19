@@ -147,22 +147,22 @@ impl OmarchyTheme {
 
     pub fn get_ansi_palette(&self) -> Vec<gdk::RGBA> {
         let color_strs = [
-            &self.dark_background,  // 0: black
-            &self.red,              // 1: red
-            &self.green,            // 2: green
-            &self.yellow,           // 3: yellow
-            &self.blue,             // 4: blue
-            &self.magenta,          // 5: magenta
-            &self.cyan,             // 6: cyan
-            &self.light_foreground, // 7: white
-            &self.dark_foreground,  // 8: bright black
-            &self.bright_red,       // 9: bright red
-            &self.bright_green,     // 10: bright green
-            &self.bright_yellow,    // 11: bright yellow
-            &self.bright_blue,      // 12: bright blue
-            &self.bright_magenta,   // 13: bright magenta
-            &self.bright_cyan,      // 14: bright cyan
-            &self.bright_foreground,// 15: bright white
+            &self.dark_background,   // 0: black
+            &self.red,               // 1: red
+            &self.green,             // 2: green
+            &self.yellow,            // 3: yellow
+            &self.blue,              // 4: blue
+            &self.magenta,           // 5: magenta
+            &self.cyan,              // 6: cyan
+            &self.light_foreground,  // 7: white
+            &self.dark_foreground,   // 8: bright black
+            &self.bright_red,        // 9: bright red
+            &self.bright_green,      // 10: bright green
+            &self.bright_yellow,     // 11: bright yellow
+            &self.bright_blue,       // 12: bright blue
+            &self.bright_magenta,    // 13: bright magenta
+            &self.bright_cyan,       // 14: bright cyan
+            &self.bright_foreground, // 15: bright white
         ];
 
         color_strs
@@ -173,7 +173,28 @@ impl OmarchyTheme {
 }
 
 static CURRENT_THEME: RwLock<Option<OmarchyTheme>> = RwLock::new(None);
-static LAST_THEME_MTIME: RwLock<Option<std::time::SystemTime>> = RwLock::new(None);
+static LAST_THEME_SIGNATURE: RwLock<Option<ThemeSignature>> = RwLock::new(None);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThemeSignature {
+    colors_path: PathBuf,
+    theme_name: String,
+    colors: Vec<u8>,
+}
+
+fn theme_name_path() -> PathBuf {
+    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    PathBuf::from(home).join(".local/state/omarchy/current/theme.name")
+}
+
+fn current_signature() -> ThemeSignature {
+    let colors_path = get_theme_colors_path();
+    ThemeSignature {
+        colors: fs::read(&colors_path).unwrap_or_default(),
+        colors_path,
+        theme_name: fs::read_to_string(theme_name_path()).unwrap_or_default(),
+    }
+}
 
 pub fn get_theme_colors_path() -> PathBuf {
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
@@ -211,8 +232,7 @@ pub fn detect_font_family() -> String {
 pub fn load_current_theme() -> OmarchyTheme {
     let mut theme = OmarchyTheme::default();
 
-    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let name_path = PathBuf::from(&home).join(".local/state/omarchy/current/theme.name");
+    let name_path = theme_name_path();
     if let Ok(name) = fs::read_to_string(&name_path) {
         let trimmed = name.trim().to_string();
         if !trimmed.is_empty() {
@@ -222,17 +242,15 @@ pub fn load_current_theme() -> OmarchyTheme {
 
     theme.font_family = detect_font_family();
 
-    let colors_path = get_theme_colors_path();
-    if let Ok(metadata) = fs::metadata(&colors_path) {
-        if let Ok(mtime) = metadata.modified() {
-            if let Ok(mut l) = LAST_THEME_MTIME.write() {
-                *l = Some(mtime);
-            }
-        }
-    }
+    let signature = current_signature();
+    let colors_path = signature.colors_path.clone();
 
     if let Ok(content) = fs::read_to_string(&colors_path) {
         parse_colors_into(&content, &mut theme);
+    }
+
+    if let Ok(mut last) = LAST_THEME_SIGNATURE.write() {
+        *last = Some(signature);
     }
 
     theme
@@ -307,15 +325,22 @@ pub fn reload_theme() -> OmarchyTheme {
 }
 
 pub fn check_theme_changed() -> bool {
-    let colors_path = get_theme_colors_path();
-    if let Ok(metadata) = fs::metadata(&colors_path) {
-        if let Ok(mtime) = metadata.modified() {
-            if let Ok(last) = LAST_THEME_MTIME.read() {
-                if let Some(prev) = *last {
-                    return mtime > prev;
-                }
-            }
-        }
+    let current = current_signature();
+    LAST_THEME_SIGNATURE
+        .read()
+        .map(|last| last.as_ref() != Some(&current))
+        .unwrap_or(true)
+}
+
+/// Return the current palette even when the Omarchy hook was missed.
+///
+/// The bridge calls this while serving phone clients, which gives both the app
+/// and its widgets a polling fallback in addition to the instant `theme-set`
+/// hook installed by super-desktop.
+pub fn current_theme_fresh() -> OmarchyTheme {
+    if check_theme_changed() {
+        reload_theme()
+    } else {
+        current_theme()
     }
-    false
 }

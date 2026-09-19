@@ -9,10 +9,20 @@
 //! Endpoints (see OmarchyAILauncher/PROTOCOL.md, wire v1):
 //!   GET  /api/v1/ping
 //!   GET  /api/v1/harnesses            (Bearer token or loopback)
-//!   POST /api/v1/pair                 (open; PIN or pairing window)
-//!   POST /api/v1/pair/open            (loopback only, opens 120s window)
+//!   GET  /api/v1/theme                 (Bearer token or loopback)
+//!   DELETE /api/v1/harnesses/<id>     (Bearer token or loopback)
+//!   POST /api/v1/pair                 (open; requests desktop approval)
+//!   POST /api/v1/pair/poll            (unguessable request capability)
+//!   GET  /api/v1/pair/state           (loopback-only pending requests)
+//!   POST /api/v1/pair/approve, /deny   (loopback-only decision)
 
 use serde::{Deserialize, Serialize};
+#[path = "bridge_pairing.rs"]
+mod pairing;
+pub use pairing::{pending_requests, decide_request, paired_devices, revoke_device, pairing_invitation};
+#[path = "bridge_security.rs"]
+mod security;
+use security::Connection;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
@@ -20,12 +30,12 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::state::load_state;
 use crate::tmux::{
-    capture_pane_ansi, capture_pane_text, extract_last_prompt, get_agent_config,
+    capture_pane_text, extract_last_prompt, get_agent_config,
     get_composer_draft, get_opencode_user_text_by_id, inspect_status,
     inspect_status_with_screen, resolve_own_opencode_id, resolve_workspace_dir,
     strip_terminal_escapes, truncate_prompt_title, SessionStatus,
@@ -33,16 +43,94 @@ use crate::tmux::{
 
 pub const BRIDGE_PORT: u16 = 8759;
 const SERVICE_NAME: &str = "Omarchy Harness Bridge";
-const PROTOCOL_VERSION: u32 = 1;
-const PAIR_WINDOW_SECS: f64 = 120.0;
+const PROTOCOL_VERSION: u32 = 3;
+static INPUT_ACTIVITY: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+
+fn wake_terminal_streams() {
+    if let Ok(mut generation) = INPUT_ACTIVITY.0.lock() {
+        *generation = generation.wrapping_add(1);
+        INPUT_ACTIVITY.1.notify_all();
+    }
+}
 type LauncherSessionMeta = (String, String, Option<String>, u8, Option<String>);
 
 fn utc_now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// The active Omarchy palette, kept explicit so the wire format remains stable
+/// if the desktop-side theme struct gains implementation-only fields.
+fn theme_document() -> serde_json::Value {
+    let t = crate::theme::current_theme_fresh();
+    serde_json::json!({
+        "name": t.name,
+        "mode": t.mode,
+        "accent": t.accent,
+        "selection": t.selection,
+        "muted": t.muted,
+        "background": t.background,
+        "darkBackground": t.dark_background,
+        "darkerBackground": t.darker_background,
+        "lighterBackground": t.lighter_background,
+        "foreground": t.foreground,
+        "darkForeground": t.dark_foreground,
+        "lightForeground": t.light_foreground,
+        "brightForeground": t.bright_foreground,
+        "red": t.red,
+        "yellow": t.yellow,
+        "orange": t.orange,
+        "green": t.green,
+        "cyan": t.cyan,
+        "blue": t.blue,
+        "magenta": t.magenta,
+        "brown": t.brown,
+        "brightRed": t.bright_red,
+        "brightYellow": t.bright_yellow,
+        "brightGreen": t.bright_green,
+        "brightCyan": t.bright_cyan,
+        "brightBlue": t.bright_blue,
+        "brightMagenta": t.bright_magenta,
+        "fontFamily": t.font_family,
+        "fontSize": t.font_size,
+    })
+}
+
 /// `(fetched_at, value)` for `tailscale_ip`; see the TTL there.
 static TAILSCALE_CACHE: Mutex<Option<(f64, Option<String>)>> = Mutex::new(None);
+static ADDRESSES_CACHE: Mutex<Option<(f64, Vec<serde_json::Value>)>> = Mutex::new(None);
+
+fn interface_addresses(document: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut result = Vec::new();
+    for interface in document.as_array().into_iter().flatten() {
+        let name = interface["ifname"].as_str().unwrap_or("");
+        for info in interface["addr_info"].as_array().into_iter().flatten() {
+            let Some(address) = info["local"].as_str() else { continue };
+            let Ok(ip) = address.parse::<std::net::IpAddr>() else { continue };
+            if ip.is_unspecified() || ip.is_multicast() { continue; }
+            let kind = if ip.is_loopback() { "loopback" }
+                else if name.starts_with("tailscale") { "tailscale" }
+                else { "lan" };
+            result.push(serde_json::json!({"address":address,"interface":name,"kind":kind,
+                // The HTTP listener currently serves IPv4. Show IPv6 addresses
+                // too, but don't let clients select them as working endpoints.
+                "connectable":ip.is_ipv4() && !ip.is_loopback() && info["scope"] != "link"}));
+        }
+    }
+    result.sort_by_key(|v| (v["kind"] != "tailscale", v["connectable"] != true, v["address"].as_str().unwrap_or("").to_string()));
+    result
+}
+
+fn bridge_addresses() -> Vec<serde_json::Value> {
+    let mut cache = ADDRESSES_CACHE.lock().unwrap();
+    if let Some((time, addresses)) = cache.as_ref() {
+        if now_epoch() - time < 10.0 { return addresses.clone(); }
+    }
+    let addresses = Command::new("ip").args(["-j", "address", "show", "up"]).output().ok()
+        .and_then(|o| serde_json::from_slice::<serde_json::Value>(&o.stdout).ok())
+        .map(|value| interface_addresses(&value)).unwrap_or_default();
+    *cache = Some((now_epoch(), addresses.clone()));
+    addresses
+}
 
 fn now_epoch() -> f64 {
     std::time::SystemTime::now()
@@ -190,6 +278,7 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             .unwrap_or_else(|| ("shell".to_string(), String::new(), None, 0, None));
         let cfg = get_agent_config(&agent_type);
         let screen = capture_pane_text(&session).unwrap_or_default();
+        let (model, effort) = harness_model_effort(&agent_type, &screen);
         let status = inspect_status_with_screen(&session, &agent_type, &screen);
         let harness_home = resolve_workspace_dir(workspace_dir.as_deref());
         let (directory, directory_kind) =
@@ -208,6 +297,8 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             "id": session,
             "agentType": agent_type,
             "agentName": cfg.name,
+            "model": model,
+            "effort": effort,
             "icon": cfg.icon,
             "status": status.status,
             "label": status.label,
@@ -237,22 +328,58 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
     out
 }
 
+/// Read only recognized status-footer formats from the current pane bottom.
+/// Never infer settings from global defaults or conversation history.
+fn harness_model_effort(agent: &str, screen: &str) -> (Option<String>, Option<String>) {
+    for line in screen.lines().rev().take(6).map(str::trim) {
+        if let Some(rest) = line.strip_prefix("MODEL ") {
+            if let Some((model, effort)) = rest.split_once("EFFORT ") {
+                let model = model.trim();
+                let effort = effort.split_whitespace().next().unwrap_or("");
+                if !model.is_empty() && !effort.is_empty() {
+                    return (Some(model.to_string()), Some(effort.to_string()));
+                }
+            }
+        }
+        if agent == "codex" {
+            if let Some((settings, _)) = line.split_once(" · ") {
+                let mut parts = settings.split_whitespace();
+                if let (Some(model), Some(effort), None) = (parts.next(), parts.next(), parts.next()) {
+                    if (model.starts_with("gpt-") || model.starts_with("o3") || model.starts_with("o4"))
+                        && matches!(effort, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra") {
+                        return (Some(model.to_string()), Some(effort.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    (None, None)
+}
+
 // ---------- pairing state ----------
 
 #[derive(Debug, Serialize, Deserialize)]
 struct BridgeConfig {
+    #[serde(default = "new_bridge_id")]
+    bridge_id: String,
     #[serde(default)]
     paired_tokens: Vec<String>,
     #[serde(default)]
-    pin: String,
-    #[serde(default)]
-    pairing_open_until: f64,
+    devices: Vec<PairedDevice>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PairedDevice { id: String, name: String, token_hash: String, expires: f64 }
+
+fn new_bridge_id() -> String { random_hex(16) }
 
 fn state_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let dir = PathBuf::from(home).join(".local/state/omarchy/harness-bridge");
-    let _ = fs::create_dir_all(&dir);
+    let dir = std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(home).join(".local/state/omarchy/harness-bridge"));
+    fs::create_dir_all(&dir).expect("Cannot create private bridge state directory");
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("Cannot secure bridge state directory");
     dir.join("config.json")
 }
 
@@ -267,26 +394,12 @@ fn urandom_bytes(n: usize) -> Vec<u8> {
             f.read_exact(&mut buf).ok()
         })
         .is_some();
-    if ok {
-        buf
-    } else {
-        // Bare-metal fallback: time + pid mix (never blocks).
-        let t = now_epoch().to_bits().to_le_bytes();
-        let p = std::process::id().to_le_bytes();
-        (0..n)
-            .map(|i| t[i % 8] ^ p[i % 4] ^ (i as u8).wrapping_mul(31))
-            .collect()
-    }
+    assert!(ok, "OS randomness unavailable; refusing to generate pairing credentials");
+    buf
 }
 
 fn random_hex(bytes: usize) -> String {
     urandom_bytes(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn new_pin() -> String {
-    let data = urandom_bytes(2);
-    let n = ((data[0] as u32) << 8 | (data[1] as u32)) % 9000 + 1000;
-    format!("{n:04}")
 }
 
 struct PairState {
@@ -309,21 +422,20 @@ fn config_mtime() -> f64 {
 impl PairState {
     fn load() -> Self {
         let path = state_path();
-        let mut cfg: BridgeConfig = fs::read_to_string(&path)
+        let cfg: BridgeConfig = fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok())
             .unwrap_or_else(|| BridgeConfig {
+                bridge_id: new_bridge_id(),
                 paired_tokens: vec![],
-                pin: new_pin(),
-                pairing_open_until: 0.0,
+                devices: vec![],
             });
-        if cfg.pin.len() != 4 {
-            cfg.pin = new_pin();
-        }
-        let state = Self {
+        let mut state = Self {
             cfg,
             mtime: 0.0,
         };
+        // Legacy credentials travelled over HTTP; never accept them under v3.
+        state.cfg.paired_tokens.clear();
         state.save();
         let mtime = config_mtime();
         Self {
@@ -332,11 +444,17 @@ impl PairState {
         }
     }
 
-    fn save(&self) {
+    fn save(&self) -> bool {
+        use std::os::unix::fs::OpenOptionsExt;
         let path = state_path();
-        if let Ok(json) = serde_json::to_string_pretty(&self.cfg) {
-            let _ = fs::write(&path, json);
-        }
+        let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+        (|| -> std::io::Result<()> {
+            let json = serde_json::to_vec_pretty(&self.cfg)?;
+            let mut file = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&temporary)?;
+            file.write_all(&json)?;
+            file.sync_all()?;
+            fs::rename(temporary, path)
+        })().is_ok()
     }
 
     /// Pick up config.json edits made by another process (e.g. a fresh PIN
@@ -351,21 +469,10 @@ impl PairState {
             .ok()
             .and_then(|c| serde_json::from_str::<BridgeConfig>(&c).ok())
         {
-            let mut tokens = disk.paired_tokens;
-            for t in &self.cfg.paired_tokens {
-                if !tokens.contains(t) {
-                    tokens.push(t.clone());
-                }
-            }
-            let pin = if disk.pin.len() == 4 {
-                disk.pin
-            } else {
-                self.cfg.pin.clone()
-            };
             self.cfg = BridgeConfig {
-                paired_tokens: tokens,
-                pin,
-                pairing_open_until: disk.pairing_open_until,
+                bridge_id: self.cfg.bridge_id.clone(),
+                paired_tokens: vec![],
+                devices: disk.devices,
             };
         }
         self.mtime = config_mtime();
@@ -373,7 +480,7 @@ impl PairState {
 
     fn valid(&mut self, token: &str) -> bool {
         self.refresh();
-        !token.is_empty() && self.cfg.paired_tokens.iter().any(|t| t == token)
+        !token.is_empty() && self.cfg.devices.iter().any(|d| d.expires > now_epoch() && security::equal(&d.token_hash, &security::digest(token.as_bytes())))
     }
 }
 
@@ -431,11 +538,11 @@ fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn read_request(stream: &mut TcpStream) -> Option<Request> {
+fn read_request(stream: &mut Connection) -> Option<Request> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .ok()?;
-    let mut buf = vec![0u8; 65536];
+    let mut buf = vec![0u8; 16384];
     let mut total = 0usize;
     let header_end = loop {
         let n = stream.read(&mut buf[total..]).ok()?;
@@ -443,14 +550,14 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
             if total == 0 {
                 return None;
             }
-            break total;
+            return None;
         }
         total += n;
         if let Some(pos) = find_subslice(&buf[..total], b"\r\n\r\n") {
             break pos + 4;
         }
         if total >= buf.len() {
-            break total;
+            return None;
         }
     };
     let header_str = String::from_utf8_lossy(&buf[..header_end]).to_string();
@@ -463,19 +570,20 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     let mut headers = HashMap::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            headers.insert(k.trim().to_lowercase(), v.trim().to_string());
+            if headers.insert(k.trim().to_lowercase(), v.trim().to_string()).is_some() { return None; }
         }
     }
     let content_len: usize = headers
         .get("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    if content_len > 16384 || headers.contains_key("transfer-encoding") { return None; }
     let mut body = buf[header_end..total].to_vec();
     while body.len() < content_len {
-        let mut chunk = vec![0u8; 8192];
+        let mut chunk = vec![0u8; (content_len - body.len()).min(8192)];
         let n = stream.read(&mut chunk).ok()?;
         if n == 0 {
-            break;
+            return None;
         }
         body.extend_from_slice(&chunk[..n]);
     }
@@ -488,7 +596,7 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     })
 }
 
-fn respond(stream: &mut TcpStream, code: u16, reason: &str, value: &serde_json::Value) {
+fn respond(stream: &mut Connection, code: u16, reason: &str, value: &serde_json::Value) {
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
     let head = format!(
         "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -500,17 +608,16 @@ fn respond(stream: &mut TcpStream, code: u16, reason: &str, value: &serde_json::
 
 fn bearer(headers: &HashMap<String, String>) -> String {
     let h = headers.get("authorization").cloned().unwrap_or_default();
-    if h.len() > 7 && h[..7].eq_ignore_ascii_case("bearer ") {
-        h[7..].trim().to_string()
+    if h.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("bearer ")) {
+        h.get(7..).unwrap_or("").trim().to_string()
     } else {
         String::new()
     }
 }
 
 /// Bearer-token or loopback authorization (same rule as `/api/v1/harnesses`).
-fn authorize(req: &Request, local: bool) -> bool {
-    local
-        || pair_state()
+fn authorize(req: &Request, _local: bool) -> bool {
+    pair_state()
             .lock()
             .map(|mut s| s.valid(&bearer(&req.headers)))
             .unwrap_or(false)
@@ -518,7 +625,8 @@ fn authorize(req: &Request, local: bool) -> bool {
 
 /// Complete a WebSocket upgrade; `false` when this is not a WS request (the
 /// caller then answers with plain HTTP).
-fn ws_upgrade(stream: &mut TcpStream, req: &Request) -> bool {
+fn ws_upgrade(stream: &mut Connection, req: &Request) -> bool {
+    stream.streaming();
     let upgrade = req
         .headers
         .get("upgrade")
@@ -541,16 +649,21 @@ const STREAM_MAX_SECS: u64 = 1800;
 /// Returns false when the peer went away (EOF or a Close frame), true when it
 /// is still there — including a Ping, which is answered so picky clients stay
 /// happy. A read timeout just means "nothing to read".
-fn ws_client_alive(stream: &mut TcpStream) -> bool {
+fn ws_client_alive(stream: &mut Connection) -> bool {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1)));
+    // A timeout in the middle of read_exact would discard a partial frame.
+    // Probe without consuming, then finish the frame or close the connection.
+    match stream.peek(&mut [0u8; 1]) {
+        Ok(0) => return false,
+        Err(e) => return matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut),
+        _ => {},
+    }
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     match crate::ws::read_frame(stream) {
         Ok(None) | Ok(Some(crate::ws::Frame::Close)) => false,
         Ok(Some(crate::ws::Frame::Ping(payload))) => crate::ws::write_pong(stream, &payload).is_ok(),
         Ok(Some(_)) => true,
-        Err(e) => matches!(
-            e.kind(),
-            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-        ),
+        Err(_) => false,
     }
 }
 
@@ -558,7 +671,7 @@ fn ws_client_alive(stream: &mut TcpStream) -> bool {
 ///
 /// Liveness comes from writes: a client that vanished makes the write (or the
 /// 5s write timeout) fail, which ends the thread — no reader thread needed.
-fn stream_harness_list(mut stream: TcpStream) {
+fn stream_harness_list(mut stream: Connection) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
     while std::time::Instant::now() < deadline {
@@ -570,6 +683,7 @@ fn stream_harness_list(mut stream: TcpStream) {
             "timestamp": utc_now_iso(),
             "harnesses": collect_harnesses(),
             "usage": crate::usage::launcher_usage(),
+            "theme": theme_document(),
         });
         if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
             return;
@@ -579,38 +693,49 @@ fn stream_harness_list(mut stream: TcpStream) {
     let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
 }
 
-/// Push one harness's live pane output (~2 frames/s) until the session dies.
+/// Push changed terminal snapshots, waking immediately after phone input.
 ///
 /// The first frame doubles as the "attached" signal; the phone renders `tail`
 /// in its terminal screen and stops when `status` turns `EXITED`.
-fn stream_one_harness(mut stream: TcpStream, id: &str) {
+fn stream_one_harness(mut stream: Connection, id: &str) {
+    let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
     let (agent_type, tag) = session_meta(id);
+    let Ok(mut control) = crate::tmux_control::Control::open(id) else {
+        let _ = crate::ws::write_close(&mut stream, 1011, "terminal unavailable");
+        return;
+    };
+    let mut cached_status = inspect_status(id, &agent_type);
+    let mut status_updated = std::time::Instant::now();
     let mut previous: Option<String> = None;
+    let mut active_until = std::time::Instant::now();
+    let mut heartbeat = std::time::Instant::now();
     while std::time::Instant::now() < deadline {
+        let input_generation = INPUT_ACTIVITY.0.lock().map(|g| *g).unwrap_or(0);
         if !ws_client_alive(&mut stream) {
             return;
         }
-        let alive = crate::tmux::session_alive(id);
         // One styled tmux capture drives both representations. This is cheaper
         // than capturing once for status/plain text and again for colour.
-        let ansi_tail = alive.then(|| capture_pane_ansi(id)).flatten();
+        let captured = control.capture();
+        let alive = captured.is_ok();
+        let ansi_tail = captured.ok();
         let plain_tail = ansi_tail.as_deref().map(strip_terminal_escapes);
-        let status = if let Some(screen) = plain_tail.as_deref() {
-            inspect_status_with_screen(id, &agent_type, screen)
-        } else if alive {
-            inspect_status(id, &agent_type)
-        } else {
-            SessionStatus {
+        if !alive {
+            cached_status = SessionStatus {
                 status: "EXITED",
                 label: "○ EXITED",
                 pid: String::new(),
                 cmd: String::new(),
                 cwd: String::new(),
-            }
-        };
-        let frame = serde_json::json!({
+            };
+        } else if status_updated.elapsed() >= Duration::from_millis(500) {
+            cached_status = inspect_status_with_screen(id, &agent_type, plain_tail.as_deref().unwrap_or(""));
+            status_updated = std::time::Instant::now();
+        }
+        let status = &cached_status;
+        let mut document = serde_json::json!({
             "id": id,
             "agentType": agent_type,
             "status": status.status,
@@ -622,22 +747,87 @@ fn stream_one_harness(mut stream: TcpStream, id: &str) {
             "tail": plain_tail,
             "tailAnsi": ansi_tail,
             "tailFormat": alive.then_some("ansi-sgr"),
-            "updatedAt": utc_now_iso(),
-        })
-        .to_string();
-        if previous.as_deref() != Some(frame.as_str()) {
-            if crate::ws::write_text(&mut stream, &frame).is_err() {
+        });
+        let frame = document.to_string();
+        let changed = previous.as_deref() != Some(frame.as_str());
+        if changed || heartbeat.elapsed() >= Duration::from_secs(5) {
+            if changed { active_until = std::time::Instant::now() + Duration::from_secs(2); }
+            document["updatedAt"] = serde_json::json!(utc_now_iso());
+            if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
                 return;
             }
             previous = Some(frame);
+            heartbeat = std::time::Instant::now();
         }
         if !alive {
             let _ = crate::ws::write_close(&mut stream, 1000, "session ended");
             return;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        let delay = Duration::from_millis(if std::time::Instant::now() < active_until { 16 } else { 100 });
+        if let Ok(generation) = INPUT_ACTIVITY.0.lock() {
+            if let Ok((generation, _)) = INPUT_ACTIVITY.1.wait_timeout_while(
+                generation, delay, |g| *g == input_generation,
+            ) {
+                if *generation != input_generation {
+                    active_until = std::time::Instant::now() + Duration::from_secs(2);
+                }
+            }
+        }
     }
     let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
+}
+
+/// Ordered input on a persistent socket. Never replay an input after a lost
+/// acknowledgement: the client must treat that outcome as uncertain.
+fn stream_keys(mut stream: Connection, id: &str) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let (agent, _) = session_meta(id);
+    let Ok(mut control) = crate::tmux_control::Control::open(id) else {
+        let _ = crate::ws::write_close(&mut stream, 1011, "terminal unavailable");
+        return;
+    };
+    loop {
+        match crate::ws::read_frame(&mut stream) {
+            Ok(Some(crate::ws::Frame::Text(text))) => {
+                let Ok(body) = serde_json::from_str::<serde_json::Value>(&text) else { break };
+                let value = body["text"].as_str().unwrap_or("");
+                let enter = body["enter"].as_bool().unwrap_or(false);
+                let result = (|| -> Result<(), String> {
+                    if value.len() > 4096 { return Err("text_too_long".into()); }
+                    if body["checkIdle"].as_bool().unwrap_or(false) {
+                        if inspect_status(id, &agent).status != "IDLE" {
+                            return Err("Wait for the harness to become idle.".into());
+                        }
+                        if get_composer_draft(id).is_some_and(|s| !s.trim().is_empty()) {
+                            return Err("Finish or clear the remote draft first.".into());
+                        }
+                    }
+                    if !stream.still_authorized() { return Err("device_revoked".into()); }
+                    control.send(value, false)?;
+                    wake_terminal_streams();
+                    // Codex paste detection needs settling, but it does not
+                    // need another phone-to-bridge round trip.
+                    if enter && !value.is_empty() && agent == "codex" {
+                        std::thread::sleep(Duration::from_millis(200));
+                    }
+                    if !stream.still_authorized() { return Err("device_revoked".into()); }
+                    if enter { control.send("", true)?; }
+                    wake_terminal_streams();
+                    Ok(())
+                })();
+                let ack = serde_json::json!({"sequence": body["sequence"],
+                    "ok": result.is_ok(), "error": result.err()});
+                if crate::ws::write_text(&mut stream, &ack.to_string()).is_err() { break; }
+            }
+            Ok(Some(crate::ws::Frame::Ping(payload))) => {
+                if crate::ws::write_pong(&mut stream, &payload).is_err() { break; }
+            }
+            Ok(Some(crate::ws::Frame::Pong(_))) => {},
+            _ => break,
+        }
+    }
 }
 
 /// Agent type + group tag of a session, from the desktop state file.
@@ -654,7 +844,7 @@ fn session_meta(session: &str) -> (String, u8) {
 ///
 /// Body: `{"text": "ls -la", "enter": true}`. `text` is optional (so the phone
 /// can send a bare Return, or a control byte such as `\u0003` for Ctrl-C).
-fn handle_keys(stream: &mut TcpStream, req: &Request, id: &str, local: bool) {
+fn handle_keys(stream: &mut Connection, req: &Request, id: &str, local: bool) {
     if !authorize(req, local) {
         return respond(
             stream,
@@ -703,30 +893,162 @@ fn handle_keys(stream: &mut TcpStream, req: &Request, id: &str, local: bool) {
     }
 }
 
-fn is_loopback(peer: &str) -> bool {
-    peer.starts_with("127.0.0.1") || peer.starts_with("[::1]") || peer.starts_with("::1")
+/// `DELETE /api/v1/harnesses/<id>` — close one launcher-visible harness.
+fn handle_close_harness(stream: &mut Connection, req: &Request, id: &str, local: bool) {
+    if !authorize(req, local) {
+        return respond(
+            stream,
+            401,
+            "Unauthorized",
+            &serde_json::json!({"status": "error", "error": "not_paired"}),
+        );
+    }
+    if !id.starts_with("sd_term_") {
+        return respond(
+            stream,
+            404,
+            "Not Found",
+            &serde_json::json!({"status": "error", "error": "no_such_session"}),
+        );
+    }
+    match crate::ipc_request(&format!("close-term {id}")) {
+        crate::Ipc::Reply(reply) => {
+            let result: serde_json::Value =
+                serde_json::from_str(&reply).unwrap_or(serde_json::Value::Null);
+            if result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                respond(stream, 200, "OK", &result)
+            } else if result.get("error").and_then(|v| v.as_str()) == Some("no_such_session") {
+                respond(stream, 404, "Not Found", &result)
+            } else {
+                respond(
+                    stream,
+                    500,
+                    "Internal Server Error",
+                    &serde_json::json!({"status": "error", "error": "close_failed"}),
+                )
+            }
+        }
+        crate::Ipc::NoDaemon => respond(
+            stream,
+            503,
+            "Service Unavailable",
+            &serde_json::json!({"status": "error", "error": "desktop_not_running"}),
+        ),
+        crate::Ipc::Stalled => respond(
+            stream,
+            504,
+            "Gateway Timeout",
+            &serde_json::json!({"status": "error", "error": "close_timeout_check_machine_before_retry"}),
+        ),
+    }
 }
 
-fn handle_client(mut stream: TcpStream) {
-    let peer = stream
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_default();
+fn creation_command(agent: &str, body: &serde_json::Value) -> Option<String> {
+    if let Some(value) = body.get("workspace") {
+        let directory = value.as_str().and_then(crate::state::clean_dir)?;
+        Some(format!("add-term-in {}", serde_json::json!({"agentType":agent,"workspace":directory})))
+    } else {
+        Some(format!("add-term {agent}"))
+    }
+}
+
+fn handle_client(mut stream: Connection, admission: Option<security::Admission>) {
     let req = match read_request(&mut stream) {
         Some(r) => r,
         None => return,
     };
-    let local = is_loopback(&peer);
+    let local = stream.is_local();
+    if req.headers.contains_key("origin") || req.headers.contains_key("sec-fetch-site") {
+        return respond(&mut stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
+    }
+    if let Some(guard) = &admission { guard.identify(&bearer(&req.headers)); }
+    // Recheck on each stream I/O as well as closing the socket: TLS may already
+    // have buffered input when a device is revoked.
+    if authorize(&req, false) {
+        let token = bearer(&req.headers);
+        security::note_activity(&token);
+        stream.credential(&token);
+    }
     let path = req.path.split('?').next().unwrap_or("").to_string();
 
+    // All pairing routes go through explicit desktop approval. In particular,
+    // neither a legacy PIN nor an open window can mint a token any longer.
+    if path == "/api/v1/pair" || path.starts_with("/api/v1/pair/") {
+        return pairing::handle(&mut stream, &req, local, &path);
+    }
+
+    if path == "/api/v1/workspaces" || path == "/api/v1/harness-types" || (path == "/api/v1/harnesses" && req.method == "POST") {
+        if !authorize(&req, local) {
+            return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+        }
+        if req.method == "GET" && path == "/api/v1/workspaces" {
+            return match crate::ipc_request("workspace-choices") {
+                crate::Ipc::Reply(reply) => match serde_json::from_str::<serde_json::Value>(&reply) {
+                    Ok(value) => respond(&mut stream, 200, "OK", &value),
+                    Err(_) => respond(&mut stream, 502, "Bad Gateway", &serde_json::json!({"error":"invalid_desktop_response"})),
+                },
+                _ => respond(&mut stream, 503, "Service Unavailable", &serde_json::json!({"error":"desktop_not_running"})),
+            };
+        }
+        if req.method == "GET" && path == "/api/v1/harness-types" {
+            let types: Vec<_> = crate::tmux::HARNESS_KEYS.iter().map(|key| {
+                let config = get_agent_config(key);
+                serde_json::json!({"id":key,"name":config.name,"icon":config.icon,
+                    "available":crate::tmux::detect_harness_command(key).is_some()})
+            }).collect();
+            return respond(&mut stream, 200, "OK", &serde_json::json!({"types":types,
+                "workspace":crate::state::effective_workspace_dir(&load_state())}));
+        }
+        if req.method == "POST" && path == "/api/v1/harnesses" {
+            let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or(serde_json::Value::Null);
+            let agent = body.get("agentType").and_then(|v| v.as_str()).unwrap_or("");
+            if !crate::tmux::HARNESS_KEYS.contains(&agent) {
+                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"unsupported_harness"}));
+            }
+            if crate::tmux::detect_harness_command(agent).is_none() {
+                return respond(&mut stream, 409, "Conflict", &serde_json::json!({"error":"harness_not_installed"}));
+            }
+            let Some(command) = creation_command(agent, &body) else {
+                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_workspace"}));
+            };
+            return match crate::ipc_request(&command) {
+                crate::Ipc::Reply(reply) => {
+                    let result: serde_json::Value = serde_json::from_str(&reply).unwrap_or(serde_json::Value::Null);
+                    if result["ok"] == true {
+                        respond(&mut stream, 201, "Created", &result)
+                    } else if result["error"] == "invalid_workspace" {
+                        respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_workspace"}))
+                    } else {
+                        respond(&mut stream, 500, "Internal Server Error", &serde_json::json!({"error":"creation_failed"}))
+                    }
+                }
+                crate::Ipc::NoDaemon => respond(&mut stream, 503, "Service Unavailable", &serde_json::json!({"error":"desktop_not_running"})),
+                crate::Ipc::Stalled => respond(&mut stream, 504, "Gateway Timeout", &serde_json::json!({"error":"creation_timeout_check_machine_before_retry"})),
+            };
+        }
+    }
+
     // Dynamic harness routes: /api/v1/harnesses/<id>/stream (WebSocket, live
-    // pane output) and /api/v1/harnesses/<id>/keys (phone → harness input).
+    // pane output), /keys (phone → harness input), and DELETE (close harness).
     // Only our own `sd_term_*` sessions are addressable, so a paired phone
     // cannot type into unrelated tmux sessions.
     if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
+        if req.method == "DELETE" && !rest.contains('/') {
+            return handle_close_harness(&mut stream, &req, rest, local);
+        }
         if let Some((id, action)) = rest.rsplit_once('/') {
             if id.starts_with("sd_term_") {
                 match (req.method.as_str(), action) {
+                    ("GET", "input") => {
+                        if !authorize(&req, local) {
+                            return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+                        }
+                        if !crate::tmux::session_alive(id) {
+                            return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"no_such_session"}));
+                        }
+                        if ws_upgrade(&mut stream, &req) { return stream_keys(stream, id); }
+                        return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
+                    }
                     ("GET", "stream") => {
                         if !authorize(&req, local) {
                             return respond(
@@ -754,7 +1076,9 @@ fn handle_client(mut stream: TcpStream) {
     }
 
     match (req.method.as_str(), path.as_str()) {
-        ("GET", "/api/v1/ping") => respond(
+        ("GET", "/api/v1/ping") => {
+            let bridge_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
+            respond(
             &mut stream,
             200,
             "OK",
@@ -764,13 +1088,15 @@ fn handle_client(mut stream: TcpStream) {
                 "protocolVersion": PROTOCOL_VERSION,
                 "hostname": hostname(),
                 "lanIp": lan_ip(),
+                "bridgeId": bridge_id,
+                "addresses": bridge_addresses(),
+                "tailscaleIp": bridge_addresses().iter().find(|v| v["kind"] == "tailscale" && v["connectable"] == true).map(|v| v["address"].clone()),
                 "port": BRIDGE_PORT,
                 "time": utc_now_iso(),
             }),
-        ),
+        ) },
         ("GET", "/api/v1/harnesses") => {
-            let ok = local
-                || pair_state()
+            let ok = pair_state()
                     .lock()
                     .map(|mut s| s.valid(&bearer(&req.headers)))
                     .unwrap_or(false);
@@ -791,8 +1117,20 @@ fn handle_client(mut stream: TcpStream) {
                     "timestamp": utc_now_iso(),
                     "harnesses": collect_harnesses(),
                     "usage": crate::usage::launcher_usage(),
+                    "theme": theme_document(),
                 }),
             );
+        }
+        ("GET", "/api/v1/theme") => {
+            if !authorize(&req, local) {
+                return respond(
+                    &mut stream,
+                    401,
+                    "Unauthorized",
+                    &serde_json::json!({"status": "error", "error": "not_paired"}),
+                );
+            }
+            respond(&mut stream, 200, "OK", &theme_document());
         }
         // PROTOCOL.md: full document on connect, then on every change (1s poll).
         ("GET", "/api/v1/harnesses/stream") => {
@@ -814,73 +1152,6 @@ fn handle_client(mut stream: TcpStream) {
             }
             stream_harness_list(stream);
         }
-        ("POST", "/api/v1/pair/open") => {
-            if !local {
-                return respond(
-                    &mut stream,
-                    401,
-                    "Unauthorized",
-                    &serde_json::json!({"status": "error", "error": "not_paired"}),
-                );
-            }
-            if let Ok(mut s) = pair_state().lock() {
-                s.refresh();
-                s.cfg.pairing_open_until = now_epoch() + PAIR_WINDOW_SECS;
-                s.save();
-            }
-            respond(
-                &mut stream,
-                200,
-                "OK",
-                &serde_json::json!({"status": "open", "secondsRemaining": 120}),
-            );
-        }
-        ("POST", "/api/v1/pair") => {
-            let body: serde_json::Value =
-                serde_json::from_str(&req.body).unwrap_or(serde_json::json!({}));
-            let pin = body
-                .get("pin")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let mut out: Option<(String, String)> = None;
-            if let Ok(mut s) = pair_state().lock() {
-                s.refresh();
-                if !pin.is_empty() && pin == s.cfg.pin {
-                    let tok = random_hex(24);
-                    s.cfg.paired_tokens.push(tok.clone());
-                    s.save();
-                    out = Some((tok, "pin".into()));
-                } else if now_epoch() < s.cfg.pairing_open_until {
-                    let tok = random_hex(24);
-                    s.cfg.paired_tokens.push(tok.clone());
-                    s.cfg.pairing_open_until = 0.0;
-                    s.save();
-                    out = Some((tok, "window".into()));
-                }
-            }
-            match out {
-                Some((tok, method)) => respond(
-                    &mut stream,
-                    200,
-                    "OK",
-                    &serde_json::json!({
-                        "status": "paired",
-                        "token": tok,
-                        "hostname": hostname(),
-                        "serverIp": lan_ip(),
-                        "method": method,
-                    }),
-                ),
-                None => respond(
-                    &mut stream,
-                    401,
-                    "Unauthorized",
-                    &serde_json::json!({"status": "error", "error": "invalid_pin"}),
-                ),
-            }
-        }
         _ => respond(
             &mut stream,
             404,
@@ -892,6 +1163,7 @@ fn handle_client(mut stream: TcpStream) {
 
 /// Blocking serve loop for `super-desktop harness-bridge`.
 pub fn serve(port: u16) {
+    let tls = security::tls_config().expect("Cannot load TLS identity; refusing insecure fallback");
     let listener = match TcpListener::bind(("0.0.0.0", port)) {
         Ok(l) => l,
         Err(e) => {
@@ -899,7 +1171,8 @@ pub fn serve(port: u16) {
             std::process::exit(1);
         }
     };
-    println!("{SERVICE_NAME} on 0.0.0.0:{port} (lan {})", lan_ip());
+    security::serve_control().expect("Cannot start private desktop control socket");
+    println!("{SERVICE_NAME} HTTPS on 0.0.0.0:{port} (lan {})", lan_ip());
     // Advertise for the launcher's NSD lookup (OmarchyAILauncher/PROTOCOL.md).
     // On a worker thread: confirming the record with `avahi-browse` takes a
     // moment, and discovery must never delay serving requests.
@@ -915,7 +1188,12 @@ pub fn serve(port: u16) {
     for stream in listener.incoming() {
         match stream {
             Ok(s) => {
-                std::thread::spawn(move || handle_client(s));
+                if let Some(admission) = security::Admission::acquire(&s) {
+                    let tls = tls.clone();
+                    std::thread::spawn(move || {
+                        if let Ok(stream) = Connection::tls(s, tls) { handle_client(stream, Some(admission)); }
+                    });
+                }
             }
             Err(e) => eprintln!("accept error: {e}"),
         }
@@ -926,7 +1204,7 @@ pub fn serve(port: u16) {
 pub const MDNS_SERVICE_TYPE: &str = "_omarchy-harness._tcp";
 
 /// Protocol version advertised in the TXT record (`ver=1`).
-const MDNS_PROTOCOL_TXT_VERSION: u32 = 1;
+const MDNS_PROTOCOL_TXT_VERSION: u32 = PROTOCOL_VERSION;
 
 /// Publish `_omarchy-harness._tcp` through the system Avahi daemon.
 ///
@@ -943,15 +1221,16 @@ pub fn publish_mdns(port: u16) -> bool {
     let host = hostname();
     let name = format!("{SERVICE_NAME} on {host}");
     let txt_host = format!("host={host}");
-    // Names are const/hostname, but they can contain spaces, so quote them.
+    // Pass names as arguments, never interpolate them into a shell script.
     let script = format!(
-        "avahi-publish-service -s '{name}' {MDNS_SERVICE_TYPE} {port} \
-         ver={MDNS_PROTOCOL_TXT_VERSION} '{txt_host}' & publisher=$!; \
+        "avahi-publish-service -s \"$1\" \"$2\" \"$3\" \
+         ver={MDNS_PROTOCOL_TXT_VERSION} \"$4\" approval=desktop & publisher=$!; \
          cat >/dev/null; kill $publisher 2>/dev/null; wait $publisher 2>/dev/null"
     );
 
     let mut command = Command::new("sh");
-    command.arg("-c").arg(&script).stdin(Stdio::piped());
+    command.arg("-c").arg(&script).arg("super-desktop-mdns")
+        .arg(&name).arg(MDNS_SERVICE_TYPE).arg(port.to_string()).arg(&txt_host).stdin(Stdio::piped());
     match log_file_append().and_then(|file| file.try_clone().ok().map(|clone| (file, clone))) {
         Some((out, err)) => {
             command.stdout(Stdio::from(out)).stderr(Stdio::from(err));
@@ -1112,12 +1391,8 @@ pub fn bridge_running(port: u16) -> bool {
     bridge_ping_body(port).is_some()
 }
 
-fn bridge_ping_body(port: u16) -> Option<String> {
-    let mut s = TcpStream::connect_timeout(
-        &format!("127.0.0.1:{port}").parse().ok()?,
-        Duration::from_secs(2),
-    )
-    .ok()?;
+fn bridge_ping_body(_port: u16) -> Option<String> {
+    let mut s = std::os::unix::net::UnixStream::connect(security::control_path()).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     s.write_all(b"GET /api/v1/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .ok()?;
@@ -1299,95 +1574,6 @@ fn wait_port_free() -> bool {
     false
 }
 
-/// Current pairing PIN (fresh from disk, so external edits are visible).
-pub fn read_pin() -> String {
-    let cfg: Option<BridgeConfig> = fs::read_to_string(state_path())
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok());
-    match cfg.map(|c| c.pin) {
-        Some(p) if p.len() == 4 => p,
-        _ => pair_state()
-            .lock()
-            .map(|mut s| {
-                s.refresh();
-                s.cfg.pin.clone()
-            })
-            .unwrap_or_else(|_| "----".to_string()),
-    }
-}
-
-/// Generate and persist a fresh PIN (takes effect immediately, even if the
-/// bridge keeps running, via PairState::refresh).
-pub fn rotate_pin() -> String {
-    let pin = new_pin();
-    if let Ok(mut s) = pair_state().lock() {
-        s.refresh();
-        s.cfg.pin = pin.clone();
-        s.save();
-        s.mtime = config_mtime();
-    } else {
-        // Bridge never ran in this process: write through the file directly.
-        let mut cfg: BridgeConfig = fs::read_to_string(state_path())
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_else(|| BridgeConfig {
-                paired_tokens: vec![],
-                pin: pin.clone(),
-                pairing_open_until: 0.0,
-            });
-        cfg.pin = pin.clone();
-        let _ = fs::write(
-            state_path(),
-            serde_json::to_string_pretty(&cfg).unwrap_or_default(),
-        );
-    }
-    pin
-}
-
-/// Seconds left on the laptop pairing window (0 = closed).
-pub fn pairing_seconds_left() -> u64 {
-    let cfg: Option<BridgeConfig> = fs::read_to_string(state_path())
-        .ok()
-        .and_then(|c| serde_json::from_str(&c).ok());
-    let until = cfg.map(|c| c.pairing_open_until).unwrap_or(0.0);
-    let left = until - now_epoch();
-    if left > 0.0 {
-        left as u64
-    } else {
-        0
-    }
-}
-
-/// Open the 120s pairing window via loopback. Returns seconds remaining.
-pub fn open_pairing_window() -> Result<u64, String> {
-    let mut s = TcpStream::connect(("127.0.0.1", BRIDGE_PORT))
-        .map_err(|_| "bridge not running — start it first".to_string())?;
-    s.set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| e.to_string())?;
-    let body = "{}";
-    let req = format!(
-        "POST /api/v1/pair/open HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    s.write_all(req.as_bytes())
-        .map_err(|e| e.to_string())?;
-    let mut resp = String::new();
-    s.read_to_string(&mut resp)
-        .map_err(|e| e.to_string())?;
-    let body = resp.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
-    let v: serde_json::Value =
-        serde_json::from_str(body).map_err(|_| "bad bridge response".to_string())?;
-    if v.get("status").and_then(|x| x.as_str()) == Some("open") {
-        Ok(v
-            .get("secondsRemaining")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(120))
-    } else {
-        Err("bridge refused".to_string())
-    }
-}
-
 // ---------- firewall (UFW) ----------
 
 fn firewall_marker_path() -> PathBuf {
@@ -1451,6 +1637,133 @@ pub fn unlock_firewall() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn address_inventory_labels_tailscale_and_only_selects_served_addresses() {
+        let addresses = super::interface_addresses(&serde_json::json!([
+            {"ifname":"wlan0","addr_info":[{"local":"192.168.1.5","scope":"global"}]},
+            {"ifname":"tailscale0","addr_info":[{"local":"100.64.0.5","scope":"global"},{"local":"fd7a::5","scope":"global"}]},
+            {"ifname":"lo","addr_info":[{"local":"127.0.0.1","scope":"host"}]}
+        ]));
+        assert_eq!(addresses.len(), 4);
+        assert_eq!(addresses[0]["address"], "100.64.0.5");
+        assert_eq!(addresses[0]["connectable"], true);
+        assert!(addresses.iter().filter(|a| a["address"] == "fd7a::5" || a["kind"] == "loopback").all(|a| a["connectable"] == false));
+    }
+
+    #[test]
+    fn stable_bridge_identity_migrates_without_losing_tokens() {
+        let old: super::BridgeConfig = serde_json::from_str(r#"{"paired_tokens":["existing"]}"#).unwrap();
+        assert!(!old.bridge_id.is_empty());
+        let restored: super::BridgeConfig = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(old.bridge_id, restored.bridge_id);
+        assert_eq!(restored.paired_tokens, vec!["existing"]);
+    }
+    #[test]
+    fn creation_workspace_is_explicit_and_invalid_paths_never_fall_back() {
+        use serde_json::json;
+        assert_eq!(super::creation_command("shell", &json!({})), Some("add-term shell".into()));
+        for value in [json!(null), json!(42), json!(""), json!("/nonexistent/sd-workspace-test")] {
+            assert!(super::creation_command("shell", &json!({"workspace":value})).is_none());
+        }
+        let directory = std::env::temp_dir().join(format!("sd bridge path with spaces {}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let command = super::creation_command("shell", &json!({"workspace":directory})).unwrap();
+        let body: serde_json::Value = serde_json::from_str(command.strip_prefix("add-term-in ").unwrap()).unwrap();
+        assert_eq!(body["workspace"], directory.canonicalize().unwrap().to_string_lossy().as_ref());
+        assert_eq!(body["agentType"], "shell");
+        std::fs::remove_dir(directory).unwrap();
+    }
+    #[test]
+    fn persistent_input_keeps_order_and_acknowledges_errors() {
+        let id = format!("sd_perf_test_{}", std::process::id());
+        struct Session(String);
+        impl Drop for Session {
+            fn drop(&mut self) { let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output(); }
+        }
+        let result = Command::new("tmux").args(["new-session", "-d", "-s", &id, "cat"]).output().unwrap();
+        assert!(result.status.success());
+        let _session = Session(id.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream_keys(Connection::plain(stream), &id);
+        });
+        fn send(client: &mut TcpStream, body: serde_json::Value) {
+            let bytes = body.to_string().into_bytes();
+            let mut frame = vec![0x81];
+            if bytes.len() < 126 { frame.push(0x80 | bytes.len() as u8); }
+            else { frame.push(0xfe); frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes()); }
+            frame.extend_from_slice(&[0, 0, 0, 0]);
+            frame.extend_from_slice(&bytes);
+            client.write_all(&frame).unwrap();
+        }
+        fn receive(client: &mut TcpStream) -> serde_json::Value {
+            let mut header = [0u8; 2];
+            client.read_exact(&mut header).unwrap();
+            assert_eq!(header[0], 0x81);
+            let mut size = usize::from(header[1]);
+            if size == 126 {
+                let mut extended = [0; 2]; client.read_exact(&mut extended).unwrap();
+                size = usize::from(u16::from_be_bytes(extended));
+            }
+            let mut body = vec![0; size]; client.read_exact(&mut body).unwrap();
+            serde_json::from_slice(&body).unwrap()
+        }
+        // Pipeline messages without waiting for each acknowledgement.
+        send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
+        send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
+        send(&mut client, serde_json::json!({"sequence":3,"text":"x".repeat(4097)}));
+        for sequence in 1..=3 {
+            let ack = receive(&mut client);
+            assert_eq!(ack["sequence"], sequence);
+            assert_eq!(ack["ok"], sequence < 3);
+        }
+        let screen = capture_pane_text(&_session.0).unwrap();
+        assert!(screen.find("alpha").unwrap() < screen.find("beta").unwrap());
+        let mut control = crate::tmux_control::Control::open(&_session.0).unwrap();
+        assert_eq!(control.capture().unwrap(), crate::tmux::capture_pane_ansi(&_session.0).unwrap());
+        control.send("literal ' ; $() \\ Ukrainian: привіт", true).unwrap();
+        assert!(control.capture().unwrap().contains("literal ' ; $() \\ Ukrainian: привіт"));
+        drop(client);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn theme_document_contains_the_android_palette_contract() {
+        let theme = super::theme_document();
+        for key in [
+            "name",
+            "mode",
+            "accent",
+            "background",
+            "darkBackground",
+            "darkerBackground",
+            "lighterBackground",
+            "foreground",
+            "darkForeground",
+            "brightForeground",
+            "brightRed",
+            "brightYellow",
+            "brightGreen",
+            "brightCyan",
+            "brightBlue",
+            "brightMagenta",
+        ] {
+            assert!(theme.get(key).and_then(|v| v.as_str()).is_some(), "missing {key}");
+        }
+    }
+
+    #[test]
+    fn settings_come_from_live_footer_only() {
+        assert_eq!(super::harness_model_effort("codex", "prompt\n  gpt-6-astra medium · ~/project · title"),
+            (Some("gpt-6-astra".into()), Some("medium".into())));
+        assert_eq!(super::harness_model_effort("reasonix", "MODEL deepseek-v4-flash   EFFORT auto\nstatus"),
+            (Some("deepseek-v4-flash".into()), Some("auto".into())));
+        assert_eq!(super::harness_model_effort("codex", &format!("gpt-6-astra high · old\n{}", "blank\n".repeat(8))), (None, None));
+        assert_eq!(super::harness_model_effort("shell", "gpt-6-astra high · text"), (None, None));
+    }
     use super::*;
 
     #[test]

@@ -37,7 +37,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::state::{
-    clean_dir, display_dir, effective_workspace_dir, home_dir_string, push_recent_dir,
+    clean_dir, display_dir, effective_workspace_dir, home_dir_string, remember_workspace_dir,
     resolve_workspace_input, AppState,
 };
 
@@ -64,6 +64,51 @@ struct CompleteState {
     suppress: bool,
     /// Text as of the last handled `changed`, so Backspace does not re-expand.
     last_typed: String,
+}
+
+/// GTK4 delegates Entry editing to an internal GtkText child. During real
+/// typing that child, rather than the outer Entry, owns root focus, so checking
+/// only `entry.has_focus()` incorrectly classifies user input as a
+/// programmatic update and suppresses autocomplete.
+fn entry_is_being_edited(entry: &Entry) -> bool {
+    if entry.has_focus() {
+        return true;
+    }
+    let Some(root) = entry.root() else {
+        return false;
+    };
+    let Some(focused) = root.focus() else {
+        return false;
+    };
+    focused == entry.clone().upcast::<gtk4::Widget>() || focused.is_ancestor(entry)
+}
+
+/// Show autocomplete without letting the popover interrupt typing. GTK may
+/// move focus to a newly mapped popover child after the current input event,
+/// so restoration runs on the next main-loop turn and preserves both the
+/// caret and an inline-completion selection.
+fn popup_for_entry(popover: &Popover, entry: &Entry) {
+    let caret = entry.position();
+    let selection = entry.selection_bounds();
+    // An autohide Popover installs a modal input grab. On a layer-shell
+    // surface that grab stops the parent Entry receiving further keys even
+    // when GTK still paints its caret. Autocomplete closes explicitly, so it
+    // must be non-modal while the user is typing.
+    popover.set_autohide(false);
+    popover.popup();
+    let popover = popover.clone();
+    let entry = entry.clone();
+    glib::idle_add_local_once(move || {
+        if !popover.is_visible() || entry_is_being_edited(&entry) {
+            return;
+        }
+        entry.grab_focus_without_selecting();
+        if let Some((start, end)) = selection {
+            entry.select_region(start, end);
+        } else {
+            entry.set_position(caret);
+        }
+    });
 }
 
 /// Build the workspace field that sits right after the brand label.
@@ -95,13 +140,13 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
 
     let entry = Entry::new();
     entry.add_css_class("ws-entry");
-    // 1.5× the compact 6–14 character field: still much shorter than the
-    // original 18–42, large enough to click and type a path into.
-    entry.set_width_chars(9);
-    entry.set_max_width_chars(21);
+    // Twice the previous compact field, so a project path remains readable
+    // without opening the history or moving the caret through it.
+    entry.set_width_chars(18);
+    entry.set_max_width_chars(42);
     entry.set_valign(Align::Center);
-    // GTK entries expand by default, which would stretch the whole centred HUD
-    // bar across the screen: the field claims its own text width and stops.
+    // GTK entries expand by default; the field claims its configured text
+    // width so the other dock controls keep their own space.
     entry.set_hexpand(false);
     entry.set_can_focus(true);
     entry.set_editable(true);
@@ -182,6 +227,10 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
             Rc::clone(&on_change_toggle),
             None,
         );
+        // The explicit history menu behaves like a normal menu and may close
+        // when the user clicks elsewhere. Autocomplete switches this back off
+        // before showing matches from typing.
+        pop_toggle.set_autohide(true);
         pop_toggle.popup();
     });
 
@@ -198,7 +247,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
             return;
         }
         let typed = entry.text().to_string();
-        if !entry.has_focus() {
+        if !entry_is_being_edited(entry) {
             complete_changed.borrow_mut().last_typed = typed;
             return;
         }
@@ -261,7 +310,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
                 &on_change_changed,
             );
             if !pop_changed.is_visible() {
-                pop_changed.popup();
+                popup_for_entry(&pop_changed, &entry_changed);
             }
         } else if pop_changed.is_visible() && !complete_changed.borrow().history {
             pop_changed.popdown();
@@ -411,7 +460,7 @@ fn nudge_selection<FChange: Fn(AppState) + 'static>(
         on_change,
     );
     if !popover.is_visible() {
-        popover.popup();
+        popup_for_entry(popover, entry);
     }
 }
 
@@ -484,7 +533,7 @@ fn apply_dir<FChange: Fn(AppState) + 'static>(
     let snapshot = {
         let mut s = state.borrow_mut();
         s.workspace_dir = Some(dir.to_string());
-        push_recent_dir(&mut s.recent_dirs, dir);
+        remember_workspace_dir(&mut s, dir);
         s.clone()
     };
     on_change(snapshot);
@@ -587,9 +636,9 @@ fn list_matching_dirs(parent: &Path, partial: &str) -> Vec<String> {
 
 /// Folders a harness has actually run in, newest first, existing on disk.
 ///
-/// `recent_dirs` is what the field itself remembered; each card also stores
-/// the cwd it was launched with, so a folder used once still completes after
-/// it has fallen off the 8-deep combobox list.
+/// `recent_dirs` is the seven-row visible list; `used_dirs` is the persistent
+/// autocomplete index. Each card also contributes its cwd so sessions written
+/// by an older version become searchable before the next state save.
 fn collect_used_dirs(state: &AppState) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -601,6 +650,9 @@ fn collect_used_dirs(state: &AppState) -> Vec<String> {
         }
     };
     for d in &state.recent_dirs {
+        push(d);
+    }
+    for d in &state.used_dirs {
         push(d);
     }
     for t in &state.terminals {
@@ -705,10 +757,10 @@ fn inline_completion(typed: &str, current: &str) -> Option<String> {
     if lcp.len() <= partial.len() {
         return None;
     }
-    let mut completed = format!("{}{}", user_parent_prefix(typed), lcp);
-    if fs.len() == 1 && !completed.ends_with('/') {
-        completed.push('/');
-    }
+    // Leave the suggested suffix selected in the Entry. Appending `/` here
+    // used to put the caret after the completion, so the next typed character
+    // was appended to `Github/` instead of replacing the `thub` suggestion.
+    let completed = format!("{}{}", user_parent_prefix(typed), lcp);
     if completed == trimmed {
         return None;
     }
@@ -802,6 +854,8 @@ fn list_row<FChange: Fn(AppState) + 'static>(
     let pick = Button::new();
     pick.add_css_class("ws-row-pick");
     pick.set_hexpand(true);
+    pick.set_can_focus(false);
+    pick.set_focus_on_click(false);
     pick.set_tooltip_text(Some(dir));
 
     let label_row = GtkBox::new(Orientation::Horizontal, 8);
@@ -838,6 +892,8 @@ fn list_row<FChange: Fn(AppState) + 'static>(
     if show_delete {
         let del = Button::with_label("✕");
         del.add_css_class("ws-del");
+        del.set_can_focus(false);
+        del.set_focus_on_click(false);
         del.set_tooltip_text(Some("Remove from this list (the folder itself stays)"));
         row.append(&del);
 
@@ -958,7 +1014,7 @@ mod tests {
         assert_eq!(lcp, format!("{root_s}/Git"));
 
         let unique = inline_completion(&format!("{root_s}/on"), "/tmp").unwrap();
-        assert_eq!(unique, format!("{root_s}/onlyone/"));
+        assert_eq!(unique, format!("{root_s}/onlyone"));
 
         assert!(
             inline_completion(&format!("{root_s}/Git"), "/tmp").is_none(),
@@ -999,6 +1055,15 @@ mod tests {
             "a short name still finds a used folder by substring"
         );
 
+        let mixed_case = matching_used_dirs("SCiFi", "SCiFi", &[
+            project_s.clone(),
+            other_s.clone(),
+        ]);
+        assert!(
+            mixed_case.is_empty(),
+            "unrelated folders must not match an arbitrary fragment"
+        );
+
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1015,6 +1080,7 @@ mod tests {
 
         let mut state = AppState::default();
         state.recent_dirs = vec!["/definitely/not/here".to_string()];
+        state.used_dirs = vec![launched_s.clone()];
         state.terminals = vec![TerminalData {
             id: "t".to_string(),
             session_name: "s".to_string(),
@@ -1038,6 +1104,24 @@ mod tests {
         let used = collect_used_dirs(&state);
         assert_eq!(used, vec![launched_s]);
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_used_folder_matches_case_insensitive_name_fragment() {
+        let root = std::env::temp_dir().join(format!("sd-ac-scifi-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let project = root.join("LocalDesertaSciFi");
+        fs::create_dir_all(&project).unwrap();
+        let project = fs::canonicalize(project)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        for typed in ["SciFi", "scifi", "SCIFI", "desertascifi"] {
+            let hits = matching_used_dirs(typed, typed, std::slice::from_ref(&project));
+            assert_eq!(hits, vec![project.clone()], "fragment {typed:?}");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1112,8 +1196,8 @@ mod tests {
             !entry.has_tooltip(),
             "a hover tooltip would cover the field and steal clicks"
         );
-        assert_eq!(entry.width_chars(), 9);
-        assert_eq!(entry.max_width_chars(), 21);
+        assert_eq!(entry.width_chars(), 18);
+        assert_eq!(entry.max_width_chars(), 42);
 
         // The ▾ list has one row per remembered folder, each with its own ✕.
         rebuild_recent(&bar.popover, &state, &entry, Rc::clone(&persist), None);
@@ -1139,6 +1223,7 @@ mod tests {
         assert!(!entry.has_css_class("ws-entry-invalid"));
         assert_eq!(state.borrow().workspace_dir.as_deref(), Some(project_s.as_str()));
         assert_eq!(state.borrow().recent_dirs[0], project_s);
+        assert_eq!(state.borrow().used_dirs[0], project_s);
         assert_eq!(effective_workspace_dir(&state.borrow()), project_s);
         assert_eq!(saved.borrow().len(), 1, "one persist per committed folder");
         assert_eq!(
@@ -1230,6 +1315,32 @@ mod tests {
         let child = bar.popover.child().unwrap();
         assert_eq!(count_class(&child, "ws-row"), 0);
         assert_eq!(count_class(&child, "ws-empty"), 1);
+
+        // GtkEntry delegates real editing focus to its internal GtkText. A
+        // prefix typed with that child focused must still run autocomplete
+        // and build the picker rows.
+        let host = gtk4::Window::new();
+        host.set_child(Some(&bar.widget));
+        let text_child = entry.first_child().expect("GtkEntry text delegate");
+        gtk4::prelude::RootExt::set_focus(&host, Some(&text_child));
+        assert!(entry_is_being_edited(&entry));
+        state.borrow_mut().used_dirs = vec![project_s.clone()];
+        entry.set_text(&project_s);
+        let chars = project_s.chars().count() as i32;
+        entry.delete_text(chars - 2, chars);
+        pump_idle();
+        assert!(
+            entry_is_being_edited(&entry),
+            "opening autocomplete after Backspace must keep keyboard focus in the field"
+        );
+        assert!(
+            !bar.popover.is_autohide(),
+            "autocomplete must not install a modal input grab"
+        );
+        assert!(
+            count_class(&bar.popover.child().expect("autocomplete rows"), "ws-row") >= 1,
+            "typing a used path prefix must populate the picker"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

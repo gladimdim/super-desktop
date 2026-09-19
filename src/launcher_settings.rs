@@ -4,11 +4,11 @@
 //! window), and the ⚙ card is a two-page panel: this file builds its second
 //! page, with everything needed to connect the OmarchyAILauncher Android app:
 //! bridge status (start/stop), firewall unlock, LAN + Tailscale IPs, port, the
-//! pairing PIN, and the 120s pairing window. The card chrome, the header and
+//! pending phone requests and explicit approval. The card chrome, the header and
 //! the settings ⇄ launcher navigation live in `harness_settings`.
 //!
-//! Layout: a stack of bordered, numbered section panels (`.launcher-section`):
-//! bridge, firewall, addresses, pairing, phone steps. Every colour/radius/
+//! Layout: connection, pairing, and devices; network/firewall diagnostics stay
+//! collapsed until needed. Every colour/radius/
 //! padding lives in `styles.rs` (see the "Launcher Connection Page" block) —
 //! this file only builds the widgets.
 
@@ -36,8 +36,8 @@ struct LauncherSnapshot {
     lan: String,
     tailscale: Option<String>,
     mdns: String,
-    pin: String,
-    pairing_left: u64,
+    pending: Vec<serde_json::Value>,
+    devices: Vec<serde_json::Value>,
 }
 
 impl LauncherSnapshot {
@@ -55,15 +55,15 @@ impl LauncherSnapshot {
             lan: bridge::lan_ip(),
             tailscale: bridge::tailscale_ip(),
             mdns: bridge::mdns_summary(online),
-            pin: bridge::read_pin(),
-            pairing_left: bridge::pairing_seconds_left(),
+            pending: if online { bridge::pending_requests() } else { vec![] },
+            devices: bridge::paired_devices(),
         }
     }
 }
 
 /// At most one probe runs at a time. Requests arriving during it trigger a
 /// follow-up, so a slow old probe cannot leave a completed action stale.
-fn background_refresh<T: Send + 'static>(
+pub(crate) fn background_refresh<T: Send + 'static>(
     collect: impl Fn() -> T + Send + Sync + 'static,
     apply: impl Fn(T) + 'static,
 ) -> Rc<dyn Fn()> {
@@ -106,14 +106,16 @@ fn set_state_class(label: &Label, active: bool, yes: &str, no: &str) {
     }
 }
 
-/// Builds the launcher-connection page: a scrolling stack of numbered section
+/// Builds the Android-connection page: a scrolling stack of compact section
 /// cards. Card chrome and the header belong to the ⚙ settings card.
 pub fn build_launcher_page() -> LauncherPage {
     let root = Box::new(Orientation::Vertical, 10);
     root.add_css_class("launcher-body");
+    root.add_css_class("android-page");
+    let network = Box::new(Orientation::Vertical, 10);
 
     // ---- 1 · bridge status + controls ----
-    let (head, body) = section_card(&root, "1", "Bridge");
+    let (head, body) = section_card(&root, "", "Connection");
     let v_bridge_state = chip("…");
     v_bridge_state.add_css_class("launcher-offline");
     head.append(&v_bridge_state);
@@ -126,22 +128,21 @@ pub fn build_launcher_page() -> LauncherPage {
 
     let controls = Box::new(Orientation::Horizontal, 8);
     controls.add_css_class("launcher-actions");
-    let btn_start = Button::with_label("▶ Start bridge");
+    let btn_start = Button::with_label("Start bridge");
     btn_start.set_tooltip_text(Some("Launch super-desktop harness-bridge on :8759"));
     btn_start.add_css_class("launcher-btn");
     btn_start.add_css_class("launcher-btn-primary");
-    let btn_stop = Button::with_label("■ Stop");
+    let btn_stop = Button::with_label("Stop");
     btn_stop.set_tooltip_text(Some("Stop the local harness bridge"));
     btn_stop.add_css_class("launcher-btn");
     btn_stop.add_css_class("launcher-btn-danger");
     controls.append(&btn_start);
     controls.append(&btn_stop);
     body.append(&controls);
+    let start_weak = btn_start.downgrade();
+    let stop_weak = btn_stop.downgrade();
 
-    let port_hint = Label::new(Some(&format!(
-        "Listens on 0.0.0.0:{} · your LAN / Tailscale only, nothing leaves the network",
-        bridge::BRIDGE_PORT
-    )));
+    let port_hint = Label::new(Some("Encrypted end to end · Wi-Fi or Tailscale"));
     port_hint.add_css_class("launcher-hint");
     port_hint.set_xalign(0.0);
     port_hint.set_wrap(true);
@@ -157,7 +158,7 @@ pub fn build_launcher_page() -> LauncherPage {
     body.append(&bridge_note);
 
     // ---- 2 · firewall (prerequisite) ----
-    let (_, body) = section_card(&root, "2", "Firewall");
+    let (_, body) = section_card(&network, "", "Firewall");
     let fw_row = Box::new(Orientation::Horizontal, 10);
     fw_row.add_css_class("launcher-row");
     let v_fw = Label::new(None);
@@ -166,7 +167,7 @@ pub fn build_launcher_page() -> LauncherPage {
     v_fw.set_hexpand(true);
     v_fw.set_wrap(true);
     fw_row.append(&v_fw);
-    let btn_fw = Button::with_label("🔓 Unlock");
+    let btn_fw = Button::with_label("Allow connection");
     btn_fw.set_tooltip_text(Some("Allow 8759/tcp via a password prompt"));
     btn_fw.add_css_class("launcher-btn");
     btn_fw.add_css_class("launcher-btn-primary");
@@ -182,7 +183,7 @@ pub fn build_launcher_page() -> LauncherPage {
     body.append(&v_fw_note);
 
     // ---- 3 · connect to ----
-    let (_, body) = section_card(&root, "3", "Connect to");
+    let (_, body) = section_card(&network, "", "Network addresses");
     let v_host = kv(&body, "Laptop");
     body.append(&row_sep());
     let v_lan = kv(&body, "LAN IP");
@@ -194,69 +195,85 @@ pub fn build_launcher_page() -> LauncherPage {
     let v_mdns = kv(&body, "mDNS");
 
     // ---- 4 · pairing ----
-    let (_, body) = section_card(&root, "4", "Pair");
-    let pin_box = Box::new(Orientation::Horizontal, 12);
-    pin_box.add_css_class("launcher-pin-box");
-    let pin_label = Label::new(Some("PIN"));
-    pin_label.add_css_class("launcher-pin-label");
-    pin_label.set_valign(Align::Center);
-    pin_box.append(&pin_label);
-    let v_pin = Label::new(None);
-    v_pin.add_css_class("launcher-pin-value");
-    v_pin.set_xalign(0.0);
-    v_pin.set_hexpand(true);
-    pin_box.append(&v_pin);
-    body.append(&pin_box);
+    let (_, body) = section_card(&root, "", "Pair a phone");
+    let explanation = Label::new(Some("Scan the QR on your phone, then approve the matching code here."));
+    explanation.add_css_class("launcher-hint");
+    explanation.set_wrap(true);
+    explanation.set_xalign(0.0);
+    body.append(&explanation);
+    let invite_button = Button::with_label("＋ Pair Android device");
+    invite_button.add_css_class("launcher-btn");
+    invite_button.add_css_class("launcher-btn-primary");
+    invite_button.set_halign(Align::Start);
+    body.append(&invite_button);
+    let qr_box = Box::new(Orientation::Vertical, 8);
+    body.append(&qr_box);
+    invite_button.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        let button = button.clone();
+        let qr_box = qr_box.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let result = gtk4::gio::spawn_blocking(bridge::pairing_invitation).await;
+            while let Some(child) = qr_box.first_child() { qr_box.remove(&child); }
+            if let Ok(Ok(payload)) = result {
+                let encoded = crate::ws::base64(payload.as_bytes()).trim_end_matches('=').replace('+', "-").replace('/', "_");
+                let link = format!("superdesktop://pair?data={encoded}");
+                if let Ok(code) = qrcode::QrCode::new(link.as_bytes()) {
+                    let area = gtk4::DrawingArea::new();
+                    area.set_content_width(320);
+                    area.set_content_height(320);
+                    area.set_halign(gtk4::Align::Start);
+                    area.set_valign(gtk4::Align::Start);
+                    area.set_hexpand(false);
+                    area.set_vexpand(false);
+                    area.set_draw_func(move |_, cr, width, height| {
+                        let size = code.width();
+                        let unit = (width.min(height) as f64 / (size + 8) as f64).floor().max(1.0);
+                        let offset_x = (width as f64 - (size+8) as f64 * unit) / 2.0;
+                        let offset_y = (height as f64 - (size+8) as f64 * unit) / 2.0;
+                        cr.set_source_rgb(1.0,1.0,1.0); let _ = cr.paint();
+                        cr.set_source_rgb(0.0,0.0,0.0);
+                        for y in 0..size { for x in 0..size {
+                            if code[(x,y)] == qrcode::Color::Dark { cr.rectangle(offset_x+(x+4) as f64*unit,offset_y+(y+4) as f64*unit,unit,unit); }
+                        } }
+                        let _ = cr.fill();
+                    });
+                    qr_box.append(&area);
+                }
+                let text = Label::new(Some(&link));
+                text.set_selectable(true); text.set_wrap(true); text.set_max_width_chars(60);
+                let help = Label::new(Some("Scan and tap Open in SUPER DESKTOP.\nIf your camera does not offer Open, use Bridges → Scan pairing QR.\nSingle-use invitation · expires in 3 minutes."));
+                help.set_xalign(0.0); help.set_wrap(true);
+                qr_box.append(&help);
+                let details = gtk4::Expander::new(Some("Copy pairing link"));
+                details.set_child(Some(&text));
+                qr_box.append(&details);
+                let expiry_box = qr_box.clone();
+                glib::timeout_add_local_once(std::time::Duration::from_secs(180), move || {
+                    // Only clear the invitation this timer belongs to.
+                    if text.parent().is_some() { while let Some(child) = expiry_box.first_child() { expiry_box.remove(&child); } }
+                });
+            } else { qr_box.append(&Label::new(Some("Start the secure bridge first."))); }
+            button.set_sensitive(true);
+        });
+    });
+    let pending_rows = Box::new(Orientation::Vertical, 8);
+    body.append(&pending_rows);
+    let previous_requests = std::cell::RefCell::new(None);
+    let (device_head, body) = section_card(&root, "", "Android devices");
+    let device_count = chip("0/0");
+    device_count.set_tooltip_text(Some("Active / registered devices. Active means connected or seen in the last 60 seconds."));
+    device_head.append(&device_count);
+    let device_rows = Box::new(Orientation::Vertical, 8);
+    body.append(&device_rows);
+    let previous_devices = std::cell::RefCell::new(None);
 
-    let pair_row = Box::new(Orientation::Horizontal, 8);
-    pair_row.add_css_class("launcher-actions");
-    let btn_pin = Button::with_label("🎲 New PIN");
-    btn_pin.set_tooltip_text(Some("Generate a fresh pairing PIN (applies instantly)"));
-    btn_pin.add_css_class("launcher-btn");
-    let btn_window = Button::with_label("🔓 Open 120s window");
-    btn_window.set_tooltip_text(Some("Let the phone pair with no PIN for 2 minutes"));
-    btn_window.add_css_class("launcher-btn");
-    btn_window.add_css_class("launcher-btn-primary");
-    pair_row.append(&btn_pin);
-    pair_row.append(&btn_window);
-    body.append(&pair_row);
+    let advanced = gtk4::Expander::new(Some("Network & troubleshooting"));
+    advanced.add_css_class("android-advanced");
+    advanced.set_child(Some(&network));
+    root.append(&advanced);
 
-    let v_window = Label::new(None);
-    v_window.add_css_class("launcher-window-state");
-    v_window.set_xalign(0.0);
-    v_window.set_wrap(true);
-    body.append(&v_window);
-
-    // ---- 5 · phone steps ----
-    let (_, body) = section_card(&root, "5", "On the phone");
-    for (i, step) in [
-        "Unlock the firewall above (unless it is off).",
-        "In OmarchyAILauncher open ⋮⋮⋮ → ⚙ → Bridge connection.",
-        "Enter the LAN IP (same Wi-Fi) or the Tailscale IP, then Test.",
-        "Tap Pair — empty PIN if you opened the window here, or type the PIN shown above.",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let row = Box::new(Orientation::Horizontal, 8);
-        row.add_css_class("launcher-step");
-        let num = Label::new(Some(&(i + 1).to_string()));
-        num.add_css_class("launcher-step-num");
-        num.set_valign(Align::Start);
-        let text = Label::new(Some(step));
-        text.add_css_class("launcher-step-text");
-        text.set_xalign(0.0);
-        text.set_hexpand(true);
-        text.set_wrap(true);
-        row.append(&num);
-        row.append(&text);
-        body.append(&row);
-    }
-
-    let footer = Label::new(Some(&format!(
-        "super-desktop harness-bridge · port {} · serves the sd_term_* tmux sessions",
-        bridge::BRIDGE_PORT
-    )));
+    let footer = Label::new(Some("Only approved devices can access your terminals."));
     footer.add_css_class("launcher-footer");
     footer.set_xalign(0.5);
     footer.set_wrap(true);
@@ -285,14 +302,16 @@ pub fn build_launcher_page() -> LauncherPage {
             "launcher-online",
             "launcher-offline",
         );
+        if let Some(start) = start_weak.upgrade() { start.set_visible(!snapshot.online); }
+        if let Some(stop) = stop_weak.upgrade() { stop.set_visible(snapshot.online); }
         if snapshot.online {
             let n = snapshot.harnesses;
             set_text(&v_bridge_state, "● ONLINE");
             set_text(
                 &status,
                 &format!(
-                    "Serving {n} live harness{} over LAN / Tailscale.",
-                    if n == 1 { "" } else { "es" }
+                    "{} · {n} terminal{} available",
+                    snapshot.host, if n == 1 { "" } else { "s" }
                 ),
             );
         } else {
@@ -312,21 +331,80 @@ pub fn build_launcher_page() -> LauncherPage {
         );
         set_text(&v_port, &bridge::BRIDGE_PORT.to_string());
         set_text(&v_mdns, &snapshot.mdns);
-        set_text(&v_pin, &snapshot.pin);
-        let left = snapshot.pairing_left;
-        set_state_class(
-            &v_window,
-            left > 0,
-            "launcher-window-open",
-            "launcher-window-closed",
-        );
-        if left > 0 {
-            set_text(&v_window, &format!("🔓 Pairing window OPEN — {left}s left"));
-        } else {
-            set_text(
-                &v_window,
-                "🔒 Pairing window closed — the phone needs the PIN above.",
-            );
+        let active = snapshot.devices.iter().filter(|d| d["active"] == true).count();
+        set_text(&device_count, &format!("{active}/{}", snapshot.devices.len()));
+        if previous_requests.borrow().as_ref() != Some(&snapshot.pending) {
+            while let Some(child) = pending_rows.first_child() { pending_rows.remove(&child); }
+            pending_rows.set_visible(!snapshot.pending.is_empty());
+            for request in &snapshot.pending {
+                let row = Box::new(Orientation::Vertical, 4);
+                row.add_css_class("android-request");
+                let label = Label::new(Some(&format!("{} · {}\nVerification code: {}",
+                    request["deviceName"].as_str().unwrap_or("Phone"),
+                    request["address"].as_str().unwrap_or(""),
+                    request["code"].as_str().unwrap_or(""))));
+                label.set_xalign(0.0);
+                label.set_wrap(true);
+                row.append(&label);
+                let buttons = Box::new(Orientation::Horizontal, 8);
+                for (title, approve) in [("Approve", true), ("Deny", false)] {
+                    let button = Button::with_label(title);
+                    button.add_css_class("launcher-btn");
+                    let id = request["requestId"].as_str().unwrap_or("").to_string();
+                    let buttons_for_click = buttons.clone();
+                    let label = label.clone();
+                    button.connect_clicked(move |_| {
+                        buttons_for_click.set_sensitive(false);
+                        let id = id.clone();
+                        let label = label.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            let result = gtk4::gio::spawn_blocking(move || bridge::decide_request(&id, approve)).await;
+                            label.set_text(match result {
+                                Ok(Ok(())) => if approve {"Phone approved."} else {"Request denied."},
+                                _ => "Decision failed or request expired. Request pairing again on the phone.",
+                            });
+                        });
+                    });
+                    buttons.append(&button);
+                }
+                row.append(&buttons);
+                pending_rows.append(&row);
+            }
+            *previous_requests.borrow_mut() = Some(snapshot.pending);
+        }
+        if previous_devices.borrow().as_ref() != Some(&snapshot.devices) {
+            while let Some(child) = device_rows.first_child() { device_rows.remove(&child); }
+            if snapshot.devices.is_empty() {
+                let empty = Label::new(Some("No devices yet\nPair your first phone using the QR above."));
+                empty.add_css_class("android-empty"); empty.set_xalign(0.0);
+                device_rows.append(&empty);
+            }
+            for device in &snapshot.devices {
+                let row = Box::new(Orientation::Horizontal, 8);
+                row.add_css_class("android-device-row");
+                let name = Label::new(Some(device["name"].as_str().unwrap_or("Phone")));
+                name.set_wrap(true); name.set_hexpand(true); name.set_xalign(0.0);
+                row.append(&name);
+                let active = device["active"] == true;
+                let state = chip(if active { "● Active" } else { "Offline" });
+                state.add_css_class(if active { "launcher-online" } else { "launcher-offline" });
+                row.append(&state);
+                let revoke = Button::with_label("Revoke access");
+                revoke.add_css_class("launcher-btn");
+                revoke.add_css_class("launcher-btn-danger");
+                let id = device["id"].as_str().unwrap_or("").to_string();
+                revoke.connect_clicked(move |button| {
+                    button.set_sensitive(false);
+                    let button = button.clone(); let id = id.clone();
+                    glib::MainContext::default().spawn_local(async move {
+                        let ok = matches!(gtk4::gio::spawn_blocking(move || bridge::revoke_device(&id)).await, Ok(Ok(())));
+                        button.set_label(if ok { "Revoked" } else { "Retry revoke" });
+                        button.set_sensitive(!ok);
+                    });
+                });
+                row.append(&revoke); device_rows.append(&row);
+            }
+            *previous_devices.borrow_mut() = Some(snapshot.devices);
         }
     });
 
@@ -390,22 +468,6 @@ pub fn build_launcher_page() -> LauncherPage {
     btn_stop.connect_clicked({
         let run = run_bridge_action.clone();
         move |_| run("… stopping the bridge", bridge::stop_bridge)
-    });
-    btn_pin.connect_clicked({
-        let refresh = Rc::clone(&refresh);
-        move |_| {
-            bridge::rotate_pin();
-            refresh();
-        }
-    });
-    btn_window.connect_clicked({
-        let refresh = Rc::clone(&refresh);
-        move |_| {
-            if let Err(e) = bridge::open_pairing_window() {
-                eprintln!("SUPER DESKTOP: open pairing window: {e}");
-            }
-            refresh();
-        }
     });
     btn_fw.connect_clicked({
         let refresh = Rc::clone(&refresh);
@@ -473,7 +535,7 @@ pub(crate) fn section_card(parent: &Box, num: &str, title: &str) -> (Box, Box) {
     let n = Label::new(Some(num));
     n.add_css_class("launcher-section-num");
     n.set_valign(Align::Center);
-    head.append(&n);
+    if !num.is_empty() { head.append(&n); }
     let t = Label::new(Some(title));
     t.add_css_class("launcher-section-title");
     t.set_xalign(0.0);
@@ -528,6 +590,33 @@ fn kv(parent: &Box, key: &str) -> Label {
 mod tests {
     use super::*;
 
+    #[test]
+    #[ignore = "interactive visual preview; run explicitly with one test thread"]
+    fn android_page_visual_preview() {
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let page = build_launcher_page();
+        let window = gtk4::Window::new();
+        window.set_title(Some("SUPER DESKTOP · Android settings preview"));
+        window.set_default_size(600, 700);
+        window.add_css_class("mini-terminal");
+        window.set_child(Some(&page.widget));
+        window.present();
+        (page.refresh)();
+        let context = glib::MainContext::default();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            while context.pending() { context.iteration(false); }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let snapshot = gtk4::Snapshot::new();
+        let paintable = gtk4::WidgetPaintable::new(Some(&page.widget));
+        paintable.snapshot(&snapshot, page.widget.width() as f64, page.widget.height() as f64);
+        let node = snapshot.to_node().unwrap();
+        window.renderer().unwrap().render_texture(&node, None).save_to_png("/tmp/sd-android-settings-preview.png").unwrap();
+        window.close();
+    }
+
     /// Count widgets carrying `class` in the subtree rooted at `w`.
     fn count_class(w: &gtk4::Widget, class: &str) -> usize {
         let mut n = usize::from(w.has_css_class(class));
@@ -562,23 +651,23 @@ mod tests {
         assert!(page.widget.downcast_ref::<ScrolledWindow>().is_some());
         assert!(!page.widget.has_css_class("mini-terminal"));
 
-        // Bridge, Firewall, Connect to, Pair, On the phone.
-        assert_eq!(count_class(&page.widget, "launcher-section"), 5);
-        assert_eq!(count_class(&page.widget, "launcher-section-num"), 5);
-        assert_eq!(count_class(&page.widget, "launcher-section-title"), 5);
+        // Only connection, pairing and devices are shown initially.
+        assert_eq!(count_class(&page.widget, "launcher-section"), 3);
+        assert_eq!(count_class(&page.widget, "launcher-section-num"), 0);
+        assert_eq!(count_class(&page.widget, "launcher-section-title"), 3);
 
-        // One PIN panel, five address rows, four numbered phone steps.
-        assert_eq!(count_class(&page.widget, "launcher-pin-box"), 1);
-        assert_eq!(count_class(&page.widget, "launcher-value"), 5);
-        assert_eq!(count_class(&page.widget, "launcher-step"), 4);
+        // No legacy PIN panel; five address rows and four phone steps.
+        assert_eq!(count_class(&page.widget, "launcher-pin-box"), 0);
+        assert_eq!(count_class(&page.widget, "launcher-value"), 0);
+        assert_eq!(count_class(&page.widget, "launcher-step"), 0);
 
-        // Start / Stop / Unlock / New PIN / Open window.
-        assert_eq!(count_class(&page.widget, "launcher-btn"), 5);
+        // Start / Stop / Unlock / pairing QR; approvals appear for requests.
+        assert_eq!(count_class(&page.widget, "launcher-btn"), 3);
 
         // Navigation calls this on every entry: it must not panic and must
         // leave the bridge chip in one of its two styled states.
         (page.refresh)();
-        assert_eq!(count_class(&page.widget, "term-status-badge"), 1);
+        assert_eq!(count_class(&page.widget, "term-status-badge"), 2);
     }
 
     fn check_background_refresh() {

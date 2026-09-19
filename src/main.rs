@@ -14,6 +14,7 @@ mod styles;
 mod tag;
 mod theme;
 mod tmux;
+mod tmux_control;
 mod usage;
 mod window;
 mod workspace_bar;
@@ -674,13 +675,69 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             }
             json!({ "ok": true }).to_string()
         }
+        "workspace-choices" => {
+            if let Some(win) = &ctx.borrow().window {
+                return win.workspace_choices().to_string();
+            }
+            let state = state::load_state();
+            json!({"workspace": state::effective_workspace_dir(&state),
+                "recentDirectories": state.recent_dirs}).to_string()
+        }
+        "add-term-in" => {
+            // JSON preserves spaces and escapes newlines in paths over IPC.
+            let payload = cmd.strip_prefix("add-term-in ").unwrap_or("");
+            let request: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+            let agent = request["agentType"].as_str().unwrap_or("");
+            if !tmux::HARNESS_KEYS.contains(&agent) {
+                return json!({"ok":false,"error":"unsupported_harness"}).to_string();
+            }
+            let Some(directory) = request["workspace"].as_str().and_then(state::clean_dir) else {
+                return json!({"ok":false,"error":"invalid_workspace"}).to_string();
+            };
+            show_window(ctx, app);
+            if let Some(win) = &ctx.borrow().window {
+                let id = win.create_new_terminal_in(agent, None, None, None, Some(&directory));
+                return json!({"ok":tmux::session_alive(&id),"id":id}).to_string();
+            }
+            json!({"ok":false,"error":"desktop_unavailable"}).to_string()
+        }
         "add-term" => {
             show_window(ctx, app);
             let agent = parts.get(1).unwrap_or(&"shell");
             if let Some(win) = &ctx.borrow().window {
-                win.create_new_terminal(agent, None, None, None);
+                let id = win.create_new_terminal(agent, None, None, None);
+                return json!({ "ok": tmux::session_alive(&id), "id": id }).to_string();
             }
-            json!({ "ok": true }).to_string()
+            json!({ "ok": false, "error": "desktop_unavailable" }).to_string()
+        }
+        "close-term" => {
+            let Some(sess) = parts.get(1) else {
+                return json!({ "ok": false, "error": "missing_session" }).to_string();
+            };
+            if !sess.starts_with("sd_term_") {
+                return json!({ "ok": false, "error": "foreign_session" }).to_string();
+            }
+            if let Some(win) = &ctx.borrow().window {
+                return if win.close_terminal(sess) {
+                    json!({ "ok": true, "id": sess }).to_string()
+                } else {
+                    json!({ "ok": false, "error": "no_such_session", "id": sess }).to_string()
+                };
+            }
+
+            let mut state = state::load_state();
+            let before = state.terminals.len();
+            state.terminals.retain(|t| t.session_name != *sess);
+            let removed = state.terminals.len() != before;
+            if tmux::session_alive(sess) {
+                tmux::kill_session(sess);
+            }
+            if removed {
+                state::save_state_async(state);
+                json!({ "ok": true, "id": sess }).to_string()
+            } else {
+                json!({ "ok": false, "error": "no_such_session", "id": sess }).to_string()
+            }
         }
         "reload-theme" | "refresh-theme" | "theme-reload" => {
             let t = styles::reload_styles();

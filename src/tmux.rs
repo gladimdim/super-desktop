@@ -942,6 +942,7 @@ pub fn capture_pane_text(session_name: &str) -> Option<String> {
 /// Capture tmux's real terminal styling as ANSI SGR sequences. The bridge
 /// sends this beside its plain-text fallback so capable clients can reproduce
 /// the agent's colours without changing the desktop card path.
+#[cfg(test)]
 pub fn capture_pane_ansi(session_name: &str) -> Option<String> {
     capture_pane(session_name, true)
 }

@@ -3,6 +3,22 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
+/// User-selectable scale for the full-width top dock. Large deliberately
+/// matches the toolbar's original control sizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TopBarSize {
+    Small,
+    Medium,
+    Large,
+}
+
+impl Default for TopBarSize {
+    fn default() -> Self {
+        Self::Large
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteData {
     pub id: String,
@@ -113,6 +129,15 @@ pub struct AppState {
     /// [`push_recent_dir`].
     #[serde(default)]
     pub recent_dirs: Vec<String>,
+    /// Every folder ever used for a harness, newest first. Unlike
+    /// `recent_dirs`, this is not the visible dropdown: it is the persistent
+    /// search index used when the user types any part of a folder name.
+    #[serde(default)]
+    pub used_dirs: Vec<String>,
+    /// Scale of the full-width top dock. Missing in older state files means
+    /// Large, preserving the size those users already had.
+    #[serde(default)]
+    pub top_bar_size: TopBarSize,
 }
 
 impl Default for AppState {
@@ -134,6 +159,8 @@ impl Default for AppState {
             toggle_shortcut: None,
             workspace_dir: None,
             recent_dirs: Vec::new(),
+            used_dirs: Vec::new(),
+            top_bar_size: TopBarSize::Large,
         }
     }
 }
@@ -159,8 +186,8 @@ pub fn display_dir(path: &str) -> String {
     }
 }
 
-/// How many folders the top bar's combobox remembers.
-pub const RECENT_DIRS_MAX: usize = 8;
+/// How many folders the top bar's open dropdown shows directly.
+pub const RECENT_DIRS_MAX: usize = 7;
 
 /// The folder new harness sessions start in: the configured one when it is
 /// still a usable directory, otherwise the home directory.
@@ -212,6 +239,46 @@ pub fn push_recent_dir(recent: &mut Vec<String>, dir: &str) {
     recent.truncate(RECENT_DIRS_MAX);
 }
 
+/// Remember a folder for future substring autocomplete. This history is kept
+/// independently from the seven-row dropdown so an older project remains
+/// discoverable after it falls out of the recent list.
+pub fn push_used_dir(used: &mut Vec<String>, dir: &str) {
+    used.retain(|d| d != dir);
+    used.insert(0, dir.to_string());
+}
+
+/// Record one workspace in both the short dropdown and the complete search
+/// history.
+pub fn remember_workspace_dir(state: &mut AppState, dir: &str) {
+    push_recent_dir(&mut state.recent_dirs, dir);
+    push_used_dir(&mut state.used_dirs, dir);
+}
+
+/// Upgrade history written by older versions. Capture every formerly recent,
+/// current, or still-open card directory before trimming the visible list to
+/// seven, so an update never makes an older workspace undiscoverable.
+fn normalize_workspace_history(state: &mut AppState) -> bool {
+    let before_recent = state.recent_dirs.clone();
+    let before_used = state.used_dirs.clone();
+    let mut known = state.recent_dirs.clone();
+    if let Some(dir) = state.workspace_dir.clone() {
+        known.push(dir);
+    }
+    known.extend(
+        state
+            .terminals
+            .iter()
+            .filter_map(|terminal| terminal.workspace_dir.clone()),
+    );
+    for dir in known {
+        if !state.used_dirs.iter().any(|used| used == &dir) {
+            state.used_dirs.push(dir);
+        }
+    }
+    state.recent_dirs.truncate(RECENT_DIRS_MAX);
+    state.recent_dirs != before_recent || state.used_dirs != before_used
+}
+
 /// What the workspace field's text means: [`clean_dir`] for an absolute or
 /// `~` path, plus the two convenient readings of a bare name — relative to the
 /// folder in use, then relative to the home directory. So `super-desktop`,
@@ -251,7 +318,13 @@ pub fn load_state() -> AppState {
     let path = get_state_path();
     if path.exists() {
         if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(state) = serde_json::from_str::<AppState>(&content) {
+            if let Ok(mut state) = serde_json::from_str::<AppState>(&content) {
+                if normalize_workspace_history(&mut state) {
+                    // Persist the migration immediately. Otherwise the eighth
+                    // old dropdown entry would only live in memory and could
+                    // be lost if the daemon exits before another UI change.
+                    save_state(&state);
+                }
                 return state;
             }
         }
@@ -467,6 +540,7 @@ mod tests {
     #[test]
     fn test_default_state_starts_unconfigured() {
         assert_eq!(AppState::default().visible_harnesses, None);
+        assert_eq!(AppState::default().top_bar_size, TopBarSize::Large);
     }
 
     #[test]
@@ -487,8 +561,10 @@ mod tests {
             "toggle_shortcut": "SUPER + SHIFT + Q"
         }"#;
         let state: AppState = serde_json::from_str(legacy).expect("legacy state must load");
+        assert_eq!(state.top_bar_size, TopBarSize::Large);
         assert_eq!(state.workspace_dir, None);
         assert!(state.recent_dirs.is_empty());
+        assert!(state.used_dirs.is_empty());
         assert_eq!(state.terminals.len(), 1);
         assert_eq!(state.terminals[0].workspace_dir, None);
         assert_eq!(
@@ -503,10 +579,14 @@ mod tests {
         let mut picked = state.clone();
         picked.workspace_dir = Some("/tmp".to_string());
         picked.recent_dirs = vec!["/tmp".to_string()];
+        picked.used_dirs = vec!["/tmp".to_string(), "/var/tmp".to_string()];
+        picked.top_bar_size = TopBarSize::Small;
         let reloaded: AppState =
             serde_json::from_str(&serde_json::to_string(&picked).unwrap()).unwrap();
         assert_eq!(reloaded.workspace_dir.as_deref(), Some("/tmp"));
         assert_eq!(reloaded.recent_dirs, vec!["/tmp".to_string()]);
+        assert_eq!(reloaded.used_dirs, vec!["/tmp", "/var/tmp"]);
+        assert_eq!(reloaded.top_bar_size, TopBarSize::Small);
     }
 
     #[test]
@@ -570,6 +650,35 @@ mod tests {
         }
         assert_eq!(recent.len(), RECENT_DIRS_MAX);
         assert_eq!(recent[0], format!("/dir-{}", RECENT_DIRS_MAX * 2 - 1));
+    }
+
+    #[test]
+    fn test_complete_workspace_history_outlives_the_seven_row_dropdown() {
+        let mut state = AppState::default();
+        for i in 0..12 {
+            remember_workspace_dir(&mut state, &format!("/project-{i}"));
+        }
+        assert_eq!(state.recent_dirs.len(), 7);
+        assert_eq!(state.used_dirs.len(), 12);
+        assert_eq!(state.recent_dirs[0], "/project-11");
+        assert!(state.used_dirs.contains(&"/project-0".to_string()));
+
+        // Re-use moves a directory to the front of both lists without
+        // duplicating it or discarding any autocomplete history.
+        remember_workspace_dir(&mut state, "/project-0");
+        assert_eq!(state.recent_dirs[0], "/project-0");
+        assert_eq!(state.used_dirs[0], "/project-0");
+        assert_eq!(state.used_dirs.len(), 12);
+    }
+
+    #[test]
+    fn test_history_migration_preserves_entries_trimmed_from_old_dropdowns() {
+        let mut state = AppState::default();
+        state.recent_dirs = (0..9).map(|i| format!("/old-{i}")).collect();
+        assert!(normalize_workspace_history(&mut state));
+        assert_eq!(state.recent_dirs.len(), 7);
+        assert_eq!(state.used_dirs.len(), 9);
+        assert!(state.used_dirs.contains(&"/old-8".to_string()));
     }
 
     #[test]

@@ -33,14 +33,46 @@ window.sd-hot-corner {{
     box-shadow: none;
 }}
 
-/* ================= Top Floating HUD Bar ================= */
+/* ================= Full-width Top Dock ================= */
 .hud-bar {{
     background-color: {hud_bg};
-    border: 1px solid {hud_border};
-    border-radius: 9999px;
+    border: none;
+    border-bottom: 1px solid {hud_border};
+    border-radius: 0;
     padding: 6px 16px;
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55), 0 0 1px {hud_glow};
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38), inset 0 -1px {hud_glow};
 }}
+
+.hud-bar > separator {{
+    background-color: {btn_border};
+    min-width: 1px;
+    margin: 8px 3px;
+}}
+
+.hud-bar.hud-size-medium {{
+    padding: 4px 12px;
+}}
+
+.hud-bar.hud-size-small {{
+    padding: 2px 10px;
+}}
+
+.hud-size-medium .hud-button {{ padding: 4px 10px; font-size: 11px; }}
+.hud-size-medium .hud-gear {{ min-width: 32px; min-height: 32px; font-size: 19px; padding: 0; }}
+.hud-size-medium .hud-title {{ font-size: 12px; }}
+.hud-size-medium .hud-badge,
+.hud-size-medium .hud-shortcut {{ font-size: 10px; }}
+.hud-size-medium entry.ws-entry {{ min-height: 24px; padding: 2px 8px; font-size: 12px; }}
+
+.hud-size-small .hud-button {{ padding: 2px 8px; font-size: 10px; }}
+.hud-size-small .hud-gear {{ min-width: 28px; min-height: 28px; font-size: 17px; padding: 0; }}
+.hud-size-small .hud-title {{ font-size: 11px; }}
+.hud-size-small .hud-badge,
+.hud-size-small .hud-shortcut {{ font-size: 9px; padding-top: 2px; padding-bottom: 2px; }}
+.hud-size-small .ws-subtitle {{ font-size: 8px; padding-bottom: 0; }}
+.hud-size-small .ws-icon {{ font-size: 10px; }}
+.hud-size-small entry.ws-entry {{ min-height: 20px; padding: 1px 7px; font-size: 11px; }}
+.hud-size-small .ws-menu-btn {{ padding: 1px 6px; font-size: 10px; }}
 
 .hud-title {{
     color: {accent};
@@ -50,37 +82,46 @@ window.sd-hot-corner {{
 }}
 
 .hud-badge {{
-    background-color: {badge_bg};
-    color: {accent};
-    border-radius: 9999px;
-    padding: 3px 9px;
+    background-color: transparent;
+    color: {dark_foreground};
+    border: none;
+    border-radius: 0;
+    padding: 2px 5px;
     font-size: 11px;
     font-weight: 600;
 }}
 
 .hud-button {{
-    background-color: {btn_bg};
-    color: {foreground};
-    border: 1px solid {btn_border};
-    border-radius: 9999px;
-    padding: 5px 12px;
+    background-color: transparent;
+    background-image: none;
+    color: {light_foreground};
+    border: none;
+    border-radius: 6px;
+    box-shadow: none;
+    padding: 6px 10px;
     font-size: 12px;
     font-weight: 600;
-    transition: background-color 150ms ease, border-color 150ms ease;
+    transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }}
 
 .hud-button:hover {{
     background-color: {btn_hover_bg};
     color: {bright_foreground};
-    border-color: {accent};
+    box-shadow: inset 0 -2px {accent};
 }}
 
 .hud-button:active {{
     background-color: {badge_bg};
-    border-color: {accent};
+    color: {accent};
+    box-shadow: inset 0 -2px {accent};
 }}
 
-/* The ⚙ settings toggle: the gear alone, oversized, in a round hit target —
+.hud-action-primary {{
+    color: {accent};
+    font-weight: 700;
+}}
+
+/* The ⚙ settings toggle: the gear alone, oversized, in a clear hit target —
    it is the only way into the settings card (shortcut, top bar, launcher),
    so it reads as an icon rather than one more pill among the labels. */
 .hud-gear {{
@@ -91,20 +132,26 @@ window.sd-hot-corner {{
 }}
 
 .hud-button-danger {{
-    background-color: {danger_bg};
+    background-color: transparent;
     color: {bright_red};
-    border-color: {danger_border};
 }}
 
 .hud-button-danger:hover {{
-    background-color: {danger_border};
-    color: #ffffff;
+    background-color: {danger_bg};
+    color: {bright_red};
+    box-shadow: inset 0 -2px {bright_red};
 }}
 
 .hud-shortcut {{
     color: {dark_foreground};
     font-size: 11px;
     font-weight: 500;
+}}
+
+.top-bar-size-active {{
+    background-color: {badge_bg};
+    color: {accent};
+    border-color: {accent};
 }}
 
 /* ================= Top Bar: Workspace Folder Field ================= */
@@ -127,11 +174,14 @@ window.sd-hot-corner {{
 }}
 
 entry.ws-entry {{
-    background-color: {btn_bg};
+    background-color: transparent;
+    background-image: none;
     color: {foreground};
-    border: 1px solid {btn_border};
-    border-radius: 9999px;
-    padding: 3px 10px;
+    border: none;
+    border-bottom: 1px solid {btn_border};
+    border-radius: 0;
+    box-shadow: none;
+    padding: 3px 6px;
     min-height: 28px;
     min-width: 0;
     font-size: 13px;
@@ -141,6 +191,7 @@ entry.ws-entry {{
 
 entry.ws-entry:focus {{
     border-color: {accent};
+    box-shadow: inset 0 -1px {accent};
 }}
 
 /* The text is not a folder that exists: keep the old folder in use and say so
@@ -151,11 +202,13 @@ entry.ws-entry.ws-entry-invalid {{
 }}
 
 .ws-menu-btn {{
-    background-color: {btn_bg};
-    color: {foreground};
-    border: 1px solid {btn_border};
-    border-radius: 9999px;
-    padding: 2px 8px;
+    background-color: transparent;
+    background-image: none;
+    color: {dark_foreground};
+    border: none;
+    border-radius: 5px;
+    box-shadow: none;
+    padding: 2px 6px;
     min-height: 0;
     font-size: 11px;
     font-weight: 700;
@@ -164,7 +217,6 @@ entry.ws-entry.ws-entry-invalid {{
 .ws-menu-btn:hover {{
     background-color: {btn_hover_bg};
     color: {bright_foreground};
-    border-color: {accent};
 }}
 
 popover.ws-pop {{
@@ -797,6 +849,41 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 .launcher-body {{
     padding: 12px 14px 14px 14px;
 }}
+
+/* Android follows the current Omarchy palette: restrained surfaces, thin
+   borders, square-ish corners, and one accent for primary actions. */
+.android-settings-entry {{
+    background: {launcher_section_bg};
+    border: 1px solid {launcher_section_border};
+    border-radius: 6px;
+    padding: 14px;
+    color: {foreground};
+    box-shadow: none;
+}}
+.android-settings-entry:hover {{
+    border-color: {accent};
+    background: {badge_bg};
+}}
+.android-entry-icon {{ color: {accent}; font-size: 24px; }}
+.android-entry-title {{ font-weight: 700; font-size: 13px; }}
+.android-connection-count {{ color: {accent}; padding: 4px 9px; }}
+.android-page .launcher-section {{
+    border-radius: 6px;
+    padding: 14px;
+}}
+.android-page .launcher-section-head {{ margin-bottom: 8px; }}
+.android-page .launcher-section-title {{ font-size: 13px; }}
+.android-page .launcher-btn {{ border-radius: 4px; padding: 7px 12px; }}
+.android-page .launcher-section-body {{ border-spacing: 8px; }}
+.android-device-row {{ padding: 9px 0; }}
+.android-empty {{ color: {dark_foreground}; padding: 12px 0; }}
+.android-request {{
+    border-left: 2px solid {accent};
+    padding: 10px 12px;
+    background: {badge_bg};
+}}
+.android-advanced {{ color: {dark_foreground}; padding: 8px 0; }}
+.android-advanced > box {{ margin-top: 10px; }}
 
 .launcher-section {{
     background-color: {launcher_section_bg};

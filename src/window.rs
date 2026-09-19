@@ -16,7 +16,7 @@ use crate::mini_terminal::{
     clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, MiniTerminalCard,
     NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
 };
-use crate::state::{load_state, AppState, NoteData, TerminalData};
+use crate::state::{load_state, AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
 use crate::tag::DEFAULT_TERMINAL_TAG;
 use crate::tmux::{create_session, kill_session};
@@ -40,13 +40,31 @@ const SLIDE_LAUNCH_IN: f64 = 5.5;
 const SLIDE_LAUNCH_OUT: f64 = 7.5;
 const SLIDE_SETTLE_X: f64 = 0.0015;
 const SLIDE_SETTLE_V: f64 = 0.025;
-/// Resting gap between the top of the overlay and the HUD pill.
-const HUD_REST_MARGIN: i32 = 18;
 /// Extra pixels past the HUD's own height so it is fully off-screen at progress 0.
 const HUD_OFFSCREEN_PAD: f64 = 40.0;
 /// Fallback HUD height before GTK has allocated it, so the first frame still
 /// starts above the screen instead of at rest.
 const HUD_MIN_HEIGHT: i32 = 56;
+
+fn top_bar_height(size: TopBarSize) -> i32 {
+    match size {
+        TopBarSize::Small => 36,
+        TopBarSize::Medium => 46,
+        TopBarSize::Large => HUD_MIN_HEIGHT,
+    }
+}
+
+fn paint_top_bar_size(hud: &gtk4::Box, size: TopBarSize, screen_width: i32) {
+    for class in ["hud-size-small", "hud-size-medium", "hud-size-large"] {
+        hud.remove_css_class(class);
+    }
+    hud.add_css_class(match size {
+        TopBarSize::Small => "hud-size-small",
+        TopBarSize::Medium => "hud-size-medium",
+        TopBarSize::Large => "hud-size-large",
+    });
+    hud.set_size_request(screen_width, top_bar_height(size));
+}
 
 /// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
 /// Motion is a critically damped spring sampled on the GTK frame clock (the
@@ -237,6 +255,10 @@ impl SuperDesktopWindow {
         hint.add_css_class("hud-shortcut");
         paint_shortcut_hints(&hint, &btn_close, &state.borrow());
 
+        // The settings panel is built before the dock. This holder lets its
+        // size buttons repaint the live dock once construction has finished.
+        let hud_for_settings: Rc<RefCell<Option<gtk4::Box>>> = Rc::new(RefCell::new(None));
+
         let settings_panel = crate::harness_settings::build_harness_settings_panel(
             Rc::clone(&state),
             Rc::new({
@@ -272,6 +294,21 @@ impl SuperDesktopWindow {
                     crate::state::save_state_async(snapshot);
                 }
             }),
+            Rc::new({
+                let state = Rc::clone(&state);
+                let hud_for_settings = Rc::clone(&hud_for_settings);
+                move |size: TopBarSize| {
+                    let snapshot = {
+                        let mut s = state.borrow_mut();
+                        s.top_bar_size = size;
+                        s.clone()
+                    };
+                    if let Some(hud) = hud_for_settings.borrow().as_ref() {
+                        paint_top_bar_size(hud, size, screen_width);
+                    }
+                    crate::state::save_state_async(snapshot);
+                }
+            }),
         );
         settings_panel.widget.set_visible(false);
         settings_panel.widget.set_halign(Align::Center);
@@ -279,6 +316,8 @@ impl SuperDesktopWindow {
 
         let hud = gtk4::Box::new(Orientation::Horizontal, 10);
         hud.add_css_class("hud-bar");
+        paint_top_bar_size(&hud, state.borrow().top_bar_size, screen_width);
+        *hud_for_settings.borrow_mut() = Some(hud.clone());
 
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
         brand.add_css_class("hud-title");
@@ -296,6 +335,7 @@ impl SuperDesktopWindow {
 
         let hud_badge = Label::new(Some("0 Notes • 0 Agents"));
         hud_badge.add_css_class("hud-badge");
+        hud_badge.set_valign(Align::Center);
         hud.append(&hud_badge);
 
         let sep1 = Separator::new(Orientation::Vertical);
@@ -339,12 +379,38 @@ impl SuperDesktopWindow {
         {
             let focus = EventControllerFocus::new();
             let win = win_rc.window.clone();
-            let terms = Rc::clone(&win_rc.terminal_cards);
             focus.connect_enter(move |_| {
                 win.set_keyboard_mode(KeyboardMode::Exclusive);
             });
             let win = win_rc.window.clone();
-            focus.connect_leave(move |_| {
+            let terms = Rc::clone(&win_rc.terminal_cards);
+            let popover = workspace_bar.popover.clone();
+            focus.connect_leave(move |controller| {
+                // A newly mapped autocomplete popup can produce a transient
+                // focus-leave notification. Keep the layer keyboard-enabled
+                // long enough for `popup_for_entry` to restore the GtkText
+                // delegate. A real click elsewhere remains unfocused after
+                // the grace period, closes the list and returns to OnDemand.
+                if popover.is_visible() && !popover.is_autohide() {
+                    win.set_keyboard_mode(KeyboardMode::Exclusive);
+                    let controller = controller.clone();
+                    let win = win.clone();
+                    let terms = Rc::clone(&terms);
+                    let popover = popover.clone();
+                    glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+                        if controller.contains_focus() {
+                            return;
+                        }
+                        popover.popdown();
+                        let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
+                        win.set_keyboard_mode(if any_expanded {
+                            KeyboardMode::Exclusive
+                        } else {
+                            KeyboardMode::OnDemand
+                        });
+                    });
+                    return;
+                }
                 let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
                 win.set_keyboard_mode(if any_expanded {
                     KeyboardMode::Exclusive
@@ -355,10 +421,39 @@ impl SuperDesktopWindow {
             workspace_bar.entry.add_controller(focus);
         }
 
+        // Arm keyboard interactivity before the mouse button goes down over
+        // the entry. Switching a layer-shell surface from OnDemand to
+        // Exclusive in the entry's focus callback happens during that same
+        // press and can cancel GTK's built-in drag-selection gesture. Pointer
+        // enter runs first, so normal click/drag, double-click (word) and
+        // triple-click (all) selection reach GtkEntry intact.
+        {
+            let motion = EventControllerMotion::new();
+            let win = win_rc.window.clone();
+            motion.connect_enter(move |_, _, _| {
+                win.set_keyboard_mode(KeyboardMode::Exclusive);
+            });
+            let win = win_rc.window.clone();
+            let entry = workspace_bar.entry.clone();
+            let terms = Rc::clone(&win_rc.terminal_cards);
+            motion.connect_leave(move |_| {
+                if !entry.has_focus() {
+                    let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
+                    win.set_keyboard_mode(if any_expanded {
+                        KeyboardMode::Exclusive
+                    } else {
+                        KeyboardMode::OnDemand
+                    });
+                }
+            });
+            workspace_bar.entry.add_controller(motion);
+        }
+
         // + Note Button
         let btn_note = Button::with_label("📝 + Note");
         btn_note.set_tooltip_text(Some("Create Sticky Note"));
         btn_note.add_css_class("hud-button");
+        btn_note.add_css_class("hud-action-primary");
         let win_w = Rc::downgrade(&win_rc);
         btn_note.connect_clicked(move |_| {
             if let Some(w) = win_w.upgrade() {
@@ -467,6 +562,12 @@ impl SuperDesktopWindow {
         let sep2 = Separator::new(Orientation::Vertical);
         hud.append(&sep2);
 
+        // Keep launch controls grouped at the left and dock controls aligned
+        // against the right edge of the full-width bar.
+        let dock_spacer = gtk4::Box::new(Orientation::Horizontal, 0);
+        dock_spacer.set_hexpand(true);
+        hud.append(&dock_spacer);
+
         // Arrange
         let btn_arrange = Button::with_label("✨ Arrange");
         btn_arrange.set_tooltip_text(Some("Organize notes left, terminals right"));
@@ -483,7 +584,7 @@ impl SuperDesktopWindow {
         // the ⚙ card — shortcut, top-bar harnesses, and the 📱 launcher page.
         let btn_settings = Button::with_label("⚙");
         btn_settings.set_tooltip_text(Some(
-            "Settings: shortcut, top bar launch buttons, launcher connection",
+            "Settings: Android devices, shortcuts and top bar",
         ));
         btn_settings.add_css_class("hud-button");
         btn_settings.add_css_class("hud-gear");
@@ -510,30 +611,14 @@ impl SuperDesktopWindow {
 
         hud.append(&hint);
 
-        // On the canvas, not an Overlay child: Overlay+margin_top reallocates
-        // the pill every frame and squashes the harness buttons. Fixed.move_
-        // translates the whole bar as one widget, same as the cards.
+        // On the canvas, not an Overlay child: Fixed.move_ translates the
+        // full-width dock as one widget, same as the cards.
         hud.set_hexpand(false);
         hud.set_vexpand(false);
         hud.set_halign(Align::Start);
         hud.set_valign(Align::Start);
-        let (hud_w, _) = hud_measured_size(&hud);
-        let hud_x = (win_rc.screen_width as f64 - hud_w) * 0.5;
-        win_rc.canvas.put(&hud, hud_x, HUD_REST_MARGIN as f64);
+        win_rc.canvas.put(&hud, 0.0, 0.0);
         raise_canvas_child(&win_rc.canvas, &hud);
-
-        {
-            let canvas_hud = win_rc.canvas.clone();
-            let slide_hud = Rc::clone(&win_rc.slide);
-            let sw = win_rc.screen_width;
-            hud.connect_notify_local(Some("width"), move |h, _| {
-                if slide_hud.running.get() || slide_hud.progress.get() < 0.5 {
-                    return;
-                }
-                let (w, _) = hud_measured_size(h);
-                canvas_hud.move_(h, (sw as f64 - w) * 0.5, HUD_REST_MARGIN as f64);
-            });
-        }
 
         // Added after the HUD so the settings card floats above it.
         root_overlay.add_overlay(&settings_panel.widget);
@@ -866,10 +951,22 @@ impl SuperDesktopWindow {
         raise_canvas_child(&canvas, &self.hud);
     }
 
-    pub fn create_new_terminal(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>) {
+    pub fn create_new_terminal(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>) -> String {
+        self.create_new_terminal_in(agent_type, cmd, x, y, None)
+    }
+
+    pub fn workspace_choices(&self) -> serde_json::Value {
+        let state = self.state.borrow();
+        serde_json::json!({"workspace": crate::state::effective_workspace_dir(&state),
+            "recentDirectories": state.recent_dirs})
+    }
+
+    pub fn create_new_terminal_in(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>) -> String {
         // The folder from the top bar field: this card's harness starts there,
         // and keeps it for its whole life (see TerminalData::workspace_dir).
-        let workspace_dir = crate::state::effective_workspace_dir(&self.state.borrow());
+        let workspace_dir = directory.map(str::to_owned)
+            .unwrap_or_else(|| crate::state::effective_workspace_dir(&self.state.borrow()));
+        crate::state::remember_workspace_dir(&mut self.state.borrow_mut(), &workspace_dir);
         let (sess, cmd_run) = create_session(agent_type, cmd, Some(&workspace_dir));
         let idx = self.terminal_cards.borrow().len();
 
@@ -892,7 +989,7 @@ impl SuperDesktopWindow {
 
         let data = TerminalData {
             id: sess.clone(),
-            session_name: sess,
+            session_name: sess.clone(),
             agent_type: agent_type.to_string(),
             command: cmd_run,
             x: nx,
@@ -912,6 +1009,7 @@ impl SuperDesktopWindow {
 
         self.spawn_terminal_widget(data, true);
         self.update_counts();
+        sess
     }
 
     fn spawn_terminal_widget(&self, term_data: TerminalData, save: bool) {
@@ -1385,6 +1483,26 @@ impl SuperDesktopWindow {
         (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
     }
 
+    pub fn close_terminal(&self, sess: &str) -> bool {
+        kill_session(sess);
+        let card = {
+            let mut cards = self.terminal_cards.borrow_mut();
+            cards
+                .iter()
+                .position(|c| c.data.borrow().session_name == sess)
+                .map(|pos| cards.remove(pos))
+        };
+        let Some(card) = card else { return false };
+
+        self.canvas.remove(&card.container);
+        let mut s = self.state.borrow_mut();
+        s.terminals.retain(|t| t.session_name != sess);
+        let snapshot = s.clone();
+        drop(s);
+        crate::state::save_state_async(snapshot);
+        self.update_counts();
+        true
+    }
 
     pub fn raise_all_notes(&self) {
         let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
@@ -1531,11 +1649,11 @@ fn hud_measured_size(hud: &gtk4::Box) -> (f64, f64) {
     (w, h)
 }
 
-/// Rest pose (centred under the top) and off-screen pose (same X, above the
-/// overlay) for the toolbar as a single translated widget.
-fn hud_slide_pose(hud_w: f64, hud_h: f64, screen_w: f64) -> (f64, f64, f64, f64) {
-    let tx = ((screen_w - hud_w) * 0.5).max(0.0);
-    let ty = HUD_REST_MARGIN as f64;
+/// Rest pose (flush with the top-left edge) and off-screen pose (same X, above
+/// the overlay) for the toolbar as a single translated widget.
+fn hud_slide_pose(_hud_w: f64, hud_h: f64, _screen_w: f64) -> (f64, f64, f64, f64) {
+    let tx = 0.0;
+    let ty = 0.0;
     let sy = -hud_h - HUD_OFFSCREEN_PAD;
     (tx, ty, tx, sy)
 }
@@ -1626,9 +1744,9 @@ mod tests {
     fn test_hud_slides_straight_up_from_its_rest_pose() {
         let (tx, ty, sx, sy) = hud_slide_pose(400.0, 48.0, 2560.0);
         assert_eq!(sx, tx, "toolbar must not drift sideways");
-        assert_eq!(ty, HUD_REST_MARGIN as f64);
+        assert_eq!(ty, 0.0);
         assert!(sy <= -48.0, "hidden toolbar sits fully above the overlay, sy={sy}");
-        assert!((tx - (2560.0 - 400.0) * 0.5).abs() < 0.01);
+        assert_eq!(tx, 0.0, "full-width toolbar is anchored to the left edge");
     }
 
     #[test]

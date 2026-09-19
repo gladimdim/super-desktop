@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use crate::launcher_settings::{chip, section_card};
 use crate::shortcut::{Capture, CaptureGuard};
-use crate::state::AppState;
+use crate::state::{AppState, TopBarSize};
 use crate::tmux::{detect_harnesses, HarnessInfo};
 
 /// How long a recording may stay armed before it cancels itself. The recorder
@@ -125,6 +125,14 @@ fn paint_toggle(btn: &Button, shown: bool) {
     }
 }
 
+fn paint_size_button(btn: &Button, selected: bool) {
+    if selected {
+        btn.add_css_class("top-bar-size-active");
+    } else {
+        btn.remove_css_class("top-bar-size-active");
+    }
+}
+
 /// One `[logo] name …… resolved command [ON/OFF]` row.
 fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
     let row = Box::new(Orientation::Horizontal, 8);
@@ -173,11 +181,13 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
 /// `on_change` receives the new full selection (harness keys, in detection
 /// order) whenever the user flips a row or a bulk button;
 /// `on_shortcut_change` receives a freshly recorded key combination once it has
-/// been written into Hyprland's config.
+/// been written into Hyprland's config; `on_top_bar_size_change` applies and
+/// persists a newly selected dock scale.
 pub fn build_harness_settings_panel(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<dyn Fn(Vec<String>)>,
     on_shortcut_change: Rc<dyn Fn(String)>,
+    on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
 ) -> HarnessSettingsPanel {
     let outer = Box::new(Orientation::Vertical, 0);
     outer.add_css_class("mini-terminal");
@@ -199,7 +209,7 @@ pub fn build_harness_settings_panel(
     let title = Label::new(Some("Settings"));
     title.add_css_class("term-title");
     title.set_halign(Align::Start);
-    let subtitle = Label::new(Some("Shortcut · top bar launch buttons · launcher"));
+    let subtitle = Label::new(Some("Android · shortcuts · top bar"));
     subtitle.add_css_class("launcher-subtitle");
     subtitle.set_halign(Align::Start);
     titles.append(&title);
@@ -300,8 +310,25 @@ pub fn build_harness_settings_panel(
     summary.set_wrap(true);
     body.append(&summary);
 
-    // ---- 3 · bulk actions ----
+    // ---- 3 · top-bar scale and bulk actions ----
     let (_, body) = section_card(&root, "3", "Top bar");
+    let size_label = Label::new(Some("Size"));
+    size_label.add_css_class("launcher-status-text");
+    size_label.set_xalign(0.0);
+    body.append(&size_label);
+
+    let size_actions = Box::new(Orientation::Horizontal, 8);
+    size_actions.add_css_class("launcher-actions");
+    let btn_small = Button::with_label("Small");
+    let btn_medium = Button::with_label("Medium");
+    let btn_large = Button::with_label("Large");
+    for button in [&btn_small, &btn_medium, &btn_large] {
+        button.add_css_class("launcher-btn");
+        button.add_css_class("top-bar-size");
+        size_actions.append(button);
+    }
+    body.append(&size_actions);
+
     let actions = Box::new(Orientation::Horizontal, 8);
     actions.add_css_class("launcher-actions");
     let btn_all = Button::with_label("✓ Show all");
@@ -324,25 +351,70 @@ pub fn build_harness_settings_panel(
     note.set_wrap(true);
     body.append(&note);
 
-    // ---- 4 · launcher connection: navigates to the 📱 page ----
-    let (_, body) = section_card(&root, "4", "Launcher connection");
-    let launcher_hint = Label::new(Some(
-        "Bridge status, LAN / Tailscale addresses and the pairing PIN for the \
-         OmarchyAILauncher Android app.",
-    ));
-    launcher_hint.add_css_class("launcher-hint");
-    launcher_hint.set_xalign(0.0);
-    launcher_hint.set_wrap(true);
-    body.append(&launcher_hint);
+    let size_buttons = Rc::new(vec![
+        (TopBarSize::Small, btn_small),
+        (TopBarSize::Medium, btn_medium),
+        (TopBarSize::Large, btn_large),
+    ]);
+    let paint_size: Rc<dyn Fn()> = {
+        let state = Rc::clone(&state);
+        let size_buttons = Rc::clone(&size_buttons);
+        Rc::new(move || {
+            let selected = state.borrow().top_bar_size;
+            for (size, button) in size_buttons.iter() {
+                paint_size_button(button, *size == selected);
+            }
+        })
+    };
+    for (size, button) in size_buttons.iter() {
+        let size = *size;
+        let state = Rc::clone(&state);
+        let paint_size = Rc::clone(&paint_size);
+        let on_top_bar_size_change = Rc::clone(&on_top_bar_size_change);
+        button.connect_clicked(move |_| {
+            state.borrow_mut().top_bar_size = size;
+            paint_size();
+            on_top_bar_size_change(size);
+        });
+    }
+    paint_size();
 
-    let btn_launcher = Button::with_label("📱 Open launcher connection");
-    btn_launcher.set_tooltip_text(Some("Bridge status, IPs and the pairing PIN"));
-    btn_launcher.add_css_class("launcher-btn");
-    btn_launcher.add_css_class("launcher-btn-primary");
-    let launcher_row = Box::new(Orientation::Horizontal, 8);
-    launcher_row.add_css_class("launcher-actions");
-    launcher_row.append(&btn_launcher);
-    body.append(&launcher_row);
+    // Android is the first settings destination, with live device counts.
+    let btn_launcher = Button::new();
+    btn_launcher.add_css_class("android-settings-entry");
+    btn_launcher.set_tooltip_text(Some("Manage Android devices and secure pairing"));
+    let launcher_row = Box::new(Orientation::Horizontal, 12);
+    let icon = Label::new(Some("▣"));
+    icon.add_css_class("android-entry-icon");
+    launcher_row.append(&icon);
+    let words = Box::new(Orientation::Vertical, 3);
+    words.set_hexpand(true);
+    let heading = Label::new(Some("SUPER DESKTOP on Android"));
+    heading.set_xalign(0.0); heading.add_css_class("android-entry-title");
+    words.append(&heading);
+    let hint = Label::new(Some("Devices & secure pairing"));
+    hint.set_xalign(0.0); hint.add_css_class("launcher-hint");
+    words.append(&hint);
+    launcher_row.append(&words);
+    let counts = chip("…/…");
+    counts.add_css_class("android-connection-count");
+    counts.set_tooltip_text(Some("Active / registered phones. Active: connected or seen in the last 60 seconds."));
+    launcher_row.append(&counts);
+    launcher_row.append(&Label::new(Some("›")));
+    btn_launcher.set_child(Some(&launcher_row));
+    root.prepend(&btn_launcher);
+    let count_refresh = crate::launcher_settings::background_refresh(crate::bridge::paired_devices, move |devices| {
+        let active = devices.iter().filter(|d| d["active"] == true).count();
+        let text = format!("{active}/{}", devices.len());
+        if counts.text().as_str() != text { counts.set_text(&text); }
+    });
+    btn_launcher.connect_map({ let refresh = Rc::clone(&count_refresh); move |_| refresh() });
+    let entry_weak = btn_launcher.downgrade();
+    gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+        let Some(entry) = entry_weak.upgrade() else { return gtk4::glib::ControlFlow::Break; };
+        if entry.is_mapped() { count_refresh(); }
+        gtk4::glib::ControlFlow::Continue
+    });
 
     let footer = Label::new(Some(
         "detected with which / npx · selection stored in state.json",
@@ -390,13 +462,13 @@ pub fn build_harness_settings_panel(
             btn_back.set_visible(launcher);
             if launcher {
                 badge.set_label("📱");
-                title.set_label("Launcher connection");
-                subtitle.set_label("OmarchyAILauncher bridge");
+                title.set_label("SUPER DESKTOP on Android");
+                subtitle.set_label("Devices · encrypted connections");
                 launcher_refresh();
             } else {
                 badge.set_label("⚙");
                 title.set_label("Settings");
-                subtitle.set_label("Shortcut · top bar launch buttons · launcher");
+                subtitle.set_label("Android · shortcuts · top bar");
             }
         })
     };
@@ -697,9 +769,11 @@ pub fn build_harness_settings_panel(
         // recording armed with the keyboard held.
         let stop_recording = Rc::clone(&stop_recording);
         let paint_recorder = Rc::clone(&paint_recorder);
+        let paint_size = Rc::clone(&paint_size);
         Rc::new(move || {
             stop_recording(None);
             paint_recorder();
+            paint_size();
 
             let detected = detect_harnesses();
             let light_theme = crate::theme::current_theme().mode == "light";
@@ -834,10 +908,13 @@ mod tests {
         let seen_cb = Rc::clone(&seen);
         let shortcut_changes: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
         let shortcut_cb = Rc::clone(&shortcut_changes);
+        let size_changes: Rc<RefCell<Vec<TopBarSize>>> = Rc::new(RefCell::new(Vec::new()));
+        let size_cb = Rc::clone(&size_changes);
         let panel = build_harness_settings_panel(
             Rc::clone(&app_state),
             Rc::new(move |keys: Vec<String>| seen_cb.borrow_mut().push(keys)),
             Rc::new(move |combo: String| shortcut_cb.borrow_mut().push(combo)),
+            Rc::new(move |size| size_cb.borrow_mut().push(size)),
         );
         (panel.refresh)();
 
@@ -850,9 +927,9 @@ mod tests {
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![4, 5]);
-        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 9);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 9);
+        assert_eq!(sections, vec![3, 3]);
+        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 3);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 6);
 
         // The card opens on the settings page, and ← shows up only while the
         // launcher page does.
@@ -867,15 +944,16 @@ mod tests {
 
         // The launcher section navigates to the 📱 page, ← navigates back, and
         // neither throws away the settings page.
-        let btn_launcher = find_buttons(&panel.widget, "launcher-btn")
+        let btn_launcher = find_buttons(&panel.widget, "android-settings-entry")
             .into_iter()
-            .find(|b| b.label().as_deref() == Some("📱 Open launcher connection"))
+            .next()
             .expect("the launcher section must offer the navigation button");
+        assert_eq!(btn_launcher.parent().unwrap().first_child().unwrap(), btn_launcher.clone().upcast::<gtk4::Widget>(), "Android entry must be first");
         btn_launcher.emit_clicked();
         assert!(!shown(&pages[0]));
         assert!(shown(&pages[1]));
         assert!(shown(&btn_back));
-        assert_eq!(title_text(&panel.widget), "Launcher connection");
+        assert_eq!(title_text(&panel.widget), "SUPER DESKTOP on Android");
 
         btn_back.emit_clicked();
         assert!(shown(&pages[0]));
@@ -911,6 +989,17 @@ mod tests {
         (panel.refresh)();
         assert_eq!(combo_text(&panel.widget), "SUPER + SHIFT + K");
         assert_eq!(record.label().as_deref(), Some("⏺ Record"));
+
+        // Large preserves the original toolbar scale. Choosing another size
+        // updates state, selection styling and the live-dock callback.
+        let size_buttons = find_buttons(&panel.widget, "top-bar-size");
+        assert_eq!(size_buttons.len(), 3);
+        assert!(size_buttons[2].has_css_class("top-bar-size-active"));
+        size_buttons[0].emit_clicked();
+        assert_eq!(app_state.borrow().top_bar_size, TopBarSize::Small);
+        assert_eq!(*size_changes.borrow(), [TopBarSize::Small]);
+        assert!(size_buttons[0].has_css_class("top-bar-size-active"));
+        assert!(!size_buttons[2].has_css_class("top-bar-size-active"));
 
         // One toggle row per detected harness, all ON by default.
         let toggles = find_buttons(&panel.widget, "harness-toggle");
