@@ -1,5 +1,6 @@
 mod brand;
 mod bridge;
+mod card_resize;
 mod crashlog;
 mod harness_settings;
 mod hotcorner;
@@ -61,18 +62,16 @@ use gtk4::gio::prelude::{ApplicationExt, ApplicationExtManual};
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::Application;
+use futures_util::StreamExt;
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::io::RawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -341,11 +340,7 @@ fn run_daemon(start_visible: bool) {
     // strobe, and a second tap during the slide-in can reverse immediately.
     shortcut::ensure_release_toggle();
 
-    let (ipc_tx, ipc_rx) = channel::<IpcMessage>();
-
-    // Wake pipe: lets the IPC thread wake the GTK main loop only when a
-    // command arrives (see unix_fd_add_local below).
-    let (wake_read, wake_write) = make_wake_pipe();
+    let (ipc_tx, mut ipc_rx) = futures_channel::mpsc::unbounded::<IpcMessage>();
 
     let ctx_activate = Rc::clone(&context);
     let app_clone = app.clone();
@@ -360,13 +355,10 @@ fn run_daemon(start_visible: bool) {
             let hot_inside = Rc::clone(&ctx_activate.borrow().hot_inside);
             let ctx_toggle = Rc::clone(&ctx_activate);
             let app_toggle = application.clone();
-            *hot_corner.borrow_mut() = hotcorner::HotCorner::spawn(
-                application,
-                hot_inside,
-                move || {
+            *hot_corner.borrow_mut() =
+                hotcorner::HotCorner::spawn(application, hot_inside, move || {
                     toggle_window(&ctx_toggle, &app_toggle);
-                },
-            );
+                });
         }
         if start_visible {
             show_window(&ctx_activate, application);
@@ -375,8 +367,12 @@ fn run_daemon(start_visible: bool) {
 
     // After the socket bind: a duplicate daemon exits inside `start_ipc_thread`
     // (see its liveness probe) and must not look like a run in the crash log.
-    crashlog::note_start(if start_visible { "daemon (visible)" } else { "daemon" });
-    start_ipc_thread(ipc_tx, wake_write);
+    crashlog::note_start(if start_visible {
+        "daemon (visible)"
+    } else {
+        "daemon"
+    });
+    start_ipc_thread(ipc_tx);
 
     // Warm the UI right after start, never on the startup path: startup stays
     // fast (the socket is up first) and by the time a human presses the
@@ -389,32 +385,27 @@ fn run_daemon(start_visible: bool) {
         });
     }
 
-    // NOTE: glib 0.22 removed `unix_fd_add_local`, so the event-driven dispatch
-    // can't compile against this stack (gio lost `UnixInputStream` too, so the
-    // wake pipe has no GSource). Poll instead, and drain the pipe each tick so
-    // the IPC thread's best-effort writes never fill it up.
-    //
-    // 10ms, not the 50ms this used to be: the poll interval is pure latency on
-    // every shortcut press (the daemon only sees a `toggle` on the next tick),
-    // and a tick is a pipe read plus a channel `try_recv` — a few microseconds.
-    let ctx_timer = Rc::clone(&context);
-    let app_timer = app.clone();
-    glib::timeout_add_local(Duration::from_millis(10), move || {
-        if let Some(fd) = wake_read {
-            drain_wake_pipe(fd);
+    // The channel's waker schedules this future on GTK as soon as a command
+    // arrives. No polling timer, idle CPU use, or extra wake-pipe descriptors.
+    let ctx_ipc = Rc::clone(&context);
+    let app_ipc = app.clone();
+    glib::MainContext::default().spawn_local(async move {
+        let mut toggles = ToggleGate::default();
+        while let Some(msg) = ipc_rx.next().await {
+            let response = if msg.cmd.trim() == "toggle" {
+                let visible =
+                    toggles.dispatch(msg.received_at, || toggle_window(&ctx_ipc, &app_ipc));
+                json!({ "ok": true, "visible": visible }).to_string()
+            } else {
+                toggles.last = None;
+                handle_ipc_command(&msg.cmd, &ctx_ipc, &app_ipc)
+            };
+            let _ = msg.responder.send(response);
         }
-        // Drain the whole tick first. The keysym bind and the `code:` bind both
-        // fire on one key-release, so two `toggle` commands can be waiting at
-        // once — handling them in order would show then hide in a single frame.
-        let mut batch = Vec::new();
-        while let Ok(msg) = ipc_rx.try_recv() {
-            batch.push(msg);
-        }
-        dispatch_ipc_batch(batch, &ctx_timer, &app_timer);
-        glib::ControlFlow::Continue
     });
 
     app_clone.run_with_args::<&str>(&[]);
+    state::flush_state_saves();
 }
 
 fn ensure_omarchy_theme_hook() {
@@ -523,9 +514,8 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
 }
 
 fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
-    // No time debounce: a tap during the slide-in must reverse immediately.
-    // Same-tick duplicate toggles (keysym + `code:` bind on one release) are
-    // collapsed in `dispatch_ipc_batch` instead.
+    // A tap during the slide-in reverses immediately. Duplicate IPC events
+    // from the keysym and physical-key bindings are handled by ToggleGate.
     if ctx.borrow().shown {
         hide_window(ctx);
         false
@@ -535,71 +525,31 @@ fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     }
 }
 
-/// Handle every IPC message that arrived in one GTK tick.
-///
-/// Consecutive `toggle` commands collapse to a single toggle: Hyprland runs
-/// both the keysym bind and the layout-proof `code:` bind on the same
-/// key-release, and two toggles in one frame would cancel each other. Real
-/// second taps arrive on a later tick (the bind is on release, so it cannot
-/// repeat while the key is held).
-fn dispatch_ipc_batch(
-    batch: Vec<IpcMessage>,
-    ctx: &Rc<RefCell<AppContext>>,
-    app: &Application,
-) {
-    let mut pending_toggles: Vec<IpcMessage> = Vec::new();
-    let flush_toggles = |group: Vec<IpcMessage>| {
-        if group.is_empty() {
-            return;
+/// Hyprland can fire both the keysym and physical-key binding on one release.
+/// Apply the first immediately; coalesce duplicates within the old 10ms poll
+/// interval without delaying real taps that reverse an in-flight animation.
+#[derive(Default)]
+struct ToggleGate {
+    last: Option<(std::time::Instant, bool)>,
+}
+
+impl ToggleGate {
+    fn dispatch(&mut self, at: std::time::Instant, toggle: impl FnOnce() -> bool) -> bool {
+        if let Some((last, visible)) = self.last {
+            if at.saturating_duration_since(last) < Duration::from_millis(10) {
+                return visible;
+            }
         }
-        let vis = toggle_window(ctx, app);
-        let resp = json!({ "ok": true, "visible": vis }).to_string();
-        for msg in group {
-            let _ = msg.responder.send(resp.clone());
-        }
-    };
-    for msg in batch {
-        if msg.cmd.trim() == "toggle" {
-            pending_toggles.push(msg);
-        } else {
-            flush_toggles(std::mem::take(&mut pending_toggles));
-            let resp = handle_ipc_command(&msg.cmd, ctx, app);
-            let _ = msg.responder.send(resp);
-        }
+        let visible = toggle();
+        self.last = Some((at, visible));
+        visible
     }
-    flush_toggles(pending_toggles);
 }
 
 struct IpcMessage {
     cmd: String,
     responder: Sender<String>,
-}
-
-/// Creates a non-blocking pipe used to wake the GTK main loop from the IPC
-/// thread. Returns (read_fd, write_fd) or (None, None) on failure, in which
-/// case the caller falls back to timeout polling.
-fn make_wake_pipe() -> (Option<RawFd>, Option<RawFd>) {
-    let mut fds = [0 as libc::c_int; 2];
-    if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
-        return (None, None);
-    }
-    for fd in fds {
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        unsafe {
-            libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-        }
-    }
-    (Some(fds[0]), Some(fds[1]))
-}
-
-fn drain_wake_pipe(fd: RawFd) {
-    let mut buf = [0u8; 64];
-    loop {
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
-        if n <= 0 || (n as usize) < buf.len() {
-            break;
-        }
-    }
+    received_at: std::time::Instant,
 }
 
 /// Bind the daemon's control socket, refusing to take over a live daemon's.
@@ -610,7 +560,7 @@ fn drain_wake_pipe(fd: RawFd) {
 /// the older process kept its overlay window on screen — every later `toggle`
 /// reached the new process, so the visible window could not be hidden any more.
 /// Now a live daemon is probed first; if it answers, this process exits instead.
-fn start_ipc_thread(ipc_tx: Sender<IpcMessage>, wake_fd: Option<RawFd>) {
+fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) {
     let sock_path = get_socket_path();
 
     match ipc_request("status") {
@@ -646,15 +596,8 @@ fn start_ipc_thread(ipc_tx: Sender<IpcMessage>, wake_fd: Option<RawFd>) {
 
     watch_socket_ownership(&sock_path);
 
-    let running = Arc::new(AtomicBool::new(true));
-    let r_clone = Arc::clone(&running);
-
     thread::spawn(move || {
         for stream in listener.incoming() {
-            if !r_clone.load(Ordering::SeqCst) {
-                break;
-            }
-
             if let Ok(mut s) = stream {
                 let mut buf = [0u8; 1024];
                 if let Ok(n) = s.read(&mut buf) {
@@ -665,14 +608,14 @@ fn start_ipc_thread(ipc_tx: Sender<IpcMessage>, wake_fd: Option<RawFd>) {
                     let cmd = line.trim().to_string();
 
                     let (resp_tx, resp_rx) = channel();
-                    if ipc_tx.send(IpcMessage { cmd, responder: resp_tx }).is_ok() {
-                        // Wake the GTK main loop (best-effort; the fallback
-                        // poll also drains the channel if this fails).
-                        if let Some(fd) = wake_fd {
-                            unsafe {
-                                libc::write(fd, [1u8].as_ptr() as *const libc::c_void, 1);
-                            }
-                        }
+                    if ipc_tx
+                        .unbounded_send(IpcMessage {
+                            cmd,
+                            responder: resp_tx,
+                            received_at: std::time::Instant::now(),
+                        })
+                        .is_ok()
+                    {
                         if let Ok(resp) = resp_rx.recv_timeout(Duration::from_millis(2000)) {
                             let _ = s.write_all(resp.as_bytes());
                             let _ = s.shutdown(std::net::Shutdown::Both);
@@ -702,19 +645,30 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             json!({ "ok": true, "visible": false }).to_string()
         }
         "status" => {
-            let is_vis = ctx.borrow().shown;
-            let state = state::load_state();
+            let context = ctx.borrow();
+            let (notes, terminals) = context
+                .window
+                .as_ref()
+                .map(|w| w.item_counts())
+                .unwrap_or_else(|| {
+                    let state = state::load_state();
+                    (state.notes.len(), state.terminals.len())
+                });
             json!({
                 "ok": true,
-                "visible": is_vis,
-                "notes_count": state.notes.len(),
-                "terminals_count": state.terminals.len(),
+                "visible": context.shown,
+                "notes_count": notes,
+                "terminals_count": terminals,
             })
             .to_string()
         }
         "add-note" => {
             show_window(ctx, app);
-            let text = if parts.len() > 1 { parts[1..].join(" ") } else { "New note...".to_string() };
+            let text = if parts.len() > 1 {
+                parts[1..].join(" ")
+            } else {
+                "New note...".to_string()
+            };
             if let Some(win) = &ctx.borrow().window {
                 win.create_new_note(None, None, &text);
             }
@@ -746,7 +700,10 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             // process alive with no window — which is how a "killed" daemon
             // used to stay around holding the socket.
             let _ = fs::remove_file(get_socket_path());
-            glib::timeout_add_local_once(Duration::from_millis(150), || std::process::exit(0));
+            glib::timeout_add_local_once(Duration::from_millis(150), || {
+                state::flush_state_saves();
+                std::process::exit(0);
+            });
             json!({ "ok": true, "action": "quitting" }).to_string()
         }
         _ => json!({ "ok": false, "error": format!("unknown_command: {}", action) }).to_string(),
@@ -757,6 +714,39 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
 mod ipc_tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn duplicate_bindings_do_not_cancel_but_a_second_tap_reverses() {
+        let mut gate = ToggleGate::default();
+        let at = std::time::Instant::now();
+        assert!(gate.dispatch(at, || true));
+        assert!(gate.dispatch(at + Duration::from_millis(3), || panic!("duplicate toggled")));
+        assert!(!gate.dispatch(at + Duration::from_millis(40), || false));
+        assert!(!gate.dispatch(at + Duration::from_millis(41), || panic!("duplicate toggled")));
+        gate.last = None; // An intervening command resets the gate.
+        assert!(gate.dispatch(at + Duration::from_millis(42), || true));
+    }
+
+    #[test]
+    fn ipc_channel_wakes_a_sleeping_main_context() {
+        let context = glib::MainContext::new();
+        context.with_thread_default(|| {
+            let (tx, mut rx) = futures_channel::mpsc::unbounded::<u32>();
+            let seen = Rc::new(Cell::new(0));
+            let result = Rc::clone(&seen);
+            context.spawn_local(async move {
+                result.set(rx.next().await.unwrap());
+            });
+            // Arm the receiver before sending from another thread.
+            context.iteration(false);
+            assert!(!context.pending(), "idle receiver must not spin");
+            thread::spawn(move || tx.unbounded_send(42).unwrap()).join().unwrap();
+            while context.pending() {
+                context.iteration(false);
+            }
+            assert_eq!(seen.get(), 42);
+        }).unwrap();
+    }
 
     /// Private dir so this test can never touch the user's real daemon.
     fn private_runtime_dir(tag: &str) -> PathBuf {

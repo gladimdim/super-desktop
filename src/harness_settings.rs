@@ -1,21 +1,26 @@
-//! ⚙ Settings panel for the overlay HUD.
+//! ⚙ Settings card for the overlay HUD.
 //!
 //! A floating card that lives INSIDE the super-desktop layer-shell overlay
-//! (centered above notes and terminals) — never a separate Hyprland window. Two
-//! things live here:
+//! (centered above notes and terminals) — never a separate Hyprland window. It
+//! is a two-page panel; the header (badge, title, ← back, ✕) is shared:
 //!
-//! 1. **Show / hide shortcut** — a recorder: click Record, press a combination,
-//!    and it becomes the Hyprland binding for `super-desktop toggle`. Capture,
-//!    spelling and the Hyprland side live in `crate::shortcut`; this file owns
-//!    the widget state machine and every way out of a recording.
-//! 2. **Top bar launch buttons** — the harnesses that actually resolve on THIS
-//!    machine (see `tmux::detect_harnesses`), each with a show/hide toggle.
+//! 1. **Settings page**
+//!    - **Show / hide shortcut** — a recorder: click Record, press a
+//!      combination, and it becomes the Hyprland binding for
+//!      `super-desktop toggle`. Capture, spelling and the Hyprland side live in
+//!      `crate::shortcut`; this file owns the widget state machine and every
+//!      way out of a recording.
+//!    - **Top bar launch buttons** — the harnesses that actually resolve on THIS
+//!      machine (see `tmux::detect_harnesses`), each with a show/hide toggle.
+//!    - **Launcher connection** — an entry that navigates to page 2.
+//! 2. **Launcher connection page** — the 📱 bridge status, addresses and pairing
+//!    PIN, built by `crate::launcher_settings`; ← returns to the settings page.
 //!
-//! Same visual language as the 📱 launcher panel: `mini-terminal` +
-//! `term-header` card chrome whose body is a stack of numbered
-//! `.launcher-section` panels (chrome helpers shared with `launcher_settings`).
-//! Colours, radii and spacing live in `styles.rs` — this file only builds
-//! widgets, reads detection and drives the recorder.
+//! Same visual language as notes/terminals: `mini-terminal` + `term-header`
+//! card chrome whose body is a stack of numbered `.launcher-section` panels
+//! (chrome helpers shared with `launcher_settings`). Colours, radii and spacing
+//! live in `styles.rs` — this file only builds widgets, reads detection, drives
+//! the recorder and swaps the pages.
 //!
 //! The selection itself is owned by the window: this panel reads it, reports
 //! changes through `on_change` (harnesses) and `on_shortcut_change` (shortcut)
@@ -179,7 +184,7 @@ pub fn build_harness_settings_panel(
     outer.add_css_class("harness-panel");
     outer.set_size_request(660, 620);
 
-    // ---- header: badge, title + subtitle, close ----
+    // ---- header: badge, title + subtitle, ← back, close ----
     let header = Box::new(Orientation::Horizontal, 10);
     header.add_css_class("term-header");
 
@@ -194,12 +199,20 @@ pub fn build_harness_settings_panel(
     let title = Label::new(Some("Settings"));
     title.add_css_class("term-title");
     title.set_halign(Align::Start);
-    let subtitle = Label::new(Some("Shortcut · top bar launch buttons"));
+    let subtitle = Label::new(Some("Shortcut · top bar launch buttons · launcher"));
     subtitle.add_css_class("launcher-subtitle");
     subtitle.set_halign(Align::Start);
     titles.append(&title);
     titles.append(&subtitle);
     header.append(&titles);
+
+    // Shown only while the 📱 launcher page is up (see `nav`).
+    let btn_back = Button::with_label("←");
+    btn_back.set_tooltip_text(Some("Back to settings"));
+    btn_back.add_css_class("term-btn");
+    btn_back.set_valign(Align::Center);
+    btn_back.set_visible(false);
+    header.append(&btn_back);
 
     let btn_close = Button::with_label("✕");
     btn_close.set_tooltip_text(Some("Close panel"));
@@ -296,7 +309,7 @@ pub fn build_harness_settings_panel(
     btn_all.add_css_class("launcher-btn");
     btn_all.add_css_class("launcher-btn-primary");
     let btn_none = Button::with_label("✕ Hide all");
-    btn_none.set_tooltip_text(Some("Keep only the note / settings / launcher buttons"));
+    btn_none.set_tooltip_text(Some("Keep only the note and settings buttons"));
     btn_none.add_css_class("launcher-btn");
     btn_none.add_css_class("launcher-btn-danger");
     actions.append(&btn_all);
@@ -311,6 +324,26 @@ pub fn build_harness_settings_panel(
     note.set_wrap(true);
     body.append(&note);
 
+    // ---- 4 · launcher connection: navigates to the 📱 page ----
+    let (_, body) = section_card(&root, "4", "Launcher connection");
+    let launcher_hint = Label::new(Some(
+        "Bridge status, LAN / Tailscale addresses and the pairing PIN for the \
+         OmarchyAILauncher Android app.",
+    ));
+    launcher_hint.add_css_class("launcher-hint");
+    launcher_hint.set_xalign(0.0);
+    launcher_hint.set_wrap(true);
+    body.append(&launcher_hint);
+
+    let btn_launcher = Button::with_label("📱 Open launcher connection");
+    btn_launcher.set_tooltip_text(Some("Bridge status, IPs and the pairing PIN"));
+    btn_launcher.add_css_class("launcher-btn");
+    btn_launcher.add_css_class("launcher-btn-primary");
+    let launcher_row = Box::new(Orientation::Horizontal, 8);
+    launcher_row.add_css_class("launcher-actions");
+    launcher_row.append(&btn_launcher);
+    body.append(&launcher_row);
+
     let footer = Label::new(Some(
         "detected with which / npx · selection stored in state.json",
     ));
@@ -320,11 +353,74 @@ pub fn build_harness_settings_panel(
 
     let scroll = ScrolledWindow::new();
     scroll.add_css_class("launcher-scroll");
+    scroll.add_css_class("harness-page");
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroll.set_child(Some(&root));
     scroll.set_vexpand(true);
     scroll.set_hexpand(true);
-    outer.append(&scroll);
+
+    // ---- pages: settings (above) ⇄ 📱 launcher connection ----
+    // Both pages live in the same card and are swapped by visibility, so the
+    // header, the recorder state and the harness rows survive navigating away
+    // and back. The launcher page is built here (`launcher_settings`) because
+    // its content belongs to that file; it is refreshed on every entry.
+    let launcher_page = crate::launcher_settings::build_launcher_page();
+    let launcher_view = launcher_page.widget.clone();
+
+    let pages = Box::new(Orientation::Vertical, 0);
+    pages.add_css_class("harness-pages");
+    pages.set_vexpand(true);
+    pages.append(&scroll);
+    pages.append(&launcher_view);
+    launcher_view.set_visible(false);
+    outer.append(&pages);
+
+    // `nav(true)` selects the 📱 launcher page, `nav(false)` the settings page.
+    let nav: Rc<dyn Fn(bool)> = {
+        let settings_view = scroll.clone();
+        let launcher_view = launcher_view.clone();
+        let btn_back = btn_back.clone();
+        let badge = badge.clone();
+        let title = title.clone();
+        let subtitle = subtitle.clone();
+        let launcher_refresh = Rc::clone(&launcher_page.refresh);
+        Rc::new(move |launcher: bool| {
+            settings_view.set_visible(!launcher);
+            launcher_view.set_visible(launcher);
+            btn_back.set_visible(launcher);
+            if launcher {
+                badge.set_label("📱");
+                title.set_label("Launcher connection");
+                subtitle.set_label("OmarchyAILauncher bridge");
+                launcher_refresh();
+            } else {
+                badge.set_label("⚙");
+                title.set_label("Settings");
+                subtitle.set_label("Shortcut · top bar launch buttons · launcher");
+            }
+        })
+    };
+
+    btn_launcher.connect_clicked({
+        let nav = Rc::clone(&nav);
+        move |_| nav(true)
+    });
+    btn_back.connect_clicked({
+        let nav = Rc::clone(&nav);
+        move |_| nav(false)
+    });
+    // Reopening always lands on the settings page: the card is re-shown by the
+    // HUD gear, and coming back to a half-finished launcher page (or to a
+    // stale bridge reading) would be a surprise. While the card stays open a
+    // theme switch may refresh it — the page must not jump.
+    outer.connect_visible_notify({
+        let nav = Rc::clone(&nav);
+        move |o| {
+            if o.is_visible() {
+                nav(false);
+            }
+        }
+    });
 
     // ---- shortcut recorder ----
     // `armed` holds the keymap guard for exactly as long as the listener is
@@ -745,10 +841,59 @@ mod tests {
         );
         (panel.refresh)();
 
-        // Three numbered sections: shortcut, harnesses, top bar.
-        assert_eq!(count_class(&panel.widget, "launcher-section"), 3);
-        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 3);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 3);
+        // Two pages in one card: the settings page — 4 numbered sections
+        // (shortcut, harnesses, top bar, launcher entry) — and the 📱 launcher
+        // page (5: bridge, firewall, addresses, pairing, phone steps).
+        let pages = find_widgets(&panel.widget, "harness-page");
+        assert_eq!(pages.len(), 2, "settings + launcher pages");
+        let sections: Vec<usize> = pages
+            .iter()
+            .map(|p| count_class(p, "launcher-section"))
+            .collect();
+        assert_eq!(sections, vec![4, 5]);
+        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 9);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 9);
+
+        // The card opens on the settings page, and ← shows up only while the
+        // launcher page does.
+        let btn_back = find_buttons(&panel.widget, "term-btn")
+            .into_iter()
+            .find(|b| b.label().as_deref() == Some("←"))
+            .expect("the header must offer a back button");
+        assert!(shown(&pages[0]), "settings page is the landing page");
+        assert!(!shown(&pages[1]));
+        assert!(!shown(&btn_back));
+        assert_eq!(title_text(&panel.widget), "Settings");
+
+        // The launcher section navigates to the 📱 page, ← navigates back, and
+        // neither throws away the settings page.
+        let btn_launcher = find_buttons(&panel.widget, "launcher-btn")
+            .into_iter()
+            .find(|b| b.label().as_deref() == Some("📱 Open launcher connection"))
+            .expect("the launcher section must offer the navigation button");
+        btn_launcher.emit_clicked();
+        assert!(!shown(&pages[0]));
+        assert!(shown(&pages[1]));
+        assert!(shown(&btn_back));
+        assert_eq!(title_text(&panel.widget), "Launcher connection");
+
+        btn_back.emit_clicked();
+        assert!(shown(&pages[0]));
+        assert!(!shown(&pages[1]));
+        assert!(!shown(&btn_back));
+        assert_eq!(title_text(&panel.widget), "Settings");
+
+        // Reopening the card lands on the settings page too, even when the
+        // launcher page was the last thing up: the window hides the card with
+        // `set_visible(false)` and the HUD gear re-shows it.
+        panel.widget.set_visible(false);
+        btn_launcher.emit_clicked();
+        assert!(shown(&pages[1]));
+        panel.widget.set_visible(true);
+        assert!(shown(&pages[0]), "reopening resets to the settings page");
+        assert!(!shown(&pages[1]));
+        assert!(!shown(&btn_back));
+        assert_eq!(title_text(&panel.widget), "Settings");
 
         // The recorder shows the shipped shortcut until one is recorded, and
         // switches to the stored one as soon as state.json has it. Note what
@@ -829,6 +974,24 @@ mod tests {
         found[0]
             .downcast_ref::<Label>()
             .expect("combo label is a Label")
+            .label()
+            .to_string()
+    }
+
+    /// The widget's own `visible` property. NOT `is_visible()`: GTK4's walks
+    /// up to the root, so every page of an unshown card would read as hidden
+    /// and the navigation assertions below could not tell them apart.
+    fn shown<W: IsA<gtk4::Widget>>(w: &W) -> bool {
+        w.property::<bool>("visible")
+    }
+
+    /// The card header's title, which follows the current page.
+    fn title_text(w: &gtk4::Widget) -> String {
+        let found = find_widgets(w, "term-title");
+        assert_eq!(found.len(), 1, "exactly one card title");
+        found[0]
+            .downcast_ref::<Label>()
+            .expect("card title is a Label")
             .label()
             .to_string()
     }

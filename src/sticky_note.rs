@@ -1,23 +1,33 @@
 use gtk4::prelude::*;
-use gtk4::{glib, Align, Button, GestureClick, GestureDrag, Label, Orientation, PolicyType, ScrolledWindow, TextView, WrapMode};
+use gtk4::{
+    glib, Align, Button, GestureClick, GestureDrag, Label, Orientation, Overlay, PolicyType,
+    ScrolledWindow, TextView, WrapMode,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::state::NoteData;
 
+pub const MIN_NOTE_WIDTH: i32 = 180;
+pub const MIN_NOTE_HEIGHT: i32 = 120;
+
 pub struct StickyNote {
-    pub container: gtk4::Box,
+    pub container: Overlay,
     pub data: Rc<RefCell<NoteData>>,
 }
 
 impl StickyNote {
-    pub fn new<FDragUpdate, FDragEnd, FDelete, FChange, FRaise>(
-        note_data: NoteData,
+    pub fn new<FDragUpdate, FDragEnd, FDelete, FChange, FRaise, FResizeGhost, FResizeEnd>(
+        mut note_data: NoteData,
         on_drag_update: FDragUpdate,
         on_drag_end: FDragEnd,
         on_delete: FDelete,
         on_change: FChange,
         on_raise: FRaise,
+        on_resize_ghost: FResizeGhost,
+        on_resize_end: FResizeEnd,
+        screen_w: i32,
+        screen_h: i32,
     ) -> Self
     where
         FDragUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
@@ -25,15 +35,29 @@ impl StickyNote {
         FDelete: Fn(String) + 'static,
         FChange: Fn(&NoteData) + 'static,
         FRaise: Fn(gtk4::Widget) + 'static,
+        FResizeGhost: Fn(f64, f64, i32, i32) + 'static,
+        FResizeEnd: Fn() + 'static,
     {
+        note_data.width = note_data.width.clamp(
+            MIN_NOTE_WIDTH,
+            ((screen_w as f64) * 0.70).round() as i32,
+        );
+        note_data.height = note_data.height.clamp(
+            MIN_NOTE_HEIGHT,
+            ((screen_h as f64) * 0.75).round() as i32,
+        );
         let data = Rc::new(RefCell::new(note_data));
         let on_drag_end = Rc::new(on_drag_end);
         let on_change_rc = Rc::new(on_change);
         let on_raise_rc = Rc::new(on_raise);
-        let container = gtk4::Box::new(Orientation::Vertical, 0);
+        let on_resize_ghost = Rc::new(on_resize_ghost);
+        let on_resize_end = Rc::new(on_resize_end);
+        let container = Overlay::new();
+        let body = gtk4::Box::new(Orientation::Vertical, 0);
 
         container.set_size_request(data.borrow().width, data.borrow().height);
         container.add_css_class("sticky-note");
+        container.set_child(Some(&body));
 
         // Click to raise note above all other widgets
         let click = GestureClick::new();
@@ -81,7 +105,7 @@ impl StickyNote {
         });
         header.append(&delete_btn);
 
-        container.append(&header);
+        body.append(&header);
 
         // Content
         let content_box = gtk4::Box::new(Orientation::Vertical, 0);
@@ -135,7 +159,7 @@ impl StickyNote {
 
         scrolled.set_child(Some(&text_view));
         content_box.append(&scrolled);
-        container.append(&content_box);
+        body.append(&content_box);
 
         // Drag gesture
         let drag = GestureDrag::new();
@@ -189,7 +213,7 @@ impl StickyNote {
         let data_drag_end = Rc::clone(&data);
         let start_pos_end = Rc::clone(&start_pos);
         let grab_offset_end = Rc::clone(&grab_offset);
-        let on_drag_end = Rc::clone(&on_drag_end);
+        let on_drag_end_move = Rc::clone(&on_drag_end);
         drag.connect_drag_end(move |gesture, offset_x, offset_y| {
             if let Some(c) = container_weak.upgrade() {
                 let (nx, ny) = match (
@@ -206,12 +230,124 @@ impl StickyNote {
                 let ry = ny.round() as i32;
                 data_drag_end.borrow_mut().x = rx;
                 data_drag_end.borrow_mut().y = ry;
-                on_drag_end(c.upcast(), &data_drag_end.borrow());
+                on_drag_end_move(c.upcast(), &data_drag_end.borrow());
             }
         });
 
         header.add_controller(drag);
 
+        let resize_limits = crate::card_resize::Limits {
+            min_width: MIN_NOTE_WIDTH,
+            min_height: MIN_NOTE_HEIGHT,
+            max_width: ((screen_w as f64) * 0.70).round() as i32,
+            max_height: ((screen_h as f64) * 0.75).round() as i32,
+            left: 10.0,
+            top: 70.0,
+            right: (screen_w - 10) as f64,
+            bottom: (screen_h - 10) as f64,
+        };
+        let data_start = Rc::clone(&data);
+        let get_start: Rc<dyn Fn() -> Option<crate::card_resize::Rect>> = Rc::new(move || {
+            let d = data_start.borrow();
+            Some(crate::card_resize::Rect {
+                x: d.x as f64,
+                y: d.y as f64,
+                width: d.width,
+                height: d.height,
+            })
+        });
+        let root_begin = container.clone();
+        let data_begin = Rc::clone(&data);
+        let on_raise_resize = Rc::clone(&on_raise_rc);
+        let ghost_begin = Rc::clone(&on_resize_ghost);
+        let on_begin: Rc<dyn Fn()> = Rc::new(move || {
+            root_begin.add_css_class("resizing");
+            on_raise_resize(root_begin.clone().upcast());
+            let d = data_begin.borrow();
+            ghost_begin(d.x as f64, d.y as f64, d.width, d.height);
+        });
+        let ghost_preview = Rc::clone(&on_resize_ghost);
+        let on_preview: Rc<dyn Fn(crate::card_resize::Rect)> = Rc::new(move |rect| {
+            ghost_preview(rect.x, rect.y, rect.width, rect.height);
+        });
+        let root_commit = container.clone();
+        let data_commit = Rc::clone(&data);
+        let on_drag_end_resize = Rc::clone(&on_drag_end);
+        let ghost_end = Rc::clone(&on_resize_end);
+        let on_commit: Rc<dyn Fn(crate::card_resize::Rect)> = Rc::new(move |rect| {
+            ghost_end();
+            {
+                let mut d = data_commit.borrow_mut();
+                d.x = rect.x as i32;
+                d.y = rect.y as i32;
+                d.width = rect.width;
+                d.height = rect.height;
+            }
+            root_commit.set_size_request(rect.width, rect.height);
+            root_commit.remove_css_class("resizing");
+            on_drag_end_resize(root_commit.clone().upcast(), &data_commit.borrow());
+        });
+        crate::card_resize::attach_resize_borders(
+            &container,
+            resize_limits,
+            get_start,
+            on_begin,
+            on_preview,
+            on_commit,
+        );
+
         Self { container, data }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_note_has_all_eight_resize_targets() {
+        crate::gtk_test::run_in_child_process("sticky_note::tests::note_resize_targets_child");
+    }
+
+    #[test]
+    fn note_resize_targets_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let note = StickyNote::new(
+            NoteData {
+                id: "test".into(),
+                text: "text".into(),
+                x: 100,
+                y: 100,
+                width: 260,
+                height: 200,
+                color: "omarchy".into(),
+                updated_at: 0.0,
+                tag: 0,
+            },
+            |_, _, _| {},
+            |_, _| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_, _, _, _| {},
+            || {},
+            1920,
+            1080,
+        );
+        assert_eq!(count_class(&note.container, "card-resize-zone"), 8);
+    }
+
+    fn count_class<W: IsA<gtk4::Widget>>(root: &W, class: &str) -> usize {
+        let widget = root.as_ref();
+        let mut count = usize::from(widget.has_css_class(class));
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            count += count_class(&current, class);
+            child = current.next_sibling();
+        }
+        count
     }
 }

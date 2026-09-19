@@ -25,15 +25,17 @@ use std::time::Duration;
 
 use crate::state::load_state;
 use crate::tmux::{
-    capture_pane_text, extract_last_prompt, get_agent_config, get_composer_draft,
-    get_opencode_user_text_by_id, inspect_status, resolve_own_opencode_id,
-    truncate_prompt_title, SessionStatus,
+    capture_pane_ansi, capture_pane_text, extract_last_prompt, get_agent_config,
+    get_composer_draft, get_opencode_user_text_by_id, inspect_status,
+    inspect_status_with_screen, resolve_own_opencode_id, resolve_workspace_dir,
+    strip_terminal_escapes, truncate_prompt_title, SessionStatus,
 };
 
 pub const BRIDGE_PORT: u16 = 8759;
 const SERVICE_NAME: &str = "Omarchy Harness Bridge";
 const PROTOCOL_VERSION: u32 = 1;
 const PAIR_WINDOW_SECS: f64 = 120.0;
+type LauncherSessionMeta = (String, String, Option<String>, u8, Option<String>);
 
 fn utc_now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -83,7 +85,12 @@ fn live_sessions() -> Vec<String> {
     sessions.into_iter().map(|(n, _)| n).collect()
 }
 
-fn last_user_text(session: &str, agent_type: &str, persisted: Option<&str>) -> Option<String> {
+fn last_user_text(
+    session: &str,
+    agent_type: &str,
+    persisted: Option<&str>,
+    screen: &str,
+) -> Option<String> {
     // Priority mirrors mini_terminal.rs refresh_status(): composer draft,
     // then exact opencode DB text, then pane-scrape heuristic. The DB id is
     // resolved to the session OWNED by this pane (own `--session` flag, else
@@ -98,10 +105,47 @@ fn last_user_text(session: &str, agent_type: &str, persisted: Option<&str>) -> O
             }
         }
     }
-    capture_pane_text(session)
-        .as_deref()
-        .and_then(extract_last_prompt)
+    extract_last_prompt(screen)
         .map(|s| truncate_prompt_title(&s))
+}
+
+fn is_regular_terminal(agent_type: &str) -> bool {
+    matches!(agent_type, "shell" | "bash" | "terminal")
+}
+
+/// Pick the directory the launcher should describe. Harness rows show the
+/// workspace they were launched in; regular terminals track the pane's live
+/// cwd so `cd` is reflected immediately.
+fn launcher_directory(
+    agent_type: &str,
+    harness_home: &str,
+    live_cwd: &str,
+) -> (String, &'static str) {
+    if is_regular_terminal(agent_type) && !live_cwd.trim().is_empty() {
+        (live_cwd.trim().to_string(), "cwd")
+    } else if is_regular_terminal(agent_type) {
+        (harness_home.to_string(), "cwd")
+    } else {
+        (harness_home.to_string(), "home")
+    }
+}
+
+/// Keep the directory as the final preview line because the current Android
+/// launcher renders the final three non-empty lines of this field.
+fn preview_with_directory(screen: &str, kind: &str, display_dir: &str) -> String {
+    let lines: Vec<&str> = screen
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    let start = lines.len().saturating_sub(11);
+    let mut preview = lines[start..].join("\n");
+    if !preview.is_empty() {
+        preview.push('\n');
+    }
+    preview.push_str(kind);
+    preview.push_str(" · ");
+    preview.push_str(display_dir);
+    preview
 }
 
 /// Hex colour of a super-desktop group tag (0 = untagged).
@@ -122,7 +166,7 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
     // agent type, fallback command, persisted agent session id and the user's
     // group colour (super-desktop's 8-swatch tag) for every session we know
     // about.
-    let meta: HashMap<String, (String, String, Option<String>, u8)> = state
+    let meta: HashMap<String, LauncherSessionMeta> = state
         .terminals
         .iter()
         .map(|t| {
@@ -133,24 +177,24 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
                     t.command.clone(),
                     t.agent_session_id.clone(),
                     t.tag,
+                    t.workspace_dir.clone(),
                 ),
             )
         })
         .collect();
     let mut out = vec![];
     for session in live_sessions() {
-        let (agent_type, cmd_fallback, persisted_sid, tag) = meta
+        let (agent_type, cmd_fallback, persisted_sid, tag, workspace_dir) = meta
             .get(&session)
             .cloned()
-            .unwrap_or_else(|| ("shell".to_string(), String::new(), None, 0));
+            .unwrap_or_else(|| ("shell".to_string(), String::new(), None, 0, None));
         let cfg = get_agent_config(&agent_type);
-        let status = inspect_status(&session, &agent_type);
         let screen = capture_pane_text(&session).unwrap_or_default();
-        let lines: Vec<&str> = screen
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-        let start = lines.len().saturating_sub(12);
+        let status = inspect_status_with_screen(&session, &agent_type, &screen);
+        let harness_home = resolve_workspace_dir(workspace_dir.as_deref());
+        let (directory, directory_kind) =
+            launcher_directory(&agent_type, &harness_home, &status.cwd);
+        let directory_display = crate::state::display_dir(&directory);
         let cmd = if status.cmd.is_empty() {
             if cmd_fallback.is_empty() {
                 agent_type.clone()
@@ -169,9 +213,19 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             "label": status.label,
             "pid": status.pid,
             "cmd": cmd,
-            "lastPrompt": last_user_text(&session, &agent_type, persisted_sid.as_deref()),
+            "lastPrompt": last_user_text(
+                &session,
+                &agent_type,
+                persisted_sid.as_deref(),
+                &screen,
+            ),
             "composerDraft": get_composer_draft(&session),
-            "preview": lines[start..].join("\n"),
+            "preview": preview_with_directory(&screen, directory_kind, &directory_display),
+            "directory": &directory,
+            "directoryDisplay": &directory_display,
+            "directoryKind": directory_kind,
+            "homeDirectory": (directory_kind == "home").then_some(directory.as_str()),
+            "cwd": (directory_kind == "cwd").then_some(directory.as_str()),
             // Group colour: the same 8-swatch tag the desktop card shows, so a
             // phone row can be coloured identically (`tagColor` is null when
             // the card has no tag).
@@ -341,7 +395,7 @@ pub fn lan_ip() -> String {
 }
 
 pub fn hostname() -> String {
-    // /proc read instead of forking `hostname`: the launcher panel is filled on
+    // /proc read instead of forking `hostname`: the launcher page is filled on
     // the window-build path, where every fork/exec costs tens of milliseconds.
     if let Ok(raw) = fs::read_to_string("/proc/sys/kernel/hostname") {
         let name = raw.trim();
@@ -515,6 +569,7 @@ fn stream_harness_list(mut stream: TcpStream) {
             "protocolVersion": PROTOCOL_VERSION,
             "timestamp": utc_now_iso(),
             "harnesses": collect_harnesses(),
+            "usage": crate::usage::launcher_usage(),
         });
         if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
             return;
@@ -538,7 +593,13 @@ fn stream_one_harness(mut stream: TcpStream, id: &str) {
             return;
         }
         let alive = crate::tmux::session_alive(id);
-        let status = if alive {
+        // One styled tmux capture drives both representations. This is cheaper
+        // than capturing once for status/plain text and again for colour.
+        let ansi_tail = alive.then(|| capture_pane_ansi(id)).flatten();
+        let plain_tail = ansi_tail.as_deref().map(strip_terminal_escapes);
+        let status = if let Some(screen) = plain_tail.as_deref() {
+            inspect_status_with_screen(id, &agent_type, screen)
+        } else if alive {
             inspect_status(id, &agent_type)
         } else {
             SessionStatus {
@@ -546,6 +607,7 @@ fn stream_one_harness(mut stream: TcpStream, id: &str) {
                 label: "○ EXITED",
                 pid: String::new(),
                 cmd: String::new(),
+                cwd: String::new(),
             }
         };
         let frame = serde_json::json!({
@@ -555,7 +617,11 @@ fn stream_one_harness(mut stream: TcpStream, id: &str) {
             "label": status.label,
             "tag": tag,
             "tagColor": tag_color(tag),
-            "tail": if alive { capture_pane_text(id) } else { None },
+            // `tail` remains plain for existing launchers. `tailAnsi` is the
+            // exact tmux styling for clients that render ANSI SGR attributes.
+            "tail": plain_tail,
+            "tailAnsi": ansi_tail,
+            "tailFormat": alive.then_some("ansi-sgr"),
             "updatedAt": utc_now_iso(),
         })
         .to_string();
@@ -724,6 +790,7 @@ fn handle_client(mut stream: TcpStream) {
                     "protocolVersion": PROTOCOL_VERSION,
                     "timestamp": utc_now_iso(),
                     "harnesses": collect_harnesses(),
+                    "usage": crate::usage::launcher_usage(),
                 }),
             );
         }
@@ -976,7 +1043,7 @@ fn mdns_advertised_port() -> Option<u16> {
     value.get("port")?.as_u64().map(|p| p as u16)
 }
 
-/// Line the launcher panel shows for discovery.
+/// Line the launcher page shows for discovery.
 pub fn mdns_summary(bridge_online: bool) -> String {
     if !bridge_online {
         return format!("{MDNS_SERVICE_TYPE} · bridge offline");
@@ -1002,6 +1069,7 @@ pub fn print_once() {
         "{}",
         serde_json::to_string_pretty(&serde_json::json!({
             "harnesses": collect_harnesses(),
+            "usage": crate::usage::launcher_usage(),
         }))
         .unwrap_or_default()
     );
@@ -1416,6 +1484,36 @@ mod tests {
         for n in 1..=crate::tag::TAG_COUNT {
             assert!(tag_color(n).is_some_and(|c| c.starts_with('#') && c.len() == 7));
         }
+    }
+
+    #[test]
+    fn test_launcher_directory_tracks_shell_cwd_and_harness_home() {
+        assert_eq!(
+            launcher_directory("shell", "/home/me", "/tmp/project"),
+            ("/tmp/project".to_string(), "cwd")
+        );
+        assert_eq!(
+            launcher_directory("codex", "/home/me/Github/app", "/tmp/other"),
+            ("/home/me/Github/app".to_string(), "home")
+        );
+        assert_eq!(
+            launcher_directory("terminal", "/home/me", ""),
+            ("/home/me".to_string(), "cwd")
+        );
+    }
+
+    #[test]
+    fn test_launcher_preview_keeps_directory_visible_in_its_tail() {
+        let screen = (0..20)
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let preview = preview_with_directory(&screen, "home", "~/Github/app");
+        let lines: Vec<_> = preview.lines().collect();
+        assert_eq!(lines.len(), 12);
+        assert_eq!(lines.first(), Some(&"line 9"));
+        assert_eq!(lines.last(), Some(&"home · ~/Github/app"));
+        assert!(lines.iter().rev().take(3).any(|line| line.starts_with("home · ")));
     }
 
     #[test]

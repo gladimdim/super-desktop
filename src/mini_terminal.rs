@@ -11,7 +11,8 @@ use crate::state::TerminalData;
 use crate::tmux::{
     capture_pane_text, ensure_session_with_agent_id, extract_composer_draft,
     extract_last_prompt, get_agent_config, get_opencode_user_text_by_id,
-    get_preview, inspect_status, resolve_own_opencode_id, tmux_bin, truncate_prompt_title,
+    inspect_status_with_screen, preview_from_screen, resolve_own_opencode_id,
+    tmux_bin, truncate_prompt_title,
 };
 
 pub const CARD_WIDTH: i32 = 380;
@@ -338,7 +339,7 @@ impl MiniTerminalCard {
         meta_label.set_halign(Align::Start);
         footer.append(&meta_label);
 
-        let hint_label = Label::new(Some("Double-click to expand • drag corner to resize"));
+        let hint_label = Label::new(Some("Double-click to expand • drag any edge to resize"));
         hint_label.add_css_class("term-hint");
         hint_label.set_hexpand(true);
         hint_label.set_halign(Align::End);
@@ -413,7 +414,7 @@ impl MiniTerminalCard {
         resize_handle.set_valign(Align::End);
         resize_handle.set_margin_end(4);
         resize_handle.set_margin_bottom(2);
-        resize_handle.set_tooltip_text(Some("Drag corner to resize"));
+        resize_handle.set_tooltip_text(Some("Drag any edge or corner to resize"));
         resize_handle.set_cursor_from_name(Some("se-resize"));
         root.add_overlay(&resize_handle);
 
@@ -503,7 +504,7 @@ impl MiniTerminalCard {
                     container.remove_css_class("term-expanded");
                     expand_btn.set_label("⛶");
                     expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
-                    hint_label.set_label("Double-click to expand • drag corner to resize");
+                    hint_label.set_label("Double-click to expand • drag any edge to resize");
                 }
                 remove_vte(&vte, &preview_box);
                 {
@@ -565,7 +566,7 @@ impl MiniTerminalCard {
                     container.remove_css_class("term-expanded");
                     expand_btn.set_label("⛶");
                     expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
-                    hint_label.set_label("Double-click to expand • drag corner to resize");
+                    hint_label.set_label("Double-click to expand • drag any edge to resize");
                 }
                 let (nw, nh) = {
                     let d = data.borrow();
@@ -713,167 +714,82 @@ impl MiniTerminalCard {
             true,
         );
 
-        // Corner resize gesture
-        let start_size = Rc::new(RefCell::new((initial_w, initial_h)));
-        let expanded_resize = Rc::clone(&card.expanded);
-        let start_size_begin = Rc::clone(&start_size);
-        let data_begin = Rc::clone(&card.data);
+        // Eight border/corner resize targets. The visible southeast glyph is
+        // still a hint, while transparent hit zones make every edge behave
+        // like a conventional desktop window. Compact and expanded cards do
+        // not resize: restore/collapse them first.
+        let resize_limits = crate::card_resize::Limits {
+            min_width: MIN_CARD_WIDTH,
+            min_height: MIN_CARD_HEIGHT,
+            max_width: ((screen_w as f64) * 0.70).round() as i32,
+            max_height: ((screen_h as f64) * 0.75).round() as i32,
+            left: 10.0,
+            top: 70.0,
+            right: (screen_w - 10) as f64,
+            bottom: (screen_h - 10) as f64,
+        };
+        let data_start = Rc::clone(&card.data);
+        let expanded_start = Rc::clone(&card.expanded);
+        let get_start: Rc<dyn Fn() -> Option<crate::card_resize::Rect>> = Rc::new(move || {
+            let d = data_start.borrow();
+            if *expanded_start.borrow() || d.iconified {
+                return None;
+            }
+            Some(crate::card_resize::Rect {
+                x: d.x as f64,
+                y: d.y as f64,
+                width: d.width,
+                height: d.height,
+            })
+        });
         let root_begin = card.container.clone();
-        let on_ghost_begin = Rc::clone(&on_resize_ghost);
         let on_raise_resize = Rc::clone(&on_raise_rc);
-        let root_weak_resize = card.container.downgrade();
-        let resize_drag = GestureDrag::new();
-        resize_drag.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        resize_drag.connect_drag_begin(move |_, _, _| {
-            if let Some(r) = root_weak_resize.upgrade() {
-                on_raise_resize(r.upcast());
-            }
-            if *expanded_resize.borrow() {
-                return;
-            }
-            let d = data_begin.borrow();
-            *start_size_begin.borrow_mut() = (d.width, d.height);
+        let on_ghost_begin = Rc::clone(&on_resize_ghost);
+        let data_begin = Rc::clone(&card.data);
+        let on_begin: Rc<dyn Fn()> = Rc::new(move || {
             root_begin.add_css_class("term-resizing");
-            let (gx, gy) = displayed_pos(&d);
-            on_ghost_begin(gx, gy, d.width, d.height, d.iconified);
+            on_raise_resize(root_begin.clone().upcast());
+            let d = data_begin.borrow();
+            on_ghost_begin(d.x as f64, d.y as f64, d.width, d.height, false);
         });
-
-        let expanded_update = Rc::clone(&card.expanded);
-        let start_size_update = Rc::clone(&start_size);
-        let root_update = card.container.clone();
-        let data_update = Rc::clone(&card.data);
-        let on_ghost_update = Rc::clone(&on_resize_ghost);
-        resize_drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-            if *expanded_update.borrow() {
-                return;
-            }
-            if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
-                gesture.set_state(gtk4::EventSequenceState::Claimed);
-                // Perf: add_css_class forces a restyle; only do it once per
-                // gesture instead of on every motion event.
-                if !root_update.has_css_class("term-resizing") {
-                    root_update.add_css_class("term-resizing");
-                }
-            }
-            let (sw0, sh0) = *start_size_update.borrow();
-            let raw_w = sw0 + offset_x as i32;
-            let raw_h = sh0 + offset_y as i32;
-            let should_iconify = raw_w < MIN_CARD_WIDTH || raw_h < MIN_CARD_HEIGHT;
-            let (final_w, final_h) = if should_iconify {
-                (ICON_SIZE, ICON_SIZE)
-            } else {
-                clamp_card_size(raw_w, raw_h, screen_w, screen_h)
-            };
-
-            let (cx, cy) = (data_update.borrow().x as f64, data_update.borrow().y as f64);
-            on_ghost_update(cx, cy, final_w, final_h, should_iconify);
+        let on_ghost_preview = Rc::clone(&on_resize_ghost);
+        let on_preview: Rc<dyn Fn(crate::card_resize::Rect)> = Rc::new(move |rect| {
+            on_ghost_preview(rect.x, rect.y, rect.width, rect.height, false);
         });
-
-        let expanded_end = Rc::clone(&card.expanded);
-        let start_size_end = Rc::clone(&start_size);
-        let data_end = Rc::clone(&card.data);
+        let root_commit = card.container.clone();
+        let data_commit = Rc::clone(&card.data);
+        let visual_commit = Rc::clone(&card.visual_pos);
+        let restore_btn_commit = card.restore_btn.clone();
         let on_drag_end_resize = Rc::clone(&on_drag_end);
         let on_ghost_end = Rc::clone(&on_resize_end);
-        let root_end = card.container.clone();
-        let header_e = card.header.clone();
-        let footer_e = card.footer.clone();
-        let preview_e = card.preview_label.clone();
-        let icon_box_e = card.icon_box.clone();
-        let compact_top_bar_e = card.compact_top_bar.clone();
-        let handle_e = card.resize_handle.clone();
-        let restore_btn_e = card.restore_btn.clone();
-        let compact_restore_btn_e = card.compact_restore_btn.clone();
-        let vte_end = Rc::clone(&card.vte);
-        let preview_box_end = card.preview_box.clone();
-        let on_toggle_resize_end = Rc::clone(&on_toggle);
-        resize_drag.connect_drag_end(move |_, offset_x, offset_y| {
-            root_end.remove_css_class("term-resizing");
-            handle_e.set_tooltip_text(Some("Drag corner to resize"));
+        let on_commit: Rc<dyn Fn(crate::card_resize::Rect)> = Rc::new(move |rect| {
             on_ghost_end();
-            if *expanded_end.borrow() {
-                return;
-            }
-            if offset_x.abs() < 3.0 && offset_y.abs() < 3.0 {
-                return;
-            }
-            let (sw0, sh0) = *start_size_end.borrow();
-            let raw_w = sw0 + offset_x as i32;
-            let raw_h = sh0 + offset_y as i32;
-            let should_iconify = raw_w < MIN_CARD_WIDTH || raw_h < MIN_CARD_HEIGHT;
-            let (final_w, final_h) = if should_iconify {
-                (ICON_SIZE, ICON_SIZE)
-            } else {
-                clamp_card_size(raw_w, raw_h, screen_w, screen_h)
-            };
-
+            root_commit.remove_css_class("term-resizing");
             {
-                let mut d = data_end.borrow_mut();
-                // Corner-resize can cross the icon threshold in either
-                // direction; keep the two remembered spots straight.
-                if should_iconify && !d.iconified {
-                    seed_icon_pos(&mut d);
-                } else if !should_iconify && d.iconified {
-                    // The icon just grew back into a card: the card now sits
-                    // where the icon was (the icon spot stays saved).
-                    d.x = d.icon_x.unwrap_or(d.x);
-                    d.y = d.icon_y.unwrap_or(d.y);
-                }
-                d.width = final_w;
-                d.height = final_h;
-                d.iconified = should_iconify;
-                if !should_iconify {
-                    d.restored_width = final_w;
-                    d.restored_height = final_h;
-                    restore_btn_e.set_tooltip_text(Some(&format!(
-                        "Restore size ({}×{})",
-                        final_w, final_h
-                    )));
-                } else {
-                    compact_restore_btn_e.set_tooltip_text(Some(&format!(
-                        "Expand to larger size ({}×{})",
-                        d.restored_width, d.restored_height
-                    )));
-                }
+                let mut d = data_commit.borrow_mut();
+                d.x = rect.x as i32;
+                d.y = rect.y as i32;
+                d.width = rect.width;
+                d.height = rect.height;
+                d.restored_width = rect.width;
+                d.restored_height = rect.height;
             }
-            root_end.set_size_request(final_w, final_h);
-
-            if should_iconify {
-                remove_vte(&vte_end, &preview_box_end);
-            } else if vte_end.borrow().is_none() {
-                spawn_vte(
-                    &vte_end,
-                    &preview_box_end,
-                    &data_end,
-                    false,
-                    &on_toggle_resize_end,
-                    &expanded_end,
-                );
-            } else if let Some(term) = vte_end.borrow().as_ref() {
-                let theme = crate::theme::current_theme();
-                let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
-                term.set_font(Some(&font));
-            }
-
-            let vte_attached = !should_iconify && vte_end.borrow().is_some();
-            apply_layout(
-                false,
-                final_w,
-                final_h,
-                should_iconify,
-                screen_w,
-                &root_end,
-                &header_e,
-                &footer_e,
-                &preview_e,
-                &icon_box_e,
-                &compact_top_bar_e,
-                &handle_e,
-                vte_attached,
-            );
-
-            on_drag_end_resize(root_end.clone().upcast(), &data_end.borrow());
+            *visual_commit.borrow_mut() = (rect.x, rect.y);
+            root_commit.set_size_request(rect.width, rect.height);
+            restore_btn_commit.set_tooltip_text(Some(&format!(
+                "Restore size ({}×{})",
+                rect.width, rect.height
+            )));
+            on_drag_end_resize(root_commit.clone().upcast(), &data_commit.borrow());
         });
-        card.resize_handle.add_controller(resize_drag);
+        crate::card_resize::attach_resize_borders(
+            &card.container,
+            resize_limits,
+            get_start,
+            on_begin,
+            on_preview,
+            on_commit,
+        );
 
         if !card.data.borrow().iconified && card.data.borrow().width >= MIN_CARD_WIDTH {
             card.attach_vte();
@@ -955,7 +871,7 @@ impl MiniTerminalCard {
         self.expand_btn
             .set_tooltip_text(Some("Expand to 80% overlay"));
         self.hint_label
-            .set_label("Double-click to expand • drag corner to resize");
+            .set_label("Double-click to expand • drag any edge to resize");
         self.apply_chrome();
         self.refresh_status();
     }
@@ -1073,8 +989,6 @@ impl MiniTerminalCard {
                 return;
             }
             let handle = gtk4::gio::spawn_blocking(move || {
-                let status = inspect_status(&sess_name, &agent_type);
-                let preview = preview_lines.map(|lines| get_preview(&sess_name, lines));
                 // Single screen capture feeds both detectors. Priority for the
                 // title is strictly USER-entered text:
                 //   1. composer draft (typed, not yet submitted),
@@ -1082,6 +996,16 @@ impl MiniTerminalCard {
                 //   3. shell-history prompt (`~ ❯ cmd` on plain shells),
                 //   4. default `icon + agent name` (never agent output).
                 let screen = capture_pane_text(&sess_name);
+                let status = inspect_status_with_screen(
+                    &sess_name,
+                    &agent_type,
+                    screen.as_deref().unwrap_or(""),
+                );
+                let preview = preview_lines.map(|lines| match screen.as_deref() {
+                    Some(screen) => preview_from_screen(screen, lines),
+                    None if status.status == "EXITED" => "Session offline or ended.".into(),
+                    None => "Ready. Waiting for input...".into(),
+                });
                 let history = screen
                     .as_deref()
                     .and_then(extract_last_prompt)
@@ -1349,6 +1273,7 @@ fn apply_layout(
     icon_box.set_visible(compact);
     compact_top_bar.set_visible(compact && !expanded);
     resize_handle.set_visible(!expanded);
+    crate::card_resize::set_resize_borders_visible(root, !expanded && !compact);
 
     if compact {
         root.add_css_class("term-compact");
@@ -1604,4 +1529,3 @@ mod tests {
         assert_eq!(format_card_title("⚡ Claude Code", Some("   ")), "⚡ Claude Code");
     }
 }
-

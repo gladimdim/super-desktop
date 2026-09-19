@@ -601,33 +601,18 @@ pub fn session_alive(session_name: &str) -> bool {
     session_exists(session_name)
 }
 
-pub fn get_preview(session_name: &str, lines: usize) -> String {
-    if let Ok(output) = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", session_name, "-S", &format!("-{}", lines * 3)])
-        .output()
-    {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let mut raw_lines: Vec<&str> = text.lines().collect();
-            while let Some(last) = raw_lines.last() {
-                if last.trim().is_empty() {
-                    raw_lines.pop();
-                } else {
-                    break;
-                }
-            }
-            if raw_lines.is_empty() {
-                return "Ready. Waiting for input...".to_string();
-            }
-            let start = if raw_lines.len() > lines {
-                raw_lines.len() - lines
-            } else {
-                0
-            };
-            return raw_lines[start..].join("\n");
-        }
+pub fn preview_from_screen(screen: &str, lines: usize) -> String {
+    let mut tail: Vec<&str> = screen
+        .lines()
+        .rev()
+        .skip_while(|line| line.trim().is_empty())
+        .take(lines)
+        .collect();
+    if tail.is_empty() {
+        return "Ready. Waiting for input...".to_string();
     }
-    "Session offline or ended.".to_string()
+    tail.reverse();
+    tail.join("\n")
 }
 
 fn get_proc_comm(pid: u32) -> String {
@@ -717,26 +702,50 @@ pub struct SessionStatus {
     pub label: &'static str,
     pub pid: String,
     pub cmd: String,
+    /// Live working directory reported by tmux for the active pane.
+    pub cwd: String,
 }
 
 pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
+    inspect_status_impl(session_name, agent_type, None)
+}
+
+/// Reuse the capture already needed by the card's title and preview.
+pub fn inspect_status_with_screen(
+    session_name: &str,
+    agent_type: &str,
+    screen: &str,
+) -> SessionStatus {
+    inspect_status_impl(session_name, agent_type, Some(screen))
+}
+
+fn inspect_status_impl(
+    session_name: &str,
+    agent_type: &str,
+    screen: Option<&str>,
+) -> SessionStatus {
     if let Ok(output) = Command::new("tmux")
         .args([
             "list-panes",
             "-t",
             session_name,
             "-F",
-            "#{pane_pid}::#{pane_current_command}::#{pane_dead}",
+            "#{pane_pid}::#{pane_current_command}::#{pane_dead}::#{pane_height}::#{pane_current_path}",
         ])
         .output()
     {
         if output.status.success() {
             let text = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = text.lines().next() {
-                let parts: Vec<&str> = first_line.split("::").collect();
-                let pid = parts.get(0).unwrap_or(&"").trim().to_string();
-                let cmd = parts.get(1).unwrap_or(&"").trim().to_string();
-                let dead = parts.get(2).unwrap_or(&"0").trim();
+                let mut parts = first_line.splitn(5, "::");
+                let pid = parts.next().unwrap_or("").trim().to_string();
+                let cmd = parts.next().unwrap_or("").trim().to_string();
+                let dead = parts.next().unwrap_or("0").trim();
+                let height = parts
+                    .next()
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(24);
+                let cwd = parts.next().unwrap_or("").trim().to_string();
 
                 if dead == "1" || pid.is_empty() {
                     return SessionStatus {
@@ -744,6 +753,7 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
                         label: "○ EXITED",
                         pid,
                         cmd,
+                        cwd,
                     };
                 }
 
@@ -754,10 +764,12 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
                         label: "○ EXITED",
                         pid,
                         cmd,
+                        cwd,
                     };
                 }
 
-                let is_shell_agent = agent_type == "shell" || agent_type == "bash" || agent_type == "terminal";
+                let is_shell_agent =
+                    agent_type == "shell" || agent_type == "bash" || agent_type == "terminal";
                 let effective_pid = resolve_effective_pid(p_num, is_shell_agent);
                 let display_pid = if effective_pid != 0 {
                     effective_pid.to_string()
@@ -779,6 +791,7 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
                         label: "● WORKING",
                         pid: display_pid,
                         cmd: display_cmd,
+                        cwd,
                     };
                 }
 
@@ -790,88 +803,89 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
                         label: "● WORKING",
                         pid: display_pid,
                         cmd: display_cmd,
+                        cwd,
                     };
                 }
 
                 // Check 3: Screen capture of bottom lines for spinners, cancel hints, or status words
-                if let Ok(cap_out) = Command::new("tmux")
-                    .args(["capture-pane", "-p", "-t", session_name, "-S", "-15"])
-                    .output()
-                {
-                    if cap_out.status.success() {
-                        let cap_text = String::from_utf8_lossy(&cap_out.stdout);
-                        let non_empty_lines: Vec<&str> = cap_text
-                            .lines()
-                            .map(|l| l.trim())
-                            .filter(|l| !l.is_empty())
-                            .collect();
+                let captured = screen.map(std::borrow::Cow::Borrowed).or_else(|| {
+                    let output = Command::new("tmux")
+                        .args(["capture-pane", "-p", "-t", session_name, "-S", "-15"])
+                        .output()
+                        .ok()?;
+                    output.status.success().then(|| {
+                        std::borrow::Cow::Owned(
+                            String::from_utf8_lossy(&output.stdout).into_owned(),
+                        )
+                    })
+                });
+                if let Some(cap_text) = captured {
+                    for line in recent_status_lines(&cap_text, height) {
+                        // Check for Braille spinner characters (U+2801 to U+28FF)
+                        let has_braille =
+                            line.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c));
+                        if has_braille {
+                            return SessionStatus {
+                                status: "WORKING",
+                                label: "● WORKING",
+                                pid: display_pid,
+                                cmd: display_cmd,
+                                cwd,
+                            };
+                        }
 
-                        let tail_len = non_empty_lines.len().min(8);
-                        let recent_lines = &non_empty_lines[non_empty_lines.len() - tail_len..];
+                        let line_lower = line.to_lowercase();
 
-                        for line in recent_lines {
-                            // Check for Braille spinner characters (U+2801 to U+28FF)
-                            let has_braille = line.chars().any(|c| c >= '\u{2801}' && c <= '\u{28FF}');
-                            if has_braille {
-                                return SessionStatus {
-                                    status: "WORKING",
-                                    label: "● WORKING",
-                                    pid: display_pid,
-                                    cmd: display_cmd,
-                                };
-                            }
+                        // Check for interrupt hints
+                        if line_lower.contains("esc to cancel")
+                            || line_lower.contains("esc to interrupt")
+                            || line_lower.contains("ctrl+c to cancel")
+                            || line_lower.contains("ctrl+c to interrupt")
+                            || line_lower.contains("press esc to stop")
+                            || line_lower.contains("press ctrl-c to stop")
+                            || line_lower.contains("to interrupt")
+                            || line_lower.contains("to cancel")
+                        {
+                            return SessionStatus {
+                                status: "WORKING",
+                                label: "● WORKING",
+                                pid: display_pid,
+                                cmd: display_cmd,
+                                cwd,
+                            };
+                        }
 
-                            let line_lower = line.to_lowercase();
-
-                            // Check for interrupt hints
-                            if line_lower.contains("esc to cancel")
-                                || line_lower.contains("esc to interrupt")
-                                || line_lower.contains("ctrl+c to cancel")
-                                || line_lower.contains("ctrl+c to interrupt")
-                                || line_lower.contains("press esc to stop")
-                                || line_lower.contains("press ctrl-c to stop")
-                                || line_lower.contains("to interrupt")
-                                || line_lower.contains("to cancel")
-                            {
-                                return SessionStatus {
-                                    status: "WORKING",
-                                    label: "● WORKING",
-                                    pid: display_pid,
-                                    cmd: display_cmd,
-                                };
-                            }
-
-                            // Check for active progress words
-                            if line_lower.contains("thinking...")
-                                || line_lower.contains("thinking…")
-                                || line_lower.contains("generating...")
-                                || line_lower.contains("generating…")
-                                || line_lower.contains("streaming...")
-                                || line_lower.contains("streaming…")
-                                || line_lower.contains("working...")
-                                || line_lower.contains("working…")
-                                || line_lower.contains("building...")
-                                || line_lower.contains("building…")
-                                || line_lower.contains("compiling...")
-                                || line_lower.contains("compiling…")
-                                || line_lower.contains("editing files...")
-                                || line_lower.contains("editing files…")
-                                || line_lower.contains("editing...")
-                                || line_lower.contains("editing…")
-                                || line_lower.contains("running...")
-                                || line_lower.contains("running…")
-                                || line_lower.contains("calling tool")
-                                || line_lower.contains("running tool")
-                                || line_lower.contains("analyzing...")
-                                || line_lower.contains("analyzing…")
-                            {
-                                return SessionStatus {
-                                    status: "WORKING",
-                                    label: "● WORKING",
-                                    pid: display_pid,
-                                    cmd: display_cmd,
-                                };
-                            }
+                        // Check for active progress words
+                        if line_lower.contains("thinking...")
+                            || line_lower.contains("thinking…")
+                            || line_lower.contains("generating...")
+                            || line_lower.contains("generating…")
+                            || line_lower.contains("streaming...")
+                            || line_lower.contains("streaming…")
+                            || line_lower.contains("working...")
+                            || line_lower.contains("working…")
+                            || line_lower.contains("building...")
+                            || line_lower.contains("building…")
+                            || line_lower.contains("compiling...")
+                            || line_lower.contains("compiling…")
+                            || line_lower.contains("editing files...")
+                            || line_lower.contains("editing files…")
+                            || line_lower.contains("editing...")
+                            || line_lower.contains("editing…")
+                            || line_lower.contains("running...")
+                            || line_lower.contains("running…")
+                            || line_lower.contains("calling tool")
+                            || line_lower.contains("running tool")
+                            || line_lower.contains("analyzing...")
+                            || line_lower.contains("analyzing…")
+                        {
+                            return SessionStatus {
+                                status: "WORKING",
+                                label: "● WORKING",
+                                pid: display_pid,
+                                cmd: display_cmd,
+                                cwd,
+                            };
                         }
                     }
                 }
@@ -881,6 +895,7 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
                     label: "● IDLE",
                     pid: display_pid,
                     cmd: display_cmd,
+                    cwd,
                 };
             }
         }
@@ -891,7 +906,21 @@ pub fn inspect_status(session_name: &str, agent_type: &str) -> SessionStatus {
         label: "○ EXITED",
         pid: "-".to_string(),
         cmd: agent_type.to_string(),
+        cwd: String::new(),
     }
+}
+
+/// Match capture-pane -S -15: visible rows plus 15 rows of history. Limiting
+/// before skipping blank rows prevents old scrollback spinners marking an
+/// idle card busy when we reuse the deeper title capture.
+fn recent_status_lines(screen: &str, height: usize) -> impl Iterator<Item = &str> {
+    screen
+        .lines()
+        .rev()
+        .take(height.saturating_add(15))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(8)
 }
 
 pub fn tmux_bin() -> String {
@@ -907,8 +936,24 @@ pub const PROMPT_TITLE_MAX_CHARS: usize = 120;
 /// Capture the visible text of a tmux pane (TUI apps like opencode run
 /// fullscreen, so this is the current screen, not scrollback history).
 pub fn capture_pane_text(session_name: &str) -> Option<String> {
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", session_name, "-S", "-300"])
+    capture_pane(session_name, false)
+}
+
+/// Capture tmux's real terminal styling as ANSI SGR sequences. The bridge
+/// sends this beside its plain-text fallback so capable clients can reproduce
+/// the agent's colours without changing the desktop card path.
+pub fn capture_pane_ansi(session_name: &str) -> Option<String> {
+    capture_pane(session_name, true)
+}
+
+fn capture_pane(session_name: &str, ansi: bool) -> Option<String> {
+    let mut command = Command::new("tmux");
+    command.arg("capture-pane");
+    if ansi {
+        command.arg("-e");
+    }
+    let output = command
+        .args(["-p", "-t", session_name, "-S", "-300"])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -919,6 +964,60 @@ pub fn capture_pane_text(session_name: &str) -> Option<String> {
         return None;
     }
     Some(text)
+}
+
+/// Remove terminal control sequences while preserving the visible text.
+/// Handles CSI/OSC/DCS strings as well as two-byte ESC commands; tmux `-e`
+/// currently emits SGR CSI sequences, while the wider handling keeps the
+/// plain fallback safe if tmux expands what it preserves later.
+pub fn strip_terminal_escapes(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x1b if i + 1 < bytes.len() => {
+                i += 1;
+                match bytes[i] {
+                    b'[' => {
+                        i += 1;
+                        while i < bytes.len() {
+                            let byte = bytes[i];
+                            i += 1;
+                            if (0x40..=0x7e).contains(&byte) {
+                                break;
+                            }
+                        }
+                    }
+                    b']' | b'P' | b'^' | b'_' => {
+                        i += 1;
+                        while i < bytes.len() {
+                            if bytes[i] == 0x07 {
+                                i += 1;
+                                break;
+                            }
+                            if bytes[i] == 0x1b
+                                && i + 1 < bytes.len()
+                                && bytes[i + 1] == b'\\'
+                            {
+                                i += 2;
+                                break;
+                            }
+                            i += 1;
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            0x1b => i += 1,
+            byte if byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t') => i += 1,
+            byte => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// Capture the last user prompt from a tmux session and return a short
@@ -1591,6 +1690,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_capture_keeps_status_within_the_original_history_window() {
+        let screen = format!("old thinking...\n{}ready\n", "\n".repeat(40));
+        assert_eq!(recent_status_lines(&screen, 24).collect::<Vec<_>>(), ["ready"]);
+        let screen = (0..40).map(|n| format!("line {n}\n")).collect::<String>();
+        assert_eq!(recent_status_lines(&screen, 24).collect::<Vec<_>>(),
+            ["line 39", "line 38", "line 37", "line 36", "line 35", "line 34", "line 33", "line 32"]);
+    }
+
+    #[test]
+    fn shared_capture_preview_keeps_internal_blank_lines_and_unicode() {
+        assert_eq!(preview_from_screen("old\nfirst\n\n🦀 last\n \n\n", 3), "first\n\n🦀 last");
+        assert_eq!(preview_from_screen("\n \n", 8), "Ready. Waiting for input...");
+        assert_eq!(preview_from_screen("one\ntwo", 1), "two");
+    }
+
+    #[test]
+    fn terminal_escape_stripping_preserves_only_visible_text() {
+        let styled = concat!(
+            "\x1b[1mBold\x1b[0m ",
+            "\x1b[38;2;137;180;250mblue\x1b[39m\n",
+            "\x1b]0;hidden title\x07next\tline\x1bPignored\x1b\\!"
+        );
+        assert_eq!(strip_terminal_escapes(styled), "Bold blue\nnext\tline!");
+    }
+
+    #[test]
     fn test_nonexistent_session_exited() {
         let status = inspect_status("nonexistent_session_xyz_999", "agy");
         assert_eq!(status.status, "EXITED");
@@ -1620,6 +1745,13 @@ mod tests {
             status_idle = inspect_status(sess, "bash");
         }
         assert_eq!(status_idle.status, "IDLE", "Shell at prompt should be IDLE");
+        assert!(
+            std::path::Path::new(&status_idle.cwd).is_dir(),
+            "tmux must expose its live pane cwd, got {:?}",
+            status_idle.cwd
+        );
+        let screen = capture_pane_text(sess).unwrap_or_default();
+        assert_eq!(inspect_status_with_screen(sess, "bash", &screen).status, status_idle.status);
 
         // Send a sleep command
         let _ = Command::new("tmux").args(["send-keys", "-t", sess, "sleep 1.5", "Enter"]).output();
@@ -1627,6 +1759,8 @@ mod tests {
 
         let status_busy = inspect_status(sess, "bash");
         assert_eq!(status_busy.status, "WORKING", "Shell executing sleep should be WORKING");
+        let screen = capture_pane_text(sess).unwrap_or_default();
+        assert_eq!(inspect_status_with_screen(sess, "bash", &screen).status, status_busy.status);
 
         // Wait for sleep to complete
         let mut status_done = inspect_status(sess, "bash");
@@ -2547,4 +2681,3 @@ mod tests {
         assert!(fallback.contains("--continue") && fallback.contains("--fork"));
     }
 }
-

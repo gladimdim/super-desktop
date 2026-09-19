@@ -80,6 +80,16 @@ window.sd-hot-corner {{
     border-color: {accent};
 }}
 
+/* The ⚙ settings toggle: the gear alone, oversized, in a round hit target —
+   it is the only way into the settings card (shortcut, top bar, launcher),
+   so it reads as an icon rather than one more pill among the labels. */
+.hud-gear {{
+    padding: 0;
+    min-width: 36px;
+    min-height: 36px;
+    font-size: 22px;
+}}
+
 .hud-button-danger {{
     background-color: {danger_bg};
     color: {bright_red};
@@ -568,6 +578,11 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
 }}
 
+.term-resize-ghost.ghost-note .term-ghost-label {{
+    color: {bright_yellow};
+    border-color: {bright_yellow};
+}}
+
 .mini-terminal.term-compact {{
     border-radius: 18px;
     background-color: {compact_bg};
@@ -634,6 +649,14 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 
 .term-resize-handle:hover {{
     color: {accent};
+}}
+
+/* Invisible Windows-style resize targets on all four edges and corners.
+   Their size is set in Rust; keeping the CSS inert avoids paint work. */
+.card-resize-zone {{
+    background: transparent;
+    border: none;
+    padding: 0;
 }}
 
 .term-vte {{
@@ -747,14 +770,11 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     opacity: 0.8;
 }}
 
-/* ================= Launcher Connection Panel ================= */
-/* Same card chrome as terminals/notes (`mini-terminal` + `term-header`), but
-   the body is a stack of numbered section cards so each concern — bridge,
-   firewall, addresses, pairing, phone steps — reads as its own little panel. */
-.launcher-panel {{
-    border: 1px solid {hud_border};
-}}
-
+/* ================= Launcher Connection Page ================= */
+/* The ⚙ settings card's second page (`harness_settings` owns the card chrome:
+   `mini-terminal` + `harness-panel` + `term-header`). The body is a stack of
+   numbered section cards, so each concern — bridge, firewall, addresses,
+   pairing, phone steps — reads as its own little panel. */
 .launcher-head-badge {{
     background-color: {badge_bg};
     border-radius: 9px;
@@ -962,9 +982,11 @@ separator.launcher-sep {{
     font-weight: 600;
 }}
 
-/* ================= Harness Settings Panel ================= */
-/* Second overlay card, same chrome as the launcher panel; rows read
-   `[logo] name …… resolved command [ON/OFF]`. */
+/* ================= Harness Settings Card ================= */
+/* The only overlay card: it holds the settings page (rows read
+   `[logo] name …… resolved command [ON/OFF]`) and, on navigation, the 📱
+   launcher page. `.harness-pages` / `.harness-page` are markers for which
+   child of the card is showing; they need no rules of their own. */
 .harness-panel {{
     border: 1px solid {hud_border};
 }}
@@ -1179,7 +1201,7 @@ mod tests {
             return;
         }
         // A single bad property silently drops its rule at runtime, which is
-        // how the launcher panel would quietly lose its chrome. Parse the
+        // how the launcher page would quietly lose its chrome. Parse the
         // generated stylesheet and fail on any CSS parser complaint.
         let _ = gtk4::init();
         let css = generate_css(&current_theme());
@@ -1208,7 +1230,7 @@ mod tests {
             let caught = Rc::clone(&caught);
             bogus.connect_parsing_error(move |_, _, _| *caught.borrow_mut() += 1);
         }
-        bogus.load_from_string(".launcher-panel { border-radius: not-a-length; }");
+        bogus.load_from_string(".harness-panel { border-radius: not-a-length; }");
         assert!(
             *caught.borrow() > 0,
             "CSS parsing-error hook is not wired up"
@@ -1216,10 +1238,13 @@ mod tests {
     }
 
     #[test]
-    fn test_launcher_panel_styles_exist() {
+    fn test_launcher_page_styles_exist() {
+        // The launcher page of the ⚙ card (`launcher_settings`): a typo here
+        // turns a section into unstyled text, and the card chrome comes from
+        // `.harness-panel`.
         let css = generate_css(&current_theme());
         for class in [
-            "launcher-panel",
+            "launcher-scroll",
             "launcher-section",
             "launcher-section-num",
             "launcher-section-title",
@@ -1243,7 +1268,7 @@ mod tests {
 
     #[test]
     fn test_harness_settings_panel_styles_exist() {
-        // The ⚙ panel is built from the shared `.launcher-section` chrome plus
+        // The ⚙ card is built from the shared `.launcher-section` chrome plus
         // these; a typo in either turns a row into unstyled text.
         let css = generate_css(&current_theme());
         for class in [
@@ -1328,5 +1353,16 @@ mod tests {
                 "missing CSS rule for .{class}"
             );
         }
+    }
+
+    #[test]
+    fn test_hud_gear_style_exists() {
+        // The ⚙ settings toggle is icon-only: without this rule it renders as
+        // one more small labelled pill instead of a large gear.
+        let css = generate_css(&current_theme());
+        assert!(
+            css.contains(".hud-gear"),
+            "missing CSS rule for .hud-gear"
+        );
     }
 }

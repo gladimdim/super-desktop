@@ -101,6 +101,49 @@ fn usage_file(id: &str) -> PathBuf {
         .join(format!("{id}.json"))
 }
 
+/// Public, allowlisted usage snapshots for the launcher header. Reads the
+/// collector cache only; credentials and arbitrary collector fields stay local.
+pub fn launcher_usage() -> Vec<Value> {
+    ["codex", "claude", "antigravity", "grok", "fireworks"]
+        .iter()
+        .filter_map(|id| {
+            let raw = fs::read_to_string(usage_file(id)).ok()?;
+            let value: Value = serde_json::from_str(&raw).ok()?;
+            launcher_usage_snapshot(id, &value)
+        })
+        .collect()
+}
+
+fn launcher_usage_snapshot(id: &str, value: &Value) -> Option<Value> {
+    if !value.is_object() {
+        return None;
+    }
+    let limits: Vec<Value> = value.get("limits").and_then(Value::as_array)
+        .into_iter().flatten().take(4).map(|limit| {
+            serde_json::json!({
+                "label": limit.get("label").or_else(|| limit.get("title"))
+                    .and_then(Value::as_str).unwrap_or("Limit"),
+                "percentUsed": limit.get("percent").and_then(Value::as_f64)
+                    .filter(|v| v.is_finite()).map(|v| v.clamp(0.0, 1.0)),
+                "resetsAt": limit.get("resetsAt").and_then(Value::as_str),
+                "used": opt_u64(limit, "used"),
+                "allowance": opt_u64(limit, "allowance"),
+            })
+        }).collect();
+    Some(serde_json::json!({
+        "id": id,
+        "name": value.get("name").and_then(Value::as_str).unwrap_or(id),
+        "ready": value.get("ready").and_then(Value::as_bool).unwrap_or(false),
+        "updatedAt": value.get("updatedAt").and_then(Value::as_str),
+        "limits": limits,
+        "todayTokens": opt_u64(value, "todayTotalTokens"),
+        "todaySessions": opt_u64(value, "todaySessions"),
+        "todayPrompts": opt_u64(value, "todayPrompts"),
+        "totalSessions": opt_u64(value, "totalSessions"),
+        "totalPrompts": opt_u64(value, "totalPrompts"),
+    }))
+}
+
 fn get_str(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or("").to_string()
 }
@@ -484,6 +527,20 @@ fn footer_box(launch: &str, src: &str) -> gtk4::Box {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launcher_snapshot_preserves_unknown_counts_and_excludes_private_fields() {
+        let snapshot = super::launcher_usage_snapshot("codex", &serde_json::json!({
+            "ready": true, "token": "private", "todaySessions": 0,
+            "limits": [{"label": "Weekly", "percent": 0.15}, {"label": "Unknown"}]
+        })).unwrap();
+        assert!(snapshot.get("token").is_none());
+        assert!(snapshot["todayTokens"].is_null());
+        assert_eq!(snapshot["todaySessions"], 0);
+        assert_eq!(snapshot["limits"][0]["percentUsed"], 0.15);
+        assert!(snapshot["limits"][1]["percentUsed"].is_null());
+        assert!(super::launcher_usage_snapshot("codex", &serde_json::Value::Null).is_none());
+    }
+
     use super::*;
 
     #[test]

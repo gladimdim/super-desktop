@@ -13,14 +13,14 @@
 
 SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy workspace:
 
-- **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize, and group color tags.
-- **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize freely with ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged.
+- **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize from any edge or corner, and group color tags.
+- **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize from any edge or corner with a ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
 - **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
 - **⌨ Your own shortcut** — `SUPER + SHIFT + Q` out of the box. Open ⚙ Settings, click **Record**, press any combination you like — `SUPER`/`CTRL`/`ALT` plus a key, or an `F1`–`F12` key on its own: it is captured, remembered in `state.json` and written into Hyprland's config (plus its `code:` form, so a layout switch does not break it).
 - **🎨 Native Omarchy theming** — colors, fonts, and terminal palette are read from the active Omarchy theme and update instantly when you switch themes (no restart).
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
-- **🔌 Phone bridge (optional)** — exposes your harness sessions over LAN/Tailscale (port 8759, mDNS `_omarchy-harness._tcp`) for the OmarchyAILauncher Android app.
+- **🔌 Phone bridge (optional)** — exposes your harness sessions over LAN/Tailscale (port 8759, mDNS `_omarchy-harness._tcp`) for the OmarchyAILauncher Android app. Its control page — bridge start/stop, firewall unlock, LAN/Tailscale addresses, pairing PIN — lives in the ⚙ gear card: open the gear, then *Launcher connection* (← goes back to the settings).
 
 ### Supported AI harnesses
 
@@ -162,7 +162,7 @@ super-desktop status
 │   ├── theme.rs / styles.rs # Omarchy theme parsing + GTK4 CSS generation
 │   ├── sticky_note.rs       # Sticky note widget
 │   ├── tag.rs / brand.rs    # group color tags, agent brand assets
-│   ├── harness_settings.rs / launcher_settings.rs  # ⚙ settings (shortcut + top bar) / 📱 launcher panel
+│   ├── harness_settings.rs / launcher_settings.rs  # ⚙ settings card (shortcut + top bar + 📱 launcher connection page)
 │   ├── usage.rs / ws.rs     # usage stats, misc helpers
 │   └── crashlog.rs          # panic hook (release builds abort; crashes leave a trace)
 ├── assets/                  # vendored toolbar logos → ~/.config/super-desktop/assets/

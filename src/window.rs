@@ -146,8 +146,8 @@ pub struct SuperDesktopWindow {
     /// Rebuilds the ⚙ settings panel (detection + brand logos for the new
     /// light/dark mode) after a theme switch.
     settings_refresh: Rc<dyn Fn()>,
-    /// Floating panels (📱 launcher, ⚙ settings) inside `root_overlay`; hidden
-    /// with the window so they cannot reappear on the next show.
+    /// Floating panels (the ⚙ settings card) inside `root_overlay`; hidden with
+    /// the window so they cannot reappear on the next show.
     overlay_panels: Vec<gtk4::Widget>,
     /// The workspace field's ▾ list. A popover is its own Wayland surface, so
     /// hiding the window does not dismiss it: it must be popped down
@@ -199,14 +199,6 @@ impl SuperDesktopWindow {
         canvas.set_hexpand(true);
         canvas.set_vexpand(true);
         root_overlay.set_child(Some(&canvas));
-
-        // Launcher connection hover card: floats centered above notes and
-        // terminals, toggled by the 📱 HUD button (never a separate window).
-        let launcher_panel = crate::launcher_settings::build_launcher_panel();
-        launcher_panel.widget.set_visible(false);
-        launcher_panel.widget.set_halign(Align::Center);
-        launcher_panel.widget.set_valign(Align::Center);
-        root_overlay.add_overlay(&launcher_panel.widget);
 
         let ghost_box = gtk4::Box::new(Orientation::Vertical, 0);
         ghost_box.add_css_class("term-resize-ghost");
@@ -335,10 +327,7 @@ impl SuperDesktopWindow {
             on_slide_hidden,
             brand_images: Rc::clone(&brand_images),
             settings_refresh: Rc::clone(&settings_panel.refresh),
-            overlay_panels: vec![
-                launcher_panel.widget.clone(),
-                settings_panel.widget.clone(),
-            ],
+            overlay_panels: vec![settings_panel.widget.clone()],
             ws_popover: workspace_bar.popover.clone(),
             show_token: std::cell::Cell::new(0),
         });
@@ -490,25 +479,14 @@ impl SuperDesktopWindow {
         });
         hud.append(&btn_arrange);
 
-        // Launcher connection settings (IP / port / PIN for the Android app)
-        let btn_launcher = Button::with_label("📱 Launcher");
-        btn_launcher.set_tooltip_text(Some("Launcher connection: bridge status, IPs, PIN"));
-        btn_launcher.add_css_class("hud-button");
-        let panel_w = launcher_panel.widget.clone();
-        let panel_refresh = Rc::clone(&launcher_panel.refresh);
-        btn_launcher.connect_clicked(move |_| {
-            let show = !panel_w.is_visible();
-            panel_w.set_visible(show);
-            if show {
-                panel_refresh();
-            }
-        });
-        hud.append(&btn_launcher);
-
-        // Harness settings: which launch buttons the top bar shows
-        let btn_settings = Button::with_label("⚙ Settings");
-        btn_settings.set_tooltip_text(Some("Choose which harnesses appear in the top bar"));
+        // The one settings entry point: a bare gear icon (no label), opening
+        // the ⚙ card — shortcut, top-bar harnesses, and the 📱 launcher page.
+        let btn_settings = Button::with_label("⚙");
+        btn_settings.set_tooltip_text(Some(
+            "Settings: shortcut, top bar launch buttons, launcher connection",
+        ));
         btn_settings.add_css_class("hud-button");
+        btn_settings.add_css_class("hud-gear");
         let settings_w = settings_panel.widget.clone();
         let settings_refresh = Rc::clone(&settings_panel.refresh);
         btn_settings.connect_clicked(move |_| {
@@ -829,6 +807,48 @@ impl SuperDesktopWindow {
             crate::state::save_state_async(self.state.borrow().clone());
         }
 
+        let ghost = self.ghost_box.clone();
+        let ghost_lbl = self.ghost_label.clone();
+        let canvas_ghost = canvas.clone();
+        let ghost_last: Rc<RefCell<Option<(f64, f64, i32, i32)>>> =
+            Rc::new(RefCell::new(None));
+        let ghost_last_show = Rc::clone(&ghost_last);
+        let on_resize_ghost = move |x: f64, y: f64, w: i32, h: i32| {
+            let qx = x.round();
+            let qy = y.round();
+            if *ghost_last_show.borrow() == Some((qx, qy, w, h)) {
+                return;
+            }
+            let previous = *ghost_last_show.borrow();
+            *ghost_last_show.borrow_mut() = Some((qx, qy, w, h));
+
+            if !ghost.is_visible() {
+                if ghost.parent().is_some() {
+                    canvas_ghost.remove(&ghost);
+                }
+                canvas_ghost.put(&ghost, qx, qy);
+            } else if previous.map(|(x, y, _, _)| (x, y)) != Some((qx, qy)) {
+                canvas_ghost.move_(&ghost, qx, qy);
+            }
+            ghost.set_visible(true);
+            if previous.map(|(_, _, w, h)| (w, h)) != Some((w, h)) {
+                ghost.set_size_request(w, h);
+            }
+            ghost.remove_css_class("ghost-icon");
+            ghost.add_css_class("ghost-note");
+            let label = format!("📝 {w} × {h} (Note)");
+            if ghost_lbl.label().as_str() != label {
+                ghost_lbl.set_label(&label);
+            }
+        };
+
+        let ghost_end = self.ghost_box.clone();
+        let ghost_last_hide = Rc::clone(&ghost_last);
+        let on_resize_end = move || {
+            *ghost_last_hide.borrow_mut() = None;
+            ghost_end.set_visible(false);
+        };
+
         let note = StickyNote::new(
             note_data,
             on_drag_update,
@@ -836,6 +856,10 @@ impl SuperDesktopWindow {
             on_delete,
             on_change,
             on_raise,
+            on_resize_ghost,
+            on_resize_end,
+            sw,
+            sh,
         );
         canvas.put(&note.container, x as f64, y as f64);
         note_cards.borrow_mut().push(Rc::new(note));
@@ -1062,6 +1086,7 @@ impl SuperDesktopWindow {
                     ghost.remove_css_class("ghost-icon");
                 }
             }
+            ghost.remove_css_class("ghost-note");
             let text = if is_icon {
                 "🗕 128 × 128 (Icon)".to_string()
             } else {
@@ -1356,6 +1381,10 @@ impl SuperDesktopWindow {
         set_counts_label(&self.hud_badge, n_notes, n_terms);
     }
 
+    pub fn item_counts(&self) -> (usize, usize) {
+        (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
+    }
+
 
     pub fn raise_all_notes(&self) {
         let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
@@ -1598,7 +1627,7 @@ mod tests {
         let (tx, ty, sx, sy) = hud_slide_pose(400.0, 48.0, 2560.0);
         assert_eq!(sx, tx, "toolbar must not drift sideways");
         assert_eq!(ty, HUD_REST_MARGIN as f64);
-        assert!(sy < 0.0 && sy <= -48.0, "hidden toolbar sits fully above the overlay, sy={sy}");
+        assert!(sy <= -48.0, "hidden toolbar sits fully above the overlay, sy={sy}");
         assert!((tx - (2560.0 - 400.0) * 0.5).abs() < 0.01);
     }
 
@@ -1665,8 +1694,30 @@ mod tests {
             tag: 0,
         };
 
-        let note1 = StickyNote::new(note1_data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {});
-        let note2 = StickyNote::new(note2_data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {});
+        let note1 = StickyNote::new(
+            note1_data,
+            |_, _, _| {},
+            |_, _| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_, _, _, _| {},
+            || {},
+            1920,
+            1080,
+        );
+        let note2 = StickyNote::new(
+            note2_data,
+            |_, _, _| {},
+            |_, _| {},
+            |_| {},
+            |_| {},
+            |_| {},
+            |_, _, _, _| {},
+            || {},
+            1920,
+            1080,
+        );
 
         canvas.put(&note1.container, 50.0, 50.0);
         canvas.put(&note2.container, 100.0, 100.0);

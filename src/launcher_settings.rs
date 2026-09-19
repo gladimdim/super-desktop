@@ -1,16 +1,16 @@
-//! 📱 Launcher connection card for the overlay HUD.
+//! 📱 Launcher connection page of the ⚙ settings card in the overlay HUD.
 //!
-//! A floating hover card that lives INSIDE the super-desktop layer-shell
-//! overlay (centered above notes and terminals) — never a separate Hyprland
-//! window. Shows everything needed to connect the OmarchyAILauncher Android
-//! app: bridge status (start/stop), firewall unlock, LAN + Tailscale IPs,
-//! port, the pairing PIN, and the 120s pairing window.
+//! The overlay is a single layer-shell surface (never a separate Hyprland
+//! window), and the ⚙ card is a two-page panel: this file builds its second
+//! page, with everything needed to connect the OmarchyAILauncher Android app:
+//! bridge status (start/stop), firewall unlock, LAN + Tailscale IPs, port, the
+//! pairing PIN, and the 120s pairing window. The card chrome, the header and
+//! the settings ⇄ launcher navigation live in `harness_settings`.
 //!
-//! Layout: one card chrome shared with terminals/notes (`mini-terminal` +
-//! `term-header`), whose body is a stack of bordered, numbered section panels
-//! (`.launcher-section`): bridge, firewall, addresses, pairing, phone steps.
-//! Every colour/radius/padding lives in `styles.rs` (see the
-//! "Launcher Connection Panel" block) — this file only builds the widgets.
+//! Layout: a stack of bordered, numbered section panels (`.launcher-section`):
+//! bridge, firewall, addresses, pairing, phone steps. Every colour/radius/
+//! padding lives in `styles.rs` (see the "Launcher Connection Page" block) —
+//! this file only builds the widgets.
 
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -20,55 +20,95 @@ use std::rc::Rc;
 
 use crate::bridge;
 
-/// Floating card + its refresh handle. The overlay adds `widget` centered
-/// and toggles visibility; `refresh` re-reads everything live.
-pub struct LauncherPanel {
+/// Page widget + its refresh handle. `harness_settings` embeds `widget` as the
+/// ⚙ card's second page, shows it on navigation, and calls `refresh` so every
+/// value is live.
+pub struct LauncherPage {
     pub widget: gtk4::Widget,
     pub refresh: Rc<dyn Fn()>,
 }
 
-pub fn build_launcher_panel() -> LauncherPanel {
-    let outer = Box::new(Orientation::Vertical, 0);
-    outer.add_css_class("mini-terminal");
-    outer.add_css_class("launcher-panel");
-    outer.set_size_request(620, 700);
+struct LauncherSnapshot {
+    online: bool,
+    harnesses: usize,
+    firewall: (String, bool),
+    host: String,
+    lan: String,
+    tailscale: Option<String>,
+    mdns: String,
+    pin: String,
+    pairing_left: u64,
+}
 
-    // ---- header: app badge, title + subtitle, close ----
-    let header = Box::new(Orientation::Horizontal, 10);
-    header.add_css_class("term-header");
-
-    let badge = Label::new(Some("📱"));
-    badge.add_css_class("launcher-head-badge");
-    badge.set_valign(Align::Center);
-    header.append(&badge);
-
-    let titles = Box::new(Orientation::Vertical, 0);
-    titles.set_hexpand(true);
-    titles.set_valign(Align::Center);
-    let title = Label::new(Some("Launcher connection"));
-    title.add_css_class("term-title");
-    title.set_halign(Align::Start);
-    let subtitle = Label::new(Some("OmarchyAILauncher bridge"));
-    subtitle.add_css_class("launcher-subtitle");
-    subtitle.set_halign(Align::Start);
-    titles.append(&title);
-    titles.append(&subtitle);
-    header.append(&titles);
-
-    let btn_close = Button::with_label("✕");
-    btn_close.set_tooltip_text(Some("Close panel"));
-    btn_close.add_css_class("term-btn");
-    btn_close.set_valign(Align::Center);
-    header.append(&btn_close);
-    outer.append(&header);
-
-    let weak_outer = outer.downgrade();
-    btn_close.connect_clicked(move |_| {
-        if let Some(o) = weak_outer.upgrade() {
-            o.set_visible(false);
+impl LauncherSnapshot {
+    fn collect() -> Self {
+        let online = bridge::bridge_running(bridge::BRIDGE_PORT);
+        Self {
+            online,
+            harnesses: if online {
+                bridge::collect_harnesses().len()
+            } else {
+                0
+            },
+            firewall: bridge::firewall_summary(),
+            host: bridge::hostname(),
+            lan: bridge::lan_ip(),
+            tailscale: bridge::tailscale_ip(),
+            mdns: bridge::mdns_summary(online),
+            pin: bridge::read_pin(),
+            pairing_left: bridge::pairing_seconds_left(),
         }
-    });
+    }
+}
 
+/// At most one probe runs at a time. Requests arriving during it trigger a
+/// follow-up, so a slow old probe cannot leave a completed action stale.
+fn background_refresh<T: Send + 'static>(
+    collect: impl Fn() -> T + Send + Sync + 'static,
+    apply: impl Fn(T) + 'static,
+) -> Rc<dyn Fn()> {
+    let collect = std::sync::Arc::new(collect);
+    let apply = Rc::new(apply);
+    let running = Rc::new(Cell::new(false));
+    let requested = Rc::new(Cell::new(false));
+    Rc::new(move || {
+        requested.set(true);
+        if running.replace(true) {
+            return;
+        }
+        let collect = std::sync::Arc::clone(&collect);
+        let apply = Rc::clone(&apply);
+        let running = Rc::clone(&running);
+        let requested = Rc::clone(&requested);
+        glib::MainContext::default().spawn_local(async move {
+            while requested.replace(false) {
+                let collect = std::sync::Arc::clone(&collect);
+                if let Ok(snapshot) = gtk4::gio::spawn_blocking(move || collect()).await {
+                    apply(snapshot);
+                }
+            }
+            running.set(false);
+        });
+    })
+}
+
+fn set_text(label: &Label, text: &str) {
+    if label.text().as_str() != text {
+        label.set_text(text);
+    }
+}
+
+fn set_state_class(label: &Label, active: bool, yes: &str, no: &str) {
+    let (add, remove) = if active { (yes, no) } else { (no, yes) };
+    if !label.has_css_class(add) {
+        label.remove_css_class(remove);
+        label.add_css_class(add);
+    }
+}
+
+/// Builds the launcher-connection page: a scrolling stack of numbered section
+/// cards. Card chrome and the header belong to the ⚙ settings card.
+pub fn build_launcher_page() -> LauncherPage {
     let root = Box::new(Orientation::Vertical, 10);
     root.add_css_class("launcher-body");
 
@@ -224,55 +264,69 @@ pub fn build_launcher_panel() -> LauncherPanel {
 
     let scroll = ScrolledWindow::new();
     scroll.add_css_class("launcher-scroll");
+    scroll.add_css_class("harness-page");
     // Horizontal scrolling would only ever clip the panels; labels wrap.
     scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
     scroll.set_child(Some(&root));
     scroll.set_vexpand(true);
     scroll.set_hexpand(true);
-    outer.append(&scroll);
 
-    // Shared refresh: re-read everything live.
-    let refresh: Rc<dyn Fn()> = Rc::new(move || {
-        v_bridge_state.remove_css_class("launcher-online");
-        v_bridge_state.remove_css_class("launcher-offline");
-        let online = bridge::bridge_running(bridge::BRIDGE_PORT);
-        if online {
-            let n = bridge::collect_harnesses().len();
-            v_bridge_state.set_text("● ONLINE");
-            v_bridge_state.add_css_class("launcher-online");
-            status.set_text(&format!(
-                "Serving {n} live harness{} over LAN / Tailscale.",
-                if n == 1 { "" } else { "es" }
-            ));
-        } else {
-            v_bridge_state.set_text("○ OFFLINE");
-            v_bridge_state.add_css_class("launcher-offline");
-            status.set_text("Start the bridge, then pair the phone below.");
+    // System commands, sockets and disk reads never run on the GTK thread.
+    let firewall_busy = Rc::new(Cell::new(false));
+    let firewall_refresh_busy = Rc::clone(&firewall_busy);
+    let page_weak = scroll.downgrade();
+    let refresh = background_refresh(LauncherSnapshot::collect, move |snapshot| {
+        if page_weak.upgrade().is_none() {
+            return;
         }
-        let (fw_text, fw_can_unlock) = bridge::firewall_summary();
-        v_fw.set_text(&fw_text);
-        if let Some(b) = btn_fw_weak.upgrade() {
-            b.set_sensitive(fw_can_unlock);
-        }
-        v_host.set_text(&bridge::hostname());
-        v_lan.set_text(&bridge::lan_ip());
-        v_tail.set_text(
-            bridge::tailscale_ip()
-                .as_deref()
-                .unwrap_or("— (Tailscale off)"),
+        set_state_class(
+            &v_bridge_state,
+            snapshot.online,
+            "launcher-online",
+            "launcher-offline",
         );
-        v_port.set_text(&bridge::BRIDGE_PORT.to_string());
-        v_mdns.set_text(&bridge::mdns_summary(online));
-        v_pin.set_text(&bridge::read_pin());
-        v_window.remove_css_class("launcher-window-open");
-        v_window.remove_css_class("launcher-window-closed");
-        let left = bridge::pairing_seconds_left();
-        if left > 0 {
-            v_window.set_text(&format!("🔓 Pairing window OPEN — {left}s left"));
-            v_window.add_css_class("launcher-window-open");
+        if snapshot.online {
+            let n = snapshot.harnesses;
+            set_text(&v_bridge_state, "● ONLINE");
+            set_text(
+                &status,
+                &format!(
+                    "Serving {n} live harness{} over LAN / Tailscale.",
+                    if n == 1 { "" } else { "es" }
+                ),
+            );
         } else {
-            v_window.set_text("🔒 Pairing window closed — the phone needs the PIN above.");
-            v_window.add_css_class("launcher-window-closed");
+            set_text(&v_bridge_state, "○ OFFLINE");
+            set_text(&status, "Start the bridge, then pair the phone below.");
+        }
+        let (fw_text, fw_can_unlock) = snapshot.firewall;
+        set_text(&v_fw, &fw_text);
+        if let Some(b) = btn_fw_weak.upgrade() {
+            b.set_sensitive(fw_can_unlock && !firewall_refresh_busy.get());
+        }
+        set_text(&v_host, &snapshot.host);
+        set_text(&v_lan, &snapshot.lan);
+        set_text(
+            &v_tail,
+            snapshot.tailscale.as_deref().unwrap_or("— (Tailscale off)"),
+        );
+        set_text(&v_port, &bridge::BRIDGE_PORT.to_string());
+        set_text(&v_mdns, &snapshot.mdns);
+        set_text(&v_pin, &snapshot.pin);
+        let left = snapshot.pairing_left;
+        set_state_class(
+            &v_window,
+            left > 0,
+            "launcher-window-open",
+            "launcher-window-closed",
+        );
+        if left > 0 {
+            set_text(&v_window, &format!("🔓 Pairing window OPEN — {left}s left"));
+        } else {
+            set_text(
+                &v_window,
+                "🔒 Pairing window closed — the phone needs the PIN above.",
+            );
         }
     });
 
@@ -297,48 +351,41 @@ pub fn build_launcher_panel() -> LauncherPanel {
             note.set_text(progress);
             note.set_visible(true);
 
-            let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
-            std::thread::spawn(move || {
-                let _ = tx.send(op());
-            });
-
             let refresh = Rc::clone(&refresh);
             let note = note.clone();
             let btn_start = btn_start.clone();
             let btn_stop = btn_stop.clone();
             let busy = Rc::clone(&busy);
-            glib::timeout_add_local(std::time::Duration::from_millis(120), move || {
-                let done = match rx.try_recv() {
+            glib::MainContext::default().spawn_local(async move {
+                match gtk4::gio::spawn_blocking(op).await {
                     Ok(Ok(())) => {
                         note.set_text(&format!("● Bridge answering on :{}", bridge::BRIDGE_PORT));
-                        true
                     }
                     Ok(Err(e)) => {
                         note.add_css_class("launcher-note-error");
                         note.set_text(&format!("⚠ {e}"));
-                        true
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err(_) => {
                         note.add_css_class("launcher-note-error");
                         note.set_text("⚠ bridge action did not finish");
-                        true
                     }
-                };
-                if done {
-                    busy.set(false);
-                    btn_start.set_sensitive(true);
-                    btn_stop.set_sensitive(true);
-                    refresh();
                 }
-                glib::ControlFlow::Break
+                busy.set(false);
+                btn_start.set_sensitive(true);
+                btn_stop.set_sensitive(true);
+                refresh();
             });
         }
     };
 
     btn_start.connect_clicked({
         let run = run_bridge_action.clone();
-        move |_| run(&format!("… starting the bridge on :{}", bridge::BRIDGE_PORT), bridge::start_bridge)
+        move |_| {
+            run(
+                &format!("… starting the bridge on :{}", bridge::BRIDGE_PORT),
+                bridge::start_bridge,
+            )
+        }
     });
     btn_stop.connect_clicked({
         let run = run_bridge_action.clone();
@@ -364,61 +411,50 @@ pub fn build_launcher_panel() -> LauncherPanel {
         let refresh = Rc::clone(&refresh);
         let note = v_fw_note.clone();
         move |btn| {
+            if firewall_busy.replace(true) {
+                return;
+            }
             btn.set_sensitive(false);
             note.set_text("Waiting for the password prompt…");
-            // Only the result string crosses threads; widgets stay on the
-            // GTK thread and poll the channel from an idle callback.
-            // Fresh clones per click: the outer closure is Fn.
-            let (tx, rx) = std::sync::mpsc::channel::<String>();
-            std::thread::spawn(move || {
-                let msg = match bridge::unlock_firewall() {
-                    Ok(m) => m,
-                    Err(e) => format!("Unlock failed: {e}"),
-                };
-                let _ = tx.send(msg);
-            });
             let note2 = note.clone();
             let refresh2 = Rc::clone(&refresh);
-            gtk4::glib::idle_add_local(move || {
-                match rx.try_recv() {
-                    Ok(msg) => {
-                        note2.set_text(&msg);
-                        refresh2();
-                        gtk4::glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        note2.set_text("Unlock failed");
-                        refresh2();
-                        gtk4::glib::ControlFlow::Break
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        gtk4::glib::ControlFlow::Continue
-                    }
-                }
+            let busy = Rc::clone(&firewall_busy);
+            glib::MainContext::default().spawn_local(async move {
+                let msg = match gtk4::gio::spawn_blocking(bridge::unlock_firewall).await {
+                    Ok(Ok(msg)) => msg,
+                    Ok(Err(error)) => format!("Unlock failed: {error}"),
+                    Err(_) => "Unlock failed".into(),
+                };
+                busy.set(false);
+                note2.set_text(&msg);
+                refresh2();
             });
         }
     });
 
     // Deliberately no eager `refresh()` here: it probes tmux (one exec per live
-    // session), `tailscale` (~100ms) and `hostname`, and this panel is built on
-    // the window-build path. The content is filled when the panel is opened —
-    // the HUD button calls `refresh` — and then every 2s while it stays open.
+    // session), `tailscale` (~100ms) and `hostname`, and this page is built on
+    // the window-build path. The content is filled when the ⚙ card navigates
+    // here (`refresh`) and then every 2s while it stays on screen.
 
-    // Live refresh while the overlay lives; only re-reads when visible.
-    let weak = outer.downgrade();
+    // Live refresh while the page is on screen. `is_mapped` is false both when
+    // the card navigated away from this page and when the card (or the whole
+    // overlay) is hidden, so nothing probes tmux / `tailscale` / `hostname`
+    // every 2s for a page nobody is looking at.
+    let weak = scroll.downgrade();
     let tick = Rc::clone(&refresh);
     gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-        let Some(o) = weak.upgrade() else {
+        let Some(s) = weak.upgrade() else {
             return gtk4::glib::ControlFlow::Break;
         };
-        if o.is_visible() {
+        if s.is_mapped() {
             tick();
         }
         gtk4::glib::ControlFlow::Continue
     });
 
-    LauncherPanel {
-        widget: outer.upcast(),
+    LauncherPage {
+        widget: scroll.upcast(),
         refresh,
     }
 }
@@ -504,41 +540,111 @@ mod tests {
     }
 
     #[test]
-    fn test_panel_is_built_from_numbered_section_cards() {
+    fn test_page_is_built_from_numbered_section_cards() {
         // GTK may only be used from one thread per process, so the widget
         // assertions run in a child process (see `crate::gtk_test`).
-        crate::gtk_test::run_in_child_process("launcher_settings::tests::panel_gtk_structure");
+        crate::gtk_test::run_in_child_process("launcher_settings::tests::page_gtk_structure");
     }
 
     /// Only meaningful when re-run as the single test of a fresh process.
     #[test]
-    fn panel_gtk_structure() {
+    fn page_gtk_structure() {
         if !crate::gtk_test::is_child() {
             return;
         }
         let _ = gtk4::init();
-        let panel = build_launcher_panel();
+        check_background_refresh();
+        let page = build_launcher_page();
 
-        // Shared card chrome, so the panel matches notes/terminal cards.
-        assert!(panel.widget.has_css_class("launcher-panel"));
-        assert!(panel.widget.has_css_class("mini-terminal"));
+        // The ⚙ settings card owns the chrome (`mini-terminal`/`harness-panel`);
+        // this page is only the scrolling body it embeds.
+        assert!(page.widget.has_css_class("launcher-scroll"));
+        assert!(page.widget.downcast_ref::<ScrolledWindow>().is_some());
+        assert!(!page.widget.has_css_class("mini-terminal"));
 
         // Bridge, Firewall, Connect to, Pair, On the phone.
-        assert_eq!(count_class(&panel.widget, "launcher-section"), 5);
-        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 5);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 5);
+        assert_eq!(count_class(&page.widget, "launcher-section"), 5);
+        assert_eq!(count_class(&page.widget, "launcher-section-num"), 5);
+        assert_eq!(count_class(&page.widget, "launcher-section-title"), 5);
 
         // One PIN panel, five address rows, four numbered phone steps.
-        assert_eq!(count_class(&panel.widget, "launcher-pin-box"), 1);
-        assert_eq!(count_class(&panel.widget, "launcher-value"), 5);
-        assert_eq!(count_class(&panel.widget, "launcher-step"), 4);
+        assert_eq!(count_class(&page.widget, "launcher-pin-box"), 1);
+        assert_eq!(count_class(&page.widget, "launcher-value"), 5);
+        assert_eq!(count_class(&page.widget, "launcher-step"), 4);
 
         // Start / Stop / Unlock / New PIN / Open window.
-        assert_eq!(count_class(&panel.widget, "launcher-btn"), 5);
+        assert_eq!(count_class(&page.widget, "launcher-btn"), 5);
 
-        // The HUD toggle calls this on every open: it must not panic and must
+        // Navigation calls this on every entry: it must not panic and must
         // leave the bridge chip in one of its two styled states.
-        (panel.refresh)();
-        assert_eq!(count_class(&panel.widget, "term-status-badge"), 1);
+        (page.refresh)();
+        assert_eq!(count_class(&page.widget, "term-status-badge"), 1);
+    }
+
+    fn check_background_refresh() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc::channel,
+            Arc, Mutex,
+        };
+        use std::time::{Duration, Instant};
+
+        let (started_tx, started_rx) = channel();
+        let (release_tx, release_rx) = channel();
+        let release_rx = Mutex::new(release_rx);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&calls);
+        let applied = Rc::new(Cell::new(0));
+        let result = Rc::clone(&applied);
+        let refresh = background_refresh(
+            move || {
+                let n = count.fetch_add(1, Ordering::SeqCst) + 1;
+                if n == 1 {
+                    started_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap();
+                }
+                n
+            },
+            move |n| result.set(n),
+        );
+        let context = glib::MainContext::default();
+        refresh();
+        while context.pending() {
+            context.iteration(false);
+        }
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..1000 {
+            refresh();
+        }
+        let responsive = Rc::new(Cell::new(false));
+        let ran = Rc::clone(&responsive);
+        context.spawn_local(async move {
+            ran.set(true);
+        });
+        while context.pending() {
+            context.iteration(false);
+        }
+        assert!(
+            responsive.get(),
+            "main loop must run while the probe is blocked"
+        );
+        assert_eq!(applied.get(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "no concurrent probes");
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while applied.get() != 2 && Instant::now() < deadline {
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert_eq!(
+            applied.get(),
+            2,
+            "requests coalesce into one fresh follow-up"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

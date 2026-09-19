@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NoteData {
@@ -261,34 +262,178 @@ pub fn load_state() -> AppState {
 }
 
 pub fn save_state(state: &AppState) {
-    let path = get_state_path();
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let temp_path = path.with_extension("tmp");
-        if fs::write(&temp_path, json).is_ok() {
-            let _ = fs::rename(temp_path, path);
+    save_state_async(state.clone());
+    flush_state_saves();
+}
+
+static STATE_WRITER: OnceLock<StateWriter> = OnceLock::new();
+
+/// The caller snapshots the state; serialization and disk I/O use one worker.
+/// Pending snapshots coalesce, so a burst never creates threads or a backlog
+/// of obsolete writes. The single writer also prevents older saves winning
+/// the rename race and overwriting newer edits.
+pub fn save_state_async(state: AppState) {
+    STATE_WRITER
+        .get_or_init(|| StateWriter::new(get_state_path()))
+        .submit(state);
+}
+
+/// Only used at shutdown and by the synchronous initialization path.
+pub fn flush_state_saves() {
+    if let Some(writer) = STATE_WRITER.get() {
+        if let Err(error) = writer.flush() {
+            eprintln!("SUPER DESKTOP: saving state failed: {error}");
         }
     }
 }
 
-/// Non-blocking variant for hot paths (drag-end, typing, resize-end).
-/// Cloning + JSON serialization + file I/O all happen on a background
-/// thread so the 120Hz frame clock on the main thread never stalls.
-pub fn save_state_async(state: AppState) {
-    std::thread::spawn(move || {
-        let path = get_state_path();
-        if let Ok(json) = serde_json::to_string_pretty(&state) {
-            let temp_path = path.with_extension("tmp");
-            if fs::write(&temp_path, json).is_ok() {
-                let _ = fs::rename(temp_path, path);
-            }
+#[derive(Default)]
+struct SaveQueue {
+    pending: Option<(u64, AppState)>,
+    submitted: u64,
+    completed: u64,
+    error: Option<String>,
+    closed: bool,
+}
+
+struct StateWriter {
+    queue: Arc<(Mutex<SaveQueue>, Condvar)>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl StateWriter {
+    fn new(path: PathBuf) -> Self {
+        Self::with_writer(move |state| {
+            use std::io::Write;
+            // A different process loading state must not share our temp file.
+            let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+            let mut file = std::io::BufWriter::new(fs::File::create(&temp)?);
+            serde_json::to_writer_pretty(&mut file, state)?;
+            file.flush()?;
+            fs::rename(temp, &path)
+        })
+    }
+
+    fn with_writer(
+        mut write: impl FnMut(&AppState) -> std::io::Result<()> + Send + 'static,
+    ) -> Self {
+        let queue = Arc::new((Mutex::new(SaveQueue::default()), Condvar::new()));
+        let worker_queue = Arc::clone(&queue);
+        let thread = std::thread::Builder::new()
+            .name("state-writer".into())
+            .spawn(move || {
+                let (lock, ready) = &*worker_queue;
+                loop {
+                    let mut queue = lock.lock().unwrap();
+                    while queue.pending.is_none() && !queue.closed {
+                        queue = ready.wait(queue).unwrap();
+                    }
+                    let Some((generation, state)) = queue.pending.take() else {
+                        break;
+                    };
+                    drop(queue);
+                    let error = write(&state).err().map(|e| e.to_string());
+                    if let Some(error) = &error {
+                        eprintln!("SUPER DESKTOP: saving state failed: {error}");
+                    }
+                    let mut queue = lock.lock().unwrap();
+                    queue.completed = generation;
+                    queue.error = error;
+                    ready.notify_all();
+                }
+            })
+            .expect("start state writer");
+        Self {
+            queue,
+            thread: Some(thread),
         }
-    });
+    }
+
+    fn submit(&self, state: AppState) {
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock.lock().unwrap();
+        queue.submitted += 1;
+        queue.pending = Some((queue.submitted, state));
+        ready.notify_all();
+    }
+
+    fn flush(&self) -> Result<(), String> {
+        let (lock, ready) = &*self.queue;
+        let mut queue = lock.lock().unwrap();
+        let target = queue.submitted;
+        while queue.completed < target {
+            queue = ready.wait(queue).unwrap();
+        }
+        queue.error.clone().map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for StateWriter {
+    fn drop(&mut self) {
+        let (lock, ready) = &*self.queue;
+        lock.lock().unwrap().closed = true;
+        ready.notify_all();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
+
+    #[test]
+    fn saves_coalesce_and_shutdown_flushes_the_latest_snapshot() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let saved = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&saved);
+        let writer = StateWriter::with_writer(move |state| {
+            if output.lock().unwrap().is_empty() {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+            output.lock().unwrap().push(state.notes[0].text.clone());
+            Ok(())
+        });
+        let mut state = AppState::default();
+        state.notes[0].text = "first".into();
+        writer.submit(state.clone());
+        started_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        for n in 0..1000 {
+            state.notes[0].text = n.to_string();
+            writer.submit(state.clone());
+        }
+        release_tx.send(()).unwrap();
+        writer.flush().unwrap();
+        assert_eq!(*saved.lock().unwrap(), ["first", "999"]);
+        state.notes[0].text = "on shutdown".into();
+        writer.submit(state);
+        drop(writer);
+        assert_eq!(saved.lock().unwrap().last().unwrap(), "on shutdown");
+    }
+
+    #[test]
+    fn state_writer_publishes_complete_json_and_reports_write_errors() {
+        let path = env::temp_dir().join(format!("sd-save-{}.json", std::process::id()));
+        let writer = StateWriter::new(path.clone());
+        let mut state = AppState::default();
+        for n in 0..100 {
+            state.notes[0].text = format!("{n}: {}", "🦀".repeat(4096));
+            writer.submit(state.clone());
+        }
+        writer.flush().unwrap();
+        let read: AppState = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(read.notes[0].text, state.notes[0].text);
+        drop(writer);
+        fs::remove_file(path).unwrap();
+
+        let writer = StateWriter::with_writer(|_| Err(std::io::Error::other("disk full")));
+        writer.submit(state);
+        assert_eq!(writer.flush().unwrap_err(), "disk full");
+    }
 
     #[test]
     fn test_state_without_visible_harnesses_reads_as_unconfigured() {
