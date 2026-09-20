@@ -242,14 +242,14 @@ pub fn build_launcher_page() -> LauncherPage {
                 }
                 let text = Label::new(Some(&link));
                 text.set_selectable(true); text.set_wrap(true); text.set_max_width_chars(60);
-                let help = Label::new(Some("Scan and tap Open in SUPER DESKTOP.\nIf your camera does not offer Open, use Bridges → Scan pairing QR.\nSingle-use invitation · expires in 3 minutes."));
+                let help = Label::new(Some("Scan and tap Open in SUPER DESKTOP.\nIf your camera does not offer Open, use Bridges → Scan pairing QR.\nSingle-use invitation · expires in 5 minutes."));
                 help.set_xalign(0.0); help.set_wrap(true);
                 qr_box.append(&help);
                 let details = gtk4::Expander::new(Some("Copy pairing link"));
                 details.set_child(Some(&text));
                 qr_box.append(&details);
                 let expiry_box = qr_box.clone();
-                glib::timeout_add_local_once(std::time::Duration::from_secs(180), move || {
+                glib::timeout_add_local_once(std::time::Duration::from_secs(300), move || {
                     // Only clear the invitation this timer belongs to.
                     if text.parent().is_some() { while let Some(child) = expiry_box.first_child() { expiry_box.remove(&child); } }
                 });

@@ -111,7 +111,6 @@ pub struct MiniTerminalCard {
     expand_btn: Button,
     compact_restore_btn: Button,
     _compact_kill_btn: Button,
-    resize_handle: Label,
     compact_top_bar: gtk4::Box,
     preview_box: gtk4::Box,
     vte: Rc<RefCell<Option<VteTerminal>>>,
@@ -410,17 +409,6 @@ impl MiniTerminalCard {
         compact_top_bar.append(&compact_actions);
         root.add_overlay(&compact_top_bar);
 
-        // Corner resize handle
-        let resize_handle = Label::new(Some("◢"));
-        resize_handle.add_css_class("term-resize-handle");
-        resize_handle.set_halign(Align::End);
-        resize_handle.set_valign(Align::End);
-        resize_handle.set_margin_end(4);
-        resize_handle.set_margin_bottom(2);
-        resize_handle.set_tooltip_text(Some("Drag any edge or corner to resize"));
-        resize_handle.set_cursor_from_name(Some("se-resize"));
-        root.add_overlay(&resize_handle);
-
         let title_prefix = format!("{} {}", cfg.icon, cfg.name);
         // Seed from persisted state so rebooted cards resume the SAME agent
         // session without waiting for the DB mapping to re-resolve.
@@ -455,7 +443,6 @@ impl MiniTerminalCard {
             expand_btn,
             compact_restore_btn: compact_restore_btn.clone(),
             _compact_kill_btn: compact_kill_btn.clone(),
-            resize_handle: resize_handle.clone(),
             compact_top_bar,
             preview_box,
             vte,
@@ -497,7 +484,6 @@ impl MiniTerminalCard {
             let preview_label = card.preview_label.clone();
             let icon_box = card.icon_box.clone();
             let compact_top_bar = card.compact_top_bar.clone();
-            let resize_handle = card.resize_handle.clone();
             let expand_btn = card.expand_btn.clone();
             let hint_label = card.hint_label.clone();
             let compact_restore_btn = card.compact_restore_btn.clone();
@@ -540,7 +526,6 @@ impl MiniTerminalCard {
                     &preview_label,
                     &icon_box,
                     &compact_top_bar,
-                    &resize_handle,
                     false,
                 );
                 on_save(container.clone().upcast(), &data.borrow());
@@ -559,7 +544,6 @@ impl MiniTerminalCard {
             let preview_label = card.preview_label.clone();
             let icon_box = card.icon_box.clone();
             let compact_top_bar = card.compact_top_bar.clone();
-            let resize_handle = card.resize_handle.clone();
             let expand_btn = card.expand_btn.clone();
             let restore_btn = card.restore_btn.clone();
             let hint_label = card.hint_label.clone();
@@ -618,7 +602,6 @@ impl MiniTerminalCard {
                     &preview_label,
                     &icon_box,
                     &compact_top_bar,
-                    &resize_handle,
                     vte.borrow().is_some(),
                 );
                 on_save(container.clone().upcast(), &data.borrow());
@@ -719,10 +702,9 @@ impl MiniTerminalCard {
             true,
         );
 
-        // Eight border/corner resize targets. The visible southeast glyph is
-        // still a hint, while transparent hit zones make every edge behave
-        // like a conventional desktop window. Compact and expanded cards do
-        // not resize: restore/collapse them first.
+        // Eight border/corner resize targets make every edge behave like a
+        // conventional desktop window. Compact and expanded cards do not
+        // resize: restore/collapse them first.
         let resize_limits = crate::card_resize::Limits {
             min_width: MIN_CARD_WIDTH,
             min_height: MIN_CARD_HEIGHT,
@@ -901,7 +883,6 @@ impl MiniTerminalCard {
             &self.preview_label,
             &self.icon_box,
             &self.compact_top_bar,
-            &self.resize_handle,
             vte_attached,
         );
     }
@@ -1303,7 +1284,6 @@ fn apply_layout(
     preview_label: &Label,
     icon_box: &gtk4::Box,
     compact_top_bar: &gtk4::Box,
-    resize_handle: &Label,
     vte_attached: bool,
 ) {
     let compact = !expanded && iconified;
@@ -1312,7 +1292,6 @@ fn apply_layout(
     preview_label.set_visible(!compact && !expanded && !vte_attached);
     icon_box.set_visible(compact);
     compact_top_bar.set_visible(compact && !expanded);
-    resize_handle.set_visible(!expanded);
     crate::card_resize::set_resize_borders_visible(root, !expanded && !compact);
 
     if compact {

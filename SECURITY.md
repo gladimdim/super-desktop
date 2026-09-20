@@ -27,7 +27,7 @@ it has the desktop's trusted certificate pin.
    require explicit confirmation and never automatically approve a device. Manual address
    selection can override the invitation's LAN route without changing its pin.
 3. Android requests approval using the QR's random 192-bit, single-use secret.
-   Invitations expire after 180 seconds. Approval requests expire after 120 seconds.
+   Invitations expire after 300 seconds. Approval requests expire after 120 seconds.
 4. Compare the displayed code and approve on the desktop. Names are untrusted labels.
 5. The phone receives a separate random 192-bit bearer credential, valid for 90 days.
 

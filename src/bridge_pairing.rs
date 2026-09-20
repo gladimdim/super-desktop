@@ -48,9 +48,9 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
     match (req.method.as_str(), path) {
         ("POST", "/api/v1/pair/invitation") => {
             let secret = random_hex(24);
-            *INVITATION.lock().unwrap() = Some(Invitation { secret: secret.clone(), expires: now + 180.0 });
+            *INVITATION.lock().unwrap() = Some(Invitation { secret: secret.clone(), expires: now + 300.0 });
             respond(stream, 200, "OK", &json!({"v":3,"host":lan_ip(),"port":BRIDGE_PORT,
-                "fingerprint":security::fingerprint(),"secret":secret,"expiresIn":180}));
+                "fingerprint":security::fingerprint(),"secret":secret,"expiresIn":300}));
         }
         ("GET", "/api/v1/pair/devices") => {
             let paired = pair_state().lock().unwrap();

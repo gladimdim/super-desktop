@@ -691,18 +691,6 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     font-size: 11px;
 }}
 
-.term-resize-handle {{
-    color: {dark_foreground};
-    font-size: 12px;
-    padding: 2px 5px 0 8px;
-    min-width: 18px;
-    min-height: 16px;
-}}
-
-.term-resize-handle:hover {{
-    color: {accent};
-}}
-
 /* Invisible Windows-style resize targets on all four edges and corners.
    Their size is set in Rust; keeping the CSS inert avoids paint work. */
 .card-resize-zone {{
