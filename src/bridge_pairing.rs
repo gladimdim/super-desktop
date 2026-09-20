@@ -209,7 +209,7 @@ mod tests {
             let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server, _) = listener.accept().unwrap();
             let mut server = Connection::plain(server);
-            let request = Request { method:method.into(), path:path.into(), body:body.to_string(), headers:HashMap::new() };
+            let request = Request { method:method.into(), path:path.into(), body:body.to_string(), headers:HashMap::new(), _upload_slot:None };
             handle(&mut server, &request, local, path);
             drop(server);
             let mut response = String::new();

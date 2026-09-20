@@ -44,6 +44,9 @@ Android's per-terminal bell can report explicit Codex response completion, inclu
 while the phone UI is hidden using an opt-in foreground monitor. Other harnesses
 do not yet have verified completion adapters. See [completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).
 
+Android can also attach an image using **＋** and send it together with a prompt
+to an idle Codex terminal. See [image prompts, compatibility and upload limits](docs/IMAGE_PROMPTS.md).
+
 | | |
 |---|---|
 | 🌌 Antigravity CLI | `agy` / `antigravity` |

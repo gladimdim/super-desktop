@@ -64,8 +64,14 @@ memory, output and wall-clock bounds; it never falls back to unsandboxed parsing
 See [file previews](docs/FILE_ASSETS.md) for decoder limits and known limitations.
 
 64 simultaneous network connections; 12 per source IP; 5-second total initial
-TLS/request deadline enforced by a socket reaper; 16 KiB headers and bodies;
-16 KiB inbound WebSocket frames; 125-byte control frames. Pairing is invitation-
+TLS/request deadline enforced by a socket reaper; 16 KiB headers and normal bodies;
+16 KiB inbound WebSocket frames; 125-byte control frames. The authenticated
+image-prompt route alone allows a 3 MiB JSON body, a 30-second upload deadline,
+and four concurrent jobs shared with file previews. Authorization and origin
+checks happen before accepting the larger body. Images are validated, capped,
+re-encoded and privately staged; no client-selected file paths or overwrites.
+See [image prompt security and retention](docs/IMAGE_PROMPTS.md).
+Pairing is invitation-
 gated and limited to eight pending/recent requests and one per source per 120 seconds.
 At most 64 paired devices. These bounds mitigate abuse, not volumetric network DoS.
 

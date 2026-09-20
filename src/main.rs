@@ -2,6 +2,7 @@ mod brand;
 mod assets;
 mod asset_history;
 mod completion;
+mod prompt_image;
 mod asset_pdf;
 mod asset_view;
 mod bridge;

@@ -114,7 +114,8 @@ fn text_view(text: &str, markdown: bool) -> gtk4::TextView {
 }
 
 pub fn button(session: String) -> gtk4::Button {
-    let button = gtk4::Button::with_label("Files");
+    let button = gtk4::Button::from_icon_name("folder-symbolic");
+    button.update_property(&[gtk4::accessible::Property::Label("Files")]);
     button.add_css_class("term-btn");
     button.set_tooltip_text(Some(
         "Referenced files: images, GIF, PDF, Markdown and text",
@@ -437,7 +438,8 @@ mod tests {
             return;
         }
         let button = button("test_missing_asset_terminal".into());
-        assert_eq!(button.label().as_deref(), Some("Files"));
+        assert_eq!(button.icon_name().as_deref(), Some("folder-symbolic"));
+        assert!(button.label().is_none());
         let pop = build_drawer("test_missing_asset_terminal");
         assert!(pop.child().is_some());
         assert!(!pop.is_mapped());

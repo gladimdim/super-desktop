@@ -179,13 +179,16 @@ fn last_user_text(
     persisted: Option<&str>,
     screen: &str,
 ) -> Option<String> {
-    // Priority mirrors mini_terminal.rs refresh_status(): composer draft,
-    // then exact opencode DB text, then pane-scrape heuristic. The DB id is
-    // resolved to the session OWNED by this pane (own `--session` flag, else
-    // a claims-aware match), so a closed console's prompt never leaks here.
-    if let Some(draft) = get_composer_draft(session) {
-        return Some(draft);
+    // Codex sets the pane title to its submitted task and workspace. The
+    // terminal screen may contain only the response, so parse this first.
+    if agent_type == "codex" {
+        if let Some(prompt) = codex_prompt_from_pane_title(session) {
+            return Some(prompt);
+        }
     }
+    // Exact opencode DB text is resolved to the session OWNED by this pane
+    // (own `--session` flag, else a claims-aware match), so a closed console's
+    // prompt never leaks here. Composer drafts stay in their separate field.
     if agent_type == "opencode" {
         if let Some(id) = resolve_own_opencode_id(session, persisted) {
             if let Some(text) = get_opencode_user_text_by_id(&id) {
@@ -195,6 +198,29 @@ fn last_user_text(
     }
     extract_last_prompt(screen)
         .map(|s| truncate_prompt_title(&s))
+}
+
+fn codex_prompt_from_pane_title(session: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["display-message", "-p", "-t", session, "#{pane_title}"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    codex_prompt_from_title(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Codex titles end in the workspace. When action is required, the title is
+/// `status | prompt | workspace`, so the prompt is always the penultimate part.
+fn codex_prompt_from_title(title: &str) -> Option<String> {
+    let parts: Vec<_> = title.split('|').map(str::trim).filter(|part| !part.is_empty()).collect();
+    let candidate = parts.get(parts.len().checked_sub(2)?).copied()?;
+    let candidate = candidate.trim_start_matches(|c: char| {
+        c.is_whitespace() || ('\u{2801}'..='\u{28FF}').contains(&c)
+    });
+    let cleaned = candidate.split_whitespace().collect::<Vec<_>>().join(" ");
+    (cleaned.chars().count() >= 2).then(|| truncate_prompt_title(&cleaned))
 }
 
 fn is_regular_terminal(agent_type: &str) -> bool {
@@ -532,13 +558,14 @@ struct Request {
     path: String,
     headers: HashMap<String, String>,
     body: String,
+    _upload_slot: Option<crate::assets::Transfer>,
 }
 
 fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
-fn read_request(stream: &mut Connection) -> Option<Request> {
+fn read_request(stream: &mut Connection, admission: Option<&security::Admission>) -> Option<Request> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .ok()?;
@@ -577,7 +604,33 @@ fn read_request(stream: &mut Connection) -> Option<Request> {
         .get("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    if content_len > 16384 || headers.contains_key("transfer-encoding") { return None; }
+    let image_upload = method == "POST" && crate::prompt_image::route(&path).is_some();
+    if headers.contains_key("transfer-encoding") { return None; }
+    let mut upload_slot = None;
+    if image_upload {
+        let head = Request { method: method.clone(), path: path.clone(), headers: headers.clone(), body: String::new(), _upload_slot: None };
+        if headers.contains_key("origin") || headers.contains_key("sec-fetch-site") {
+            respond(stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
+            return None;
+        }
+        if !authorize(&head, false) {
+            respond(stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            return None;
+        }
+        if content_len > crate::prompt_image::MAX_BODY {
+            respond(stream, 413, "Payload Too Large", &serde_json::json!({"error":"image_too_large"}));
+            return None;
+        }
+        upload_slot = crate::assets::Transfer::acquire();
+        if upload_slot.is_none() {
+            respond(stream, 429, "Too Many Requests", &serde_json::json!({"error":"busy"}));
+            return None;
+        }
+        let token = bearer(&headers);
+        stream.credential(&token);
+        if let Some(guard) = admission { guard.identify(&token); }
+        stream.upload_deadline();
+    } else if content_len > 16384 { return None; }
     let mut body = buf[header_end..total].to_vec();
     while body.len() < content_len {
         let mut chunk = vec![0u8; (content_len - body.len()).min(8192)];
@@ -587,12 +640,13 @@ fn read_request(stream: &mut Connection) -> Option<Request> {
         }
         body.extend_from_slice(&chunk[..n]);
     }
-    body.truncate(content_len.min(1 << 20));
+    body.truncate(content_len);
     Some(Request {
         method,
         path,
         headers,
         body: String::from_utf8_lossy(&body).to_string(),
+        _upload_slot: upload_slot,
     })
 }
 
@@ -795,6 +849,7 @@ fn stream_keys(mut stream: Connection, id: &str) {
                 let value = body["text"].as_str().unwrap_or("");
                 let enter = body["enter"].as_bool().unwrap_or(false);
                 let result = (|| -> Result<(), String> {
+                    let _input = crate::prompt_image::input_guard(id)?;
                     if value.len() > 4096 { return Err("text_too_long".into()); }
                     if body["checkIdle"].as_bool().unwrap_or(false) {
                         if inspect_status(id, &agent).status != "IDLE" {
@@ -882,7 +937,8 @@ fn handle_keys(stream: &mut Connection, req: &Request, id: &str, local: bool) {
             &serde_json::json!({"status": "error", "error": "text_too_long"}),
         );
     }
-    match crate::tmux::send_keys(id, text, enter) {
+    let result = crate::prompt_image::input_guard(id).and_then(|_guard| crate::tmux::send_keys(id, text, enter));
+    match result {
         Ok(()) => respond(stream, 200, "OK", &serde_json::json!({"status": "ok"})),
         Err(e) => respond(
             stream,
@@ -953,7 +1009,7 @@ fn creation_command(agent: &str, body: &serde_json::Value) -> Option<String> {
 }
 
 fn handle_client(mut stream: Connection, admission: Option<security::Admission>) {
-    let req = match read_request(&mut stream) {
+    let req = match read_request(&mut stream, admission.as_ref()) {
         Some(r) => r,
         None => return,
     };
@@ -970,6 +1026,21 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
         stream.credential(&token);
     }
     let path = req.path.split('?').next().unwrap_or("").to_string();
+    if req.method == "POST" {
+        if let Some(session) = crate::prompt_image::route(&path) {
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            stream.streaming();
+            let body = serde_json::from_str(&req.body).unwrap_or_default();
+            let result = crate::prompt_image::submit(session, &security::digest(bearer(&req.headers).as_bytes()), &body, || stream.still_authorized());
+            wake_terminal_streams();
+            return match result {
+                Ok(()) => respond(&mut stream, 200, "OK", &serde_json::json!({"status":"submitted"})),
+                Err(error) => respond(&mut stream, 409, "Conflict", &serde_json::json!({"error":error})),
+            };
+        }
+    }
 
     // All pairing routes go through explicit desktop approval. In particular,
     // neither a legacy PIN nor an open window can mint a token any longer.
@@ -1898,6 +1969,19 @@ mod tests {
         assert_eq!(lines.first(), Some(&"line 9"));
         assert_eq!(lines.last(), Some(&"home · ~/Github/app"));
         assert!(lines.iter().rev().take(3).any(|line| line.starts_with("home · ")));
+    }
+
+    #[test]
+    fn codex_pane_titles_provide_the_submitted_prompt() {
+        assert_eq!(
+            codex_prompt_from_title("⠧ Remove the bottom-right resize icon | super-desktop"),
+            Some("Remove the bottom-right resize icon".into()),
+        );
+        assert_eq!(
+            codex_prompt_from_title("[ ! ] Action Required | Add directory selector | super-desktop"),
+            Some("Add directory selector".into()),
+        );
+        assert_eq!(codex_prompt_from_title("OpenAI Codex"), None);
     }
 
     #[test]

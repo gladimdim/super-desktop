@@ -91,6 +91,7 @@ impl Connection {
         buf[0] = self.peeked.unwrap(); Ok(1)
     }
     pub(super) fn streaming(&mut self) { self.deadline = None; }
+    pub(super) fn upload_deadline(&mut self) { self.deadline = Some(std::time::Instant::now() + Duration::from_secs(30)); }
     pub(super) fn credential(&mut self, token: &str) { self.credential_hash = Some(digest(token.as_bytes())); }
     pub(super) fn still_authorized(&self) -> bool {
         self.credential_hash.as_ref().is_none_or(|hash| pair_state().lock().map(|p|

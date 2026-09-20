@@ -66,6 +66,8 @@ def main():
                 assert request(path)[0] == 401, path
             assert request("/api/v1/pair/state")[0] == 403
             assert request("/api/v1/completions", {"sessions": []})[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {})[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, headers={"Content-Length": "99999999"})[0] == 401
             assert request("/api/v1/pair/invitation", {})[0] == 403
             assert request("/api/v1/pair", {"deviceName": "stranger"})[0] == 403
             assert request("/api/v1/ping", headers={"Origin": "https://untrusted.example"})[0] == 403
@@ -80,6 +82,11 @@ def main():
             admin("/api/v1/pair/approve", rid)
             token = request("/api/v1/pair/poll", rid)[1]["token"]
             assert request("/api/v1/theme", token=token)[0] == 200
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Content-Length": "99999999"})[0] == 413
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {"requestId": "a" * 32, "text": "hello", "imageBase64": "invalid"}, token=token)[0] == 409
+            # Authorized image route accepts >16 KiB, but the general request limit stays unchanged.
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {"requestId": "a" * 32, "text": "hello", "imageBase64": "A" * 20000}, token=token)[0] == 409
             assert request("/api/v1/completions", {"sessions": ["../invalid"]}, token=token)[0] == 400
             assert request("/api/v1/completions", {"sessions": ["x"] * 33}, token=token)[0] == 400
             status, completion = request("/api/v1/completions", {"sessions": ["sd_term_missing"]}, token=token)
@@ -99,6 +106,7 @@ def main():
             assert admin("/api/v1/pair/devices")["devices"] == []
             assert request("/api/v1/theme", token=token)[0] == 401
             assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401
             assert request("/api/v1/pair/poll", rid)[0] == 404
             while live.recv(65536):
