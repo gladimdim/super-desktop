@@ -2,7 +2,16 @@
 # SUPER DESKTOP - Pure Native Rust Launcher
 set -e
 
-SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/.." && pwd)"
+# Resolve installed symlinks with one process, not nested realpath/dirname/cd.
+SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="${SCRIPT_PATH%/bin/*}"
+
+# The control client does not link GTK/VTE or preload layer-shell. It delegates
+# cold starts and non-control commands to the full application.
+CLIENT_BIN="$SCRIPT_DIR/target/release/super-desktop-client"
+if [[ -x "$CLIENT_BIN" && -x "$SCRIPT_DIR/target/release/super-desktop" ]]; then
+    exec "$CLIENT_BIN" "$@"
+fi
 
 # Ensure GTK4 Layer Shell library is preloaded if present
 LAYER_SHELL_LIB="/usr/lib/libgtk4-layer-shell.so"

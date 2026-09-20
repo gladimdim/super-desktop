@@ -19,7 +19,7 @@ use crate::mini_terminal::{
 use crate::state::{load_state, AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
 use crate::tag::DEFAULT_TERMINAL_TAG;
-use crate::tmux::{create_session, kill_session};
+use crate::tmux::create_session;
 
 #[derive(Clone, Copy)]
 struct Trajectory {
@@ -187,6 +187,7 @@ impl SuperDesktopWindow {
         on_request_close: FClose,
         hot_inside: Rc<Cell<bool>>,
     ) -> Rc<Self> {
+        crate::startup::mark("overlay construction started");
         let window = ApplicationWindow::new(app);
 
         window.init_layer_shell();
@@ -259,7 +260,7 @@ impl SuperDesktopWindow {
         // size buttons repaint the live dock once construction has finished.
         let hud_for_settings: Rc<RefCell<Option<gtk4::Box>>> = Rc::new(RefCell::new(None));
 
-        let settings_panel = crate::harness_settings::build_harness_settings_panel(
+        let settings_panel = crate::harness_settings::build_lazy_harness_settings_panel(
             Rc::clone(&state),
             Rc::new({
                 let state = Rc::clone(&state);
@@ -711,13 +712,19 @@ impl SuperDesktopWindow {
             }
         });
 
+        crate::startup::mark("overlay constructed (terminal preparation queued)");
+        win_rc.window.add_tick_callback(|_, _| {
+            crate::startup::mark("first overlay frame-clock tick (not presentation time)");
+            glib::ControlFlow::Break
+        });
         win_rc
     }
 
     fn load_items(&self) {
         let terminals: Vec<TerminalData> = self.state.borrow().terminals.clone();
+        let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::default());
         for term_data in terminals {
-            self.spawn_terminal_widget(term_data, false);
+            self.spawn_terminal_widget(term_data, false, Some(std::sync::Arc::clone(&inventory)));
         }
 
         let notes: Vec<NoteData> = self.state.borrow().notes.clone();
@@ -958,7 +965,8 @@ impl SuperDesktopWindow {
     pub fn workspace_choices(&self) -> serde_json::Value {
         let state = self.state.borrow();
         serde_json::json!({"workspace": crate::state::effective_workspace_dir(&state),
-            "recentDirectories": state.recent_dirs})
+            "recentDirectories": state.recent_dirs,
+            "usedDirectories": state.used_dirs})
     }
 
     pub fn create_new_terminal_in(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>) -> String {
@@ -1007,12 +1015,12 @@ impl SuperDesktopWindow {
             workspace_dir: Some(workspace_dir),
         };
 
-        self.spawn_terminal_widget(data, true);
+        self.spawn_terminal_widget(data, true, None);
         self.update_counts();
         sess
     }
 
-    fn spawn_terminal_widget(&self, term_data: TerminalData, save: bool) {
+    fn spawn_terminal_widget(&self, term_data: TerminalData, save: bool, startup_inventory: Option<std::sync::Arc<crate::tmux::SessionInventory>>) {
         let canvas = self.canvas.clone();
         let state = Rc::clone(&self.state);
         let term_cards = Rc::clone(&self.terminal_cards);
@@ -1105,7 +1113,6 @@ impl SuperDesktopWindow {
         let hud_del = hud_badge.clone();
 
         let on_close = move |sess: String| {
-            kill_session(&sess);
             // Pull the card out of the shared list and drop the borrow BEFORE
             // touching GTK. `canvas.remove` unparents the whole card subtree
             // (VTE included), and that unmap emits pointer/focus-enter signals
@@ -1121,6 +1128,7 @@ impl SuperDesktopWindow {
             };
             let Some(card) = card else { return };
 
+            card.close_session();
             canvas_del.remove(&card.container);
             let mut s = state_del.borrow_mut();
             s.terminals.retain(|t| t.session_name != sess);
@@ -1257,6 +1265,7 @@ impl SuperDesktopWindow {
             on_session_persist,
             sw,
             sh,
+            startup_inventory,
         );
         canvas.put(&card.container, x, y);
         term_cards.borrow_mut().push(Rc::new(card));
@@ -1484,7 +1493,6 @@ impl SuperDesktopWindow {
     }
 
     pub fn close_terminal(&self, sess: &str) -> bool {
-        kill_session(sess);
         let card = {
             let mut cards = self.terminal_cards.borrow_mut();
             cards
@@ -1494,6 +1502,7 @@ impl SuperDesktopWindow {
         };
         let Some(card) = card else { return false };
 
+        card.close_session();
         self.canvas.remove(&card.container);
         let mut s = self.state.borrow_mut();
         s.terminals.retain(|t| t.session_name != sess);

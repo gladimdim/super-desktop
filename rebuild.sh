@@ -11,7 +11,7 @@
 #   1. Stops the running super-desktop daemon (IPC kill + pkill fallback,
 #      stale socket cleanup) so the old binary releases the socket.
 #   2. Rebuilds the native Rust binary (cargo build --release).
-#   3. Re-links ~/.local/bin/super-desktop -> bin/super-desktop and refreshes
+#   3. Re-links ~/.local/bin/super-desktop -> the native control client and refreshes
 #      toolbar assets in ~/.config/super-desktop/assets.
 #   4. Reloads Hyprland (hyprctl reload) and validates (hyprctl configerrors).
 #   5. Starts a fresh hidden daemon (super-desktop daemon) and verifies it
@@ -19,7 +19,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="$SCRIPT_DIR/bin/super-desktop"
+BIN_SRC="$SCRIPT_DIR/target/release/super-desktop-client"
 BIN_DST="$HOME/.local/bin/super-desktop"
 RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"
 CONFIG_DIR="$HOME/.config/super-desktop"

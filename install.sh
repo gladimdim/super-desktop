@@ -3,7 +3,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIN_SRC="$SCRIPT_DIR/bin/super-desktop"
+BIN_SRC="$SCRIPT_DIR/target/release/super-desktop-client"
 BIN_DST="$HOME/.local/bin/super-desktop"
 CONFIG_DIR="$HOME/.config/super-desktop"
 APP_DST="$HOME/.local/share/applications/super-desktop.desktop"

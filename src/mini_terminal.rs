@@ -4,12 +4,13 @@ use gtk4::prelude::*;
 use gtk4::{Align, Button, EventControllerFocus, GestureClick, GestureDrag, Label, Orientation, Overlay};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 use vte4::prelude::*;
 use vte4::{PtyFlags, Terminal as VteTerminal};
 
 use crate::state::TerminalData;
 use crate::tmux::{
-    capture_pane_text, ensure_session_with_agent_id, extract_composer_draft,
+    capture_pane_text, ensure_session_with_inventory, extract_composer_draft,
     extract_last_prompt, get_agent_config, get_opencode_user_text_by_id,
     inspect_status_with_screen, preview_from_screen, resolve_own_opencode_id,
     tmux_bin, truncate_prompt_title,
@@ -114,6 +115,7 @@ pub struct MiniTerminalCard {
     compact_top_bar: gtk4::Box,
     preview_box: gtk4::Box,
     vte: Rc<RefCell<Option<VteTerminal>>>,
+    session_task: Arc<crate::session_task::SessionTask>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
     on_session_persist: Rc<dyn Fn(&TerminalData)>,
@@ -132,6 +134,7 @@ impl MiniTerminalCard {
         on_session_persist: FSessionSave,
         screen_w: i32,
         screen_h: i32,
+        startup_inventory: Option<Arc<crate::tmux::SessionInventory>>,
     ) -> Self
     where
         FDragUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
@@ -424,6 +427,7 @@ impl MiniTerminalCard {
         let opencode_session = Rc::new(RefCell::new(data.borrow().agent_session_id.clone()));
         let on_session_persist: Rc<dyn Fn(&TerminalData)> = Rc::new(on_session_persist);
         let card = Self {
+            session_task: Arc::new(crate::session_task::SessionTask::default()),
             container: root,
             data: Rc::clone(&data),
             expanded: Rc::clone(&expanded),
@@ -544,6 +548,7 @@ impl MiniTerminalCard {
         };
 
         let restore_action: Rc<dyn Fn()> = {
+            let session_task = Arc::clone(&card.session_task);
             let expanded = Rc::clone(&expanded);
             let data = Rc::clone(&data);
             let vte = Rc::clone(&card.vte);
@@ -594,7 +599,7 @@ impl MiniTerminalCard {
                 container.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
-                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded);
+                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None);
                 } else if let Some(term) = vte.borrow().as_ref() {
                     let theme = crate::theme::current_theme();
                     let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
@@ -792,7 +797,7 @@ impl MiniTerminalCard {
         );
 
         if !card.data.borrow().iconified && card.data.borrow().width >= MIN_CARD_WIDTH {
-            card.attach_vte();
+            card.attach_vte_with_inventory(startup_inventory);
         }
         card.apply_chrome();
         card.refresh_status();
@@ -902,6 +907,10 @@ impl MiniTerminalCard {
     }
 
     pub fn attach_vte(&self) {
+        self.attach_vte_with_inventory(None);
+    }
+
+    fn attach_vte_with_inventory(&self, inventory: Option<Arc<crate::tmux::SessionInventory>>) {
         if self.vte.borrow().is_some() {
             return;
         }
@@ -912,7 +921,19 @@ impl MiniTerminalCard {
             self.is_expanded(),
             &self.on_toggle,
             &self.expanded,
+            &self.session_task,
+            inventory,
         );
+    }
+
+    pub fn close_session(&self) {
+        self.session_task.close();
+        self.detach_vte();
+        let task = Arc::clone(&self.session_task);
+        let session = self.data.borrow().session_name.clone();
+        gtk4::gio::spawn_blocking(move || {
+            task.finish_close(|| crate::tmux::kill_session(&session));
+        });
     }
 
     pub fn detach_vte(&self) {
@@ -1136,7 +1157,10 @@ fn spawn_vte(
     is_expanded: bool,
     on_toggle: &Rc<dyn Fn(&TerminalData)>,
     expanded_ref: &Rc<RefCell<bool>>,
+    session_task: &Arc<crate::session_task::SessionTask>,
+    inventory: Option<Arc<crate::tmux::SessionInventory>>,
 ) {
+    if session_task.is_closed() { return; }
     remove_vte(vte, preview_box);
 
     let term = VteTerminal::new();
@@ -1194,48 +1218,64 @@ fn spawn_vte(
     // history to the cwd, so a card restored elsewhere would come back
     // attached to a different project. Cards from before this existed have
     // `None` and keep the old behaviour ($HOME).
-    let cwd = crate::tmux::resolve_workspace_dir(data.borrow().workspace_dir.as_deref());
-    ensure_session_with_agent_id(
-        &session,
-        &agent_type,
-        Some(&cmd),
-        agent_session_id.as_deref(),
-        Some(&cwd),
-    );
+    let workspace_dir = data.borrow().workspace_dir.clone();
 
-    let tmux = tmux_bin();
-    let argv = [tmux.as_str(), "-2", "attach-session", "-t", session.as_str()];
+    // Display the widget immediately, but do not block GTK on tmux, filesystem
+    // probes, or agent resume lookup. A weak widget + identity check prevents
+    // a late completion attaching a removed/replaced VTE after minimize/close.
+    let weak_term = term.downgrade();
+    let weak_slot = Rc::downgrade(vte);
+    let task = Arc::clone(session_task);
+    glib::MainContext::default().spawn_local(async move {
+        if task.is_closed() { return; }
+        let prepare_task = Arc::clone(&task);
+        let prepare_session = session.clone();
+        let prepared = gtk4::gio::spawn_blocking(move || {
+            let cwd = crate::tmux::resolve_workspace_dir(workspace_dir.as_deref());
+            let ready = prepare_task.prepare(|| ensure_session_with_inventory(
+                &prepare_session, &agent_type, Some(&cmd), agent_session_id.as_deref(), Some(&cwd),
+                inventory.as_deref(),
+            ));
+            (ready, cwd, tmux_bin())
+        }).await;
+        let Ok((true, cwd, tmux)) = prepared else { return; };
+        crate::startup::mark("terminal session prepared");
+        if task.is_closed() { return; }
+        let (Some(term), Some(slot)) = (weak_term.upgrade(), weak_slot.upgrade()) else { return; };
+        if slot.borrow().as_ref() != Some(&term) { return; }
+        let argv = [tmux.as_str(), "-2", "attach-session", "-t", session.as_str()];
 
-    let mut env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
-    // Attaching from inside a tmux client nests sessions and routes input to
-    // the OUTER session, so output/Ctrl+C leaks across cards. The daemon is
-    // normally spawned by Hyprland (no TMUX), but unsets make dev launches
-    // (`... daemon` from a terminal) safe too.
-    env_map.remove("TMUX");
-    env_map.remove("TMUX_PANE");
-    env_map.insert("TERM".to_string(), "xterm-256color".to_string());
-    env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
-    let env: Vec<String> = env_map
-        .into_iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    let env_refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
+        let mut env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
+        // Attaching from inside a tmux client nests sessions and routes input
+        // to the OUTER session. Unset these for launches from a terminal too.
+        env_map.remove("TMUX");
+        env_map.remove("TMUX_PANE");
+        env_map.insert("TERM".to_string(), "xterm-256color".to_string());
+        env_map.insert("COLORTERM".to_string(), "truecolor".to_string());
+        let env: Vec<String> = env_map
+            .into_iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let env_refs: Vec<&str> = env.iter().map(|s| s.as_str()).collect();
 
-    term.spawn_async(
-        PtyFlags::DEFAULT,
-        Some(cwd.as_str()),
-        &argv,
-        &env_refs,
-        glib::SpawnFlags::DEFAULT,
-        || {},
-        -1,
-        None::<&gtk4::gio::Cancellable>,
-        |result| {
-            if let Err(err) = result {
-                eprintln!("SUPER DESKTOP: failed to attach tmux in overlay: {err}");
-            }
-        },
-    );
+        term.spawn_async(
+            PtyFlags::DEFAULT,
+            Some(cwd.as_str()),
+            &argv,
+            &env_refs,
+            glib::SpawnFlags::DEFAULT,
+            || {},
+            -1,
+            None::<&gtk4::gio::Cancellable>,
+            |result| {
+                if let Err(err) = result {
+                    eprintln!("SUPER DESKTOP: failed to attach tmux in overlay: {err}");
+                } else {
+                    crate::startup::mark("terminal attach process spawned");
+                }
+            },
+        );
+    });
 
     let expand_time = std::time::Instant::now();
     let on_toggle_child = Rc::clone(on_toggle);
@@ -1462,6 +1502,31 @@ mod tests {
         assert_eq!((d.icon_x, d.icon_y), (Some(500), Some(300)));
         d.iconified = true;
         assert_eq!(displayed_pos(&d), (500.0, 300.0));
+    }
+
+    #[test]
+    fn closing_before_gtk_dispatch_cancels_terminal_preparation() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("mini_terminal::tests::closing_before_gtk_dispatch_cancels_terminal_preparation");
+            return;
+        }
+        if gtk4::init().is_err() { return; }
+        let mut data = term_data(false);
+        data.session_name = format!("test_sd_cancel_prepare_{}", std::process::id());
+        let session = data.session_name.clone();
+        let slot = Rc::new(RefCell::new(None));
+        let preview = gtk4::Box::new(Orientation::Vertical, 0);
+        let task = Arc::new(crate::session_task::SessionTask::default());
+        let toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(|_| {});
+        spawn_vte(&slot, &preview, &Rc::new(RefCell::new(data)), false,
+            &toggle, &Rc::new(RefCell::new(false)), &task, None);
+        assert!(slot.borrow().is_some(), "placeholder exists before async setup");
+        task.close();
+        remove_vte(&slot, &preview);
+        let context = glib::MainContext::default();
+        while context.pending() { context.iteration(false); }
+        assert!(slot.borrow().is_none());
+        assert!(!crate::tmux::session_exists(&session), "cancelled setup must not create a session");
     }
 
     #[test]

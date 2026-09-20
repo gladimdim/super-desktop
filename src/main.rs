@@ -8,7 +8,9 @@ mod jev;
 mod launcher_settings;
 mod mini_terminal;
 mod shortcut;
+mod session_task;
 mod state;
+mod startup;
 mod sticky_note;
 mod styles;
 mod tag;
@@ -188,6 +190,7 @@ struct AppContext {
 }
 
 fn main() {
+    startup::mark("process entry");
     // First thing: release builds abort on panic and the daemon's stderr goes
     // to /dev/null, so without this a crash leaves no readable trace.
     crashlog::install_panic_hook();
@@ -319,6 +322,7 @@ fn main() {
 
 fn run_daemon(start_visible: bool) {
     let _ = gtk4::init();
+    startup::mark("GTK initialized");
 
     let app = Application::builder()
         .application_id("org.omarchy.superdesktop")
@@ -329,6 +333,7 @@ fn run_daemon(start_visible: bool) {
     std::mem::forget(app.hold());
     ensure_omarchy_theme_hook();
     apply_styles();
+    startup::mark("theme and styles ready");
 
     let context = Rc::new(RefCell::new(AppContext {
         window: None,
@@ -374,6 +379,7 @@ fn run_daemon(start_visible: bool) {
         "daemon"
     });
     start_ipc_thread(ipc_tx);
+    startup::mark("IPC listening");
 
     // The bridge waits for its child to become reachable, so keep that work
     // off GTK's main thread. Start it only after this process owns the daemon
@@ -696,7 +702,8 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             }
             let state = state::load_state();
             json!({"workspace": state::effective_workspace_dir(&state),
-                "recentDirectories": state.recent_dirs}).to_string()
+                "recentDirectories": state.recent_dirs,
+                "usedDirectories": state.used_dirs}).to_string()
         }
         "add-term-in" => {
             // JSON preserves spaces and escapes newlines in paths over IPC.

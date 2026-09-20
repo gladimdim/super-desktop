@@ -63,6 +63,8 @@ super-desktop harnesses       # one-shot JSON dump of sessions (debug)
 
 State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Rebuild after updates with `./rebuild.sh`.
 
+See [Linux performance](PERFORMANCE.md) for startup changes, measured command latency, and opt-in startup profiling.
+
 ---
 
 ## 🤖 For AI assistants — installing this on someone's Omarchy
@@ -89,7 +91,7 @@ cd ~/GitHub/super-desktop
 `install.sh` does, in order:
 1. Ensures `cargo` and `vte4` (warns instead of prompting when no TTY).
 2. `cargo build --release`.
-3. Symlinks `~/.local/bin/super-desktop` → `bin/super-desktop` (a launcher that `LD_PRELOAD`s `libgtk4-layer-shell.so` and execs `target/release/super-desktop`; it auto-builds if the binary is missing).
+3. Symlinks `~/.local/bin/super-desktop` → `target/release/super-desktop-client`, a lightweight native IPC client. Existing-daemon commands avoid loading GTK/VTE; cold starts delegate to the main binary with layer-shell preloaded. The repository's `bin/super-desktop` remains a build-on-demand fallback.
 4. Copies `assets/` → `~/.config/super-desktop/assets/`.
 5. Installs the desktop entry `~/.local/share/applications/super-desktop.desktop`.
 6. Writes the toggle binding into a marked block in `~/.config/hypr/bindings.lua` — `hl.unbind` + `o.bind("SUPER + SHIFT + Q", …)` plus the `code:24` form that keeps it working on the UK/Cyrillic layouts — and `o.exec_on_start("super-desktop daemon")`. Migrates and skips what is already there, so re-running is safe. Everything between the two markers belongs to the app: the ⚙ Settings panel rewrites that block when the user records another shortcut (see `src/shortcut.rs`).

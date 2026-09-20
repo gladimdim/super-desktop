@@ -2,6 +2,7 @@
 name = "super-desktop"
 version = "1.1.0"
 edition = "2021"
+default-run = "super-desktop"
 authors = ["gladimdim"]
 description = "High-performance Wayland LayerShell overlay for sticky notes and AI terminals on Omarchy / Hyprland"
 

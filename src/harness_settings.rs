@@ -183,6 +183,48 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
 /// `on_shortcut_change` receives a freshly recorded key combination once it has
 /// been written into Hyprland's config; `on_top_bar_size_change` applies and
 /// persists a newly selected dock scale.
+/// The overlay only needs a placeholder until Settings is actually opened.
+/// Keep the constructed panel afterwards so navigation and controls survive.
+pub fn build_lazy_harness_settings_panel(
+    state: Rc<RefCell<AppState>>,
+    on_change: Rc<dyn Fn(Vec<String>)>,
+    on_shortcut_change: Rc<dyn Fn(String)>,
+    on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
+) -> HarnessSettingsPanel {
+    let host = Box::new(Orientation::Vertical, 0);
+    host.set_visible(false);
+    let panel: Rc<RefCell<Option<HarnessSettingsPanel>>> = Rc::new(RefCell::new(None));
+    let weak_host = host.downgrade();
+    let refresh = Rc::new(move || {
+        let Some(host) = weak_host.upgrade() else { return };
+        if let Some(panel) = panel.borrow().as_ref() {
+            panel.widget.set_visible(host.is_visible());
+            (panel.refresh)();
+            return;
+        }
+        if !host.is_visible() { return; }
+        let built = build_harness_settings_panel(
+            Rc::clone(&state), Rc::clone(&on_change),
+            Rc::clone(&on_shortcut_change), Rc::clone(&on_top_bar_size_change),
+        );
+        // The panel's close button hides its root; mirror that on the host so
+        // the next gear click opens it instead of requiring two clicks.
+        let weak_host = host.downgrade();
+        built.widget.connect_visible_notify(move |widget| {
+            if !widget.is_visible() {
+                if let Some(host) = weak_host.upgrade() { host.set_visible(false); }
+            }
+        });
+        let weak_panel = built.widget.downgrade();
+        host.connect_visible_notify(move |host| {
+            if let Some(widget) = weak_panel.upgrade() { widget.set_visible(host.is_visible()); }
+        });
+        host.append(&built.widget);
+        *panel.borrow_mut() = Some(built);
+    });
+    HarnessSettingsPanel { widget: host.upcast(), refresh }
+}
+
 pub fn build_harness_settings_panel(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<dyn Fn(Vec<String>)>,
@@ -829,6 +871,36 @@ pub fn build_harness_settings_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_panel_builds_only_on_open_and_reopens_after_close() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("harness_settings::tests::lazy_panel_builds_only_on_open_and_reopens_after_close");
+            return;
+        }
+        if gtk4::init().is_err() { return; }
+        let panel = build_lazy_harness_settings_panel(
+            Rc::new(RefCell::new(AppState::default())),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+        );
+        assert!(panel.widget.first_child().is_none());
+        (panel.refresh)(); // Theme changes while unopened must remain cheap.
+        assert!(panel.widget.first_child().is_none());
+        panel.widget.set_visible(true);
+        (panel.refresh)();
+        let child = panel.widget.first_child().expect("built on first open");
+        child.set_visible(false); // Inner close button.
+        assert!(!panel.widget.is_visible());
+        panel.widget.set_visible(true);
+        (panel.refresh)();
+        assert_eq!(panel.widget.first_child(), Some(child.clone()));
+        assert!(child.is_visible());
+        panel.widget.set_visible(false); // Overlay hide.
+        assert!(!child.is_visible());
+        (panel.refresh)();
+        assert!(!panel.widget.is_visible());
+        assert!(!child.is_visible());
+    }
 
     fn info(key: &'static str) -> HarnessInfo {
         HarnessInfo {

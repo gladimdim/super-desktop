@@ -378,7 +378,20 @@ fn pin_client_exit(session_name: &str) {
 /// Existence + the pinned-client flag of one session, in a single `tmux` call:
 /// `Some(true)` = exists and already pins `detach-on-destroy on`, `Some(false)`
 /// = exists but still inherits the global setting, `None` = no such session.
+#[derive(Default)]
+pub struct SessionInventory(std::sync::OnceLock<Option<std::collections::HashMap<String, bool>>>);
+
+impl SessionInventory {
+    fn state(&self, session_name: &str) -> Option<bool> {
+        self.0.get_or_init(read_session_inventory).as_ref()?.get(session_name).copied()
+    }
+}
+
 fn session_state(session_name: &str) -> Option<bool> {
+    read_session_inventory()?.get(session_name).copied()
+}
+
+fn read_session_inventory() -> Option<std::collections::HashMap<String, bool>> {
     let out = Command::new("tmux")
         .args([
             "list-sessions",
@@ -391,10 +404,10 @@ fn session_state(session_name: &str) -> Option<bool> {
         return None;
     }
     let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().find_map(|line| {
+    Some(text.lines().filter_map(|line| {
         let (name, value) = line.split_once("::")?;
-        (name.trim() == session_name).then(|| value.trim() == "on")
-    })
+        Some((name.trim().to_string(), value.trim() == "on"))
+    }).collect())
 }
 
 /// The directory a harness session runs in: the requested folder when it is a
@@ -524,11 +537,24 @@ pub fn ensure_session_with_agent_id(
     agent_session_id: Option<&str>,
     workspace_dir: Option<&str>,
 ) {
+    ensure_session_with_inventory(session_name, agent_type, custom_command, agent_session_id, workspace_dir, None);
+}
+
+/// Share an inventory only during the initial restoration batch, never across
+/// later attachments (which need to discover sessions closed in the meantime).
+pub fn ensure_session_with_inventory(
+    session_name: &str,
+    agent_type: &str,
+    custom_command: Option<&str>,
+    agent_session_id: Option<&str>,
+    workspace_dir: Option<&str>,
+    inventory: Option<&SessionInventory>,
+) {
     // One `tmux` call answers both questions this function needs: does the
     // session exist, and is `detach-on-destroy` already pinned? Every fork/exec
     // is tens of milliseconds on a loaded machine, and this runs once per card
     // while the overlay is being built.
-    match session_state(session_name) {
+    match inventory.map_or_else(|| session_state(session_name), |snapshot| snapshot.state(session_name)) {
         // Already there and already pinned: nothing to do.
         Some(true) => return,
         // Exists but still inheriting the user's `detach-on-destroy off`
@@ -1870,6 +1896,18 @@ mod tests {
 
         let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
         assert_eq!(session_state(sess), None);
+    }
+
+    #[test]
+    fn restoration_inventory_is_shared_and_not_a_global_cache() {
+        let inventory = SessionInventory::default();
+        inventory.0.set(Some(std::collections::HashMap::from([
+            ("test_a".to_string(), true), ("test_b".to_string(), false),
+        ]))).unwrap();
+        assert_eq!(inventory.state("test_a"), Some(true));
+        assert_eq!(inventory.state("test_b"), Some(false));
+        assert_eq!(inventory.state("missing"), None);
+        assert!(SessionInventory::default().0.get().is_none());
     }
 
     #[test]
