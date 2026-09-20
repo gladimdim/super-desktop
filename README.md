@@ -25,6 +25,10 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 
 ### Supported AI harnesses
 
+Android's per-terminal bell can report explicit Codex response completion, including
+while the phone UI is hidden using an opt-in foreground monitor. Other harnesses
+do not yet have verified completion adapters. See [completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).
+
 | | |
 |---|---|
 | 🌌 Antigravity CLI | `agy` / `antigravity` |

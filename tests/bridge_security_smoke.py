@@ -65,6 +65,7 @@ def main():
                          "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
                 assert request(path)[0] == 401, path
             assert request("/api/v1/pair/state")[0] == 403
+            assert request("/api/v1/completions", {"sessions": []})[0] == 401
             assert request("/api/v1/pair/invitation", {})[0] == 403
             assert request("/api/v1/pair", {"deviceName": "stranger"})[0] == 403
             assert request("/api/v1/ping", headers={"Origin": "https://untrusted.example"})[0] == 403
@@ -79,6 +80,10 @@ def main():
             admin("/api/v1/pair/approve", rid)
             token = request("/api/v1/pair/poll", rid)[1]["token"]
             assert request("/api/v1/theme", token=token)[0] == 200
+            assert request("/api/v1/completions", {"sessions": ["../invalid"]}, token=token)[0] == 400
+            assert request("/api/v1/completions", {"sessions": ["x"] * 33}, token=token)[0] == 400
+            status, completion = request("/api/v1/completions", {"sessions": ["sd_term_missing"]}, token=token)
+            assert status == 200 and completion["terminals"][0]["supported"] is False
             assert request("/api/v1/harnesses/sd_term_nonexistent_asset_probe/assets", token=token)[0] == 400
             assert request("/api/v1/harnesses/sd_term_nonexistent_asset_probe/assets", {"path": "../../etc/passwd"}, token=token)[0] == 400
             assert request("/api/v1/pair/approve", rid, token=token)[0] == 403
@@ -93,6 +98,7 @@ def main():
             admin("/api/v1/pair/revoke", {"deviceId": device["id"]})
             assert admin("/api/v1/pair/devices")["devices"] == []
             assert request("/api/v1/theme", token=token)[0] == 401
+            assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401
             assert request("/api/v1/pair/poll", rid)[0] == 404
             while live.recv(65536):

@@ -1176,6 +1176,22 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                 }),
             );
         }
+        ("POST", "/api/v1/completions") => {
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+            let ids: Option<Vec<String>> = body["sessions"].as_array().filter(|v| v.len() <= 32).and_then(|v| {
+                v.iter().map(|id| id.as_str().filter(|s| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).map(str::to_string)).collect()
+            });
+            let Some(ids) = ids else {
+                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_sessions"}));
+            };
+            let Some(_job) = crate::assets::Transfer::acquire() else {
+                return respond(&mut stream, 429, "Too Many Requests", &serde_json::json!({"error":"busy"}));
+            };
+            respond(&mut stream, 200, "OK", &serde_json::json!({"terminals": crate::completion::collect(&ids)}));
+        }
         ("GET", "/api/v1/theme") => {
             if !authorize(&req, local) {
                 return respond(

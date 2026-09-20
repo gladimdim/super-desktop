@@ -34,10 +34,19 @@ There is no automatic HOME fallback and no recursive scan, even for a workspace
 that is itself the home directory. Files outside the workspace cannot currently
 be added; no extra-directory approval workflow exists yet.
 
-The in-memory reference history holds at most 64 files for each of 64 terminals
-per process and is cleared on restart. Linux and bridge maintain independent
-histories; they discover the same terminal output, but manually added entries
-are not synchronized between the two processes in this first version.
+Linux and the bridge share persistent reference history under
+`~/.local/state/super-desktop/file-assets/` when running as the same Linux user.
+Manually added references appear on the other device after opening or refreshing
+Files, and survive process restarts. History is scoped to both terminal ID and
+recorded workspace: at most 64 references for each of 64 terminal/workspace pairs,
+with a 2 MiB total index limit (oldest histories are evicted first).
+Only relative paths are stored, never file contents or credentials. The directory
+is private (0700), files are private (0600), and writes are locked across processes
+and atomically replaced. Every restored path passes the normal file-access checks;
+deleted, disallowed, or oversized files do not appear. If storage is unavailable
+or unsafe, Files still works using in-memory history, with a diagnostic in Linux
+logs. Content IDs remain process-local and versioned; reopen/refresh Files after
+a bridge restart before downloading again.
 
 Content is re-opened with descriptor-relative, no-symlink traversal and checked
 against the listed inode/device/size/mtime/ctime before and after reading. Changed

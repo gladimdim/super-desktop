@@ -258,6 +258,22 @@ pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String>
             break;
         }
     }
+    // Persist only path hints. Re-registering below enforces the same workspace,
+    // symlink, hidden-file and size policy for references added on either device.
+    let references = found
+        .iter()
+        .map(|e| e.asset.relative_path.clone())
+        .collect();
+    match crate::asset_history::merge(session, &root, references) {
+        Ok(paths) => {
+            for path in paths {
+                if let Ok(entry) = register(&root, session, &path) {
+                    found.push(entry);
+                }
+            }
+        }
+        Err(error) => eprintln!("File reference history unavailable: {error}"),
+    }
     let mut catalog = catalog().lock().unwrap();
     let old = catalog
         .sessions
