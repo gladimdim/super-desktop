@@ -13,6 +13,7 @@ mod jev;
 mod launcher_settings;
 mod mini_terminal;
 mod shortcut;
+mod sleep_lock;
 mod session_task;
 mod state;
 mod startup;
@@ -326,6 +327,7 @@ fn main() {
 }
 
 fn run_daemon(start_visible: bool) {
+    sleep_lock::set_enabled(state::load_state().sleep_lock_on_ac);
     let _ = gtk4::init();
     startup::mark("GTK initialized");
 

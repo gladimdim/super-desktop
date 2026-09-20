@@ -49,6 +49,7 @@ enum SettingsPage {
     Shortcut,
     Harnesses,
     TopBar,
+    SleepLock,
     Android,
 }
 
@@ -382,6 +383,12 @@ pub fn build_harness_settings_panel(
     btn_top_bar_page.set_tooltip_text(Some("Change the top-bar size"));
     home_root.append(&btn_top_bar_page);
 
+    let (btn_sleep_lock, _) = settings_entry(
+        "☀", "Sleep lock", "Keep AI harnesses awake while the laptop is on charger power.",
+        "settings-sleep-lock-entry",
+    );
+    home_root.append(&btn_sleep_lock);
+
     let (btn_launcher, launcher_trailing) = settings_entry(
         "▣",
         "SUPER DESKTOP on Android",
@@ -580,10 +587,56 @@ pub fn build_harness_settings_panel(
     }
     paint_size();
 
+    let sleep_root = Box::new(Orientation::Vertical, 10);
+    sleep_root.add_css_class("launcher-body");
+    let (_, sleep_body) = section_card(&sleep_root, "", "Stay awake on charger");
+    let sleep_row = Box::new(Orientation::Horizontal, 12);
+    let sleep_label = Label::new(Some("Prevent sleep while plugged in"));
+    sleep_label.set_hexpand(true);
+    sleep_label.set_xalign(0.0);
+    sleep_label.set_wrap(true);
+    let sleep_toggle = gtk4::Switch::new();
+    sleep_toggle.add_css_class("sleep-lock-toggle");
+    sleep_toggle.set_valign(Align::Center);
+    sleep_toggle.set_active(state.borrow().sleep_lock_on_ac);
+    sleep_toggle.set_tooltip_text(Some("Keep AI harnesses running on charger power, including with the lid closed"));
+    sleep_row.append(&sleep_label);
+    sleep_row.append(&sleep_toggle);
+    sleep_body.append(&sleep_row);
+    let sleep_help = Label::new(Some("Keeps this laptop awake, including with the lid closed, while SUPER DESKTOP is running and charger power is detected. Normal sleep behavior returns on battery. The screen can still turn off and lock. Turn this off before manually suspending."));
+    sleep_help.set_wrap(true);
+    sleep_help.set_xalign(0.0);
+    sleep_help.add_css_class("launcher-hint");
+    sleep_body.append(&sleep_help);
+    let sleep_status = Label::new(Some(&crate::sleep_lock::status()));
+    sleep_status.set_wrap(true);
+    sleep_status.set_xalign(0.0);
+    sleep_status.add_css_class("sleep-lock-status");
+    sleep_body.append(&sleep_status);
+    sleep_toggle.connect_active_notify({
+        let state = Rc::clone(&state);
+        move |toggle| {
+            let enabled = toggle.is_active();
+            state.borrow_mut().sleep_lock_on_ac = enabled;
+            crate::state::save_state_async(state.borrow().clone());
+            crate::sleep_lock::set_enabled(enabled);
+        }
+    });
+    let weak_status = sleep_status.downgrade();
+    glib::timeout_add_local(Duration::from_secs(1), move || {
+        let Some(label) = weak_status.upgrade() else { return glib::ControlFlow::Break; };
+        if label.is_mapped() {
+            let text = crate::sleep_lock::status();
+            if label.text().as_str() != text { label.set_text(&text); }
+        }
+        glib::ControlFlow::Continue
+    });
+
     let home_view = settings_scroll(&home_root);
     let shortcut_view = settings_scroll(&shortcut_root);
     let harnesses_view = settings_scroll(&harnesses_root);
     let top_bar_view = settings_scroll(&top_bar_root);
+    let sleep_view = settings_scroll(&sleep_root);
 
     // The Android page owns its live bridge controls. It is one destination in
     // the settings hub and refreshes only when entered.
@@ -598,10 +651,12 @@ pub fn build_harness_settings_panel(
     pages.append(&harnesses_view);
     pages.append(&top_bar_view);
     pages.append(&launcher_view);
+    pages.append(&sleep_view);
     shortcut_view.set_visible(false);
     harnesses_view.set_visible(false);
     top_bar_view.set_visible(false);
     launcher_view.set_visible(false);
+    sleep_view.set_visible(false);
     outer.append(&pages);
 
     let nav: Rc<dyn Fn(SettingsPage)> = {
@@ -610,6 +665,7 @@ pub fn build_harness_settings_panel(
         let harnesses_view = harnesses_view.clone();
         let top_bar_view = top_bar_view.clone();
         let launcher_view = launcher_view.clone();
+        let sleep_view = sleep_view.clone();
         let btn_back = btn_back.clone();
         let badge = badge.clone();
         let title = title.clone();
@@ -621,6 +677,7 @@ pub fn build_harness_settings_panel(
             harnesses_view.set_visible(page == SettingsPage::Harnesses);
             top_bar_view.set_visible(page == SettingsPage::TopBar);
             launcher_view.set_visible(page == SettingsPage::Android);
+            sleep_view.set_visible(page == SettingsPage::SleepLock);
             btn_back.set_visible(page != SettingsPage::Home);
 
             match page {
@@ -644,6 +701,11 @@ pub fn build_harness_settings_panel(
                     title.set_label("Top bar");
                     subtitle.set_label("Choose the desktop dock size");
                 }
+                SettingsPage::SleepLock => {
+                    badge.set_label("☀");
+                    title.set_label("Sleep lock");
+                    subtitle.set_label("Keep harnesses available on charger power");
+                }
                 SettingsPage::Android => {
                     badge.set_label("📱");
                     title.set_label("SUPER DESKTOP on Android");
@@ -659,6 +721,7 @@ pub fn build_harness_settings_panel(
         (&btn_harnesses_page, SettingsPage::Harnesses),
         (&btn_top_bar_page, SettingsPage::TopBar),
         (&btn_launcher, SettingsPage::Android),
+        (&btn_sleep_lock, SettingsPage::SleepLock),
     ] {
         let nav = Rc::clone(&nav);
         button.connect_clicked(move |_| nav(page));
@@ -1163,14 +1226,14 @@ mod tests {
         // page, with Android keeping its existing connection, pairing and
         // device sections together.
         let pages = find_widgets(&panel.widget, "harness-page");
-        assert_eq!(pages.len(), 5, "hub + four destination pages");
+        assert_eq!(pages.len(), 6, "hub + five destination pages");
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![0, 1, 1, 1, 3]);
+        assert_eq!(sections, vec![0, 1, 1, 1, 3, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 6);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 7);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -1188,6 +1251,7 @@ mod tests {
             ("settings-harnesses-entry", 2, "Harness launchers"),
             ("settings-top-bar-entry", 3, "Top bar"),
             ("android-settings-entry", 4, "SUPER DESKTOP on Android"),
+            ("settings-sleep-lock-entry", 5, "Sleep lock"),
         ] {
             let button = find_buttons(&panel.widget, class)
                 .into_iter()

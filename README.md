@@ -23,6 +23,21 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
 - **🔌 Phone bridge (optional)** — encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Launcher connection*. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
 
+### Sleep lock on charger
+
+In **Settings → Sleep lock**, enable **Prevent sleep while plugged in** to keep
+AI harnesses reachable while SUPER DESKTOP runs on charger power, including with
+the laptop lid closed. The setting persists across app restarts and defaults off.
+It releases the lock within a few seconds of unplugging, disabling the setting,
+or losing power-source information. Screen locking and display power saving
+continue normally. Disable the setting before manually suspending.
+
+This uses systemd-logind's `sleep:handle-lid-switch` block inhibitor; no root
+access, logind configuration edits, or helper service is required. The settings
+page reports active, battery, unknown-power, or permission/service errors rather
+than claiming protection when the lock could not be acquired. Forced sleep and
+other components that bypass logind inhibitors are outside its control.
+
 ### Supported AI harnesses
 
 Android's per-terminal bell can report explicit Codex response completion, including

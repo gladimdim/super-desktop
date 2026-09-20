@@ -138,6 +138,9 @@ pub struct AppState {
     /// Large, preserving the size those users already had.
     #[serde(default)]
     pub top_bar_size: TopBarSize,
+    /// Prevent suspend while external power is connected. Off by default.
+    #[serde(default)]
+    pub sleep_lock_on_ac: bool,
 }
 
 impl Default for AppState {
@@ -161,6 +164,7 @@ impl Default for AppState {
             recent_dirs: Vec::new(),
             used_dirs: Vec::new(),
             top_bar_size: TopBarSize::Large,
+            sleep_lock_on_ac: false,
         }
     }
 }
