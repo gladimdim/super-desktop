@@ -48,6 +48,21 @@ devices remain visible while the bridge is stopped.
 
 ## Resource bounds
 
+### Referenced files
+
+File listing/registration, content downloads and PDF page previews require the
+same paired-device authentication as terminal access. Asset IDs are not bearer
+capabilities. The service serves only registered, supported regular files within
+the recorded terminal workspace: no arbitrary-path GET, hidden components,
+symlinks, hard links, special files, HTML/SVG, URL fetching or directory scans.
+Descriptor-relative opens prevent symlink-swap escapes, and metadata/version
+checks reject replaced or changed files. Limits are 16 MiB per file, 512 KiB for
+text, 64 references per terminal, 64 terminal catalogs and four jobs per process.
+Revocation is checked during chunked content writes. Exported copies cannot be
+revoked. PDF rasterization requires a no-network bubblewrap sandbox with CPU,
+memory, output and wall-clock bounds; it never falls back to unsandboxed parsing.
+See [file previews](docs/FILE_ASSETS.md) for decoder limits and known limitations.
+
 64 simultaneous network connections; 12 per source IP; 5-second total initial
 TLS/request deadline enforced by a socket reaper; 16 KiB headers and bodies;
 16 KiB inbound WebSocket frames; 125-byte control frames. Pairing is invitation-

@@ -1,11 +1,11 @@
 //! 📱 Launcher connection page of the ⚙ settings card in the overlay HUD.
 //!
 //! The overlay is a single layer-shell surface (never a separate Hyprland
-//! window), and the ⚙ card is a two-page panel: this file builds its second
-//! page, with everything needed to connect the OmarchyAILauncher Android app:
+//! window), and the ⚙ card is a settings hub. This file builds its Android
+//! destination, with everything needed to connect the OmarchyAILauncher app:
 //! bridge status (start/stop), firewall unlock, LAN + Tailscale IPs, port, the
 //! pending phone requests and explicit approval. The card chrome, the header and
-//! the settings ⇄ launcher navigation live in `harness_settings`.
+//! the settings-hub navigation lives in `harness_settings`.
 //!
 //! Layout: connection, pairing, and devices; network/firewall diagnostics stay
 //! collapsed until needed. Every colour/radius/
@@ -20,12 +20,12 @@ use std::rc::Rc;
 
 use crate::bridge;
 
-/// Page widget + its refresh handle. `harness_settings` embeds `widget` as the
-/// ⚙ card's second page, shows it on navigation, and calls `refresh` so every
-/// value is live.
+/// Android page widget plus its live refresh and network-navigation handles.
+/// `harness_settings` embeds `widget` as one destination in the ⚙ card.
 pub struct LauncherPage {
     pub widget: gtk4::Widget,
     pub refresh: Rc<dyn Fn()>,
+    pub show_network: Rc<dyn Fn()>,
 }
 
 struct LauncherSnapshot {
@@ -515,9 +515,19 @@ pub fn build_launcher_page() -> LauncherPage {
         gtk4::glib::ControlFlow::Continue
     });
 
+    let show_network: Rc<dyn Fn()> = {
+        let advanced = advanced.clone();
+        let refresh = Rc::clone(&refresh);
+        Rc::new(move || {
+            advanced.set_expanded(true);
+            refresh();
+        })
+    };
+
     LauncherPage {
         widget: scroll.upcast(),
         refresh,
+        show_network,
     }
 }
 

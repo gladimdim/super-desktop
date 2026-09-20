@@ -252,6 +252,7 @@ impl MiniTerminalCard {
         status_badge.add_css_class("status-idle");
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
+        header.append(&crate::asset_view::button(data.borrow().session_name.clone()));
 
         // Iconify button: iconifies the window into 128x128 size
         let iconify_btn = Button::with_label("🗕");

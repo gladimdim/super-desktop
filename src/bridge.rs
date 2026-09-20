@@ -977,6 +977,61 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
         return pairing::handle(&mut stream, &req, local, &path);
     }
 
+    if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
+        let parts: Vec<_> = rest.split('/').collect();
+        if parts.get(1) == Some(&"assets") {
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            // Authenticated asset work has its own bounded renderer timeout;
+            // the initial TLS/header/body deadline no longer applies.
+            stream.streaming();
+            let Some(_permit) = crate::assets::Transfer::acquire() else {
+                return respond(&mut stream, 429, "Too Many Requests", &serde_json::json!({"error":"asset_transfer_busy"}));
+            };
+            if parts.len() == 2 && (req.method == "GET" || req.method == "POST") {
+                let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
+                let explicit = body["path"].as_str();
+                if req.method == "POST" && explicit.is_none() {
+                    return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"missing_path"}));
+                }
+                return match crate::assets::list(parts[0], if req.method == "POST" { explicit } else { None }) {
+                    Ok(items) => respond(&mut stream, 200, "OK", &serde_json::json!({"assets":items,"maxFileBytes":crate::assets::MAX_FILE})),
+                    Err(error) => respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":error})),
+                };
+            }
+            if parts.len() == 4 && parts[3] == "content" && req.method == "GET" {
+                return match crate::assets::read(parts[0], parts[2]) {
+                    Ok((asset, bytes)) => {
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nContent-Disposition: attachment\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", asset.mime_type, bytes.len());
+                        if stream.write_all(header.as_bytes()).is_err() { return; }
+                        // Connection checks revocation on every write, including buffered TLS.
+                        for chunk in bytes.chunks(64 * 1024) {
+                            if stream.write_all(chunk).is_err() { break; }
+                        }
+                    }
+                    Err(error) => respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":error})),
+                };
+            }
+            if parts.len() == 5 && parts[3] == "pages" && req.method == "GET" {
+                let result = crate::assets::read(parts[0], parts[2]).and_then(|(asset, bytes)| {
+                    if asset.kind != "pdf" { return Err("not_a_pdf".into()); }
+                    let page = parts[4].parse().map_err(|_| "invalid_page")?;
+                    crate::asset_pdf::page(bytes, page)
+                });
+                return match result {
+                    Ok(bytes) => {
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", bytes.len());
+                        if stream.write_all(header.as_bytes()).is_err() { return; }
+                        for chunk in bytes.chunks(64 * 1024) { if stream.write_all(chunk).is_err() { break; } }
+                    }
+                    Err(error) => respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":error})),
+                };
+            }
+            return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"unknown_asset_route"}));
+        }
+    }
+
     if path == "/api/v1/workspaces" || path == "/api/v1/harness-types" || (path == "/api/v1/harnesses" && req.method == "POST") {
         if !authorize(&req, local) {
             return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));

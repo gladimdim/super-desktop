@@ -2,25 +2,14 @@
 //!
 //! A floating card that lives INSIDE the super-desktop layer-shell overlay
 //! (centered above notes and terminals) — never a separate Hyprland window. It
-//! is a two-page panel; the header (badge, title, ← back, ✕) is shared:
-//!
-//! 1. **Settings page**
-//!    - **Show / hide shortcut** — a recorder: click Record, press a
-//!      combination, and it becomes the Hyprland binding for
-//!      `super-desktop toggle`. Capture, spelling and the Hyprland side live in
-//!      `crate::shortcut`; this file owns the widget state machine and every
-//!      way out of a recording.
-//!    - **Top bar launch buttons** — the harnesses that actually resolve on THIS
-//!      machine (see `tmux::detect_harnesses`), each with a show/hide toggle.
-//!    - **Launcher connection** — an entry that navigates to page 2.
-//! 2. **Launcher connection page** — the 📱 bridge status, addresses and pairing
-//!    PIN, built by `crate::launcher_settings`; ← returns to the settings page.
+//! is a settings hub with dedicated pages for the keyboard shortcut, harness
+//! launchers, top bar, and Android connection. The header (badge, title, ←
+//! back, ✕) is shared by every page.
 //!
 //! Same visual language as notes/terminals: `mini-terminal` + `term-header`
-//! card chrome whose body is a stack of numbered `.launcher-section` panels
-//! (chrome helpers shared with `launcher_settings`). Colours, radii and spacing
-//! live in `styles.rs` — this file only builds widgets, reads detection, drives
-//! the recorder and swaps the pages.
+//! card chrome, with compact navigation on the hub and a focused page for each
+//! setting. Colours, radii and spacing live in `styles.rs` — this file builds
+//! widgets, reads detection, drives the recorder and swaps pages.
 //!
 //! The selection itself is owned by the window: this panel reads it, reports
 //! changes through `on_change` (harnesses) and `on_shortcut_change` (shortcut)
@@ -53,6 +42,63 @@ const RECORD_TICK: Duration = Duration::from_millis(250);
 type StopRecording = Rc<dyn Fn(Option<&str>)>;
 /// Commits a captured combination together with its physical (X11) keycode.
 type CommitShortcut = Rc<dyn Fn(&str, u32)>;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    Home,
+    Shortcut,
+    Harnesses,
+    TopBar,
+    Android,
+}
+
+fn settings_entry(icon: &str, title: &str, summary: &str, class: &str) -> (Button, Box) {
+    let button = Button::new();
+    button.add_css_class("settings-entry");
+    button.add_css_class(class);
+    button.set_hexpand(true);
+
+    let row = Box::new(Orientation::Horizontal, 12);
+    let icon = Label::new(Some(icon));
+    icon.add_css_class("settings-entry-icon");
+    icon.set_valign(Align::Center);
+    row.append(&icon);
+
+    let words = Box::new(Orientation::Vertical, 3);
+    words.set_hexpand(true);
+    let heading = Label::new(Some(title));
+    heading.add_css_class("settings-entry-title");
+    heading.set_xalign(0.0);
+    words.append(&heading);
+    let description = Label::new(Some(summary));
+    description.add_css_class("settings-entry-summary");
+    description.set_xalign(0.0);
+    description.set_wrap(true);
+    words.append(&description);
+    row.append(&words);
+
+    let arrow = Label::new(Some("›"));
+    arrow.add_css_class("settings-entry-arrow");
+    arrow.set_valign(Align::Center);
+    let trailing = Box::new(Orientation::Horizontal, 6);
+    trailing.set_valign(Align::Center);
+    trailing.append(&arrow);
+    row.append(&trailing);
+    button.set_child(Some(&row));
+
+    (button, trailing)
+}
+
+fn settings_scroll(content: &Box) -> ScrolledWindow {
+    let scroll = ScrolledWindow::new();
+    scroll.add_css_class("launcher-scroll");
+    scroll.add_css_class("harness-page");
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_child(Some(content));
+    scroll.set_vexpand(true);
+    scroll.set_hexpand(true);
+    scroll
+}
 
 
 /// Floating card + its refresh handle. The overlay adds `widget` centered and
@@ -280,17 +326,117 @@ pub fn build_harness_settings_panel(
         }
     });
 
-    let root = Box::new(Orientation::Vertical, 10);
-    root.add_css_class("launcher-body");
+    // The landing page keeps the choices short. Each substantial setting gets
+    // its own scrollable destination below, so a user never has to hunt through
+    // an ever-growing stack of unrelated controls.
+    let home_root = Box::new(Orientation::Vertical, 10);
+    home_root.add_css_class("launcher-body");
+    home_root.add_css_class("settings-home");
 
-    // ---- 1 · the overlay's own show / hide shortcut ----
+    let firewall_notice = Box::new(Orientation::Horizontal, 10);
+    firewall_notice.add_css_class("settings-firewall-warning");
+    firewall_notice.set_visible(false);
+    let firewall_words = Box::new(Orientation::Vertical, 2);
+    firewall_words.set_hexpand(true);
+    let firewall_title = Label::new(Some("Android connection needs attention"));
+    firewall_title.add_css_class("settings-firewall-warning-title");
+    firewall_title.set_xalign(0.0);
+    firewall_words.append(&firewall_title);
+    let firewall_text = Label::new(None);
+    firewall_text.add_css_class("settings-firewall-warning-text");
+    firewall_text.set_xalign(0.0);
+    firewall_text.set_wrap(true);
+    firewall_words.append(&firewall_text);
+    firewall_notice.append(&firewall_words);
+    let btn_review_firewall = Button::with_label("Review");
+    btn_review_firewall.add_css_class("launcher-btn");
+    btn_review_firewall.add_css_class("launcher-btn-primary");
+    btn_review_firewall.set_valign(Align::Center);
+    firewall_notice.append(&btn_review_firewall);
+    home_root.append(&firewall_notice);
+
+    let (btn_shortcut_page, _) = settings_entry(
+        "⌨",
+        "Keyboard shortcut",
+        "Record the shortcut that shows or hides SUPER DESKTOP.",
+        "settings-shortcut-entry",
+    );
+    btn_shortcut_page.set_tooltip_text(Some("Change the overlay shortcut"));
+    home_root.append(&btn_shortcut_page);
+
+    let (btn_harnesses_page, _) = settings_entry(
+        "⌘",
+        "Harness launchers",
+        "Choose which installed coding agents appear in the top bar.",
+        "settings-harnesses-entry",
+    );
+    btn_harnesses_page.set_tooltip_text(Some("Manage harness launch buttons"));
+    home_root.append(&btn_harnesses_page);
+
+    let (btn_top_bar_page, _) = settings_entry(
+        "▤",
+        "Top bar",
+        "Choose the size of the desktop dock.",
+        "settings-top-bar-entry",
+    );
+    btn_top_bar_page.set_tooltip_text(Some("Change the top-bar size"));
+    home_root.append(&btn_top_bar_page);
+
+    let (btn_launcher, launcher_trailing) = settings_entry(
+        "▣",
+        "SUPER DESKTOP on Android",
+        "Pair devices and manage secure connections.",
+        "android-settings-entry",
+    );
+    btn_launcher.set_tooltip_text(Some("Manage Android devices and secure pairing"));
+    let counts = chip("…/…");
+    counts.add_css_class("android-connection-count");
+    counts.set_tooltip_text(Some(
+        "Active / registered phones. Active means connected or seen in the last 60 seconds.",
+    ));
+    launcher_trailing.prepend(&counts);
+    home_root.append(&btn_launcher);
+    let count_refresh = crate::launcher_settings::background_refresh(
+        crate::bridge::paired_devices,
+        move |devices| {
+            let active = devices.iter().filter(|d| d["active"] == true).count();
+            let text = format!("{active}/{}", devices.len());
+            if counts.text().as_str() != text {
+                counts.set_text(&text);
+            }
+        },
+    );
+    btn_launcher.connect_map({
+        let refresh = Rc::clone(&count_refresh);
+        move |_| refresh()
+    });
+    let entry_weak = btn_launcher.downgrade();
+    gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
+        let Some(entry) = entry_weak.upgrade() else {
+            return gtk4::glib::ControlFlow::Break;
+        };
+        if entry.is_mapped() {
+            count_refresh();
+        }
+        gtk4::glib::ControlFlow::Continue
+    });
+
+    let home_footer = Label::new(Some("Settings are saved as you change them."));
+    home_footer.add_css_class("launcher-footer");
+    home_footer.set_xalign(0.5);
+    home_root.append(&home_footer);
+
+    let shortcut_root = Box::new(Orientation::Vertical, 10);
+    shortcut_root.add_css_class("launcher-body");
+
+    // ---- the overlay's own show / hide shortcut ----
     //
     // Recording seizes the keyboard for a few seconds (`shortcut::begin_capture`
     // parks Hyprland in a throw-away submap so no global bind can eat the key),
     // so every exit — Esc, the button turning into Cancel, the watchdog, the
     // panel being closed, the panel being reopened — funnels through
     // `stop_recording`, which is also the only thing that releases the guard.
-    let (_, body) = section_card(&root, "1", "Show / hide shortcut");
+    let (_, body) = section_card(&shortcut_root, "", "Show / hide shortcut");
     let combo_label = Label::new(None);
     combo_label.add_css_class("shortcut-combo");
     combo_label.set_valign(Align::Center);
@@ -323,8 +469,11 @@ pub fn build_harness_settings_panel(
     shortcut_hint.set_wrap(true);
     body.append(&shortcut_hint);
 
-    // ---- 2 · harnesses installed here, each with a show/hide toggle ----
-    let (head, body) = section_card(&root, "2", "Harnesses on this machine");
+    let harnesses_root = Box::new(Orientation::Vertical, 10);
+    harnesses_root.add_css_class("launcher-body");
+
+    // ---- harnesses installed here, each with a show/hide toggle ----
+    let (head, body) = section_card(&harnesses_root, "", "Harnesses on this machine");
     let count_chip = chip("…");
     head.append(&count_chip);
 
@@ -352,25 +501,6 @@ pub fn build_harness_settings_panel(
     summary.set_wrap(true);
     body.append(&summary);
 
-    // ---- 3 · top-bar scale and bulk actions ----
-    let (_, body) = section_card(&root, "3", "Top bar");
-    let size_label = Label::new(Some("Size"));
-    size_label.add_css_class("launcher-status-text");
-    size_label.set_xalign(0.0);
-    body.append(&size_label);
-
-    let size_actions = Box::new(Orientation::Horizontal, 8);
-    size_actions.add_css_class("launcher-actions");
-    let btn_small = Button::with_label("Small");
-    let btn_medium = Button::with_label("Medium");
-    let btn_large = Button::with_label("Large");
-    for button in [&btn_small, &btn_medium, &btn_large] {
-        button.add_css_class("launcher-btn");
-        button.add_css_class("top-bar-size");
-        size_actions.append(button);
-    }
-    body.append(&size_actions);
-
     let actions = Box::new(Orientation::Horizontal, 8);
     actions.add_css_class("launcher-actions");
     let btn_all = Button::with_label("✓ Show all");
@@ -392,6 +522,35 @@ pub fn build_harness_settings_panel(
     note.set_xalign(0.0);
     note.set_wrap(true);
     body.append(&note);
+
+    let footer = Label::new(Some(
+        "Detected with which / npx · selection stored in state.json",
+    ));
+    footer.add_css_class("launcher-footer");
+    footer.set_xalign(0.5);
+    harnesses_root.append(&footer);
+
+    let top_bar_root = Box::new(Orientation::Vertical, 10);
+    top_bar_root.add_css_class("launcher-body");
+
+    // ---- top-bar scale ----
+    let (_, body) = section_card(&top_bar_root, "", "Top bar");
+    let size_label = Label::new(Some("Size"));
+    size_label.add_css_class("launcher-status-text");
+    size_label.set_xalign(0.0);
+    body.append(&size_label);
+
+    let size_actions = Box::new(Orientation::Horizontal, 8);
+    size_actions.add_css_class("launcher-actions");
+    let btn_small = Button::with_label("Small");
+    let btn_medium = Button::with_label("Medium");
+    let btn_large = Button::with_label("Large");
+    for button in [&btn_small, &btn_medium, &btn_large] {
+        button.add_css_class("launcher-btn");
+        button.add_css_class("top-bar-size");
+        size_actions.append(button);
+    }
+    body.append(&size_actions);
 
     let size_buttons = Rc::new(vec![
         (TopBarSize::Small, btn_small),
@@ -421,118 +580,126 @@ pub fn build_harness_settings_panel(
     }
     paint_size();
 
-    // Android is the first settings destination, with live device counts.
-    let btn_launcher = Button::new();
-    btn_launcher.add_css_class("android-settings-entry");
-    btn_launcher.set_tooltip_text(Some("Manage Android devices and secure pairing"));
-    let launcher_row = Box::new(Orientation::Horizontal, 12);
-    let icon = Label::new(Some("▣"));
-    icon.add_css_class("android-entry-icon");
-    launcher_row.append(&icon);
-    let words = Box::new(Orientation::Vertical, 3);
-    words.set_hexpand(true);
-    let heading = Label::new(Some("SUPER DESKTOP on Android"));
-    heading.set_xalign(0.0); heading.add_css_class("android-entry-title");
-    words.append(&heading);
-    let hint = Label::new(Some("Devices & secure pairing"));
-    hint.set_xalign(0.0); hint.add_css_class("launcher-hint");
-    words.append(&hint);
-    launcher_row.append(&words);
-    let counts = chip("…/…");
-    counts.add_css_class("android-connection-count");
-    counts.set_tooltip_text(Some("Active / registered phones. Active: connected or seen in the last 60 seconds."));
-    launcher_row.append(&counts);
-    launcher_row.append(&Label::new(Some("›")));
-    btn_launcher.set_child(Some(&launcher_row));
-    root.prepend(&btn_launcher);
-    let count_refresh = crate::launcher_settings::background_refresh(crate::bridge::paired_devices, move |devices| {
-        let active = devices.iter().filter(|d| d["active"] == true).count();
-        let text = format!("{active}/{}", devices.len());
-        if counts.text().as_str() != text { counts.set_text(&text); }
-    });
-    btn_launcher.connect_map({ let refresh = Rc::clone(&count_refresh); move |_| refresh() });
-    let entry_weak = btn_launcher.downgrade();
-    gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-        let Some(entry) = entry_weak.upgrade() else { return gtk4::glib::ControlFlow::Break; };
-        if entry.is_mapped() { count_refresh(); }
-        gtk4::glib::ControlFlow::Continue
-    });
+    let home_view = settings_scroll(&home_root);
+    let shortcut_view = settings_scroll(&shortcut_root);
+    let harnesses_view = settings_scroll(&harnesses_root);
+    let top_bar_view = settings_scroll(&top_bar_root);
 
-    let footer = Label::new(Some(
-        "detected with which / npx · selection stored in state.json",
-    ));
-    footer.add_css_class("launcher-footer");
-    footer.set_xalign(0.5);
-    root.append(&footer);
-
-    let scroll = ScrolledWindow::new();
-    scroll.add_css_class("launcher-scroll");
-    scroll.add_css_class("harness-page");
-    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
-    scroll.set_child(Some(&root));
-    scroll.set_vexpand(true);
-    scroll.set_hexpand(true);
-
-    // ---- pages: settings (above) ⇄ 📱 launcher connection ----
-    // Both pages live in the same card and are swapped by visibility, so the
-    // header, the recorder state and the harness rows survive navigating away
-    // and back. The launcher page is built here (`launcher_settings`) because
-    // its content belongs to that file; it is refreshed on every entry.
+    // The Android page owns its live bridge controls. It is one destination in
+    // the settings hub and refreshes only when entered.
     let launcher_page = crate::launcher_settings::build_launcher_page();
     let launcher_view = launcher_page.widget.clone();
 
     let pages = Box::new(Orientation::Vertical, 0);
     pages.add_css_class("harness-pages");
     pages.set_vexpand(true);
-    pages.append(&scroll);
+    pages.append(&home_view);
+    pages.append(&shortcut_view);
+    pages.append(&harnesses_view);
+    pages.append(&top_bar_view);
     pages.append(&launcher_view);
+    shortcut_view.set_visible(false);
+    harnesses_view.set_visible(false);
+    top_bar_view.set_visible(false);
     launcher_view.set_visible(false);
     outer.append(&pages);
 
-    // `nav(true)` selects the 📱 launcher page, `nav(false)` the settings page.
-    let nav: Rc<dyn Fn(bool)> = {
-        let settings_view = scroll.clone();
+    let nav: Rc<dyn Fn(SettingsPage)> = {
+        let home_view = home_view.clone();
+        let shortcut_view = shortcut_view.clone();
+        let harnesses_view = harnesses_view.clone();
+        let top_bar_view = top_bar_view.clone();
         let launcher_view = launcher_view.clone();
         let btn_back = btn_back.clone();
         let badge = badge.clone();
         let title = title.clone();
         let subtitle = subtitle.clone();
         let launcher_refresh = Rc::clone(&launcher_page.refresh);
-        Rc::new(move |launcher: bool| {
-            settings_view.set_visible(!launcher);
-            launcher_view.set_visible(launcher);
-            btn_back.set_visible(launcher);
-            if launcher {
-                badge.set_label("📱");
-                title.set_label("SUPER DESKTOP on Android");
-                subtitle.set_label("Devices · encrypted connections");
-                launcher_refresh();
-            } else {
-                badge.set_label("⚙");
-                title.set_label("Settings");
-                subtitle.set_label("Android · shortcuts · top bar");
+        Rc::new(move |page| {
+            home_view.set_visible(page == SettingsPage::Home);
+            shortcut_view.set_visible(page == SettingsPage::Shortcut);
+            harnesses_view.set_visible(page == SettingsPage::Harnesses);
+            top_bar_view.set_visible(page == SettingsPage::TopBar);
+            launcher_view.set_visible(page == SettingsPage::Android);
+            btn_back.set_visible(page != SettingsPage::Home);
+
+            match page {
+                SettingsPage::Home => {
+                    badge.set_label("⚙");
+                    title.set_label("Settings");
+                    subtitle.set_label("Choose a section");
+                }
+                SettingsPage::Shortcut => {
+                    badge.set_label("⌨");
+                    title.set_label("Keyboard shortcut");
+                    subtitle.set_label("Show or hide SUPER DESKTOP");
+                }
+                SettingsPage::Harnesses => {
+                    badge.set_label("⌘");
+                    title.set_label("Harness launchers");
+                    subtitle.set_label("Choose what appears in the top bar");
+                }
+                SettingsPage::TopBar => {
+                    badge.set_label("▤");
+                    title.set_label("Top bar");
+                    subtitle.set_label("Choose the desktop dock size");
+                }
+                SettingsPage::Android => {
+                    badge.set_label("📱");
+                    title.set_label("SUPER DESKTOP on Android");
+                    subtitle.set_label("Devices · encrypted connections");
+                    launcher_refresh();
+                }
             }
         })
     };
 
-    btn_launcher.connect_clicked({
+    for (button, page) in [
+        (&btn_shortcut_page, SettingsPage::Shortcut),
+        (&btn_harnesses_page, SettingsPage::Harnesses),
+        (&btn_top_bar_page, SettingsPage::TopBar),
+        (&btn_launcher, SettingsPage::Android),
+    ] {
         let nav = Rc::clone(&nav);
-        move |_| nav(true)
-    });
-    btn_back.connect_clicked({
+        button.connect_clicked(move |_| nav(page));
+    }
+    btn_review_firewall.connect_clicked({
         let nav = Rc::clone(&nav);
-        move |_| nav(false)
+        let show_network = Rc::clone(&launcher_page.show_network);
+        move |_| {
+            nav(SettingsPage::Android);
+            show_network();
+        }
     });
-    // Reopening always lands on the settings page: the card is re-shown by the
-    // HUD gear, and coming back to a half-finished launcher page (or to a
-    // stale bridge reading) would be a surprise. While the card stays open a
-    // theme switch may refresh it — the page must not jump.
+    // Reopening always lands on the hub. A theme refresh while the card stays
+    // open deliberately leaves the current page alone.
     outer.connect_visible_notify({
         let nav = Rc::clone(&nav);
         move |o| {
             if o.is_visible() {
-                nav(false);
+                nav(SettingsPage::Home);
             }
+        }
+    });
+
+    let firewall_notice_refresh = crate::launcher_settings::background_refresh(
+        crate::bridge::firewall_summary,
+        move |(summary, can_unlock)| {
+            firewall_notice.set_visible(can_unlock);
+            if can_unlock {
+                firewall_text.set_text(&format!(
+                    "{summary}. Allow {}/tcp so Android devices can reach this computer.",
+                    crate::bridge::BRIDGE_PORT,
+                ));
+            }
+        },
+    );
+    btn_back.connect_clicked({
+        let nav = Rc::clone(&nav);
+        let refresh = Rc::clone(&firewall_notice_refresh);
+        move |_| {
+            nav(SettingsPage::Home);
+            refresh();
         }
     });
 
@@ -812,10 +979,12 @@ pub fn build_harness_settings_panel(
         let stop_recording = Rc::clone(&stop_recording);
         let paint_recorder = Rc::clone(&paint_recorder);
         let paint_size = Rc::clone(&paint_size);
+        let firewall_notice_refresh = Rc::clone(&firewall_notice_refresh);
         Rc::new(move || {
             stop_recording(None);
             paint_recorder();
             paint_size();
+            firewall_notice_refresh();
 
             let detected = detect_harnesses();
             let light_theme = crate::theme::current_theme().mode == "light";
@@ -990,58 +1159,66 @@ mod tests {
         );
         (panel.refresh)();
 
-        // Two pages in one card: the settings page — 4 numbered sections
-        // (shortcut, harnesses, top bar, launcher entry) — and the 📱 launcher
-        // page (5: bridge, firewall, addresses, pairing, phone steps).
+        // The hub is deliberately short. Each substantial setting has its own
+        // page, with Android keeping its existing connection, pairing and
+        // device sections together.
         let pages = find_widgets(&panel.widget, "harness-page");
-        assert_eq!(pages.len(), 2, "settings + launcher pages");
+        assert_eq!(pages.len(), 5, "hub + four destination pages");
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![3, 3]);
-        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 3);
+        assert_eq!(sections, vec![0, 1, 1, 1, 3]);
+        assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
         assert_eq!(count_class(&panel.widget, "launcher-section-title"), 6);
+        assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
-        // The card opens on the settings page, and ← shows up only while the
-        // launcher page does.
+        // The card opens on the hub, and ← appears on every destination page.
         let btn_back = find_buttons(&panel.widget, "term-btn")
             .into_iter()
             .find(|b| b.label().as_deref() == Some("←"))
             .expect("the header must offer a back button");
-        assert!(shown(&pages[0]), "settings page is the landing page");
-        assert!(!shown(&pages[1]));
+        assert!(shown(&pages[0]), "settings hub is the landing page");
+        assert!(pages[1..].iter().all(|page| !shown(page)));
         assert!(!shown(&btn_back));
         assert_eq!(title_text(&panel.widget), "Settings");
 
-        // The launcher section navigates to the 📱 page, ← navigates back, and
-        // neither throws away the settings page.
+        for (class, page_index, page_title) in [
+            ("settings-shortcut-entry", 1, "Keyboard shortcut"),
+            ("settings-harnesses-entry", 2, "Harness launchers"),
+            ("settings-top-bar-entry", 3, "Top bar"),
+            ("android-settings-entry", 4, "SUPER DESKTOP on Android"),
+        ] {
+            let button = find_buttons(&panel.widget, class)
+                .into_iter()
+                .next()
+                .expect("each settings destination needs a navigation button");
+            button.emit_clicked();
+            assert!(shown(&pages[page_index]));
+            assert!(pages
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != page_index)
+                .all(|(_, page)| !shown(page)));
+            assert!(shown(&btn_back));
+            assert_eq!(title_text(&panel.widget), page_title);
+            btn_back.emit_clicked();
+            assert!(shown(&pages[0]));
+            assert!(!shown(&btn_back));
+            assert_eq!(title_text(&panel.widget), "Settings");
+        }
+
+        // Reopening returns to the hub even when Android was the last page.
         let btn_launcher = find_buttons(&panel.widget, "android-settings-entry")
             .into_iter()
             .next()
-            .expect("the launcher section must offer the navigation button");
-        assert_eq!(btn_launcher.parent().unwrap().first_child().unwrap(), btn_launcher.clone().upcast::<gtk4::Widget>(), "Android entry must be first");
-        btn_launcher.emit_clicked();
-        assert!(!shown(&pages[0]));
-        assert!(shown(&pages[1]));
-        assert!(shown(&btn_back));
-        assert_eq!(title_text(&panel.widget), "SUPER DESKTOP on Android");
-
-        btn_back.emit_clicked();
-        assert!(shown(&pages[0]));
-        assert!(!shown(&pages[1]));
-        assert!(!shown(&btn_back));
-        assert_eq!(title_text(&panel.widget), "Settings");
-
-        // Reopening the card lands on the settings page too, even when the
-        // launcher page was the last thing up: the window hides the card with
-        // `set_visible(false)` and the HUD gear re-shows it.
+            .expect("the Android destination must offer a navigation button");
         panel.widget.set_visible(false);
         btn_launcher.emit_clicked();
-        assert!(shown(&pages[1]));
+        assert!(shown(&pages[4]));
         panel.widget.set_visible(true);
-        assert!(shown(&pages[0]), "reopening resets to the settings page");
-        assert!(!shown(&pages[1]));
+        assert!(shown(&pages[0]), "reopening resets to the settings hub");
+        assert!(pages[1..].iter().all(|page| !shown(page)));
         assert!(!shown(&btn_back));
         assert_eq!(title_text(&panel.widget), "Settings");
 

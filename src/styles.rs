@@ -11,6 +11,22 @@ pub fn generate_css(theme: &OmarchyTheme) -> String {
     format!(
 r#"
 /* ================= Base Window & Backdrop ================= */
+.asset-drawer > contents {{
+    background-color: {term_card_bg};
+    color: {foreground};
+    border: 1px solid {btn_border};
+    border-radius: 8px;
+}}
+.asset-drawer textview, .asset-drawer textview text {{
+    background-color: {note_content_bg};
+    color: {foreground};
+}}
+.asset-drawer button, .asset-drawer entry {{
+    background-color: {btn_bg};
+    color: {foreground};
+    border: 1px solid {btn_border};
+    border-radius: 5px;
+}}
 window.super-desktop-window {{
     background-color: {win_bg};
 }}
@@ -810,11 +826,9 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     opacity: 0.8;
 }}
 
-/* ================= Launcher Connection Page ================= */
-/* The ⚙ settings card's second page (`harness_settings` owns the card chrome:
-   `mini-terminal` + `harness-panel` + `term-header`). The body is a stack of
-   numbered section cards, so each concern — bridge, firewall, addresses,
-   pairing, phone steps — reads as its own little panel. */
+/* ================= Settings and Android Connection Pages ================= */
+/* `harness_settings` owns the card chrome (`mini-terminal` + `harness-panel`
+   + `term-header`) and swaps dedicated destination pages into its body. */
 .launcher-head-badge {{
     background-color: {badge_bg};
     border-radius: 9px;
@@ -838,8 +852,9 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     padding: 12px 14px 14px 14px;
 }}
 
-/* Android follows the current Omarchy palette: restrained surfaces, thin
-   borders, square-ish corners, and one accent for primary actions. */
+/* Settings destinations use the same restrained card language as Android.
+   The hub keeps these choices separate instead of making one long form. */
+.settings-entry,
 .android-settings-entry {{
     background: {launcher_section_bg};
     border: 1px solid {launcher_section_border};
@@ -848,12 +863,36 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     color: {foreground};
     box-shadow: none;
 }}
+.settings-entry:hover,
 .android-settings-entry:hover {{
     border-color: {accent};
     background: {badge_bg};
 }}
+.settings-entry-icon,
 .android-entry-icon {{ color: {accent}; font-size: 24px; }}
-.android-entry-title {{ font-weight: 700; font-size: 13px; }}
+.settings-entry-title,
+.android-entry-title {{ color: {foreground}; font-weight: 700; font-size: 13px; }}
+.settings-entry-summary {{ color: {dark_foreground}; font-size: 10.5px; }}
+.settings-entry-arrow {{ color: {dark_foreground}; font-size: 22px; }}
+
+/* This is deliberately the first child of the Settings hub: without an open
+   8759/tcp rule the Android page can look configured while every phone fails
+   to reach the bridge. */
+.settings-firewall-warning {{
+    background-color: {danger_bg};
+    border: 1px solid {danger_border};
+    border-radius: 8px;
+    padding: 10px 12px;
+}}
+.settings-firewall-warning-title {{
+    color: {bright_yellow};
+    font-size: 11.5px;
+    font-weight: 800;
+}}
+.settings-firewall-warning-text {{
+    color: {light_foreground};
+    font-size: 10.5px;
+}}
 .android-connection-count {{ color: {accent}; padding: 4px 9px; }}
 .android-page .launcher-section {{
     border-radius: 6px;
@@ -1348,6 +1387,8 @@ mod tests {
         let css = generate_css(&current_theme());
         for class in [
             "harness-panel",
+            "settings-entry",
+            "settings-firewall-warning",
             "harness-rows",
             "harness-row",
             "harness-name",

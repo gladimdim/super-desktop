@@ -1,4 +1,7 @@
 mod brand;
+mod assets;
+mod asset_pdf;
+mod asset_view;
 mod bridge;
 mod card_resize;
 mod crashlog;

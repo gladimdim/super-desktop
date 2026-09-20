@@ -60,7 +60,9 @@ def main():
                     connection.close()
 
             assert request("/api/v1/ping")[0] == 200
-            for path in ["/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input"]:
+            for path in ["/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
+                         "/api/v1/harnesses/sd_term_probe/assets", "/api/v1/harnesses/sd_term_probe/assets/id/content",
+                         "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
                 assert request(path)[0] == 401, path
             assert request("/api/v1/pair/state")[0] == 403
             assert request("/api/v1/pair/invitation", {})[0] == 403
@@ -77,6 +79,8 @@ def main():
             admin("/api/v1/pair/approve", rid)
             token = request("/api/v1/pair/poll", rid)[1]["token"]
             assert request("/api/v1/theme", token=token)[0] == 200
+            assert request("/api/v1/harnesses/sd_term_nonexistent_asset_probe/assets", token=token)[0] == 400
+            assert request("/api/v1/harnesses/sd_term_nonexistent_asset_probe/assets", {"path": "../../etc/passwd"}, token=token)[0] == 400
             assert request("/api/v1/pair/approve", rid, token=token)[0] == 403
             assert token not in (pathlib.Path(directory) / "config.json").read_text()
 
@@ -89,6 +93,7 @@ def main():
             admin("/api/v1/pair/revoke", {"deviceId": device["id"]})
             assert admin("/api/v1/pair/devices")["devices"] == []
             assert request("/api/v1/theme", token=token)[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401
             assert request("/api/v1/pair/poll", rid)[0] == 404
             while live.recv(65536):
                 pass
