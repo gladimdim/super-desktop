@@ -375,6 +375,21 @@ fn run_daemon(start_visible: bool) {
     });
     start_ipc_thread(ipc_tx);
 
+    // The bridge waits for its child to become reachable, so keep that work
+    // off GTK's main thread. Start it only after this process owns the daemon
+    // socket: a duplicate daemon exits in `start_ipc_thread` and must not
+    // restart or disturb the bridge.
+    if let Err(error) = thread::Builder::new()
+        .name("super-desktop-bridge-start".to_string())
+        .spawn(|| {
+            if let Err(error) = bridge::start_bridge() {
+                eprintln!("SUPER DESKTOP: could not auto-start bridge: {error}");
+            }
+        })
+    {
+        eprintln!("SUPER DESKTOP: could not schedule bridge auto-start: {error}");
+    }
+
     // Warm the UI right after start, never on the startup path: startup stays
     // fast (the socket is up first) and by the time a human presses the
     // shortcut the overlay is already built.
