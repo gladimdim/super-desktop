@@ -12,6 +12,8 @@ mod desktop_protocol;
 mod peer_client;
 mod peer_store;
 mod peer_cli;
+mod machine_selector;
+mod remote_workspace;
 mod harness_settings;
 mod hotcorner;
 mod jev;

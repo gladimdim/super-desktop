@@ -135,6 +135,7 @@ fn paint_shortcut_hints(hint: &Label, btn_close: &Button, state: &AppState) {
 pub struct SuperDesktopWindow {
     pub window: ApplicationWindow,
     canvas: Fixed,
+    machine_view: Rc<crate::machine_selector::MachineView>,
     ghost_box: gtk4::Box,
     ghost_label: Label,
     state: Rc<RefCell<AppState>>,
@@ -218,7 +219,6 @@ impl SuperDesktopWindow {
         let canvas = Fixed::new();
         canvas.set_hexpand(true);
         canvas.set_vexpand(true);
-        root_overlay.set_child(Some(&canvas));
 
         let ghost_box = gtk4::Box::new(Orientation::Vertical, 0);
         ghost_box.add_css_class("term-resize-ghost");
@@ -320,6 +320,22 @@ impl SuperDesktopWindow {
         paint_top_bar_size(&hud, state.borrow().top_bar_size, screen_width);
         *hud_for_settings.borrow_mut() = Some(hud.clone());
 
+        let machine_view = crate::machine_selector::MachineView::new(
+            &canvas,
+            Rc::new({
+                let window = window.clone();
+                let settings = settings_panel.widget.clone();
+                move || {
+                    settings.set_visible(false);
+                    vte4::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
+                    window.set_keyboard_mode(KeyboardMode::OnDemand);
+                }
+            }),
+            on_close_rc.clone(),
+        );
+        root_overlay.set_child(Some(&machine_view.stack));
+        hud.append(&machine_view.local_button);
+
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
         brand.add_css_class("hud-title");
         hud.append(&brand);
@@ -333,6 +349,10 @@ impl SuperDesktopWindow {
             Rc::new(crate::state::save_state_async),
         );
         hud.append(&workspace_bar.widget);
+        {
+            let popover = workspace_bar.popover.clone();
+            workspace_bar.widget.connect_unmap(move |_| popover.popdown());
+        }
 
         let hud_badge = Label::new(Some("0 Notes • 0 Agents"));
         hud_badge.add_css_class("hud-badge");
@@ -352,6 +372,7 @@ impl SuperDesktopWindow {
         let win_rc = Rc::new(Self {
             window,
             canvas,
+            machine_view,
             ghost_box,
             ghost_label,
             state,
@@ -655,7 +676,9 @@ impl SuperDesktopWindow {
                             return glib::Propagation::Proceed;
                         }
                     }
-                    w.create_new_note(None, None, "");
+                    if !w.machine_view.is_remote() {
+                        w.create_new_note(None, None, "");
+                    }
                 }
                 return glib::Propagation::Stop;
             }
@@ -1375,6 +1398,7 @@ impl SuperDesktopWindow {
     }
 
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
+        self.machine_view.dismiss();
         self.ensure_slide_trajectories(false);
         *self.on_slide_hidden.borrow_mut() = Some(Rc::new(on_finish));
         if !self.slide.running.get() {

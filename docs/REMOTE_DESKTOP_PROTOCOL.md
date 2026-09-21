@@ -1,12 +1,13 @@
-# Desktop protocol: workspace snapshot increment
+# Desktop protocol and PC-to-PC increment status
 
 This document accompanies [the implementation plan](REMOTE_DESKTOP_PLAN.md).
-The machine selector and network terminal transport are **not available yet**.
+The machine selector now offers a **read-only remote layout preview**.
+Interactive remote consoles and network terminal transport are not available yet.
 Implemented: protocol negotiation, a daemon-owned local workspace model,
 authenticated workspace snapshots/events, persisted terminal stacking order, and
 an isolated server-side PTY implementation with tmux/VTE integration tests.
 Outgoing certificate-pinned pairing and remote snapshot retrieval are available
-through the CLI (see below). Remote mutations, the machine selector and WSS terminal
+through the CLI (see below). Remote mutations, graphical pairing and WSS terminal
 attachment remain pending; this is still an incremental development branch.
 
 ## Available endpoints
@@ -216,8 +217,9 @@ routing). The certificate pin still comes from the invitation. Compare the
 six-digit code and approve the request on the host. Invitations are read from
 stdin, never from command arguments; scripts may supply a compact JSON
 invitation or the existing `superdesktop://pair?data=...` link. Treat invitations
-as secrets. The viewer stores the peer only after host approval. Local starts
-remain local; these commands do not switch or display a remote workspace yet.
+as secrets. The viewer stores the peer only after host approval. New application starts select This PC. After pairing, open the top-left machine
+selector to display the remote layout preview. The CLI commands themselves do
+not switch the displayed workspace.
 
 `peer-workspace` returns the host's typed layout snapshot, including card
 positions, sizes and stacking order. The host desktop daemon must be running.
@@ -249,3 +251,32 @@ It starts disposable bridges and a fake owner IPC endpoint. It tests real TLS,
 CLI pairing, approval/denial, pin rejection, self-pair rejection, private
 storage, snapshots, identity changes, expiry, local removal and host revocation.
 No production daemon or bridge credentials are used.
+
+
+## Machine selector and remote layout preview
+
+The top-left selector defaults to **This PC**. Open it to read the current peer
+registry, including PCs added with `peer-add` while the application was running.
+Selecting a peer displays its host workspace path, harness names and console
+layout. The preview preserves card positions, sizes, stacking, iconified
+positions and expanded geometry, uniformly scaled to fit the viewer. Physical
+monitor scale is not applied again to the host's logical coordinates.
+
+This is explicitly a **read-only layout preview**, not a terminal screenshot or
+interactive console. No remote content is passed to the local terminal/session
+creation code. The local canvas and widgets remain alive while hidden, so
+switching to This PC restores their existing state. Local launch and arrange
+controls are absent from remote mode, and Ctrl+N cannot create a local note
+while a remote PC is selected. Incoming bridge snapshots still describe this
+PC's local model even while it is viewing another PC.
+
+The preview fetches snapshots every two seconds while mapped, with one request
+in flight at a time. Network and registry operations run outside GTK. Each
+selection has a generation number: late responses from an earlier PC or an
+earlier visit to the same PC are discarded. Disconnect, revocation and invalid
+layout responses clear the preview and show a status message. Reopening the
+window refreshes the remote snapshot. Application restart returns to This PC;
+hiding and showing the same window preserves its current selection.
+
+This increment uses bounded HTTPS polling. Live WSS subscriptions, graphical
+Add/Manage PC, terminal streaming and remote layout mutations remain pending.

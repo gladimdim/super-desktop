@@ -176,7 +176,8 @@ super-desktop status
 PC-to-PC workspace switching: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md).
 Outgoing PC pairing and remote layout retrieval are now testable through the
 [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment);
-the graphical machine selector and interactive remote consoles are still pending.
+the top-left machine selector now shows a read-only remote layout preview.
+Interactive remote consoles are still pending.
 
 ```
 ~/GitHub/super-desktop/
