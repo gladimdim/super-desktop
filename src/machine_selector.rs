@@ -35,16 +35,18 @@ impl MachineView {
         let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
         toolbar.add_css_class("hud-bar");
         let local_button = gtk4::MenuButton::new();
-        local_button.set_label("This PC ▾");
-        local_button.add_css_class("hud-button");
+        local_button.set_label("This PC");
+        local_button.add_css_class("machine-selector");
         let remote_button = gtk4::MenuButton::new();
-        remote_button.add_css_class("hud-button");
+        remote_button.add_css_class("machine-selector");
         toolbar.append(&remote_button);
         let status = gtk4::Label::new(Some("Connecting…"));
         status.set_hexpand(true);
         status.set_xalign(0.0);
         toolbar.append(&status);
         let hide = gtk4::Button::with_label("✕ Hide");
+        hide.add_css_class("hud-button");
+        hide.add_css_class("hud-button-danger");
         hide.connect_clicked(move |_| on_hide());
         toolbar.append(&hide);
         remote.append(&toolbar);
@@ -80,6 +82,9 @@ impl MachineView {
         });
         for button in [&view.local_button, &view.remote_button] {
             let popover = gtk4::Popover::new();
+            popover.add_css_class("ws-pop");
+            popover.set_has_arrow(false);
+            popover.set_offset(0, 6);
             button.set_popover(Some(&popover));
             let weak = Rc::downgrade(&view);
             popover.connect_show(move |popover| {
@@ -121,7 +126,9 @@ impl MachineView {
     }
     fn populate(self: &Rc<Self>, popover: &gtk4::Popover) {
         let list = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        list.add_css_class("ws-pop-box");
         let local = gtk4::Button::with_label("This PC");
+        style_peer_button(&local, !self.is_remote());
         let weak = Rc::downgrade(self);
         let pop = popover.downgrade();
         local.connect_clicked(move |_| {
@@ -134,6 +141,7 @@ impl MachineView {
         });
         list.append(&local);
         let loading = gtk4::Label::new(Some("Loading paired PCs…"));
+        loading.add_css_class("ws-row-path");
         list.append(&loading);
         popover.set_child(Some(&list));
         let weak = Rc::downgrade(self);
@@ -163,6 +171,11 @@ impl MachineView {
                             if peer.expired { " · Pair again" } else { "" }
                         );
                         let button = gtk4::Button::with_label(&title);
+                        style_peer_button(
+                            &button,
+                            view.selection.borrow().machine
+                                == MachineSelection::Remote(peer.machine_id.clone()),
+                        );
                         button.set_tooltip_text(Some(&format!(
                             "{}:{} · {}",
                             peer.endpoint.host, peer.endpoint.port, peer.machine_id
@@ -187,6 +200,11 @@ impl MachineView {
             let help = gtk4::Label::new(Some(
                 "Add a PC from a terminal:\nsuper-desktop peer-add --host HOST_IP",
             ));
+            help.add_css_class("ws-row-path");
+            help.set_xalign(0.0);
+            help.set_margin_start(10);
+            help.set_margin_end(10);
+            help.set_margin_bottom(8);
             help.set_selectable(true);
             help.set_margin_top(8);
             list.append(&help);
@@ -206,7 +224,7 @@ impl MachineView {
                 self.selection
                     .borrow_mut()
                     .select(MachineSelection::Remote(id));
-                self.remote_button.set_label(&format!("{label} ▾"));
+                self.remote_button.set_label(&label);
                 self.status.set_text("Connecting…");
                 self.stack.set_visible_child_name("remote");
                 self.refresh();
@@ -339,6 +357,20 @@ impl MachineView {
             let _ = cr.restore();
         }
         let _ = cr.restore();
+    }
+}
+
+fn style_peer_button(button: &gtk4::Button, selected: bool) {
+    button.add_css_class("hud-button");
+    button.add_css_class("machine-peer");
+    if selected {
+        button.add_css_class("machine-peer-selected");
+    }
+    if let Some(label) = button
+        .child()
+        .and_then(|child| child.downcast::<gtk4::Label>().ok())
+    {
+        label.set_xalign(0.0);
     }
 }
 

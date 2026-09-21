@@ -73,14 +73,16 @@ window.sd-hot-corner {{
     padding: 2px 10px;
 }}
 
-.hud-size-medium .hud-button {{ padding: 4px 10px; font-size: 11px; }}
+.hud-size-medium .hud-button,
+.hud-size-medium menubutton.machine-selector > button {{ padding: 4px 10px; font-size: 11px; }}
 .hud-size-medium .hud-gear {{ min-width: 32px; min-height: 32px; font-size: 19px; padding: 0; }}
 .hud-size-medium .hud-title {{ font-size: 12px; }}
 .hud-size-medium .hud-badge,
 .hud-size-medium .hud-shortcut {{ font-size: 10px; }}
 .hud-size-medium entry.ws-entry {{ min-height: 24px; padding: 2px 8px; font-size: 12px; }}
 
-.hud-size-small .hud-button {{ padding: 2px 8px; font-size: 10px; }}
+.hud-size-small .hud-button,
+.hud-size-small menubutton.machine-selector > button {{ padding: 2px 8px; font-size: 10px; }}
 .hud-size-small .hud-gear {{ min-width: 28px; min-height: 28px; font-size: 17px; padding: 0; }}
 .hud-size-small .hud-title {{ font-size: 11px; }}
 .hud-size-small .hud-badge,
@@ -107,7 +109,8 @@ window.sd-hot-corner {{
     font-weight: 600;
 }}
 
-.hud-button {{
+.hud-button,
+menubutton.machine-selector > button {{
     background-color: transparent;
     background-image: none;
     color: {light_foreground};
@@ -120,13 +123,16 @@ window.sd-hot-corner {{
     transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
 }}
 
-.hud-button:hover {{
+.hud-button:hover,
+menubutton.machine-selector > button:hover {{
     background-color: {btn_hover_bg};
     color: {bright_foreground};
     box-shadow: inset 0 -2px {accent};
 }}
 
-.hud-button:active {{
+.hud-button:active,
+menubutton.machine-selector > button:active,
+menubutton.machine-selector > button:checked {{
     background-color: {badge_bg};
     color: {accent};
     box-shadow: inset 0 -2px {accent};
@@ -135,6 +141,27 @@ window.sd-hot-corner {{
 .hud-action-primary {{
     color: {accent};
     font-weight: 700;
+}}
+
+/* MenuButton wraps a real button: style that node, avoiding nested pills. */
+menubutton.machine-selector {{
+    padding: 0;
+    background: transparent;
+    border: none;
+    box-shadow: none;
+}}
+menubutton.machine-selector > button:focus-visible,
+button.machine-peer:focus-visible {{
+    outline: 1px solid {accent};
+    outline-offset: -2px;
+}}
+button.machine-peer {{
+    padding: 8px 10px;
+    border-radius: 8px;
+}}
+button.machine-peer-selected {{
+    color: {accent};
+    background-color: {badge_bg};
 }}
 
 /* The ⚙ settings toggle: the gear alone, oversized, in a clear hit target —
