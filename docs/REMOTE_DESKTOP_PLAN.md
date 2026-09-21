@@ -1,7 +1,12 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
-Status: proposed implementation handoff; no application changes implemented.
+Status: implementation started; the complete feature is not yet available.
 Prepared 2026-09-21 against the current repository.
+
+Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
+The original architecture below remains the target; capability negotiation and
+the isolated PTY prototype are implemented, while the selector, workspace model
+and network terminal transport remain pending.
 
 ## 1. Intended experience and scope
 

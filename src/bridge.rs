@@ -44,6 +44,8 @@ use crate::tmux::{
 pub const BRIDGE_PORT: u16 = 8759;
 const SERVICE_NAME: &str = "Omarchy Harness Bridge";
 const PROTOCOL_VERSION: u32 = 3;
+#[path = "desktop_bridge.rs"]
+mod desktop;
 static INPUT_ACTIVITY: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
 
 fn wake_terminal_streams() {
@@ -1202,6 +1204,27 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     }
 
     match (req.method.as_str(), path.as_str()) {
+        ("GET", "/api/v1/desktop/capabilities") => {
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            let machine_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
+            let capabilities = crate::desktop_protocol::Capabilities::current(machine_id);
+            respond(&mut stream, 200, "OK", &serde_json::to_value(capabilities).unwrap());
+        }
+        ("GET", "/api/v1/desktop/workspace" | "/api/v1/desktop/events") => {
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            if path.ends_with("/events") {
+                if !ws_upgrade(&mut stream, &req) {
+                    return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
+                }
+                desktop::stream_workspace(stream);
+            } else {
+                desktop::get_workspace(&mut stream);
+            }
+        }
         ("GET", "/api/v1/ping") => {
             let bridge_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
             respond(

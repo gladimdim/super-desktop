@@ -8,6 +8,7 @@ mod asset_view;
 mod bridge;
 mod card_resize;
 mod crashlog;
+mod desktop_protocol;
 mod harness_settings;
 mod hotcorner;
 mod jev;
@@ -24,9 +25,11 @@ mod tag;
 mod theme;
 mod tmux;
 mod tmux_control;
+mod terminal_transport;
 mod usage;
 mod window;
 mod workspace_bar;
+mod workspace_model;
 mod ws;
 
 /// Test-only helper for the GTK-dependent tests.
@@ -148,8 +151,8 @@ fn ipc_request_at(sock_path: &std::path::Path, cmd: &str) -> Ipc {
     let _ = stream.write_all(format!("{}\n", cmd.trim()).as_bytes());
 
     let mut resp = String::new();
-    match stream.read_to_string(&mut resp) {
-        Ok(_) if !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
+    match stream.take(1024 * 1024 + 1).read_to_string(&mut resp) {
+        Ok(_) if resp.len() <= 1024 * 1024 && !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
         _ => Ipc::Stalled,
     }
 }
@@ -184,6 +187,7 @@ fn watch_socket_ownership(sock_path: &PathBuf) {
 }
 
 struct AppContext {
+    local_workspace: Rc<workspace_model::LocalWorkspace>,
     /// Kept for the whole daemon lifetime once built: hiding only unmaps it
     /// (see `hide_window`), so showing again costs no rebuild.
     window: Option<Rc<SuperDesktopWindow>>,
@@ -284,6 +288,8 @@ fn main() {
             } else {
                 println!("{}", resp);
             }
+        } else if action == "desktop-workspace" {
+            println!("{}", resp);
         } else {
             println!("SUPER DESKTOP (Rust): {}", resp);
         }
@@ -328,7 +334,8 @@ fn main() {
 }
 
 fn run_daemon(start_visible: bool) {
-    sleep_lock::set_enabled(state::load_state().sleep_lock_on_ac);
+    let initial_state = state::load_state();
+    sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     let _ = gtk4::init();
     startup::mark("GTK initialized");
 
@@ -344,6 +351,7 @@ fn run_daemon(start_visible: bool) {
     startup::mark("theme and styles ready");
 
     let context = Rc::new(RefCell::new(AppContext {
+        local_workspace: Rc::new(workspace_model::LocalWorkspace::new(initial_state)),
         window: None,
         shown: false,
         hot_inside: Rc::new(Cell::new(false)),
@@ -484,7 +492,8 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
 
     let ctx_close = Rc::clone(ctx);
     let hot_inside = Rc::clone(&ctx.borrow().hot_inside);
-    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside);
+    let local_state = ctx.borrow().local_workspace.state();
+    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside, local_state);
 
     win.window.present();
     win.start_slide_in();
@@ -524,7 +533,8 @@ fn warm_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
     }
     let ctx_close = Rc::clone(ctx);
     let hot_inside = Rc::clone(&ctx.borrow().hot_inside);
-    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside);
+    let local_state = ctx.borrow().local_workspace.state();
+    let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside, local_state);
     // Not presented: the window stays unmapped until the first show.
     ctx.borrow_mut().window = Some(win);
 }
@@ -681,7 +691,8 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
                 .as_ref()
                 .map(|w| w.item_counts())
                 .unwrap_or_else(|| {
-                    let state = state::load_state();
+                    let state = context.local_workspace.state();
+                    let state = state.borrow();
                     (state.notes.len(), state.terminals.len())
                 });
             json!({
@@ -704,11 +715,22 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             }
             json!({ "ok": true }).to_string()
         }
+        "desktop-workspace" => {
+            let Some(win) = live_window(ctx) else {
+                return json!({"ok": false, "error": "desktop_not_ready"}).to_string();
+            };
+            let model = ctx.borrow().local_workspace.clone();
+            match win.desktop_snapshot(&model) {
+                Ok(workspace) => json!({"ok": true, "workspace": workspace}).to_string(),
+                Err(error) => json!({"ok": false, "error": error}).to_string(),
+            }
+        }
         "workspace-choices" => {
             if let Some(win) = &ctx.borrow().window {
                 return win.workspace_choices().to_string();
             }
-            let state = state::load_state();
+            let shared = ctx.borrow().local_workspace.state();
+            let state = shared.borrow();
             json!({"workspace": state::effective_workspace_dir(&state),
                 "recentDirectories": state.recent_dirs,
                 "usedDirectories": state.used_dirs}).to_string()
@@ -755,7 +777,8 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
                 };
             }
 
-            let mut state = state::load_state();
+            let shared = ctx.borrow().local_workspace.state();
+            let mut state = shared.borrow_mut();
             let before = state.terminals.len();
             state.terminals.retain(|t| t.session_name != *sess);
             let removed = state.terminals.len() != before;
@@ -763,7 +786,10 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
                 tmux::kill_session(sess);
             }
             if removed {
-                state::save_state_async(state);
+                state::normalize_terminal_order(&mut state);
+                let snapshot = state.clone();
+                drop(state);
+                state::save_state_async(snapshot);
                 json!({ "ok": true, "id": sess }).to_string()
             } else {
                 json!({ "ok": false, "error": "no_such_session", "id": sess }).to_string()

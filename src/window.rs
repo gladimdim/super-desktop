@@ -4,7 +4,6 @@ use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Button, EventControllerFocus, EventControllerKey,
     EventControllerMotion, Fixed, Image, Label, Orientation, Overlay, Popover, PositionType,
-    Separator,
 };
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
@@ -16,7 +15,7 @@ use crate::mini_terminal::{
     clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, MiniTerminalCard,
     NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
 };
-use crate::state::{load_state, AppState, NoteData, TerminalData, TopBarSize};
+use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
 use crate::tag::DEFAULT_TERMINAL_TAG;
 use crate::tmux::create_session;
@@ -114,15 +113,6 @@ fn spring_settled(x: f64, v: f64, target: f64) -> bool {
     (x - target).abs() < SLIDE_SETTLE_X && v.abs() < SLIDE_SETTLE_V
 }
 
-/// Sets the HUD counts label only when the text actually changed.
-/// Unconditional set_label() queues a relayout of the HUD bar.
-fn set_counts_label(badge: &Label, notes: usize, terms: usize) {
-    let text = format!("{} Notes • {} Terminals", notes, terms);
-    if badge.label().as_str() != text.as_str() {
-        badge.set_label(&text);
-    }
-}
-
 /// Show the stored toggle shortcut in the HUD: the trailing hint label and the
 /// Hide button's tooltip. Called once at build time and again whenever the ⚙
 /// Settings panel records a new combination.
@@ -150,7 +140,6 @@ pub struct SuperDesktopWindow {
     note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>>,
     terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
     hud: gtk4::Box,
-    hud_badge: Label,
     screen_width: i32,
     screen_height: i32,
     drag_pending: Rc<RefCell<HashMap<gtk4::Widget, (f64, f64)>>>,
@@ -186,6 +175,7 @@ impl SuperDesktopWindow {
         app: &Application,
         on_request_close: FClose,
         hot_inside: Rc<Cell<bool>>,
+        state: Rc<RefCell<AppState>>,
     ) -> Rc<Self> {
         crate::startup::mark("overlay construction started");
         let window = ApplicationWindow::new(app);
@@ -234,7 +224,6 @@ impl SuperDesktopWindow {
 
         canvas.put(&ghost_box, 0.0, 0.0);
 
-        let state = Rc::new(RefCell::new(load_state()));
         let note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>> = Rc::new(RefCell::new(Vec::new()));
         let terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>> =
             Rc::new(RefCell::new(Vec::new()));
@@ -315,14 +304,34 @@ impl SuperDesktopWindow {
         settings_panel.widget.set_halign(Align::Center);
         settings_panel.widget.set_valign(Align::Center);
 
-        let hud = gtk4::Box::new(Orientation::Horizontal, 10);
+        let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
         paint_top_bar_size(&hud, state.borrow().top_bar_size, screen_width);
         *hud_for_settings.borrow_mut() = Some(hud.clone());
 
+        // Left chrome (brand, folder, + Note) and right chrome (Arrange / ⚙ /
+        // Hide) sit in a full-width row. The harness launch list is an overlay
+        // with Align::Center so it stays on the display midline even when the
+        // two chrome groups have different widths.
+        let hud_overlay = Overlay::new();
+        hud_overlay.set_hexpand(true);
+        hud_overlay.set_vexpand(true);
+        hud_overlay.set_halign(Align::Fill);
+        hud_overlay.set_valign(Align::Fill);
+
+        let chrome = gtk4::Box::new(Orientation::Horizontal, 10);
+        chrome.set_hexpand(true);
+        chrome.set_vexpand(true);
+        chrome.set_halign(Align::Fill);
+        chrome.set_valign(Align::Fill);
+
+        let hud_left = gtk4::Box::new(Orientation::Horizontal, 10);
+        hud_left.set_valign(Align::Center);
+        hud_left.set_halign(Align::Start);
+
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
         brand.add_css_class("hud-title");
-        hud.append(&brand);
+        hud_left.append(&brand);
 
         // Workspace folder: the directory new harness cards start in. It sits
         // right after the brand so the folder in use is the first thing read
@@ -332,15 +341,29 @@ impl SuperDesktopWindow {
             Rc::clone(&state),
             Rc::new(crate::state::save_state_async),
         );
-        hud.append(&workspace_bar.widget);
+        hud_left.append(&workspace_bar.widget);
+        chrome.append(&hud_left);
 
-        let hud_badge = Label::new(Some("0 Notes • 0 Agents"));
-        hud_badge.add_css_class("hud-badge");
-        hud_badge.set_valign(Align::Center);
-        hud.append(&hud_badge);
+        let chrome_spacer = gtk4::Box::new(Orientation::Horizontal, 0);
+        chrome_spacer.set_hexpand(true);
+        chrome.append(&chrome_spacer);
 
-        let sep1 = Separator::new(Orientation::Vertical);
-        hud.append(&sep1);
+        let hud_right = gtk4::Box::new(Orientation::Horizontal, 10);
+        hud_right.set_valign(Align::Center);
+        hud_right.set_halign(Align::End);
+        chrome.append(&hud_right);
+
+        hud_overlay.set_child(Some(&chrome));
+
+        let hud_launchers = gtk4::Box::new(Orientation::Horizontal, 10);
+        hud_launchers.add_css_class("hud-launchers");
+        hud_launchers.set_halign(Align::Center);
+        hud_launchers.set_valign(Align::Center);
+        hud_launchers.set_hexpand(false);
+        hud_launchers.set_vexpand(false);
+        hud_overlay.add_overlay(&hud_launchers);
+
+        hud.append(&hud_overlay);
 
         let drag_pending = Rc::new(RefCell::new(HashMap::new()));
         let drag_tick_active = Rc::new(RefCell::new(false));
@@ -358,7 +381,6 @@ impl SuperDesktopWindow {
             note_cards,
             terminal_cards,
             hud: hud.clone(),
-            hud_badge,
             screen_width,
             screen_height,
             drag_pending,
@@ -461,7 +483,7 @@ impl SuperDesktopWindow {
                 w.create_new_note(None, None, "");
             }
         });
-        hud.append(&btn_note);
+        hud_left.append(&btn_note);
 
         // Agents (company logo + name; emoji label if the SVG is missing).
         // Driven by `HARNESS_KEYS` so the launch buttons and the ⚙ settings
@@ -554,20 +576,11 @@ impl SuperDesktopWindow {
                 });
             }
             btn.set_visible(visible_keys.iter().any(|k| k == agent_key));
-            hud.append(&btn);
+            hud_launchers.append(&btn);
             harness_buttons
                 .borrow_mut()
                 .push((agent_key.to_string(), btn));
         }
-
-        let sep2 = Separator::new(Orientation::Vertical);
-        hud.append(&sep2);
-
-        // Keep launch controls grouped at the left and dock controls aligned
-        // against the right edge of the full-width bar.
-        let dock_spacer = gtk4::Box::new(Orientation::Horizontal, 0);
-        dock_spacer.set_hexpand(true);
-        hud.append(&dock_spacer);
 
         // Arrange
         let btn_arrange = Button::with_label("✨ Arrange");
@@ -579,7 +592,7 @@ impl SuperDesktopWindow {
                 w.auto_arrange();
             }
         });
-        hud.append(&btn_arrange);
+        hud_right.append(&btn_arrange);
 
         // The one settings entry point: a bare gear icon (no label), opening
         // the ⚙ card — shortcut, top-bar harnesses, and the 📱 launcher page.
@@ -600,7 +613,7 @@ impl SuperDesktopWindow {
                 settings_refresh();
             }
         });
-        hud.append(&btn_settings);
+        hud_right.append(&btn_settings);
 
         // Close (its tooltip already names the current shortcut — see
         // `paint_shortcut_hints`).
@@ -608,9 +621,9 @@ impl SuperDesktopWindow {
         btn_close.connect_clicked(move |_| {
             on_close_btn();
         });
-        hud.append(&btn_close);
+        hud_right.append(&btn_close);
 
-        hud.append(&hint);
+        hud_right.append(&hint);
 
         // On the canvas, not an Overlay child: Fixed.move_ translates the
         // full-width dock as one widget, same as the cards.
@@ -721,7 +734,9 @@ impl SuperDesktopWindow {
     }
 
     fn load_items(&self) {
-        let terminals: Vec<TerminalData> = self.state.borrow().terminals.clone();
+        let mut terminals: Vec<TerminalData> = self.state.borrow().terminals.clone();
+        let order = self.state.borrow().terminal_order.clone();
+        terminals.sort_by_key(|t| order.iter().position(|id| id == &t.id).unwrap_or(usize::MAX));
         let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::default());
         for term_data in terminals {
             self.spawn_terminal_widget(term_data, false, Some(std::sync::Arc::clone(&inventory)));
@@ -734,7 +749,6 @@ impl SuperDesktopWindow {
 
         self.raise_all_notes();
         raise_canvas_child(&self.canvas, &self.hud);
-        self.update_counts();
     }
 
     pub fn create_new_note(&self, x: Option<i32>, y: Option<i32>, text: &str) {
@@ -757,15 +771,12 @@ impl SuperDesktopWindow {
         };
 
         self.spawn_note_widget(data, true);
-        self.update_counts();
     }
 
     fn spawn_note_widget(&self, note_data: NoteData, save: bool) {
         let canvas = self.canvas.clone();
         let state = Rc::clone(&self.state);
         let note_cards = Rc::clone(&self.note_cards);
-        let hud_badge = self.hud_badge.clone();
-        let term_len = self.terminal_cards.borrow().len();
 
         let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
@@ -829,7 +840,6 @@ impl SuperDesktopWindow {
         let canvas_del = canvas.clone();
         let state_del = Rc::clone(&state);
         let note_cards_del = Rc::clone(&note_cards);
-        let hud_del = hud_badge.clone();
 
         let on_delete = move |id: String| {
             // Take the note out of the shared list and drop the borrow BEFORE
@@ -850,8 +860,6 @@ impl SuperDesktopWindow {
             let snapshot = s.clone();
             drop(s);
             crate::state::save_state_async(snapshot);
-            let n = note_cards_del.borrow().len();
-            set_counts_label(&hud_del, n, term_len);
         };
 
         let state_change = Rc::clone(&state);
@@ -1016,7 +1024,6 @@ impl SuperDesktopWindow {
         };
 
         self.spawn_terminal_widget(data, true, None);
-        self.update_counts();
         sess
     }
 
@@ -1024,8 +1031,6 @@ impl SuperDesktopWindow {
         let canvas = self.canvas.clone();
         let state = Rc::clone(&self.state);
         let term_cards = Rc::clone(&self.terminal_cards);
-        let hud_badge = self.hud_badge.clone();
-        let notes_len = self.note_cards.borrow().len();
 
         let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
@@ -1110,7 +1115,6 @@ impl SuperDesktopWindow {
         let canvas_del = canvas.clone();
         let state_del = Rc::clone(&state);
         let term_cards_del = Rc::clone(&term_cards);
-        let hud_del = hud_badge.clone();
 
         let on_close = move |sess: String| {
             // Pull the card out of the shared list and drop the borrow BEFORE
@@ -1132,11 +1136,10 @@ impl SuperDesktopWindow {
             canvas_del.remove(&card.container);
             let mut s = state_del.borrow_mut();
             s.terminals.retain(|t| t.session_name != sess);
+            crate::state::normalize_terminal_order(&mut s);
             let snapshot = s.clone();
             drop(s);
             crate::state::save_state_async(snapshot);
-            let n = term_cards_del.borrow().len();
-            set_counts_label(&hud_del, notes_len, n);
         };
 
         // Restored cards reappear wherever their current mode lives: an
@@ -1146,6 +1149,7 @@ impl SuperDesktopWindow {
 
         if save {
             self.state.borrow_mut().terminals.push(term_data.clone());
+            crate::state::normalize_terminal_order(&mut self.state.borrow_mut());
             crate::state::save_state_async(self.state.borrow().clone());
         }
 
@@ -1216,6 +1220,8 @@ impl SuperDesktopWindow {
         let hud_raise = self.hud.clone();
         let term_cards_raise = Rc::clone(&term_cards);
         let sess_name = term_data.session_name.clone();
+        let card_id_raise = term_data.id.clone();
+        let state_raise = Rc::clone(&state);
         let on_raise = move |widget: gtk4::Widget| {
             if let Some(last) = canvas_raise.last_child() {
                 if &last != &widget {
@@ -1233,6 +1239,16 @@ impl SuperDesktopWindow {
             if let Some(pos) = cards.iter().position(|c| c.data.borrow().session_name == sess_name) {
                 let card = cards.remove(pos);
                 cards.push(card);
+            }
+            drop(cards);
+            let mut state = state_raise.borrow_mut();
+            if state.terminal_order.last() != Some(&card_id_raise)
+                && state.terminals.iter().any(|t| t.id == card_id_raise) {
+                state.terminal_order.retain(|id| id != &card_id_raise);
+                state.terminal_order.push(card_id_raise.clone());
+                let snapshot = state.clone();
+                drop(state);
+                crate::state::save_state_async(snapshot);
             }
         };
 
@@ -1482,10 +1498,22 @@ impl SuperDesktopWindow {
         });
     }
 
-    fn update_counts(&self) {
-        let n_notes = self.note_cards.borrow().len();
-        let n_terms = self.terminal_cards.borrow().len();
-        set_counts_label(&self.hud_badge, n_notes, n_terms);
+    /// Read current local layout without presenting the window or probing tmux.
+    /// This remains the local workspace even when a remote view is added later.
+    pub fn desktop_snapshot(&self, model: &crate::workspace_model::LocalWorkspace)
+        -> Result<crate::desktop_protocol::LocalWorkspaceSnapshot, &'static str>
+    {
+        let presentation = self.terminal_cards.borrow().iter().map(|card| {
+            (card.data.borrow().id.clone(), card.desktop_presentation())
+        }).collect();
+        // Export the same logical canvas used by local placement/animation.
+        // Do not export animated widget coordinates during slide-in/out.
+        let canvas = crate::desktop_protocol::Canvas {
+            x: 0, y: 0, width: self.screen_width as u32, height: self.screen_height as u32,
+            scale: self.window.scale_factor() as f64,
+            top_inset: top_bar_height(self.state.borrow().top_bar_size) as u32,
+        };
+        model.snapshot(canvas, &presentation)
     }
 
     pub fn item_counts(&self) -> (usize, usize) {
@@ -1506,10 +1534,10 @@ impl SuperDesktopWindow {
         self.canvas.remove(&card.container);
         let mut s = self.state.borrow_mut();
         s.terminals.retain(|t| t.session_name != sess);
+        crate::state::normalize_terminal_order(&mut s);
         let snapshot = s.clone();
         drop(s);
         crate::state::save_state_async(snapshot);
-        self.update_counts();
         true
     }
 
@@ -1592,7 +1620,6 @@ impl SuperDesktopWindow {
         for card in cards.iter() {
             card.refresh_status();
         }
-        self.update_counts();
     }
 }
 

@@ -46,6 +46,11 @@ Active means an open authenticated connection or authenticated activity within
 the last 60 seconds. Expired/revoked devices are never counted active; registered
 devices remain visible while the bridge is stopped.
 
+The additive `GET /api/v1/desktop/capabilities` endpoint requires paired-device
+authentication and follows the same origin rejection, expiry and revocation
+rules. Its capability list remains empty until PC workspace/terminal endpoints
+are implemented. It does not grant new access or change security protocol v3.
+
 ## Resource bounds
 
 ### Referenced files
