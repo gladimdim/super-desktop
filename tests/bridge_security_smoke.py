@@ -60,7 +60,7 @@ def main():
                     connection.close()
 
             assert request("/api/v1/ping")[0] == 200
-            for path in ["/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
+            for path in ["/api/v1/desktop/capabilities", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
                          "/api/v1/harnesses/sd_term_probe/assets", "/api/v1/harnesses/sd_term_probe/assets/id/content",
                          "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
                 assert request(path)[0] == 401, path
@@ -81,6 +81,13 @@ def main():
             assert request("/api/v1/pair/approve", rid)[0] == 403
             admin("/api/v1/pair/approve", rid)
             token = request("/api/v1/pair/poll", rid)[1]["token"]
+            status, desktop = request("/api/v1/desktop/capabilities", token=token)
+            assert status == 200
+            assert desktop == {"machineId": request("/api/v1/ping")[1]["bridgeId"],
+                               "desktopApiVersion": 1, "capabilities": []}
+            assert request("/api/v1/ping")[1]["protocolVersion"] == 3
+            assert request("/api/v1/desktop/capabilities", token=token,
+                           headers={"Origin": "https://untrusted.example"})[0] == 403
             assert request("/api/v1/theme", token=token)[0] == 200
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Content-Length": "99999999"})[0] == 413
@@ -105,6 +112,7 @@ def main():
             admin("/api/v1/pair/revoke", {"deviceId": device["id"]})
             assert admin("/api/v1/pair/devices")["devices"] == []
             assert request("/api/v1/theme", token=token)[0] == 401
+            assert request("/api/v1/desktop/capabilities", token=token)[0] == 401
             assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401

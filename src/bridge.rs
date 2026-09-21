@@ -1202,6 +1202,14 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     }
 
     match (req.method.as_str(), path.as_str()) {
+        ("GET", "/api/v1/desktop/capabilities") => {
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            let machine_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
+            let capabilities = crate::desktop_protocol::Capabilities::current(machine_id);
+            respond(&mut stream, 200, "OK", &serde_json::to_value(capabilities).unwrap());
+        }
         ("GET", "/api/v1/ping") => {
             let bridge_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
             respond(
