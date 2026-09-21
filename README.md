@@ -172,6 +172,8 @@ super-desktop status
 
 ## 🏗️ Project layout (for contributors)
 
+Planned PC-to-PC workspace switching: [implementation handoff](docs/REMOTE_DESKTOP_PLAN.md).
+
 ```
 ~/GitHub/super-desktop/
 ├── bin/super-desktop        # Launcher: LD_PRELOAD layer-shell, execs target/release/super-desktop (auto-builds if missing)
