@@ -5,7 +5,8 @@ The machine selector and network terminal transport are **not available yet**.
 Implemented: protocol negotiation, a daemon-owned local workspace model,
 authenticated workspace snapshots/events, persisted terminal stacking order, and
 an isolated server-side PTY implementation with tmux/VTE integration tests.
-Remote mutations, outgoing pairing, the machine selector and WSS terminal
+Outgoing certificate-pinned pairing and remote snapshot retrieval are available
+through the CLI (see below). Remote mutations, the machine selector and WSS terminal
 attachment remain pending; this is still an incremental development branch.
 
 ## Available endpoints
@@ -196,3 +197,55 @@ installed, but this PC falls back to its shell. The same failure was reproduced
 on the unmodified base commit `013492a`. This increment's serial suite reports
 201 passed, 4 ignored and that same single failure. No unrelated tests were changed.
 The extended TLS/WSS security smoke test and build-only release validation passed.
+
+## Outgoing PC pairing (CLI increment)
+
+Both PCs must run this branch. On the host, enable the bridge in Settings →
+Android, generate an invitation and copy its pairing link. On the viewing PC:
+
+```sh
+super-desktop peer-add --host 192.168.1.20 --name "Work laptop"
+# Paste the invitation at the prompt; input is hidden.
+super-desktop peer-list
+super-desktop peer-workspace MACHINE_ID
+super-desktop peer-forget MACHINE_ID
+```
+
+`--host` and `--port` override the invitation's address (useful for LAN/VPN
+routing). The certificate pin still comes from the invitation. Compare the
+six-digit code and approve the request on the host. Invitations are read from
+stdin, never from command arguments; scripts may supply a compact JSON
+invitation or the existing `superdesktop://pair?data=...` link. Treat invitations
+as secrets. The viewer stores the peer only after host approval. Local starts
+remain local; these commands do not switch or display a remote workspace yet.
+
+`peer-workspace` returns the host's typed layout snapshot, including card
+positions, sizes and stacking order. The host desktop daemon must be running.
+It checks the pinned certificate, persistent machine identity and desktop
+capabilities before fetching the layout. Errors contain no credentials or
+response bodies. Redirects, environment proxies and automatic retries are
+disabled. Pairing waits up to two minutes; an ambiguous submission failure
+requires checking the host and generating a fresh invitation rather than
+silently retrying it.
+
+Outgoing credentials live in `~/.local/state/super-desktop/peers.json`
+(directory 0700, file 0600), separate from the bridge's incoming devices. They
+are **not encrypted at rest**; processes running as the same user can read them.
+`SUPER_DESKTOP_PEERS_STATE_DIR` overrides this directory for testing. The store
+rejects unsafe permissions and symlinks, uses a lock to prevent lost updates,
+and replaces records atomically. `peer-list` prints only public metadata.
+`peer-forget` removes the local record; revoke the device on the host to
+invalidate its token. Re-pairing the same machine replaces its saved endpoint,
+pin and credential after approval. Older hosts may omit expiry metadata; host
+HTTP authorization remains authoritative.
+
+Run the isolated integration regression with:
+
+```sh
+python3 tests/peer_pairing_smoke.py target/release/super-desktop
+```
+
+It starts disposable bridges and a fake owner IPC endpoint. It tests real TLS,
+CLI pairing, approval/denial, pin rejection, self-pair rejection, private
+storage, snapshots, identity changes, expiry, local removal and host revocation.
+No production daemon or bridge credentials are used.

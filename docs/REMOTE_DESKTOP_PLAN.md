@@ -6,9 +6,10 @@ Prepared 2026-09-21 against the current repository.
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
 The original architecture below remains the target. Capability negotiation,
 the isolated PTY prototype, the daemon-owned local state, persisted terminal order
-and authenticated workspace snapshot/event routes are implemented. Lifecycle
-mutation extraction, remote commands, outgoing peer connections, the selector and
-network terminal transport remain pending.
+and authenticated workspace snapshot/event routes are implemented. Outgoing
+certificate-pinned PC pairing, private peer storage and remote snapshot retrieval
+are testable through the CLI. Lifecycle mutation extraction, remote commands,
+the selector, live outgoing subscriptions and network terminal transport remain pending.
 
 ## 1. Intended experience and scope
 
