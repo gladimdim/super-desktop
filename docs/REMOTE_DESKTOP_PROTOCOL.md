@@ -1,11 +1,14 @@
-# Desktop protocol: first implementation increment
+# Desktop protocol: workspace snapshot increment
 
 This document accompanies [the implementation plan](REMOTE_DESKTOP_PLAN.md).
 The machine selector and network terminal transport are **not available yet**.
-This increment adds protocol types, authenticated feature negotiation, and an
-isolated server-side PTY implementation with tmux/VTE integration tests.
+Implemented: protocol negotiation, a daemon-owned local workspace model,
+authenticated workspace snapshots/events, persisted terminal stacking order, and
+an isolated server-side PTY implementation with tmux/VTE integration tests.
+Remote mutations, outgoing pairing, the machine selector and WSS terminal
+attachment remain pending; this is still an incremental development branch.
 
-## Available endpoint
+## Available endpoints
 
 `GET /api/v1/desktop/capabilities` requires the existing paired-device bearer
 credential over HTTPS. It returns:
@@ -14,21 +17,44 @@ credential over HTTPS. It returns:
 {
   "machineId": "<existing persistent bridgeId>",
   "desktopApiVersion": 1,
-  "capabilities": []
+  "capabilities": ["workspace-snapshot-v1"]
 }
 ```
 
-The empty list is intentional: neither complete workspace synchronization nor
-network PTY attachment is implemented. A future desktop client must require
+`workspace-snapshot-v1` advertises read-only workspace snapshots/events. It does
+not advertise writable layout synchronization or interactive terminals. A future
+desktop client must require
 both `workspace-layout-v1` and `terminal-pty-v1`, together with a supported
 `desktopApiVersion`, before enabling interactive remote desktop mode. Unknown
 optional capabilities can be ignored. Missing endpoint, missing capability or
 unsupported version means the host needs an update, not permission to fall back
 to snapshot terminal emulation.
 
-The endpoint uses the same auth, browser-origin rejection, credential expiry
-and revocation rules as existing bridge endpoints. Security protocol remains
-v3; Android endpoints and credentials are unchanged.
+All desktop endpoints use the same auth, browser-origin rejection, credential
+expiry and revocation rules as existing bridge endpoints. Security protocol
+remains v3; Android endpoints and credentials are unchanged.
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /api/v1/desktop/workspace` | Complete current workspace snapshot, retrieved from the local daemon via Unix IPC. |
+| `GET /api/v1/desktop/events` (WSS) | Initial complete snapshot, then changed snapshots and five-second heartbeats. |
+
+Events use `{"type":"snapshot","workspace":{...}}` or
+`{"type":"unavailable","error":"desktop_unavailable"}`. Events poll the owning
+model every 500 ms and coalesce intermediate edits; every message is self-contained
+and no delta application is necessary. Discard prior assumptions on epoch changes.
+Streams expire after 30 minutes and ask the client to reconnect, like the existing
+phone stream. Credential revocation closes these streams immediately.
+
+An unavailable daemon returns HTTP 503 rather than an empty workspace. A daemon
+whose window has not warmed up yet returns `desktop_not_ready` (503); a timeout
+returns 504; a malformed/unsupported owner IPC response returns 502. A live stream
+reports unavailability and resumes complete snapshots when the daemon returns.
+Snapshot responses are bounded to 1 MiB over IPC and 256 saved terminal cards.
+
+The bridge supplies its own persistent machine ID. The daemon never reads or
+rewrites the bridge credential database. The DTO excludes notes, launch commands,
+agent-session mappings, OS settings and any future outgoing peer credentials.
 
 ## Initial contracts
 
@@ -41,7 +67,10 @@ v3; Android endpoints and credentials are unchanged.
   serializes the local application's complete state.
 - Cards distinguish card ID from session name, saved geometry from transient
   expansion, missing sessions from removed cards, and card revision from workspace
-  revision. A terminal size is columns/rows, not card pixels.
+  revision. A terminal size is columns/rows, not card pixels. `sessionAlive` and
+  harness `available` are nullable: `null` means unknown while background discovery
+  is pending or unavailable. `status` is `RUNNING`, `EXITED` or `UNKNOWN`; this API
+  does not yet distinguish a busy agent from an idle running process.
 - `WorkspaceEvent` initially provides full snapshots and unavailability. Incremental
   deltas are intentionally not specified until gap recovery is implemented.
 - Commands are typed envelopes with request/machine/epoch identity. Create takes
@@ -53,9 +82,41 @@ v3; Android endpoints and credentials are unchanged.
   applied/rejected result. An acknowledgement is not yet an implemented durability
   guarantee: the host model and persistence integration come next.
 
-These are compiled contracts, not available workspace/command routes. Future
-arrange/raise/expand operations and the WSS attach envelope will be added alongside
-their implementations. Do not advertise support from DTO availability alone.
+Workspace snapshot/event routes are available. Command DTOs remain contracts
+without network handlers. Future arrange/raise/expand operations and the WSS attach
+envelope will be added alongside their implementations.
+
+## Workspace ownership and revisions
+
+`AppContext` owns `LocalWorkspace`; the existing window shares its local state
+handle. CLI and Android operations keep referring to that local state. This is
+an incremental extraction: lifecycle mutations still run through existing local
+widget callbacks and are not yet a remotely writable model.
+
+Snapshots read in-memory state, including unsaved edits. They do not reload
+`state.json`, show the overlay, create cards, or attach terminals. A background
+worker is started lazily for runtime inventory and only probes while snapshots
+are requested. It coalesces requests, polls at most once per second, bounds the
+tmux subprocess to 750 ms/512 KiB output, and marks cached results older than five
+seconds unknown. Titles reflect the owning card's cached title, including while
+hidden; this API does not independently query harness conversation history.
+
+A random epoch lasts for the daemon lifetime. Workspace revisions advance when
+published content changes; individual card revisions advance only when that
+card's exported content changes. Identical reads preserve revisions. Removals are
+represented by absence from a complete snapshot. A future mutation handler must
+publish current state before validating a client revision; this is not a log of
+every pointer-motion event and no persisted revision continuity is promised.
+
+`terminal_order` stores terminal IDs back-to-front in `state.json`. Loading old
+state fills missing IDs in prior creation order, removes obsolete/duplicate
+entries, and preserves valid ordering. Raising a terminal persists the new order;
+notes retain their existing separate stacking behavior. Icon positions and saved
+card dimensions remain separate from transient expansion and overlay animation.
+Canvas metadata reports the logical placement canvas used by the current renderer,
+including its existing minimum-size behavior. Actual-monitor fitting and topology
+handling remain part of the future viewer/layout milestone.
+
 
 ## PTY feasibility result and required sizing policy
 
@@ -100,6 +161,7 @@ After checking out this branch, use the existing development dependencies
 ```bash
 cargo test --bin super-desktop desktop_protocol::tests
 cargo test --bin super-desktop terminal_transport::tests -- --nocapture
+cargo test --bin super-desktop workspace_model::tests
 cargo build --bin super-desktop
 python tests/bridge_security_smoke.py target/debug/super-desktop
 ./rebuild.sh --no-daemon
@@ -110,14 +172,27 @@ their own test shell, and clean up that session. They do not attach to your
 existing sessions. The VTE check runs in an isolated child process and requires
 a working display; it intentionally reports failure if GTK cannot initialize.
 The bridge smoke test uses temporary bridge state, credentials and an ephemeral
-port. `--no-daemon` now builds without stopping the daemon, installing symlinks
+port and private daemon IPC stub, so snapshot tests never query your real desktop.
+They exercise geometry updates, daemon-epoch changes, removals, malformed replies,
+unavailability and revocation on the real TLS/WSS server. `--no-daemon` builds without stopping the daemon, installing symlinks
 or refreshing assets. Use `./rebuild.sh` separately to install/restart deliberately.
 
-Validation on the development PC (2026-09-21): new protocol and tmux/VTE tests
-passed, the extended bridge security smoke passed, and the release build passed.
-The serial full suite reported 194 passed, 4 ignored and one existing failure:
+To inspect real local layouts after deliberately installing this build:
+
+```bash
+./rebuild.sh
+super-desktop desktop-workspace | python -m json.tool
+```
+
+Move, resize, iconify or raise a terminal and repeat the command. The card geometry,
+order and revisions should change accordingly. Hiding the overlay should still
+allow snapshots without showing it. Runtime fields may be `null` on the first read;
+a subsequent read after a second should have inventory if tmux is reachable.
+There is no machine selector to test yet.
+
+The first increment's full-suite baseline has one known failure:
 `tmux::tests::test_resolve_command_ai_agent_arguments` assumes Antigravity is
 installed, but this PC falls back to its shell. The same failure was reproduced
-on the unmodified base commit `013492a`. The parallel run also had transient
-failures in the existing released-port and shortcut-stub checks; both passed in
-the serial run. Those unrelated tests were not changed by this increment.
+on the unmodified base commit `013492a`. This increment's serial suite reports
+201 passed, 4 ignored and that same single failure. No unrelated tests were changed.
+The extended TLS/WSS security smoke test and build-only release validation passed.

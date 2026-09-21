@@ -82,6 +82,7 @@ super-desktop add-term claude # claude | antigravity | codex | opencode | grok |
 super-desktop reload-theme    # re-read Omarchy theme colors
 super-desktop kill            # stop the background daemon
 super-desktop harnesses       # one-shot JSON dump of sessions (debug)
+super-desktop desktop-workspace # local card layout + epoch/revisions as JSON (debug)
 ```
 
 State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Rebuild after updates with `./rebuild.sh`.

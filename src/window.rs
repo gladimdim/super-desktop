@@ -16,7 +16,7 @@ use crate::mini_terminal::{
     clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, MiniTerminalCard,
     NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
 };
-use crate::state::{load_state, AppState, NoteData, TerminalData, TopBarSize};
+use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
 use crate::tag::DEFAULT_TERMINAL_TAG;
 use crate::tmux::create_session;
@@ -186,6 +186,7 @@ impl SuperDesktopWindow {
         app: &Application,
         on_request_close: FClose,
         hot_inside: Rc<Cell<bool>>,
+        state: Rc<RefCell<AppState>>,
     ) -> Rc<Self> {
         crate::startup::mark("overlay construction started");
         let window = ApplicationWindow::new(app);
@@ -234,7 +235,6 @@ impl SuperDesktopWindow {
 
         canvas.put(&ghost_box, 0.0, 0.0);
 
-        let state = Rc::new(RefCell::new(load_state()));
         let note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>> = Rc::new(RefCell::new(Vec::new()));
         let terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>> =
             Rc::new(RefCell::new(Vec::new()));
@@ -721,7 +721,9 @@ impl SuperDesktopWindow {
     }
 
     fn load_items(&self) {
-        let terminals: Vec<TerminalData> = self.state.borrow().terminals.clone();
+        let mut terminals: Vec<TerminalData> = self.state.borrow().terminals.clone();
+        let order = self.state.borrow().terminal_order.clone();
+        terminals.sort_by_key(|t| order.iter().position(|id| id == &t.id).unwrap_or(usize::MAX));
         let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::default());
         for term_data in terminals {
             self.spawn_terminal_widget(term_data, false, Some(std::sync::Arc::clone(&inventory)));
@@ -1132,6 +1134,7 @@ impl SuperDesktopWindow {
             canvas_del.remove(&card.container);
             let mut s = state_del.borrow_mut();
             s.terminals.retain(|t| t.session_name != sess);
+            crate::state::normalize_terminal_order(&mut s);
             let snapshot = s.clone();
             drop(s);
             crate::state::save_state_async(snapshot);
@@ -1146,6 +1149,7 @@ impl SuperDesktopWindow {
 
         if save {
             self.state.borrow_mut().terminals.push(term_data.clone());
+            crate::state::normalize_terminal_order(&mut self.state.borrow_mut());
             crate::state::save_state_async(self.state.borrow().clone());
         }
 
@@ -1216,6 +1220,8 @@ impl SuperDesktopWindow {
         let hud_raise = self.hud.clone();
         let term_cards_raise = Rc::clone(&term_cards);
         let sess_name = term_data.session_name.clone();
+        let card_id_raise = term_data.id.clone();
+        let state_raise = Rc::clone(&state);
         let on_raise = move |widget: gtk4::Widget| {
             if let Some(last) = canvas_raise.last_child() {
                 if &last != &widget {
@@ -1233,6 +1239,16 @@ impl SuperDesktopWindow {
             if let Some(pos) = cards.iter().position(|c| c.data.borrow().session_name == sess_name) {
                 let card = cards.remove(pos);
                 cards.push(card);
+            }
+            drop(cards);
+            let mut state = state_raise.borrow_mut();
+            if state.terminal_order.last() != Some(&card_id_raise)
+                && state.terminals.iter().any(|t| t.id == card_id_raise) {
+                state.terminal_order.retain(|id| id != &card_id_raise);
+                state.terminal_order.push(card_id_raise.clone());
+                let snapshot = state.clone();
+                drop(state);
+                crate::state::save_state_async(snapshot);
             }
         };
 
@@ -1488,6 +1504,24 @@ impl SuperDesktopWindow {
         set_counts_label(&self.hud_badge, n_notes, n_terms);
     }
 
+    /// Read current local layout without presenting the window or probing tmux.
+    /// This remains the local workspace even when a remote view is added later.
+    pub fn desktop_snapshot(&self, model: &crate::workspace_model::LocalWorkspace)
+        -> Result<crate::desktop_protocol::LocalWorkspaceSnapshot, &'static str>
+    {
+        let presentation = self.terminal_cards.borrow().iter().map(|card| {
+            (card.data.borrow().id.clone(), card.desktop_presentation())
+        }).collect();
+        // Export the same logical canvas used by local placement/animation.
+        // Do not export animated widget coordinates during slide-in/out.
+        let canvas = crate::desktop_protocol::Canvas {
+            x: 0, y: 0, width: self.screen_width as u32, height: self.screen_height as u32,
+            scale: self.window.scale_factor() as f64,
+            top_inset: top_bar_height(self.state.borrow().top_bar_size) as u32,
+        };
+        model.snapshot(canvas, &presentation)
+    }
+
     pub fn item_counts(&self) -> (usize, usize) {
         (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
     }
@@ -1506,6 +1540,7 @@ impl SuperDesktopWindow {
         self.canvas.remove(&card.container);
         let mut s = self.state.borrow_mut();
         s.terminals.retain(|t| t.session_name != sess);
+        crate::state::normalize_terminal_order(&mut s);
         let snapshot = s.clone();
         drop(s);
         crate::state::save_state_async(snapshot);

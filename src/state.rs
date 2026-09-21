@@ -97,6 +97,10 @@ pub struct TerminalData {
 pub struct AppState {
     pub notes: Vec<NoteData>,
     pub terminals: Vec<TerminalData>,
+    /// Terminal card IDs, back to front. Missing legacy entries are appended
+    /// in creation order; notes retain their existing independent stacking.
+    #[serde(default)]
+    pub terminal_order: Vec<String>,
     /// Harness keys (see `tmux::HARNESS_KEYS`) the user wants as launch
     /// buttons in the overlay's top bar, chosen in the ⚙ Settings panel.
     ///
@@ -158,6 +162,7 @@ impl Default for AppState {
                 tag: 0,
             }],
             terminals: Vec::new(),
+            terminal_order: Vec::new(),
             visible_harnesses: None,
             toggle_shortcut: None,
             workspace_dir: None,
@@ -283,6 +288,18 @@ fn normalize_workspace_history(state: &mut AppState) -> bool {
     state.recent_dirs != before_recent || state.used_dirs != before_used
 }
 
+/// Repair missing, duplicate and deleted IDs without moving valid entries.
+pub fn normalize_terminal_order(state: &mut AppState) -> bool {
+    let before = state.terminal_order.clone();
+    let known: std::collections::HashSet<_> = state.terminals.iter().map(|t| t.id.as_str()).collect();
+    let mut seen = std::collections::HashSet::new();
+    state.terminal_order.retain(|id| known.contains(id.as_str()) && seen.insert(id.clone()));
+    for card in &state.terminals {
+        if seen.insert(card.id.clone()) { state.terminal_order.push(card.id.clone()); }
+    }
+    before != state.terminal_order
+}
+
 /// What the workspace field's text means: [`clean_dir`] for an absolute or
 /// `~` path, plus the two convenient readings of a bare name — relative to the
 /// folder in use, then relative to the home directory. So `super-desktop`,
@@ -323,7 +340,9 @@ pub fn load_state() -> AppState {
     if path.exists() {
         if let Ok(content) = fs::read_to_string(&path) {
             if let Ok(mut state) = serde_json::from_str::<AppState>(&content) {
-                if normalize_workspace_history(&mut state) {
+                let changed_history = normalize_workspace_history(&mut state);
+                let changed_order = normalize_terminal_order(&mut state);
+                if changed_history || changed_order {
                     // Persist the migration immediately. Otherwise the eighth
                     // old dropdown entry would only live in memory and could
                     // be lost if the daemon exits before another UI change.

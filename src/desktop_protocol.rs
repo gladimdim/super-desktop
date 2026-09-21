@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 pub const DESKTOP_API_VERSION: u32 = 1;
+pub const WORKSPACE_SNAPSHOT: &str = "workspace-snapshot-v1";
 pub const WORKSPACE_LAYOUT: &str = "workspace-layout-v1";
 pub const TERMINAL_PTY: &str = "terminal-pty-v1";
 
@@ -25,7 +26,7 @@ impl Capabilities {
             machine_id,
             desktop_api_version: DESKTOP_API_VERSION,
             // Enable only once the complete endpoint behavior is available.
-            capabilities: vec![],
+            capabilities: vec![WORKSPACE_SNAPSHOT.into()],
         }
     }
 
@@ -108,7 +109,7 @@ impl TerminalSize {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopCard {
     pub card_id: String,
@@ -116,7 +117,7 @@ pub struct DesktopCard {
     pub agent_type: String,
     pub title: String,
     pub status: String,
-    pub session_alive: bool,
+    pub session_alive: Option<bool>,
     pub workspace: String,
     pub revision: u64,
     pub layout: CardLayout,
@@ -125,18 +126,26 @@ pub struct DesktopCard {
     pub terminal_size: Option<TerminalSize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HarnessType {
     pub id: String,
     pub name: String,
-    pub available: bool,
+    pub available: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceSnapshot {
     pub machine_id: String,
+    #[serde(flatten)]
+    pub local: LocalWorkspaceSnapshot,
+}
+
+/// Daemon-owned payload. The bridge binds this to its persistent identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalWorkspaceSnapshot {
     pub epoch: String,
     pub revision: u64,
     pub canvas: Canvas,
@@ -149,14 +158,14 @@ pub struct WorkspaceSnapshot {
 
 /// Initial subscriptions and recovery use complete snapshots. No delta schema
 /// is promised until there is a retained event log and gap recovery.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum WorkspaceEvent {
     Snapshot { workspace: WorkspaceSnapshot },
     Unavailable { error: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CommandRequest {
     pub request_id: String,
@@ -167,7 +176,7 @@ pub struct CommandRequest {
 
 /// Fields accepted from viewers, never arbitrary commands or tmux arguments.
 /// The host must additionally check ownership, revisions and geometry bounds.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -194,7 +203,7 @@ pub enum WorkspaceCommand {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandReply {
     pub request_id: String,
@@ -204,7 +213,7 @@ pub struct CommandReply {
     pub result: CommandResult,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",

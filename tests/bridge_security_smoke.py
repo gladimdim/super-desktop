@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from desktop_bridge_checks import check_desktop_routes
 
 
 def main():
@@ -19,7 +20,8 @@ def main():
         port = probe.getsockname()[1]
         probe.close()
         process = subprocess.Popen([binary, "harness-bridge", str(port)],
-            env={**os.environ, "SUPER_DESKTOP_BRIDGE_STATE_DIR": directory},
+            env={**os.environ, "SUPER_DESKTOP_BRIDGE_STATE_DIR": directory,
+                 "XDG_RUNTIME_DIR": directory},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             control = str(pathlib.Path(directory) / "control.sock")
@@ -60,7 +62,7 @@ def main():
                     connection.close()
 
             assert request("/api/v1/ping")[0] == 200
-            for path in ["/api/v1/desktop/capabilities", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
+            for path in ["/api/v1/desktop/capabilities", "/api/v1/desktop/workspace", "/api/v1/desktop/events", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
                          "/api/v1/harnesses/sd_term_probe/assets", "/api/v1/harnesses/sd_term_probe/assets/id/content",
                          "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
                 assert request(path)[0] == 401, path
@@ -84,10 +86,14 @@ def main():
             status, desktop = request("/api/v1/desktop/capabilities", token=token)
             assert status == 200
             assert desktop == {"machineId": request("/api/v1/ping")[1]["bridgeId"],
-                               "desktopApiVersion": 1, "capabilities": []}
+                               "desktopApiVersion": 1, "capabilities": ["workspace-snapshot-v1"]}
             assert request("/api/v1/ping")[1]["protocolVersion"] == 3
             assert request("/api/v1/desktop/capabilities", token=token,
                            headers={"Origin": "https://untrusted.example"})[0] == 403
+            for route in ["workspace", "events"]:
+                assert request("/api/v1/desktop/" + route, token=token,
+                               headers={"Origin": "https://untrusted.example"})[0] == 403
+            desktop_live = check_desktop_routes(request, context, port, token, directory)
             assert request("/api/v1/theme", token=token)[0] == 200
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Content-Length": "99999999"})[0] == 413
@@ -113,6 +119,8 @@ def main():
             assert admin("/api/v1/pair/devices")["devices"] == []
             assert request("/api/v1/theme", token=token)[0] == 401
             assert request("/api/v1/desktop/capabilities", token=token)[0] == 401
+            assert request("/api/v1/desktop/workspace", token=token)[0] == 401
+            assert request("/api/v1/desktop/events", token=token)[0] == 401
             assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401
@@ -120,6 +128,9 @@ def main():
             while live.recv(65536):
                 pass
             live.close()
+            while desktop_live.recv(65536):
+                pass
+            desktop_live.close()
 
             def raw(payload):
                 with context.wrap_socket(socket.create_connection(("127.0.0.1", port)), server_hostname="super-desktop.local") as client:
@@ -143,7 +154,7 @@ def main():
                     raise AssertionError("Untrusted certificate accepted")
             except ssl.SSLCertVerificationError:
                 pass
-            print("PASS: TLS, no plaintext/localhost bypass, origin rejection, invitation/approval, hashed tokens, live revocation, request limits, malformed headers")
+            print("PASS: TLS, no plaintext/localhost bypass, origin rejection, invitation/approval, hashed tokens, live revocation, desktop snapshots/events/restart, request limits, malformed headers")
         finally:
             process.terminate()
             try:
