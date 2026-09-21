@@ -45,19 +45,21 @@ done
 
 echo "=== SUPER DESKTOP rebuild ==="
 
-# 1. Stop old daemon so it releases the IPC socket.
-echo "--> Stopping old daemon..."
-if [[ -x "$BIN_DST" ]]; then
-  "$BIN_DST" kill >/dev/null 2>&1 || true
-elif [[ -x "$BIN_SRC" ]]; then
-  "$BIN_SRC" kill >/dev/null 2>&1 || true
-fi
-pkill -f "super-desktop.*daemon" >/dev/null 2>&1 || true
-# Give IPC `kill` a moment, then drop a stale socket file if the daemon is gone.
-sleep 0.5
-if [[ -S "$SOCK" ]] && ! pgrep -f "super-desktop.*daemon" >/dev/null 2>&1; then
-  rm -f "$SOCK"
-  echo "    removed stale socket $SOCK"
+# 1. Stop old daemon only when installing/restarting this build.
+if [[ "$START_DAEMON" -eq 1 ]]; then
+  echo "--> Stopping old daemon..."
+  if [[ -x "$BIN_DST" ]]; then
+    "$BIN_DST" kill >/dev/null 2>&1 || true
+  elif [[ -x "$BIN_SRC" ]]; then
+    "$BIN_SRC" kill >/dev/null 2>&1 || true
+  fi
+  pkill -f "super-desktop.*daemon" >/dev/null 2>&1 || true
+  # Give IPC `kill` a moment, then drop a stale socket file if the daemon is gone.
+  sleep 0.5
+  if [[ -S "$SOCK" ]] && ! pgrep -f "super-desktop.*daemon" >/dev/null 2>&1; then
+    rm -f "$SOCK"
+    echo "    removed stale socket $SOCK"
+  fi
 fi
 
 # 2. Rebuild.
@@ -74,6 +76,11 @@ if [[ ! -x "$RUST_BIN" ]]; then
 fi
 echo "✓ Built $RUST_BIN ($(du -h "$RUST_BIN" | cut -f1))"
 
+if [[ "$START_DAEMON" -eq 0 ]]; then
+  echo "=== Build done (--no-daemon, running installation unchanged) ==="
+  exit 0
+fi
+
 # 3. Re-link into Omarchy paths.
 mkdir -p "$HOME/.local/bin"
 mkdir -p "$CONFIG_DIR"
@@ -87,12 +94,7 @@ if [[ -d "$SCRIPT_DIR/assets" ]]; then
   echo "✓ Refreshed toolbar assets in $CONFIG_DIR/assets"
 fi
 
-# 4-5. Reload Hyprland + restart daemon (unless --no-daemon).
-if [[ "$START_DAEMON" -eq 0 ]]; then
-  echo "=== Build done (--no-daemon, daemon not restarted) ==="
-  exit 0
-fi
-
+# 4-5. Reload Hyprland + restart daemon.
 if command -v hyprctl >/dev/null 2>&1; then
   echo "--> hyprctl reload..."
   hyprctl reload >/dev/null || true
