@@ -82,6 +82,7 @@ super-desktop add-term claude # claude | antigravity | codex | opencode | grok |
 super-desktop reload-theme    # re-read Omarchy theme colors
 super-desktop kill            # stop the background daemon
 super-desktop harnesses       # one-shot JSON dump of sessions (debug)
+super-desktop desktop-workspace # local card layout + epoch/revisions as JSON (debug)
 ```
 
 State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Rebuild after updates with `./rebuild.sh`.
@@ -172,7 +173,11 @@ super-desktop status
 
 ## 🏗️ Project layout (for contributors)
 
-Planned PC-to-PC workspace switching: [implementation handoff](docs/REMOTE_DESKTOP_PLAN.md).
+PC-to-PC workspace switching: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md).
+Use **Add a PC** in the top-left machine selector to pair another computer and
+view its read-only layout preview. The [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
+is also available for pairing and remote layout retrieval.
+Interactive remote consoles are still pending.
 
 ```
 ~/GitHub/super-desktop/

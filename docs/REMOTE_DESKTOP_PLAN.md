@@ -4,9 +4,14 @@ Status: implementation started; the complete feature is not yet available.
 Prepared 2026-09-21 against the current repository.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
-The original architecture below remains the target; capability negotiation and
-the isolated PTY prototype are implemented, while the selector, workspace model
-and network terminal transport remain pending.
+The original architecture below remains the target. Capability negotiation,
+the isolated PTY prototype, the daemon-owned local state, persisted terminal order
+and authenticated workspace snapshot/event routes are implemented. Outgoing
+certificate-pinned PC pairing, private peer storage and remote snapshot retrieval
+are testable through the CLI. Lifecycle mutation extraction, remote commands,
+live outgoing subscriptions and network terminal transport remain pending. The
+top-left selector now provides a read-only remote layout preview and an Add a PC
+pairing form. Interactive remote cards remain pending.
 
 ## 1. Intended experience and scope
 

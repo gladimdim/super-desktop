@@ -46,10 +46,16 @@ Active means an open authenticated connection or authenticated activity within
 the last 60 seconds. Expired/revoked devices are never counted active; registered
 devices remain visible while the bridge is stopped.
 
-The additive `GET /api/v1/desktop/capabilities` endpoint requires paired-device
-authentication and follows the same origin rejection, expiry and revocation
-rules. Its capability list remains empty until PC workspace/terminal endpoints
-are implemented. It does not grant new access or change security protocol v3.
+The additive `/api/v1/desktop/capabilities`, `/api/v1/desktop/workspace` and
+`/api/v1/desktop/events` endpoints require paired-device authentication and follow
+the same origin rejection, expiry and revocation rules. The read-only snapshot
+capability exposes owned terminal geometry, ordering, folders and cached titles;
+it excludes notes, launch commands, local OS settings and credentials. Snapshots
+come from the daemon's local in-memory model over Unix IPC, not from a peer it may
+later be viewing. Export is capped at 256 cards and 1 MiB of IPC data. Events reuse
+bridge connection bounds, write deadlines, stream lifetime and live revocation.
+No remote mutation or raw terminal endpoint is enabled yet; security protocol v3
+and existing Android credentials are unchanged.
 
 ## Resource bounds
 

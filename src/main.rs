@@ -9,6 +9,13 @@ mod bridge;
 mod card_resize;
 mod crashlog;
 mod desktop_protocol;
+mod peer_client;
+mod peer_store;
+mod peer_cli;
+mod peer_pairing;
+mod peer_pairing_ui;
+mod machine_selector;
+mod remote_workspace;
 mod harness_settings;
 mod hotcorner;
 mod jev;
@@ -208,6 +215,14 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
+
+    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-forget") {
+        if let Err(error) = peer_cli::run(action, &args[2..]) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if action == "daemon" || action == "start" {
         run_daemon(action == "start");

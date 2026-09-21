@@ -94,8 +94,8 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             *invitation = None;
             // Constant notification text: remote device names are untrusted.
             if !cfg!(test) { std::thread::spawn(|| {
-                let _ = Command::new("notify-send").args(["SUPER DESKTOP: phone pairing request",
-                    "Open SUPER DESKTOP settings → Android. Compare the code on your phone, then Approve or Deny."]).status();
+                let _ = Command::new("notify-send").args(["SUPER DESKTOP: device pairing request",
+                    "Open SUPER DESKTOP settings → Android. Compare the code on your device, then Approve or Deny."]).status();
             }); }
             respond(stream, 202, "Accepted", &json!({"status":"pending","requestId":id,"code":code,"expiresIn":120}));
         }
@@ -136,7 +136,12 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             let result = match request.decision {
                 None => json!({"status":"pending"}),
                 Some(false) => json!({"status":"denied"}),
-                Some(true) => json!({"status":"paired","token":request.token}),
+                Some(true) => {
+                    let paired = pair_state().lock().unwrap();
+                    let expires = request.token.as_ref().and_then(|token| paired.cfg.devices.iter()
+                        .find(|d| d.token_hash == security::digest(token.as_bytes())).map(|d| d.expires));
+                    json!({"status":"paired","token":request.token,"expires":expires})
+                },
             };
             respond(stream, 200, "OK", &result);
         }

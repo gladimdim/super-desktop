@@ -401,6 +401,14 @@ struct PairedDevice { id: String, name: String, token_hash: String, expires: f64
 
 fn new_bridge_id() -> String { random_hex(16) }
 
+/// Read identity without initializing or rewriting the bridge credential store.
+pub fn own_bridge_id() -> Option<String> {
+    let dir = std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".local/state/omarchy/harness-bridge")))?;
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("config.json")).ok()?).ok()?;
+    value["bridge_id"].as_str().map(str::to_owned)
+}
+
 fn state_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let dir = std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").map(PathBuf::from)
