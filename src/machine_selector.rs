@@ -398,6 +398,18 @@ impl MachineView {
         let _ = cr.paint();
         let snapshot = self.snapshot.borrow();
         let Some(snapshot) = snapshot.as_ref() else {
+            // A remote capability mismatch used to render as an entirely blank
+            // canvas. Keep the actionable state in the preview itself, where
+            // it remains visible even if the compact toolbar is off-screen.
+            cr.set_source_rgb(0.86, 0.88, 0.92);
+            cr.set_font_size(18.0);
+            cr.move_to(28.0, 56.0);
+            let _ = cr.show_text(&self.status.text());
+            cr.set_source_rgb(0.58, 0.63, 0.70);
+            cr.set_font_size(14.0);
+            cr.move_to(28.0, 86.0);
+            let _ =
+                cr.show_text("Update and rebuild SUPER DESKTOP on the host, then reopen this PC.");
             return;
         };
         let canvas = &snapshot.local.canvas;
