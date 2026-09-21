@@ -787,6 +787,12 @@ impl MiniTerminalCard {
         card
     }
 
+    pub fn desktop_presentation(&self) -> crate::workspace_model::CardPresentation {
+        crate::workspace_model::CardPresentation {
+            title: self.title_label.label().to_string(), expanded: self.is_expanded(),
+        }
+    }
+
     pub fn is_expanded(&self) -> bool {
         *self.expanded.borrow()
     }

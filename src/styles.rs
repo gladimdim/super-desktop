@@ -59,12 +59,6 @@ window.sd-hot-corner {{
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.38), inset 0 -1px {hud_glow};
 }}
 
-.hud-bar > separator {{
-    background-color: {btn_border};
-    min-width: 1px;
-    margin: 8px 3px;
-}}
-
 .hud-bar.hud-size-medium {{
     padding: 4px 12px;
 }}
@@ -76,14 +70,12 @@ window.sd-hot-corner {{
 .hud-size-medium .hud-button {{ padding: 4px 10px; font-size: 11px; }}
 .hud-size-medium .hud-gear {{ min-width: 32px; min-height: 32px; font-size: 19px; padding: 0; }}
 .hud-size-medium .hud-title {{ font-size: 12px; }}
-.hud-size-medium .hud-badge,
 .hud-size-medium .hud-shortcut {{ font-size: 10px; }}
 .hud-size-medium entry.ws-entry {{ min-height: 24px; padding: 2px 8px; font-size: 12px; }}
 
 .hud-size-small .hud-button {{ padding: 2px 8px; font-size: 10px; }}
 .hud-size-small .hud-gear {{ min-width: 28px; min-height: 28px; font-size: 17px; padding: 0; }}
 .hud-size-small .hud-title {{ font-size: 11px; }}
-.hud-size-small .hud-badge,
 .hud-size-small .hud-shortcut {{ font-size: 9px; padding-top: 2px; padding-bottom: 2px; }}
 .hud-size-small .ws-subtitle {{ font-size: 8px; padding-bottom: 0; }}
 .hud-size-small .ws-icon {{ font-size: 10px; }}
@@ -95,16 +87,6 @@ window.sd-hot-corner {{
     font-weight: 800;
     font-size: 13px;
     letter-spacing: 0.5px;
-}}
-
-.hud-badge {{
-    background-color: transparent;
-    color: {dark_foreground};
-    border: none;
-    border-radius: 0;
-    padding: 2px 5px;
-    font-size: 11px;
-    font-weight: 600;
 }}
 
 .hud-button {{
