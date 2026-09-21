@@ -10,6 +10,25 @@ Outgoing certificate-pinned pairing and remote snapshot retrieval are available
 through the CLI (see below). Remote mutations and WSS terminal
 attachment remain pending; this is still an incremental development branch.
 
+## Delivered user flow and current limit
+
+The top-left **This PC** control is the machine selector. **Add a PC** has two
+flows: create/copy a single-use connection link to let another PC connect here,
+or paste a link from another PC to connect this PC there. Host approval and
+six-digit-code comparison remain mandatory. Once approved, the peer is selected
+and its workspace layout is rendered as a read-only, scaled preview.
+
+The preview preserves terminal-card geometry and order but does not stream
+terminal output or accept clicks/keys. Remote create, close, drag/resize, folder
+selection and remote terminal attachment are deliberately disabled until typed
+host commands and a bidirectional PTY transport are implemented.
+
+Both PCs must run a current bridge. After pulling an update, run `./rebuild.sh`:
+it now stops the independent `super-desktop harness-bridge` process as well as
+the daemon, preventing an old bridge on port 8759 from masking the rebuilt code.
+If a selected peer says to update/rebuild the host, update **that host** and run
+the script there; the saved pairing does not need to be recreated.
+
 ## Available endpoints
 
 `GET /api/v1/desktop/capabilities` requires the existing paired-device bearer

@@ -1,7 +1,8 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
-Status: implementation started; the complete feature is not yet available.
-Prepared 2026-09-21 against the current repository.
+Status: pairing and a read-only remote workspace preview are delivered; the
+interactive remote-desktop release remains in progress.
+Updated 2026-09-21 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
 The original architecture below remains the target. Capability negotiation,
@@ -12,6 +13,68 @@ are testable through the CLI. Lifecycle mutation extraction, remote commands,
 live outgoing subscriptions and network terminal transport remain pending. The
 top-left selector now provides a read-only remote layout preview and an Add a PC
 pairing form. Interactive remote cards remain pending.
+
+## Current delivery status
+
+The following is present on `master` and has been rebuilt/tested between two
+PCs:
+
+- The top-left **This PC** selector defaults to the local machine and retains a
+  selected remote PC while the overlay is hidden. Restarting the daemon returns
+  to the local machine.
+- **Add a PC** supports both directions in one Omarchy-styled panel: create and
+  copy a one-time connection link to share this PC, or paste a link created on
+  the other PC to connect this PC. Approval and the verification code still
+  happen on the host PC.
+- Approved, certificate-pinned peers are stored privately and appear in the
+  selector. The viewer polls the host's authenticated workspace snapshot and
+  draws terminal cards in their host positions, sizes, iconified positions and
+  stacking order, scaled to fit the viewer canvas.
+- The Android bridge's connection-link popover is compact. Closing the
+  selector popover no longer cancels an already submitted pairing request.
+- `./rebuild.sh` now stops both the desktop daemon and its separate
+  `harness-bridge` process before restarting. This is required because an old
+  bridge can otherwise keep serving port 8759 and return a 404 for the desktop
+  capability route after the source has been updated.
+
+This is a **layout preview**, not a remote terminal implementation. It does not
+show terminal pixels or accept input, create/close cards, or write card geometry
+on the selected host. A blank remote canvas accompanied by “Update and rebuild
+SUPER DESKTOP on the host” means that host is still serving an older bridge.
+
+### Two-PC update and smoke check
+
+Install the same current `master` on both PCs, then run this on each PC:
+
+```sh
+git pull origin master
+./rebuild.sh
+```
+
+The second command must be run after pulling `655edbb` or newer: it replaces a
+stale bridge as well as the daemon. Existing approved peers remain saved. Open
+the selector on the viewing PC and select the peer again; the preview refreshes
+within two seconds. A host with the current bridge returns **401** (before a
+credential is supplied) for `GET /api/v1/desktop/capabilities`; an old bridge
+returns **404** and must be rebuilt.
+
+### Next implementation commits
+
+1. Add authenticated `POST /api/v1/desktop/commands` handlers backed by the
+   host's workspace model. Start with card layout/iconify and close operations;
+   enforce machine/epoch/card revisions and request deduplication, then cover
+   creation, harness inventory and default folders.
+2. Define and implement the pinned, bidirectional WSS terminal-attach protocol
+   around the existing isolated tmux PTY transport. Include client masking,
+   binary byte framing, resize/control messages, cancellation, revocation and
+   bounded backpressure before exposing it in the UI.
+3. Replace remote preview cards with remote VTE proxy widgets. Attach only
+   visible/focused cards, send input only after a current-selection handshake,
+   and detach on hide or machine switch without affecting the host session.
+4. Route remote card gestures and toolbar actions through the command API;
+   implement fit/100% coordinate transforms, conflict feedback and live WSS
+   workspace events. Add two-PC regression coverage for switching, concurrent
+   edits, bridge/daemon restart and revocation.
 
 ## 1. Intended experience and scope
 
@@ -330,32 +393,32 @@ return a distinct `desktop_unavailable`, not an empty workspace.
 Each phase should be a separately reviewable change. All phases through 7 are
 required for the first release; follow-ups in section 1 are separate work.
 
-1. **Contracts and terminal feasibility.** Define DTOs, identity, IPC contracts,
+1. **Contracts and terminal feasibility — delivered.** Define DTOs, identity, IPC contracts,
    capability schema and errors in a proposed `src/desktop_protocol.rs`. Build
    an isolated PTY/WSS/VTE proof with one shell and one full-screen terminal app.
    Prove grid ownership, mouse/paste, redraw/reconnect, revocation and clean
    detach with two viewers. Resolve technical failures before building the UI.
-2. **Local model boundary.** Extract authoritative local workspace operations
+2. **Local model boundary — partially delivered.** Extract authoritative local workspace operations
    from `window.rs` into a proposed `src/workspace_model.rs`; add revisions,
    canvas metadata, stacking migration and structured IPC in `main.rs`. Keep
    local UI behavior and CLI/Android targeting intact. Ensure create/resize works
    while hidden without forcibly showing the host overlay.
-3. **Desktop bridge APIs.** Add snapshot/events/commands in a proposed
+3. **Desktop bridge APIs — snapshots/events delivered; mutations and PTY network transport pending.** Add snapshot/events/commands in a proposed
    `src/desktop_bridge.rs`, reusing bridge authentication, limits and owner IPC.
    Add capability negotiation, epoch reconciliation and mutation deduplication.
    Integrate the validated PTY server in `src/terminal_transport.rs` or equivalent.
-4. **Peer client and registry.** Add proposed `src/peer_client.rs` and
+4. **Peer client and registry — delivered for pairing and snapshot retrieval.** Add proposed `src/peer_client.rs` and
    `src/peer_store.rs`: invitation pairing, pinned HTTP/WSS, private credentials,
    version checks, connection state, cancellation and reconnect. Test without GTK.
-5. **Selector and remote card view.** Add proposed `src/machine_selector.rs` and
+5. **Selector and remote card view — delivered as a read-only preview.** Add proposed `src/machine_selector.rs` and
    backend/view boundary; reuse card chrome while keeping remote attachments
    away from local session preparation. Implement top-left selector, Add/Manage,
    routed controls, disconnected UI and guarded asynchronous callbacks.
-6. **Layout and simultaneous use.** Implement fit/100% modes, inverse drag
+6. **Layout and simultaneous use — next UI milestone.** Implement fit/100% modes, inverse drag
    transform, revision conflicts, host-owned grids, local/remote updates and
    stream budgeting. Verify B can view C while A operates B, and A/B can view
    each other without recursion or exported peer state.
-7. **Regression, documentation and release.** Complete the matrix below, update
+7. **Regression, documentation and release — ongoing.** Complete the matrix below, update
    README and SECURITY (device terminology, outgoing credentials, new routes,
    resource limits), and document known limits and recovery. Include an actual
    two-PC walkthrough and measured performance results in the implementation PR.

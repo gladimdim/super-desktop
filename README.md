@@ -175,7 +175,10 @@ super-desktop status
 
 PC-to-PC workspace switching: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md).
 Use **Add a PC** in the top-left machine selector to pair another computer and
-view its read-only layout preview. The [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
+view its read-only layout preview. The panel can either create a one-time
+connection link for another PC or accept one from it; approval stays on the
+host PC. Update and run `./rebuild.sh` on both PCs, since the rebuild also
+restarts the separate bridge process. The [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
 is also available for pairing and remote layout retrieval.
 Interactive remote consoles are still pending.
 
