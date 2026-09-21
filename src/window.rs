@@ -666,6 +666,9 @@ impl SuperDesktopWindow {
         let ws_popover = workspace_bar.popover.clone();
         key_ctrl.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::Escape {
+                if win_w.upgrade().is_some_and(|w| w.machine_view.dismiss_if_open()) {
+                    return glib::Propagation::Stop;
+                }
                 // An open folder list is the innermost thing Esc can dismiss:
                 // closing the whole overlay here would lose the typed path.
                 if ws_popover.is_visible() {

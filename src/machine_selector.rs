@@ -84,6 +84,9 @@ impl MachineView {
             let popover = gtk4::Popover::new();
             popover.add_css_class("ws-pop");
             popover.set_has_arrow(false);
+            // Wayland layer-shell keyboard changes invalidate GTK's modal
+            // popup grab. Dismiss explicitly, as the workspace dropdown does.
+            popover.set_autohide(false);
             popover.set_offset(0, 6);
             button.set_popover(Some(&popover));
             let weak = Rc::downgrade(&view);
@@ -123,6 +126,22 @@ impl MachineView {
     pub fn dismiss(&self) {
         self.local_button.popdown();
         self.remote_button.popdown();
+    }
+    pub fn dismiss_if_open(&self) -> bool {
+        let open = [&self.local_button, &self.remote_button]
+            .iter()
+            .any(|button| button.popover().is_some_and(|pop| pop.is_visible()));
+        if open {
+            self.dismiss();
+        }
+        open
+    }
+    fn contains_menu_widget(&self, widget: &gtk4::Widget) -> bool {
+        [&self.local_button, &self.remote_button]
+            .iter()
+            .any(|button| {
+                widget == button.upcast_ref::<gtk4::Widget>() || widget.is_ancestor(*button)
+            })
     }
     fn populate(self: &Rc<Self>, popover: &gtk4::Popover) {
         let list = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
@@ -228,7 +247,38 @@ impl MachineView {
         });
         popover.set_child(Some(&crate::peer_pairing_ui::build(back, saved)));
     }
-    pub fn bind_keyboard(&self, window: &gtk4::ApplicationWindow) {
+    pub fn bind_keyboard(self: &Rc<Self>, window: &gtk4::ApplicationWindow) {
+        // Observe outside clicks without consuming them: the clicked local
+        // control should still work. Events in the popup have their own surface.
+        let outside = gtk4::GestureClick::new();
+        outside.set_button(0);
+        outside.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        let win = window.downgrade();
+        outside.connect_pressed(move |gesture, _, x, y| {
+            if gesture
+                .current_event()
+                .and_then(|event| event.surface())
+                .is_some_and(|surface| surface.is::<gtk4::gdk::Popup>())
+            {
+                return;
+            }
+            if let (Some(view), Some(window)) = (weak.upgrade(), win.upgrade()) {
+                let inside = window
+                    .pick(x, y, gtk4::PickFlags::DEFAULT)
+                    .is_some_and(|widget| view.contains_menu_widget(&widget));
+                if !inside {
+                    view.dismiss_if_open();
+                }
+            }
+        });
+        window.add_controller(outside);
+        let weak = Rc::downgrade(self);
+        window.connect_unmap(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.dismiss();
+            }
+        });
         use gtk4_layer_shell::{KeyboardMode, LayerShell};
         for button in [&self.local_button, &self.remote_button] {
             let popover = button.popover().unwrap();
@@ -419,6 +469,100 @@ fn style_peer_button(button: &gtk4::Button, selected: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires a real Wayland compositor with layer-shell"]
+    fn layer_popup_stays_open() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "machine_selector::tests::layer_popup_inner",
+                "--nocapture",
+            ])
+            .env(crate::gtk_test::CHILD_ENV, "1")
+            .env("LD_PRELOAD", "/usr/lib/libgtk4-layer-shell.so")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    #[test]
+    fn layer_popup_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+        gtk4::init().unwrap();
+        let directory = std::env::temp_dir().join(format!("sd-popup-{}", std::process::id()));
+        std::env::set_var("SUPER_DESKTOP_PEERS_STATE_DIR", &directory);
+        let app = gtk4::Application::new(
+            Some("com.superdesktop.PopupTest"),
+            gtk4::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let window = gtk4::ApplicationWindow::new(&app);
+        window.init_layer_shell();
+        window.set_layer(Layer::Overlay);
+        window.set_namespace(Some("sd-selector-regression"));
+        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        window.set_default_size(640, 480);
+        let local = gtk4::Fixed::new();
+        let view = MachineView::new(&local, Rc::new(|| {}), Rc::new(|| {}));
+        local.put(&view.local_button, 10.0, 10.0);
+        view.bind_keyboard(&window);
+        window.set_child(Some(&view.stack));
+        window.present();
+        fn pump() {
+            let until = std::time::Instant::now() + Duration::from_millis(250);
+            while std::time::Instant::now() < until {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        pump();
+        let pop = view.local_button.popover().unwrap();
+        assert!(!pop.is_autohide());
+        view.local_button.popup();
+        pump();
+        assert!(
+            pop.is_visible(),
+            "selector closed during layer keyboard transition"
+        );
+        assert_eq!(window.keyboard_mode(), KeyboardMode::Exclusive);
+        view.pairing_form(&pop);
+        pump();
+        assert!(pop.is_visible(), "pairing form disappeared");
+        assert!(view.contains_menu_widget(&pop.child().unwrap()));
+        assert!(!view.contains_menu_widget(local.upcast_ref()));
+        let controllers = window.observe_controllers();
+        let outside = (0..controllers.n_items())
+            .find_map(|i| {
+                controllers
+                    .item(i)
+                    .and_then(|object| object.downcast::<gtk4::GestureClick>().ok())
+            })
+            .unwrap();
+        // Same capture handler as a pointer press outside the selector.
+        outside.emit_by_name::<()>("pressed", &[&1i32, &600.0f64, &400.0f64]);
+        pump();
+        assert!(!pop.is_visible(), "outside click did not dismiss selector");
+        assert_eq!(window.keyboard_mode(), KeyboardMode::OnDemand);
+        view.local_button.popup();
+        pump();
+        assert!(pop.is_visible(), "selector could not reopen");
+        assert!(view.dismiss_if_open()); // Escape uses this same method.
+        pump();
+        view.local_button.popup();
+        pump();
+        window.set_visible(false);
+        pump();
+        assert!(!pop.is_visible(), "selector survived hiding the window");
+        window.close();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
     #[test]
     fn local_widgets_survive_remote_selection() {
         crate::gtk_test::run_in_child_process("machine_selector::tests::switching_inner");
