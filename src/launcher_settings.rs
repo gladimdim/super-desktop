@@ -14,7 +14,9 @@
 
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, Box, Button, Label, Orientation, PolicyType, ScrolledWindow, Separator};
+use gtk4::{
+    Align, Box, Button, Entry, Label, Orientation, PolicyType, Popover, ScrolledWindow, Separator,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -55,7 +57,11 @@ impl LauncherSnapshot {
             lan: bridge::lan_ip(),
             tailscale: bridge::tailscale_ip(),
             mdns: bridge::mdns_summary(online),
-            pending: if online { bridge::pending_requests() } else { vec![] },
+            pending: if online {
+                bridge::pending_requests()
+            } else {
+                vec![]
+            },
             devices: bridge::paired_devices(),
         }
     }
@@ -196,7 +202,9 @@ pub fn build_launcher_page() -> LauncherPage {
 
     // ---- 4 · pairing ----
     let (_, body) = section_card(&root, "", "Pair a phone");
-    let explanation = Label::new(Some("Scan the QR on your phone, then approve the matching code here."));
+    let explanation = Label::new(Some(
+        "Scan the QR on your phone, then approve the matching code here.",
+    ));
     explanation.add_css_class("launcher-hint");
     explanation.set_wrap(true);
     explanation.set_xalign(0.0);
@@ -240,18 +248,48 @@ pub fn build_launcher_page() -> LauncherPage {
                     });
                     qr_box.append(&area);
                 }
-                let text = Label::new(Some(&link));
-                text.set_selectable(true); text.set_wrap(true); text.set_max_width_chars(60);
                 let help = Label::new(Some("Scan and tap Open in SUPER DESKTOP.\nIf your camera does not offer Open, use Bridges → Scan pairing QR.\nSingle-use invitation · expires in 5 minutes."));
                 help.set_xalign(0.0); help.set_wrap(true);
                 qr_box.append(&help);
-                let details = gtk4::Expander::new(Some("Copy pairing link"));
-                details.set_child(Some(&text));
-                qr_box.append(&details);
+                // The long URI has no useful word-breaks. Keep it in a compact,
+                // horizontally scrolling popover instead of widening the entire
+                // Android settings card when the user needs to copy it.
+                let copy = Button::with_label("Copy connection link");
+                copy.add_css_class("launcher-btn");
+                copy.set_halign(Align::Start);
+                let link_popover = Popover::new();
+                link_popover.add_css_class("ws-pop");
+                link_popover.set_has_arrow(false);
+                link_popover.set_parent(&copy);
+                let link_box = Box::new(Orientation::Vertical, 8);
+                link_box.add_css_class("connection-link-popover");
+                let link_entry = Entry::new();
+                link_entry.set_text(&link);
+                link_entry.set_editable(false);
+                link_entry.set_width_chars(34);
+                link_entry.set_max_width_chars(34);
+                link_entry.set_tooltip_text(Some("Single-use connection link. Select and copy it."));
+                link_box.append(&link_entry);
+                let copied = Label::new(Some("Select the link above and copy it to the other device."));
+                copied.add_css_class("ws-row-path");
+                copied.set_xalign(0.0);
+                link_box.append(&copied);
+                link_popover.set_child(Some(&link_box));
+                let copied_button = copied.clone();
+                let link_for_clipboard = link.clone();
+                let copy_expiry = copy.clone();
+                copy.connect_clicked(move |_| {
+                    if let Some(display) = gtk4::gdk::Display::default() {
+                        display.clipboard().set_text(&link_for_clipboard);
+                        copied_button.set_text("Connection link copied.");
+                    }
+                    link_popover.popup();
+                });
+                qr_box.append(&copy);
                 let expiry_box = qr_box.clone();
                 glib::timeout_add_local_once(std::time::Duration::from_secs(300), move || {
                     // Only clear the invitation this timer belongs to.
-                    if text.parent().is_some() { while let Some(child) = expiry_box.first_child() { expiry_box.remove(&child); } }
+                    if copy_expiry.parent().is_some() { while let Some(child) = expiry_box.first_child() { expiry_box.remove(&child); } }
                 });
             } else { qr_box.append(&Label::new(Some("Start the secure bridge first."))); }
             button.set_sensitive(true);
@@ -262,7 +300,9 @@ pub fn build_launcher_page() -> LauncherPage {
     let previous_requests = std::cell::RefCell::new(None);
     let (device_head, body) = section_card(&root, "", "Android devices");
     let device_count = chip("0/0");
-    device_count.set_tooltip_text(Some("Active / registered devices. Active means connected or seen in the last 60 seconds."));
+    device_count.set_tooltip_text(Some(
+        "Active / registered devices. Active means connected or seen in the last 60 seconds.",
+    ));
     device_head.append(&device_count);
     let device_rows = Box::new(Orientation::Vertical, 8);
     body.append(&device_rows);
@@ -302,8 +342,12 @@ pub fn build_launcher_page() -> LauncherPage {
             "launcher-online",
             "launcher-offline",
         );
-        if let Some(start) = start_weak.upgrade() { start.set_visible(!snapshot.online); }
-        if let Some(stop) = stop_weak.upgrade() { stop.set_visible(snapshot.online); }
+        if let Some(start) = start_weak.upgrade() {
+            start.set_visible(!snapshot.online);
+        }
+        if let Some(stop) = stop_weak.upgrade() {
+            stop.set_visible(snapshot.online);
+        }
         if snapshot.online {
             let n = snapshot.harnesses;
             set_text(&v_bridge_state, "● ONLINE");
@@ -311,7 +355,8 @@ pub fn build_launcher_page() -> LauncherPage {
                 &status,
                 &format!(
                     "{} · {n} terminal{} available",
-                    snapshot.host, if n == 1 { "" } else { "s" }
+                    snapshot.host,
+                    if n == 1 { "" } else { "s" }
                 ),
             );
         } else {
@@ -331,18 +376,29 @@ pub fn build_launcher_page() -> LauncherPage {
         );
         set_text(&v_port, &bridge::BRIDGE_PORT.to_string());
         set_text(&v_mdns, &snapshot.mdns);
-        let active = snapshot.devices.iter().filter(|d| d["active"] == true).count();
-        set_text(&device_count, &format!("{active}/{}", snapshot.devices.len()));
+        let active = snapshot
+            .devices
+            .iter()
+            .filter(|d| d["active"] == true)
+            .count();
+        set_text(
+            &device_count,
+            &format!("{active}/{}", snapshot.devices.len()),
+        );
         if previous_requests.borrow().as_ref() != Some(&snapshot.pending) {
-            while let Some(child) = pending_rows.first_child() { pending_rows.remove(&child); }
+            while let Some(child) = pending_rows.first_child() {
+                pending_rows.remove(&child);
+            }
             pending_rows.set_visible(!snapshot.pending.is_empty());
             for request in &snapshot.pending {
                 let row = Box::new(Orientation::Vertical, 4);
                 row.add_css_class("android-request");
-                let label = Label::new(Some(&format!("{} · {}\nVerification code: {}",
+                let label = Label::new(Some(&format!(
+                    "{} · {}\nVerification code: {}",
                     request["deviceName"].as_str().unwrap_or("Phone"),
                     request["address"].as_str().unwrap_or(""),
-                    request["code"].as_str().unwrap_or(""))));
+                    request["code"].as_str().unwrap_or("")
+                )));
                 label.set_xalign(0.0);
                 label.set_wrap(true);
                 row.append(&label);
@@ -373,21 +429,32 @@ pub fn build_launcher_page() -> LauncherPage {
             *previous_requests.borrow_mut() = Some(snapshot.pending);
         }
         if previous_devices.borrow().as_ref() != Some(&snapshot.devices) {
-            while let Some(child) = device_rows.first_child() { device_rows.remove(&child); }
+            while let Some(child) = device_rows.first_child() {
+                device_rows.remove(&child);
+            }
             if snapshot.devices.is_empty() {
-                let empty = Label::new(Some("No devices yet\nPair your first phone using the QR above."));
-                empty.add_css_class("android-empty"); empty.set_xalign(0.0);
+                let empty = Label::new(Some(
+                    "No devices yet\nPair your first phone using the QR above.",
+                ));
+                empty.add_css_class("android-empty");
+                empty.set_xalign(0.0);
                 device_rows.append(&empty);
             }
             for device in &snapshot.devices {
                 let row = Box::new(Orientation::Horizontal, 8);
                 row.add_css_class("android-device-row");
                 let name = Label::new(Some(device["name"].as_str().unwrap_or("Phone")));
-                name.set_wrap(true); name.set_hexpand(true); name.set_xalign(0.0);
+                name.set_wrap(true);
+                name.set_hexpand(true);
+                name.set_xalign(0.0);
                 row.append(&name);
                 let active = device["active"] == true;
                 let state = chip(if active { "● Active" } else { "Offline" });
-                state.add_css_class(if active { "launcher-online" } else { "launcher-offline" });
+                state.add_css_class(if active {
+                    "launcher-online"
+                } else {
+                    "launcher-offline"
+                });
                 row.append(&state);
                 let revoke = Button::with_label("Revoke access");
                 revoke.add_css_class("launcher-btn");
@@ -395,14 +462,19 @@ pub fn build_launcher_page() -> LauncherPage {
                 let id = device["id"].as_str().unwrap_or("").to_string();
                 revoke.connect_clicked(move |button| {
                     button.set_sensitive(false);
-                    let button = button.clone(); let id = id.clone();
+                    let button = button.clone();
+                    let id = id.clone();
                     glib::MainContext::default().spawn_local(async move {
-                        let ok = matches!(gtk4::gio::spawn_blocking(move || bridge::revoke_device(&id)).await, Ok(Ok(())));
+                        let ok = matches!(
+                            gtk4::gio::spawn_blocking(move || bridge::revoke_device(&id)).await,
+                            Ok(Ok(()))
+                        );
                         button.set_label(if ok { "Revoked" } else { "Retry revoke" });
                         button.set_sensitive(!ok);
                     });
                 });
-                row.append(&revoke); device_rows.append(&row);
+                row.append(&revoke);
+                device_rows.append(&row);
             }
             *previous_devices.borrow_mut() = Some(snapshot.devices);
         }
@@ -545,7 +617,9 @@ pub(crate) fn section_card(parent: &Box, num: &str, title: &str) -> (Box, Box) {
     let n = Label::new(Some(num));
     n.add_css_class("launcher-section-num");
     n.set_valign(Align::Center);
-    if !num.is_empty() { head.append(&n); }
+    if !num.is_empty() {
+        head.append(&n);
+    }
     let t = Label::new(Some(title));
     t.add_css_class("launcher-section-title");
     t.set_xalign(0.0);
@@ -616,14 +690,25 @@ mod tests {
         let context = glib::MainContext::default();
         let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while std::time::Instant::now() < until {
-            while context.pending() { context.iteration(false); }
+            while context.pending() {
+                context.iteration(false);
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let snapshot = gtk4::Snapshot::new();
         let paintable = gtk4::WidgetPaintable::new(Some(&page.widget));
-        paintable.snapshot(&snapshot, page.widget.width() as f64, page.widget.height() as f64);
+        paintable.snapshot(
+            &snapshot,
+            page.widget.width() as f64,
+            page.widget.height() as f64,
+        );
         let node = snapshot.to_node().unwrap();
-        window.renderer().unwrap().render_texture(&node, None).save_to_png("/tmp/sd-android-settings-preview.png").unwrap();
+        window
+            .renderer()
+            .unwrap()
+            .render_texture(&node, None)
+            .save_to_png("/tmp/sd-android-settings-preview.png")
+            .unwrap();
         window.close();
     }
 

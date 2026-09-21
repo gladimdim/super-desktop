@@ -3,26 +3,115 @@ use crate::{
     peer_client::{PeerError, PeerSummary},
     peer_pairing::{self, Event, Session},
 };
-use gtk4::{glib, prelude::*};
+use gtk4::{gdk, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 pub fn build(on_back: Rc<dyn Fn()>, on_saved: Rc<dyn Fn(PeerSummary)>) -> gtk4::Box {
     let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     panel.add_css_class("ws-pop-box");
     panel.set_size_request(380, -1);
-    let title = gtk4::Label::new(Some("Add a PC"));
+    let title = gtk4::Label::new(Some("Connect PCs"));
     title.add_css_class("settings-entry-title");
     title.set_xalign(0.0);
     panel.append(&title);
+    let share_title = gtk4::Label::new(Some("Share this PC with another PC"));
+    share_title.add_css_class("settings-entry-title");
+    share_title.set_xalign(0.0);
+    panel.append(&share_title);
     let instructions = gtk4::Label::new(Some(
-        "On the other PC, open Settings → Android, enable its bridge and copy a new pairing link.",
+        "Create a one-time connection link here, then paste it into SUPER DESKTOP on the other PC.",
     ));
     instructions.set_wrap(true);
     instructions.set_max_width_chars(46);
     instructions.set_xalign(0.0);
     instructions.add_css_class("ws-row-path");
     panel.append(&instructions);
-    let invitation = field(&panel, "Pairing link", "Paste the host's pairing link");
+    let share_actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    let create_link = gtk4::Button::with_label("Create connection link");
+    create_link.add_css_class("hud-button");
+    create_link.add_css_class("hud-action-primary");
+    share_actions.append(&create_link);
+    let copy_link = gtk4::Button::with_label("Copy link");
+    copy_link.add_css_class("hud-button");
+    copy_link.set_sensitive(false);
+    share_actions.append(&copy_link);
+    panel.append(&share_actions);
+    let generated_link = gtk4::Entry::new();
+    generated_link.add_css_class("ws-entry");
+    generated_link.set_editable(false);
+    generated_link.set_placeholder_text(Some("One-time link appears here"));
+    generated_link.set_tooltip_text(Some(
+        "Single-use link. Copy it to the other PC; it expires after five minutes.",
+    ));
+    panel.append(&generated_link);
+    let share_status = gtk4::Label::new(None);
+    share_status.add_css_class("ws-row-path");
+    share_status.set_xalign(0.0);
+    panel.append(&share_status);
+    let link_for_copy = generated_link.clone();
+    let share_status_copy = share_status.clone();
+    copy_link.connect_clicked(move |_| {
+        let link = link_for_copy.text();
+        if !link.is_empty() {
+            if let Some(display) = gdk::Display::default() {
+                display.clipboard().set_text(&link);
+                share_status_copy.set_text("Connection link copied. Paste it into the other PC.");
+            }
+        }
+    });
+    let generated_link_for_worker = generated_link.clone();
+    let share_status_worker = share_status.clone();
+    let copy_link_worker = copy_link.clone();
+    let create_link_button = create_link.clone();
+    create_link.connect_clicked(move |_| {
+        create_link_button.set_sensitive(false);
+        share_status_worker.set_text("Creating a secure one-time connection link…");
+        let generated_link = generated_link_for_worker.clone();
+        let status = share_status_worker.clone();
+        let copy = copy_link_worker.clone();
+        let create = create_link_button.clone();
+        glib::MainContext::default().spawn_local(async move {
+            match gtk4::gio::spawn_blocking(crate::bridge::pairing_invitation).await {
+                Ok(Ok(payload)) => {
+                    let encoded = crate::ws::base64(payload.as_bytes()).trim_end_matches('=')
+                        .replace('+', "-").replace('/', "_");
+                    generated_link.set_text(&format!("superdesktop://pair?data={encoded}"));
+                    generated_link.set_position(0);
+                    copy.set_sensitive(true);
+                    status.set_text("Copy this link into SUPER DESKTOP on the other PC. It expires in five minutes.");
+                    let generated_link_expiry = generated_link.clone();
+                    let copy_expiry = copy.clone();
+                    let status_expiry = status.clone();
+                    glib::timeout_add_local_once(Duration::from_secs(300), move || {
+                        generated_link_expiry.set_text("");
+                        copy_expiry.set_sensitive(false);
+                        status_expiry.set_text("That connection link expired. Create a new one when needed.");
+                    });
+                }
+                _ => status.set_text("Start the secure bridge in Settings → Android, then create the link again."),
+            }
+            create.set_sensitive(true);
+        });
+    });
+    let divider = gtk4::Separator::new(gtk4::Orientation::Horizontal);
+    panel.append(&divider);
+    let receive_title = gtk4::Label::new(Some("Connect this PC to another PC"));
+    receive_title.add_css_class("settings-entry-title");
+    receive_title.set_xalign(0.0);
+    panel.append(&receive_title);
+    let receive_help = gtk4::Label::new(Some(
+        "On the other PC, choose Add a PC, create a connection link, and paste it below. Then compare and approve the code on that PC.",
+    ));
+    receive_help.set_wrap(true);
+    receive_help.set_max_width_chars(46);
+    receive_help.set_xalign(0.0);
+    receive_help.add_css_class("ws-row-path");
+    panel.append(&receive_help);
+    let invitation = field(
+        &panel,
+        "Connection link",
+        "Paste the other PC's connection link",
+    );
     invitation.set_visibility(false);
     invitation.set_max_length(crate::peer_client::MAX_INVITATION as i32);
     let name = field(&panel, "PC name (optional)", "Use the host's name");
@@ -170,18 +259,18 @@ mod tests {
             .iter()
             .filter_map(|w| w.clone().downcast::<gtk4::Entry>().ok())
             .collect();
-        assert_eq!(entries.len(), 4);
-        assert!(!gtk4::prelude::EntryExt::is_visible(&entries[0])); // Entry text visibility, not widget mapping.
-        entries[0].set_text(&data["invitation"].to_string());
-        entries[2].set_text("127.0.0.1");
-        entries[3].set_text(&data["port"].to_string());
+        assert_eq!(entries.len(), 5);
+        assert!(entries[0].text().is_empty()); // Generated links start blank.
+        entries[1].set_text(&data["invitation"].to_string());
+        entries[3].set_text("127.0.0.1");
+        entries[4].set_text(&data["port"].to_string());
         let connect = widgets
             .iter()
             .filter_map(|w| w.clone().downcast::<gtk4::Button>().ok())
             .find(|b| b.label().as_deref() == Some("Connect"))
             .unwrap();
         connect.emit_clicked();
-        assert!(entries[0].text().is_empty());
+        assert!(entries[1].text().is_empty());
         assert!(!connect.is_sensitive());
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut printed_code = false;

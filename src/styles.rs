@@ -910,6 +910,13 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 .android-page .launcher-section-head {{ margin-bottom: 8px; }}
 .android-page .launcher-section-title {{ font-size: 13px; }}
 .android-page .launcher-btn {{ border-radius: 4px; padding: 7px 12px; }}
+.connection-link-popover {{
+    padding: 10px;
+    min-width: 300px;
+}}
+.connection-link-popover entry {{
+    min-width: 300px;
+}}
 .android-page .launcher-section-body {{ border-spacing: 8px; }}
 .android-device-row {{ padding: 9px 0; }}
 .android-empty {{ color: {dark_foreground}; padding: 12px 0; }}
