@@ -5,6 +5,7 @@ use gtk4::{Align, Button, EventControllerFocus, GestureClick, GestureDrag, Label
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use vte4::prelude::*;
 use vte4::{PtyFlags, Terminal as VteTerminal};
 
@@ -24,6 +25,67 @@ pub const MIN_CARD_WIDTH: i32 = 320;
 pub const MIN_CARD_HEIGHT: i32 = 180;
 pub const ICON_SIZE: i32 = 128;
 pub const EXPAND_RATIO: f64 = 0.80;
+/// Newly opened harnesses ignore hover-raise on other cards for this long
+/// so the pointer can travel to the new card without burying it.
+pub const NEW_HARNESS_HOVER_LOCK: Duration = Duration::from_secs(4);
+
+/// Shared across every terminal card. After `lock()`, pointer-enter on any
+/// other card skips raise/focus until the hold expires or a click on another
+/// card calls `on_click` (clicks stay an intentional switch).
+#[derive(Clone)]
+pub struct HoverRaiseLock {
+    until: Rc<Cell<Option<Instant>>>,
+    owner: Rc<RefCell<Option<String>>>,
+}
+
+impl HoverRaiseLock {
+    pub fn new() -> Self {
+        Self {
+            until: Rc::new(Cell::new(None)),
+            owner: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    pub fn lock(&self, session_name: &str) {
+        self.lock_for(session_name, NEW_HARNESS_HOVER_LOCK);
+    }
+
+    pub fn lock_for(&self, session_name: &str, duration: Duration) {
+        self.until.set(Some(Instant::now() + duration));
+        *self.owner.borrow_mut() = Some(session_name.to_string());
+    }
+
+    pub fn release(&self) {
+        self.until.set(None);
+        self.owner.borrow_mut().take();
+    }
+
+    fn active_owner(&self) -> Option<String> {
+        let until = self.until.get()?;
+        if Instant::now() >= until {
+            self.release();
+            return None;
+        }
+        self.owner.borrow().clone()
+    }
+
+    /// True when this card may raise and take focus from a pointer enter.
+    pub fn allows_hover(&self, session_name: &str) -> bool {
+        match self.active_owner() {
+            None => true,
+            Some(owner) => owner == session_name,
+        }
+    }
+
+    /// A click on a different card is an intentional switch: drop the hold.
+    pub fn on_click(&self, session_name: &str) {
+        if let Some(owner) = self.active_owner() {
+            if owner != session_name {
+                self.release();
+            }
+        }
+    }
+}
 
 pub fn expanded_rect(screen_w: i32, screen_h: i32) -> (f64, f64, f64, f64) {
     let w = (screen_w as f64 * EXPAND_RATIO).round();
@@ -118,6 +180,7 @@ pub struct MiniTerminalCard {
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
     on_session_persist: Rc<dyn Fn(&TerminalData)>,
+    hover_lock: HoverRaiseLock,
 }
 
 impl MiniTerminalCard {
@@ -134,6 +197,7 @@ impl MiniTerminalCard {
         screen_w: i32,
         screen_h: i32,
         startup_inventory: Option<Arc<crate::tmux::SessionInventory>>,
+        hover_lock: HoverRaiseLock,
     ) -> Self
     where
         FDragUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
@@ -176,12 +240,16 @@ impl MiniTerminalCard {
 
         let root = Overlay::new();
 
-        // Raise on click anywhere on container
+        // Raise on click anywhere on container. A click on a different card
+        // during a new-harness hold is an intentional switch, so drop the lock.
         let click_raise = GestureClick::new();
         click_raise.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let container_weak_click = root.downgrade();
         let on_raise_click = Rc::clone(&on_raise_rc);
+        let click_lock = hover_lock.clone();
+        let click_session = data.borrow().session_name.clone();
         click_raise.connect_pressed(move |_, _, _, _| {
+            click_lock.on_click(&click_session);
             if let Some(c) = container_weak_click.upgrade() {
                 on_raise_click(c.upcast());
             }
@@ -450,15 +518,23 @@ impl MiniTerminalCard {
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
             on_session_persist: Rc::clone(&on_session_persist),
+            hover_lock: hover_lock.clone(),
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
-        // exactly like clicking inside the terminal.
+        // exactly like clicking inside the terminal. Skipped while a newly
+        // opened harness holds the lock, otherwise the pointer path to that
+        // card raises whatever it crosses and hides the new one.
         let hover = gtk4::EventControllerMotion::new();
         let container_weak_hover = card.container.downgrade();
         let vte_hover = Rc::clone(&card.vte);
         let on_raise_hover = Rc::clone(&on_raise_rc);
+        let hover_lock_enter = hover_lock.clone();
+        let hover_session = card.data.borrow().session_name.clone();
         hover.connect_enter(move |_, _, _| {
+            if !hover_lock_enter.allows_hover(&hover_session) {
+                return;
+            }
             if let Some(c) = container_weak_hover.upgrade() {
                 on_raise_hover(c.upcast());
             }
@@ -550,6 +626,7 @@ impl MiniTerminalCard {
             let hint_label = card.hint_label.clone();
             let on_save = Rc::clone(&on_drag_end);
             let on_toggle_restore = Rc::clone(&on_toggle);
+            let hover_lock_restore = card.hover_lock.clone();
             Rc::new(move || {
                 if *expanded.borrow() {
                     *expanded.borrow_mut() = false;
@@ -584,7 +661,7 @@ impl MiniTerminalCard {
                 container.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
-                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None);
+                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone());
                 } else if let Some(term) = vte.borrow().as_ref() {
                     let theme = crate::theme::current_theme();
                     let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
@@ -911,6 +988,7 @@ impl MiniTerminalCard {
             &self.expanded,
             &self.session_task,
             inventory,
+            self.hover_lock.clone(),
         );
     }
 
@@ -1147,6 +1225,7 @@ fn spawn_vte(
     expanded_ref: &Rc<RefCell<bool>>,
     session_task: &Arc<crate::session_task::SessionTask>,
     inventory: Option<Arc<crate::tmux::SessionInventory>>,
+    hover_lock: HoverRaiseLock,
 ) {
     if session_task.is_closed() { return; }
     remove_vte(vte, preview_box);
@@ -1179,16 +1258,25 @@ fn spawn_vte(
 
     let term_click = GestureClick::new();
     let term_weak = term.downgrade();
+    let click_lock = hover_lock.clone();
+    let click_session = data.borrow().session_name.clone();
     term_click.connect_pressed(move |_, _, _, _| {
+        click_lock.on_click(&click_session);
         if let Some(t) = term_weak.upgrade() {
             t.grab_focus();
         }
     });
     term.add_controller(term_click);
 
+    let session = data.borrow().session_name.clone();
     let term_hover = gtk4::EventControllerMotion::new();
     let term_weak = term.downgrade();
+    let hover_lock_vte = hover_lock.clone();
+    let hover_session = session.clone();
     term_hover.connect_enter(move |_, _, _| {
+        if !hover_lock_vte.allows_hover(&hover_session) {
+            return;
+        }
         if let Some(t) = term_weak.upgrade() {
             if !t.has_focus() {
                 t.grab_focus();
@@ -1196,8 +1284,6 @@ fn spawn_vte(
         }
     });
     term.add_controller(term_hover);
-
-    let session = data.borrow().session_name.clone();
     let agent_type = data.borrow().agent_type.clone();
     let cmd = data.borrow().command.clone();
     let agent_session_id = data.borrow().agent_session_id.clone();
@@ -1505,7 +1591,7 @@ mod tests {
         let task = Arc::new(crate::session_task::SessionTask::default());
         let toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(|_| {});
         spawn_vte(&slot, &preview, &Rc::new(RefCell::new(data)), false,
-            &toggle, &Rc::new(RefCell::new(false)), &task, None);
+            &toggle, &Rc::new(RefCell::new(false)), &task, None, HoverRaiseLock::new());
         assert!(slot.borrow().is_some(), "placeholder exists before async setup");
         task.close();
         remove_vte(&slot, &preview);
@@ -1541,6 +1627,35 @@ mod tests {
         assert_eq!(h, 864.0);
         assert_eq!(x, 192.0);
         assert_eq!(y, 108.0);
+    }
+
+    #[test]
+    fn test_hover_raise_lock_blocks_other_cards_until_expiry_or_click() {
+        assert!(NEW_HARNESS_HOVER_LOCK >= Duration::from_secs(3));
+        assert!(NEW_HARNESS_HOVER_LOCK <= Duration::from_secs(5));
+
+        let lock = HoverRaiseLock::new();
+        assert!(lock.allows_hover("old"));
+        assert!(lock.allows_hover("new"));
+
+        lock.lock_for("new", Duration::from_secs(30));
+        assert!(lock.allows_hover("new"), "the new harness may still take hover");
+        assert!(!lock.allows_hover("old"), "other cards must not steal hover");
+
+        lock.on_click("new");
+        assert!(!lock.allows_hover("old"), "clicking the new card keeps the hold");
+
+        lock.on_click("old");
+        assert!(lock.allows_hover("old"), "clicking another card is an intentional switch");
+        assert!(lock.allows_hover("new"));
+    }
+
+    #[test]
+    fn test_hover_raise_lock_expires() {
+        let lock = HoverRaiseLock::new();
+        lock.lock_for("new", Duration::ZERO);
+        assert!(lock.allows_hover("old"));
+        assert!(lock.allows_hover("new"));
     }
 
     #[test]

@@ -12,8 +12,8 @@ use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mini_terminal::{
-    clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, MiniTerminalCard,
-    NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
+    clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, HoverRaiseLock,
+    MiniTerminalCard, NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
 };
 use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
@@ -164,6 +164,9 @@ pub struct SuperDesktopWindow {
     /// Bumped by `show_again`; a slide-out that finishes afterwards must not
     /// unmap the window again (hide → show inside the 140ms animation).
     show_token: std::cell::Cell<u64>,
+    /// After a new harness is spawned, hover-raise on other cards is ignored
+    /// until this hold expires so the pointer path cannot bury the new card.
+    hover_raise_lock: HoverRaiseLock,
 }
 
 impl SuperDesktopWindow {
@@ -415,6 +418,7 @@ impl SuperDesktopWindow {
             overlay_panels: vec![settings_panel.widget.clone()],
             ws_popover: workspace_bar.popover.clone(),
             show_token: std::cell::Cell::new(0),
+            hover_raise_lock: HoverRaiseLock::new(),
         });
 
         // The overlay is OnDemand so an unfocused HUD does not eat desktop
@@ -1296,6 +1300,12 @@ impl SuperDesktopWindow {
             }
         };
 
+        let hover_lock = self.hover_raise_lock.clone();
+        if save {
+            // Hold hover-raise on every other card so moving the pointer
+            // toward this newly opened harness cannot bury it.
+            hover_lock.lock(&term_data.session_name);
+        }
         let card = MiniTerminalCard::new(
             term_data,
             on_drag_update,
@@ -1309,9 +1319,14 @@ impl SuperDesktopWindow {
             sw,
             sh,
             startup_inventory,
+            hover_lock,
         );
+        let card = Rc::new(card);
         canvas.put(&card.container, x, y);
-        term_cards.borrow_mut().push(Rc::new(card));
+        if save {
+            card.focus_terminal();
+        }
+        term_cards.borrow_mut().push(Rc::clone(&card));
         raise_canvas_child(&canvas, &self.hud);
     }
 
