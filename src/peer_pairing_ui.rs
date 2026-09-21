@@ -141,10 +141,12 @@ pub fn build(on_back: Rc<dyn Fn()>, on_saved: Rc<dyn Fn(PeerSummary)>) -> gtk4::
     actions.append(&connect);
     panel.append(&actions);
     let session: Rc<RefCell<Option<Session>>> = Rc::new(RefCell::new(None));
-    let canceled = session.clone();
     let secret = invitation.clone();
     panel.connect_unmap(move |_| {
-        canceled.borrow_mut().take();
+        // A MenuButton popover may transiently unmap while Wayland negotiates
+        // focus. The authenticated request is already pending on the host, so
+        // do not silently throw away its session here. Explicit Back/Cancel
+        // below remains the user's cancellation control.
         secret.set_text("");
     });
     let canceled = session.clone();
@@ -172,7 +174,7 @@ pub fn build(on_back: Rc<dyn Fn()>, on_saved: Rc<dyn Fn(PeerSummary)>) -> gtk4::
                 let invitation = invitation.clone(); let name = name.clone(); let advanced = advanced.clone();
                 let back = back.clone(); let on_saved = on_saved.clone();
                 glib::timeout_add_local(Duration::from_millis(100), move || {
-                    if weak_panel.upgrade().is_none() { session.borrow_mut().take(); return glib::ControlFlow::Break; }
+                    let visible = weak_panel.upgrade().is_some_and(|panel| panel.is_mapped());
                     let event = {
                         let current = session.borrow();
                         let Some(job) = current.as_ref() else { return glib::ControlFlow::Break; };
@@ -185,7 +187,7 @@ pub fn build(on_back: Rc<dyn Fn()>, on_saved: Rc<dyn Fn(PeerSummary)>) -> gtk4::
                     };
                     match event {
                         Event::Code(code) => {
-                            status.set_text(&format!("Compare code {code} on the host, then approve it there.\nClosing this form stops pairing; deny any pending request on the host."));
+                            status.set_text(&format!("Compare code {code} on the host, then approve it there.\nUse Cancel to stop this request."));
                             return glib::ControlFlow::Continue;
                         }
                         Event::Saved(peer) => {
@@ -193,11 +195,15 @@ pub fn build(on_back: Rc<dyn Fn()>, on_saved: Rc<dyn Fn(PeerSummary)>) -> gtk4::
                             on_saved(peer);
                             return glib::ControlFlow::Break;
                         }
-                        Event::Failed(error) => status.set_text(peer_pairing::message(error)),
+                        Event::Failed(error) => {
+                            status.set_text(peer_pairing::message(error));
+                        }
                     }
                     session.borrow_mut().take();
-                    connect.set_sensitive(true); back.set_label("Back");
-                    invitation.set_sensitive(true); name.set_sensitive(true); advanced.set_sensitive(true);
+                    if visible || !connect.is_sensitive() {
+                        connect.set_sensitive(true); back.set_label("Back");
+                        invitation.set_sensitive(true); name.set_sensitive(true); advanced.set_sensitive(true);
+                    }
                     glib::ControlFlow::Break
                 });
             }
@@ -272,6 +278,9 @@ mod tests {
         connect.emit_clicked();
         assert!(entries[1].text().is_empty());
         assert!(!connect.is_sensitive());
+        if data["unmap"] == true {
+            panel.emit_by_name::<()>("unmap", &[]);
+        }
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         let mut printed_code = false;
         let mut canceled_at = None;

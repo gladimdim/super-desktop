@@ -293,12 +293,14 @@ saved and its read-only layout preview opens automatically.
 
 The invitation field is hidden and cleared after submission or closing the
 form. Network requests and private-store writes run on a worker. Only one
-pairing worker can run at a time. Cancel/Back, closing the menu or hiding the
-application cancels an unfinished attempt. A request already submitted to the
-host can remain pending there: deny it on the host, and use a fresh invitation
-for another attempt. Cancellation before saving claims completion prevents a
-late approval from writing a peer; a save already begun is allowed to finish.
-Host revocation remains authoritative if access must be withdrawn.
+pairing worker can run at a time. Use Cancel/Back to stop an unfinished
+attempt. The selector may transiently close while the Wayland layer surface
+changes focus; the pending request continues so a host approval can save and
+select the peer. A request already submitted to the host can remain pending
+there: deny it on the host, and use a fresh invitation for another attempt.
+Cancellation before saving claims completion prevents a late approval from
+writing a peer; a save already begun is allowed to finish. Host revocation
+remains authoritative if access must be withdrawn.
 
 The existing isolated pairing smoke test can also drive the real GTK form
 without opening a production window. Build tests with `cargo test --no-run`,

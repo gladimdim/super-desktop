@@ -12,7 +12,7 @@ from desktop_bridge_checks import DesktopStub
 BINARY = str(pathlib.Path(sys.argv[1]).resolve())
 
 
-def scenario(approve, gui_test_binary=None, cancel=False):
+def scenario(approve, gui_test_binary=None, cancel=False, unmap=False):
     with tempfile.TemporaryDirectory(prefix="sd-peer-smoke-") as root:
         root = pathlib.Path(root)
         host = root / "host"
@@ -62,7 +62,7 @@ def scenario(approve, gui_test_binary=None, cancel=False):
             if gui_test_binary:
                 form_input = root / "form-input.json"
                 form_result = root / "form-result.json"
-                form_input.write_text(json.dumps({"invitation": invitation, "port": port, "approve": approve, "cancel": cancel}))
+                form_input.write_text(json.dumps({"invitation": invitation, "port": port, "approve": approve, "cancel": cancel, "unmap": unmap}))
                 gui_env = {**client_env, "XDG_RUNTIME_DIR": os.environ["XDG_RUNTIME_DIR"],
                            "SUPER_DESKTOP_PAIRING_TEST_INPUT": str(form_input),
                            "SUPER_DESKTOP_PAIRING_TEST_RESULT": str(form_result)}
@@ -143,4 +143,5 @@ scenario(True, gui_test_binary)
 scenario(False, gui_test_binary)
 if gui_test_binary:
     scenario(True, gui_test_binary, cancel=True)
+    scenario(True, gui_test_binary, unmap=True)
 print("Desktop peer pairing smoke passed: pin, self-pair, approval, denial, private storage, layout, identity, expiry, forget, revocation")
