@@ -10,8 +10,8 @@ and authenticated workspace snapshot/event routes are implemented. Outgoing
 certificate-pinned PC pairing, private peer storage and remote snapshot retrieval
 are testable through the CLI. Lifecycle mutation extraction, remote commands,
 live outgoing subscriptions and network terminal transport remain pending. The
-top-left selector now provides a read-only remote layout preview; graphical
-pairing and interactive remote cards remain pending.
+top-left selector now provides a read-only remote layout preview and an Add a PC
+pairing form. Interactive remote cards remain pending.
 
 ## 1. Intended experience and scope
 

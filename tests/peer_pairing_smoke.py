@@ -12,7 +12,7 @@ from desktop_bridge_checks import DesktopStub
 BINARY = str(pathlib.Path(sys.argv[1]).resolve())
 
 
-def scenario(approve):
+def scenario(approve, gui_test_binary=None, cancel=False):
     with tempfile.TemporaryDirectory(prefix="sd-peer-smoke-") as root:
         root = pathlib.Path(root)
         host = root / "host"
@@ -59,11 +59,21 @@ def scenario(approve):
             assert "itself" in cli(*options, input=json.dumps(invitation), expected=1,
                                     environment={**client_env, "SUPER_DESKTOP_BRIDGE_STATE_DIR": str(host)}).stderr
             assert not admin("state")["requests"]
-            pairing = subprocess.Popen([BINARY, *options], env=client_env, stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            pairing.stdin.write(json.dumps(invitation) + "\n")
-            pairing.stdin.close()
-            pairing.stdin = None
+            if gui_test_binary:
+                form_input = root / "form-input.json"
+                form_result = root / "form-result.json"
+                form_input.write_text(json.dumps({"invitation": invitation, "port": port, "approve": approve, "cancel": cancel}))
+                gui_env = {**client_env, "XDG_RUNTIME_DIR": os.environ["XDG_RUNTIME_DIR"],
+                           "SUPER_DESKTOP_PAIRING_TEST_INPUT": str(form_input),
+                           "SUPER_DESKTOP_PAIRING_TEST_RESULT": str(form_result)}
+                pairing = subprocess.Popen([gui_test_binary, "--exact", "peer_pairing_ui::tests::wire_inner", "--nocapture"],
+                                           env=gui_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            else:
+                pairing = subprocess.Popen([BINARY, *options], env=client_env, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                pairing.stdin.write(json.dumps(invitation) + "\n")
+                pairing.stdin.close()
+                pairing.stdin = None
             pending = []
             for _ in range(100):
                 pending = admin("state")["requests"]
@@ -72,15 +82,26 @@ def scenario(approve):
                 assert pairing.poll() is None, pairing.communicate()
                 time.sleep(.05)
             assert len(pending) == 1
+            if cancel:
+                for _ in range(100):
+                    if form_result.exists():
+                        break
+                    assert pairing.poll() is None, pairing.communicate()
+                    time.sleep(.05)
+                assert form_result.read_text() == "cancelled"
             admin("approve" if approve else "deny", {"requestId": pending[0]["requestId"]})
             stdout, stderr = pairing.communicate(timeout=15)
             assert pending[0]["code"] in stderr
+            if cancel:
+                assert pairing.returncode == 0, (stdout, stderr)
+                assert json.loads(cli("peer-list").stdout) == []
+                return
             if not approve:
-                assert pairing.returncode == 1 and "pairing_denied" in stderr
+                assert pairing.returncode == (0 if gui_test_binary else 1) and "pairing_denied" in stderr
                 assert json.loads(cli("peer-list").stdout) == []
                 return
             assert pairing.returncode == 0, stderr
-            summary = json.loads(stdout)
+            summary = json.loads(form_result.read_text() if gui_test_binary else stdout)
             machine = summary["machineId"]
             registry = root / "peers" / "peers.json"
             saved = registry.read_bytes()
@@ -117,6 +138,9 @@ def scenario(approve):
             bridge.wait(timeout=10)
 
 
-scenario(True)
-scenario(False)
+gui_test_binary = str(pathlib.Path(sys.argv[2]).resolve()) if len(sys.argv) > 2 else None
+scenario(True, gui_test_binary)
+scenario(False, gui_test_binary)
+if gui_test_binary:
+    scenario(True, gui_test_binary, cancel=True)
 print("Desktop peer pairing smoke passed: pin, self-pair, approval, denial, private storage, layout, identity, expiry, forget, revocation")

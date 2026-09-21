@@ -197,18 +197,60 @@ impl MachineView {
                     "Could not read paired PCs. Check peer-list.",
                 ))),
             }
-            let help = gtk4::Label::new(Some(
-                "Add a PC from a terminal:\nsuper-desktop peer-add --host HOST_IP",
-            ));
-            help.add_css_class("ws-row-path");
-            help.set_xalign(0.0);
-            help.set_margin_start(10);
-            help.set_margin_end(10);
-            help.set_margin_bottom(8);
-            help.set_selectable(true);
-            help.set_margin_top(8);
-            list.append(&help);
+            let add = gtk4::Button::with_label("＋ Add a PC");
+            style_peer_button(&add, false);
+            add.add_css_class("hud-action-primary");
+            let weak = Rc::downgrade(&view);
+            let pop = pop.downgrade();
+            add.connect_clicked(move |_| {
+                if let (Some(view), Some(pop)) = (weak.upgrade(), pop.upgrade()) {
+                    view.pairing_form(&pop);
+                }
+            });
+            list.append(&add);
         });
+    }
+    fn pairing_form(self: &Rc<Self>, popover: &gtk4::Popover) {
+        let weak = Rc::downgrade(self);
+        let pop = popover.downgrade();
+        let back = Rc::new(move || {
+            if let (Some(view), Some(pop)) = (weak.upgrade(), pop.upgrade()) {
+                view.populate(&pop);
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let pop = popover.downgrade();
+        let saved = Rc::new(move |peer: peer_client::PeerSummary| {
+            if let (Some(view), Some(pop)) = (weak.upgrade(), pop.upgrade()) {
+                pop.popdown();
+                view.select(Some((peer.machine_id, peer.label)));
+            }
+        });
+        popover.set_child(Some(&crate::peer_pairing_ui::build(back, saved)));
+    }
+    pub fn bind_keyboard(&self, window: &gtk4::ApplicationWindow) {
+        use gtk4_layer_shell::{KeyboardMode, LayerShell};
+        for button in [&self.local_button, &self.remote_button] {
+            let popover = button.popover().unwrap();
+            let previous = Rc::new(Cell::new(KeyboardMode::OnDemand));
+            let mode = previous.clone();
+            let weak = window.downgrade();
+            popover.connect_show(move |_| {
+                if let Some(window) = weak.upgrade() {
+                    mode.set(window.keyboard_mode());
+                    window.set_keyboard_mode(KeyboardMode::Exclusive);
+                }
+            });
+            let weak = window.downgrade();
+            popover.connect_closed(move |_| {
+                if let Some(window) = weak.upgrade() {
+                    // A PC switch may already have reset keyboard ownership.
+                    if window.keyboard_mode() == KeyboardMode::Exclusive {
+                        window.set_keyboard_mode(previous.get());
+                    }
+                }
+            });
+        }
     }
     fn select(self: &Rc<Self>, peer: Option<(String, String)>) {
         (self.on_switch)();

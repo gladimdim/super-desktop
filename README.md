@@ -174,9 +174,9 @@ super-desktop status
 ## 🏗️ Project layout (for contributors)
 
 PC-to-PC workspace switching: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md).
-Outgoing PC pairing and remote layout retrieval are now testable through the
-[peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment);
-the top-left machine selector now shows a read-only remote layout preview.
+Use **Add a PC** in the top-left machine selector to pair another computer and
+view its read-only layout preview. The [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
+is also available for pairing and remote layout retrieval.
 Interactive remote consoles are still pending.
 
 ```

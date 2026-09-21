@@ -12,6 +12,8 @@ mod desktop_protocol;
 mod peer_client;
 mod peer_store;
 mod peer_cli;
+mod peer_pairing;
+mod peer_pairing_ui;
 mod machine_selector;
 mod remote_workspace;
 mod harness_settings;

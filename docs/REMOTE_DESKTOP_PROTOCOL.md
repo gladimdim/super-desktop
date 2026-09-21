@@ -7,7 +7,7 @@ Implemented: protocol negotiation, a daemon-owned local workspace model,
 authenticated workspace snapshots/events, persisted terminal stacking order, and
 an isolated server-side PTY implementation with tmux/VTE integration tests.
 Outgoing certificate-pinned pairing and remote snapshot retrieval are available
-through the CLI (see below). Remote mutations, graphical pairing and WSS terminal
+through the CLI (see below). Remote mutations and WSS terminal
 attachment remain pending; this is still an incremental development branch.
 
 ## Available endpoints
@@ -279,4 +279,34 @@ window refreshes the remote snapshot. Application restart returns to This PC;
 hiding and showing the same window preserves its current selection.
 
 This increment uses bounded HTTPS polling. Live WSS subscriptions, graphical
-Add/Manage PC, terminal streaming and remote layout mutations remain pending.
+peer removal, terminal streaming and remote layout mutations remain pending.
+
+
+## Add a PC from the selector
+
+Open the top-left selector and choose **Add a PC**. On the host, open
+Settings → Android, enable the bridge, generate an invitation and expand
+**Copy pairing link**. Paste that link into the viewer's form. A friendly name
+and connection address/port overrides are optional. Click **Connect**, compare
+the six-digit code on both PCs, and approve on the host. The approved peer is
+saved and its read-only layout preview opens automatically.
+
+The invitation field is hidden and cleared after submission or closing the
+form. Network requests and private-store writes run on a worker. Only one
+pairing worker can run at a time. Cancel/Back, closing the menu or hiding the
+application cancels an unfinished attempt. A request already submitted to the
+host can remain pending there: deny it on the host, and use a fresh invitation
+for another attempt. Cancellation before saving claims completion prevents a
+late approval from writing a peer; a save already begun is allowed to finish.
+Host revocation remains authoritative if access must be withdrawn.
+
+The existing isolated pairing smoke test can also drive the real GTK form
+without opening a production window. Build tests with `cargo test --no-run`,
+then supply the main test executable as a second argument:
+
+```sh
+python3 tests/peer_pairing_smoke.py target/release/super-desktop target/debug/deps/super_desktop-TEST_HASH
+```
+
+This exercises GUI approval, denial and cancellation before a late host
+approval, then checks persisted peers, layout retrieval and host revocation.

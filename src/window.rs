@@ -333,6 +333,7 @@ impl SuperDesktopWindow {
             }),
             on_close_rc.clone(),
         );
+        machine_view.bind_keyboard(&window);
         root_overlay.set_child(Some(&machine_view.stack));
         hud.append(&machine_view.local_button);
 
