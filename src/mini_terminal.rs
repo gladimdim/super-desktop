@@ -975,6 +975,14 @@ impl MiniTerminalCard {
         self.attach_vte_with_inventory(None);
     }
 
+    /// Unmap the VTE widget without detaching tmux. Hide uses this so a
+    /// GPU-heavy local model cannot stall compositor frames on live terminals.
+    pub fn set_vte_drawing(&self, drawing: bool) {
+        if let Some(term) = self.vte.borrow().as_ref() {
+            term.set_visible(drawing);
+        }
+    }
+
     fn attach_vte_with_inventory(&self, inventory: Option<Arc<crate::tmux::SessionInventory>>) {
         if self.vte.borrow().is_some() {
             return;

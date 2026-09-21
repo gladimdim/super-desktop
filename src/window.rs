@@ -9,7 +9,7 @@ use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::mini_terminal::{
     clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, HoverRaiseLock,
@@ -44,6 +44,11 @@ const HUD_OFFSCREEN_PAD: f64 = 40.0;
 /// Fallback HUD height before GTK has allocated it, so the first frame still
 /// starts above the screen instead of at rest.
 const HUD_MIN_HEIGHT: i32 = 56;
+/// Hide must not wait forever on Hyprland vsync. A local LLM (LM Studio /
+/// llama.cpp) can fill the GPU so frame callbacks never run, which used to
+/// leave the overlay mapped after Toggle. 4/ω_out ≈ 200ms; this is one
+/// extra refresh of slack, then we unmap anyway.
+pub(crate) const HIDE_FALLBACK: Duration = Duration::from_millis(280);
 
 fn top_bar_height(size: TopBarSize) -> i32 {
     match size {
@@ -1418,6 +1423,12 @@ impl SuperDesktopWindow {
 
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
         self.machine_view.dismiss();
+        // VTE GPU buffers stay mapped during the slide. With VRAM exhausted
+        // (a 27B local model on a 16 GB card) each `canvas.move_` of those
+        // terminals can stall the compositor and the GTK frame clock never
+        // settles, so hide never unmaps. Drop the surfaces first; tmux
+        // clients stay attached for the next show.
+        self.set_terminal_gpu_mapped(false);
         self.ensure_slide_trajectories(false);
         *self.on_slide_hidden.borrow_mut() = Some(Rc::new(on_finish));
         if !self.slide.running.get() {
@@ -1486,6 +1497,12 @@ impl SuperDesktopWindow {
             .iter()
             .map(|(w, t)| (w.clone(), *t))
             .collect();
+        let terminal_widgets: Vec<gtk4::Widget> = self
+            .terminal_cards
+            .borrow()
+            .iter()
+            .map(|card| card.container.clone().upcast())
+            .collect();
         let slide = Rc::clone(&self.slide);
         let canvas = self.canvas.clone();
         let on_hidden = Rc::clone(&self.on_slide_hidden);
@@ -1522,6 +1539,9 @@ impl SuperDesktopWindow {
                 slide.velocity.set(0.0);
                 slide.running.set(false);
                 for (widget, traj) in frames.iter() {
+                    if !appear && terminal_widgets.iter().any(|t| t == widget) {
+                        continue;
+                    }
                     paint_slide_widget(&canvas, widget, *traj, target);
                 }
                 canvas.remove_css_class("sliding");
@@ -1535,6 +1555,11 @@ impl SuperDesktopWindow {
             slide.progress.set(progress);
             slide.velocity.set(velocity);
             for (widget, traj) in frames.iter() {
+                // Do not move live VTE cards on hide: each move composites
+                // GPU terminal buffers. HUD + notes still slide away.
+                if !appear && terminal_widgets.iter().any(|t| t == widget) {
+                    continue;
+                }
                 paint_slide_widget(&canvas, widget, *traj, progress);
             }
             glib::ControlFlow::Continue
@@ -1618,6 +1643,7 @@ impl SuperDesktopWindow {
     /// between the shortcut and the overlay appearing.
     pub fn show_again(&self) {
         self.show_token.set(self.show_token.get().wrapping_add(1));
+        self.set_terminal_gpu_mapped(true);
         self.window.present();
         self.window.set_visible(true);
         // Re-assert keyboard interactivity: typing in a card flips it to
@@ -1645,6 +1671,11 @@ impl SuperDesktopWindow {
 
     /// Unmap the window but keep the whole widget tree alive for the next show.
     fn hide_now(&self) {
+        // Stop a vsync tick that may never fire (GPU stall) from later
+        // painting or calling `on_slide_hidden` after we already unmapped.
+        self.slide.running.set(false);
+        self.slide.gen.set(self.slide.gen.get().wrapping_add(1));
+        self.set_terminal_gpu_mapped(false);
         // Floating panels must not come back with the window.
         for panel in &self.overlay_panels {
             panel.set_visible(false);
@@ -1653,6 +1684,13 @@ impl SuperDesktopWindow {
         // overlay's widget tree (it is its own popup surface).
         self.ws_popover.popdown();
         self.window.set_visible(false);
+    }
+
+    /// Hide VTE widgets so hide/unmap does not composite live GPU terminals.
+    fn set_terminal_gpu_mapped(&self, mapped: bool) {
+        for card in self.terminal_cards.borrow().iter() {
+            card.set_vte_drawing(mapped);
+        }
     }
 
     fn periodic_refresh(&self) {
@@ -1817,6 +1855,15 @@ mod tests {
         let (sx, sy) = card_slide_offscreen(2400.0, 20.0, 128.0, sw);
         assert!(sx > sw);
         assert_eq!(sy, 20.0);
+    }
+
+    #[test]
+    fn hide_fallback_does_not_wait_on_a_stuck_compositor() {
+        // Settle time of the hide spring is about 4/ω_out ≈ 200ms. The
+        // fallback must fire after that, and well before a frozen overlay
+        // feels like a hang.
+        assert!(HIDE_FALLBACK >= Duration::from_millis(200));
+        assert!(HIDE_FALLBACK <= Duration::from_millis(400));
     }
 
     #[test]

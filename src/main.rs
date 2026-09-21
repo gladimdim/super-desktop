@@ -563,9 +563,17 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
     // Slide out, then unmap: the widget tree, the VTE terminals and their tmux
     // attach clients stay alive, so the next show is instant. The token makes a
     // show that lands during the animation win over this unmap.
+    //
+    // VTE drawing is paused inside `start_slide_out`. If Hyprland never
+    // delivers frames (GPU full from a local LLM), the spring never
+    // settles — the fallback unmaps anyway.
     let token = win.current_show_token();
     let win_hide = Rc::clone(&win);
     win.start_slide_out(move || win_hide.hide_if_unchanged(token));
+    let win_fb = Rc::clone(&win);
+    glib::timeout_add_local_once(crate::window::HIDE_FALLBACK, move || {
+        win_fb.hide_if_unchanged(token);
+    });
 }
 
 fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
