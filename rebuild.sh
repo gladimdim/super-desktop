@@ -8,8 +8,8 @@
 #   ./rebuild.sh --help       # this help
 #
 # What it does:
-#   1. Stops the running super-desktop daemon (IPC kill + pkill fallback,
-#      stale socket cleanup) so the old binary releases the socket.
+#   1. Stops the running super-desktop daemon and its harness bridge (IPC kill
+#      + pkill fallback, stale socket cleanup) so no old process remains.
 #   2. Rebuilds the native Rust binary (cargo build --release).
 #   3. Re-links ~/.local/bin/super-desktop -> the native control client and refreshes
 #      toolbar assets in ~/.config/super-desktop/assets.
@@ -45,7 +45,7 @@ done
 
 echo "=== SUPER DESKTOP rebuild ==="
 
-# 1. Stop old daemon only when installing/restarting this build.
+# 1. Stop old desktop processes only when installing/restarting this build.
 if [[ "$START_DAEMON" -eq 1 ]]; then
   echo "--> Stopping old daemon..."
   if [[ -x "$BIN_DST" ]]; then
@@ -54,6 +54,9 @@ if [[ "$START_DAEMON" -eq 1 ]]; then
     "$BIN_SRC" kill >/dev/null 2>&1 || true
   fi
   pkill -f "super-desktop.*daemon" >/dev/null 2>&1 || true
+  # The bridge is a separate process. Leaving it running would keep serving
+  # the previous binary after a successful daemon rebuild.
+  pkill -f "super-desktop harness-bridge" >/dev/null 2>&1 || true
   # Give IPC `kill` a moment, then drop a stale socket file if the daemon is gone.
   sleep 0.5
   if [[ -S "$SOCK" ]] && ! pgrep -f "super-desktop.*daemon" >/dev/null 2>&1; then
