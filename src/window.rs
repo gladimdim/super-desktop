@@ -1742,6 +1742,13 @@ impl SuperDesktopWindow {
     fn hide_now(&self) {
         // Outlines are hints on a visible desk: they do not survive the unmap.
         self.ghosts.suspend();
+        // An unmap does not always deliver a pointer leave, and a card that
+        // still believed the pointer was on it would keep suppressing the
+        // outlines of the cards it covers after the next show.
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        for card in cards.iter() {
+            card.forget_pointer();
+        }
         // Stop a vsync tick that may never fire (GPU stall) from later
         // painting or calling `on_slide_hidden` after we already unmapped.
         self.slide.running.set(false);
@@ -1775,10 +1782,14 @@ impl SuperDesktopWindow {
         if crate::theme::check_theme_changed() {
             self.reload_theme();
         }
-        // Safety net for the overlap ghosts: pointer and focus callbacks cover
-        // the interactive cases, and this catches anything that changed while
-        // they could not run. A refresh that changes nothing draws nothing.
-        self.ghosts.refresh();
+        // Safety net for the overlap ghosts: the pointer, focus, drag and resize
+        // callbacks cover the interactive cases, and this catches the rest. It
+        // also picks the outlines back up when the settle of the slide-in was
+        // never reported (a stalled compositor skips that frame tick), so an
+        // idle desk always ends up with the ghosts it should have.
+        if !self.slide.running.get() {
+            self.ghosts.resume();
+        }
         let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
         for card in cards.iter() {
             card.refresh_status();

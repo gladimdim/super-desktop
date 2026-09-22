@@ -476,6 +476,23 @@ impl RemoteCard {
                 card.type_on_host(bytes);
             }
         });
+        // Return never arrives as a commit on this PTY-less emulator: the
+        // input method and the window's activate-default binding consume it,
+        // while letters still come through `commit`. Catch it on the way in
+        // and send the carriage return the host shell treats as "run this".
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let weak_key = Rc::downgrade(self);
+        keys.connect_key_pressed(move |_, keyval, _, state| {
+            if !is_submit_key(keyval, state) {
+                return glib::Propagation::Proceed;
+            }
+            if let Some(card) = weak_key.upgrade() {
+                card.type_on_host(b"\r");
+            }
+            glib::Propagation::Stop
+        });
+        terminal.add_controller(keys);
         let weak_focus = Rc::downgrade(self);
         let click = gtk4::GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
@@ -645,6 +662,22 @@ fn fit_font(
     }
 }
 
+/// Enter, keypad Enter and the ISO Enter key submit the line.
+///
+/// Ctrl and Alt stay with VTE (Ctrl+Enter is a different sequence). Shift and
+/// Lock do not: a shell still treats Shift+Enter as submit.
+fn is_submit_key(keyval: gtk4::gdk::Key, state: gtk4::gdk::ModifierType) -> bool {
+    if state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+        || state.contains(gtk4::gdk::ModifierType::ALT_MASK)
+    {
+        return false;
+    }
+    matches!(
+        keyval,
+        gtk4::gdk::Key::Return | gtk4::gdk::Key::KP_Enter | gtk4::gdk::Key::ISO_Enter
+    )
+}
+
 /// Subscribe to VTE's `commit` signal and forward the bytes the host should see.
 ///
 /// VTE emits the payload with its real length, then GObject delivers `text` as
@@ -695,6 +728,19 @@ fn agent_icon(agent_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enter_submits_and_modified_enter_does_not() {
+        use gtk4::gdk::{Key, ModifierType};
+        let none = ModifierType::empty();
+        assert!(is_submit_key(Key::Return, none));
+        assert!(is_submit_key(Key::KP_Enter, none));
+        assert!(is_submit_key(Key::ISO_Enter, none));
+        assert!(is_submit_key(Key::Return, ModifierType::SHIFT_MASK));
+        assert!(!is_submit_key(Key::Return, ModifierType::CONTROL_MASK));
+        assert!(!is_submit_key(Key::Return, ModifierType::ALT_MASK));
+        assert!(!is_submit_key(Key::a, none));
+    }
 
     #[test]
     fn committed_bytes_keep_their_length_including_a_nul() {

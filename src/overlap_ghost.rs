@@ -3,13 +3,20 @@
 //! Two terminals of the overlay can end up stacked: a card dropped on another
 //! one, a freshly launched harness cascading 32px over the previous one, an
 //! auto-arrange that stacks a column. The top card hides the one underneath, so
-//! while the user is working in neither of them the buried card's rectangle is
-//! drawn as a dotted ghost outline — the desk still shows that a terminal is
-//! there.
+//! the buried card's rectangle is drawn as a dotted ghost outline — the desk
+//! still shows that a terminal is there.
 //!
-//! Only terminals count as coverers (a sticky note is decoration), only cards
-//! painted *above* the buried one hide it (a raised card is fully visible), and
-//! nothing is drawn over the card the user is working in.
+//! The rule, in one sentence: **the terminal the user is working in draws no
+//! outline of its own, and neither do the terminals it covers; every other
+//! buried terminal shows its dotted outline.** "Working in" (see
+//! `MiniTerminalCard::user_is_active`) is the pointer being on the card, the
+//! card being expanded, or the card having just taken a keystroke / a launch /
+//! an expand — all of which expire on their own, so the outlines always come
+//! back.
+//!
+//! Only terminals count as coverers (a sticky note is decoration), and only
+//! cards painted *above* a card hide it: a raised card is fully visible and
+//! needs no hint about itself.
 //!
 //! The planner ([`ghost_indexes`], [`covered_ratio`]) is plain geometry that
 //! unit tests cover; [`GhostLayer`] is the thin GTK side that places one
@@ -621,82 +628,5 @@ mod tests {
         layer.apply(&[]);
         assert!(outlines(&canvas).is_empty());
         assert!(hud.parent().is_some(), "the toolbar stays in the canvas");
-    }
-}
-
-#[cfg(test)]
-mod preview_probe {
-    use super::*;
-    use gtk4::prelude::*;
-
-    #[test]
-    fn render_preview() {
-        crate::gtk_test::run_in_child_process("overlap_ghost::preview_probe::render_preview_inner");
-    }
-
-    #[test]
-    fn render_preview_inner() {
-        if !crate::gtk_test::is_child() {
-            return;
-        }
-        gtk4::init().unwrap();
-        crate::styles::apply_styles();
-        let app = gtk4::Application::new(Some("com.superdesktop.GhostPreview"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
-        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
-        let window = gtk4::ApplicationWindow::new(&app);
-        window.set_default_size(900, 600);
-        let canvas = Fixed::new();
-        let backdrop = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        backdrop.add_css_class("super-desktop-window");
-        backdrop.set_size_request(900, 600);
-        canvas.put(&backdrop, 0.0, 0.0);
-
-        let hud = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        hud.add_css_class("hud-bar");
-        hud.set_size_request(900, 46);
-        canvas.put(&hud, 0.0, 0.0);
-
-        let make_card = |x: f64, y: f64, w: i32, h: i32, title: &str| {
-            let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-            card.add_css_class("mini-terminal");
-            card.set_size_request(w, h);
-            let label = gtk4::Label::new(Some(title));
-            label.set_margin_top(20);
-            card.append(&label);
-            canvas.put(&card, x, y);
-        };
-        make_card(120.0, 150.0, 400, 300, "💻 buried claude (drawn above)");
-        make_card(150.0, 170.0, 350, 260, "🤖 codex");
-        window.set_child(Some(&canvas));
-        window.present();
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(300);
-        while std::time::Instant::now() < until {
-            while gtk4::glib::MainContext::default().iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-
-        let layer = GhostLayer::new(&canvas, &hud, Rc::new(RefCell::new(Vec::<Rc<MiniTerminalCard>>::new())), 900, 600);
-        let buried = TerminalPlacement { session: "buried".to_string(), rect: rect_of(120, 150, 400, 300), user_active: false };
-        let over = TerminalPlacement { session: "over".to_string(), rect: rect_of(150, 170, 350, 260), user_active: false };
-        layer.apply(&[buried, over]);
-        let until = std::time::Instant::now() + std::time::Duration::from_millis(400);
-        while std::time::Instant::now() < until {
-            while gtk4::glib::MainContext::default().iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        let snapshot = gtk4::Snapshot::new();
-        window.snapshot_child(&canvas, &snapshot);
-        let node = snapshot.to_node().expect("render node");
-        let renderer = window
-            .native()
-            .and_then(|native| native.renderer())
-            .expect("renderer");
-        let texture = renderer.render_texture(node, None);
-        texture.save_to_png("/tmp/ghost_preview.png").unwrap();
-        println!("PREVIEW written");
-    }
-
-    fn rect_of(x: i32, y: i32, width: i32, height: i32) -> Rect {
-        Rect { x: x as f64, y: y as f64, width, height }
     }
 }

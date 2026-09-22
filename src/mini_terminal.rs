@@ -1,7 +1,10 @@
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Align, Button, EventControllerFocus, GestureClick, GestureDrag, Label, Orientation, Overlay};
+use gtk4::{
+    Align, Button, EventControllerFocus, EventControllerKey, GestureClick, GestureDrag, Label,
+    Orientation, Overlay,
+};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -84,6 +87,67 @@ impl HoverRaiseLock {
                 self.release();
             }
         }
+    }
+}
+
+/// How long a card stays "in use" after the last sign of the user working in it
+/// (a keystroke, a launch, an expand).
+pub const ACTIVE_FOR: Duration = Duration::from_secs(3);
+
+/// Why a card counts as the one the user is working in, plus the hook that
+/// tells the overlay when that changed.
+///
+/// GTK keyboard focus cannot answer this question in this overlay: hovering a
+/// card raises it *and* grabs focus, nothing releases that focus when the
+/// pointer moves on, and a launched or expanded card holds it until something
+/// else claims it. "Focused" therefore meant "active forever", and the dotted
+/// outlines of the cards it covered never came back. Both signals here expire
+/// on their own instead — the pointer immediately, keystrokes and deliberate
+/// launches/expands after [`ACTIVE_FOR`] (the overlay's 1s refresh re-reads
+/// that).
+pub struct CardActivity {
+    pointer_inside: Cell<bool>,
+    last_activity: Cell<Option<Instant>>,
+    on_change: Rc<dyn Fn()>,
+}
+
+impl CardActivity {
+    pub fn new(on_change: Rc<dyn Fn()>) -> Self {
+        Self {
+            pointer_inside: Cell::new(false),
+            last_activity: Cell::new(None),
+            on_change,
+        }
+    }
+
+    /// True while the user is working in this card.
+    pub fn is_active(&self, now: Instant) -> bool {
+        self.pointer_inside.get()
+            || self
+                .last_activity
+                .get()
+                .is_some_and(|at| now.saturating_duration_since(at) < ACTIVE_FOR)
+    }
+
+    /// The pointer entered or left the card. Notifies on a real change only, so
+    /// a pointer that keeps crossing cards does not redraw the outlines twice.
+    pub fn set_pointer_inside(&self, inside: bool) {
+        if self.pointer_inside.replace(inside) != inside {
+            (self.on_change)();
+        }
+    }
+
+    /// The user did something with this card: a keystroke meant for it, a
+    /// launch, an expand. It is active now, and stays so while that keeps
+    /// happening.
+    ///
+    /// Notifies when this is what made it active again (the first sign after a
+    /// pause), not on every repeat: the outlines are already in the right state.
+    pub fn note_activity(&self, now: Instant) {
+        if !self.is_active(now) {
+            (self.on_change)();
+        }
+        self.last_activity.set(Some(now));
     }
 }
 
@@ -181,11 +245,8 @@ pub struct MiniTerminalCard {
     on_toggle: Rc<dyn Fn(&TerminalData)>,
     on_session_persist: Rc<dyn Fn(&TerminalData)>,
     hover_lock: HoverRaiseLock,
-    /// The pointer is over this card. See `user_is_active`.
-    pointer_inside: Rc<Cell<bool>>,
-    /// The keyboard focus of this card was claimed on purpose (click, launch,
-    /// expand) rather than by hover-raise. See `user_is_active`.
-    focus_claimed: Rc<Cell<bool>>,
+    /// Pointer and typing signals for the overlap ghosts (`user_is_active`).
+    activity: Rc<CardActivity>,
 }
 
 impl MiniTerminalCard {
@@ -246,10 +307,9 @@ impl MiniTerminalCard {
         let on_resize_ghost = Rc::new(on_resize_ghost);
         let on_resize_end = Rc::new(on_resize_end);
         let on_raise_rc = Rc::new(on_raise);
-        let on_interaction: Rc<dyn Fn()> = Rc::new(on_interaction);
-        // Attention on this card, for the overlap ghosts (`user_is_active`).
-        let pointer_inside = Rc::new(Cell::new(false));
-        let focus_claimed = Rc::new(Cell::new(false));
+        // Pointer and typing attention on this card, for the overlap ghosts
+        // (`user_is_active`). The callback tells the overlay to redraw them.
+        let activity = Rc::new(CardActivity::new(Rc::new(on_interaction)));
         let visual_pos = Rc::new(RefCell::new(displayed_pos(&data.borrow())));
 
         let root = Overlay::new();
@@ -262,17 +322,8 @@ impl MiniTerminalCard {
         let on_raise_click = Rc::clone(&on_raise_rc);
         let click_lock = hover_lock.clone();
         let click_session = data.borrow().session_name.clone();
-        let claim_click = Rc::clone(&focus_claimed);
-        let notify_click = Rc::clone(&on_interaction);
         click_raise.connect_pressed(move |_, _, _, _| {
-            // A click is an explicit claim on the card's focus (see
-            // `user_is_active`), and it is the user's intent even when the
-            // click lands on chrome that never takes focus at all.
-            let changed = !claim_click.replace(true);
             click_lock.on_click(&click_session);
-            if changed {
-                notify_click();
-            }
             if let Some(c) = container_weak_click.upgrade() {
                 on_raise_click(c.upcast());
             }
@@ -288,10 +339,6 @@ impl MiniTerminalCard {
                 on_raise_focus(c.upcast());
             }
         });
-        // Focus that leaves the card ends its "in use" state without a raise,
-        // so tell the overlap ghosts about it directly.
-        let notify_focus_leave = Rc::clone(&on_interaction);
-        focus_raise.connect_leave(move |_| notify_focus_leave());
         root.add_controller(focus_raise);
 
         let body = gtk4::Box::new(Orientation::Vertical, 0);
@@ -546,8 +593,7 @@ impl MiniTerminalCard {
             on_toggle: Rc::clone(&on_toggle),
             on_session_persist: Rc::clone(&on_session_persist),
             hover_lock: hover_lock.clone(),
-            pointer_inside,
-            focus_claimed,
+            activity,
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -560,14 +606,11 @@ impl MiniTerminalCard {
         let on_raise_hover = Rc::clone(&on_raise_rc);
         let hover_lock_enter = hover_lock.clone();
         let hover_session = card.data.borrow().session_name.clone();
-        let pointer_enter = Rc::clone(&card.pointer_inside);
-        let notify_enter = Rc::clone(&on_interaction);
+        let pointer_enter = Rc::clone(&card.activity);
         hover.connect_enter(move |_, _, _| {
             // Attention bookkeeping comes first: it must happen even while the
             // hover lock below skips the raise.
-            if !pointer_enter.replace(true) {
-                notify_enter();
-            }
+            pointer_enter.set_pointer_inside(true);
             if !hover_lock_enter.allows_hover(&hover_session) {
                 return;
             }
@@ -583,13 +626,8 @@ impl MiniTerminalCard {
                 }
             }
         });
-        let pointer_leave = Rc::clone(&card.pointer_inside);
-        let notify_leave = Rc::clone(&on_interaction);
-        hover.connect_leave(move |_| {
-            if pointer_leave.replace(false) {
-                notify_leave();
-            }
-        });
+        let pointer_leave = Rc::clone(&card.activity);
+        hover.connect_leave(move |_| pointer_leave.set_pointer_inside(false));
         card.container.add_controller(hover);
 
         // Actions
@@ -670,6 +708,7 @@ impl MiniTerminalCard {
             let on_save = Rc::clone(&on_drag_end);
             let on_toggle_restore = Rc::clone(&on_toggle);
             let hover_lock_restore = card.hover_lock.clone();
+            let activity_restore = Rc::clone(&card.activity);
             Rc::new(move || {
                 if *expanded.borrow() {
                     *expanded.borrow_mut() = false;
@@ -704,7 +743,7 @@ impl MiniTerminalCard {
                 container.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
-                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone());
+                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore);
                 } else if let Some(term) = vte.borrow().as_ref() {
                     let theme = crate::theme::current_theme();
                     let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
@@ -953,21 +992,24 @@ impl MiniTerminalCard {
     }
 
     /// True while the user is working in this card, which keeps the dotted
-    /// ghost outlines of the cards it hides off the screen.
+    /// ghost outlines of the cards it covers (and its own) off the screen.
     ///
-    /// Hovering a card raises it *and* grabs keyboard focus, so keyboard focus
-    /// alone would keep a card "in use" long after the pointer walked away —
-    /// and the ghost would come back only by accident. The pointer is the
-    /// source of truth; keyboard focus counts while an explicit act claimed it
-    /// (a click into the card, a launch, an expand), which is what keeps the
-    /// ghost away from a terminal the user is typing in.
+    /// Expanded counts, and so do the pointer being on the card and any
+    /// keystroke meant for it — but that last one only for [`ACTIVE_FOR`] after
+    /// the last sign of use. Signals that expire on their own are the point:
+    /// GTK focus would keep a card "in use" forever, because hover-raise grabs
+    /// it and nothing releases it when the user moves on (see [`CardActivity`]).
     pub fn user_is_active(&self) -> bool {
-        self.pointer_inside.get()
-            || (self.focus_claimed.get()
-                && self
-                    .container
-                    .state_flags()
-                    .contains(gtk4::StateFlags::FOCUS_WITHIN))
+        self.is_expanded() || self.activity.is_active(Instant::now())
+    }
+
+    /// Drop the "the pointer is over this card" state.
+    ///
+    /// Called when the overlay is unmapped: an unmap does not always deliver a
+    /// pointer leave, and a card that still believed the pointer was on it
+    /// would suppress the outlines of everything it covers after the next show.
+    pub fn forget_pointer(&self) {
+        self.activity.set_pointer_inside(false);
     }
 
     pub fn expand(&self, screen_w: i32, screen_h: i32) {
@@ -1028,10 +1070,10 @@ impl MiniTerminalCard {
     }
 
     pub fn focus_terminal(&self) {
-        // A launch or an expand deliberately puts the keyboard focus here, so
-        // the card is the one the user is working in (`user_is_active`) even
-        // before the first click.
-        self.focus_claimed.set(true);
+        // A launch or an expand is a deliberate "I am working here" (see
+        // `CardActivity`): it keeps the outlines of the covered cards off the
+        // screen for a moment, and expires on its own like everything else.
+        self.activity.note_activity(Instant::now());
         if let Some(term) = self.vte.borrow().as_ref() {
             term.grab_focus();
         }
@@ -1081,6 +1123,7 @@ impl MiniTerminalCard {
             &self.session_task,
             inventory,
             self.hover_lock.clone(),
+            &self.activity,
         );
     }
 
@@ -1340,6 +1383,7 @@ fn spawn_vte(
     session_task: &Arc<crate::session_task::SessionTask>,
     inventory: Option<Arc<crate::tmux::SessionInventory>>,
     hover_lock: HoverRaiseLock,
+    activity: &Rc<CardActivity>,
 ) {
     if session_task.is_closed() { return; }
     remove_vte(vte, preview_box);
@@ -1362,13 +1406,31 @@ fn spawn_vte(
     let term_weak = term.downgrade();
     let click_lock = hover_lock.clone();
     let click_session = data.borrow().session_name.clone();
+    let click_activity = Rc::clone(activity);
     term_click.connect_pressed(move |_, _, _, _| {
         click_lock.on_click(&click_session);
+        // Clicking a terminal is how the user says "I am working here": keep
+        // the outlines of the cards it covers off the screen while that lasts
+        // (see `CardActivity`), even if the pointer wanders off to type.
+        click_activity.note_activity(Instant::now());
         if let Some(t) = term_weak.upgrade() {
             t.grab_focus();
         }
     });
     term.add_controller(term_click);
+
+    // Keystrokes are how the overlay knows the user is working in *this* card
+    // (see `CardActivity`): a terminal taking input keeps the dotted outlines
+    // of the cards it covers off the screen until the typing stops. Capture
+    // phase, and `Proceed`, so the terminal still receives every key.
+    let keys_activity = Rc::clone(activity);
+    let keys = EventControllerKey::new();
+    keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    keys.connect_key_pressed(move |_, _, _, _| {
+        keys_activity.note_activity(Instant::now());
+        glib::Propagation::Proceed
+    });
+    term.add_controller(keys);
 
     let session = data.borrow().session_name.clone();
     let term_hover = gtk4::EventControllerMotion::new();
@@ -1693,7 +1755,8 @@ mod tests {
         let task = Arc::new(crate::session_task::SessionTask::default());
         let toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(|_| {});
         spawn_vte(&slot, &preview, &Rc::new(RefCell::new(data)), false,
-            &toggle, &Rc::new(RefCell::new(false)), &task, None, HoverRaiseLock::new());
+            &toggle, &Rc::new(RefCell::new(false)), &task, None, HoverRaiseLock::new(),
+            &Rc::new(CardActivity::new(Rc::new(|| {}))));
         assert!(slot.borrow().is_some(), "placeholder exists before async setup");
         task.close();
         remove_vte(&slot, &preview);
@@ -1797,70 +1860,43 @@ mod tests {
         assert_eq!(format_card_title("⚡ Claude Code", Some("   ")), "⚡ Claude Code");
     }
 
-    /// `grab_focus` on the widget inside a card marks the card itself, which is
-    /// what `user_is_active` reads (the VTE is the focus owner, never the card).
+    /// The outline rule hangs on this: a card counts as "in use" while the
+    /// pointer is on it or it is taking keystrokes — and stops counting on its
+    /// own. GTK focus cannot be used here (hover-raise grabs it and nothing
+    /// releases it), which is what made the outlines vanish for good.
     #[test]
-    fn focus_within_marks_the_card_that_holds_the_focus() {
-        crate::gtk_test::run_in_child_process("mini_terminal::tests::focus_within_gtk");
-    }
+    fn a_card_is_active_only_while_the_user_is_in_it() {
+        let changes = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&changes);
+        let activity = CardActivity::new(Rc::new(move || counter.set(counter.get() + 1)));
+        let start = Instant::now();
 
-    #[test]
-    fn focus_within_gtk() {
-        if !crate::gtk_test::is_child() {
-            return;
-        }
-        gtk4::init().unwrap();
-        let app = gtk4::Application::new(
-            Some("com.superdesktop.FocusWithinTest"),
-            gtk4::gio::ApplicationFlags::NON_UNIQUE,
-        );
-        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
-        let window = gtk4::ApplicationWindow::new(&app);
+        assert!(!activity.is_active(start), "an untouched card is not in use");
 
-        let first = gtk4::Box::new(Orientation::Vertical, 0);
-        let first_terminal = gtk4::Button::new();
-        first.append(&first_terminal);
-        let second = gtk4::Box::new(Orientation::Vertical, 0);
-        let second_terminal = gtk4::Button::new();
-        second.append(&second_terminal);
+        activity.set_pointer_inside(true);
+        assert!(activity.is_active(start), "the pointer counts at once");
+        activity.set_pointer_inside(true);
+        assert_eq!(changes.get(), 1, "an unchanged pointer must not redraw");
+        activity.set_pointer_inside(false);
+        assert_eq!(changes.get(), 2);
 
-        let row = gtk4::Box::new(Orientation::Horizontal, 0);
-        row.append(&first);
-        row.append(&second);
-        window.set_child(Some(&row));
-        window.present();
-        // GTK assigns the initial focus while the window is being mapped and
-        // propagates `:focus-within` over the following frames, so wait for the
-        // state instead of assuming it is there after a fixed number of frames.
-        let wait_for = |what: &str, reached: &dyn Fn() -> bool| {
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while std::time::Instant::now() < deadline {
-                if reached() {
-                    return;
-                }
-                while glib::MainContext::default().iteration(false) {}
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            panic!("timed out waiting for {what}");
-        };
+        assert!(!activity.is_active(start));
+        activity.note_activity(start);
+        assert_eq!(changes.get(), 3, "typing makes the card active");
+        assert!(activity.is_active(start + Duration::from_secs(1)));
+        activity.note_activity(start + Duration::from_secs(2));
+        assert_eq!(changes.get(), 3, "keystrokes while active change nothing");
 
-        let focused_within = |card: &gtk4::Box| {
-            card.state_flags().contains(gtk4::StateFlags::FOCUS_WITHIN)
-        };
-        first_terminal.grab_focus();
-        wait_for("the first card to own the focus", &|| focused_within(&first));
-        assert!(!focused_within(&second), "the other card is not marked");
+        // A pause hands the card back, and the next key takes it again. The
+        // window runs from the *last* keystroke, not from the first.
+        let expired = start + Duration::from_secs(2) + ACTIVE_FOR;
+        assert!(activity.is_active(expired - Duration::from_millis(1)));
+        assert!(!activity.is_active(expired));
+        activity.note_activity(expired);
+        assert_eq!(changes.get(), 4);
 
-        // Typing moves on: the first card stops counting as "in use".
-        second_terminal.grab_focus();
-        wait_for("the second card to own the focus", &|| focused_within(&second));
-        assert!(!focused_within(&first));
-
-        vte4::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
-        wait_for("the focus to leave both cards", &|| {
-            !focused_within(&first) && !focused_within(&second)
-        });
-        window.close();
+        // The pointer wins over an expired keyboard state.
+        activity.set_pointer_inside(true);
+        assert!(activity.is_active(start + Duration::from_secs(600)));
     }
 }
-
