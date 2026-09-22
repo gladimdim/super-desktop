@@ -99,6 +99,26 @@ pub fn fit(host_width: u32, host_height: u32, width: f64, height: f64) -> (f64, 
     )
 }
 
+/// Inverse of the fit scale: a point in the fitted canvas, back in host pixels.
+///
+/// The canvas widget is already centered, so card positions inside it are
+/// `host * scale` with no extra offset. Returns nothing for a scale that
+/// cannot be inverted.
+pub fn host_origin(scale: f64, view_x: f64, view_y: f64) -> Option<(i32, i32)> {
+    if !scale.is_finite() || scale <= 0.0 || !view_x.is_finite() || !view_y.is_finite() {
+        return None;
+    }
+    Some(((view_x / scale).round() as i32, (view_y / scale).round() as i32))
+}
+
+/// Same edges the local cards use, so a remote drop cannot park a card where
+/// the host would refuse to draw it.
+pub fn clamp_card_origin(canvas_w: u32, canvas_h: u32, x: i32, y: i32) -> (i32, i32) {
+    let max_x = (canvas_w as i32 - 80).max(10);
+    let max_y = (canvas_h as i32 - 60).max(70);
+    (x.clamp(10, max_x), y.clamp(70, max_y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,6 +141,14 @@ mod tests {
         assert_eq!(fit(1920, 1080, 1920.0, 1080.0), (1.0, 0.0, 0.0));
         // A larger viewer screen never scales host cards up.
         assert_eq!(fit(1920, 1080, 2560.0, 1440.0), (1.0, 320.0, 180.0));
+    }
+    #[test]
+    fn a_fitted_drop_lands_on_the_host_pixel_and_inside_the_canvas() {
+        assert_eq!(host_origin(0.5, 50.0, 100.0), Some((100, 200)));
+        assert_eq!(host_origin(1.0, 10.4, 69.6), Some((10, 70)));
+        assert!(host_origin(0.0, 1.0, 1.0).is_none());
+        assert_eq!(clamp_card_origin(1920, 1080, -40, 5000), (10, 1020));
+        assert_eq!(clamp_card_origin(100, 80, 0, 0), (10, 70));
     }
 }
 

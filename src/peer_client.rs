@@ -349,7 +349,7 @@ impl PinnedClient {
 
     fn request<T: DeserializeOwned>(
         &self,
-        path: &'static str,
+        path: &str,
         body: Option<Value>,
         token: Option<&str>,
     ) -> Result<T> {
@@ -572,6 +572,31 @@ pub fn verified_workspace(
 
 pub fn workspace(peer: &Peer) -> Result<crate::desktop_protocol::WorkspaceSnapshot> {
     verified_workspace(peer).map(|(_, workspace)| workspace)
+}
+
+/// Ask the host to move one of its own cards. Coordinates are host pixels.
+/// The host clamps them and raises the card; a rejected move is not retried.
+pub fn move_card(peer: &Peer, card_id: &str, x: i32, y: i32) -> Result<()> {
+    if card_id.is_empty()
+        || card_id.len() > 128
+        || !card_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(PeerError("invalid_peer_response"));
+    }
+    let client = PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)?;
+    let path = format!("/api/v1/desktop/cards/{card_id}/position");
+    let reply: serde_json::Value = client.request(
+        &path,
+        Some(serde_json::json!({"x": x, "y": y})),
+        Some(&peer.token),
+    )?;
+    if reply["ok"].as_bool() == Some(true) {
+        Ok(())
+    } else {
+        Err(PeerError("invalid_layout"))
+    }
 }
 
 /// Upgrade a pinned, authenticated WebSocket to one of the host's desktop

@@ -112,6 +112,85 @@ fn decode_reply(reply: &str) -> Result<LocalWorkspaceSnapshot, WorkspaceError> {
     Ok(snapshot)
 }
 
+/// Move one owned card. The daemon clamps to its own screen and decides
+/// whether the number is the card origin or the icon origin.
+pub(super) fn move_position(stream: &mut Connection, card_id: &str, body: &str) {
+    if !valid_card_id(card_id) {
+        return respond(
+            stream,
+            404,
+            "Not Found",
+            &serde_json::json!({"ok": false, "error": "unknown_card"}),
+        );
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Move {
+        x: i32,
+        y: i32,
+    }
+    let Ok(requested) = serde_json::from_str::<Move>(body) else {
+        return respond(
+            stream,
+            400,
+            "Bad Request",
+            &serde_json::json!({"ok": false, "error": "invalid_layout"}),
+        );
+    };
+    if !(-32768..=32768).contains(&requested.x) || !(-32768..=32768).contains(&requested.y) {
+        return respond(
+            stream,
+            400,
+            "Bad Request",
+            &serde_json::json!({"ok": false, "error": "invalid_layout"}),
+        );
+    }
+    let command = format!(
+        "desktop-move {}",
+        serde_json::json!({"cardId": card_id, "x": requested.x, "y": requested.y})
+    );
+    let reply = match crate::ipc_request(&command) {
+        crate::Ipc::Reply(reply) => reply,
+        crate::Ipc::NoDaemon => {
+            return respond(
+                stream,
+                503,
+                "Service Unavailable",
+                &serde_json::json!({"ok": false, "error": "desktop_unavailable"}),
+            )
+        }
+        crate::Ipc::Stalled => {
+            return respond(
+                stream,
+                504,
+                "Gateway Timeout",
+                &serde_json::json!({"ok": false, "error": "desktop_timeout"}),
+            )
+        }
+    };
+    let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
+    if parsed["ok"].as_bool() == Some(true) {
+        return respond(stream, 200, "OK", &serde_json::json!({"ok": true}));
+    }
+    let error = parsed["error"].as_str().unwrap_or("invalid_layout");
+    let (code, reason) = match error {
+        "unknown_card" => (404, "Not Found"),
+        "terminal_expanded" => (409, "Conflict"),
+        "desktop_not_ready" | "desktop_unavailable" => (503, "Service Unavailable"),
+        _ => (400, "Bad Request"),
+    };
+    let error = match error {
+        "unknown_card" | "terminal_expanded" | "desktop_not_ready" | "invalid_layout" => error,
+        _ => "invalid_layout",
+    };
+    respond(
+        stream,
+        code,
+        reason,
+        &serde_json::json!({"ok": false, "error": error}),
+    );
+}
+
 pub(super) fn get_workspace(stream: &mut Connection) {
     match workspace() {
         Ok(snapshot) => respond(stream, 200, "OK", &serde_json::to_value(snapshot).unwrap()),

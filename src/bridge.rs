@@ -1245,6 +1245,23 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
         }
     }
 
+    if req.method == "POST" {
+        if let Some(card_id) = path
+            .strip_prefix("/api/v1/desktop/cards/")
+            .and_then(|rest| rest.strip_suffix("/position"))
+        {
+            if !authorize(&req, local) {
+                return respond(
+                    &mut stream,
+                    401,
+                    "Unauthorized",
+                    &serde_json::json!({"ok": false, "error": "not_paired"}),
+                );
+            }
+            return desktop::move_position(&mut stream, card_id, &req.body);
+        }
+    }
+
     match (req.method.as_str(), path.as_str()) {
         ("GET", "/api/v1/desktop/capabilities") => {
             if !authorize(&req, local) {

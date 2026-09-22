@@ -6,7 +6,8 @@
 //! a VTE widget fed by the network stream. Keystrokes, paste and IME are the
 //! bytes VTE commits for that widget: they are forwarded only after the host's
 //! `attached` handshake, and a hide or machine switch drops anything still
-//! queued. Creating, closing and dragging cards stay local to the host.
+//! queued. Dragging a card tells the host to move and raise it. Creating,
+//! closing and resizing stay on the host.
 use crate::desktop_protocol::{DesktopCard, TerminalSize, WorkspaceSnapshot, MAX_REMOTE_VIEWERS};
 use crate::peer_client::{self, Peer};
 use crate::peer_terminal::{Event as StreamEvent, TerminalStream};
@@ -38,6 +39,9 @@ pub struct RemoteCanvas {
     cards: RefCell<HashMap<String, Rc<RemoteCard>>>,
     snapshot: RefCell<Option<WorkspaceSnapshot>>,
     peer: RefCell<Option<Peer>>,
+    /// Drops the host has not confirmed yet, in host pixels. A refresh that
+    /// still has the old origin keeps the card where it was released.
+    pending_moves: RefCell<HashMap<String, (i32, i32)>>,
     message: gtk4::Label,
 }
 
@@ -66,6 +70,7 @@ impl RemoteCanvas {
             cards: RefCell::new(HashMap::new()),
             snapshot: RefCell::new(None),
             peer: RefCell::new(None),
+            pending_moves: RefCell::new(HashMap::new()),
             message,
         });
         // The viewer's own monitor can change while the overlay stays mapped
@@ -140,11 +145,23 @@ impl RemoteCanvas {
         }
         *self.snapshot.borrow_mut() = None;
         *self.peer.borrow_mut() = None;
+        self.pending_moves.borrow_mut().clear();
     }
 
     /// Render a fresh host snapshot. Cards that did not change keep their
     /// widget, their scrollback and their live stream.
     pub fn apply(self: &Rc<Self>, peer: &Peer, snapshot: &WorkspaceSnapshot) {
+        {
+            let mut pending = self.pending_moves.borrow_mut();
+            pending.retain(|id, pos| {
+                snapshot
+                    .local
+                    .cards
+                    .iter()
+                    .find(|card| &card.card_id == id)
+                    .is_some_and(|card| !card.expanded && shown_origin(card) != *pos)
+            });
+        }
         *self.peer.borrow_mut() = Some(peer.clone());
         *self.snapshot.borrow_mut() = Some(snapshot.clone());
         let stale: Vec<String> = self
@@ -182,6 +199,7 @@ impl RemoteCanvas {
                 Some(widget) => widget,
                 None => {
                     let widget = RemoteCard::new(card);
+                    widget.install_drag(self.canvas.clone(), Rc::downgrade(self));
                     self.canvas.put(&widget.root, 0.0, 0.0);
                     self.cards
                         .borrow_mut()
@@ -195,7 +213,7 @@ impl RemoteCanvas {
     }
 
     fn relayout(self: &Rc<Self>) {
-        let Some(snapshot) = self.snapshot.borrow().clone() else {
+        let Some(snapshot) = self.presented_snapshot() else {
             return;
         };
         let (scale, ..) = remote_workspace::fit(
@@ -223,6 +241,11 @@ impl RemoteCanvas {
                 snapshot.local.canvas.width,
                 snapshot.local.canvas.height,
             );
+            // A card under the pointer keeps the position the gesture set.
+            // The next layout after the drop uses the host origin.
+            if card.dragging.get() {
+                continue;
+            }
             self.canvas.move_(&card.root, rect.x * scale, rect.y * scale);
             card.set_rest(
                 rect.x * scale,
@@ -233,6 +256,118 @@ impl RemoteCanvas {
         }
         self.area.set_visible_child_name("canvas");
     }
+
+    /// Snapshot plus drops the host has not echoed yet.
+    fn presented_snapshot(&self) -> Option<WorkspaceSnapshot> {
+        let mut snapshot = self.snapshot.borrow().clone()?;
+        let pending = self.pending_moves.borrow().clone();
+        for card in &mut snapshot.local.cards {
+            if card.expanded {
+                continue;
+            }
+            if let Some(&(x, y)) = pending.get(&card.card_id) {
+                if card.layout.iconified {
+                    card.layout.icon_x = Some(x);
+                    card.layout.icon_y = Some(y);
+                } else {
+                    card.layout.x = x;
+                    card.layout.y = y;
+                }
+            }
+        }
+        Some(snapshot)
+    }
+
+    /// Convert a fitted drop into host pixels, keep it on screen through the
+    /// next refresh, and ask the host to store it.
+    fn commit_move(self: &Rc<Self>, card_id: &str, view_x: f64, view_y: f64) {
+        let Some(snapshot) = self.snapshot.borrow().clone() else {
+            return;
+        };
+        let (scale, ..) = remote_workspace::fit(
+            snapshot.local.canvas.width,
+            snapshot.local.canvas.height,
+            self.area.width() as f64,
+            self.area.height() as f64,
+        );
+        let Some((x, y)) = remote_workspace::host_origin(scale, view_x, view_y) else {
+            self.relayout();
+            return;
+        };
+        let (x, y) = remote_workspace::clamp_card_origin(
+            snapshot.local.canvas.width,
+            snapshot.local.canvas.height,
+            x,
+            y,
+        );
+        // A click on the header starts and ends a drag without moving. Leave
+        // the host alone; the card is already where this snapshot drew it.
+        if snapshot
+            .local
+            .cards
+            .iter()
+            .any(|card| card.card_id == card_id && shown_origin(card) == (x, y))
+        {
+            self.relayout();
+            return;
+        }
+        let Some(peer) = self.peer.borrow().clone() else {
+            self.relayout();
+            return;
+        };
+        self.pending_moves
+            .borrow_mut()
+            .insert(card_id.to_string(), (x, y));
+        if let Some(card) = self.cards.borrow().get(card_id) {
+            let placed_x = f64::from(x) * scale;
+            let placed_y = f64::from(y) * scale;
+            self.canvas.move_(&card.root, placed_x, placed_y);
+            let width = card.rest().map(|(_, _, width)| width).unwrap_or(0.0);
+            card.set_rest(placed_x, placed_y, width);
+        }
+        let id = card_id.to_string();
+        let task_id = id.clone();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let moved = gtk4::gio::spawn_blocking(move || {
+                crate::peer_client::move_card(&peer, &task_id, x, y)
+            })
+            .await;
+            if matches!(moved, Ok(Ok(()))) {
+                return;
+            }
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            view.pending_moves.borrow_mut().remove(&id);
+            view.relayout();
+        });
+    }
+}
+
+/// Where the card is drawn on the host: the icon spot when minimized, otherwise
+/// the saved card origin.
+fn shown_origin(card: &DesktopCard) -> (i32, i32) {
+    if card.layout.iconified {
+        (
+            card.layout.icon_x.unwrap_or(card.layout.x),
+            card.layout.icon_y.unwrap_or(card.layout.y),
+        )
+    } else {
+        (card.layout.x, card.layout.y)
+    }
+}
+
+/// Pointer position in the remote canvas. Event coordinates are surface
+/// coordinates; the canvas is centered inside the viewer, not at the origin.
+fn pointer_on_canvas(canvas: &gtk4::Fixed, gesture: &gtk4::GestureDrag) -> Option<(f64, f64)> {
+    let (x, y) = gesture.current_event()?.position()?;
+    let root = canvas.root()?;
+    let translated = root.compute_point(
+        canvas,
+        &gtk4::graphene::Point::new(x as f32, y as f32),
+    )?;
+    Some((f64::from(translated.x()), f64::from(translated.y())))
 }
 
 /// A card holds a live stream when the host session exists and the card shows a
@@ -272,6 +407,11 @@ struct RemoteCard {
     /// before that, and after suspend, are dropped rather than queued across
     /// a reconnect.
     input_ready: Cell<bool>,
+    iconified: Cell<bool>,
+    expanded: Cell<bool>,
+    /// Pointer is currently moving this card, so a snapshot refresh must not
+    /// pull it back to the origin it had at the start of the gesture.
+    dragging: Cell<bool>,
 }
 
 impl RemoteCard {
@@ -334,12 +474,17 @@ impl RemoteCard {
             suspended: Cell::new(false),
             fed: Cell::new(false),
             input_ready: Cell::new(false),
+            iconified: Cell::new(card.layout.iconified),
+            expanded: Cell::new(card.expanded),
+            dragging: Cell::new(false),
         })
     }
 
     /// Apply host content and stream state. Called on every snapshot refresh,
     /// so it must be safe to repeat with unchanged data.
     fn update(self: &Rc<Self>, card: &DesktopCard, live: bool, peer: &Peer) {
+        self.iconified.set(card.layout.iconified);
+        self.expanded.set(card.expanded);
         self.title.set_text(&peer_client::label(&card.title));
         self.status.set_text(match card.session_alive {
             Some(false) => "○ EXITED",
@@ -522,6 +667,109 @@ impl RemoteCard {
         }
         *self.terminal.borrow_mut() = Some(terminal.clone());
         Some(terminal)
+    }
+
+    /// Header drag moves an open card. An icon drags from anywhere on its tile.
+    /// Expanded cards do not move: that rectangle is not the saved origin.
+    fn install_drag(self: &Rc<Self>, canvas: gtk4::Fixed, view: std::rc::Weak<RemoteCanvas>) {
+        self.attach_drag(&canvas, view.clone(), false);
+        self.attach_drag(&canvas, view, true);
+    }
+
+    fn attach_drag(
+        self: &Rc<Self>,
+        canvas: &gtk4::Fixed,
+        view: std::rc::Weak<RemoteCanvas>,
+        icon_only: bool,
+    ) {
+        let drag = gtk4::GestureDrag::new();
+        let active = Rc::new(Cell::new(false));
+        let start = Rc::new(Cell::new((0.0, 0.0)));
+        let grab: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+        let card_begin = Rc::downgrade(self);
+        let canvas_begin = canvas.clone();
+        let active_begin = Rc::clone(&active);
+        let start_begin = Rc::clone(&start);
+        let grab_begin = Rc::clone(&grab);
+        drag.connect_drag_begin(move |gesture, _, _| {
+            let Some(card) = card_begin.upgrade() else {
+                return;
+            };
+            let icon = card.iconified.get();
+            if card.expanded.get() || icon_only != icon {
+                active_begin.set(false);
+                return;
+            }
+            active_begin.set(true);
+            card.dragging.set(true);
+            card.root.add_css_class("dragging");
+            crate::window::raise_canvas_child(&canvas_begin, &card.root);
+            let (px, py, _) = card.rest().unwrap_or((0.0, 0.0, 0.0));
+            start_begin.set((px, py));
+            grab_begin.set(
+                pointer_on_canvas(&canvas_begin, gesture).map(|(mx, my)| (mx - px, my - py)),
+            );
+        });
+        let card_update = Rc::downgrade(self);
+        let canvas_update = canvas.clone();
+        let active_update = Rc::clone(&active);
+        let start_update = Rc::clone(&start);
+        let grab_update = Rc::clone(&grab);
+        drag.connect_drag_update(move |gesture, offset_x, offset_y| {
+            if !active_update.get() {
+                return;
+            }
+            let Some(card) = card_update.upgrade() else {
+                return;
+            };
+            if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+            }
+            let (nx, ny) = match (
+                grab_update.get(),
+                pointer_on_canvas(&canvas_update, gesture),
+            ) {
+                (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
+                _ => {
+                    let (sx, sy) = start_update.get();
+                    (sx + offset_x, sy + offset_y)
+                }
+            };
+            canvas_update.move_(&card.root, nx, ny);
+            let width = card.rest().map(|(_, _, width)| width).unwrap_or(0.0);
+            card.set_rest(nx, ny, width);
+        });
+        let card_end = Rc::downgrade(self);
+        let canvas_end = canvas.clone();
+        let view_end = view;
+        let active_end = active;
+        let start_end = start;
+        let grab_end = grab;
+        drag.connect_drag_end(move |gesture, offset_x, offset_y| {
+            if !active_end.replace(false) {
+                return;
+            }
+            let Some(card) = card_end.upgrade() else {
+                return;
+            };
+            card.dragging.set(false);
+            card.root.remove_css_class("dragging");
+            let (nx, ny) = match (grab_end.get(), pointer_on_canvas(&canvas_end, gesture)) {
+                (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
+                _ => {
+                    let (sx, sy) = start_end.get();
+                    (sx + offset_x, sy + offset_y)
+                }
+            };
+            if let Some(view) = view_end.upgrade() {
+                view.commit_move(&card.card_id, nx, ny);
+            }
+        });
+        if icon_only {
+            self.root.add_controller(drag);
+        } else {
+            self.header.add_controller(drag);
+        }
     }
 
     /// Forward one VTE commit to the host, after this attachment's handshake.

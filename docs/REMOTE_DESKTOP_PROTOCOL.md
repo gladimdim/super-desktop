@@ -28,8 +28,9 @@ keys, bracketed paste, IME) and the viewer sends those bytes after the host's
 input guard as phone and image-prompt input, and drops them if that guard is
 busy or the PTY cannot accept them. Keys are not replayed after a disconnect,
 a hide, or a switch to another PC. The viewer holds at most eight attachments
-at once. Remote create, close, drag/resize and folder selection stay on the
-host until typed commands exist. Cards the host shows in front are the ones
+at once. Dragging a card's header moves and raises it on the host.
+Remote create, close, resize and folder selection stay on the host until
+typed commands exist. Cards the host shows in front are the ones
 that get live output; the rest keep their chrome with an explanation. While
 the overlay is hidden the streams are released (the host keeps its sessions and
 every card keeps its last frame), and showing it again reconnects at once.

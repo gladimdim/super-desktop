@@ -1678,6 +1678,70 @@ impl SuperDesktopWindow {
         true
     }
 
+    /// Move one local card to a host-pixel origin and raise it.
+    ///
+    /// Used when a remote viewer drops the card. The icon and the open card
+    /// keep separate spots; which one moves is the card's own state, not the
+    /// viewer's. Expanded cards stay put: their on-screen rectangle is
+    /// transient and must not overwrite the saved origin.
+    pub fn move_terminal_card(&self, card_id: &str, x: i32, y: i32) -> Result<(), &'static str> {
+        if card_id.is_empty()
+            || card_id.len() > 128
+            || !card_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err("unknown_card");
+        }
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        let Some(card) = cards.into_iter().find(|c| c.data.borrow().id == card_id) else {
+            return Err("unknown_card");
+        };
+        if card.is_expanded() {
+            return Err("terminal_expanded");
+        }
+        let (x, y) = crate::remote_workspace::clamp_card_origin(
+            self.screen_width.max(0) as u32,
+            self.screen_height.max(0) as u32,
+            x,
+            y,
+        );
+        crate::mini_terminal::set_displayed_pos(&mut card.data.borrow_mut(), x, y);
+        let (px, py) = crate::mini_terminal::displayed_pos(&card.data.borrow());
+        self.canvas.move_(&card.container, px, py);
+        let widget = card.container.upcast_ref::<gtk4::Widget>();
+        if let Some(last) = self.canvas.last_child() {
+            if &last != widget {
+                widget.insert_after(&self.canvas, Some(&last));
+            }
+        }
+        raise_canvas_child(&self.canvas, &self.hud);
+        {
+            let mut list = self.terminal_cards.borrow_mut();
+            if let Some(pos) = list.iter().position(|c| c.data.borrow().id == card_id) {
+                let raised = list.remove(pos);
+                list.push(raised);
+            }
+        }
+        let data = card.data.borrow().clone();
+        let snapshot = {
+            let mut state = self.state.borrow_mut();
+            let Some(saved) = state.terminals.iter_mut().find(|t| t.id == card_id) else {
+                return Err("unknown_card");
+            };
+            saved.x = data.x;
+            saved.y = data.y;
+            saved.icon_x = data.icon_x;
+            saved.icon_y = data.icon_y;
+            state.terminal_order.retain(|id| id != card_id);
+            state.terminal_order.push(card_id.to_string());
+            state.clone()
+        };
+        crate::state::save_state_async(snapshot);
+        self.ghosts.refresh();
+        Ok(())
+    }
+
     pub fn raise_all_notes(&self) {
         let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
         raise_notes_on_canvas(&self.canvas, &notes);

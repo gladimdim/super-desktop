@@ -230,10 +230,10 @@ impl GhostLayer {
                     .iter()
                     .position(|outline| &outline.session == session)
                 {
-                    Some(index) => outlines[index].show(*rect),
+                    Some(index) => outlines[index].show(&self.canvas, *rect),
                     None => {
                         let outline = Outline::new(session, &self.canvas, *rect);
-                        outline.show(*rect);
+                        outline.show(&self.canvas, *rect);
                         outlines.push(outline);
                     }
                 }
@@ -351,15 +351,31 @@ impl Outline {
             widget,
             rect: Cell::new(None),
         };
-        outline.place(rect);
+        outline.place(canvas, rect);
         outline
     }
 
-    fn show(&self, rect: Rect) {
-        self.place(rect);
-        if !self.widget.is_visible() {
-            self.widget.set_visible(true);
+    fn show(&self, canvas: &Fixed, rect: Rect) {
+        if self.rect.get() == Some(rect) {
+            if !self.widget.is_visible() {
+                self.widget.set_visible(true);
+            }
+            return;
         }
+        if self.widget.is_visible() {
+            canvas.move_(&self.widget, rect.x, rect.y);
+        } else {
+            // Show before sizing, and re-add the widget: a `GtkFixed` child that
+            // is off screen keeps its old allocation when its size request
+            // changes, so an outline that was hidden while its card was resized
+            // came back painted at the card's *previous* size. Re-adding it
+            // forces a fresh measure — the same trick the resize preview uses.
+            canvas.remove(&self.widget);
+            canvas.put(&self.widget, rect.x, rect.y);
+        }
+        self.widget.set_visible(true);
+        self.widget.set_size_request(rect.width, rect.height);
+        self.rect.set(Some(rect));
     }
 
     fn hide(&self) {
@@ -371,13 +387,11 @@ impl Outline {
         }
     }
 
-    fn place(&self, rect: Rect) {
+    fn place(&self, canvas: &Fixed, rect: Rect) {
         if self.rect.get() == Some(rect) {
             return;
         }
-        if let Some(parent) = self.widget.parent().and_then(|p| p.downcast::<Fixed>().ok()) {
-            parent.move_(&self.widget, rect.x, rect.y);
-        }
+        canvas.move_(&self.widget, rect.x, rect.y);
         self.widget.set_size_request(rect.width, rect.height);
         self.rect.set(Some(rect));
     }
@@ -628,5 +642,76 @@ mod tests {
         layer.apply(&[]);
         assert!(outlines(&canvas).is_empty());
         assert!(hud.parent().is_some(), "the toolbar stays in the canvas");
+    }
+
+    #[test]
+    fn an_outline_follows_its_card_after_a_resize() {
+        crate::gtk_test::run_in_child_process("overlap_ghost::tests::outline_resize_gtk");
+    }
+
+    #[test]
+    fn outline_resize_gtk() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(
+            Some("com.superdesktop.GhostResizeTest"),
+            gtk4::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let window = gtk4::ApplicationWindow::new(&app);
+        let canvas = Fixed::new();
+        canvas.set_size_request(1400, 900);
+        let hud = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        canvas.put(&hud, 0.0, 0.0);
+        let coverer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        canvas.put(&coverer, 0.0, 0.0);
+        window.set_child(Some(&canvas));
+        window.present();
+
+        let layer = GhostLayer::new(
+            &canvas,
+            &hud,
+            Rc::new(RefCell::new(Vec::<Rc<MiniTerminalCard>>::new())),
+            1400,
+            900,
+        );
+        let buried = |x: i32, y: i32, width: i32, height: i32| TerminalPlacement {
+            session: "buried".to_string(),
+            rect: rect(x, y, width, height),
+            user_active: false,
+        };
+        let coverer_at = |x: i32| TerminalPlacement {
+            session: "coverer".to_string(),
+            rect: rect(x, 120, 600, 420),
+            user_active: false,
+        };
+
+        layer.apply(&[buried(100, 100, 640, 480), coverer_at(120)]);
+        pump();
+        assert_eq!(outlines(&canvas)[0].size_request(), (640, 480));
+
+        // The covering card is dragged away, so the outline goes off screen…
+        layer.apply(&[buried(100, 100, 640, 480), coverer_at(900)]);
+        pump();
+        assert!(!outlines(&canvas)[0].is_visible());
+
+        // …and the buried card is resized while its outline is hidden. When the
+        // outline comes back it must be the card's *current* size: a `GtkFixed`
+        // child that is off screen keeps its old allocation when its size
+        // request changes, which used to paint the previous, larger box. The
+        // allocation is what matters here — the size request was right all along.
+        layer.apply(&[buried(200, 260, 335, 242), coverer_at(220)]);
+        pump();
+        let outline = &outlines(&canvas)[0];
+        assert!(outline.is_visible());
+        assert_eq!(canvas.child_position(outline), (200.0, 260.0));
+        assert_eq!(outline.size_request(), (335, 242));
+        assert_eq!(
+            (outline.width(), outline.height()),
+            (335, 242),
+            "the outline must not keep the allocation of the previous size"
+        );
     }
 }

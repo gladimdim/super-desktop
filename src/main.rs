@@ -750,6 +750,26 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
                 Err(error) => json!({"ok": false, "error": error}).to_string(),
             }
         }
+        "desktop-move" => {
+            let Some(win) = live_window(ctx) else {
+                return json!({"ok": false, "error": "desktop_not_ready"}).to_string();
+            };
+            let payload = cmd.strip_prefix("desktop-move ").unwrap_or("");
+            let request: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
+            let Some(id) = request["cardId"].as_str() else {
+                return json!({"ok": false, "error": "unknown_card"}).to_string();
+            };
+            let (Some(x), Some(y)) = (request["x"].as_i64(), request["y"].as_i64()) else {
+                return json!({"ok": false, "error": "invalid_layout"}).to_string();
+            };
+            if !(-32768..=32768).contains(&x) || !(-32768..=32768).contains(&y) {
+                return json!({"ok": false, "error": "invalid_layout"}).to_string();
+            }
+            match win.move_terminal_card(id, x as i32, y as i32) {
+                Ok(()) => json!({"ok": true}).to_string(),
+                Err(error) => json!({"ok": false, "error": error}).to_string(),
+            }
+        }
         "workspace-choices" => {
             if let Some(win) = &ctx.borrow().window {
                 return win.workspace_choices().to_string();
