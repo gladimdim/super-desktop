@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::io::Read;
+use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -243,25 +244,94 @@ impl ServerCertVerifier for PinVerifier {
     }
 }
 
+/// Certificate-pinned TLS client configuration.
+///
+/// The verified invitation's pin replaces CA and DNS-name trust, so the same
+/// config is used for HTTPS requests and for the WebSocket terminal stream.
+/// Handshake signatures are still verified against the pinned certificate.
+fn pinned_tls(fingerprint: &str) -> Result<Arc<rustls::ClientConfig>> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = Arc::new(PinVerifier {
+        pin: parse_pin(fingerprint)?,
+        algorithms: provider.signature_verification_algorithms,
+    });
+    Ok(Arc::new(
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .map_err(|_| PeerError("tls_configuration_failed"))?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_no_client_auth(),
+    ))
+}
+
+/// Blocking pinned connection to a peer's bridge for a streaming protocol.
+///
+/// No proxies, no redirects, no plaintext fallback and no certificate-name
+/// trust: only the invitation's pin. The TLS handshake is completed here so a
+/// pin mismatch fails before use, and the returned stream keeps a short read
+/// timeout so a streaming reader can poll for cancellation or disconnect.
+pub type PinnedStream = rustls::StreamOwned<rustls::ClientConnection, std::net::TcpStream>;
+
+/// Read timeout for streaming protocols: how long a reader may block before it
+/// can notice that the viewer no longer wants this stream.
+pub const STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
+
+pub fn pinned_stream(peer: &Peer) -> Result<PinnedStream> {
+    peer.validate()?;
+    if peer.summary().expired {
+        return Err(PeerError("peer_revoked_or_expired"));
+    }
+    let config = pinned_tls(&peer.fingerprint)?;
+    let name = rustls::pki_types::ServerName::try_from(peer.endpoint.host.clone())
+        .map_err(|_| PeerError("invalid_peer_address"))?;
+    let connection = rustls::ClientConnection::new(config, name)
+        .map_err(|_| PeerError("tls_configuration_failed"))?;
+    let addresses = (peer.endpoint.host.as_str(), peer.endpoint.port)
+        .to_socket_addrs()
+        .map_err(|_| PeerError("connection_failed_or_pin_mismatch"))?
+        .collect::<Vec<_>>();
+    let mut socket = None;
+    for address in addresses {
+        if let Ok(connected) = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5))
+        {
+            socket = Some(connected);
+            break;
+        }
+    }
+    let socket = socket.ok_or(PeerError("connection_failed_or_pin_mismatch"))?;
+    let _ = socket.set_nodelay(true);
+    let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
+    let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut stream = rustls::StreamOwned::new(connection, socket);
+    while stream.conn.is_handshaking() {
+        stream
+            .conn
+            .complete_io(&mut stream.sock)
+            .map_err(|_| PeerError("connection_failed_or_pin_mismatch"))?;
+    }
+    // A streaming reader polls for cancellation, so it must never block on a
+    // host that has nothing to say. The handshake above keeps the longer
+    // timeout: a laggy link must not fail the connection setup.
+    let _ = stream
+        .sock
+        .set_read_timeout(Some(STREAM_READ_TIMEOUT));
+    Ok(stream)
+}
+
 struct PinnedClient {
     http: Client,
     endpoint: Endpoint,
 }
 impl PinnedClient {
     fn new(endpoint: Endpoint, fingerprint: &str) -> Result<Self> {
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let verifier = Arc::new(PinVerifier {
-            pin: parse_pin(fingerprint)?,
-            algorithms: provider.signature_verification_algorithms,
-        });
-        let tls = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .map_err(|_| PeerError("tls_configuration_failed"))?
-            .dangerous()
-            .with_custom_certificate_verifier(verifier)
-            .with_no_client_auth();
+        let tls = pinned_tls(fingerprint)?;
+        // reqwest 0.13 type-erases the backend (`impl Any`) and downcasts to
+        // `Option<ClientConfig>` by value; an `Arc` lands in `Unknown` and
+        // fails `build` with "unknown TLS backend". The streaming side keeps
+        // the `Arc` for `ClientConnection::new`.
         let http = Client::builder()
-            .tls_backend_preconfigured(tls)
+            .tls_backend_preconfigured(Arc::unwrap_or_clone(tls))
             .http1_only()
             .https_only(true)
             .no_proxy()
@@ -448,7 +518,11 @@ impl Pairing {
     }
 }
 
-pub fn workspace(peer: &Peer) -> Result<crate::desktop_protocol::WorkspaceSnapshot> {
+/// Verified identity and capability document for a peer.
+///
+/// Checks the pinned certificate, the persistent bridge identity and a
+/// supported desktop API version before anything else is attempted.
+pub fn capabilities(peer: &Peer) -> Result<crate::desktop_protocol::Capabilities> {
     peer.validate()?;
     if peer.summary().expired {
         return Err(PeerError("peer_revoked_or_expired"));
@@ -462,20 +536,129 @@ pub fn workspace(peer: &Peer) -> Result<crate::desktop_protocol::WorkspaceSnapsh
     if capabilities.machine_id != peer.machine_id {
         return Err(PeerError("peer_identity_changed"));
     }
-    if capabilities.desktop_api_version != crate::desktop_protocol::DESKTOP_API_VERSION
-        || !capabilities
-            .capabilities
-            .iter()
-            .any(|c| c == crate::desktop_protocol::WORKSPACE_SNAPSHOT)
+    if capabilities.desktop_api_version != crate::desktop_protocol::DESKTOP_API_VERSION {
+        return Err(PeerError("update_remote_super_desktop"));
+    }
+    Ok(capabilities)
+}
+
+/// One verified round of peer discovery: identity, capabilities and workspace.
+///
+/// The capability document is returned so a caller can decide what to enable
+/// without a second negotiation, and so a host that only supports layout
+/// snapshots is never mistaken for one that streams terminals.
+pub fn verified_workspace(
+    peer: &Peer,
+) -> Result<(
+    crate::desktop_protocol::Capabilities,
+    crate::desktop_protocol::WorkspaceSnapshot,
+)> {
+    let capabilities = capabilities(peer)?;
+    if !capabilities
+        .capabilities
+        .iter()
+        .any(|c| c == crate::desktop_protocol::WORKSPACE_SNAPSHOT)
     {
         return Err(PeerError("update_remote_super_desktop"));
     }
+    let client = PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)?;
     let workspace: crate::desktop_protocol::WorkspaceSnapshot =
         client.request("/api/v1/desktop/workspace", None, Some(&peer.token))?;
     if workspace.machine_id != peer.machine_id {
         return Err(PeerError("peer_identity_changed"));
     }
-    Ok(workspace)
+    Ok((capabilities, workspace))
+}
+
+pub fn workspace(peer: &Peer) -> Result<crate::desktop_protocol::WorkspaceSnapshot> {
+    verified_workspace(peer).map(|(_, workspace)| workspace)
+}
+
+/// Upgrade a pinned, authenticated WebSocket to one of the host's desktop
+/// endpoints. Identity and the required capability are checked first, and the
+/// credential is only ever placed in the request header.
+pub fn desktop_socket(
+    peer: &Peer,
+    path: &str,
+    required: &str,
+) -> Result<tungstenite::WebSocket<PinnedStream>> {
+    if !path.starts_with("/api/v1/desktop/")
+        || path.len() > 256
+        || !path.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
+    {
+        return Err(PeerError("invalid_peer_response"));
+    }
+    if !capabilities(peer)?
+        .capabilities
+        .iter()
+        .any(|c| c == required)
+    {
+        return Err(PeerError("update_remote_super_desktop"));
+    }
+    let stream = pinned_stream(peer)?;
+    let authority = if peer.endpoint.host.contains(':') {
+        format!("[{}]:{}", peer.endpoint.host, peer.endpoint.port)
+    } else {
+        format!("{}:{}", peer.endpoint.host, peer.endpoint.port)
+    };
+    let uri: tungstenite::http::Uri = format!("wss://{authority}{path}")
+        .parse()
+        .map_err(|_| PeerError("invalid_peer_address"))?;
+    let mut request = tungstenite::client::IntoClientRequest::into_client_request(uri)
+        .map_err(|_| PeerError("invalid_peer_address"))?;
+    let mut authorization = tungstenite::http::HeaderValue::from_str(&format!("Bearer {}", peer.token))
+        .map_err(|_| PeerError("invalid_peer_record"))?;
+    authorization.set_sensitive(true);
+    request
+        .headers_mut()
+        .insert(tungstenite::http::header::AUTHORIZATION, authorization);
+
+    let mut config = tungstenite::protocol::WebSocketConfig::default()
+        .read_buffer_size(crate::desktop_protocol::ATTACH_MAX_CHUNK * 2)
+        // Write every frame immediately: terminal output is latency-sensitive
+        // and each chunk is already bounded.
+        .write_buffer_size(0);
+    config.max_frame_size = Some(crate::desktop_protocol::ATTACH_MAX_CHUNK);
+    config.max_message_size = Some(crate::desktop_protocol::ATTACH_MAX_CHUNK * 2);
+    match tungstenite::client::client_with_config(request, stream, Some(config)) {
+        Ok((socket, _response)) => Ok(socket),
+        Err(tungstenite::HandshakeError::Failure(error)) => Err(socket_failure(error)),
+        Err(tungstenite::HandshakeError::Interrupted(_)) => {
+            Err(PeerError("connection_failed_or_pin_mismatch"))
+        }
+    }
+}
+
+/// Map a socket/protocol failure to a stable code. Response bodies and
+/// credentials are deliberately never included.
+fn socket_failure(error: tungstenite::Error) -> PeerError {
+    match error {
+        tungstenite::Error::Http(response) => {
+            // The host answers a refused attach with a stable code. Only codes
+            // this client knows are accepted; anything else stays unmapped.
+            if let Some(reason) = response
+                .body()
+                .as_deref()
+                .and_then(|body| serde_json::from_slice::<Value>(body).ok())
+                .and_then(|document| {
+                    document["error"]
+                        .as_str()
+                        .and_then(crate::desktop_protocol::known_reason)
+                })
+            {
+                return PeerError(reason);
+            }
+            match response.status().as_u16() {
+            401 => PeerError("peer_revoked_or_expired"),
+            403 => PeerError("invitation_rejected"),
+            404 => PeerError("peer_endpoint_unavailable"),
+            429 => PeerError("attachment_limit"),
+            503 => PeerError("remote_desktop_unavailable"),
+            _ => PeerError("peer_request_rejected"),
+        }
+        }
+        _ => PeerError("connection_failed_or_pin_mismatch"),
+    }
 }
 
 #[cfg(test)]
@@ -537,6 +720,17 @@ mod tests {
             "https://[::1]:1234/api/v1/ping"
         );
         assert!(Endpoint::new("host", 0).is_err());
+    }
+
+    #[test]
+    fn pinned_https_client_builds_with_preconfigured_backend() {
+        // reqwest type-erases the backend and rejects anything it cannot
+        // downcast; a regression here breaks all pairing, snapshot and attach
+        // calls before a single byte is sent.
+        let pin = "ab".repeat(32);
+        assert!(pinned_tls(&pin).is_ok());
+        let endpoint = Endpoint::new("127.0.0.1", 8759).unwrap();
+        assert!(PinnedClient::new(endpoint, &pin).is_ok());
     }
 
     #[test]

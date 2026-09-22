@@ -666,8 +666,15 @@ fn respond(stream: &mut Connection, code: u16, reason: &str, value: &serde_json:
         "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
+    // One write, not head-then-body: a WebSocket client that rejects an
+    // upgrade only keeps bytes already buffered past the headers (`tail`),
+    // so a split write intermittently delivers headers without the error
+    // body and the caller falls back to a status-only guess.
+    let mut out = Vec::with_capacity(head.len() + body.len());
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(body.as_bytes());
+    let _ = stream.write_all(&out);
+    let _ = stream.flush();
 }
 
 fn bearer(headers: &HashMap<String, String>) -> String {
@@ -1208,6 +1215,33 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                     _ => {}
                 }
             }
+        }
+    }
+
+    // Live terminal output for one owned card: WSS binary frames of raw PTY
+    // bytes, plus bounded text control frames. Read-only by construction.
+    if let Some(rest) = path.strip_prefix("/api/v1/desktop/terminals/") {
+        if let Some(card_id) = rest.strip_suffix("/attach") {
+            if req.method != "GET" || card_id.contains('/') {
+                return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"not_found"}));
+            }
+            if !authorize(&req, local) {
+                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            }
+            // Ownership, session liveness, the host-owned grid and this
+            // device's attachment budget are all settled before the upgrade, so
+            // every failure is a status a viewer can show.
+            let device = stream.credential_id().map(str::to_string);
+            let target = match desktop::resolve_attach(card_id, device.as_deref()) {
+                Ok(target) => target,
+                Err(error) => {
+                    return respond(&mut stream, error.code, error.reason, &serde_json::json!({"error":error.error}))
+                }
+            };
+            if !ws_upgrade(&mut stream, &req) {
+                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
+            }
+            return desktop::attach_terminal(stream, target);
         }
     }
 

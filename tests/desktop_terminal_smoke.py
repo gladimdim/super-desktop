@@ -42,11 +42,13 @@ def scenario():
         }
         # Hermetic tmux: bare `tmux` commands inherit the caller's server via
         # $TMUX and ignore $TMUX_TMPDIR, so without this a `kill-server` in the
-        # cleanup below would murder the user's real sessions. Pin every call
-        # to an explicit socket and never let the production server leak in.
+        # cleanup below would murder the user's real sessions. Dropping
+        # $TMUX/$TMUX_PANE makes every call (here and in the bridge under
+        # test, which uses the default socket) land on a private server in
+        # $TMUX_TMPDIR. No `-L`/`-S` flag: the bridge has no such option, so
+        # the test must use the same default socket the bridge will use.
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
-        SOCKET = "sd-terminal-smoke"
         client_env = {
             **env,
             "SUPER_DESKTOP_BRIDGE_STATE_DIR": str(root / "viewer"),
@@ -54,7 +56,7 @@ def scenario():
         }
 
         def tmux(*args, check=True):
-            result = subprocess.run(["tmux", "-L", SOCKET, *args], env=env, capture_output=True,
+            result = subprocess.run(["tmux", *args], env=env, capture_output=True,
                                     text=True, timeout=15)
             assert result.returncode == 0 or not check, (args, result.stdout, result.stderr)
             return result.stdout.strip()
@@ -156,10 +158,10 @@ def scenario():
             assert COLOR_SGR.search(result.stdout), result.stdout
 
             # Only an owned card can be addressed, and only its own session.
-            assert "unknown_card" in cli("peer-attach", machine, "no-such-card",
-                                         expected=1).stderr.decode()
-            assert "unknown_card" in cli("peer-attach", machine, FOREIGN_CARD,
-                                         expected=1).stderr.decode()
+            refused = cli("peer-attach", machine, "no-such-card", expected=1).stderr
+            assert b"unknown_card" in refused, refused
+            foreign = cli("peer-attach", machine, FOREIGN_CARD, expected=1).stderr
+            assert b"unknown_card" in foreign, foreign
             # Revoked access cannot keep streaming, let alone keep typing into it.
             live = subprocess.Popen([BINARY, "peer-attach", machine, CARD], env=client_env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
