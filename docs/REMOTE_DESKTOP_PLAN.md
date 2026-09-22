@@ -213,8 +213,10 @@ Important details to preserve:
 - The current bridge security protocol is v3 even though routes use `/api/v1`.
   Some bridge source comments still describe loopback exceptions; actual security
   uses owner-only Unix control and no network loopback authentication bypass.
-- Current terminal streams send `tail`/`tailAnsi` snapshots. Feeding these
-  repeatedly into VTE would duplicate text and lose cursor/application state.
+- Current terminal streams send `tail`/`tailAnsi` snapshots, plus the pane's own
+  `columns`/`rows` so a phone can lay that text out at the width it was rendered
+  at. Feeding the tail repeatedly into VTE would duplicate text and lose
+  cursor/application state.
 - Current geometry uses the first monitor and minimum dimensions of 1920×1080
   in `window.rs`. Define actual logical canvas bounds before promising matching
   layouts on smaller monitors. Multi-monitor placement is not currently modeled.

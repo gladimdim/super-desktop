@@ -222,6 +222,44 @@ pub fn detect_harnesses() -> Vec<HarnessInfo> {
         .collect()
 }
 
+/// The grid one owned pane renders into, in cells.
+///
+/// This is the pane's own width and height — not a client's, which includes the
+/// status line — so a phone rendering the pane's captured text can size that
+/// text to the columns the pane actually has. Reads nothing and changes nothing.
+pub fn pane_grid(session_name: &str) -> Option<crate::desktop_protocol::TerminalSize> {
+    if !session_name.starts_with("sd_term_")
+        || session_name.len() > 128
+        || !session_name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    let output = Command::new(tmux_bin())
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={session_name}:"),
+            "#{pane_width} #{pane_height}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut fields = text.split_whitespace();
+    let columns = fields.next()?.parse::<u16>().ok()?;
+    let rows = fields.next()?.parse::<u16>().ok()?;
+    crate::desktop_protocol::TerminalSize { columns, rows }
+        .validate()
+        .ok()
+}
+
 pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
     let cfg = get_agent_config(agent_type);
     if let Some(cmd) = custom {
@@ -2498,6 +2536,33 @@ mod tests {
         // must not produce a session that starts nowhere.
         assert_eq!(resolve_workspace_dir(Some("/definitely/gone/xyz")), home);
         assert_eq!(resolve_workspace_dir(Some("/tmp")), "/tmp");
+    }
+
+    #[test]
+    fn test_pane_grid_is_the_owned_pane_and_nothing_else() {
+        // Pure: a session this bridge does not own is never resolved or probed.
+        assert!(pane_grid("other_session").is_none());
+        assert!(pane_grid("sd_term_bad name").is_none());
+        assert!(pane_grid("").is_none());
+
+        let has_tmux = Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !has_tmux {
+            return;
+        }
+        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let _cleanup = SessionCleanup(vec![sess.clone()]);
+        let grid = pane_grid(&sess).expect("an owned pane has a grid");
+        // It is the pane's own size — the width its captured text is rendered
+        // at — not a client's, which would include the status line.
+        let reported = tmux_display(&sess, "#{pane_width} #{pane_height}").expect("pane size");
+        let mut fields = reported.split_whitespace();
+        assert_eq!(grid.columns.to_string(), fields.next().unwrap());
+        assert_eq!(grid.rows.to_string(), fields.next().unwrap());
+        assert!(grid.validate().is_ok());
     }
 
     #[test]

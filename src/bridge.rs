@@ -779,6 +779,10 @@ fn stream_one_harness(mut stream: Connection, id: &str) {
     };
     let mut cached_status = inspect_status(id, &agent_type);
     let mut status_updated = std::time::Instant::now();
+    // The pane's own grid, read on the status tick: a client rendering this
+    // session's captured text needs the columns it was rendered at, and the
+    // pane's size changes far less often than its output.
+    let mut cached_grid = crate::tmux::pane_grid(id);
     let mut previous: Option<String> = None;
     let mut active_until = std::time::Instant::now();
     let mut heartbeat = std::time::Instant::now();
@@ -803,6 +807,7 @@ fn stream_one_harness(mut stream: Connection, id: &str) {
             };
         } else if status_updated.elapsed() >= Duration::from_millis(500) {
             cached_status = inspect_status_with_screen(id, &agent_type, plain_tail.as_deref().unwrap_or(""));
+            cached_grid = crate::tmux::pane_grid(id);
             status_updated = std::time::Instant::now();
         }
         let status = &cached_status;
@@ -818,6 +823,10 @@ fn stream_one_harness(mut stream: Connection, id: &str) {
             "tail": plain_tail,
             "tailAnsi": ansi_tail,
             "tailFormat": alive.then_some("ansi-sgr"),
+            // The pane's own grid, so a client can lay this text out at the
+            // width it was rendered at instead of guessing from the lines.
+            "columns": cached_grid.map(|grid| grid.columns),
+            "rows": cached_grid.map(|grid| grid.rows),
         });
         let frame = document.to_string();
         let changed = previous.as_deref() != Some(frame.as_str());
