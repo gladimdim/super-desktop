@@ -86,9 +86,12 @@ pub fn card_rect(card: &DesktopCard, width: u32, height: u32) -> Rect {
     }
 }
 /// Logical pixels are already independent of the host's physical monitor scale.
+/// A viewer never enlarges a host card: fitting is presentation only, so the
+/// scale is capped at 1.0 as the documented fit rule requires.
 pub fn fit(host_width: u32, host_height: u32, width: f64, height: f64) -> (f64, f64, f64) {
     let scale = (width.max(1.0) / host_width.max(1) as f64)
-        .min(height.max(1.0) / host_height.max(1) as f64);
+        .min(height.max(1.0) / host_height.max(1) as f64)
+        .min(1.0);
     (
         scale,
         (width - host_width as f64 * scale) / 2.0,
@@ -116,6 +119,8 @@ mod tests {
     fn fit_preserves_aspect_and_centers_without_applying_physical_dpi() {
         assert_eq!(fit(1920, 1080, 960.0, 600.0), (0.5, 0.0, 30.0));
         assert_eq!(fit(1920, 1080, 1920.0, 1080.0), (1.0, 0.0, 0.0));
+        // A larger viewer screen never scales host cards up.
+        assert_eq!(fit(1920, 1080, 2560.0, 1440.0), (1.0, 320.0, 180.0));
     }
 }
 

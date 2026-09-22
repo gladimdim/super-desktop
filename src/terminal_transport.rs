@@ -1,10 +1,10 @@
-//! Server-side PTY attachment for the upcoming desktop byte transport.
+//! Server-side PTY attachment for the desktop byte transport.
 //!
-//! Not exposed to network clients yet. Authentication, card ownership and input
-//! arbitration belong to the bridge adapter. This object only attaches an
-//! existing session, never creates a harness or resizes the host pane. Dropping
-//! it reaps exactly its tmux client, not the tmux server/session.
-#![allow(dead_code)] // Wired into WSS after the isolated feasibility milestone.
+//! An authenticated remote viewer gets one existing session attached on a
+//! private Linux PTY. This object only attaches an existing session, never
+//! creates a harness or resizes the host pane. Dropping it reaps exactly its
+//! tmux client, not the tmux server/session.
+#![allow(dead_code)] // The WSS adapter and its tests use this module.
 
 use crate::desktop_protocol::TerminalSize;
 use std::fs::File;
@@ -14,7 +14,9 @@ use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-pub const MAX_CHUNK: usize = 16 * 1024;
+/// Largest read one attachment forwards. The same bound the viewer's frame
+/// limit uses, so a chunk is never split for the sake of a size limit.
+pub const MAX_CHUNK: usize = crate::desktop_protocol::ATTACH_MAX_CHUNK;
 
 #[derive(Debug)]
 pub enum Output {
@@ -26,12 +28,37 @@ pub enum Output {
 pub struct PtyAttachment {
     master: File,
     child: Child,
+    session: String,
 }
 
 impl PtyAttachment {
-    /// `session` must already have been resolved from an owned local card.
-    pub fn open(session: &str, size: TerminalSize) -> io::Result<Self> {
-        Self::spawn(|| Command::new(crate::tmux::tmux_bin()), session, size)
+    /// Attach one viewer at a grid read moments earlier.
+    ///
+    /// `session` must already have been resolved from an owned local card. The
+    /// grid must still be the one the host owns or the attach is refused; the
+    /// caller reads it before the upgrade so a viewer can be told why it has no
+    /// stream yet, and the returned grid is the one its emulator must match.
+    pub fn open_at(session: &str, grid: TerminalSize) -> io::Result<(Self, TerminalSize)> {
+        Self::open_with(|| Command::new(crate::tmux::tmux_bin()), session, grid)
+    }
+
+    fn open_with(
+        tmux_command: impl Fn() -> Command,
+        session: &str,
+        grid: TerminalSize,
+    ) -> io::Result<(Self, TerminalSize)> {
+        Ok((Self::spawn(tmux_command, session, grid)?, grid))
+    }
+
+    /// The host's live client grid for this session. The host is the only
+    /// authority: a viewer's reported size is applied only when it equals this.
+    pub fn host_grid(&self) -> io::Result<TerminalSize> {
+        client_grid(&|| Command::new(crate::tmux::tmux_bin()), &self.session)
+    }
+
+    /// Poll the PTY master, for a loop that also watches the network socket.
+    pub fn raw_fd(&self) -> std::os::fd::RawFd {
+        self.master.as_raw_fd()
     }
 
     fn spawn(
@@ -48,23 +75,14 @@ impl PtyAttachment {
         {
             return Err(invalid("invalid_owned_session_name"));
         }
-        // ignore-size is insufficient when *all* clients have that flag.
-        // Require the host model to own sizing before admitting a viewer.
-        // This query does not change any session options.
-        let policy = tmux_command()
-            .args([
-                "show-options",
-                "-w",
-                "-v",
-                "-t",
-                &format!("={session}:"),
-                "window-size",
-            ])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output()?;
-        if !policy.status.success() || policy.stdout != b"manual\n" {
-            return Err(invalid("host_grid_not_managed"));
+        // A tmux client whose terminal is exactly the grid the host already
+        // renders cannot change the host pane under ANY `window-size` policy:
+        // `latest`/`largest`/`smallest` all arbitrate to the same size, and
+        // `manual` ignores clients. Attaching at any other size could shrink or
+        // grow the host's grid, so it is refused instead. `ignore-size` is
+        // additional defence for the resize case (see `set_view_size`).
+        if client_grid(&tmux_command, session)? != size {
+            return Err(invalid("host_grid_mismatch"));
         }
         let mut command = tmux_command();
         let (master, slave) = open_pty(size)?;
@@ -102,7 +120,11 @@ impl PtyAttachment {
             });
         }
         let child = command.spawn()?;
-        Ok(Self { master, child })
+        Ok(Self {
+            master,
+            child,
+            session: session.to_string(),
+        })
     }
 
     /// Bounded read suitable for a worker loop. Preserve arbitrary bytes:
@@ -144,8 +166,9 @@ impl PtyAttachment {
         self.master.write(bytes)
     }
 
-    /// Change this client's viewport. The required manual host sizing policy
-    /// keeps the owning pane's grid unchanged; ignore-size is additional defense.
+    /// Change this client's own viewport. The attachment carries `ignore-size`,
+    /// so while the host has any other client this cannot change the host grid.
+    /// Callers only ever pass the grid the host itself reported.
     pub fn set_view_size(&mut self, size: TerminalSize) -> io::Result<()> {
         size.validate().map_err(invalid)?;
         let size = winsize(size);
@@ -163,6 +186,65 @@ impl Drop for PtyAttachment {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// The grid tmux currently renders into this session's clients.
+///
+/// Used before an upgrade so the host can report "no grid yet" as a status
+/// instead of opening a stream it cannot size.
+pub fn grid(session: &str) -> io::Result<TerminalSize> {
+    client_grid(&|| Command::new(crate::tmux::tmux_bin()), session)
+}
+
+/// The terminal grid tmux renders into one of this session's clients.
+///
+/// A client's terminal is the window plus the status line(s) tmux draws on it,
+/// so this is exactly the grid a viewer's emulator has to match. It is derived
+/// from the live window size, which is what makes attaching at it a no-op for
+/// the host's own grid. Reads no state and changes no option.
+fn client_grid(tmux_command: &impl Fn() -> Command, session: &str) -> io::Result<TerminalSize> {
+    if !session.starts_with("sd_term_")
+        || session.len() > 128
+        || !session
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(invalid("invalid_owned_session_name"));
+    }
+    let output = tmux_command()
+        .args([
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={session}:"),
+            "#{window_width} #{window_height} #{status}",
+        ])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()?;
+    if !output.status.success() {
+        return Err(invalid("host_grid_unavailable"));
+    }
+    parse_client_grid(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `"<columns> <rows> <status>"` as reported by `client_grid`'s tmux query.
+fn parse_client_grid(text: &str) -> io::Result<TerminalSize> {
+    let mut fields = text.split_whitespace();
+    let unavailable = || invalid("host_grid_unavailable");
+    let columns: u16 = fields.next().and_then(|v| v.parse().ok()).ok_or_else(unavailable)?;
+    let rows: u16 = fields.next().and_then(|v| v.parse().ok()).ok_or_else(unavailable)?;
+    let status_rows: u16 = match fields.next().ok_or_else(unavailable)? {
+        "off" | "0" => 0,
+        "on" => 1,
+        value => value.parse().map_err(|_| unavailable())?,
+    };
+    TerminalSize {
+        columns,
+        rows: rows.checked_add(status_rows).ok_or_else(unavailable)?,
+    }
+    .validate()
+    .map_err(invalid)
 }
 
 fn invalid(message: &str) -> io::Error {
@@ -284,6 +366,12 @@ mod tests {
                 .unwrap()
         }
 
+        /// The grid the host owns, as `PtyAttachment::open` derives it.
+        fn grid(&self) -> TerminalSize {
+            let command = || self.command();
+            client_grid(&command, SESSION).unwrap()
+        }
+
         fn pane(&self) -> String {
             self.run(&[
                 "display-message",
@@ -362,9 +450,13 @@ mod tests {
         let server = Server::new();
         let original = server.pane();
         assert!(original.ends_with(":120:40"), "{original}");
+        // Both viewers attach at the grid the host already owns. That is the
+        // only size this transport admits, and it is what makes a second viewer
+        // unable to resize the host's pane.
+        assert_eq!(server.grid(), TerminalSize { columns: 120, rows: 40 });
         let mut first = server.attach(120, 40);
         until_output(&mut first, "SD_PROMPT>");
-        let mut second = server.attach(80, 24);
+        let mut second = server.attach(120, 40);
         until_output(&mut second, "SD_PROMPT>");
         wait_clients(&server, 2);
         assert_eq!(server.pane(), original);
@@ -422,8 +514,9 @@ mod tests {
     }
 
     #[test]
-    fn unmanaged_grid_is_rejected_without_attaching_or_resizing() {
+    fn a_viewer_that_would_resize_the_host_is_rejected_instead_of_attached() {
         let server = Server::new();
+        // The production default: tmux sizes the window from its latest client.
         server.run(&["set-option", "-w", "-t", SESSION, "window-size", "latest"]);
         let before = server.pane();
         let result = PtyAttachment::spawn(
@@ -434,9 +527,51 @@ mod tests {
                 rows: 24,
             },
         );
-        assert!(matches!(result, Err(ref e) if e.to_string() == "host_grid_not_managed"));
+        assert!(matches!(result, Err(ref e) if e.to_string() == "host_grid_mismatch"));
         assert_eq!(server.clients(), 0);
         assert_eq!(server.pane(), before);
+        // The host's own grid is admitted, and attaching at it is a no-op.
+        let (attachment, grid) = PtyAttachment::open_with(
+            || server.command(),
+            SESSION,
+            TerminalSize {
+                columns: 120,
+                rows: 40,
+            },
+        )
+        .unwrap();
+        assert_eq!(grid, TerminalSize { columns: 120, rows: 40 });
+        assert_eq!(server.pane(), before);
+        drop(attachment);
+        assert_eq!(server.pane(), before);
+    }
+
+    #[test]
+    fn the_client_grid_adds_the_status_lines_tmux_draws() {
+        assert_eq!(
+            parse_client_grid("120 40 off\n").unwrap(),
+            TerminalSize {
+                columns: 120,
+                rows: 40
+            }
+        );
+        assert_eq!(
+            parse_client_grid("80 23 on\n").unwrap(),
+            TerminalSize {
+                columns: 80,
+                rows: 24
+            }
+        );
+        assert_eq!(
+            parse_client_grid("80 22 2\n").unwrap(),
+            TerminalSize {
+                columns: 80,
+                rows: 24
+            }
+        );
+        for bad in ["", "120", "120 40", "120 40 sideways", "0 40 off", "120 0 off"] {
+            assert!(parse_client_grid(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]

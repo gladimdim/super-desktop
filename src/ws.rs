@@ -124,6 +124,17 @@ pub fn write_text<W: Write>(out: &mut W, text: &str) -> io::Result<()> {
     write_frame(out, OP_TEXT, text.as_bytes())
 }
 
+/// Raw terminal bytes. Frame boundaries carry no character semantics: the
+/// receiving emulator reassembles byte order only, so a UTF-8 character or an
+/// escape sequence may be split across frames.
+pub fn write_binary<W: Write>(out: &mut W, bytes: &[u8]) -> io::Result<()> {
+    write_frame(out, OP_BINARY, bytes)
+}
+
+pub fn write_ping<W: Write>(out: &mut W, payload: &[u8]) -> io::Result<()> {
+    write_frame(out, OP_PING, payload)
+}
+
 pub fn write_pong<W: Write>(out: &mut W, payload: &[u8]) -> io::Result<()> {
     write_frame(out, OP_PONG, payload)
 }

@@ -1218,6 +1218,28 @@ fn apply_status_view(badge: &Label, compact: &Label, status: &str) {
     }
 }
 
+/// Apply the active Omarchy theme and a font size to a VTE terminal.
+///
+/// One source of truth for terminal rendering: a local card and the remote live
+/// view must paint the host's bytes identically. Fractional sizes are supported
+/// because a remote card fits the host's grid into the viewer's own screen.
+pub fn apply_vte_theme(term: &VteTerminal, font_size: f64) {
+    let theme = crate::theme::current_theme();
+    let mut font = gtk4::pango::FontDescription::from_string(&theme.font_family);
+    font.set_size((font_size * f64::from(gtk4::pango::SCALE)).round() as i32);
+    term.set_font(Some(&font));
+
+    let fg = gdk::RGBA::parse(&theme.foreground).ok();
+    let bg = gdk::RGBA::parse(&theme.darker_background).ok();
+    let palette = theme.get_ansi_palette();
+    let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
+    term.set_colors(fg.as_ref(), bg.as_ref(), &palette_refs);
+
+    if let Ok(cursor) = gdk::RGBA::parse(&theme.accent) {
+        term.set_color_cursor(Some(&cursor));
+    }
+}
+
 fn remove_vte(vte: &Rc<RefCell<Option<VteTerminal>>>, preview_box: &gtk4::Box) {
     if let Some(term) = vte.borrow_mut().take() {
         preview_box.remove(&term);
@@ -1249,20 +1271,8 @@ fn spawn_vte(
     term.set_can_focus(true);
     term.set_focusable(true);
 
-    let font_size = if is_expanded { 11 } else { 10 };
-    let theme = crate::theme::current_theme();
-    let font = gtk4::pango::FontDescription::from_string(&format!("{} {}", theme.font_family, font_size));
-    term.set_font(Some(&font));
-
-    let fg = gdk::RGBA::parse(&theme.foreground).ok();
-    let bg = gdk::RGBA::parse(&theme.darker_background).ok();
-    let palette = theme.get_ansi_palette();
-    let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
-    term.set_colors(fg.as_ref(), bg.as_ref(), &palette_refs);
-
-    if let Ok(cursor) = gdk::RGBA::parse(&theme.accent) {
-        term.set_color_cursor(Some(&cursor));
-    }
+    let font_size = if is_expanded { 11.0 } else { 10.0 };
+    apply_vte_theme(&term, font_size);
 
     let term_click = GestureClick::new();
     let term_weak = term.downgrade();

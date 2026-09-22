@@ -175,12 +175,20 @@ super-desktop status
 
 PC-to-PC workspace switching: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md).
 Use **Add a PC** in the top-left machine selector to pair another computer and
-view its read-only layout preview. The panel can either create a one-time
-connection link for another PC or accept one from it; approval stays on the
-host PC. Update and run `./rebuild.sh` on both PCs, since the rebuild also
-restarts the separate bridge process. The [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
-is also available for pairing and remote layout retrieval.
-Interactive remote consoles are still pending.
+open its workspace: the host's consoles are streamed live, in colour, at the
+host's own positions, sizes, stacking order and iconified state. The panel can
+either create a one-time connection link for another PC or accept one from it;
+approval stays on the host PC. Update and run `./rebuild.sh` on both PCs, since
+the rebuild also restarts the separate bridge process. The
+[peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
+also pairs PCs, fetches remote layouts and can stream one console to a terminal
+(`peer-attach`).
+
+Remote consoles are a **read-only live view** for now: clicking, typing and
+remote layout changes are not implemented, and the host keeps its own grid.
+`workspace-layout-v1` and `terminal-pty-v1` in
+[the protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md) record what each PC
+advertises.
 
 ```
 ~/GitHub/super-desktop/

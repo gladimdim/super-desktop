@@ -146,6 +146,18 @@ button.machine-peer-selected {{
     background-color: {badge_bg};
 }}
 
+/* ================= Remote PC live consoles =================
+   A remote card is the local `.mini-terminal` chrome with a distinct border, so
+   a streamed console is never mistaken for a local one. */
+.term-remote {{
+    border: 1.5px solid {bright_blue};
+}}
+
+.remote-canvas {{
+    background-color: {darker_background};
+    border-radius: 12px;
+}}
+
 /* The ⚙ settings toggle: the gear alone, oversized, in a clear hit target —
    it is the only way into the settings card (shortcut, top bar, launcher),
    so it reads as an icon rather than one more pill among the labels. */

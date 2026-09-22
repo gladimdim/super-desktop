@@ -46,16 +46,28 @@ Active means an open authenticated connection or authenticated activity within
 the last 60 seconds. Expired/revoked devices are never counted active; registered
 devices remain visible while the bridge is stopped.
 
-The additive `/api/v1/desktop/capabilities`, `/api/v1/desktop/workspace` and
-`/api/v1/desktop/events` endpoints require paired-device authentication and follow
-the same origin rejection, expiry and revocation rules. The read-only snapshot
-capability exposes owned terminal geometry, ordering, folders and cached titles;
-it excludes notes, launch commands, local OS settings and credentials. Snapshots
-come from the daemon's local in-memory model over Unix IPC, not from a peer it may
-later be viewing. Export is capped at 256 cards and 1 MiB of IPC data. Events reuse
-bridge connection bounds, write deadlines, stream lifetime and live revocation.
-No remote mutation or raw terminal endpoint is enabled yet; security protocol v3
-and existing Android credentials are unchanged.
+The additive `/api/v1/desktop/capabilities`, `/api/v1/desktop/workspace`,
+`/api/v1/desktop/events` and `/api/v1/desktop/terminals/<card-id>/attach`
+endpoints require paired-device authentication and follow the same origin
+rejection, expiry and revocation rules. The read-only snapshot capability exposes
+owned terminal geometry, ordering, folders and cached titles; it excludes notes,
+launch commands, local OS settings and credentials. Snapshots come from the
+daemon's local in-memory model over Unix IPC, not from a peer it may later be
+viewing. Export is capped at 256 cards and 1 MiB of IPC data. Events reuse bridge
+connection bounds, write deadlines, stream lifetime and live revocation.
+
+The attach stream is **output-only**: it carries the bytes of one owned
+`sd_term_*` session, and binary frames from a viewer are consumed and dropped, so
+no frame type can type into a host session or run a command there. A card id is
+resolved against the daemon's own workspace snapshot, so an unowned or unrelated
+tmux session is not addressable. Attachments are limited to 8 per credential and
+16 per bridge, are refused with a stable code before the WebSocket upgrade, are
+torn down when the credential is revoked or expires, and end after 30 minutes.
+The host attaches its own tmux client at the grid it already owns, which is what
+prevents a viewer from resizing host panes, and dropping the stream reaps exactly
+that client. No remote mutation endpoint is enabled yet, so
+`workspace-layout-v1` is not advertised; security protocol v3 and existing
+Android credentials are unchanged.
 
 ## Resource bounds
 
@@ -103,9 +115,13 @@ private (0600). Loss/replacement requires pairing again. The optional
 
 `cargo build --bin super-desktop && python tests/bridge_security_smoke.py target/debug/super-desktop`
 
-The smoke test uses temporary state and an ephemeral port, verifies TLS rejection,
-authentication, invitation consumption, desktop-only approval, live revocation,
-oversized requests, and malformed headers. It never approves production phones.
+`python3 tests/desktop_terminal_smoke.py target/debug/super-desktop`
+
+The smoke tests use temporary state, an ephemeral port and a private tmux server,
+verify TLS rejection, authentication, invitation consumption, desktop-only
+approval, live revocation (including mid-stream), oversized requests, malformed
+headers, card ownership and that a refused attachment never reaches a session.
+They never approve production phones or touch production sessions.
 Android has unit tests and an optional `BridgeSecurityInstrumentation` real-device
 test (public `host`, `port`, `pin` arguments); it writes no pairing credentials.
 

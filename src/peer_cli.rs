@@ -1,8 +1,10 @@
 use crate::{
     peer_client::{self, Endpoint, Invitation, Pairing, PeerError, Result},
     peer_store::PeerStore,
+    peer_terminal::{Event, TerminalStream},
 };
-use std::io::{BufRead, IsTerminal, Read};
+use std::io::{BufRead, IsTerminal, Read, Write};
+use std::time::{Duration, Instant};
 
 pub fn run(action: &str, args: &[String]) -> Result<()> {
     match action {
@@ -19,9 +21,74 @@ pub fn run(action: &str, args: &[String]) -> Result<()> {
             PeerStore::default_store()?.forget(&args[0])?;
             output(&serde_json::json!({"forgotten":args[0]}))
         }
-        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-forget ID")),
+        "peer-attach" if !args.is_empty() => attach(args),
+        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-attach ID CARD [--seconds N] | peer-forget ID")),
     }
 }
+
+/// Stream one host console's raw bytes to stdout, read-only.
+///
+/// A debugging and verification tool: it exercises the same pinned WSS attach
+/// path the remote panel uses, so a two-PC problem can be narrowed to the
+/// transport or to the viewer. Terminal output is written unchanged, which
+/// means a real terminal shows exactly the host's colors.
+fn attach(args: &[String]) -> Result<()> {
+    let mut seconds = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--seconds" if seconds.is_none() => {
+                let value = args.get(index + 1).ok_or(PeerError("invalid_peer_attach_option"))?;
+                seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| PeerError("invalid_peer_attach_option"))?,
+                );
+                index += 2;
+            }
+            _ => {
+                positionals.push(args[index].as_str());
+                index += 1;
+            }
+        }
+    }
+    let [machine_id, card_id] = positionals[..] else {
+        return Err(PeerError("peer_attach_requires_machine_and_card"));
+    };
+    let peer = PeerStore::default_store()?.get(machine_id)?;
+    let (stream, mut events) = TerminalStream::open(peer, card_id);
+    let deadline = seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        match events.try_recv() {
+            Ok(Event::Bytes(bytes)) => stdout
+                .write_all(&bytes)
+                .and_then(|()| stdout.flush())
+                .map_err(|_| PeerError("output_failed"))?,
+            Ok(Event::Attached { columns, rows }) => {
+                eprintln!("attached {columns}x{rows} · read-only live view")
+            }
+            Ok(Event::Grid { columns, rows }) => eprintln!("host grid {columns}x{rows}"),
+            // Normal endings are not failures; anything else keeps its code so
+            // a caller can tell trust problems from an exited session.
+            Ok(Event::Closed("closed" | "terminal_exited" | "reconnect")) => {
+                drop(stream);
+                eprintln!("detached");
+                return Ok(());
+            }
+            Ok(Event::Closed(reason)) => return Err(PeerError(reason)),
+            Err(futures_channel::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(2))
+            }
+            Err(futures_channel::mpsc::TryRecvError::Closed) => return Ok(()),
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(());
+        }
+    }
+}
+
 fn output(value: &impl serde::Serialize) -> Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();

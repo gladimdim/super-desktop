@@ -1409,6 +1409,7 @@ impl SuperDesktopWindow {
 
     pub fn start_slide_in(&self) {
         self.ensure_slide_trajectories(!self.slide.running.get());
+        self.add_remote_slide_targets();
         if !self.slide.running.get() {
             // Idle and hidden: park cards at the edge so the appear starts
             // off-screen. Mid-flight reverse must not do this — it would jump.
@@ -1423,13 +1424,16 @@ impl SuperDesktopWindow {
 
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
         self.machine_view.dismiss();
-        // VTE GPU buffers stay mapped during the slide. With VRAM exhausted
-        // (a 27B local model on a 16 GB card) each `canvas.move_` of those
-        // terminals can stall the compositor and the GTK frame clock never
-        // settles, so hide never unmaps. Drop the surfaces first; tmux
+        // Live terminals slide out with their content, so hide reads as one
+        // motion instead of a blank frame followed by an unmap. Their GPU
+        // surfaces are dropped in `hide_now`, at the unmap itself: with VRAM
+        // exhausted (a 27B local model on a 16 GB card) moving those buffers can
+        // stall the compositor, and `HIDE_FALLBACK` unmaps regardless. tmux
         // clients stay attached for the next show.
-        self.set_terminal_gpu_mapped(false);
         self.ensure_slide_trajectories(false);
+        // A remote PC's cards are created while that PC is viewed, so they are
+        // added to the slide at each slide start rather than at window build.
+        self.add_remote_slide_targets();
         *self.on_slide_hidden.borrow_mut() = Some(Rc::new(on_finish));
         if !self.slide.running.get() {
             // Idle and shown: start from rest with an outward impulse.
@@ -1440,6 +1444,28 @@ impl SuperDesktopWindow {
         self.slide.appear.set(false);
         self.canvas.add_css_class("sliding");
         self.ensure_slide_tick();
+    }
+
+    /// Add the remote PC's cards to the current slide.
+    ///
+    /// They are pruned when their card is gone, and their rest pose is inside
+    /// the fitted canvas, so the off-screen pose is the nearest edge of the
+    /// viewer's real screen — the same rule local cards use.
+    fn add_remote_slide_targets(&self) {
+        let mut trajectories = self.anim_trajectories.borrow_mut();
+        trajectories.retain(|widget, _| widget.parent().is_some());
+        for (widget, x, y, width, offset) in self.machine_view.slide_cards() {
+            let (sx, sy) = card_slide_offscreen(x + offset, y, width, self.screen_width as f64);
+            trajectories.insert(
+                widget,
+                Trajectory {
+                    sx: sx - offset,
+                    sy,
+                    tx: x,
+                    ty: y,
+                },
+            );
+        }
     }
 
     /// Fill rest/edge positions. `reset` rebuilds them (fresh show). A reverse
@@ -1476,7 +1502,7 @@ impl SuperDesktopWindow {
     fn paint_slide(&self, progress: f64) {
         let trajs = self.anim_trajectories.borrow();
         for (widget, traj) in trajs.iter() {
-            paint_slide_widget(&self.canvas, widget, *traj, progress);
+            paint_slide_widget(widget, *traj, progress);
         }
     }
 
@@ -1496,12 +1522,6 @@ impl SuperDesktopWindow {
             .borrow()
             .iter()
             .map(|(w, t)| (w.clone(), *t))
-            .collect();
-        let terminal_widgets: Vec<gtk4::Widget> = self
-            .terminal_cards
-            .borrow()
-            .iter()
-            .map(|card| card.container.clone().upcast())
             .collect();
         let slide = Rc::clone(&self.slide);
         let canvas = self.canvas.clone();
@@ -1539,10 +1559,7 @@ impl SuperDesktopWindow {
                 slide.velocity.set(0.0);
                 slide.running.set(false);
                 for (widget, traj) in frames.iter() {
-                    if !appear && terminal_widgets.iter().any(|t| t == widget) {
-                        continue;
-                    }
-                    paint_slide_widget(&canvas, widget, *traj, target);
+                    paint_slide_widget(widget, *traj, target);
                 }
                 canvas.remove_css_class("sliding");
                 if !appear {
@@ -1555,12 +1572,7 @@ impl SuperDesktopWindow {
             slide.progress.set(progress);
             slide.velocity.set(velocity);
             for (widget, traj) in frames.iter() {
-                // Do not move live VTE cards on hide: each move composites
-                // GPU terminal buffers. HUD + notes still slide away.
-                if !appear && terminal_widgets.iter().any(|t| t == widget) {
-                    continue;
-                }
-                paint_slide_widget(&canvas, widget, *traj, progress);
+                paint_slide_widget(widget, *traj, progress);
             }
             glib::ControlFlow::Continue
         });
@@ -1675,6 +1687,9 @@ impl SuperDesktopWindow {
         // painting or calling `on_slide_hidden` after we already unmapped.
         self.slide.running.set(false);
         self.slide.gen.set(self.slide.gen.get().wrapping_add(1));
+        // Drop live terminal surfaces with the unmap: nothing composites a GPU
+        // terminal buffer while the overlay is hidden, and `show_again`
+        // re-enables drawing for the next show.
         self.set_terminal_gpu_mapped(false);
         // Floating panels must not come back with the window.
         for panel in &self.overlay_panels {
@@ -1684,6 +1699,10 @@ impl SuperDesktopWindow {
         // overlay's widget tree (it is its own popup surface).
         self.ws_popover.popdown();
         self.window.set_visible(false);
+        // Remote consoles are only released once the overlay is gone: stopping
+        // them earlier blanked the view before it could animate out. Their
+        // cards keep the last frame, so showing again reconnects immediately.
+        self.machine_view.suspend_streams();
     }
 
     /// Hide VTE widgets so hide/unmap does not composite live GPU terminals.
@@ -1728,12 +1747,20 @@ fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[Rc<crate::sticky_note::S
     }
 }
 
-fn paint_slide_widget(canvas: &Fixed, widget: &gtk4::Widget, traj: Trajectory, factor: f64) {
-    if widget.parent().is_some() {
-        let cx = traj.sx + (traj.tx - traj.sx) * factor;
-        let cy = traj.sy + (traj.ty - traj.sy) * factor;
-        canvas.move_(widget, cx, cy);
-    }
+/// Move one sliding widget between its off-screen and rest poses.
+///
+/// A card lives either in the local canvas or in a remote PC's fitted canvas,
+/// so the widget moves inside whichever `Fixed` holds it.
+fn paint_slide_widget(widget: &gtk4::Widget, traj: Trajectory, factor: f64) {
+    let Some(parent) = widget
+        .parent()
+        .and_then(|parent| parent.downcast::<Fixed>().ok())
+    else {
+        return;
+    };
+    let cx = traj.sx + (traj.tx - traj.sx) * factor;
+    let cy = traj.sy + (traj.ty - traj.sy) * factor;
+    parent.move_(widget, cx, cy);
 }
 
 /// Off-screen pose for a card or icon: nearest of the left or right edge,
@@ -1864,6 +1891,64 @@ mod tests {
         // feels like a hang.
         assert!(HIDE_FALLBACK >= Duration::from_millis(200));
         assert!(HIDE_FALLBACK <= Duration::from_millis(400));
+    }
+
+    #[test]
+    fn slide_moves_a_card_inside_its_own_canvas() {
+        crate::gtk_test::run_in_child_process("window::tests::slide_inside_own_canvas_inner");
+    }
+
+    #[test]
+    fn slide_inside_own_canvas_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(
+            Some("com.superdesktop.SlideTest"),
+            gtk4::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let window = gtk4::ApplicationWindow::new(&app);
+        window.set_default_size(800, 600);
+        // A remote PC's cards live in a nested canvas, not in the local one: a
+        // hide must move them where they are instead of leaving them frozen.
+        let outer = gtk4::Fixed::new();
+        let inner = gtk4::Fixed::new();
+        let card = gtk4::Label::new(Some("remote console"));
+        card.set_size_request(200, 100);
+        inner.put(&card, 100.0, 120.0);
+        outer.put(&inner, 0.0, 0.0);
+        window.set_child(Some(&outer));
+        window.present();
+        // A move takes effect in the next allocation, exactly as it does inside
+        // the real vsync slide tick.
+        let pump = || {
+            let until = std::time::Instant::now() + Duration::from_millis(120);
+            while std::time::Instant::now() < until {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        pump();
+        let trajectory = Trajectory {
+            sx: -240.0,
+            sy: 120.0,
+            tx: 100.0,
+            ty: 120.0,
+        };
+        paint_slide_widget(card.upcast_ref(), trajectory, 0.0);
+        pump();
+        assert_eq!(inner.child_position(&card), (-240.0, 120.0));
+        paint_slide_widget(card.upcast_ref(), trajectory, 0.5);
+        pump();
+        assert_eq!(inner.child_position(&card), (-70.0, 120.0));
+        paint_slide_widget(card.upcast_ref(), trajectory, 1.0);
+        pump();
+        assert_eq!(inner.child_position(&card), (100.0, 120.0));
+        // A widget that is not in a Fixed is skipped, never panicked over.
+        paint_slide_widget(window.upcast_ref(), trajectory, 0.0);
+        window.close();
     }
 
     #[test]

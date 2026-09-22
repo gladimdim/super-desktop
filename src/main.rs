@@ -11,10 +11,12 @@ mod crashlog;
 mod desktop_protocol;
 mod peer_client;
 mod peer_store;
+mod peer_terminal;
 mod peer_cli;
 mod peer_pairing;
 mod peer_pairing_ui;
 mod machine_selector;
+mod remote_terminal;
 mod remote_workspace;
 mod harness_settings;
 mod hotcorner;
@@ -216,7 +218,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
 
-    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-forget") {
+    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-forget") {
         if let Err(error) = peer_cli::run(action, &args[2..]) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -564,9 +566,8 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
     // attach clients stay alive, so the next show is instant. The token makes a
     // show that lands during the animation win over this unmap.
     //
-    // VTE drawing is paused inside `start_slide_out`. If Hyprland never
-    // delivers frames (GPU full from a local LLM), the spring never
-    // settles — the fallback unmaps anyway.
+    // The slide animates live terminals, so on a saturated GPU Hyprland may
+    // never deliver the frames the spring needs. The fallback unmaps anyway.
     let token = win.current_show_token();
     let win_hide = Rc::clone(&win);
     win.start_slide_out(move || win_hide.hide_if_unchanged(token));

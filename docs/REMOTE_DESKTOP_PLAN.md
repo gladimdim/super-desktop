@@ -1,18 +1,18 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
-Status: pairing and a read-only remote workspace preview are delivered; the
-interactive remote-desktop release remains in progress.
-Updated 2026-09-21 against `master`.
+Status: pairing, a live read-only remote workspace and its terminal transport are
+delivered; the interactive remote-desktop release remains in progress.
+Updated 2026-09-22 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
 The original architecture below remains the target. Capability negotiation,
-the isolated PTY prototype, the daemon-owned local state, persisted terminal order
-and authenticated workspace snapshot/event routes are implemented. Outgoing
-certificate-pinned PC pairing, private peer storage and remote snapshot retrieval
-are testable through the CLI. Lifecycle mutation extraction, remote commands,
-live outgoing subscriptions and network terminal transport remain pending. The
-top-left selector now provides a read-only remote layout preview and an Add a PC
-pairing form. Interactive remote cards remain pending.
+the daemon-owned local state, persisted terminal order, authenticated workspace
+snapshot/event routes and the host-side PTY attach transport with a host-owned
+grid are implemented. Outgoing certificate-pinned PC pairing, private peer
+storage, remote snapshot retrieval and a `peer-attach` streaming CLI are testable
+through the CLI, and the top-left selector renders the host's consoles live at
+their own positions and sizes. Lifecycle mutation extraction, remote commands,
+live outgoing workspace subscriptions and viewer input remain pending.
 
 ## Current delivery status
 
@@ -29,7 +29,14 @@ PCs:
 - Approved, certificate-pinned peers are stored privately and appear in the
   selector. The viewer polls the host's authenticated workspace snapshot and
   draws terminal cards in their host positions, sizes, iconified positions and
-  stacking order, scaled to fit the viewer canvas.
+  stacking order, scaled to fit the viewer canvas and never enlarged.
+- Each visible remote console is a real VTE terminal fed by the host's own tmux
+  attach output over pinned WSS (`GET /api/v1/desktop/terminals/<card-id>/attach`),
+  so output, colours, alternate-screen applications and redraws match the host.
+  The host attaches at the grid it already owns, which is what keeps a viewer
+  from resizing the host's panes, and pushes `grid` frames when that grid
+  changes. Attachments are bounded (8 per credential, 16 per bridge), end on
+  revocation and are released when the overlay is hidden.
 - The Android bridge's connection-link popover is compact. Closing the
   selector popover no longer cancels an already submitted pairing request.
 - `./rebuild.sh` now stops both the desktop daemon and its separate
@@ -37,10 +44,13 @@ PCs:
   bridge can otherwise keep serving port 8759 and return a 404 for the desktop
   capability route after the source has been updated.
 
-This is a **layout preview**, not a remote terminal implementation. It does not
-show terminal pixels or accept input, create/close cards, or write card geometry
-on the selected host. A blank remote canvas accompanied by “Update and rebuild
-SUPER DESKTOP on the host” means that host is still serving an older bridge.
+This is a **read-only live view**, not the finished interactive feature. It shows
+the host's terminal pixels but accepts no input, creates or closes no cards and
+writes no card geometry on the selected host; the transport has no input frame at
+all. A host that says “Update and rebuild SUPER DESKTOP on the host” is serving an
+older bridge without `terminal-pty-v1`, and its workspace is drawn as chrome
+without live consoles. Hosts that hide their overlay release their viewers'
+streams, and reopening the overlay reconnects them.
 
 ### Two-PC update and smoke check
 
@@ -53,25 +63,44 @@ git pull origin master
 
 The second command must be run after pulling `655edbb` or newer: it replaces a
 stale bridge as well as the daemon. Existing approved peers remain saved. Open
-the selector on the viewing PC and select the peer again; the preview refreshes
-within two seconds. A host with the current bridge returns **401** (before a
-credential is supplied) for `GET /api/v1/desktop/capabilities`; an old bridge
-returns **404** and must be rebuilt.
+the selector on the viewing PC and select the peer again; the view refreshes
+within two seconds and live consoles attach immediately. A host with the current
+bridge returns **401** (before a credential is supplied) for
+`GET /api/v1/desktop/capabilities`, and lists `workspace-snapshot-v1` together
+with `terminal-pty-v1` once a credential is supplied; an old bridge returns
+**404** (or omits `terminal-pty-v1`) and must be rebuilt.
+
+To check the transport from a shell without the GUI:
+
+```sh
+super-desktop peer-workspace MACHINE_ID | python -m json.tool   # card ids
+super-desktop peer-attach MACHINE_ID CARD_ID --seconds 10 > out.raw
+```
+
+`peer-attach` writes raw host bytes, so running it in a terminal shows the host's
+own colours; `tests/desktop_terminal_smoke.py` drives the same path
+automatically.
 
 ### Next implementation commits
 
-1. Add authenticated `POST /api/v1/desktop/commands` handlers backed by the
+1. **Delivered:** the pinned WSS terminal-attach protocol around the existing
+   tmux PTY transport: capability negotiation, server-ready `attached` frame,
+   binary byte framing, host-owned grid with `grid` control frames and pushes,
+   per-credential attachment budgets, heartbeats, 30-minute lifetime,
+   revocation teardown and bounded backpressure on both sides.
+2. **Delivered:** remote VTE widgets replacing the layout preview. Visible cards
+   take live streams (frontmost first, at most eight), a detached or over-budget
+   card explains itself, and both hide and machine switches detach without
+   touching the host session.
+3. Next: authenticated `POST /api/v1/desktop/commands` handlers backed by the
    host's workspace model. Start with card layout/iconify and close operations;
    enforce machine/epoch/card revisions and request deduplication, then cover
-   creation, harness inventory and default folders.
-2. Define and implement the pinned, bidirectional WSS terminal-attach protocol
-   around the existing isolated tmux PTY transport. Include client masking,
-   binary byte framing, resize/control messages, cancellation, revocation and
-   bounded backpressure before exposing it in the UI.
-3. Replace remote preview cards with remote VTE proxy widgets. Attach only
-   visible/focused cards, send input only after a current-selection handshake,
-   and detach on hide or machine switch without affecting the host session.
-4. Route remote card gestures and toolbar actions through the command API;
+   creation, harness inventory and default folders. Advertise
+   `workspace-layout-v1` only when those handlers exist.
+4. Next: viewer input. Send it only after a current-selection handshake, keep
+   the prompt-transaction guard, add the input arbitration the plan requires,
+   and never replay keys after a disconnect. Then route remote card gestures and
+   toolbar actions through the command API, add the 100% + pan/scroll mode,
    implement fit/100% coordinate transforms, conflict feedback and live WSS
    workspace events. Add two-PC regression coverage for switching, concurrent
    edits, bridge/daemon restart and revocation.
@@ -109,8 +138,9 @@ Notes are deferred in the first release: show only the selected host's terminals
 hide local notes in remote mode, and disable remote New Note with an explanation.
 Do not silently create local notes while viewing a remote PC. Remote file previews
 and image prompts are a follow-up; hide/disable those buttons until routed through
-the authenticated host APIs. Full terminal interaction is required for release;
-a snapshot-only prototype does not complete this feature.
+the authenticated host APIs. Live terminal output is delivered, but full
+interaction is still required for release: a read-only stream does not complete
+this feature.
 
 ## 2. What exists and where to change it
 
@@ -214,18 +244,21 @@ blocks connection and requires a fresh trusted invitation, never silent trust.
 Keep existing Android response shapes and endpoint semantics. Negotiate an
 additive authenticated capability document, for example
 `GET /api/v1/desktop/capabilities`, containing bridge ID, desktop API version and
-capabilities `workspace-layout-v1` and `terminal-pty-v1`. A 404 or missing required
-capability yields “Update SUPER DESKTOP on this PC”; never pretend phone snapshots
-provide full desktop support. Do not bump security protocol v3 for additive APIs.
+capabilities `workspace-snapshot-v1`, `terminal-pty-v1` and (once mutations
+exist) `workspace-layout-v1`. A 404 or missing required capability yields “Update
+SUPER DESKTOP on this PC”; never pretend phone snapshots provide full desktop
+support. Do not bump security protocol v3 for additive APIs. A host advertises a
+capability only for behavior it actually implements, so `workspace-layout-v1`
+stays off until the command route exists.
 
-Proposed endpoints (freeze exact schemas in phase 1):
+Delivered endpoints (`✓`) and the ones still to build:
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/v1/desktop/workspace` | Authoritative local-workspace snapshot from the host daemon. |
-| `GET /api/v1/desktop/events` (WSS) | Initial snapshot, then ordered workspace updates, removals and host availability. |
+| ✓ `GET /api/v1/desktop/workspace` | Authoritative local-workspace snapshot from the host daemon. |
+| ✓ `GET /api/v1/desktop/events` (WSS) | Initial snapshot, then changed snapshots and host availability. |
+| ✓ `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live PTY transport for one owned session; currently host→viewer output only. |
 | `POST /api/v1/desktop/commands` | Typed create, close, layout/tag/iconify and default-folder commands, with request IDs and revisions. |
-| `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | New bidirectional PTY transport. Resolve to an owned session on the server. |
 
 Reuse existing authenticated workspace/harness-type endpoints where their
 semantics fit. New desktop mutations should use the command envelope so create
@@ -271,37 +304,38 @@ or an ambiguous timeout; refresh state and show an uncertain outcome. Persisting
 deduplication across crashes is a later improvement, not an exactly-once claim.
 Terminal keystrokes are never replayed after disconnect.
 
-## 6. Full interactive terminal transport — first technical milestone
+## 6. Full interactive terminal transport — delivered as a read-only stream
 
-Prototype this before broad UI refactoring. Reuse the owning tmux session, but
-create a **dedicated tmux attach client on a server-side PTY** for each remote
-terminal view. Bridge PTY bytes over authenticated WSS into a local VTE attached
-to a local proxy PTY/helper. The helper has no local shell or harness session:
-it only forwards bytes and control messages. Pass its connection/credential
-through a private inherited descriptor, not argv or environment variables.
+Delivered: the host creates a **dedicated tmux attach client on a server-side
+PTY** per remote view and bridges its bytes over authenticated WSS into the
+viewer's own VTE widget. The viewer has no proxy helper process and no tmux
+client; it is a pure emulator fed by the network. The `peer-attach` CLI uses the
+same path, which is what makes the transport testable without a GUI.
 
-This path lets VTE handle terminal emulation, input methods, control keys,
-alternate screen, cursor state, paste and mouse sequences. Attaching tmux should
-produce a full initial redraw; reconnect uses a new attach and fresh redraw,
-not replayed old output. A tmux control-mode byte adapter is an alternative only
-if a prototype proves equivalent redraw and interaction behavior.
+A versioned attach handshake, server-ready `attached` frame, binary data frames,
+`grid` control frames, close reasons, 15-second heartbeats, a 30-minute stream
+lifetime and a shared stable reason-code list are implemented. Attaching tmux
+produces a full initial redraw; a reconnect is a new attach and a fresh redraw,
+never replayed old output. TERM/COLORTERM match the local cards, and the viewer
+paints the raw bytes, so Unicode, escape sequences, alternate screen and colour
+come from tmux exactly as they do locally.
 
-Define a versioned attach handshake, server-ready response, binary data frames,
-terminal size/control messages, close reasons and heartbeats. Send no user input
-until the attachment is ready for the currently selected machine. Set terminal
-type/color environment consistently with local VTE. Size both ends' proxy PTYs
-consistently and validate behavior on the installed tmux/VTE versions.
+**Sizing policy (implemented):** the host owns the session's terminal cell grid.
+The bridge reads the host's own client grid — window size plus the status lines
+tmux draws — and admits an attachment only at that exact size, which no
+`window-size` policy can change and which leaves local card resizing untouched
+(`ignore-size` is kept as defence for the viewer's own viewport). The viewer's
+VTE is matched to the host grid, and the host pushes a `grid` frame when that grid
+changes, including when no local client is attached. Viewer fitting changes
+presentation only and never writes layout back. The residual case — a host with
+no client of its own whose only remaining client is a viewer — is documented
+rather than hidden, and can only pin the host to a grid the host itself reported.
 
-**Sizing policy:** the host owns the session's terminal cell grid. Remote attach
-clients must not enter tmux's normal smallest-client sizing arbitration: use
-`ignore-size` or a verified equivalent. Viewer screen fitting changes presentation
-only. Match the remote VTE grid to host rows/columns, using zoom/scrollable viewport
-as necessary; report host grid changes to every viewer. An explicit remote card
-resize updates the host layout, then the host computes/applies the new grid,
-including while its overlay is hidden and no local VTE is attached. Establish
-one grid authority so local and remote clients cannot continually resize each
-other. Prototype redraw and resize ordering; do not silently crop output or
-force every session to the viewer's screen dimensions.
+**Not yet implemented:** viewer input. The transport has no input frame, binary
+frames from a viewer are ignored, and the plan's requirements for input still
+gate the interactive release: send input only after a ready handshake for the
+currently selected machine, keep the prompt-transaction guard, arbitrate
+per-session input, and never replay keys after a disconnect or switch.
 
 Terminals are shared sessions. Concurrent local/remote/phone input may interleave;
 show remote connection presence and document shared control. An exclusive control
@@ -320,7 +354,10 @@ Use a client-capable HTTP/WSS implementation with rustls pin verification, serve
 frame decoding and client masking; do not invert the existing server decoder.
 Prefer a maintained library over expanding custom framing. Retain TLS signature
 verification in any pin verifier and preserve server authorization on every
-stream. Choose exact crate versions during implementation, not from this plan.
+stream. Implemented as `tungstenite` (framing and the upgrade handshake) over the
+existing pinned `rustls` client config, so the invitation's pin replaces CA and
+DNS-name trust while handshake signatures are still verified; the server keeps
+its own decoder.
 
 Keep the existing 64 global / 12 per-source connection limits initially. Budget
 one workspace stream, at most eight attached remote terminals per selected peer,
@@ -403,21 +440,28 @@ required for the first release; follow-ups in section 1 are separate work.
    canvas metadata, stacking migration and structured IPC in `main.rs`. Keep
    local UI behavior and CLI/Android targeting intact. Ensure create/resize works
    while hidden without forcibly showing the host overlay.
-3. **Desktop bridge APIs — snapshots/events delivered; mutations and PTY network transport pending.** Add snapshot/events/commands in a proposed
-   `src/desktop_bridge.rs`, reusing bridge authentication, limits and owner IPC.
-   Add capability negotiation, epoch reconciliation and mutation deduplication.
-   Integrate the validated PTY server in `src/terminal_transport.rs` or equivalent.
-4. **Peer client and registry — delivered for pairing and snapshot retrieval.** Add proposed `src/peer_client.rs` and
-   `src/peer_store.rs`: invitation pairing, pinned HTTP/WSS, private credentials,
-   version checks, connection state, cancellation and reconnect. Test without GTK.
-5. **Selector and remote card view — delivered as a read-only preview.** Add proposed `src/machine_selector.rs` and
-   backend/view boundary; reuse card chrome while keeping remote attachments
-   away from local session preparation. Implement top-left selector, Add/Manage,
-   routed controls, disconnected UI and guarded asynchronous callbacks.
-6. **Layout and simultaneous use — next UI milestone.** Implement fit/100% modes, inverse drag
-   transform, revision conflicts, host-owned grids, local/remote updates and
-   stream budgeting. Verify B can view C while A operates B, and A/B can view
-   each other without recursion or exported peer state.
+3. **Desktop bridge APIs — snapshots/events and the PTY attach route delivered; mutations pending.** `src/desktop_bridge.rs`
+   serves snapshot/events plus `terminals/<card-id>/attach`, reusing bridge
+   authentication, limits, the shared reason-code list and owner IPC, and
+   advertising `terminal-pty-v1`. `src/terminal_transport.rs` owns the grid rule.
+   `POST /api/v1/desktop/commands` with epoch reconciliation and mutation
+   deduplication is still pending, and stays unadvertised until it exists.
+4. **Peer client and registry — delivered for pairing, snapshots and the attach stream.** `src/peer_client.rs` and
+   `src/peer_store.rs` handle invitation pairing, pinned HTTPS/WSS (shared pin
+   verifier, no proxies, no redirects), private credentials, version checks,
+   cancellation and reconnect, and `src/peer_terminal.rs` carries live terminal
+   bytes to the viewer with a bounded queue. Tested without GTK, both in unit
+   tests and through the `peer-attach` CLI.
+5. **Selector and remote card view — delivered as live read-only consoles.** `src/machine_selector.rs` owns the
+   selector, the pairing form, disconnect states and guarded asynchronous
+   callbacks; `src/remote_terminal.rs` renders each host card as chrome plus a
+   read-only VTE fed by the network stream, keeps host geometry and stacking,
+   budgets the attachments and never touches local session preparation.
+6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids and
+   stream budgeting are delivered. Fit/100% modes, the inverse drag transform,
+   revision conflicts and routed remote controls remain, together with a two-PC
+   check that B can view C while A operates B, and that A/B can view each other
+   without recursion or exported peer state.
 7. **Regression, documentation and release — ongoing.** Complete the matrix below, update
    README and SECURITY (device terminology, outgoing credentials, new routes,
    resource limits), and document known limits and recovery. Include an actual
@@ -438,9 +482,17 @@ Automated coverage must test behavior across boundaries, especially:
   endpoint, malformed frames and bounded queues. Isolate test state/ports.
 - Snapshot/subscription race, gaps and epoch changes; concurrent move/close;
   deduplicated create; uncertain mutations never blindly retried.
-- Terminal UTF-8 across frame boundaries, control keys, IME, multiline bracketed
-  paste, mouse, alternate screen, color, reconnect redraw, size changes,
-  slow reader and abrupt disconnect. Session PID survives detach/switch/hide.
+- Terminal UTF-8 across frame boundaries, alternate screen, color, reconnect
+  redraw, size changes, slow reader and abrupt disconnect. Session PID survives
+  detach/switch/hide. Delivered coverage: `terminal_transport` (grid rule, two
+  viewers, raw Unicode/control/alternate-screen, VTE rendering),
+  `peer_terminal` (typed frames, misrouted cards, bounded delivery),
+  `remote_terminal` (geometry, stream budgets, suspend/resume),
+  `desktop_protocol` (capability and frame schema) and
+  `tests/desktop_terminal_smoke.py` (real bridge, private tmux server, real
+  viewer CLI: pinned attach, live coloured bytes, card ownership, revocation
+  teardown, host session survival). Control keys, IME, bracketed paste, mouse
+  and viewer input remain to cover with the input increment.
 - Stale results after A→B→A cannot attach to, close, resize or send input to the
   wrong host. Incoming bridge and local CLI stay local regardless of selection.
 - Geometry round trips on equal/different aspect ratios, fractional display
@@ -454,11 +506,11 @@ Manual acceptance matrix:
 | Pair A→B and A→C | Both PCs selectable with verified identities; reverse access needs separate pairing. |
 | Equal-sized displays | Host positions, card sizes, icon state and order match. |
 | Different sizes/scales | Fit or 100% view is usable; all cards reachable; viewing never writes layout back. |
-| Shell + installed harness + full-screen app | Real interactive terminals, copy/paste and interrupt work; no snapshot artifacts. |
+| Shell + installed harness + full-screen app | Live console output, colour and full-screen redraws match the host; typing is not yet routed. |
 | Drag/resize from either machine | Other view updates; conflicts visible; no resizing oscillation. |
 | Create/close on B from A | B owns the lifecycle and folder; A's local state is unchanged. |
 | Rapid switching and hide/show | No keys reach the wrong PC and no harness is killed. |
-| B asleep, bridge restart, daemon restart | Clear stale/offline state; safe refresh; no duplicate commands. |
+| B asleep, bridge restart, daemon restart | Clear stale/offline state; safe refresh; no duplicate commands, and every console says why it has no live stream. |
 | Android plus desktop viewers | Existing phone pairing/list/input/files remain compatible. |
 | B views C while A views B | A sees and controls B's local workspace, never C's. |
 | Revoke A on B | Streams close promptly; A cannot keep typing; B's sessions survive. |

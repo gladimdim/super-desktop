@@ -1,9 +1,10 @@
-//! Paired-PC selector and read-only remote workspace preview.
+//! Paired-PC selector and the live remote workspace view.
 //! Workers own only network data; generation checks guard every GTK update.
 use crate::{
-    desktop_protocol::{MachineSelection, WorkspaceSnapshot},
+    desktop_protocol::MachineSelection,
     peer_client,
     peer_store::PeerStore,
+    remote_terminal::RemoteCanvas,
     remote_workspace::{self, Selection},
 };
 use gtk4::{glib, prelude::*};
@@ -19,8 +20,7 @@ pub struct MachineView {
     remote_button: gtk4::MenuButton,
     remote: gtk4::Box,
     selection: RefCell<Selection>,
-    snapshot: RefCell<Option<WorkspaceSnapshot>>,
-    drawing: gtk4::DrawingArea,
+    canvas: Rc<RemoteCanvas>,
     status: gtk4::Label,
     details: gtk4::Label,
     busy: Cell<bool>,
@@ -51,7 +51,7 @@ impl MachineView {
         toolbar.append(&hide);
         remote.append(&toolbar);
         let notice = gtk4::Label::new(Some(
-            "Remote layout preview · Console input and remote controls are not available yet",
+            "Live consoles from this PC · read-only — typing and remote controls are not available yet",
         ));
         notice.set_wrap(true);
         remote.append(&notice);
@@ -60,11 +60,11 @@ impl MachineView {
         details.set_margin_start(16);
         details.set_margin_end(16);
         remote.append(&details);
-        let drawing = gtk4::DrawingArea::new();
-        drawing.set_hexpand(true);
-        drawing.set_vexpand(true);
-        drawing.set_tooltip_text(Some("Host card positions and sizes, scaled to fit. This preview refreshes every two seconds."));
-        remote.append(&drawing);
+        let canvas = RemoteCanvas::new();
+        canvas.area.set_tooltip_text(Some(
+            "The host's consoles, streamed live and scaled to fit. This view refreshes every two seconds.",
+        ));
+        remote.append(&canvas.area);
         stack.add_named(&remote, Some("remote"));
         stack.set_visible_child_name("local");
         let view = Rc::new(Self {
@@ -73,8 +73,7 @@ impl MachineView {
             remote_button,
             remote,
             selection: RefCell::new(Selection::default()),
-            snapshot: RefCell::new(None),
-            drawing,
+            canvas,
             status,
             details,
             busy: Cell::new(false),
@@ -96,12 +95,6 @@ impl MachineView {
                 }
             });
         }
-        let weak = Rc::downgrade(&view);
-        view.drawing.set_draw_func(move |_, cr, width, height| {
-            if let Some(view) = weak.upgrade() {
-                view.draw(cr, width, height);
-            }
-        });
         let weak = Rc::downgrade(&view);
         view.remote.connect_map(move |_| {
             if let Some(view) = weak.upgrade() {
@@ -304,9 +297,10 @@ impl MachineView {
     }
     fn select(self: &Rc<Self>, peer: Option<(String, String)>) {
         (self.on_switch)();
-        *self.snapshot.borrow_mut() = None;
+        // Leaving a PC — or picking another one — must release this viewer's
+        // terminal streams before anything else. The host keeps its sessions.
+        self.canvas.clear();
         self.details.set_text("");
-        self.drawing.queue_draw();
         match peer {
             None => {
                 self.selection.borrow_mut().select(MachineSelection::Local);
@@ -318,11 +312,28 @@ impl MachineView {
                     .select(MachineSelection::Remote(id));
                 self.remote_button.set_label(&label);
                 self.status.set_text("Connecting…");
+                self.canvas.show_message("Connecting to this PC…");
                 self.stack.set_visible_child_name("remote");
                 self.refresh();
             }
         }
     }
+
+    /// Stop every remote terminal stream while the overlay is hidden.
+    ///
+    /// The host keeps its sessions, the cards keep their last frame for the
+    /// hide animation, and the next show reconnects. The selection, the saved
+    /// layout and the local workspace are untouched.
+    pub fn suspend_streams(&self) {
+        self.canvas.suspend();
+    }
+
+    /// Remote cards that should slide out with the overlay, as
+    /// `(widget, x, y, width, offset)` in the viewer's own coordinates.
+    pub fn slide_cards(&self) -> Vec<(gtk4::Widget, f64, f64, f64, f64)> {
+        self.canvas.slide_cards()
+    }
+
     fn refresh(self: &Rc<Self>) {
         let Some((generation, id)) = self.selection.borrow().request() else {
             return;
@@ -335,9 +346,9 @@ impl MachineView {
             let requested_id = id.clone();
             let result = gtk4::gio::spawn_blocking(move || {
                 let peer = PeerStore::default_store()?.get(&requested_id)?;
-                let snapshot = peer_client::workspace(&peer)?;
+                let (capabilities, snapshot) = peer_client::verified_workspace(&peer)?;
                 remote_workspace::validate(&snapshot).map_err(peer_client::PeerError)?;
-                Ok::<_, peer_client::PeerError>(snapshot)
+                Ok::<_, peer_client::PeerError>((peer, capabilities, snapshot))
             })
             .await;
             let Some(view) = weak.upgrade() else {
@@ -351,7 +362,7 @@ impl MachineView {
                 return;
             }
             match result {
-                Ok(Ok(snapshot)) => {
+                Ok(Ok((peer, capabilities, snapshot))) => {
                     view.status.set_text(&format!(
                         "Connected · {} consoles",
                         snapshot.local.cards.len()
@@ -366,101 +377,45 @@ impl MachineView {
                         .join(", ");
                     view.details
                         .set_text(&format!("{} · {}", snapshot.local.workspace, harnesses));
-                    *view.snapshot.borrow_mut() = Some(snapshot);
+                    // Live output is only carried for a host that advertises
+                    // the terminal transport; anything else is a layout-only
+                    // preview, never a snapshot emulation.
+                    if capabilities.supports_terminal_stream() {
+                        view.canvas.apply(&peer, &snapshot);
+                    } else {
+                        view.canvas.show_message(
+                            "Update SUPER DESKTOP on the host for live consoles · layout only for now",
+                        );
+                    }
                 }
                 failure => {
                     let error = match failure {
                         Ok(Err(e)) => e.0,
                         _ => "connection_failed",
                     };
-                    view.status.set_text(match error {
-                        "peer_revoked_or_expired" | "peer_not_found" => {
-                            "Pairing required · Add this PC again"
-                        }
-                        "update_remote_super_desktop" | "peer_endpoint_unavailable" => {
-                            "Update SUPER DESKTOP on the host"
-                        }
-                        "peer_identity_changed" | "connection_failed_or_pin_mismatch" => {
-                            "Cannot verify or reach this PC · Check its bridge and pairing"
-                        }
-                        _ => "Remote desktop unavailable · Retrying…",
-                    });
-                    // Don't present disconnected or revoked content as current.
-                    *view.snapshot.borrow_mut() = None;
+                    view.status.set_text(remote_status(error));
+                    // A late failure must not leave another PC's consoles on
+                    // screen: disconnected content is not current content.
+                    view.canvas.clear();
+                    view.canvas.show_message(remote_status(error));
                     view.details.set_text("");
                 }
             }
-            view.drawing.queue_draw();
         });
     }
-    fn draw(&self, cr: &gtk4::cairo::Context, width: i32, height: i32) {
-        cr.set_source_rgb(0.07, 0.08, 0.10);
-        let _ = cr.paint();
-        let snapshot = self.snapshot.borrow();
-        let Some(snapshot) = snapshot.as_ref() else {
-            // A remote capability mismatch used to render as an entirely blank
-            // canvas. Keep the actionable state in the preview itself, where
-            // it remains visible even if the compact toolbar is off-screen.
-            cr.set_source_rgb(0.86, 0.88, 0.92);
-            cr.set_font_size(18.0);
-            cr.move_to(28.0, 56.0);
-            let _ = cr.show_text(&self.status.text());
-            cr.set_source_rgb(0.58, 0.63, 0.70);
-            cr.set_font_size(14.0);
-            cr.move_to(28.0, 86.0);
-            let _ =
-                cr.show_text("Update and rebuild SUPER DESKTOP on the host, then reopen this PC.");
-            return;
-        };
-        let canvas = &snapshot.local.canvas;
-        let (scale, x, y) =
-            remote_workspace::fit(canvas.width, canvas.height, width as f64, height as f64);
-        let _ = cr.save();
-        cr.translate(x, y);
-        cr.scale(scale, scale);
-        cr.rectangle(0.0, 0.0, canvas.width as f64, canvas.height as f64);
-        cr.clip();
-        cr.set_source_rgb(0.12, 0.14, 0.18);
-        let _ = cr.paint();
-        cr.set_source_rgb(0.18, 0.21, 0.27);
-        cr.rectangle(0.0, 0.0, canvas.width as f64, canvas.top_inset as f64);
-        let _ = cr.fill();
-        let mut cards: Vec<_> = snapshot.local.cards.iter().collect();
-        cards.sort_by_key(|card| (card.expanded, card.stacking_order));
-        for card in cards {
-            let rect = remote_workspace::card_rect(card, canvas.width, canvas.height);
-            let _ = cr.save();
-            cr.rectangle(rect.x, rect.y, rect.width, rect.height);
-            cr.clip();
-            cr.set_source_rgb(0.19, 0.23, 0.30);
-            let _ = cr.paint();
-            cr.set_source_rgb(0.42, 0.65, 0.85);
-            cr.set_line_width(2.0);
-            cr.rectangle(
-                rect.x + 1.0,
-                rect.y + 1.0,
-                rect.width - 2.0,
-                rect.height - 2.0,
-            );
-            let _ = cr.stroke();
-            cr.set_font_size(18.0);
-            cr.set_source_rgb(0.94, 0.95, 0.98);
-            cr.move_to(rect.x + 12.0, rect.y + 28.0);
-            let _ = cr.show_text(&peer_client::label(&card.title));
-            cr.set_font_size(14.0);
-            cr.move_to(rect.x + 12.0, rect.y + 53.0);
-            let _ = cr.show_text(&format!(
-                "{} · {}",
-                peer_client::label(&card.agent_type),
-                peer_client::label(&card.status)
-            ));
-            if !card.layout.iconified {
-                cr.move_to(rect.x + 12.0, rect.y + 83.0);
-                let _ = cr.show_text("Console preview — input unavailable");
-            }
-            let _ = cr.restore();
+}
+
+/// One place for the viewer-visible wording of a peer failure.
+fn remote_status(error: &str) -> &'static str {
+    match error {
+        "peer_revoked_or_expired" | "peer_not_found" => "Pairing required · Add this PC again",
+        "update_remote_super_desktop" | "peer_endpoint_unavailable" => {
+            "Update SUPER DESKTOP on the host"
         }
-        let _ = cr.restore();
+        "peer_identity_changed" | "connection_failed_or_pin_mismatch" => {
+            "Cannot verify or reach this PC · Check its bridge and pairing"
+        }
+        _ => "Remote desktop unavailable · Retrying…",
     }
 }
 
@@ -636,14 +591,24 @@ mod tests {
         view.select(Some(("a".repeat(32), "Host laptop".into())));
         assert!(view.is_remote());
         assert_eq!(view.stack.visible_child_name().as_deref(), Some("remote"));
-        *view.snapshot.borrow_mut() = Some(remote_workspace::fixture());
-        let surface =
-            gtk4::cairo::ImageSurface::create(gtk4::cairo::Format::ARgb32, 960, 540).unwrap();
-        let cr = gtk4::cairo::Context::new(&surface).unwrap();
-        view.draw(&cr, 960, 540);
-        cr.status().unwrap();
+        // Before a host snapshot arrives the canvas states what it is doing
+        // instead of leaving an empty area.
+        assert_eq!(
+            view.canvas.area.visible_child_name().as_deref(),
+            Some("message")
+        );
+        // Reconciliation and geometry need no network: a host whose session is
+        // gone renders as a card but is never streamed.
+        let mut snapshot = remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        view.canvas.apply(&peer_client::test_peer('a'), &snapshot);
+        assert_eq!(view.canvas.card_count(), 1);
+        assert_eq!(
+            view.canvas.area.visible_child_name().as_deref(),
+            Some("canvas")
+        );
         view.select(Some(("b".repeat(32), "Other laptop".into())));
-        assert!(view.snapshot.borrow().is_none());
+        assert!(view.canvas.card_count() == 0, "another PC's cards must not stay");
         view.select(None);
         assert!(!view.is_remote());
         assert_eq!(
@@ -656,5 +621,38 @@ mod tests {
             (42.0, 84.0)
         );
         assert_eq!(switches.get(), 4);
+    }
+
+    #[test]
+    fn remote_canvas_replaces_cards_the_host_removed() {
+        crate::gtk_test::run_in_child_process("machine_selector::tests::reconcile_inner");
+    }
+
+    #[test]
+    fn reconcile_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let canvas = crate::remote_terminal::RemoteCanvas::new();
+        let peer = peer_client::test_peer('a');
+        let mut snapshot = remote_workspace::fixture();
+        // Both cards stay unstreamed, so this check never opens a socket.
+        for card in snapshot.local.cards.iter_mut() {
+            card.session_alive = Some(false);
+        }
+        let second = snapshot.local.cards[0].clone();
+        canvas.apply(&peer, &snapshot);
+        assert_eq!(canvas.card_count(), 1);
+        snapshot.local.cards.clear();
+        canvas.apply(&peer, &snapshot);
+        assert_eq!(canvas.card_count(), 0);
+        snapshot.local.cards.push(second);
+        canvas.apply(&peer, &snapshot);
+        assert_eq!(canvas.card_count(), 1);
+        // Iconified and expanded states are part of the host's geometry.
+        snapshot.local.cards[0].layout.iconified = true;
+        canvas.apply(&peer, &snapshot);
+        assert_eq!(canvas.card_count(), 1);
     }
 }

@@ -93,6 +93,19 @@ impl Connection {
     pub(super) fn streaming(&mut self) { self.deadline = None; }
     pub(super) fn upload_deadline(&mut self) { self.deadline = Some(std::time::Instant::now() + Duration::from_secs(30)); }
     pub(super) fn credential(&mut self, token: &str) { self.credential_hash = Some(digest(token.as_bytes())); }
+    /// Token hash this connection authenticated with, for per-device resource
+    /// budgets. Never logged, never returned to a peer, never persisted here.
+    pub(super) fn credential_id(&self) -> Option<&str> { self.credential_hash.as_deref() }
+    /// Raw socket, so a streaming handler can poll both directions instead of
+    /// blocking on one. TLS may still hold buffered plaintext; see `peek`.
+    pub(super) fn raw_fd(&self) -> Option<std::os::fd::RawFd> {
+        use std::os::fd::AsRawFd;
+        match &self.transport {
+            Transport::Tls(s) => Some(s.sock.as_raw_fd()),
+            Transport::Local(s) => Some(s.as_raw_fd()),
+            #[cfg(test)] Transport::Plain(s) => Some(s.as_raw_fd()),
+        }
+    }
     pub(super) fn still_authorized(&self) -> bool {
         self.credential_hash.as_ref().is_none_or(|hash| pair_state().lock().map(|p|
             p.cfg.devices.iter().any(|d| d.expires > now_epoch() && equal(hash, &d.token_hash))).unwrap_or(false))
