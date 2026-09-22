@@ -88,8 +88,6 @@
   ol.steps { margin: 18px 0 0; padding-left: 22px; color: var(--muted); }
   ol.steps li { margin-bottom: 8px; }
   ol.steps strong { color: var(--text); }
-  .split { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 18px; }
-  table.keys.compact td { padding: 8px 12px; font-size: 14.5px; }
   footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
   footer a { color: var(--accent); }
   a { color: var(--accent); }
@@ -101,18 +99,18 @@
   <header class="hero">
     <div class="bolt">⚡</div>
     <h1>SUPER <span class="grad">DESKTOP</span></h1>
-    <p class="tagline">A hidden overlay workspace for Hyprland / Omarchy — sticky notes and mini AI-terminal windows that slide in from the screen edges and vanish without a trace. Also a live view into your <strong>other PCs'</strong> workspaces and an optional encrypted bridge for your <strong>phone</strong>.</p>
+    <p class="tagline">A hidden overlay workspace for Hyprland / Omarchy — sticky notes and mini AI-terminal windows that slide in from the screen edges and vanish without a trace. Reach your <strong>other PCs'</strong> workspaces right here, or your sessions from your <strong>phone</strong>.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/gladimdim/super-desktop">GitHub repo</a>
       <a class="btn ghost" href="#remote">Remote sessions</a>
-      <a class="btn ghost" href="#phone">Phone bridge</a>
+      <a class="btn ghost" href="#phone">Phone linking</a>
     </div>
     <p style="margin-top:22px"><span class="kbd">SUPER + SHIFT + Q</span></p>
   </header>
 
   <section>
     <h2>What is this?</h2>
-    <p class="sub">A second, invisible desktop on top of your Omarchy workspace. Press the shortcut — notes and AI terminals glide in. Press it again — your desktop is completely clean. Everything keeps running in background tmux.</p>
+    <p class="sub">A second, invisible desktop on top of your Omarchy workspace. Press the shortcut — notes and AI terminals glide in. Press it again — your desktop is completely clean. Everything keeps running in the background.</p>
     <div class="grid">
       <div class="card"><h3>📝 Sticky notes</h3><p>Click and type. Notes follow your Omarchy theme, autosave, drag, resize, and take group color tags.</p></div>
       <div class="card"><h3>💻 AI terminals</h3><p>Live mini-terminals running coding agents. Iconify to 128×128, ghost-resize, expand to 80% of the screen.</p></div>
@@ -120,63 +118,39 @@
       <div class="card"><h3>🎨 Native theming</h3><p>Colors, fonts, and terminal palette come from the active Omarchy theme and sync instantly on switch.</p></div>
       <div class="card"><h3>🎯 Hot corner</h3><p>Park the pointer in the top-left corner for two seconds and the overlay toggles — no keyboard needed.</p></div>
       <div class="card"><h3>⌨ Your own shortcut</h3><p>SUPER + SHIFT + Q out of the box — click <strong>Record</strong> in ⚙ Settings, press any combination, and it becomes the key that toggles the overlay.</p></div>
-      <div class="card"><h3>🖥️ Remote sessions</h3><p>Pair another PC and its consoles stream in live — real terminals, in colour, at the host's own positions, sizes and stacking order. Click and type into them.</p></div>
-      <div class="card"><h3>📱 Phone linking</h3><p>Pair an Android phone over an encrypted LAN/Tailscale bridge. Read terminals, type into them, get completion alerts and send image prompts. Optional.</p></div>
+      <div class="card"><h3>🖥️ Remote sessions</h3><p>Pair another PC and its windows appear live in your overlay — same layout, same sessions, and you can type into them.</p></div>
+      <div class="card"><h3>📱 Phone linking</h3><p>Take your AI sessions with you. Pair an Android phone to watch and type into them on the move, and get notified when they finish. Optional.</p></div>
     </div>
   </section>
 
   <section id="remote">
     <h2>Remote sessions — your other PCs <span class="pill live">live</span></h2>
-    <p class="sub">Open the top-left <strong>This PC</strong> machine selector, choose <strong>Add a PC</strong>, and the other computer's workspace is drawn inside your overlay. Every visible console becomes a real terminal streaming that host's session output, in colour, as it happens.</p>
+    <p class="sub">Connect a second computer and its whole workspace opens inside your overlay. Every window becomes a live terminal, so you can watch and use that machine's sessions without getting up.</p>
     <div class="grid">
-      <div class="card"><h3>↔ Two directions, one panel</h3><p>Create and copy a one-time connection link to let another PC connect <em>here</em>, or paste a link created on the other PC to connect this PC <em>there</em>. The same Omarchy-styled panel does both.</p></div>
-      <div class="card"><h3>🔐 Pinned &amp; approved on the host</h3><p>The certificate pin comes from the invitation, the six-digit code must match on both PCs, and approval always happens on the host. Unknown or denied peers are never saved.</p></div>
-      <div class="card"><h3>🖥️ Host-faithful layout</h3><p>Consoles keep the host's positions, sizes, stacking order and iconified state, uniformly scaled to fit your canvas and <strong>never enlarged</strong>.</p></div>
-      <div class="card"><h3>⌨ Type into the host</h3><p>Click a console and type — keystrokes, paste and Ctrl+C are written into that host session behind the same input guard as phone input. Keys are never replayed after a disconnect.</p></div>
+      <div class="card"><h3>↔ Connect either way</h3><p>Send a one-time connection link to another PC, or accept one from it. A single panel handles both directions, so either machine can be the one you look at.</p></div>
+      <div class="card"><h3>🔐 You approve every PC</h3><p>The same code appears on both screens and access is granted only after you confirm it on the computer being shared. Nothing connects behind your back.</p></div>
+      <div class="card"><h3>🖥️ Their layout, your screen</h3><p>Windows sit exactly where they do on the other computer — same sizes and stacking — laid out neatly to fit your display.</p></div>
+      <div class="card"><h3>⌨ Type as if you were there</h3><p>Click a window and start typing. Your keys, paste and Ctrl+C go straight to the session running on the other machine.</p></div>
     </div>
-
-    <h3 style="margin-top:32px">How pairing works</h3>
+    <h3 style="margin-top:32px">In three steps</h3>
     <ol class="steps">
-      <li>On the <strong>host</strong> PC: ⚙ Settings → <em>Android</em>, start the bridge and <strong>generate an invitation</strong>, then copy its pairing link.</li>
-      <li>On the <strong>viewing</strong> PC: open the machine selector → <strong>Add a PC</strong>, paste the link (a friendly name and address/port overrides are optional), and click <strong>Connect</strong>.</li>
-      <li>Compare the six-digit code on both PCs and <strong>approve on the host</strong>. The peer is saved and its workspace opens automatically.</li>
+      <li>Share a connection link from one computer to the other.</li>
+      <li>Check that the code matches on both screens and approve.</li>
+      <li>The other PC's workspace opens and stays one click away.</li>
     </ol>
-    <div class="note">Both PCs must run a current build. After <code>git pull</code>, run <code>./rebuild.sh</code> on <strong>each</strong> PC — it now restarts the separate <code>harness-bridge</code> process too, so an old bridge cannot keep serving port 8759. Existing approved peers do not need re-pairing. A host that says <em>“Update and rebuild SUPER DESKTOP on the host”</em> is serving an older bridge without <code>terminal-pty-v1</code>.</div>
-
-    <div class="split">
-      <div class="card"><h3>⚙ What the host advertises</h3><p><code>workspace-snapshot-v1</code> (read-only snapshots/events) and <code>terminal-pty-v1</code> (live attach). <code>workspace-layout-v1</code> is deliberately <strong>not</strong> advertised yet, because remote layout mutations are still pending — a viewer only goes interactive when capabilities and <code>desktopApiVersion</code> match.</p></div>
-      <div class="card"><h3>⏳ Current limits</h3><p>Remote <strong>create, close, drag and resize</strong> stay on the host for now — the viewer shows pixels and sends input. At most eight consoles hold live streams (frontmost first); the rest keep their chrome with an explanation. Hiding the overlay releases the streams and showing it reconnects.</p></div>
-    </div>
-
-    <h3 style="margin-top:32px">Endpoints</h3>
-    <table class="keys compact">
-      <tr><td><span class="kbd">GET /api/v1/desktop/capabilities</span></td><td>Machine ID, <code>desktopApiVersion</code> and the capability list.</td></tr>
-      <tr><td><span class="kbd">GET /api/v1/desktop/workspace</span></td><td>Complete workspace snapshot from the host daemon.</td></tr>
-      <tr><td><span class="kbd">GET /api/v1/desktop/events</span> (WSS)</td><td>Initial snapshot, then changed snapshots and 5-second heartbeats.</td></tr>
-      <tr><td><span class="kbd">…/terminals/&lt;card-id&gt;/attach</span> (WSS)</td><td>Live terminal bytes: host→viewer output, viewer→host keystrokes.</td></tr>
-    </table>
-    <p class="sub" style="margin-top:12px">All four require the existing paired-device bearer credential over HTTPS/WSS, and follow the same origin-rejection, expiry and revocation rules as every other bridge endpoint.</p>
+    <div class="note">Keep <strong>both</strong> computers up to date for the smoothest experience. Once a PC is paired it is remembered — it stays in your list and never needs pairing again.</div>
   </section>
 
   <section id="phone">
-    <h2>Phone / Android linking <span class="pill">optional</span></h2>
-    <p class="sub">An encrypted HTTPS/WSS bridge over LAN, Ethernet or Tailscale (port 8759, mDNS <code>_omarchy-harness._tcp</code>) lets a paired Android phone reach your SUPER DESKTOP terminals. There is no HTTP fallback and Tailscale is optional. It starts automatically with the daemon and can be stopped or restarted from ⚙ gear → <em>Launcher connection</em>.</p>
+    <h2>Phone linking <span class="pill">optional</span></h2>
+    <p class="sub">Take your AI sessions with you. Pair an Android phone and it reaches your SUPER DESKTOP terminals over your own network, with everything kept private between your devices.</p>
     <div class="grid">
-      <div class="card"><h3>💻 Operate terminals</h3><p>List sessions and drive them — this is a remote terminal capability, not a read-only dashboard. Type into a session, and browse referenced files with PDF page previews.</p></div>
-      <div class="card"><h3>🔔 Completion alerts</h3><p>An Android per-terminal bell reports explicit Codex response completion, including while the phone UI is hidden, using an opt-in foreground monitor. Other harnesses have no verified adapter yet.</p></div>
-      <div class="card"><h3>🖼️ Image prompts</h3><p>Attach an image with <strong>＋</strong> and send it together with a prompt to an idle Codex terminal.</p></div>
-      <div class="card"><h3>🔒 Per-phone access</h3><p>Desktop QR verification, an explicit approval, and per-device revocation. Revoking on the desktop disconnects the phone's active sockets and invalidates its credential at once.</p></div>
+      <div class="card"><h3>💻 Sessions in your pocket</h3><p>See your running sessions on your phone and type into them, with the terminal's output and colours kept intact.</p></div>
+      <div class="card"><h3>🔔 Know when it's done</h3><p>Get a notification the moment Codex finishes replying, so you don't have to keep checking back.</p></div>
+      <div class="card"><h3>🖼️ Send a picture</h3><p>Attach an image and send it together with a prompt to a waiting session.</p></div>
+      <div class="card"><h3>🔒 Pair once, revoke anytime</h3><p>Pair by scanning a QR code and confirming the matching code on your desktop. Access can be taken away from any phone whenever you like.</p></div>
     </div>
-
-    <h3 style="margin-top:32px">Secure pairing in five steps</h3>
-    <ol class="steps">
-      <li>Desktop: ⚙ Settings → <em>Android</em> → <strong>Show secure pairing QR</strong>. The QR carries <code>superdesktop://pair?data=…</code>; its copyable link is expandable.</li>
-      <li>Scan it with a camera that opens custom-scheme links and tap <strong>Open</strong>, or use <em>Android → Bridges → Scan pairing QR</em>, or paste the invitation. External links require explicit confirmation and never auto-approve.</li>
-      <li>The phone requests approval with the QR's random 192-bit, single-use secret. Invitations expire after 300 seconds; approval requests after 120 seconds.</li>
-      <li>Compare the displayed six-digit code and <strong>approve on the desktop</strong>. Device names are untrusted labels.</li>
-      <li>The phone receives its own random 192-bit bearer credential, valid for 90 days. Android keeps credentials and pins in Keystore-backed encrypted storage; backups and device transfer are disabled.</li>
-    </ol>
-    <div class="note"><strong>Protocol v3</strong> — desktop state stores SHA-256 credential hashes, never bearer credentials, and old HTTP-era credentials are invalidated on upgrade, so <strong>older phones must re-pair</strong>. Discovery and IP addresses never establish trust: the pin comes only from a physically verified QR. Read <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a> before approving a device — an approved phone can operate your terminals.</div>
+    <div class="note">A paired phone can <strong>operate</strong> your terminals, not just watch them — so only pair devices you trust, and remove any phone you no longer use.</div>
   </section>
 
   <section>
@@ -190,7 +164,7 @@
       <span class="harness"><img src="logos/google.svg" alt="">Antigravity</span>
       <span class="harness"><img src="logos/shell-white.svg" alt="">Aider · Reasonix · Shell</span>
     </div>
-    <p class="sub" style="margin-top:14px">Android's per-terminal bell can report explicit <strong>Codex</strong> response completion, including while the phone UI is hidden (opt-in foreground monitor), and an image can be attached with <strong>＋</strong> and sent with a prompt to an idle Codex terminal. Other harnesses have no verified completion adapter yet — see <a href="https://github.com/gladimdim/super-desktop/blob/master/docs/COMPLETION_NOTIFICATIONS.md">completion alerts</a> and <a href="https://github.com/gladimdim/super-desktop/blob/master/docs/IMAGE_PROMPTS.md">image prompts</a>.</p>
+    <p class="sub" style="margin-top:14px">On Android, SUPER DESKTOP can tell you when <strong>Codex</strong> has finished replying, and you can send a picture along with a prompt to a waiting Codex session. Other harnesses don't support these extras yet.</p>
   </section>
 
   <section>
@@ -199,10 +173,8 @@
       <tr><td><span class="kbd">SUPER + SHIFT + Q</span></td><td><strong>Show / hide SUPER DESKTOP</strong> — works in EN + UK layouts, and any other combination can be recorded in ⚙ Settings → <em>Show / hide shortcut</em></td></tr>
       <tr><td><span class="kbd">Esc</span></td><td>Hide the overlay</td></tr>
       <tr><td>Pointer in the top-left corner (2s)</td><td>Show / hide SUPER DESKTOP</td></tr>
-      <tr><td><span class="kbd">Ctrl + N</span> / <span class="kbd">Ctrl + T</span></td><td>New note / new terminal <em>(local workspace only)</em></td></tr>
+      <tr><td><span class="kbd">Ctrl + N</span> / <span class="kbd">Ctrl + T</span></td><td>New note / new terminal</td></tr>
       <tr><td>Double-click terminal</td><td>Expand to 80% / collapse back</td></tr>
-      <tr><td>Click the 📁 folder field</td><td>Pick the working directory for new harness cards — <span class="kbd">Enter</span> = home, <span class="kbd">▾</span> = folders used before</td></tr>
-      <tr><td>Click a remote console and type</td><td>Send keystrokes, paste and <span class="kbd">Ctrl + C</span> into that host session</td></tr>
     </table>
   </section>
 
@@ -212,11 +184,8 @@
 git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
 cd ~/GitHub/super-desktop
 ./install.sh
-<span class="c"># then press SUPER + SHIFT + Q</span>
-
-<span class="c"># for remote sessions, do the same on the second PC</span>
-<span class="c"># and keep both up to date with:</span>
-git pull &amp;&amp; ./rebuild.sh</code></pre>
+<span class="c"># then press SUPER + SHIFT + Q</span></code></pre>
+    <div class="note"><strong>Using remote sessions?</strong> Install SUPER DESKTOP on the second computer too, then pair the two.</div>
     <div class="note"><strong>🤖 Are you an AI assistant</strong> installing this for your human? Don't improvise — the repo README has a dedicated <a href="https://github.com/gladimdim/super-desktop#readme">step-by-step AI install section</a> (preconditions, verification, hard rules, troubleshooting).</div>
   </section>
 
@@ -227,33 +196,22 @@ super-desktop status          <span class="c"># visible? notes / terminals count
 super-desktop add-note "Buy milk"
 super-desktop add-term claude <span class="c"># + antigravity, codex, opencode, grok, reasonix, aider, shell</span>
 super-desktop reload-theme
-super-desktop desktop-workspace <span class="c"># local card layout + revisions as JSON</span>
-./rebuild.sh                  <span class="c"># rebuild after updates (also restarts the bridge)</span>
-
-<span class="c"># remote sessions (PC-to-PC)</span>
-super-desktop peer-add --host 192.168.1.20 --name "Work laptop"
-super-desktop peer-list                 <span class="c"># saved PCs (public metadata only)</span>
-super-desktop peer-workspace MACHINE_ID <span class="c"># host layout + card ids</span>
-super-desktop peer-attach MACHINE_ID CARD_ID --seconds 10 > console.raw
-super-desktop peer-forget MACHINE_ID    <span class="c"># remove the local record (revoke on the host)</span></code></pre>
-    <p class="sub" style="margin-top:12px">Paste the invitation as hidden stdin at the <code>peer-add</code> prompt — invitations are secrets and are never passed as command arguments. Outgoing peer credentials live in <code>~/.local/state/super-desktop/peers.json</code> (<code>0700</code> dir, <code>0600</code> file) and are not encrypted at rest.</p>
+./rebuild.sh                  <span class="c"># rebuild after updates (in repo dir)</span></code></pre>
   </section>
 
   <section>
-    <h2>Deeper docs</h2>
+    <h2>Learn more</h2>
     <div class="grid">
-      <div class="card"><h3>📄 README</h3><p>Full feature list, keybindings, CLI reference and the step-by-step <a href="https://github.com/gladimdim/super-desktop#readme">AI install section</a>.</p></div>
-      <div class="card"><h3>🔐 Security</h3><p>Bridge protocol v3, pairing rules, and the desktop endpoints — <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a>.</p></div>
-      <div class="card"><h3>🖥️ Remote session design</h3><p>PC-to-PC <a href="https://github.com/gladimdim/super-desktop/blob/master/docs/REMOTE_DESKTOP_PLAN.md">implementation plan</a> and <a href="https://github.com/gladimdim/super-desktop/blob/master/docs/REMOTE_DESKTOP_PROTOCOL.md">protocol status</a>.</p></div>
-      <div class="card"><h3>📎 File previews</h3><p>Images, GIFs, PDF pages, Markdown and code, discovered from terminal output — <a href="https://github.com/gladimdim/super-desktop/blob/master/docs/FILE_ASSETS.md">FILE_ASSETS.md</a>.</p></div>
-      <div class="card"><h3>🌙 Sleep lock</h3><p>Keep harnesses reachable on charger power, even with the lid closed — Settings → <em>Sleep lock</em>.</p></div>
-      <div class="card"><h3>⚡ Performance</h3><p>Startup changes and measured command latency — <a href="https://github.com/gladimdim/super-desktop/blob/master/PERFORMANCE.md">PERFORMANCE.md</a>.</p></div>
+      <div class="card"><h3>📄 Full README</h3><p>Every feature, keybinding and command in one place — <a href="https://github.com/gladimdim/super-desktop#readme">README</a>.</p></div>
+      <div class="card"><h3>🔐 Security</h3><p>How pairing, access control and sharing between devices work — <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a>.</p></div>
+      <div class="card"><h3>📎 File previews</h3><p>Open images, GIFs, PDF pages, Markdown and code straight from a terminal — <a href="https://github.com/gladimdim/super-desktop/blob/master/docs/FILE_ASSETS.md">FILE_ASSETS.md</a>.</p></div>
+      <div class="card"><h3>🌙 Sleep lock</h3><p>Keep your AI sessions reachable while your laptop is on charge, even with the lid closed.</p></div>
     </div>
   </section>
 
   <footer>
     Built in Rust (GTK4 · LayerShell · VTE · tmux) for Omarchy &amp; Hyprland.<br>
-    Local overlay · remote PC-to-PC sessions · encrypted phone bridge.<br>
+    Local overlay · remote PC-to-PC sessions · phone linking.<br>
     <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a> · MIT-style open source — issues and PRs welcome.
   </footer>
 
