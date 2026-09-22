@@ -69,14 +69,16 @@ window.sd-hot-corner {{
 
 .hud-size-medium .hud-button,
 .hud-size-medium menubutton.machine-selector > button {{ padding: 4px 10px; font-size: 11px; }}
-.hud-size-medium .hud-gear {{ min-width: 32px; min-height: 32px; font-size: 19px; padding: 0; }}
+.hud-size-medium .hud-gear,
+.hud-size-medium .hud-icon-btn {{ min-width: 32px; min-height: 32px; padding: 0; }}
 .hud-size-medium .hud-title {{ font-size: 12px; }}
 .hud-size-medium .hud-shortcut {{ font-size: 10px; }}
 .hud-size-medium entry.ws-entry {{ min-height: 24px; padding: 2px 8px; font-size: 12px; }}
 
 .hud-size-small .hud-button,
 .hud-size-small menubutton.machine-selector > button {{ padding: 2px 8px; font-size: 10px; }}
-.hud-size-small .hud-gear {{ min-width: 28px; min-height: 28px; font-size: 17px; padding: 0; }}
+.hud-size-small .hud-gear,
+.hud-size-small .hud-icon-btn {{ min-width: 28px; min-height: 28px; padding: 0; }}
 .hud-size-small .hud-title {{ font-size: 11px; }}
 .hud-size-small .hud-shortcut {{ font-size: 9px; padding-top: 2px; padding-bottom: 2px; }}
 .hud-size-small .ws-subtitle {{ font-size: 8px; padding-bottom: 0; }}
@@ -158,14 +160,19 @@ button.machine-peer-selected {{
     border-radius: 12px;
 }}
 
-/* The ⚙ settings toggle: the gear alone, oversized, in a clear hit target —
-   it is the only way into the settings card (shortcut, top bar, launcher),
-   so it reads as an icon rather than one more pill among the labels. */
-.hud-gear {{
+/* Icon-only HUD chrome (⚙ settings, arrange): symbolic SVGs recolored by the
+   Omarchy palette through `color`, oversized into a clear hit target so they
+   read as icons rather than one more pill among the labels. */
+.hud-gear,
+.hud-icon-btn {{
     padding: 0;
     min-width: 36px;
     min-height: 36px;
-    font-size: 22px;
+}}
+.hud-gear image,
+.hud-icon-btn image {{
+    min-width: 20px;
+    min-height: 20px;
 }}
 
 .hud-button-danger {{
@@ -1292,7 +1299,19 @@ separator.launcher-sep {{
     )
 }
 
+/// Register the vendored `assets/icons` tree with the display's icon theme so
+/// `Button::from_icon_name("sd-*-symbolic")` resolves (HUD gear / arrange).
+fn register_app_icons() {
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    if let Some(root) = crate::brand::find_icons_root() {
+        gtk4::IconTheme::for_display(&display).add_search_path(root);
+    }
+}
+
 pub fn apply_styles() {
+    register_app_icons();
     CSS_PROVIDER.with(|cell| {
         let mut opt = cell.borrow_mut();
         let provider = opt.get_or_insert_with(|| {
@@ -1515,12 +1534,13 @@ mod tests {
 
     #[test]
     fn test_hud_gear_style_exists() {
-        // The ⚙ settings toggle is icon-only: without this rule it renders as
-        // one more small labelled pill instead of a large gear.
+        // The ⚙ settings / arrange toggles are icon-only symbolic SVGs:
+        // without this rule they render as empty pills, not a sized icon.
         let css = generate_css(&current_theme());
+        assert!(css.contains(".hud-gear"), "missing CSS rule for .hud-gear");
         assert!(
-            css.contains(".hud-gear"),
-            "missing CSS rule for .hud-gear"
+            css.contains(".hud-icon-btn"),
+            "missing CSS rule for .hud-icon-btn"
         );
     }
 

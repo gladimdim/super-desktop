@@ -16,6 +16,7 @@ mod peer_cli;
 mod peer_pairing;
 mod peer_pairing_ui;
 mod machine_selector;
+mod remote_launcher;
 mod remote_terminal;
 mod remote_workspace;
 mod harness_settings;
@@ -692,6 +693,14 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
     });
 }
 
+/// A typed command refusal for something that never reached the model.
+fn refusal(snapshot: &crate::desktop_protocol::LocalWorkspaceSnapshot, error: &str) -> String {
+    serde_json::to_string(&crate::desktop_protocol::CommandOutcome::rejected(
+        snapshot, error,
+    ))
+    .unwrap_or_default()
+}
+
 fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Application) -> String {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let action = parts.get(0).unwrap_or(&"toggle");
@@ -750,23 +759,47 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
                 Err(error) => json!({"ok": false, "error": error}).to_string(),
             }
         }
-        "desktop-move" => {
+        "desktop-command" => {
             let Some(win) = live_window(ctx) else {
                 return json!({"ok": false, "error": "desktop_not_ready"}).to_string();
             };
-            let payload = cmd.strip_prefix("desktop-move ").unwrap_or("");
-            let request: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
-            let Some(id) = request["cardId"].as_str() else {
-                return json!({"ok": false, "error": "unknown_card"}).to_string();
+            let model = ctx.borrow().local_workspace.clone();
+            // Publish current state before checking anything: an expected
+            // revision describes the published workspace, not a pending local
+            // edit, and a command must never compare against a moving target.
+            let current = match win.desktop_snapshot(&model) {
+                Ok(workspace) => workspace,
+                Err(error) => return json!({"ok": false, "error": error}).to_string(),
             };
-            let (Some(x), Some(y)) = (request["x"].as_i64(), request["y"].as_i64()) else {
-                return json!({"ok": false, "error": "invalid_layout"}).to_string();
+            let payload = cmd.strip_prefix("desktop-command ").unwrap_or("");
+            let request = match serde_json::from_str::<crate::desktop_protocol::CommandRequest>(
+                payload,
+            ) {
+                Ok(request) => request,
+                Err(_) => {
+                    return refusal(&current, "invalid_command");
+                }
             };
-            if !(-32768..=32768).contains(&x) || !(-32768..=32768).contains(&y) {
-                return json!({"ok": false, "error": "invalid_layout"}).to_string();
+            if let Err(rejected) = crate::desktop_protocol::check_command(&current, &request) {
+                return serde_json::to_string(&rejected).unwrap_or_default();
             }
-            match win.move_terminal_card(id, x as i32, y as i32) {
-                Ok(()) => json!({"ok": true}).to_string(),
+            // A create reports the card it made; every other command already
+            // names the card it addressed.
+            let created = match win.apply_workspace_command(&request.command) {
+                Ok(created) => created,
+                Err(error) => return refusal(&current, error),
+            };
+            // Report the state that was really published, so a viewer adopting
+            // these revisions and this geometry cannot be told a stale layout.
+            match win.desktop_snapshot(&model) {
+                Ok(workspace) => {
+                    let card_id = created.or_else(|| request.command.card_id().map(str::to_string));
+                    let applied = crate::desktop_protocol::CommandOutcome::applied(
+                        &workspace,
+                        card_id,
+                    );
+                    serde_json::to_string(&applied).unwrap_or_default()
+                }
                 Err(error) => json!({"ok": false, "error": error}).to_string(),
             }
         }

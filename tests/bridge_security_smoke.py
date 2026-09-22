@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from desktop_bridge_checks import check_desktop_routes
+from desktop_bridge_checks import check_desktop_commands, check_desktop_routes
 
 
 def main():
@@ -62,7 +62,7 @@ def main():
                     connection.close()
 
             assert request("/api/v1/ping")[0] == 200
-            for path in ["/api/v1/desktop/capabilities", "/api/v1/desktop/workspace", "/api/v1/desktop/events", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
+            for path in ["/api/v1/desktop/capabilities", "/api/v1/desktop/workspace", "/api/v1/desktop/events", "/api/v1/desktop/commands", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
                          "/api/v1/harnesses/sd_term_probe/assets", "/api/v1/harnesses/sd_term_probe/assets/id/content",
                          "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
                 assert request(path)[0] == 401, path
@@ -85,15 +85,19 @@ def main():
             token = request("/api/v1/pair/poll", rid)[1]["token"]
             status, desktop = request("/api/v1/desktop/capabilities", token=token)
             assert status == 200
-            assert desktop == {"machineId": request("/api/v1/ping")[1]["bridgeId"],
-                               "desktopApiVersion": 1, "capabilities": ["workspace-snapshot-v1"]}
+            bridge_id = request("/api/v1/ping")[1]["bridgeId"]
+            assert desktop == {"machineId": bridge_id, "desktopApiVersion": 1,
+                               "capabilities": ["workspace-snapshot-v1",
+                                                "workspace-layout-v1",
+                                                "terminal-pty-v1"]}
             assert request("/api/v1/ping")[1]["protocolVersion"] == 3
             assert request("/api/v1/desktop/capabilities", token=token,
                            headers={"Origin": "https://untrusted.example"})[0] == 403
-            for route in ["workspace", "events"]:
+            for route in ["workspace", "events", "commands"]:
                 assert request("/api/v1/desktop/" + route, token=token,
                                headers={"Origin": "https://untrusted.example"})[0] == 403
             desktop_live = check_desktop_routes(request, context, port, token, directory)
+            check_desktop_commands(request, token, bridge_id, directory)
             assert request("/api/v1/theme", token=token)[0] == 200
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Content-Length": "99999999"})[0] == 413
@@ -121,6 +125,11 @@ def main():
             assert request("/api/v1/desktop/capabilities", token=token)[0] == 401
             assert request("/api/v1/desktop/workspace", token=token)[0] == 401
             assert request("/api/v1/desktop/events", token=token)[0] == 401
+            assert request("/api/v1/desktop/commands",
+                           {"requestId": "revoked", "machineId": bridge_id,
+                            "expectedEpoch": "daemon-one",
+                            "command": {"type": "closeTerminal", "cardId": "saved-card",
+                                        "expectedRevision": 1}}, token=token)[0] == 401
             assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401

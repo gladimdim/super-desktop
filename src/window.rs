@@ -59,16 +59,18 @@ fn top_bar_height(size: TopBarSize) -> i32 {
     }
 }
 
-fn paint_top_bar_size(hud: &gtk4::Box, size: TopBarSize, screen_width: i32) {
+/// One bar style for both the local dock and the remote one, so switching PCs
+/// never changes the size of the toolbar the user is reading.
+pub fn paint_top_bar_size(bar: &impl IsA<gtk4::Widget>, size: TopBarSize, screen_width: i32) {
     for class in ["hud-size-small", "hud-size-medium", "hud-size-large"] {
-        hud.remove_css_class(class);
+        bar.remove_css_class(class);
     }
-    hud.add_css_class(match size {
+    bar.add_css_class(match size {
         TopBarSize::Small => "hud-size-small",
         TopBarSize::Medium => "hud-size-medium",
         TopBarSize::Large => "hud-size-large",
     });
-    hud.set_size_request(screen_width, top_bar_height(size));
+    bar.set_size_request(screen_width, top_bar_height(size));
 }
 
 /// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
@@ -260,6 +262,11 @@ impl SuperDesktopWindow {
         // The settings panel is built before the dock. This holder lets its
         // size buttons repaint the live dock once construction has finished.
         let hud_for_settings: Rc<RefCell<Option<gtk4::Box>>> = Rc::new(RefCell::new(None));
+        // The remote workspace has its own bar, which has to follow the same
+        // choice; it is built after this panel, hence another holder.
+        let machine_for_settings: Rc<
+            RefCell<Option<Rc<crate::machine_selector::MachineView>>>,
+        > = Rc::new(RefCell::new(None));
 
         let settings_panel = crate::harness_settings::build_lazy_harness_settings_panel(
             Rc::clone(&state),
@@ -299,6 +306,7 @@ impl SuperDesktopWindow {
             Rc::new({
                 let state = Rc::clone(&state);
                 let hud_for_settings = Rc::clone(&hud_for_settings);
+                let machine_for_settings = Rc::clone(&machine_for_settings);
                 move |size: TopBarSize| {
                     let snapshot = {
                         let mut s = state.borrow_mut();
@@ -307,6 +315,9 @@ impl SuperDesktopWindow {
                     };
                     if let Some(hud) = hud_for_settings.borrow().as_ref() {
                         paint_top_bar_size(hud, size, screen_width);
+                    }
+                    if let Some(view) = machine_for_settings.borrow().as_ref() {
+                        view.paint_top_bar_size(size, screen_width);
                     }
                     crate::state::save_state_async(snapshot);
                 }
@@ -321,8 +332,8 @@ impl SuperDesktopWindow {
         paint_top_bar_size(&hud, state.borrow().top_bar_size, screen_width);
         *hud_for_settings.borrow_mut() = Some(hud.clone());
 
-        // Left chrome (brand, folder, + Note) and right chrome (Arrange / ⚙ /
-        // Hide) sit in a full-width row. The harness launch list is an overlay
+        // Left chrome (brand, folder, + Note) and right chrome (icon-only
+        // arrange / gears / Hide) sit in a full-width row. The harness launch list is an overlay
         // with Align::Center so it stays on the display midline even when the
         // two chrome groups have different widths.
         let hud_overlay = Overlay::new();
@@ -355,6 +366,8 @@ impl SuperDesktopWindow {
             on_close_rc.clone(),
         );
         machine_view.bind_keyboard(&window);
+        machine_view.paint_top_bar_size(state.borrow().top_bar_size, screen_width);
+        *machine_for_settings.borrow_mut() = Some(Rc::clone(&machine_view));
         root_overlay.set_child(Some(&machine_view.stack));
         hud_left.append(&machine_view.local_button);
 
@@ -413,6 +426,12 @@ impl SuperDesktopWindow {
             screen_width,
             screen_height,
         );
+
+        // The remote launch bar shows the same brand logos, so a light/dark
+        // switch has to swap those images as well as the local ones.
+        brand_images
+            .borrow_mut()
+            .extend(machine_view.brand_images());
 
         let win_rc = Rc::new(Self {
             window,
@@ -542,7 +561,7 @@ impl SuperDesktopWindow {
 
         let light_theme = crate::theme::current_theme().mode == "light";
         for agent_key in crate::tmux::HARNESS_KEYS.iter().copied() {
-            let (name, emoji) = harness_label(agent_key);
+            let (name, emoji) = crate::remote_launcher::harness_label(agent_key);
             let btn = Button::new();
             btn.add_css_class("hud-button");
             if let Some(logo) = crate::brand::logo_path(agent_key, light_theme) {
@@ -556,16 +575,10 @@ impl SuperDesktopWindow {
             } else {
                 btn.set_label(&format!("{emoji} {name}"));
             }
-            let tooltip = match agent_key {
-                "antigravity" => "Launch Antigravity CLI (--dangerously-skip-permissions)",
-                "claude" => "Launch Claude Code (--dangerously-skip-permissions)",
-                "codex" => "Launch OpenAI Codex (--dangerously-bypass-approvals-and-sandbox)",
-                "opencode" => "Launch OpenCode (--auto)",
-                "grok" => "Launch Grok CLI (--dangerously-skip-permissions)",
-                "reasonix" => "Launch Reasonix (reasonix code, else npx -y reasonix code)",
-                "aider" => "Launch Aider (--yes-always)",
-                _ => "Launch Terminal Shell",
-            };
+            // Shared with the remote launch bar, so the same harness never
+            // reads differently on the machine that runs it and the one
+            // looking at it.
+            let tooltip = crate::remote_launcher::harness_tooltip(agent_key);
             let has_usage = crate::usage::usage_id_for_agent(agent_key).is_some();
             if !has_usage {
                 // Usage buttons render their launch hint inside the hover
@@ -627,10 +640,17 @@ impl SuperDesktopWindow {
                 .push((agent_key.to_string(), btn));
         }
 
-        // Arrange
-        let btn_arrange = Button::with_label("✨ Arrange");
+        // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
+        let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
+        btn_arrange.update_property(&[gtk4::accessible::Property::Label(
+            "Arrange notes and terminals",
+        )]);
         btn_arrange.set_tooltip_text(Some("Organize notes left, terminals right"));
         btn_arrange.add_css_class("hud-button");
+        btn_arrange.add_css_class("hud-icon-btn");
+        if let Some(img) = btn_arrange.child().and_downcast::<Image>() {
+            img.set_pixel_size(20);
+        }
         let win_w = Rc::downgrade(&win_rc);
         btn_arrange.connect_clicked(move |_| {
             if let Some(w) = win_w.upgrade() {
@@ -639,14 +659,16 @@ impl SuperDesktopWindow {
         });
         hud_right.append(&btn_arrange);
 
-        // The one settings entry point: a bare gear icon (no label), opening
+        // The one settings entry point: a bare gears icon (no label), opening
         // the ⚙ card — shortcut, top-bar harnesses, and the 📱 launcher page.
-        let btn_settings = Button::with_label("⚙");
-        btn_settings.set_tooltip_text(Some(
-            "Settings: Android devices, shortcuts and top bar",
-        ));
+        let btn_settings = Button::from_icon_name("sd-gears-symbolic");
+        btn_settings.update_property(&[gtk4::accessible::Property::Label("Settings")]);
+        btn_settings.set_tooltip_text(Some("Settings: Android devices, shortcuts and top bar"));
         btn_settings.add_css_class("hud-button");
         btn_settings.add_css_class("hud-gear");
+        if let Some(img) = btn_settings.child().and_downcast::<Image>() {
+            img.set_pixel_size(20);
+        }
         let settings_w = settings_panel.widget.clone();
         let settings_refresh = Rc::clone(&settings_panel.refresh);
         btn_settings.connect_clicked(move |_| {
@@ -1685,21 +1707,7 @@ impl SuperDesktopWindow {
     /// viewer's. Expanded cards stay put: their on-screen rectangle is
     /// transient and must not overwrite the saved origin.
     pub fn move_terminal_card(&self, card_id: &str, x: i32, y: i32) -> Result<(), &'static str> {
-        if card_id.is_empty()
-            || card_id.len() > 128
-            || !card_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            return Err("unknown_card");
-        }
-        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
-        let Some(card) = cards.into_iter().find(|c| c.data.borrow().id == card_id) else {
-            return Err("unknown_card");
-        };
-        if card.is_expanded() {
-            return Err("terminal_expanded");
-        }
+        let card = self.terminal_card(card_id)?;
         let (x, y) = crate::remote_workspace::clamp_card_origin(
             self.screen_width.max(0) as u32,
             self.screen_height.max(0) as u32,
@@ -1740,6 +1748,155 @@ impl SuperDesktopWindow {
         crate::state::save_state_async(snapshot);
         self.ghosts.refresh();
         Ok(())
+    }
+
+    /// Apply one validated workspace command to this window's own cards.
+    ///
+    /// Identity, epoch, revision and bounds are already checked by the bridge
+    /// and the owner IPC; what is left here are the card's own state rules, and
+    /// the same actions its local buttons and gestures run. An expanded card
+    /// refuses layout commands because its rectangle is transient, and an
+    /// iconified card keeps its square: only its icon spot moves.
+    ///
+    /// Returns the card a create made, so the caller can report the published
+    /// id and revision for it.
+    pub fn apply_workspace_command(
+        &self,
+        command: &crate::desktop_protocol::WorkspaceCommand,
+    ) -> Result<Option<String>, &'static str> {
+        use crate::desktop_protocol::WorkspaceCommand as Command;
+        match command {
+            Command::SetLayout { card_id, layout, .. } => {
+                self.set_terminal_card_layout(card_id, layout).map(|()| None)
+            }
+            Command::CloseTerminal { card_id, .. } => {
+                self.close_terminal_card(card_id).map(|()| None)
+            }
+            Command::CreateTerminal {
+                agent_type,
+                workspace,
+            } => self.create_terminal_card(agent_type, workspace).map(Some),
+            // Declared in the protocol, refused until its handler exists: a
+            // capability must never promise more than the host implements.
+            Command::SetWorkspace { .. } => Err("unsupported_command"),
+        }
+    }
+
+    /// Create one harness card at a viewer's request, on this machine.
+    ///
+    /// The viewer can only name a harness this host offers and the folder this
+    /// host published (both are checked before this runs), so a create can
+    /// never choose a command, a flag or an arbitrary path. The card is built
+    /// exactly like a local launch, and without forcing this overlay to show.
+    fn create_terminal_card(
+        &self,
+        agent_type: &str,
+        workspace: &str,
+    ) -> Result<String, &'static str> {
+        if !crate::tmux::HARNESS_KEYS.contains(&agent_type) {
+            return Err("unsupported_harness");
+        }
+        let Some(directory) = crate::state::clean_dir(workspace) else {
+            return Err("invalid_workspace");
+        };
+        let session = self.create_new_terminal_in(agent_type, None, None, None, Some(&directory));
+        if session.is_empty() || !crate::tmux::session_alive(&session) {
+            return Err("terminal_unavailable");
+        }
+        Ok(session)
+    }
+
+    /// Move, resize and iconify one card to a viewer's request, clamped to this
+    /// machine's own screen and persisted like the matching local gesture.
+    fn set_terminal_card_layout(
+        &self,
+        card_id: &str,
+        layout: &crate::desktop_protocol::CardLayout,
+    ) -> Result<(), &'static str> {
+        let card = self.terminal_card(card_id)?;
+        if card.data.borrow().iconified != layout.iconified
+            && !card.set_iconified(layout.iconified)
+        {
+            return Err("terminal_unavailable");
+        }
+        // A resize only applies to a card the host shows at its own size: an
+        // iconified card is a fixed square, and the local UI cannot resize one
+        // either. Clamping both sides is what keeps a move from silently
+        // resizing a card the host's screen no longer fits.
+        let (width, height) = clamp_card_size(
+            layout.width as i32,
+            layout.height as i32,
+            self.screen_width,
+            self.screen_height,
+        );
+        let current = {
+            let data = card.data.borrow();
+            (
+                clamp_card_size(
+                    data.width,
+                    data.height,
+                    self.screen_width,
+                    self.screen_height,
+                ),
+                data.iconified,
+            )
+        };
+        if !current.1 && (width, height) != current.0 {
+            card.apply_geometry(crate::card_resize::Rect {
+                x: layout.x as f64,
+                y: layout.y as f64,
+                width,
+                height,
+            });
+        }
+        // The card keeps two spots: which one this command addresses is the
+        // mode it is in, exactly as the viewer drew it.
+        let (x, y) = if layout.iconified {
+            (
+                layout.icon_x.unwrap_or(layout.x),
+                layout.icon_y.unwrap_or(layout.y),
+            )
+        } else {
+            (layout.x, layout.y)
+        };
+        self.move_terminal_card(card_id, x, y)
+    }
+
+    /// Close one card at a viewer's request. The host owns the lifecycle: the
+    /// card, its widget and its session go together, exactly like the local
+    /// close button. Closing writes no geometry, so it is allowed on an
+    /// expanded card — a close must win over a layout gesture.
+    fn close_terminal_card(&self, card_id: &str) -> Result<(), &'static str> {
+        let card = self.any_terminal_card(card_id)?;
+        let session = card.data.borrow().session_name.clone();
+        if self.close_terminal(&session) {
+            Ok(())
+        } else {
+            Err("unknown_card")
+        }
+    }
+
+    /// Find one card by the desktop snapshot's own id, refusing the ones whose
+    /// rectangle is transient. Every layout command starts here, so identity
+    /// and the expanded-card rule cannot drift between them.
+    fn terminal_card(&self, card_id: &str) -> Result<Rc<MiniTerminalCard>, &'static str> {
+        let card = self.any_terminal_card(card_id)?;
+        if card.is_expanded() {
+            return Err("terminal_expanded");
+        }
+        Ok(card)
+    }
+
+    /// Identity check only; the caller decides what an expanded card may take.
+    fn any_terminal_card(&self, card_id: &str) -> Result<Rc<MiniTerminalCard>, &'static str> {
+        if !crate::desktop_protocol::valid_card_id(card_id) {
+            return Err("unknown_card");
+        }
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        cards
+            .into_iter()
+            .find(|card| card.data.borrow().id == card_id)
+            .ok_or("unknown_card")
     }
 
     pub fn raise_all_notes(&self) {
@@ -1862,19 +2019,6 @@ impl SuperDesktopWindow {
 }
 
 /// Short top-bar label + emoji fallback for a harness key.
-fn harness_label(key: &str) -> (&'static str, &'static str) {
-    match key {
-        "antigravity" => ("Antigravity", "🌌"),
-        "claude" => ("Claude", "⚡"),
-        "codex" => ("Codex", "🤖"),
-        "opencode" => ("OpenCode", "🔮"),
-        "grok" => ("Grok", "🚀"),
-        "reasonix" => ("Reasonix", "🧭"),
-        "aider" => ("Aider", "🧠"),
-        _ => ("Shell", "💻"),
-    }
-}
-
 fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[Rc<crate::sticky_note::StickyNote>]) {
     for note in notes {
         if let Some(last) = canvas.last_child() {

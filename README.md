@@ -184,9 +184,17 @@ the rebuild also restarts the separate bridge process. The
 also pairs PCs, fetches remote layouts and can stream one console to a terminal
 (`peer-attach`).
 
-Click a remote console and type: keystrokes, paste and Ctrl+C go to that
-host session. The host keeps its own grid, and remote create, close and drag
-are not implemented yet. `workspace-layout-v1` and `terminal-pty-v1` in
+Click a remote console and type: keystrokes, paste and Ctrl+C go to that host
+session. Drag a console's header to move and raise it on the host: the drop
+carries the card revision this view drew, so a concurrent edit on the host is
+refused as a conflict and the console snaps to the host's real geometry. The
+host keeps its own grid. The remote top bar shows **that PC's own harness
+buttons** — same order, labels and logos as its local toolbar — so clicking one
+launches the harness there, in the folder that PC publishes, without forcing its
+overlay to show. The host's command route also applies resize, iconify and
+close, but the viewer has no edge-resize or close/iconify controls of its own
+yet, and choosing another folder on that PC is not implemented.
+`workspace-layout-v1` and `terminal-pty-v1` in
 [the protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md) record what each PC
 advertises.
 

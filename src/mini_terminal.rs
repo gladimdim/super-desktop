@@ -207,6 +207,11 @@ fn seed_icon_pos(data: &mut TerminalData) {
     }
 }
 
+/// One of the card's own actions, stored after construction so a remote command
+/// runs exactly the code the matching local button or gesture runs.
+type CardAction = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type GeometryAction = Rc<RefCell<Option<Rc<dyn Fn(crate::card_resize::Rect)>>>>;
+
 pub struct MiniTerminalCard {
     pub container: Overlay,
     pub data: Rc<RefCell<TerminalData>>,
@@ -247,6 +252,11 @@ pub struct MiniTerminalCard {
     hover_lock: HoverRaiseLock,
     /// Pointer and typing signals for the overlap ghosts (`user_is_active`).
     activity: Rc<CardActivity>,
+    /// Set after construction: see [`CardAction`]. A remote layout command must
+    /// not grow a second copy of an action that could drift from the button's.
+    iconify_action: CardAction,
+    restore_action: CardAction,
+    geometry_commit: GeometryAction,
 }
 
 impl MiniTerminalCard {
@@ -594,6 +604,9 @@ impl MiniTerminalCard {
             on_session_persist: Rc::clone(&on_session_persist),
             hover_lock: hover_lock.clone(),
             activity,
+            iconify_action: Rc::new(RefCell::new(None)),
+            restore_action: Rc::new(RefCell::new(None)),
+            geometry_commit: Rc::new(RefCell::new(None)),
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -768,6 +781,11 @@ impl MiniTerminalCard {
             })
         };
 
+        // Published after construction so remote commands reach these exact
+        // actions; see the struct fields.
+        *card.iconify_action.borrow_mut() = Some(Rc::clone(&iconify_action));
+        *card.restore_action.borrow_mut() = Some(Rc::clone(&restore_action));
+
         // Wire up buttons
         iconify_btn.connect_clicked({
             let action = Rc::clone(&iconify_action);
@@ -929,6 +947,7 @@ impl MiniTerminalCard {
             )));
             on_drag_end_resize(root_commit.clone().upcast(), &data_commit.borrow());
         });
+        *card.geometry_commit.borrow_mut() = Some(Rc::clone(&on_commit));
         crate::card_resize::attach_resize_borders(
             &card.container,
             resize_limits,
@@ -1067,6 +1086,40 @@ impl MiniTerminalCard {
             .set_label("Double-click to expand • drag any edge to resize");
         self.apply_chrome();
         self.refresh_status();
+    }
+
+    /// Iconify or restore this card through its own button action.
+    ///
+    /// Returns whether the state changed, so a caller can tell "already there"
+    /// from "cannot". A remote command must not invent a state the local UI
+    /// could not reach, which is why the action, not the geometry, is reused.
+    pub fn set_iconified(&self, iconified: bool) -> bool {
+        if self.data.borrow().iconified == iconified || self.is_expanded() {
+            return false;
+        }
+        let action = if iconified {
+            self.iconify_action.borrow().clone()
+        } else {
+            self.restore_action.borrow().clone()
+        };
+        match action {
+            Some(action) => {
+                action();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Apply a geometry commit exactly like a local resize gesture: stored
+    /// size, restored size, chrome and persisted state. Returns whether the
+    /// card was ready to take one.
+    pub fn apply_geometry(&self, rect: crate::card_resize::Rect) -> bool {
+        let Some(commit) = self.geometry_commit.borrow().clone() else {
+            return false;
+        };
+        commit(rect);
+        true
     }
 
     pub fn focus_terminal(&self) {

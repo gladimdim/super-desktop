@@ -37,6 +37,11 @@ class DesktopStub:
             }
         }
         self.commands = []
+        # Owner answers for `desktop-command`; the snapshot above answers every
+        # other route. `silent` models an owner that never answers at all, which
+        # is the only way to reach the bridge's uncertain-outcome path quickly.
+        self.command_reply = None
+        self.silent = False
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(str(self.path))
         self.listener.listen()
@@ -60,7 +65,12 @@ class DesktopStub:
                     command += part
                 with self.lock:
                     self.commands.append(command.decode().strip())
-                    response = json.dumps(self.reply).encode()
+                    if self.silent and command.startswith(b"desktop-command "):
+                        continue
+                    reply = self.reply
+                    if command.startswith(b"desktop-command ") and self.command_reply:
+                        reply = self.command_reply
+                    response = json.dumps(reply).encode()
                 try:
                     client.sendall(response)
                 except BrokenPipeError:
@@ -69,6 +79,11 @@ class DesktopStub:
     def replace(self, reply):
         with self.lock:
             self.reply = copy.deepcopy(reply)
+
+    def answer_commands_with(self, reply=None, silent=False):
+        with self.lock:
+            self.command_reply = copy.deepcopy(reply)
+            self.silent = silent
 
     def close(self):
         self.stop.set()
@@ -97,6 +112,161 @@ def receive_event(stream):
         length = struct.unpack("!Q", receive_exact(stream, 8))[0]
     assert length <= 1024 * 1024
     return json.loads(receive_exact(stream, length))
+
+
+def command_outcome(ok, **fields):
+    """One typed owner answer, shaped exactly like CommandOutcome."""
+    return dict({"ok": ok, "epoch": "daemon-one", "revision": 2,
+                 "cardId": None, "cardRevision": None, "layout": None,
+                 "error": None}, **fields)
+
+
+def set_layout_command(layout, request_id="r1", machine_id=None, epoch="daemon-one",
+                       card_id="saved-card", revision=1):
+    return {
+        "requestId": request_id,
+        "machineId": machine_id if machine_id is not None else "placeholder",
+        "expectedEpoch": epoch,
+        "command": {"type": "setLayout", "cardId": card_id,
+                    "expectedRevision": revision, "layout": layout},
+    }
+
+
+def check_desktop_commands(request, token, machine_id, directory):
+    """The mutation route: envelope validation, dedup and typed refusals."""
+    stub = DesktopStub(directory)
+    layout = copy.deepcopy(stub.reply["workspace"]["cards"][0]["layout"])
+    try:
+        # Nothing reaches the owner before the envelope is valid, so a hostile
+        # or malformed command can never move a card.
+        assert request("/api/v1/desktop/commands", set_layout_command(layout))[0] == 401
+        for bad in [
+            {"type": "setLayout", "cardId": "saved-card", "expectedRevision": 1},
+            set_layout_command(copy.deepcopy(layout), machine_id="other-machine"),
+            set_layout_command(copy.deepcopy(layout), request_id="with space"),
+            set_layout_command(copy.deepcopy(layout), revision=0),
+            set_layout_command({**layout, "width": 0}),
+            # Inside i32, outside the accepted bounds.
+            set_layout_command({**layout, "y": 2 ** 30}),
+            set_layout_command({**layout, "tag": 99}),
+            set_layout_command({**layout, "shellCommand": "rm -rf /"}),
+            {"requestId": "r0", "machineId": "placeholder", "expectedEpoch": "daemon-one",
+             "command": {"type": "createTerminal", "agentType": "", "workspace": "/remote"}},
+            # A create cannot smuggle a command, a flag or an extra field in.
+            {"requestId": "r0", "machineId": "placeholder", "expectedEpoch": "daemon-one",
+             "command": {"type": "createTerminal", "agentType": "shell", "workspace": "/remote",
+                         "command": "rm -rf /"}},
+        ]:
+            status, body = request("/api/v1/desktop/commands", bad, token=token)
+            assert status in (400, 409), (status, body)
+            assert "result" not in body and body["error"] in (
+                "invalid_command", "invalid_layout", "wrong_machine"), body
+        assert stub.commands == [], stub.commands
+
+        # An accepted move answers with the owner's published revision and
+        # geometry, and the owner sees the typed envelope, not a shell string.
+        moved = copy.deepcopy(layout)
+        moved["x"] = 700
+        stub.answer_commands_with(command_outcome(
+            True, revision=2, cardId="saved-card", cardRevision=2, layout=moved))
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(copy.deepcopy(layout), machine_id=machine_id), token=token)
+        assert status == 200, body
+        assert body == {"requestId": "r1", "machineId": machine_id, "epoch": "daemon-one",
+                        "revision": 2,
+                        "result": {"type": "applied", "cardId": "saved-card",
+                                   "cardRevision": 2, "layout": moved}}, body
+        assert len(stub.commands) == 1
+        sent = json.loads(stub.commands[0].split(" ", 1)[1])
+        assert sent["command"]["type"] == "setLayout"
+        assert sent["command"]["cardId"] == "saved-card"
+        assert sent["command"]["expectedRevision"] == 1
+        assert sent["expectedEpoch"] == "daemon-one"
+
+        # The same request id replays the recorded answer instead of applying
+        # the same mutation twice.
+        status, replayed = request("/api/v1/desktop/commands",
+            set_layout_command(copy.deepcopy(layout), machine_id=machine_id), token=token)
+        assert status == 200 and replayed == body, replayed
+        assert len(stub.commands) == 1, stub.commands
+        assert json.loads(stub.commands[0].split(" ", 1)[1])["requestId"] == "r1"
+
+        # A stale revision is refused with the owner's own geometry, so the
+        # viewer can redraw the real state instead of overwriting it.
+        stub.answer_commands_with(command_outcome(
+            False, error="conflict", cardId="saved-card", cardRevision=2, layout=moved))
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r2", machine_id=machine_id), token=token)
+        assert status == 409, body
+        assert body["result"] == {"type": "conflict", "cardId": "saved-card",
+                                  "cardRevision": 2, "layout": moved}, body
+
+        # A refused card and an expired epoch are typed refusals too.
+        stub.answer_commands_with(command_outcome(False, error="unknown_card"))
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r3", machine_id=machine_id), token=token)
+        assert status == 404 and body["result"] == {"type": "rejected",
+                                                    "error": "unknown_card"}, body
+        stub.answer_commands_with(command_outcome(False, error="epoch_changed"))
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r4", machine_id=machine_id), token=token)
+        assert status == 409 and body["result"]["error"] == "epoch_changed", body
+
+        # An owner that never answers leaves the outcome unknown. The retry is
+        # refused rather than applied a second time, and neither is replayed.
+        stub.answer_commands_with(silent=True)
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r5", machine_id=machine_id), token=token)
+        assert status == 504 and body["error"] == "desktop_timeout", body
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r5", machine_id=machine_id), token=token)
+        assert status == 409 and body["error"] == "unknown_outcome", body
+        attempts = [json.loads(c.split(" ", 1)[1])["requestId"] for c in stub.commands]
+        assert attempts.count("r5") == 1, attempts
+
+        # An owner that answers without a typed outcome applied nothing: its
+        # status is still reported, and a code that is not one of ours is never
+        # passed on as free-form text.
+        stub.answer_commands_with({"ok": False, "error": "desktop_not_ready"})
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r6", machine_id=machine_id), token=token)
+        assert status == 503 and body == {"error": "desktop_not_ready"}, body
+        stub.answer_commands_with({"ok": False, "error": "rm -rf / #"})
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r7", machine_id=machine_id), token=token)
+        assert status == 502 and body == {"error": "invalid_desktop_response"}, body
+
+        # A create names the harness and the folder the host itself reported,
+        # and the answer carries the card the host made.
+        created = copy.deepcopy(layout)
+        stub.answer_commands_with(command_outcome(
+            True, revision=3, cardId="sd_term_new", cardRevision=3, layout=created))
+        status, body = request("/api/v1/desktop/commands",
+            {"requestId": "r9", "machineId": machine_id, "expectedEpoch": "daemon-one",
+             "command": {"type": "createTerminal", "agentType": "shell",
+                         "workspace": "/remote/project with spaces"}}, token=token)
+        assert status == 200, body
+        assert body["result"] == {"type": "applied", "cardId": "sd_term_new",
+                                  "cardRevision": 3, "layout": created}, body
+        assert json.loads(stub.commands[-1].split(" ", 1)[1])["command"] == {
+            "type": "createTerminal", "agentType": "shell",
+            "workspace": "/remote/project with spaces"}
+
+        # An owner that is simply not running never received the command, so its
+        # outcome is known: the retry after the owner returns is applied instead
+        # of being refused as uncertain.
+        stub.close()
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r8", machine_id=machine_id), token=token)
+        assert status == 503 and body["error"] == "desktop_unavailable", body
+        stub = DesktopStub(directory)
+        stub.answer_commands_with(command_outcome(
+            True, revision=3, cardId="saved-card", cardRevision=3, layout=layout))
+        status, body = request("/api/v1/desktop/commands",
+            set_layout_command(layout, request_id="r8", machine_id=machine_id), token=token)
+        assert status == 200 and body["result"]["type"] == "applied", body
+    finally:
+        stub.close()
 
 
 def check_desktop_routes(request, context, port, token, directory):

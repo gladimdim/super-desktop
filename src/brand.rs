@@ -85,9 +85,49 @@ pub fn logo_path(agent: &str, light_theme: bool) -> Option<PathBuf> {
     }
 }
 
+/// Locate the vendored icon-theme root (`assets/icons`, containing `hicolor/`).
+/// Same resolution order as [`find_logos_dir`]: installed copy first, then the
+/// repo checkout relative to the executable.
+pub fn find_icons_root() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        let p = PathBuf::from(home).join(".config/super-desktop/assets/icons");
+        if p.join("hicolor").is_dir() {
+            return Some(p);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = exe
+            .parent()
+            .and_then(|d| d.parent())
+            .and_then(|t| t.parent())
+        {
+            let p = root.join("assets/icons");
+            if p.join("hicolor").is_dir() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_vendored_icons_exist_and_parse() {
+        // Same rule as logos: only checked when running from a checkout that
+        // ships the files; an installed location without them is skipped.
+        let Some(root) = find_icons_root() else {
+            return;
+        };
+        for name in ["sd-gears-symbolic.svg", "sd-arrange-symbolic.svg"] {
+            let p = root.join("hicolor/scalable/actions").join(name);
+            assert!(p.is_file(), "missing vendored HUD icon {name}");
+            let text = std::fs::read_to_string(&p).unwrap();
+            assert!(text.contains("<svg"), "{name} is not an SVG");
+        }
+    }
 
     #[test]
     fn test_logo_filename_mapping() {

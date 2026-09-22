@@ -24,6 +24,40 @@ pub const ATTACH_MAX_BACKLOG: usize = 1024 * 1024;
 /// Longest an attach stream lives before the viewer is asked to reconnect.
 pub const ATTACH_MAX_SECS: u64 = 1800;
 
+/// Largest coordinate or size a viewer may name in a layout command. The owner
+/// clamps to its own screen afterwards; these bounds only stop absurd or
+/// hostile numbers before any daemon work happens.
+pub const LAYOUT_MAX_COORD: i32 = 32768;
+pub const LAYOUT_MAX_SIZE: u32 = 32768;
+/// Mirrors `tag::TAG_COUNT`: the host normalizes anything else to "no tag".
+pub const LAYOUT_MAX_TAG: u8 = 8;
+/// Longest accepted card identity, request identity and daemon epoch.
+pub const MAX_CARD_ID: usize = 128;
+pub const MAX_REQUEST_ID: usize = 64;
+pub const MAX_EPOCH: usize = 64;
+/// Longest workspace string a viewer may name in a command.
+pub const MAX_WORKSPACE: usize = 4096;
+
+/// Card ids come from the host's own snapshot, never from a tmux target the
+/// caller supplied, so this is the only shape any route accepts.
+pub fn valid_card_id(card_id: &str) -> bool {
+    !card_id.is_empty()
+        && card_id.len() <= MAX_CARD_ID
+        && card_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Request ids are opaque to the host but must survive logging and the owner's
+/// bounded deduplication cache.
+pub fn valid_request_id(request_id: &str) -> bool {
+    !request_id.is_empty()
+        && request_id.len() <= MAX_REQUEST_ID
+        && request_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Capabilities {
@@ -38,9 +72,15 @@ impl Capabilities {
             machine_id,
             desktop_api_version: DESKTOP_API_VERSION,
             // Enable only once the complete endpoint behavior is available.
-            // `workspace-layout-v1` stays unadvertised: the host does not accept
-            // remote layout/lifecycle mutations yet.
-            capabilities: vec![WORKSPACE_SNAPSHOT.into(), TERMINAL_PTY.into()],
+            // `workspace-layout-v1` is advertised because `POST
+            // /api/v1/desktop/commands` accepts layout and close commands now;
+            // create and default-folder commands are refused with
+            // `unsupported_command` until their handlers exist.
+            capabilities: vec![
+                WORKSPACE_SNAPSHOT.into(),
+                WORKSPACE_LAYOUT.into(),
+                TERMINAL_PTY.into(),
+            ],
         }
     }
 
@@ -301,6 +341,143 @@ pub enum WorkspaceCommand {
     },
 }
 
+impl WorkspaceCommand {
+    /// The card this command addresses, if it addresses one at all. Commands
+    /// without a card are checked against the workspace revision instead.
+    pub fn card_id(&self) -> Option<&str> {
+        match self {
+            Self::CreateTerminal { .. } | Self::SetWorkspace { .. } => None,
+            Self::CloseTerminal { card_id, .. } | Self::SetLayout { card_id, .. } => Some(card_id),
+        }
+    }
+
+    /// The revision the viewer believed when it built this command. Zero means
+    /// it sent no expectation, which the owner refuses: a mutation must never
+    /// be applied on top of an unknown state.
+    pub fn expected_revision(&self) -> u64 {
+        match self {
+            Self::CreateTerminal { .. } => 0,
+            Self::CloseTerminal {
+                expected_revision, ..
+            }
+            | Self::SetLayout {
+                expected_revision, ..
+            }
+            | Self::SetWorkspace {
+                expected_revision, ..
+            } => *expected_revision,
+        }
+    }
+
+    /// Identity shape and bounds, checked independently of the owner's current
+    /// state. The owner clamps geometry to its own screen afterwards.
+    pub fn bounds_ok(&self) -> bool {
+        match self {
+            Self::CreateTerminal {
+                agent_type,
+                workspace,
+            } => {
+                !agent_type.is_empty()
+                    && agent_type.len() <= 32
+                    && agent_type.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                    && !workspace.is_empty()
+                    && workspace.len() <= MAX_WORKSPACE
+                    && !workspace.contains('\0')
+            }
+            Self::CloseTerminal { card_id, .. } => valid_card_id(card_id),
+            Self::SetLayout { card_id, layout, .. } => {
+                let bounded = |value: i32| (-LAYOUT_MAX_COORD..=LAYOUT_MAX_COORD).contains(&value);
+                valid_card_id(card_id)
+                    && bounded(layout.x)
+                    && bounded(layout.y)
+                    && layout.width.clamp(1, LAYOUT_MAX_SIZE) == layout.width
+                    && layout.height.clamp(1, LAYOUT_MAX_SIZE) == layout.height
+                    && layout.restored_width <= LAYOUT_MAX_SIZE
+                    && layout.restored_height <= LAYOUT_MAX_SIZE
+                    && layout.icon_x.is_none_or(bounded)
+                    && layout.icon_y.is_none_or(bounded)
+                    && layout.tag <= LAYOUT_MAX_TAG
+            }
+            Self::SetWorkspace {
+                workspace,
+                expected_revision,
+            } => {
+                !workspace.is_empty()
+                    && workspace.len() <= MAX_WORKSPACE
+                    && !workspace.contains('\0')
+                    && *expected_revision > 0
+            }
+        }
+    }
+
+    /// The stable code a malformed instance of this variant deserves.
+    fn invalid_code(&self) -> &'static str {
+        match self {
+            Self::SetLayout { .. } => "invalid_layout",
+            _ => "invalid_command",
+        }
+    }
+
+    /// The refusal code for a command that can never be applied, or `None` when
+    /// its shape and bounds are acceptable. Both the bridge and the owner check
+    /// this, so a malformed command is refused with the same code before any
+    /// work happens on either side.
+    pub fn shape_error(&self) -> Option<&'static str> {
+        // A card mutation never applies on top of an unknown state: the viewer
+        // has to name the revision it based the command on.
+        if self.card_id().is_some() && self.expected_revision() == 0 {
+            return Some("invalid_command");
+        }
+        if !self.bounds_ok() {
+            return Some(self.invalid_code());
+        }
+        None
+    }
+}
+
+/// Stable refusal codes for the command route, shared with viewers the same way
+/// attach reasons are: a peer never puts free-form text in front of the user.
+/// The list covers what the owner refuses and what the bridge answers when the
+/// owner could not be reached at all.
+pub const COMMAND_ERRORS: [&str; 16] = [
+    "unknown_card",
+    "terminal_expanded",
+    "epoch_changed",
+    "conflict",
+    "invalid_layout",
+    "invalid_command",
+    "unsupported_command",
+    "unsupported_harness",
+    "invalid_workspace",
+    "wrong_machine",
+    "unknown_outcome",
+    "desktop_unavailable",
+    "desktop_not_ready",
+    "desktop_timeout",
+    "invalid_desktop_response",
+    "too_many_desktop_cards",
+];
+
+/// Returns the code when it is one of ours, so callers can safely branch on it.
+pub fn known_command_error(value: &str) -> Option<&'static str> {
+    COMMAND_ERRORS.iter().copied().find(|code| *code == value)
+}
+
+/// The HTTP status for one stable command code, for answers that carry no
+/// workspace snapshot of their own.
+pub fn command_status(error: &str) -> (u16, &'static str) {
+    match error {
+        "unknown_card" => (404, "Not Found"),
+        "conflict" | "terminal_expanded" | "epoch_changed" | "unknown_outcome" | "wrong_machine"
+        | "too_many_desktop_cards" => (409, "Conflict"),
+        "desktop_unavailable" | "desktop_not_ready" => (503, "Service Unavailable"),
+        "desktop_timeout" => (504, "Gateway Timeout"),
+        "invalid_layout" | "invalid_command" | "unsupported_command"
+        | "unsupported_harness" | "invalid_workspace" => (400, "Bad Request"),
+        _ => (502, "Bad Gateway"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandReply {
@@ -318,8 +495,196 @@ pub struct CommandReply {
     rename_all_fields = "camelCase"
 )]
 pub enum CommandResult {
-    Applied { card_id: Option<String> },
+    /// Accepted. `card_revision`/`layout` are the owner's published state right
+    /// after it, so the viewer can adopt them without another round trip. A
+    /// closed card is simply gone, leaving both fields empty.
+    Applied {
+        card_id: Option<String>,
+        card_revision: Option<u64>,
+        layout: Option<CardLayout>,
+    },
+    /// Refused because the addressed card changed since the viewer's snapshot.
+    /// The owner's current geometry comes along, so the viewer redraws the real
+    /// state instead of overwriting a concurrent edit.
+    Conflict {
+        card_id: String,
+        card_revision: Option<u64>,
+        layout: Option<CardLayout>,
+    },
+    /// Refused for any other stable reason; `error` is one of
+    /// [`COMMAND_ERRORS`].
     Rejected { error: String },
+}
+
+/// The owner's typed answer to one command. The bridge binds it to its own
+/// machine id and maps it onto the viewer's [`CommandReply`], so the daemon
+/// never has to know the bridge's identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommandOutcome {
+    pub ok: bool,
+    pub epoch: String,
+    pub revision: u64,
+    pub card_id: Option<String>,
+    pub card_revision: Option<u64>,
+    pub layout: Option<CardLayout>,
+    pub error: Option<String>,
+}
+
+impl CommandOutcome {
+    /// Accepted: the addressed card's published state after the mutation.
+    pub fn applied(snapshot: &LocalWorkspaceSnapshot, card_id: Option<String>) -> Self {
+        let card = card_id
+            .as_deref()
+            .and_then(|id| snapshot.cards.iter().find(|card| card.card_id == id));
+        Self {
+            ok: true,
+            epoch: snapshot.epoch.clone(),
+            revision: snapshot.revision,
+            card_id,
+            card_revision: card.map(|card| card.revision),
+            layout: card.map(|card| card.layout.clone()),
+            error: None,
+        }
+    }
+
+    /// Refused because the card moved on. Carries the owner's own geometry.
+    pub fn conflicted(snapshot: &LocalWorkspaceSnapshot, card: &DesktopCard) -> Self {
+        Self {
+            ok: false,
+            epoch: snapshot.epoch.clone(),
+            revision: snapshot.revision,
+            card_id: Some(card.card_id.clone()),
+            card_revision: Some(card.revision),
+            layout: Some(card.layout.clone()),
+            error: Some("conflict".into()),
+        }
+    }
+
+    /// Refused before anything was applied.
+    pub fn rejected(snapshot: &LocalWorkspaceSnapshot, error: &str) -> Self {
+        Self {
+            ok: false,
+            epoch: snapshot.epoch.clone(),
+            revision: snapshot.revision,
+            card_id: None,
+            card_revision: None,
+            layout: None,
+            error: Some(
+                known_command_error(error)
+                    .unwrap_or("invalid_command")
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// The HTTP status a viewer sees for this answer.
+    pub fn status(&self) -> (u16, &'static str) {
+        if self.ok {
+            return (200, "OK");
+        }
+        command_status(self.error.as_deref().unwrap_or("invalid_command"))
+    }
+
+    /// The viewer-facing reply, carrying the bridge's own machine id.
+    pub fn into_reply(self, machine_id: &str, request_id: &str) -> CommandReply {
+        let result = if self.ok {
+            CommandResult::Applied {
+                card_id: self.card_id,
+                card_revision: self.card_revision,
+                layout: self.layout,
+            }
+        } else {
+            match self.error.as_deref() {
+                Some("conflict") => CommandResult::Conflict {
+                    card_id: self.card_id.unwrap_or_default(),
+                    card_revision: self.card_revision,
+                    layout: self.layout,
+                },
+                other => CommandResult::Rejected {
+                    error: known_command_error(other.unwrap_or("invalid_command"))
+                        .unwrap_or("invalid_command")
+                        .to_string(),
+                },
+            }
+        };
+        CommandReply {
+            request_id: request_id.to_string(),
+            machine_id: machine_id.to_string(),
+            epoch: self.epoch,
+            revision: self.revision,
+            result,
+        }
+    }
+}
+
+/// Validate one command against the owner's published workspace, before any
+/// mutation. Refusing here is what keeps a stale viewer from overwriting a
+/// concurrent local edit, and what keeps a create/close from being replayed
+/// onto a restarted daemon's different epoch.
+///
+/// The refusal is deliberately a value, not an error code: a conflict has to
+/// carry the owner's current revision and geometry to the viewer.
+#[allow(clippy::result_large_err)]
+pub fn check_command(
+    snapshot: &LocalWorkspaceSnapshot,
+    request: &CommandRequest,
+) -> Result<(), CommandOutcome> {
+    if !valid_request_id(&request.request_id)
+        || request.machine_id.is_empty()
+        || request.machine_id.len() > MAX_CARD_ID
+        || request.expected_epoch.is_empty()
+        || request.expected_epoch.len() > MAX_EPOCH
+    {
+        return Err(CommandOutcome::rejected(snapshot, "invalid_command"));
+    }
+    if request.expected_epoch != snapshot.epoch {
+        return Err(CommandOutcome::rejected(snapshot, "epoch_changed"));
+    }
+    if let Some(error) = request.command.shape_error() {
+        return Err(CommandOutcome::rejected(snapshot, error));
+    }
+    if let WorkspaceCommand::CreateTerminal {
+        agent_type,
+        workspace,
+    } = &request.command
+    {
+        // A viewer may only launch a harness this host offers, in the folder
+        // this host published. It never names a command, a flag or a path of
+        // its own: the inventory and the folder come from the snapshot.
+        if !snapshot
+            .visible_harnesses
+            .iter()
+            .any(|key| key == agent_type)
+        {
+            return Err(CommandOutcome::rejected(snapshot, "unsupported_harness"));
+        }
+        if workspace != &snapshot.workspace {
+            return Err(CommandOutcome::rejected(snapshot, "invalid_workspace"));
+        }
+        return Ok(());
+    }
+    let Some(card_id) = request.command.card_id() else {
+        // The default-folder command is declared and refused until the owner
+        // implements it; the capability only covers the handlers that exist.
+        return Err(CommandOutcome::rejected(snapshot, "unsupported_command"));
+    };
+    let card = snapshot
+        .cards
+        .iter()
+        .find(|card| card.card_id == card_id)
+        .ok_or_else(|| CommandOutcome::rejected(snapshot, "unknown_card"))?;
+    // An expanded card's rectangle is transient and must not be overwritten, so
+    // layout commands are refused. Closing writes no geometry and stays
+    // allowed: a close wins over a layout gesture.
+    if card.expanded && matches!(&request.command, WorkspaceCommand::SetLayout { .. }) {
+        return Err(CommandOutcome::rejected(snapshot, "terminal_expanded"));
+    }
+    let expected = request.command.expected_revision();
+    if expected == 0 || expected != card.revision {
+        return Err(CommandOutcome::conflicted(snapshot, card));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -351,10 +716,12 @@ mod tests {
     }
 
     #[test]
-    fn this_host_advertises_live_output_but_not_remote_layout_writes() {
+    fn this_host_advertises_live_output_and_layout_commands() {
         let caps = Capabilities::current("machine-b".into());
         assert!(caps.supports_terminal_stream());
-        assert!(!caps.supports_remote_desktop());
+        // The command route accepts layout and close commands, so the
+        // capability is no longer a promise the host cannot keep.
+        assert!(caps.supports_remote_desktop());
         assert!(caps.capabilities.contains(&WORKSPACE_SNAPSHOT.to_string()));
     }
 
@@ -420,6 +787,211 @@ mod tests {
             "type": "closeTerminal", "cardId": "card-without-revision"
         }))
         .is_err());
+    }
+
+    /// A move-only drop still carries the whole layout, because the revision it
+    /// is checked against guards every field at once.
+    fn layout_request(revision: u64, layout: CardLayout) -> CommandRequest {
+        CommandRequest {
+            request_id: "r1".into(),
+            machine_id: "b".into(),
+            expected_epoch: "host-one".into(),
+            command: WorkspaceCommand::SetLayout {
+                card_id: "card-one".into(),
+                expected_revision: revision,
+                layout,
+            },
+        }
+    }
+
+    fn host_layout() -> CardLayout {
+        crate::remote_workspace::fixture().local.cards[0].layout.clone()
+    }
+
+    fn set_layout_request(revision: u64) -> CommandRequest {
+        layout_request(revision, host_layout())
+    }
+
+    #[test]
+    fn commands_are_checked_against_epoch_revision_and_owner_state() {
+        let snapshot = crate::remote_workspace::fixture().local;
+        check_command(&snapshot, &set_layout_request(1)).unwrap();
+
+        // A stale viewer is refused with the owner's own geometry, never
+        // silently allowed to overwrite a concurrent edit.
+        let stale = check_command(&snapshot, &set_layout_request(9)).err().unwrap();
+        assert!(!stale.ok);
+        assert_eq!(stale.error.as_deref(), Some("conflict"));
+        assert_eq!(stale.card_id.as_deref(), Some("card-one"));
+        assert_eq!(stale.card_revision, Some(1));
+        assert_eq!(stale.layout.clone().unwrap().x, 100);
+        assert_eq!(stale.status(), (409, "Conflict"));
+
+        // A revision of zero is not "no expectation", it is a malformed command.
+        assert_eq!(
+            check_command(&snapshot, &set_layout_request(0))
+                .err()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("invalid_command")
+        );
+
+        let mut other_epoch = set_layout_request(1);
+        other_epoch.expected_epoch = "host-two".into();
+        assert_eq!(
+            check_command(&snapshot, &other_epoch).err().unwrap().error.as_deref(),
+            Some("epoch_changed")
+        );
+
+        let mut unknown = set_layout_request(1);
+        unknown.command = WorkspaceCommand::CloseTerminal {
+            card_id: "card-two".into(),
+            expected_revision: 1,
+        };
+        let refusal = check_command(&snapshot, &unknown).err().unwrap();
+        assert_eq!(refusal.error.as_deref(), Some("unknown_card"));
+        assert_eq!(refusal.status(), (404, "Not Found"));
+
+        // A create may only name a harness this host offers, in the folder this
+        // host published: the viewer never sends a command, a flag or a path.
+        let mut create = set_layout_request(1);
+        create.command = WorkspaceCommand::CreateTerminal {
+            agent_type: "shell".into(),
+            workspace: "/project".into(),
+        };
+        check_command(&snapshot, &create).unwrap();
+        create.command = WorkspaceCommand::CreateTerminal {
+            agent_type: "aider".into(),
+            workspace: "/project".into(),
+        };
+        let refusal = check_command(&snapshot, &create).err().unwrap();
+        assert_eq!(refusal.error.as_deref(), Some("unsupported_harness"));
+        assert_eq!(refusal.status(), (400, "Bad Request"));
+        create.command = WorkspaceCommand::CreateTerminal {
+            agent_type: "shell".into(),
+            workspace: "/etc".into(),
+        };
+        assert_eq!(
+            check_command(&snapshot, &create).err().unwrap().error.as_deref(),
+            Some("invalid_workspace")
+        );
+
+        // The default-folder command is the one variant still unimplemented, and
+        // it is refused with its own code instead of half-applying.
+        let mut unsupported = set_layout_request(1);
+        unsupported.command = WorkspaceCommand::SetWorkspace {
+            workspace: "/project".into(),
+            expected_revision: 1,
+        };
+        assert_eq!(
+            check_command(&snapshot, &unsupported)
+                .err()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("unsupported_command")
+        );
+
+        // An expanded card refuses layout commands but still accepts a close:
+        // its transient rectangle must not be written, yet a close wins.
+        let mut expanded = crate::remote_workspace::fixture().local;
+        expanded.cards[0].expanded = true;
+        assert_eq!(
+            check_command(&expanded, &set_layout_request(1))
+                .err()
+                .unwrap()
+                .error
+                .as_deref(),
+            Some("terminal_expanded")
+        );
+        let mut close = set_layout_request(1);
+        close.command = WorkspaceCommand::CloseTerminal {
+            card_id: "card-one".into(),
+            expected_revision: 1,
+        };
+        check_command(&expanded, &close).unwrap();
+    }
+
+    #[test]
+    fn command_bounds_reject_hostile_geometry_before_the_owner_sees_it() {
+        let mut layout = host_layout();
+        let bounds = |layout: CardLayout| layout_request(1, layout).command.bounds_ok();
+        assert!(bounds(layout.clone()));
+        layout.width = 0;
+        assert!(!bounds(layout.clone()));
+        layout.width = LAYOUT_MAX_SIZE + 1;
+        assert!(!bounds(layout.clone()));
+        layout.width = 640;
+        layout.y = i32::MIN;
+        assert!(!bounds(layout.clone()));
+        layout.y = 200;
+        layout.tag = LAYOUT_MAX_TAG + 1;
+        assert!(!bounds(layout.clone()));
+        layout.tag = 3;
+        layout.icon_x = Some(LAYOUT_MAX_COORD + 1);
+        assert!(!bounds(layout.clone()));
+        layout.icon_x = None;
+        assert!(bounds(layout.clone()));
+
+        // Request ids reach a log and a dedup cache, so their shape is bounded.
+        for bad in ["", "with space", "with/slash", &"x".repeat(MAX_REQUEST_ID + 1)] {
+            let mut request = set_layout_request(1);
+            request.request_id = bad.into();
+            assert!(!valid_request_id(bad), "{bad}");
+            assert!(
+                check_command(&crate::remote_workspace::fixture().local, &request).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(valid_request_id("a-b_9"));
+        // `tag::TAG_COUNT` is the palette's real size; this constant mirrors it.
+        assert_eq!(LAYOUT_MAX_TAG, crate::tag::TAG_COUNT);
+    }
+
+    #[test]
+    fn an_outcome_is_typed_on_the_wire_and_reports_the_published_revision() {
+        let mut snapshot = crate::remote_workspace::fixture().local;
+        snapshot.revision = 7;
+        snapshot.cards[0].revision = 7;
+        snapshot.cards[0].layout.x = 700;
+        let applied = CommandOutcome::applied(&snapshot, Some("card-one".into()));
+        assert_eq!(applied.status(), (200, "OK"));
+        let reply = applied.into_reply("machine-b", "r1");
+        assert_eq!(
+            serde_json::to_value(&reply).unwrap(),
+            json!({
+                "requestId": "r1", "machineId": "machine-b",
+                "epoch": "host-one", "revision": 7,
+                "result": {"type": "applied", "cardId": "card-one", "cardRevision": 7,
+                           "layout": serde_json::to_value(&snapshot.cards[0].layout).unwrap()}
+            })
+        );
+
+        // A close removes the card, so it has no revision to report.
+        let mut closed = snapshot.clone();
+        closed.cards.clear();
+        closed.revision = 8;
+        let applied = CommandOutcome::applied(&closed, Some("card-one".into()));
+        assert_eq!(applied.into_reply("machine-b", "r2").result, CommandResult::Applied {
+            card_id: Some("card-one".into()),
+            card_revision: None,
+            layout: None,
+        });
+
+        let refusal = CommandOutcome::rejected(&snapshot, "conflict");
+        assert_eq!(refusal.status(), (409, "Conflict"));
+        // Free-form text from a peer can never reach the user.
+        let refusal = CommandOutcome::rejected(&snapshot, "rm -rf /");
+        assert_eq!(refusal.error.as_deref(), Some("invalid_command"));
+        assert_eq!(refusal.status(), (400, "Bad Request"));
+        assert_eq!(
+            refusal.into_reply("machine-b", "r3").result,
+            CommandResult::Rejected {
+                error: "invalid_command".into()
+            }
+        );
+        assert!(known_command_error("unknown_outcome").is_some());
     }
 
     #[test]

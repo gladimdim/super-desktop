@@ -1,7 +1,9 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
-Status: pairing, a live remote workspace, its terminal transport and viewer
-typing are delivered; remote layout commands remain in progress.
+Status: pairing, a live remote workspace, its terminal transport, viewer typing,
+the first commands (move/resize/iconify/close) and launching the host's own
+harnesses from the remote top bar are delivered; folder selection, the remaining
+viewer command UI and live outgoing subscriptions remain in progress.
 Updated 2026-09-22 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
@@ -12,8 +14,13 @@ grid are implemented. Outgoing certificate-pinned PC pairing, private peer
 storage, remote snapshot retrieval and a `peer-attach` streaming CLI are testable
 through the CLI, and the top-left selector renders the host's consoles live at
 their own positions and sizes. Typing into a focused remote console reaches
-that host session after the attach handshake. Lifecycle mutation extraction,
-remote commands and live outgoing workspace subscriptions remain pending.
+that host session after the attach handshake, and
+`POST /api/v1/desktop/commands` applies typed layout, close and create commands
+with epoch/revision checks and per-device deduplication. While a remote PC is
+selected its top bar offers that PC's own harness buttons, and a click launches
+that harness there. Default folder selection, the viewer's own close/resize and
+iconify controls, the 100% + pan/zoom mode, live outgoing workspace
+subscriptions and the two-PC regression matrix remain pending.
 
 ## Current delivery status
 
@@ -31,6 +38,23 @@ PCs:
   selector. The viewer polls the host's authenticated workspace snapshot and
   draws terminal cards in their host positions, sizes, iconified positions and
   stacking order, scaled to fit the viewer canvas and never enlarged.
+- Dragging a remote card's header moves and raises it on the host: the gesture
+  ends with one typed `POST /api/v1/desktop/commands` (`setLayout`) that carries
+  the card revision the viewer drew, so a concurrent host edit is answered with
+  `conflict` and the host's own geometry instead of being overwritten. The same
+  command route applies resize, iconify and `closeTerminal` on the host; the
+  viewer's own edge-resize and close/iconify controls are the next milestone. A
+  card the host shows expanded, or a host that does not advertise
+  `workspace-layout-v1`, keeps its own layout.
+- The remote workspace has the **same top bar** as a local one: machine selector
+  and brand on the left, the host's own harness buttons centered in the host's
+  order, with the same labels, logos and tooltips the host's toolbar uses, and
+  that host's console count and folder beside them. Clicking one sends a typed
+  `createTerminal` command and the host builds the card exactly like a local
+  launch — its own inventory, sandbox flags and folder — without being forced to
+  show its overlay. The bar is offered only by a host that advertises
+  `workspace-layout-v1`, is inert while a launch is in flight, and names only
+  harnesses and folders that host published.
 - Each visible remote console is a real VTE terminal fed by the host's own tmux
   attach output over pinned WSS (`GET /api/v1/desktop/terminals/<card-id>/attach`),
   so output, colours, alternate-screen applications and redraws match the host.
@@ -45,13 +69,19 @@ PCs:
   bridge can otherwise keep serving port 8759 and return a 404 for the desktop
   capability route after the source has been updated.
 
-This is a **live view you can type into**, not the finished interactive feature.
-It shows the host's terminal pixels and sends keystrokes, paste and Ctrl+C to
-the focused session. It creates or closes no cards and writes no card geometry
-on the selected host. A host that says “Update and rebuild SUPER DESKTOP on the host” is serving an
-older bridge without `terminal-pty-v1`, and its workspace is drawn as chrome
-without live consoles. Hosts that hide their overlay release their viewers'
-streams, and reopening the overlay reconnects them.
+This is a **live view you can type into, rearrange and launch from**, not the
+finished interactive feature. It shows the host's terminal pixels, sends
+keystrokes, paste and Ctrl+C to the focused session, moves, resizes, iconifies
+and closes the host's own cards through the command route, and launches that
+host's harnesses from the top bar. It changes no folder: `setWorkspace` is
+accepted by the protocol and refused with `unsupported_command` until its
+handler exists, so a new card always starts in the folder that host publishes.
+The viewer still has no close/resize/iconify controls of its own — the host
+keeps those until that UI lands. A host that says “Update and rebuild SUPER
+DESKTOP on the host” is serving an older bridge without `terminal-pty-v1`, and
+its workspace is drawn as chrome without live consoles. Hosts that hide their
+overlay release their viewers' streams, and reopening the overlay reconnects
+them.
 
 ### Two-PC update and smoke check
 
@@ -93,18 +123,24 @@ automatically.
    take live streams (frontmost first, at most eight), a detached or over-budget
    card explains itself, and both hide and machine switches detach without
    touching the host session.
-3. Next: authenticated `POST /api/v1/desktop/commands` handlers backed by the
-   host's workspace model. Start with card layout/iconify and close operations;
-   enforce machine/epoch/card revisions and request deduplication, then cover
-   creation, harness inventory and default folders. Advertise
-   `workspace-layout-v1` only when those handlers exist.
-4. Next: viewer input. Send it only after a current-selection handshake, keep
-   the prompt-transaction guard, add the input arbitration the plan requires,
-   and never replay keys after a disconnect. Then route remote card gestures and
-   toolbar actions through the command API, add the 100% + pan/scroll mode,
-   implement fit/100% coordinate transforms, conflict feedback and live WSS
-   workspace events. Add two-PC regression coverage for switching, concurrent
-   edits, bridge/daemon restart and revocation.
+3. **Delivered:** `POST /api/v1/desktop/commands` backed by the host's own
+   workspace, with the typed envelope (`requestId`, `machineId`,
+   `expectedEpoch`, card id, `expectedRevision`), machine/epoch/revision checks,
+   rejected-with-geometry conflicts, a bounded per-device request cache for
+   deduplication inside one epoch, and no automatic replay after an ambiguous
+   timeout. `setLayout` (move, resize, iconify) and `closeTerminal` are applied
+   through the daemon's own card actions, `createTerminal` builds a card exactly
+   like a local launch, and `workspace-layout-v1` is advertised because those
+   handlers exist. The viewer's drag drop and its top-bar harness buttons are the
+   callers. `setWorkspace` is declared and refused with `unsupported_command`.
+4. Next: the rest of the viewer's command UI — close/iconify from remote card
+   controls, conflict feedback, and the 100% + pan/scroll mode with fit/100%
+   coordinate transforms — then the host's folder list with `setWorkspace`, live
+   WSS workspace events in place of the two-second poll, and two-PC regression
+   coverage for switching, concurrent edits, bridge/daemon restart and
+   revocation. Viewer input (delivered) stays
+   behind the current-selection handshake and the prompt-transaction guard, and
+   keys are never replayed after a disconnect.
 
 ## 1. Intended experience and scope
 
@@ -139,9 +175,9 @@ Notes are deferred in the first release: show only the selected host's terminals
 hide local notes in remote mode, and disable remote New Note with an explanation.
 Do not silently create local notes while viewing a remote PC. Remote file previews
 and image prompts are a follow-up; hide/disable those buttons until routed through
-the authenticated host APIs. Live terminal output and viewer typing are
-delivered. Remote create, close and layout changes are still required before
-this feature is complete.
+the authenticated host APIs. Live terminal output, viewer typing, remote create,
+close and layout changes are delivered; the host's own folder list and the rest
+of the viewer's command UI are still required before this feature is complete.
 
 ## 2. What exists and where to change it
 
@@ -245,12 +281,14 @@ blocks connection and requires a fresh trusted invitation, never silent trust.
 Keep existing Android response shapes and endpoint semantics. Negotiate an
 additive authenticated capability document, for example
 `GET /api/v1/desktop/capabilities`, containing bridge ID, desktop API version and
-capabilities `workspace-snapshot-v1`, `terminal-pty-v1` and (once mutations
-exist) `workspace-layout-v1`. A 404 or missing required capability yields “Update
+capabilities `workspace-snapshot-v1`, `terminal-pty-v1` and
+`workspace-layout-v1`. A 404 or missing required capability yields “Update
 SUPER DESKTOP on this PC”; never pretend phone snapshots provide full desktop
 support. Do not bump security protocol v3 for additive APIs. A host advertises a
-capability only for behavior it actually implements, so `workspace-layout-v1`
-stays off until the command route exists.
+capability only for behavior it actually implements: `workspace-layout-v1` is
+advertised because the command route applies layout, close and create commands,
+and a command whose handler does not exist is refused with `unsupported_command`
+instead of being half-implemented.
 
 Delivered endpoints (`✓`) and the ones still to build:
 
@@ -258,8 +296,8 @@ Delivered endpoints (`✓`) and the ones still to build:
 | --- | --- |
 | ✓ `GET /api/v1/desktop/workspace` | Authoritative local-workspace snapshot from the host daemon. |
 | ✓ `GET /api/v1/desktop/events` (WSS) | Initial snapshot, then changed snapshots and host availability. |
-| ✓ `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live PTY transport for one owned session; currently host→viewer output only. |
-| `POST /api/v1/desktop/commands` | Typed create, close, layout/tag/iconify and default-folder commands, with request IDs and revisions. |
+| ✓ `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live PTY transport for one owned session: host output as binary frames, viewer keystrokes back. |
+| ✓ `POST /api/v1/desktop/commands` | Typed commands with request IDs, epoch and card revisions: `setLayout`, `closeTerminal` and `createTerminal` are applied; `setWorkspace` is refused with `unsupported_command` until it is. |
 
 Reuse existing authenticated workspace/harness-type endpoints where their
 semantics fit. New desktop mutations should use the command envelope so create
@@ -291,7 +329,13 @@ Commands carry `requestId`, `machineId`, `expectedEpoch`, target card identity a
 expected card revision where applicable. Validate allowed fields and bounds.
 Apply through structured Unix IPC to the owning model, with a typed success or
 error reply and resulting revision. No shell command interpolation, arbitrary
-tmux targets or remote access to local administrative IPC.
+tmux targets or remote access to local administrative IPC. **Delivered:**
+`src/desktop_protocol.rs` owns the envelope, its bounds and the epoch/revision
+checks; the bridge validates shape and bounds before any IPC and keys its
+bounded deduplication cache on the paired device, the epoch and the request id;
+the daemon publishes current state, re-checks, applies through the card's own
+actions and publishes once more, so the revision it reports is the one it really
+stored.
 
 Serialize mutations on the host model. Persist accepted layout/lifecycle changes
 before reporting them durably committed. Local gestures use the same revision
@@ -300,10 +344,13 @@ reject a stale edit with conflict and current geometry instead of overwriting a
 concurrent edit. Closing a card wins over an in-flight drag.
 
 Use a bounded per-device request-result cache for mutation deduplication within
-one daemon epoch. Never automatically replay create/close after an epoch change
-or an ambiguous timeout; refresh state and show an uncertain outcome. Persisting
-deduplication across crashes is a later improvement, not an exactly-once claim.
-Terminal keystrokes are never replayed after disconnect.
+one daemon epoch (**delivered:** 16 per device, 256 overall, entries pruned when
+the epoch changes). Never automatically replay create/close after an epoch change
+or an ambiguous timeout; refresh state and show an uncertain outcome
+(**delivered:** a request whose owner never answered is remembered as uncertain
+and its retry is refused with `unknown_outcome` rather than applied again).
+Persisting deduplication across crashes is a later improvement, not an
+exactly-once claim. Terminal keystrokes are never replayed after disconnect.
 
 ## 6. Full interactive terminal transport — output and viewer typing delivered
 
@@ -441,12 +488,14 @@ required for the first release; follow-ups in section 1 are separate work.
    canvas metadata, stacking migration and structured IPC in `main.rs`. Keep
    local UI behavior and CLI/Android targeting intact. Ensure create/resize works
    while hidden without forcibly showing the host overlay.
-3. **Desktop bridge APIs — snapshots/events and the PTY attach route delivered; mutations pending.** `src/desktop_bridge.rs`
-   serves snapshot/events plus `terminals/<card-id>/attach`, reusing bridge
-   authentication, limits, the shared reason-code list and owner IPC, and
-   advertising `terminal-pty-v1`. `src/terminal_transport.rs` owns the grid rule.
-   `POST /api/v1/desktop/commands` with epoch reconciliation and mutation
-   deduplication is still pending, and stays unadvertised until it exists.
+3. **Desktop bridge APIs — snapshots/events, the PTY attach route and the command route delivered.** `src/desktop_bridge.rs`
+   serves snapshot/events, `terminals/<card-id>/attach` and
+   `POST /api/v1/desktop/commands`, reusing bridge authentication, limits, the
+   shared reason-code list and owner IPC, and advertising `terminal-pty-v1` and
+   `workspace-layout-v1`. `src/terminal_transport.rs` owns the grid rule; the
+   command route owns envelope validation and per-device deduplication, and the
+   daemon re-checks epoch, revision and bounds before applying anything. The
+   per-card `cards/<id>/position` route it replaced is gone.
 4. **Peer client and registry — delivered for pairing, snapshots and the attach stream.** `src/peer_client.rs` and
    `src/peer_store.rs` handle invitation pairing, pinned HTTPS/WSS (shared pin
    verifier, no proxies, no redirects), private credentials, version checks,
@@ -459,10 +508,12 @@ required for the first release; follow-ups in section 1 are separate work.
    VTE fed by the network stream, forwards that VTE's committed bytes to the
    host, keeps host geometry and stacking, budgets the attachments and never
    touches local session preparation.
-6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids and
-   stream budgeting are delivered. Fit/100% modes, the inverse drag transform,
-   revision conflicts and routed remote controls remain, together with a two-PC
-   check that B can view C while A operates B, and that A/B can view each other
+6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids,
+   stream budgeting, the inverse drag transform, revision conflicts with the
+   host's own geometry and routed move/resize/iconify/close commands are
+   delivered. The viewer's own controls for close/resize/iconify, the 100% +
+   pan/scroll mode and conflict feedback remain, together with a two-PC check
+   that B can view C while A operates B, and that A/B can view each other
    without recursion or exported peer state.
 7. **Regression, documentation and release — ongoing.** Complete the matrix below, update
    README and SECURITY (device terminology, outgoing credentials, new routes,
@@ -483,7 +534,13 @@ Automated coverage must test behavior across boundaries, especially:
   token expiry, changed certificates, immediate revocation, auth on every new
   endpoint, malformed frames and bounded queues. Isolate test state/ports.
 - Snapshot/subscription race, gaps and epoch changes; concurrent move/close;
-  deduplicated create; uncertain mutations never blindly retried.
+  deduplicated create; uncertain mutations never blindly retried. A slow poll
+  cannot take back a revision the viewer already adopted. Delivered coverage:
+  `desktop_protocol` (envelope, bounds, epoch/revision/conflict checks, typed
+  outcome and reply), `bridge_security_smoke` (route auth, refused envelopes
+  before owner IPC, deduplicated replay, uncertain outcome, conflicts with the
+  owner's geometry, free-form owner errors downgraded) and
+  `machine_selector::tests::stale_poll_inner` (revision merge and epoch reset).
 - Terminal UTF-8 across frame boundaries, alternate screen, color, reconnect
   redraw, size changes, slow reader and abrupt disconnect. Session PID survives
   detach/switch/hide. Delivered coverage: `terminal_transport` (grid rule, two
@@ -511,8 +568,10 @@ Manual acceptance matrix:
 | Equal-sized displays | Host positions, card sizes, icon state and order match. |
 | Different sizes/scales | Fit or 100% view is usable; all cards reachable; viewing never writes layout back. |
 | Shell + installed harness + full-screen app | Live console output, colour and full-screen redraws match the host; typing, paste and Ctrl+C reach the focused session. |
-| Drag/resize from either machine | Other view updates; conflicts visible; no resizing oscillation. |
-| Create/close on B from A | B owns the lifecycle and folder; A's local state is unchanged. |
+| Launch a harness from the viewer's top bar | The buttons are the host's own list, in the host's order, and the click creates the card on the host in the host's published folder. A harness the host does not offer is not listed, and an older host offers no buttons at all. |
+| Drag/resize from either machine | Other view updates; a stale gesture is refused as a conflict and the card snaps to the host's real geometry; no resizing oscillation. |
+| Close on B from A | B owns the lifecycle: its card, widget and session go, and A's local state is unchanged. |
+| Create on B from A | B owns the lifecycle: the card appears in B's workspace and folder, A's local state is unchanged, and B's overlay is not forced to show. |
 | Rapid switching and hide/show | No keys reach the wrong PC and no harness is killed. |
 | B asleep, bridge restart, daemon restart | Clear stale/offline state; safe refresh; no duplicate commands, and every console says why it has no live stream. |
 | Android plus desktop viewers | Existing phone pairing/list/input/files remain compatible. |

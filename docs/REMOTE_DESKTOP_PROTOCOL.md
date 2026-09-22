@@ -4,14 +4,19 @@ This document accompanies [the implementation plan](REMOTE_DESKTOP_PLAN.md).
 The machine selector now opens a **live remote workspace**: the host's consoles
 are streamed over pinned WSS and rendered in real VTE widgets at the host's own
 positions, sizes, stacking order and iconified state. Clicking a console and
-typing (including paste and Ctrl+C) writes into that host session.
+typing (including paste and Ctrl+C) writes into that host session, and dragging
+its header moves and raises the host's own card, and the top bar offers that
+PC's own harness buttons, so a click launches the harness on that PC.
 Implemented: protocol negotiation, a daemon-owned local workspace model,
 authenticated workspace snapshots/events, persisted terminal stacking order, the
-host-side PTY attach transport with a host-owned grid, viewer keystrokes on
-that stream, and the viewer's live consoles. Outgoing certificate-pinned
-pairing, remote snapshot retrieval and a `peer-attach` streaming CLI are
-available too (see below). Remote layout and lifecycle mutations remain
-pending; this is still an incremental development branch.
+host-side PTY attach transport with a host-owned grid, viewer keystrokes on that
+stream, the viewer's live consoles, and the typed command route with `setLayout`,
+`closeTerminal` and `createTerminal` behind epoch/revision checks and per-device
+deduplication.
+Outgoing certificate-pinned pairing, remote snapshot retrieval and a
+`peer-attach` streaming CLI are available too (see below). The default-folder
+command, the viewer's own close/iconify controls and live outgoing workspace
+subscriptions remain pending; this is still an incremental development branch.
 
 ## Delivered user flow and current limit
 
@@ -28,9 +33,28 @@ keys, bracketed paste, IME) and the viewer sends those bytes after the host's
 input guard as phone and image-prompt input, and drops them if that guard is
 busy or the PTY cannot accept them. Keys are not replayed after a disconnect,
 a hide, or a switch to another PC. The viewer holds at most eight attachments
-at once. Dragging a card's header moves and raises it on the host.
-Remote create, close, resize and folder selection stay on the host until
-typed commands exist. Cards the host shows in front are the ones
+at once.
+
+Dragging a card's header moves and raises it on the host: the gesture ends with
+one typed `setLayout` command carrying the card revision the viewer drew, so a
+concurrent host edit is refused as a conflict and the card snaps to the host's
+real geometry. Layout commands are sent only to a host that advertises
+`workspace-layout-v1`; a host that does not keeps its own layout and the drop
+reverts, and a card the host shows expanded keeps its own rectangle. The same
+route lets the host apply a resize, an iconify or a close — those are implemented
+and tested host-side, and the viewer's own controls for them are the next
+milestone.
+
+The remote top bar also carries the host's own harness list: the same buttons,
+labels, logos, tooltips and order its local toolbar shows, taken from that host's
+snapshot (`harnessTypes` plus `visibleHarnesses`, which is the host's stored
+selection minus what is not installed there). Clicking one sends `createTerminal`
+and the host creates the card in the folder it published, exactly like a local
+launch, without showing its own overlay. A host that does not advertise
+`workspace-layout-v1` shows no buttons and says to update it, there are no usage
+cards here (those numbers describe this PC, not that one), and choosing another
+folder on that PC is not available yet. Cards the host shows in front are the
+ones
 that get live output; the rest keep their chrome with an explanation. While
 the overlay is hidden the streams are released (the host keeps its sessions and
 every card keeps its last frame), and showing it again reconnects at once.
@@ -50,18 +74,21 @@ credential over HTTPS. It returns:
 {
   "machineId": "<existing persistent bridgeId>",
   "desktopApiVersion": 1,
-  "capabilities": ["workspace-snapshot-v1", "terminal-pty-v1"]
+  "capabilities": ["workspace-snapshot-v1", "workspace-layout-v1", "terminal-pty-v1"]
 }
 ```
 
-`workspace-snapshot-v1` advertises read-only workspace snapshots/events, and
-`terminal-pty-v1` advertises the live terminal attach stream. The host
-deliberately does **not** advertise `workspace-layout-v1` yet, because it still
-refuses remote layout and lifecycle mutations: it must never offer a capability
-whose endpoints are unimplemented. A desktop client enables live consoles only
-for a host advertising `terminal-pty-v1`, and enables interactive remote desktop
-mode only for a host advertising both `workspace-layout-v1` and `terminal-pty-v1`
-with a supported `desktopApiVersion`. Unknown optional capabilities can be
+`workspace-snapshot-v1` advertises read-only workspace snapshots/events,
+`terminal-pty-v1` advertises the live terminal attach stream, and
+`workspace-layout-v1` advertises the command route. The host advertises it
+because `POST /api/v1/desktop/commands` really applies layout and close
+commands; it must never offer a capability whose endpoints are unimplemented,
+which is why a command variant with no handler is answered with
+`unsupported_command` instead of being half-applied. A desktop client enables
+live consoles only for a host advertising `terminal-pty-v1`, and enables
+interactive remote desktop mode (drags and routed controls) only for a host
+advertising both `workspace-layout-v1` and `terminal-pty-v1` with a supported
+`desktopApiVersion`. Unknown optional capabilities can be
 ignored. Missing endpoint, missing capability or unsupported version means the
 host needs an update, not permission to fall back to snapshot terminal
 emulation.
@@ -75,6 +102,7 @@ remains v3; Android endpoints and credentials are unchanged.
 | `GET /api/v1/desktop/workspace` | Complete current workspace snapshot, retrieved from the local daemon via Unix IPC. |
 | `GET /api/v1/desktop/events` (WSS) | Initial complete snapshot, then changed snapshots and five-second heartbeats. |
 | `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live bytes of one owned card's session. Host→viewer binary frames are terminal output; viewer→host binary frames are terminal input. |
+| `POST /api/v1/desktop/commands` | One typed workspace command: `setLayout`, `closeTerminal`, and the not-yet-implemented `createTerminal`/`setWorkspace`. Requires the paired-device credential; a non-POST method on the path answers 405 after authorization. |
 
 Events use `{"type":"snapshot","workspace":{...}}` or
 `{"type":"unavailable","error":"desktop_unavailable"}`. Events poll the owning
@@ -92,6 +120,64 @@ Snapshot responses are bounded to 1 MiB over IPC and 256 saved terminal cards.
 The bridge supplies its own persistent machine ID. The daemon never reads or
 rewrites the bridge credential database. The DTO excludes notes, launch commands,
 agent-session mappings, OS settings and any future outgoing peer credentials.
+
+### Command route
+
+One mutation per request, in a typed envelope. The old per-card
+`POST /api/v1/desktop/cards/<card-id>/position` route is gone: a move that cannot
+name the revision it was based on is exactly what this route exists to refuse.
+
+```json
+{
+  "requestId": "m17f2c9a1b2",
+  "machineId": "<the host's bridgeId>",
+  "expectedEpoch": "<epoch from the viewer's last snapshot>",
+  "command": {
+    "type": "setLayout", "cardId": "sd_term_ab12",
+    "expectedRevision": 7,
+    "layout": {"x": 700, "y": 200, "width": 640, "height": 480,
+               "restoredWidth": 640, "restoredHeight": 480,
+               "iconified": false, "iconX": 32, "iconY": 64, "tag": 5}
+  }
+}
+```
+
+`closeTerminal` takes `cardId` and `expectedRevision`. `createTerminal` takes
+`agentType` and `workspace`, and is accepted only when the host itself offers
+that harness (it is in the snapshot's `visibleHarnesses`) and that workspace is
+the folder the host itself published: a viewer never names a command, a flag, a
+tmux target, an environment variable or a path the host did not publish.
+`setWorkspace` is declared so its shape is fixed early and is refused with
+`unsupported_command` until the host implements it.
+
+Refusals, all with a stable code from the shared command list:
+
+| Condition | Status | Code |
+| --- | --- | --- |
+| Applied | 200 | typed `applied` result with the card's new revision and geometry |
+| Card changed since the viewer's snapshot | 409 | typed `conflict` result carrying the host's current revision and geometry |
+| Host restarted (different epoch) | 409 | `epoch_changed` |
+| The card is expanded | 409 | `terminal_expanded` |
+| Unknown card | 404 | `unknown_card` |
+| Malformed envelope, bounds or identity | 400 | `invalid_command`, `invalid_layout`, `unsupported_command` |
+| A create names a harness the host does not offer | 400 | `unsupported_harness` |
+| A create names a folder the host did not publish | 400 | `invalid_workspace` |
+| Command addressed to another machine | 409 | `wrong_machine` |
+| Owner unavailable / warming up / timed out | 503 / 503 / 504 | `desktop_unavailable`, `desktop_not_ready`, `desktop_timeout` |
+| Same request id, owner never answered | 409 | `unknown_outcome` |
+
+The request id is deduplicated per paired device inside one daemon epoch: 16
+entries per device, 256 overall, entries from another epoch dropped. A repeated
+request id replays the recorded answer and never applies the mutation twice. A
+request whose owner did not answer is remembered as *uncertain*: it is not
+retried automatically, and a retry is refused with `unknown_outcome` so the
+viewer refreshes its state instead of guessing. Nothing about a command is
+persisted across a crash, so this is deduplication, not an exactly-once claim.
+
+The bridge validates the envelope's shape and bounds before any owner IPC, and
+the owner re-checks epoch, revision and bounds before applying. Both answer with
+the same code, and an owner error that is not one of our codes is reported as
+`invalid_desktop_response`, never as free-form text.
 
 ### Terminal attach stream
 
@@ -249,13 +335,20 @@ The tests prove:
 disposable bridge, a private tmux server and the real viewer CLI: pinned WSS
 attach, live coloured bytes, card ownership (`unknown_card` for a foreign or
 unknown card), revocation tearing the stream down, and the host session
-surviving every detach.
+surviving every detach. `tests/bridge_security_smoke.py` also drives the command
+route against a stub owner: authorization, refused envelopes that never reach the
+owner, deduplicated replay, the uncertain-outcome path, a conflict carrying the
+owner's own geometry, and an owner error downgraded instead of passed on.
+`machine_selector::tests::stale_poll_inner` covers the viewer's revision merge
+and epoch reset.
 
 Viewer keystrokes, the prompt-transaction input guard and the attach handshake
 gate are in place: bytes VTE commits (keys, paste, IME, and mouse reports the
 host application has enabled) are written after `attached` and dropped on
-disconnect. Still pending before the interactive release: host-driven layout
-commands. Do not bypass the input guard or replay queued keys.
+disconnect. Host-driven commands (`setLayout`, `closeTerminal`, `createTerminal`)
+are delivered on the command route, with the host's harness list in the remote
+top bar; the viewer's own close/iconify controls and folder selection are still
+pending. Do not bypass the input guard or replay queued keys.
 
 ## Test on another Linux desktop
 
@@ -314,10 +407,12 @@ installed, but this PC falls back to its shell. The same failure was reproduced
 on the unmodified base commit `013492a`, and `bridge::tests::test_port_taken_follows_the_listener`
 is a pre-existing flake: it re-uses a released ephemeral port and loses it to a
 parallel test's connection roughly once in eight full-suite runs, on the base
-commit included. The current suite reports 233 passed, 5 ignored and those same
-failures. Terminal streaming adds `desktop_protocol`, `terminal_transport`,
-`peer_terminal`, `remote_terminal`, `window` and `machine_selector` coverage plus
-the isolated terminal smoke test.
+commit included. With terminal streaming, the command route and the remote launch
+bar the suite reports 261 passed, 5 ignored and those same failures. Coverage includes
+`desktop_protocol` (envelope, bounds, epoch/revision checks, typed outcome and
+reply), `terminal_transport`, `peer_terminal`, `remote_terminal`, `window` and
+`machine_selector`, plus the isolated terminal smoke test and the bridge smoke
+test's command-route checks.
 
 ## Outgoing PC pairing (CLI increment)
 
@@ -395,8 +490,11 @@ just as it does on the host. Physical monitor scale is not applied again to the
 host's logical coordinates.
 
 Remote cards are their own widgets and never enter local session creation.
-Their emulators forward VTE's committed bytes to the host and do not write
-layout back. The local canvas and widgets stay alive while hidden, so switching
+Their emulators forward VTE's committed bytes to the host. A drag ends in one
+typed `setLayout` command carrying the revision the viewer drew, so the host
+either applies it or refuses it with its own geometry; a host that does not
+advertise `workspace-layout-v1` and a card the host shows expanded are left
+alone. The local canvas and widgets stay alive while hidden, so switching
 back to This PC restores their existing state. Local launch and arrange
 controls are absent from remote mode, and Ctrl+N cannot create a local note
 while a remote PC is selected.
@@ -420,9 +518,11 @@ the overlay again reconnects without a failure backoff. The overlay's slide-out
 moves remote consoles to their nearest border exactly like local cards, so a
 remote workspace hides the way a local one does.
 
-This increment still uses bounded HTTPS polling for layout. Live WSS workspace
-subscriptions, graphical peer removal and remote layout mutations remain
-pending. Viewer typing is delivered on the attach stream.
+This increment still uses bounded HTTPS polling for layout at two-second
+intervals. Live WSS workspace subscriptions, graphical peer removal, the remote
+folder list and the viewer's own close/iconify controls remain pending. Viewer
+typing is delivered on the attach stream, and layout, close and create commands
+are delivered on the command route.
 
 
 ## Add a PC from the selector

@@ -47,9 +47,11 @@ the last 60 seconds. Expired/revoked devices are never counted active; registere
 devices remain visible while the bridge is stopped.
 
 The additive `/api/v1/desktop/capabilities`, `/api/v1/desktop/workspace`,
-`/api/v1/desktop/events` and `/api/v1/desktop/terminals/<card-id>/attach`
-endpoints require paired-device authentication and follow the same origin
-rejection, expiry and revocation rules. The read-only snapshot capability exposes
+`/api/v1/desktop/events`, `/api/v1/desktop/commands` and
+`/api/v1/desktop/terminals/<card-id>/attach` endpoints require paired-device
+authentication and follow the same origin rejection, expiry and revocation
+rules. Authorization runs before the method check, so an unpaired caller learns
+nothing about a route's shape. The read-only snapshot capability exposes
 owned terminal geometry, ordering, folders and cached titles; it excludes notes,
 launch commands, local OS settings and credentials. Snapshots come from the
 daemon's local in-memory model over Unix IPC, not from a peer it may later be
@@ -68,9 +70,33 @@ credential and 16 per bridge, are refused with a stable code before the
 WebSocket upgrade, are torn down when the credential is revoked or expires,
 and end after 30 minutes. The host attaches its own tmux client at the grid it
 already owns, which is what prevents a viewer from resizing host panes, and
-dropping the stream reaps exactly that client. No remote mutation endpoint is
-enabled yet, so `workspace-layout-v1` is not advertised; security protocol v3
-and existing Android credentials are unchanged.
+dropping the stream reaps exactly that client.
+
+The command route is the only remote mutation endpoint, and it accepts one typed
+envelope per request: a card id that exists in the daemon's own workspace, a
+request id, the daemon epoch the viewer saw, the card revision it based the
+change on, and geometry within fixed bounds. Nothing accepts a shell command, a
+tmux target, an environment variable, a file path or free-form text; unknown
+fields and unknown command variants are refused. The bridge validates shape and
+bounds before any owner IPC, and the daemon re-checks epoch, revision and bounds
+before it applies anything through the card's own local actions, so a stale
+viewer is refused with the daemon's current geometry instead of overwriting a
+concurrent edit. Request ids are deduplicated per credential inside one epoch
+(16 per device, 256 overall, dropped on an epoch change); a request whose owner
+never answered is remembered as uncertain and its retry is refused rather than
+applied twice. `workspace-layout-v1` is advertised because `setLayout`, `closeTerminal` and
+`createTerminal` are implemented; `setWorkspace` is refused with
+`unsupported_command`.
+
+A create is the one command that makes something new, so it is bounded by the
+host's own snapshot: `agentType` must be one of the harnesses that host lists as
+visible, and `workspace` must be the folder that host published. The host then
+builds the card through the same path a local launch uses, so the executable, the
+sandbox flags, the tmux session name and the card geometry are all decided on the
+host, and a card is reported only when its session is alive. A refused create
+creates nothing. The host is not forced to show its overlay, and no peer can
+choose a command, a flag or a path. Security protocol v3 and existing Android
+credentials are unchanged.
 
 ## Resource bounds
 
@@ -91,8 +117,10 @@ See [file previews](docs/FILE_ASSETS.md) for decoder limits and known limitation
 
 64 simultaneous network connections; 12 per source IP; 5-second total initial
 TLS/request deadline enforced by a socket reaper; 16 KiB headers and normal bodies;
-16 KiB inbound WebSocket frames; 125-byte control frames. The authenticated
-image-prompt route alone allows a 3 MiB JSON body, a 30-second upload deadline,
+16 KiB inbound WebSocket frames; 125-byte control frames. A command document is
+capped at 8 KiB and its deduplication cache at 16 answers per credential and 256
+overall. The authenticated image-prompt route alone allows a 3 MiB JSON body, a
+30-second upload deadline,
 and four concurrent jobs shared with file previews. Authorization and origin
 checks happen before accepting the larger body. Images are validated, capped,
 re-encoded and privately staged; no client-selected file paths or overwrites.

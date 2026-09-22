@@ -14,13 +14,20 @@ use std::{
     time::Duration,
 };
 
+/// Set after construction: the launcher cannot hold a handle to the view it
+/// belongs to while that view is still being built.
+type OnLaunched = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+
 pub struct MachineView {
     pub stack: gtk4::Stack,
     pub local_button: gtk4::MenuButton,
     remote_button: gtk4::MenuButton,
     remote: gtk4::Box,
+    remote_toolbar: gtk4::Overlay,
     selection: RefCell<Selection>,
     canvas: Rc<RemoteCanvas>,
+    /// The host's own harness list, as launch buttons in the top bar.
+    launcher: Rc<crate::remote_launcher::RemoteLauncher>,
     status: gtk4::Label,
     details: gtk4::Label,
     busy: Cell<bool>,
@@ -31,38 +38,57 @@ impl MachineView {
         let stack = gtk4::Stack::new();
         stack.set_transition_type(gtk4::StackTransitionType::None);
         stack.add_named(local, Some("local"));
-        let remote = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-        let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 12);
+        let remote = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+        // The same top bar as the local workspace: the machine selector and the
+        // brand on the left, the host's own harness buttons centered, the
+        // connection state and Hide on the right.
+        let toolbar = gtk4::Overlay::new();
         toolbar.add_css_class("hud-bar");
+        let chrome = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        chrome.set_hexpand(true);
+        chrome.set_valign(gtk4::Align::Fill);
         let local_button = gtk4::MenuButton::new();
         local_button.set_label("This PC");
         local_button.add_css_class("machine-selector");
         let remote_button = gtk4::MenuButton::new();
         remote_button.add_css_class("machine-selector");
-        toolbar.append(&remote_button);
+        chrome.append(&remote_button);
+        let brand = gtk4::Label::new(Some("⚡ SUPER DESKTOP"));
+        brand.add_css_class("hud-title");
+        chrome.append(&brand);
+        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        spacer.set_hexpand(true);
+        chrome.append(&spacer);
+        let details = gtk4::Label::new(None);
+        details.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        chrome.append(&details);
         let status = gtk4::Label::new(Some("Connecting…"));
-        status.set_hexpand(true);
         status.set_xalign(0.0);
-        toolbar.append(&status);
+        chrome.append(&status);
         let hide = gtk4::Button::with_label("✕ Hide");
         hide.add_css_class("hud-button");
         hide.add_css_class("hud-button-danger");
         hide.connect_clicked(move |_| on_hide());
-        toolbar.append(&hide);
+        chrome.append(&hide);
+        toolbar.set_child(Some(&chrome));
+
+        // The launcher refreshes this view the moment a card is created on the
+        // host, instead of leaving the user to wait for the next poll.
+        let on_launched: OnLaunched = Rc::new(RefCell::new(None));
+        let launcher = crate::remote_launcher::RemoteLauncher::new(Rc::new({
+            let on_launched = Rc::clone(&on_launched);
+            move || {
+                if let Some(refresh) = on_launched.borrow().as_ref() {
+                    refresh();
+                }
+            }
+        }));
+        toolbar.add_overlay(&launcher.widget);
         remote.append(&toolbar);
-        let notice = gtk4::Label::new(Some(
-            "Live remote consoles at the host's own positions and sizes · click a console and type, or drag its header to move it on that PC. Remote create, close, resize and file previews are not available yet",
-        ));
-        notice.set_wrap(true);
-        remote.append(&notice);
-        let details = gtk4::Label::new(None);
-        details.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-        details.set_margin_start(16);
-        details.set_margin_end(16);
-        remote.append(&details);
+        remote.append(&launcher.note);
         let canvas = RemoteCanvas::new();
         canvas.area.set_tooltip_text(Some(
-            "The host's consoles, streamed live and scaled to fit. This view refreshes every two seconds.",
+            "The host's consoles, streamed live and scaled to fit. Click a console and type, or drag its header to move it on that PC. This view refreshes every two seconds.",
         ));
         remote.append(&canvas.area);
         stack.add_named(&remote, Some("remote"));
@@ -72,13 +98,23 @@ impl MachineView {
             local_button,
             remote_button,
             remote,
+            remote_toolbar: toolbar,
             selection: RefCell::new(Selection::default()),
             canvas,
+            launcher,
             status,
             details,
             busy: Cell::new(false),
             on_switch,
         });
+        *on_launched.borrow_mut() = Some(Rc::new({
+            let weak = Rc::downgrade(&view);
+            move || {
+                if let Some(view) = weak.upgrade() {
+                    view.refresh();
+                }
+            }
+        }));
         for button in [&view.local_button, &view.remote_button] {
             let popover = gtk4::Popover::new();
             popover.add_css_class("ws-pop");
@@ -115,6 +151,17 @@ impl MachineView {
     }
     pub fn is_remote(&self) -> bool {
         self.selection.borrow().request().is_some()
+    }
+
+    /// The remote bar's harness logos, for the window's theme swap.
+    pub fn brand_images(&self) -> Vec<(gtk4::Image, String)> {
+        self.launcher.brand_images()
+    }
+
+    /// Match the local dock's top-bar size, so the toolbar does not change
+    /// height when the user switches between this PC and another one.
+    pub fn paint_top_bar_size(&self, size: crate::state::TopBarSize, screen_width: i32) {
+        crate::window::paint_top_bar_size(&self.remote_toolbar, size, screen_width);
     }
     pub fn dismiss(&self) {
         self.local_button.popdown();
@@ -300,6 +347,7 @@ impl MachineView {
         // Leaving a PC — or picking another one — must release this viewer's
         // terminal streams before anything else. The host keeps its sessions.
         self.canvas.clear();
+        self.launcher.clear();
         self.details.set_text("");
         match peer {
             None => {
@@ -375,13 +423,26 @@ impl MachineView {
                         .map(|h| peer_client::label(&h.name))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    view.details
-                        .set_text(&format!("{} · {}", snapshot.local.workspace, harnesses));
+                    view.details.set_text(&format!(
+                        "{} · {}",
+                        peer_client::label(&snapshot.local.workspace),
+                        harnesses
+                    ));
+                    // The host's own harness list, and only a host that
+                    // accepts commands becomes a launch target.
+                    view.launcher.apply(
+                        &peer,
+                        &snapshot,
+                        capabilities.supports_remote_desktop(),
+                    );
                     // Live output is only carried for a host that advertises
                     // the terminal transport; anything else is a layout-only
-                    // preview, never a snapshot emulation.
+                    // preview, never a snapshot emulation. Layout commands and
+                    // live output are separate capabilities: a host may accept
+                    // neither, either, or both.
                     if capabilities.supports_terminal_stream() {
-                        view.canvas.apply(&peer, &snapshot);
+                        view.canvas
+                            .apply(&peer, &snapshot, capabilities.supports_remote_desktop());
                     } else {
                         view.canvas.show_message(
                             "Update SUPER DESKTOP on the host for live consoles · layout only for now",
@@ -397,6 +458,7 @@ impl MachineView {
                     // A late failure must not leave another PC's consoles on
                     // screen: disconnected content is not current content.
                     view.canvas.clear();
+                    view.launcher.clear();
                     view.canvas.show_message(remote_status(error));
                     view.details.set_text("");
                 }
@@ -601,8 +663,14 @@ mod tests {
         // gone renders as a card but is never streamed.
         let mut snapshot = remote_workspace::fixture();
         snapshot.local.cards[0].session_alive = Some(false);
-        view.canvas.apply(&peer_client::test_peer('a'), &snapshot);
+        view.canvas
+            .apply(&peer_client::test_peer('a'), &snapshot, true);
         assert_eq!(view.canvas.card_count(), 1);
+        // The remote workspace carries the host's own launch bar in its top
+        // bar, and it is inert until that host reports what it can run.
+        assert!(view.launcher.widget.parent().is_some());
+        assert!(view.launcher.note.parent().is_some());
+        assert!(!view.launcher.sensitive("shell"));
         assert_eq!(
             view.canvas.area.visible_child_name().as_deref(),
             Some("canvas")
@@ -642,17 +710,67 @@ mod tests {
             card.session_alive = Some(false);
         }
         let second = snapshot.local.cards[0].clone();
-        canvas.apply(&peer, &snapshot);
+        canvas.apply(&peer, &snapshot, true);
         assert_eq!(canvas.card_count(), 1);
         snapshot.local.cards.clear();
-        canvas.apply(&peer, &snapshot);
+        canvas.apply(&peer, &snapshot, true);
         assert_eq!(canvas.card_count(), 0);
         snapshot.local.cards.push(second);
-        canvas.apply(&peer, &snapshot);
+        canvas.apply(&peer, &snapshot, true);
         assert_eq!(canvas.card_count(), 1);
         // Iconified and expanded states are part of the host's geometry.
         snapshot.local.cards[0].layout.iconified = true;
-        canvas.apply(&peer, &snapshot);
+        canvas.apply(&peer, &snapshot, true);
         assert_eq!(canvas.card_count(), 1);
+    }
+
+    #[test]
+    fn a_slow_poll_cannot_take_back_a_revision_we_already_adopted() {
+        crate::gtk_test::run_in_child_process("machine_selector::tests::stale_poll_inner");
+    }
+
+    #[test]
+    fn stale_poll_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let canvas = crate::remote_terminal::RemoteCanvas::new();
+        let peer = peer_client::test_peer('a');
+        // A host whose session is gone renders as a card but is never streamed,
+        // so this check opens no socket.
+        let mut snapshot = remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        canvas.apply(&peer, &snapshot, true);
+        assert!(canvas.layout_is_writable());
+        assert_eq!(canvas.card_revision("card-one"), Some(1));
+
+        // A command was accepted: the host published revision 2 with the new
+        // position, and this view adopted both.
+        let mut moved = snapshot.clone();
+        moved.local.revision = 2;
+        moved.local.cards[0].revision = 2;
+        moved.local.cards[0].layout.x = 700;
+        canvas.apply(&peer, &moved, true);
+        assert_eq!(canvas.card_position("card-one"), Some((700, 200)));
+        assert_eq!(canvas.card_revision("card-one"), Some(2));
+
+        // A poll that started before that command still reports revision 1.
+        // Drawing it would make the next drop be refused as stale, so the
+        // newer revision has to win.
+        canvas.apply(&peer, &snapshot, true);
+        assert_eq!(canvas.card_position("card-one"), Some((700, 200)));
+        assert_eq!(canvas.card_revision("card-one"), Some(2));
+
+        // A host that does not accept layout commands keeps its own geometry.
+        canvas.apply(&peer, &snapshot, false);
+        assert!(!canvas.layout_is_writable());
+
+        // A restarting host owns its revisions again: nothing carries over.
+        let mut restarted = snapshot.clone();
+        restarted.local.epoch = "host-two".into();
+        canvas.apply(&peer, &restarted, true);
+        assert_eq!(canvas.card_revision("card-one"), Some(1));
+        assert_eq!(canvas.card_position("card-one"), Some((100, 200)));
     }
 }

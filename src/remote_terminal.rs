@@ -6,8 +6,11 @@
 //! a VTE widget fed by the network stream. Keystrokes, paste and IME are the
 //! bytes VTE commits for that widget: they are forwarded only after the host's
 //! `attached` handshake, and a hide or machine switch drops anything still
-//! queued. Dragging a card tells the host to move and raise it. Creating,
-//! closing and resizing stay on the host.
+//! queued. Dragging a card tells the host to move and raise it, with the
+//! revision this view drew, so a concurrent host edit is refused instead of
+//! overwritten. The viewer sends nothing to a host that does not advertise
+//! `workspace-layout-v1`, and creating, closing and resizing have no viewer
+//! control yet.
 use crate::desktop_protocol::{DesktopCard, TerminalSize, WorkspaceSnapshot, MAX_REMOTE_VIEWERS};
 use crate::peer_client::{self, Peer};
 use crate::peer_terminal::{Event as StreamEvent, TerminalStream};
@@ -42,6 +45,10 @@ pub struct RemoteCanvas {
     /// Drops the host has not confirmed yet, in host pixels. A refresh that
     /// still has the old origin keeps the card where it was released.
     pending_moves: RefCell<HashMap<String, (i32, i32)>>,
+    /// The host advertises `workspace-layout-v1`, so it accepts layout
+    /// commands. A host that does not keeps its own geometry: a drop is
+    /// dropped rather than guessed at, and no command is ever sent.
+    layout_writable: Cell<bool>,
     message: gtk4::Label,
 }
 
@@ -71,6 +78,7 @@ impl RemoteCanvas {
             snapshot: RefCell::new(None),
             peer: RefCell::new(None),
             pending_moves: RefCell::new(HashMap::new()),
+            layout_writable: Cell::new(false),
             message,
         });
         // The viewer's own monitor can change while the overlay stays mapped
@@ -91,6 +99,36 @@ impl RemoteCanvas {
     #[cfg(test)]
     pub fn card_count(&self) -> usize {
         self.cards.borrow().len()
+    }
+
+    /// Whether the host accepts layout commands, as its last answer said.
+    #[cfg(test)]
+    pub fn layout_is_writable(&self) -> bool {
+        self.layout_writable.get()
+    }
+
+    /// The revision this view holds for one card, which is what a drop sends.
+    #[cfg(test)]
+    pub fn card_revision(&self, card_id: &str) -> Option<u64> {
+        self.card(card_id).map(|card| card.revision)
+    }
+
+    /// The host position this view holds for one card.
+    #[cfg(test)]
+    pub fn card_position(&self, card_id: &str) -> Option<(i32, i32)> {
+        self.card(card_id).map(|card| (card.layout.x, card.layout.y))
+    }
+
+    #[cfg(test)]
+    fn card(&self, card_id: &str) -> Option<DesktopCard> {
+        self.snapshot
+            .borrow()
+            .as_ref()?
+            .local
+            .cards
+            .iter()
+            .find(|card| card.card_id == card_id)
+            .cloned()
     }
 
     /// Stop every stream while the overlay is hidden.
@@ -146,15 +184,25 @@ impl RemoteCanvas {
         *self.snapshot.borrow_mut() = None;
         *self.peer.borrow_mut() = None;
         self.pending_moves.borrow_mut().clear();
+        // Another PC decides for itself whether it accepts layout commands.
+        self.layout_writable.set(false);
     }
 
     /// Render a fresh host snapshot. Cards that did not change keep their
     /// widget, their scrollback and their live stream.
-    pub fn apply(self: &Rc<Self>, peer: &Peer, snapshot: &WorkspaceSnapshot) {
+    ///
+    /// `layout_writable` is the host's own `workspace-layout-v1` answer: only a
+    /// host that accepts layout commands gets drags.
+    pub fn apply(
+        self: &Rc<Self>,
+        peer: &Peer,
+        incoming: &WorkspaceSnapshot,
+        layout_writable: bool,
+    ) {
         {
             let mut pending = self.pending_moves.borrow_mut();
             pending.retain(|id, pos| {
-                snapshot
+                incoming
                     .local
                     .cards
                     .iter()
@@ -162,7 +210,13 @@ impl RemoteCanvas {
                     .is_some_and(|card| !card.expanded && shown_origin(card) != *pos)
             });
         }
+        self.layout_writable.set(layout_writable);
         *self.peer.borrow_mut() = Some(peer.clone());
+        // A poll that was already running when we applied a command still
+        // carries the older revision. Revisions only grow inside one epoch, so
+        // the newer of the two is the truth, and the next gesture is not
+        // refused as stale because of a slow snapshot.
+        let snapshot = self.newest(incoming);
         *self.snapshot.borrow_mut() = Some(snapshot.clone());
         let stale: Vec<String> = self
             .cards
@@ -209,6 +263,74 @@ impl RemoteCanvas {
             };
             widget.update(card, live.contains(&card.card_id), peer);
         }
+        self.relayout();
+    }
+
+    /// The snapshot to draw: the host's, with anything we already know to be
+    /// newer than it kept. Inside one epoch a card's revision only grows, so a
+    /// lower one is a snapshot that was read before our last command.
+    fn newest(&self, incoming: &WorkspaceSnapshot) -> WorkspaceSnapshot {
+        let mut snapshot = incoming.clone();
+        let known = self.snapshot.borrow().clone();
+        let Some(known) = known else {
+            return snapshot;
+        };
+        if known.local.epoch != snapshot.local.epoch {
+            // A restarted host owns its revisions again; nothing carries over.
+            return snapshot;
+        }
+        for card in &mut snapshot.local.cards {
+            let Some(newer) = known
+                .local
+                .cards
+                .iter()
+                .find(|known| known.card_id == card.card_id && known.revision > card.revision)
+            else {
+                continue;
+            };
+            card.revision = newer.revision;
+            card.layout = newer.layout.clone();
+            card.expanded = newer.expanded;
+        }
+        snapshot
+    }
+
+    /// Take the host's own answer as the new truth for one card, so the next
+    /// gesture is based on the state the host really published.
+    ///
+    /// Both an accepted command and a conflict carry that state: on a conflict
+    /// the card snaps to the geometry the host actually has instead of keeping
+    /// an edit the host refused.
+    fn adopt(self: &Rc<Self>, card_id: &str, reply: &crate::desktop_protocol::CommandReply) {
+        use crate::desktop_protocol::CommandResult;
+        let published = match &reply.result {
+            CommandResult::Applied {
+                card_revision,
+                layout,
+                ..
+            }
+            | CommandResult::Conflict {
+                card_revision,
+                layout,
+                ..
+            } => card_revision.zip(layout.clone()),
+            CommandResult::Rejected { .. } => None,
+        };
+        if let Some((revision, layout)) = published {
+            if let Some(snapshot) = self.snapshot.borrow_mut().as_mut() {
+                snapshot.local.revision = reply.revision;
+                if let Some(card) = snapshot
+                    .local
+                    .cards
+                    .iter_mut()
+                    .find(|card| card.card_id == card_id)
+                {
+                    card.revision = revision;
+                    card.layout = layout;
+                }
+            }
+        }
+        self.pending_moves.borrow_mut().remove(card_id);
         self.relayout();
     }
 
@@ -280,6 +402,11 @@ impl RemoteCanvas {
 
     /// Convert a fitted drop into host pixels, keep it on screen through the
     /// next refresh, and ask the host to store it.
+    ///
+    /// The drop carries the card's revision, so a host edit that happened in
+    /// between is answered with a conflict and the host's own geometry rather
+    /// than being overwritten. A host that does not advertise layout commands
+    /// keeps its own layout: the drop reverts and no command is sent.
     fn commit_move(self: &Rc<Self>, card_id: &str, view_x: f64, view_y: f64) {
         let Some(snapshot) = self.snapshot.borrow().clone() else {
             return;
@@ -311,7 +438,17 @@ impl RemoteCanvas {
             self.relayout();
             return;
         }
-        let Some(peer) = self.peer.borrow().clone() else {
+        let Some(card) = snapshot
+            .local
+            .cards
+            .iter()
+            .find(|card| card.card_id == card_id)
+            .cloned()
+        else {
+            self.relayout();
+            return;
+        };
+        let (Some(peer), true) = (self.peer.borrow().clone(), self.layout_writable.get()) else {
             self.relayout();
             return;
         };
@@ -325,22 +462,26 @@ impl RemoteCanvas {
             let width = card.rest().map(|(_, _, width)| width).unwrap_or(0.0);
             card.set_rest(placed_x, placed_y, width);
         }
+        let epoch = snapshot.local.epoch.clone();
         let id = card_id.to_string();
-        let task_id = id.clone();
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let moved = gtk4::gio::spawn_blocking(move || {
-                crate::peer_client::move_card(&peer, &task_id, x, y)
+            let reply = gtk4::gio::spawn_blocking(move || {
+                peer_client::move_card(&peer, &epoch, &card, x, y)
             })
             .await;
-            if matches!(moved, Ok(Ok(()))) {
-                return;
-            }
             let Some(view) = weak.upgrade() else {
                 return;
             };
-            view.pending_moves.borrow_mut().remove(&id);
-            view.relayout();
+            match reply {
+                // Accepted or refused with the host's own geometry: both are
+                // current state this view can trust.
+                Ok(Ok(reply)) => view.adopt(&id, &reply),
+                _ => {
+                    view.pending_moves.borrow_mut().remove(&id);
+                    view.relayout();
+                }
+            }
         });
     }
 }

@@ -1,10 +1,11 @@
-//! Authenticated desktop snapshot routes and the live terminal attach stream.
-//! Called only after bridge admission, origin checks and paired-device
-//! authorization. Never reads state.json.
+//! Authenticated desktop snapshot routes, the typed command route and the live
+//! terminal attach stream. Called only after bridge admission, origin checks
+//! and paired-device authorization. Never reads state.json.
 use super::*;
 use crate::desktop_protocol::{
-    AttachCommand, AttachEvent, LocalWorkspaceSnapshot, TerminalSize, WorkspaceEvent,
-    WorkspaceSnapshot, ATTACH_MAX_SECS, MAX_REMOTE_VIEWERS,
+    valid_card_id, AttachCommand, AttachEvent, CommandOutcome, CommandRequest,
+    LocalWorkspaceSnapshot, TerminalSize, WorkspaceEvent, WorkspaceSnapshot, ATTACH_MAX_SECS,
+    MAX_REMOTE_VIEWERS,
 };
 use crate::terminal_transport::PtyAttachment;
 use std::io;
@@ -112,83 +113,247 @@ fn decode_reply(reply: &str) -> Result<LocalWorkspaceSnapshot, WorkspaceError> {
     Ok(snapshot)
 }
 
-/// Move one owned card. The daemon clamps to its own screen and decides
-/// whether the number is the card origin or the icon origin.
-pub(super) fn move_position(stream: &mut Connection, card_id: &str, body: &str) {
-    if !valid_card_id(card_id) {
-        return respond(
-            stream,
-            404,
-            "Not Found",
-            &serde_json::json!({"ok": false, "error": "unknown_card"}),
-        );
+/// One bounded per-device cache of command answers, for mutation
+/// deduplication inside one daemon epoch.
+///
+/// A viewer never retries automatically; this exists so a retried request id
+/// (a resent request, a proxy replay) cannot apply the same mutation twice. The
+/// epoch is part of the key: a restarted owner must not replay a command whose
+/// effect it cannot know, and its own revision checks refuse one anyway.
+mod dedup {
+    use std::sync::Mutex;
+
+    /// Answers kept per device and across all devices.
+    const PER_DEVICE: usize = 16;
+    const TOTAL: usize = 256;
+    const REQUESTS: usize = 8 * 1024;
+
+    /// Longest command document accepted from a viewer.
+    pub(super) const MAX_REQUEST_BODY: usize = REQUESTS;
+
+    #[derive(Clone)]
+    pub(super) struct Answer {
+        pub(super) code: u16,
+        pub(super) reason: &'static str,
+        pub(super) document: String,
     }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct Move {
-        x: i32,
-        y: i32,
+
+    pub(super) enum Reservation {
+        /// First sight of this request id: the caller must apply and record.
+        Fresh,
+        /// Applied earlier in this epoch: replay this exact answer.
+        Cached(Answer),
+        /// Sent, but the outcome is unknown (owner timeout). Never retried.
+        Uncertain,
     }
-    let Ok(requested) = serde_json::from_str::<Move>(body) else {
-        return respond(
+
+    struct Entry {
+        device: String,
+        epoch: String,
+        request_id: String,
+        answer: Option<Answer>,
+    }
+
+    fn live() -> std::sync::MutexGuard<'static, Vec<Entry>> {
+        static ENTRIES: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+        // A panic while handling another command must not make this device's
+        // commands permanently unanswerable.
+        ENTRIES.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Claim a request id for this epoch, or report what is already known about
+    /// it. Claiming happens before the owner is asked, so two in-flight copies
+    /// of one request id cannot both reach it.
+    pub(super) fn reserve(device: &str, epoch: &str, request_id: &str) -> Reservation {
+        let mut live = live();
+        // Entries from another epoch can never be replayed meaningfully.
+        live.retain(|entry| entry.epoch == epoch);
+        if let Some(entry) = live
+            .iter()
+            .find(|entry| entry.device == device && entry.request_id == request_id)
+        {
+            return match entry.answer.clone() {
+                Some(answer) => Reservation::Cached(answer),
+                None => Reservation::Uncertain,
+            };
+        }
+        while live.len() >= TOTAL
+            || live.iter().filter(|entry| entry.device == device).count() >= PER_DEVICE
+        {
+            let Some(oldest) = live
+                .iter()
+                .position(|entry| entry.device == device)
+                .or(if live.is_empty() { None } else { Some(0) })
+            else {
+                break;
+            };
+            live.remove(oldest);
+        }
+        live.push(Entry {
+            device: device.to_string(),
+            epoch: epoch.to_string(),
+            request_id: request_id.to_string(),
+            answer: None,
+        });
+        Reservation::Fresh
+    }
+
+    /// Forget a claim whose request provably never reached the owner, so a
+    /// retry after a restart is served instead of refused.
+    pub(super) fn release(device: &str, epoch: &str, request_id: &str) {
+        let mut live = live();
+        live.retain(|entry| {
+            !(entry.device == device && entry.epoch == epoch && entry.request_id == request_id)
+        });
+    }
+
+    /// Remember what the owner answered. A request left unrecorded stays
+    /// uncertain on purpose: its outcome must never be guessed.
+    pub(super) fn record(device: &str, epoch: &str, request_id: &str, answer: Answer) {
+        let mut live = live();
+        if let Some(entry) = live.iter_mut().find(|entry| {
+            entry.device == device && entry.epoch == epoch && entry.request_id == request_id
+        }) {
+            entry.answer = Some(answer);
+        }
+    }
+}
+
+/// Apply one typed workspace command from a paired device.
+///
+/// The route accepts only the command envelope: a card id from the owner's own
+/// snapshot, a request id, the epoch the viewer saw and the card revision it
+/// based the change on. The owner re-checks identity, epoch, revision and
+/// bounds before it mutates anything, so a stale viewer is told about the
+/// conflict with the owner's own geometry instead of overwriting a concurrent
+/// edit. Nothing here ever interpolates a shell command or a tmux target.
+pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
+    let invalid = |stream: &mut Connection| {
+        respond(
             stream,
             400,
             "Bad Request",
-            &serde_json::json!({"ok": false, "error": "invalid_layout"}),
-        );
+            &serde_json::json!({"error": "invalid_command"}),
+        )
     };
-    if !(-32768..=32768).contains(&requested.x) || !(-32768..=32768).contains(&requested.y) {
+    if body.len() > dedup::MAX_REQUEST_BODY {
+        return invalid(stream);
+    }
+    let Ok(request) = serde_json::from_str::<CommandRequest>(body) else {
+        return invalid(stream);
+    };
+    let machine_id = pair_state()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .cfg
+        .bridge_id
+        .clone();
+    // A command addressed to another machine is refused before any dedup state
+    // is touched, and always for the same reason a stale viewer sees elsewhere.
+    if request.machine_id != machine_id {
+        return respond(
+            stream,
+            409,
+            "Conflict",
+            &serde_json::json!({"error": "wrong_machine"}),
+        );
+    }
+    if !crate::desktop_protocol::valid_request_id(&request.request_id) {
+        return invalid(stream);
+    }
+    // Shape and bounds are checked here and again in the owner, so a malformed
+    // command never costs an IPC round trip and never depends on one side's
+    // validation staying correct. The viewer gets the same code either way.
+    if let Some(error) = request.command.shape_error() {
         return respond(
             stream,
             400,
             "Bad Request",
-            &serde_json::json!({"ok": false, "error": "invalid_layout"}),
+            &serde_json::json!({"error": error}),
         );
     }
-    let command = format!(
-        "desktop-move {}",
-        serde_json::json!({"cardId": card_id, "x": requested.x, "y": requested.y})
-    );
-    let reply = match crate::ipc_request(&command) {
+    match dedup::reserve(device, &request.expected_epoch, &request.request_id) {
+        dedup::Reservation::Cached(answer) => {
+            return respond(
+                stream,
+                answer.code,
+                answer.reason,
+                &serde_json::from_str(&answer.document).unwrap_or_default(),
+            )
+        }
+        // The owner may or may not have applied this exact request. Reporting
+        // an uncertain outcome is the only honest answer: it is never retried
+        // on the viewer's behalf, and the viewer refreshes its state instead.
+        dedup::Reservation::Uncertain => {
+            return respond(
+                stream,
+                409,
+                "Conflict",
+                &serde_json::json!({"error": "unknown_outcome"}),
+            )
+        }
+        dedup::Reservation::Fresh => {}
+    }
+    let payload = match serde_json::to_string(&request) {
+        Ok(payload) => payload,
+        Err(_) => {
+            dedup::release(device, &request.expected_epoch, &request.request_id);
+            return invalid(stream);
+        }
+    };
+    let reply = match crate::ipc_request(&format!("desktop-command {payload}")) {
         crate::Ipc::Reply(reply) => reply,
         crate::Ipc::NoDaemon => {
+            // The command never reached an owner, so its outcome is known to be
+            // "not applied": a retry after the daemon returns must be served,
+            // not refused as uncertain.
+            dedup::release(device, &request.expected_epoch, &request.request_id);
             return respond(
                 stream,
                 503,
                 "Service Unavailable",
-                &serde_json::json!({"ok": false, "error": "desktop_unavailable"}),
+                &serde_json::json!({"error": "desktop_unavailable"}),
             )
         }
+        // The request reached the owner but its answer did not; the outcome
+        // stays unknown in the dedup cache.
         crate::Ipc::Stalled => {
             return respond(
                 stream,
                 504,
                 "Gateway Timeout",
-                &serde_json::json!({"ok": false, "error": "desktop_timeout"}),
+                &serde_json::json!({"error": "desktop_timeout"}),
             )
         }
     };
     let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
-    if parsed["ok"].as_bool() == Some(true) {
-        return respond(stream, 200, "OK", &serde_json::json!({"ok": true}));
-    }
-    let error = parsed["error"].as_str().unwrap_or("invalid_layout");
-    let (code, reason) = match error {
-        "unknown_card" => (404, "Not Found"),
-        "terminal_expanded" => (409, "Conflict"),
-        "desktop_not_ready" | "desktop_unavailable" => (503, "Service Unavailable"),
-        _ => (400, "Bad Request"),
+    let outcome = match serde_json::from_value::<CommandOutcome>(parsed.clone()) {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            // The owner answered without a typed outcome: it could not read its
+            // own workspace, so nothing here was applied.
+            let error = parsed["error"]
+                .as_str()
+                .and_then(crate::desktop_protocol::known_command_error)
+                .unwrap_or("invalid_desktop_response");
+            let (code, reason) = crate::desktop_protocol::command_status(error);
+            return respond(stream, code, reason, &serde_json::json!({"error": error}));
+        }
     };
-    let error = match error {
-        "unknown_card" | "terminal_expanded" | "desktop_not_ready" | "invalid_layout" => error,
-        _ => "invalid_layout",
-    };
-    respond(
-        stream,
-        code,
-        reason,
-        &serde_json::json!({"ok": false, "error": error}),
+    let (code, reason) = outcome.status();
+    let document = serde_json::to_value(outcome.into_reply(&machine_id, &request.request_id))
+        .unwrap_or_default();
+    dedup::record(
+        device,
+        &request.expected_epoch,
+        &request.request_id,
+        dedup::Answer {
+            code,
+            reason,
+            document: document.to_string(),
+        },
     );
+    respond(stream, code, reason, &document);
 }
 
 pub(super) fn get_workspace(stream: &mut Connection) {
@@ -201,16 +366,6 @@ pub(super) fn get_workspace(stream: &mut Connection) {
             &serde_json::json!({"error":error.error}),
         ),
     }
-}
-
-/// Cards are addressed by the desktop snapshot's own id, never by a tmux target
-/// the caller supplied.
-fn valid_card_id(card_id: &str) -> bool {
-    !card_id.is_empty()
-        && card_id.len() <= 128
-        && card_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Resolve an owned card to its session. The snapshot is the daemon's own

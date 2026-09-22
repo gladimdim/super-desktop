@@ -347,12 +347,15 @@ impl PinnedClient {
         Ok(Self { http, endpoint })
     }
 
-    fn request<T: DeserializeOwned>(
+    /// One request, with the status and a bounded body. Status policy belongs
+    /// to the callers: a fetch refuses every non-2xx, a command keeps the
+    /// typed refusal a 4xx carries.
+    fn raw(
         &self,
         path: &str,
         body: Option<Value>,
         token: Option<&str>,
-    ) -> Result<T> {
+    ) -> Result<(u16, Vec<u8>)> {
         let url = self.endpoint.url(path)?;
         let mut request = match body {
             Some(body) => self.http.post(url).json(&body),
@@ -367,15 +370,9 @@ impl PinnedClient {
         let response = request
             .send()
             .map_err(|_| PeerError("connection_failed_or_pin_mismatch"))?;
-        match response.status().as_u16() {
-            200..=299 => {}
-            300..=399 => return Err(PeerError("redirect_rejected")),
-            401 => return Err(PeerError("peer_revoked_or_expired")),
-            403 => return Err(PeerError("invitation_rejected")),
-            404 => return Err(PeerError("peer_endpoint_unavailable")),
-            429 => return Err(PeerError("pairing_rate_limited")),
-            503 => return Err(PeerError("remote_desktop_unavailable")),
-            _ => return Err(PeerError("peer_request_rejected")),
+        let status = response.status().as_u16();
+        if (300..=399).contains(&status) {
+            return Err(PeerError("redirect_rejected"));
         }
         if response.content_length().is_some_and(|n| n > MAX_RESPONSE) {
             return Err(PeerError("peer_response_too_large"));
@@ -388,7 +385,56 @@ impl PinnedClient {
         if bytes.len() as u64 > MAX_RESPONSE {
             return Err(PeerError("peer_response_too_large"));
         }
+        Ok((status, bytes))
+    }
+
+    /// A read that accepts only a 2xx answer.
+    fn request<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: Option<Value>,
+        token: Option<&str>,
+    ) -> Result<T> {
+        let (status, bytes) = self.raw(path, body, token)?;
+        match status {
+            200..=299 => {}
+            300..=399 => return Err(PeerError("redirect_rejected")),
+            401 => return Err(PeerError("peer_revoked_or_expired")),
+            403 => return Err(PeerError("invitation_rejected")),
+            404 => return Err(PeerError("peer_endpoint_unavailable")),
+            429 => return Err(PeerError("pairing_rate_limited")),
+            503 => return Err(PeerError("remote_desktop_unavailable")),
+            _ => return Err(PeerError("peer_request_rejected")),
+        }
         serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))
+    }
+
+    /// A command keeps the host's typed refusal on 400/409: a revision
+    /// conflict carries the host's own geometry, which is the whole point of
+    /// the refusal. Transport failures stay errors.
+    fn command(&self, path: &str, body: Value, token: Option<&str>) -> Result<Value> {
+        let (status, bytes) = self.raw(path, Some(body), token)?;
+        match status {
+            200..=299 | 400 | 409 => {}
+            300..=399 => return Err(PeerError("redirect_rejected")),
+            401 => return Err(PeerError("peer_revoked_or_expired")),
+            404 => return Err(PeerError("peer_endpoint_unavailable")),
+            429 => return Err(PeerError("pairing_rate_limited")),
+            503 => return Err(PeerError("remote_desktop_unavailable")),
+            _ => return Err(PeerError("peer_request_rejected")),
+        }
+        let document: Value =
+            serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))?;
+        // An answer without a result never reached the owner. Its code is still
+        // one the protocol defines, and it is never free-form text.
+        if document.get("result").is_none() {
+            let error = document["error"]
+                .as_str()
+                .and_then(crate::desktop_protocol::known_command_error)
+                .unwrap_or("invalid_peer_response");
+            return Err(PeerError(error));
+        }
+        Ok(document)
     }
 
     fn identity(&self) -> Result<Identity> {
@@ -574,29 +620,75 @@ pub fn workspace(peer: &Peer) -> Result<crate::desktop_protocol::WorkspaceSnapsh
     verified_workspace(peer).map(|(_, workspace)| workspace)
 }
 
-/// Ask the host to move one of its own cards. Coordinates are host pixels.
-/// The host clamps them and raises the card; a rejected move is not retried.
-pub fn move_card(peer: &Peer, card_id: &str, x: i32, y: i32) -> Result<()> {
-    if card_id.is_empty()
-        || card_id.len() > 128
-        || !card_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err(PeerError("invalid_peer_response"));
+/// Apply one typed command on the host and return its typed answer, including
+/// a refusal. Nothing here is retried: a caller that gets a conflict or an
+/// unknown outcome refreshes its own state instead.
+pub fn command(
+    peer: &Peer,
+    request: &crate::desktop_protocol::CommandRequest,
+) -> Result<crate::desktop_protocol::CommandReply> {
+    if !crate::desktop_protocol::valid_request_id(&request.request_id) {
+        return Err(PeerError("invalid_command"));
+    }
+    if let Some(error) = request.command.shape_error() {
+        return Err(PeerError(error));
     }
     let client = PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)?;
-    let path = format!("/api/v1/desktop/cards/{card_id}/position");
-    let reply: serde_json::Value = client.request(
-        &path,
-        Some(serde_json::json!({"x": x, "y": y})),
-        Some(&peer.token),
-    )?;
-    if reply["ok"].as_bool() == Some(true) {
-        Ok(())
-    } else {
-        Err(PeerError("invalid_layout"))
+    let body = serde_json::to_value(request).map_err(|_| PeerError("invalid_command"))?;
+    let document = client.command("/api/v1/desktop/commands", body, Some(&peer.token))?;
+    let reply: crate::desktop_protocol::CommandReply =
+        serde_json::from_value(document).map_err(|_| PeerError("invalid_peer_response"))?;
+    // The host binds every answer to its own identity and to our request.
+    if reply.machine_id != peer.machine_id || reply.request_id != request.request_id {
+        return Err(PeerError("invalid_peer_response"));
     }
+    Ok(reply)
+}
+
+/// Ask the host to move one of its own cards, as the whole layout it already
+/// reported plus the drop position. The card's own revision travels with it, so
+/// a concurrent host edit is refused as a conflict instead of being
+/// overwritten. Coordinates are host pixels; the host clamps and raises.
+pub fn move_card(
+    peer: &Peer,
+    epoch: &str,
+    card: &crate::desktop_protocol::DesktopCard,
+    x: i32,
+    y: i32,
+) -> Result<crate::desktop_protocol::CommandReply> {
+    let mut layout = card.layout.clone();
+    if layout.iconified {
+        layout.icon_x = Some(x);
+        layout.icon_y = Some(y);
+    } else {
+        layout.x = x;
+        layout.y = y;
+    }
+    command(
+        peer,
+        &crate::desktop_protocol::CommandRequest {
+            request_id: next_request_id(),
+            machine_id: peer.machine_id.clone(),
+            expected_epoch: epoch.to_string(),
+            command: crate::desktop_protocol::WorkspaceCommand::SetLayout {
+                card_id: card.card_id.clone(),
+                expected_revision: card.revision,
+                layout,
+            },
+        },
+    )
+}
+
+/// A fresh id for one attempt. The host deduplicates on it, so it is unique per
+/// request and never reused for a different one.
+pub(crate) fn next_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    format!("m{nanos:x}{:x}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
 /// Upgrade a pinned, authenticated WebSocket to one of the host's desktop

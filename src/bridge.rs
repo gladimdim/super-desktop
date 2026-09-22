@@ -1245,21 +1245,32 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
         }
     }
 
-    if req.method == "POST" {
-        if let Some(card_id) = path
-            .strip_prefix("/api/v1/desktop/cards/")
-            .and_then(|rest| rest.strip_suffix("/position"))
-        {
-            if !authorize(&req, local) {
-                return respond(
-                    &mut stream,
-                    401,
-                    "Unauthorized",
-                    &serde_json::json!({"ok": false, "error": "not_paired"}),
-                );
-            }
-            return desktop::move_position(&mut stream, card_id, &req.body);
+    // One typed command route for every mutation. The old per-card
+    // `cards/<id>/position` route is gone: a move that cannot name the revision
+    // it was based on is exactly the edit this route exists to refuse.
+    if path == "/api/v1/desktop/commands" {
+        // Authorization comes before the method check, like every other desktop
+        // route: an unpaired caller learns nothing about the route's shape.
+        if !authorize(&req, local) {
+            return respond(
+                &mut stream,
+                401,
+                "Unauthorized",
+                &serde_json::json!({"error": "not_paired"}),
+            );
         }
+        if req.method != "POST" {
+            return respond(
+                &mut stream,
+                405,
+                "Method Not Allowed",
+                &serde_json::json!({"error": "method_not_allowed"}),
+            );
+        }
+        // Deduplication is per credential, so a revoked device cannot replay
+        // another device's request id.
+        let device = stream.credential_id().map(str::to_string).unwrap_or_default();
+        return desktop::command(&mut stream, &device, &req.body);
     }
 
     match (req.method.as_str(), path.as_str()) {
