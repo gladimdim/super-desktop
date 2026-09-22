@@ -14,9 +14,11 @@ use std::{
     time::Duration,
 };
 
-/// Set after construction: the launch bar cannot hold a handle to the view it
-/// belongs to while that view is still being built.
+/// Set after construction: a bar cannot hold a handle to the view it belongs to
+/// while that view is still being built.
 type OnLaunch = Rc<RefCell<Option<Rc<dyn Fn(&str)>>>>;
+/// The same, for picking one of the host's folders.
+type OnPickFolder = Rc<RefCell<Option<Rc<dyn Fn(String)>>>>;
 
 pub struct MachineView {
     pub stack: gtk4::Stack,
@@ -28,6 +30,8 @@ pub struct MachineView {
     canvas: Rc<RemoteCanvas>,
     /// The host's own harness list, in the shared launch bar.
     bar: Rc<crate::harness_bar::HarnessBar>,
+    /// The host's folders, in the shared folder control.
+    folder_bar: crate::workspace_bar::RemoteFolderBar,
     /// Where a launch on the selected host goes, from the last snapshot.
     target: RefCell<Option<crate::harness_bar::RemoteTarget>>,
     /// One launch at a time: a slow host must not make two cards per click.
@@ -60,6 +64,19 @@ impl MachineView {
         let brand = gtk4::Label::new(Some("⚡ SUPER DESKTOP"));
         brand.add_css_class("hud-title");
         chrome.append(&brand);
+
+        // The folder new harnesses start in on that PC, in the same control the
+        // local workspace shows; only the folders are that host's to choose.
+        let on_folder: OnPickFolder = Rc::new(RefCell::new(None));
+        let folder_bar = crate::workspace_bar::build_remote_folder_bar(Rc::new({
+            let on_folder = Rc::clone(&on_folder);
+            move |dir: String| {
+                if let Some(pick) = on_folder.borrow().as_ref() {
+                    pick(dir);
+                }
+            }
+        }));
+        chrome.append(&folder_bar.widget);
         let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         spacer.set_hexpand(true);
         chrome.append(&spacer);
@@ -111,6 +128,7 @@ impl MachineView {
             selection: RefCell::new(Selection::default()),
             canvas,
             bar,
+            folder_bar,
             target: RefCell::new(None),
             launching: Cell::new(false),
             status,
@@ -123,6 +141,14 @@ impl MachineView {
             move |key: &str| {
                 if let Some(view) = weak.upgrade() {
                     view.launch_on_host(key);
+                }
+            }
+        }));
+        *on_folder.borrow_mut() = Some(Rc::new({
+            let weak = Rc::downgrade(&view);
+            move |dir: String| {
+                if let Some(view) = weak.upgrade() {
+                    view.choose_folder(&dir);
                 }
             }
         }));
@@ -184,6 +210,58 @@ impl MachineView {
     pub fn paint_top_bar_size(&self, size: crate::state::TopBarSize, screen_width: i32) {
         crate::window::paint_top_bar_size(&self.remote_toolbar, size, screen_width);
     }
+    /// Ask the selected PC to work in another of its own folders.
+    ///
+    /// The folder came from that host's own list, so this names nothing the
+    /// host did not offer; the change is the host's, visible on its own bar and
+    /// persisted there, exactly like typing it on that machine.
+    fn choose_folder(self: &Rc<Self>, directory: &str) {
+        let Some(target) = self.target.borrow().clone() else {
+            return;
+        };
+        let revision = self
+            .canvas
+            .snapshot_revision()
+            .unwrap_or_default();
+        let request = peer_client::request(
+            &target.peer,
+            &target.epoch,
+            crate::desktop_protocol::WorkspaceCommand::SetWorkspace {
+                workspace: directory.to_string(),
+                expected_revision: revision,
+            },
+        );
+        // The next launch must use the folder that was just picked, even if the
+        // snapshot of the change has not come back yet.
+        if let Some(target) = self.target.borrow_mut().as_mut() {
+            target.workspace = directory.to_string();
+        }
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let reply = gtk4::gio::spawn_blocking(move || {
+                peer_client::command(&target.peer, &request)
+            })
+            .await;
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            match reply {
+                Ok(Ok(_)) => view.refresh(),
+                Ok(Err(failure)) => {
+                    view.bar.fail(crate::harness_bar::launch_error(failure.0));
+                    // The folder this view shows is the host's, so a refused
+                    // change has to come back from the host, not from a guess
+                    // this view made on the way out.
+                    view.refresh();
+                }
+                Err(_) => {
+                    view.bar.fail("That PC did not answer · try again");
+                    view.refresh();
+                }
+            }
+        });
+    }
+
     /// Launch one harness on the selected PC, through the same bar the local
     /// workspace uses.
     ///
@@ -429,6 +507,7 @@ impl MachineView {
         *self.target.borrow_mut() = None;
         self.bar.apply(&crate::harness_bar::HarnessState::none());
         self.bar.note("");
+        self.folder_bar.clear();
         self.details.set_text("");
         match peer {
             None => {
@@ -504,11 +583,20 @@ impl MachineView {
                         .map(|h| peer_client::label(&h.name))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    view.details.set_text(&format!(
-                        "{} · {}",
-                        peer_client::label(&snapshot.local.workspace),
-                        harnesses
-                    ));
+                    // The folder has its own control in the bar; this line is
+                    // what that PC can run.
+                    view.details.set_text(&harnesses);
+                    view.folder_bar.apply(
+                        &peer_client::label(&snapshot.local.workspace),
+                        // Only a host that accepts commands can be moved to
+                        // another of its folders, so only that host's list is
+                        // worth offering.
+                        if capabilities.supports_remote_desktop() {
+                            &snapshot.local.folders
+                        } else {
+                            &[]
+                        },
+                    );
                     // The host's own harness list, offered by the same bar the
                     // local workspace uses; only a host that accepts commands
                     // becomes a launch target.
@@ -549,6 +637,7 @@ impl MachineView {
                     *view.target.borrow_mut() = None;
                     view.bar.apply(&crate::harness_bar::HarnessState::none());
                     view.bar.note("");
+                    view.folder_bar.clear();
                     view.canvas.show_message(remote_status(error));
                     view.details.set_text("");
                 }

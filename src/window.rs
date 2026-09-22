@@ -172,6 +172,8 @@ pub struct SuperDesktopWindow {
     /// hiding the window does not dismiss it: it must be popped down
     /// explicitly, or it stays on screen over an empty desktop.
     ws_popover: Popover,
+    /// The local folder field, so a viewer's folder change shows up in it.
+    ws_bar: crate::workspace_bar::WorkspaceBar,
     /// Bumped by `show_again`; a slide-out that finishes afterwards must not
     /// unmap the window again (hide → show inside the 140ms animation).
     show_token: std::cell::Cell<u64>,
@@ -456,6 +458,7 @@ impl SuperDesktopWindow {
             settings_refresh: Rc::clone(&settings_panel.refresh),
             overlay_panels: vec![settings_panel.widget.clone()],
             ws_popover: workspace_bar.popover.clone(),
+            ws_bar: workspace_bar.clone(),
             show_token: std::cell::Cell::new(0),
             hover_raise_lock: HoverRaiseLock::new(),
         });
@@ -1779,9 +1782,9 @@ impl SuperDesktopWindow {
             } => self
                 .set_terminal_card_expanded(card_id, *expanded)
                 .map(|()| None),
-            // Declared in the protocol, refused until its handler exists: a
-            // capability must never promise more than the host implements.
-            Command::SetWorkspace { .. } => Err("unsupported_command"),
+            Command::SetWorkspace { workspace, .. } => {
+                self.set_workspace_folder(workspace).map(|()| None)
+            }
         }
     }
 
@@ -1807,6 +1810,34 @@ impl SuperDesktopWindow {
             return Err("terminal_unavailable");
         }
         Ok(session)
+    }
+
+    /// Put this machine's workspace folder where a viewer asked for it.
+    ///
+    /// The folder has to be one this host itself offers: the same list the
+    /// snapshot publishes is the menu and the permission, so a viewer can never
+    /// point this machine at a path it did not offer. The change is this
+    /// machine's own, visible and persisted like typing it here.
+    fn set_workspace_folder(&self, workspace: &str) -> Result<(), &'static str> {
+        let known = {
+            let state = self.state.borrow();
+            crate::workspace_model::offered_folders(&state, &crate::state::effective_workspace_dir(&state))
+        };
+        if !known.iter().any(|folder| folder == workspace) {
+            return Err("invalid_workspace");
+        }
+        let Some(directory) = crate::state::clean_dir(workspace) else {
+            return Err("invalid_workspace");
+        };
+        let snapshot = {
+            let mut state = self.state.borrow_mut();
+            state.workspace_dir = Some(directory.clone());
+            crate::state::remember_workspace_dir(&mut state, &directory);
+            state.clone()
+        };
+        self.ws_bar.show_folder(&directory);
+        crate::state::save_state_async(snapshot);
+        Ok(())
     }
 
     /// Expand or collapse one card at a viewer's request.

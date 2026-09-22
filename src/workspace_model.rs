@@ -164,6 +164,7 @@ impl LocalWorkspace {
             epoch: self.epoch.clone(),
             revision: 0,
             canvas,
+            folders: offered_folders(&state, &workspace),
             workspace,
             home_directory: home,
             visible_harnesses,
@@ -194,6 +195,23 @@ impl LocalWorkspace {
         }
         Ok(next)
     }
+}
+
+/// The folders this host offers a viewer, in the order it would offer them: the
+/// one in use first, then the ones it has used before. A viewer can only name a
+/// folder from this list, so it is both the menu and the permission.
+pub fn offered_folders(state: &AppState, workspace: &str) -> Vec<String> {
+    let mut folders = vec![workspace.to_string()];
+    for dir in state.recent_dirs.iter().chain(state.used_dirs.iter()) {
+        if dir.is_empty() || folders.iter().any(|known| known == dir) {
+            continue;
+        }
+        folders.push(dir.clone());
+        if folders.len() == crate::desktop_protocol::MAX_FOLDERS {
+            break;
+        }
+    }
+    folders.iter().take(crate::desktop_protocol::MAX_FOLDERS).cloned().collect()
 }
 
 #[derive(Clone, Debug)]
@@ -365,6 +383,22 @@ fn bounded_output(mut command: Command) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_offers_its_own_folder_first_and_never_repeats_one() {
+        let mut state = AppState::default();
+        state.workspace_dir = Some("/work/notes".into());
+        state.recent_dirs = vec!["/work/notes".into(), "/work/old".into()];
+        state.used_dirs = vec!["/work/old".into(), "/work/deep".into()];
+        let folders = offered_folders(&state, "/work/notes");
+        assert_eq!(folders, vec!["/work/notes", "/work/old", "/work/deep"]);
+
+        // The list is capped: it is a menu, not a filesystem dump.
+        state.used_dirs = (0..64).map(|i| format!("/work/{i}")).collect();
+        let folders = offered_folders(&state, "/work/notes");
+        assert_eq!(folders.len(), crate::desktop_protocol::MAX_FOLDERS);
+        assert_eq!(folders[0], "/work/notes");
+    }
 
     fn canvas() -> Canvas {
         Canvas {

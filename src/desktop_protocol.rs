@@ -37,6 +37,9 @@ pub const MAX_REQUEST_ID: usize = 64;
 pub const MAX_EPOCH: usize = 64;
 /// Longest workspace string a viewer may name in a command.
 pub const MAX_WORKSPACE: usize = 4096;
+/// How many folders a host offers a viewer to start a harness in. The effective
+/// folder comes first, then the folders that host has used before.
+pub const MAX_FOLDERS: usize = 16;
 
 /// Card ids come from the host's own snapshot, never from a tmux target the
 /// caller supplied, so this is the only shape any route accepts.
@@ -287,7 +290,15 @@ pub struct LocalWorkspaceSnapshot {
     pub epoch: String,
     pub revision: u64,
     pub canvas: Canvas,
+    /// The folder this host would start a new harness in.
     pub workspace: String,
+    /// Every folder this host is willing to start a harness in: its own
+    /// effective folder first, then the ones it has used before. A viewer picks
+    /// from this list; it can never name a path of its own. A host that
+    /// publishes none offers exactly `workspace` (see [`offers_folder`]), which
+    /// is what a viewer could launch into before this list existed.
+    #[serde(default)]
+    pub folders: Vec<String>,
     pub home_directory: String,
     pub visible_harnesses: Vec<String>,
     pub harness_types: Vec<HarnessType>,
@@ -643,6 +654,16 @@ impl CommandOutcome {
     }
 }
 
+/// Whether the owner itself offers this folder. Everything a viewer may name
+/// comes from the snapshot's own list, so a command can never introduce a path
+/// the host did not publish.
+pub fn offers_folder(snapshot: &LocalWorkspaceSnapshot, workspace: &str) -> bool {
+    if snapshot.folders.is_empty() {
+        return workspace == snapshot.workspace;
+    }
+    snapshot.folders.iter().any(|folder| folder == workspace)
+}
+
 /// Validate one command against the owner's published workspace, before any
 /// mutation. Refusing here is what keeps a stale viewer from overwriting a
 /// concurrent local edit, and what keeps a create/close from being replayed
@@ -684,14 +705,28 @@ pub fn check_command(
         {
             return Err(CommandOutcome::rejected(snapshot, "unsupported_harness"));
         }
-        if workspace != &snapshot.workspace {
+        if !offers_folder(snapshot, workspace) {
+            return Err(CommandOutcome::rejected(snapshot, "invalid_workspace"));
+        }
+        return Ok(());
+    }
+    if let WorkspaceCommand::SetWorkspace {
+        workspace,
+        expected_revision,
+    } = &request.command
+    {
+        // A folder change is judged against the workspace revision, not a
+        // card's: it is one field of the workspace, and two viewers changing it
+        // at once must not silently overwrite each other.
+        if *expected_revision != snapshot.revision {
+            return Err(CommandOutcome::rejected(snapshot, "conflict"));
+        }
+        if !offers_folder(snapshot, workspace) {
             return Err(CommandOutcome::rejected(snapshot, "invalid_workspace"));
         }
         return Ok(());
     }
     let Some(card_id) = request.command.card_id() else {
-        // The default-folder command is declared and refused until the owner
-        // implements it; the capability only covers the handlers that exist.
         return Err(CommandOutcome::rejected(snapshot, "unsupported_command"));
     };
     let card = snapshot
@@ -904,19 +939,46 @@ mod tests {
 
         // The default-folder command is the one variant still unimplemented, and
         // it is refused with its own code instead of half-applying.
-        let mut unsupported = set_layout_request(1);
-        unsupported.command = WorkspaceCommand::SetWorkspace {
-            workspace: "/project".into(),
-            expected_revision: 1,
+        // A folder change names a folder the host offers and the workspace
+        // revision it saw: it is one field of the workspace, so it is judged
+        // against the workspace's own revision rather than a card's.
+        let mut folder = set_layout_request(1);
+        folder.command = WorkspaceCommand::SetWorkspace {
+            workspace: "/work/notes".into(),
+            expected_revision: snapshot.revision,
+        };
+        check_command(&snapshot, &folder).unwrap();
+        folder.command = WorkspaceCommand::SetWorkspace {
+            workspace: "/etc".into(),
+            expected_revision: snapshot.revision,
         };
         assert_eq!(
-            check_command(&snapshot, &unsupported)
-                .err()
-                .unwrap()
-                .error
-                .as_deref(),
-            Some("unsupported_command")
+            check_command(&snapshot, &folder).err().unwrap().error.as_deref(),
+            Some("invalid_workspace")
         );
+        folder.command = WorkspaceCommand::SetWorkspace {
+            workspace: "/work/notes".into(),
+            expected_revision: snapshot.revision + 5,
+        };
+        let stale = check_command(&snapshot, &folder).err().unwrap();
+        assert_eq!(stale.error.as_deref(), Some("conflict"));
+        assert_eq!(stale.status(), (409, "Conflict"));
+        // A create may name any folder the host offers, not only the current
+        // one, so picking a folder and launching straight away cannot race.
+        let mut create_elsewhere = set_layout_request(1);
+        create_elsewhere.command = WorkspaceCommand::CreateTerminal {
+            agent_type: "shell".into(),
+            workspace: "/work/notes".into(),
+        };
+        check_command(&snapshot, &create_elsewhere).unwrap();
+
+        // A host that publishes no folder list offers exactly the folder it
+        // reports, which is what a viewer could launch into before the list
+        // existed.
+        let mut older = crate::remote_workspace::fixture().local;
+        older.folders.clear();
+        assert!(offers_folder(&older, "/project"));
+        assert!(!offers_folder(&older, "/work/notes"));
 
         // An expanded card refuses layout commands but still accepts a close:
         // its transient rectangle must not be written, yet a close wins.

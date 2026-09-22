@@ -193,9 +193,10 @@ drag an edge to resize it, and use its buttons to minimize, maximize or close it
 there. Each action is one typed command carrying the card revision this view
 drew, so a concurrent edit on the host is refused as a conflict and the console
 snaps to the host's real geometry. The host keeps its own grid, and clicking a
-harness button launches it on that PC, in the folder that PC publishes, without
-forcing its overlay to show. Choosing another folder on that PC is not
-implemented yet.
+harness button launches it on that PC, without forcing its overlay to show. The
+folder field beside it is that PC's too: open its list to pick one of the folders
+that PC offers as the working directory for the next harness there (it becomes
+that PC's folder, exactly as if you had typed it on that machine).
 `workspace-layout-v1` and `terminal-pty-v1` in
 [the protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md) record what each PC
 advertises.

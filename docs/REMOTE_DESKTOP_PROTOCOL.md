@@ -47,6 +47,13 @@ route lets the host apply a resize, an iconify or a close — those are implemen
 and tested host-side, and the viewer's own controls for them are the next
 milestone.
 
+The folder a new harness starts in is the same control a local workspace shows,
+fed by that host instead: the snapshot publishes the folders that host offers, the
+viewer lists them, and picking one sends `setWorkspace`. A viewer cannot type a
+path on another machine, so that field is readable and the list is the only input
+— and because the list is also the permission, a picked folder can be used for a
+launch immediately, without waiting for the snapshot of the change.
+
 A remote console is the same card a local one is, so its own header buttons work
 on the host: minimize and maximize send `setLayout` and `setExpanded`, close
 sends `closeTerminal`, and dragging the header or an edge sends one `setLayout`
@@ -110,7 +117,7 @@ remains v3; Android endpoints and credentials are unchanged.
 | `GET /api/v1/desktop/workspace` | Complete current workspace snapshot, retrieved from the local daemon via Unix IPC. |
 | `GET /api/v1/desktop/events` (WSS) | Initial complete snapshot, then changed snapshots and five-second heartbeats. |
 | `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live bytes of one owned card's session. Host→viewer binary frames are terminal output; viewer→host binary frames are terminal input. |
-| `POST /api/v1/desktop/commands` | One typed workspace command: `setLayout`, `closeTerminal`, and the not-yet-implemented `createTerminal`/`setWorkspace`. Requires the paired-device credential; a non-POST method on the path answers 405 after authorization. |
+| `POST /api/v1/desktop/commands` | One typed workspace command: `setLayout`, `setExpanded`, `closeTerminal`, `createTerminal` and `setWorkspace`. Requires the paired-device credential; a non-POST method on the path answers 405 after authorization. |
 
 Events use `{"type":"snapshot","workspace":{...}}` or
 `{"type":"unavailable","error":"desktop_unavailable"}`. Events poll the owning
@@ -156,10 +163,21 @@ the snapshot already exports as `expanded`, so the viewer mirrors whatever the
 host decides. `createTerminal` takes
 `agentType` and `workspace`, and is accepted only when the host itself offers
 that harness (it is in the snapshot's `visibleHarnesses`) and that workspace is
-the folder the host itself published: a viewer never names a command, a flag, a
-tmux target, an environment variable or a path the host did not publish.
-`setWorkspace` is declared so its shape is fixed early and is refused with
-`unsupported_command` until the host implements it.
+one of the folders the host itself published (it is in the snapshot's `folders`):
+a viewer never names a command, a flag, a tmux target, an environment variable or
+a path the host did not publish.
+
+`setWorkspace` takes `workspace` and `expectedRevision`, and is what the remote
+folder picker sends. Its revision is the *workspace* revision, not a card's,
+because the folder is one field of the workspace: two viewers changing it at once
+must not silently overwrite each other, so a stale one is answered with
+`conflict` and the current revision, and `expectedRevision: 0` is malformed here
+too. The folder must be one the host offers, so the list a viewer shows is both
+the menu and the permission.
+
+A host whose snapshot publishes no `folders` (an older build) offers exactly the
+folder it reports, which is what a viewer could launch into before this list
+existed; such a host cannot be moved to another folder remotely.
 
 Refusals, all with a stable code from the shared command list:
 
@@ -173,7 +191,8 @@ Refusals, all with a stable code from the shared command list:
 | Malformed envelope, bounds or identity | 400 | `invalid_command`, `invalid_layout`, `unsupported_command` |
 | A create names a harness the host does not offer | 400 | `unsupported_harness` |
 | A layout command on a card the host shows expanded | 409 | `terminal_expanded` (a close or an expand is still accepted) |
-| A create names a folder the host did not publish | 400 | `invalid_workspace` |
+| A create or folder change names a folder the host did not publish | 400 | `invalid_workspace` |
+| A folder change names a stale workspace revision | 409 | `conflict` |
 | Command addressed to another machine | 409 | `wrong_machine` |
 | Owner unavailable / warming up / timed out | 503 / 503 / 504 | `desktop_unavailable`, `desktop_not_ready`, `desktop_timeout` |
 | Same request id, owner never answered | 409 | `unknown_outcome` |
@@ -233,8 +252,10 @@ its panes or its processes.
 - `CardKey` combines machine and card identity. `MachineSelection::Local` works
   independently of bridge identity and is the startup default.
 - `WorkspaceSnapshot` has a machine ID, daemon epoch, global revision, logical
-  canvas metadata, host folders/harness types and explicit card DTOs. It never
-  serializes the local application's complete state.
+  canvas metadata, the current folder, the folders this host offers (its
+  effective one first, then the ones it has used before, capped at `MAX_FOLDERS`),
+  harness types and explicit card DTOs. It never serializes the local
+  application's complete state.
 - Cards distinguish card ID from session name, saved geometry from transient
   expansion, missing sessions from removed cards, and card revision from workspace
   revision. A terminal size is columns/rows, not card pixels. `sessionAlive` and
@@ -249,23 +270,26 @@ its panes or its processes.
   Mutation DTOs reject unknown fields. Handlers must additionally validate
   ownership, epochs, revisions, paths, layout limits and request deduplication.
 - Replies echo request identity and authoritative epoch/revision, with a typed
-  applied/rejected result. An acknowledgement is not yet an implemented durability
-  guarantee: the host model and persistence integration come next.
+  applied/rejected result that carries the card's published revision, geometry and
+  `expanded`. An acknowledgement is not a durability guarantee: the host saves
+  `state.json` asynchronously, so a crash between the answer and the write can
+  still lose the change, and the deduplication cache does not survive a restart.
 - `AttachEvent` and `AttachCommand` are the attach stream's text frames, with
   `ATTACH_MAX_CHUNK`, `ATTACH_MAX_BACKLOG`, `ATTACH_MAX_SECS`, `MAX_REMOTE_VIEWERS`
   and the shared `ATTACH_REASONS` code list the protocol, the bridge and the
   viewer all agree on.
 
-Workspace snapshot/event routes and the terminal attach route are available.
-Command DTOs remain contracts without network handlers. Future arrange/raise/expand
-operations and viewer input will be added alongside their implementations.
+Workspace snapshot/event routes, the terminal attach route and the command route
+are all available and are what both workspaces run on. A future arrange/raise
+command and incremental deltas would each be added alongside their implementation.
 
 ## Workspace ownership and revisions
 
 `AppContext` owns `LocalWorkspace`; the existing window shares its local state
-handle. CLI and Android operations keep referring to that local state. This is
-an incremental extraction: lifecycle mutations still run through existing local
-widget callbacks and are not yet a remotely writable model.
+handle. CLI and Android operations keep referring to that local state. Lifecycle
+and layout mutations run through the same local widget callbacks a click on the
+host uses, and the command route reaches exactly those, so a remote mutation
+cannot take a path the host's own UI does not have.
 
 Snapshots read in-memory state, including unsaved edits. They do not reload
 `state.json`, show the overlay, create cards, or attach terminals. A background

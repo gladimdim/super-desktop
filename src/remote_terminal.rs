@@ -107,6 +107,15 @@ impl RemoteCanvas {
         view
     }
 
+    /// The workspace revision this view last held. A folder change is judged
+    /// against it, because the folder is one field of the workspace.
+    pub fn snapshot_revision(&self) -> Option<u64> {
+        self.snapshot
+            .borrow()
+            .as_ref()
+            .map(|snapshot| snapshot.local.revision)
+    }
+
     /// Called after a command whose effect this view cannot apply by itself
     /// (close, expand): the owner asks for a fresh snapshot instead of waiting
     /// out the poll.

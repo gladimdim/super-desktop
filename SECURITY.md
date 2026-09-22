@@ -97,7 +97,12 @@ the controls a local one does and nothing more.
 
 A create is the one command that makes something new, so it is bounded by the
 host's own snapshot: `agentType` must be one of the harnesses that host lists as
-visible, and `workspace` must be the folder that host published. The host then
+visible, and `workspace` must be one of the folders that host published (`folders`
+in the snapshot: the effective one first, then the ones it has used before, capped
+at 16). `setWorkspace` — the remote folder picker — is bounded by that same list and
+by the workspace revision, so a viewer can move that machine to a folder it already
+offered and nothing else, and two viewers cannot silently overwrite each other's
+choice. The host then
 builds the card through the same path a local launch uses, so the executable, the
 sandbox flags, the tmux session name and the card geometry are all decided on the
 host, and a card is reported only when its session is alive. A refused create

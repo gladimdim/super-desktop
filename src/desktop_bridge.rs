@@ -103,6 +103,11 @@ fn decode_reply(reply: &str) -> Result<LocalWorkspaceSnapshot, WorkspaceError> {
     if snapshot.epoch.is_empty()
         || snapshot.revision == 0
         || snapshot.cards.len() > crate::workspace_model::MAX_DESKTOP_CARDS
+        || snapshot.folders.len() > crate::desktop_protocol::MAX_FOLDERS
+        || snapshot
+            .folders
+            .iter()
+            .any(|folder| folder.len() > crate::desktop_protocol::MAX_WORKSPACE)
         || snapshot.canvas.width == 0
         || snapshot.canvas.height == 0
         || !snapshot.canvas.scale.is_finite()

@@ -1,9 +1,9 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
 Status: pairing, a live remote workspace, its terminal transport, viewer typing
-and the host's own harness bar and card chrome are delivered, and both
-workspaces now run the *same* UI code with only the source swapped; folder
-selection, the 100% + pan/zoom mode and live outgoing subscriptions remain in
+and the host's own harness bar, folder picker and card chrome are delivered, and
+both workspaces now run the *same* UI code with only the source swapped; the
+100% + pan/zoom mode, conflict feedback and live outgoing subscriptions remain in
 progress.
 Updated 2026-09-22 against `master`.
 
@@ -66,6 +66,11 @@ PCs:
   and folder — without being forced to show its overlay. The bar is offered only
   by a host that advertises `workspace-layout-v1`, is inert while a launch is in
   flight, and names only harnesses and folders that host published.
+- The folder new harnesses start in is the local control, fed by the host: the
+  snapshot publishes the folders that host offers, the viewer lists them, and
+  picking one sends `setWorkspace` (judged against the workspace revision). The
+  same list is the permission, so a create may name any folder in it — which is
+  what lets a folder be picked and used without waiting for the next snapshot.
 - Each visible remote console is a real VTE terminal fed by the host's own tmux
   attach output over pinned WSS (`GET /api/v1/desktop/terminals/<card-id>/attach`),
   so output, colours, alternate-screen applications and redraws match the host.
@@ -84,11 +89,9 @@ This is a **live view you can type into, rearrange and launch from**: the same
 widgets as a local workspace, with a host on the other end. It shows the host's
 terminal pixels, sends keystrokes, paste and Ctrl+C to the focused session, and
 its cards' own buttons, drags and edges move, resize, iconify, expand and close
-the host's cards. It changes no folder: `setWorkspace` is accepted by the
-protocol and refused with `unsupported_command` until its handler exists, so a
-new card always starts in the folder that host publishes. What is still missing
-is the 100% + pan/zoom mode, conflict feedback in the chrome, and the host's own
-folder list. A host that says “Update and rebuild SUPER DESKTOP on the host” is
+the host's cards, and the folder beside its top bar lists the folders *that PC*
+offers, so a new harness there can start in any of them. What is still missing is
+the 100% + pan/zoom mode and conflict feedback in the chrome. A host that says “Update and rebuild SUPER DESKTOP on the host” is
 serving an older bridge without `terminal-pty-v1`, and its workspace is drawn as
 chrome without live consoles. Hosts that hide their overlay release their
 viewers' streams, and reopening the overlay reconnects them.
@@ -143,13 +146,13 @@ automatically.
    card actions, `createTerminal` builds a card exactly like a local launch, and
    `workspace-layout-v1` is advertised because those handlers exist. Every caller
    is now the same UI a local workspace runs: the card's own buttons and
-   gestures, and the harness bar. `setWorkspace` is declared and refused with
-   `unsupported_command`.
-4. Next: conflict feedback in the card chrome, the 100% + pan/scroll mode with
-   fit/100% coordinate transforms, then the host's folder list with
-   `setWorkspace`, live WSS workspace events in place of the two-second poll, and
-   two-PC regression coverage for switching, concurrent edits, bridge/daemon
-   restart and revocation. Viewer input (delivered) stays
+   gestures, the harness bar and the folder picker. `setWorkspace` (a folder from
+   the host's own list, judged against the workspace revision) is applied too, so
+   every command variant has a handler.
+4. Next: conflict feedback in the card chrome and the 100% + pan/scroll mode with
+   fit/100% coordinate transforms, then live WSS workspace events in place of the
+   two-second poll, and two-PC regression coverage for switching, concurrent
+   edits, bridge/daemon restart and revocation. Viewer input (delivered) stays
    behind the current-selection handshake and the prompt-transaction guard, and
    keys are never replayed after a disconnect.
 
@@ -308,7 +311,7 @@ Delivered endpoints (`✓`) and the ones still to build:
 | ✓ `GET /api/v1/desktop/workspace` | Authoritative local-workspace snapshot from the host daemon. |
 | ✓ `GET /api/v1/desktop/events` (WSS) | Initial snapshot, then changed snapshots and host availability. |
 | ✓ `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live PTY transport for one owned session: host output as binary frames, viewer keystrokes back. |
-| ✓ `POST /api/v1/desktop/commands` | Typed commands with request IDs, epoch and card revisions: `setLayout`, `setExpanded`, `closeTerminal` and `createTerminal` are applied; `setWorkspace` is refused with `unsupported_command` until it is. |
+| ✓ `POST /api/v1/desktop/commands` | Typed commands with request IDs, epoch and card revisions: all five command variants are applied: `setLayout`, `setExpanded`, `closeTerminal`, `createTerminal` and `setWorkspace`. |
 
 Reuse existing authenticated workspace/harness-type endpoints where their
 semantics fit. New desktop mutations should use the command envelope so create
@@ -582,7 +585,8 @@ Manual acceptance matrix:
 | Launch a harness from the viewer's top bar | The buttons are the host's own list, in the host's order, and the click creates the card on the host in the host's published folder. A harness the host does not offer is not listed, and an older host offers no buttons at all. |
 | Drag/resize from either machine | Other view updates; a stale gesture is refused as a conflict and the card snaps to the host's real geometry; no resizing oscillation. |
 | Close on B from A | B owns the lifecycle: its card, widget and session go, and A's local state is unchanged. |
-| Create on B from A | B owns the lifecycle: the card appears in B's workspace and folder, A's local state is unchanged, and B's overlay is not forced to show. |
+| Create on B from A | B owns the lifecycle: the card appears in B's workspace and the chosen folder, A's local state is unchanged, and B's overlay is not forced to show. |
+| Pick a folder from A, then launch | The list is B's own folders; the pick changes B's working folder (visible on B's own bar) and the next launch starts there. |
 | Rapid switching and hide/show | No keys reach the wrong PC and no harness is killed. |
 | B asleep, bridge restart, daemon restart | Clear stale/offline state; safe refresh; no duplicate commands, and every console says why it has no live stream. |
 | Android plus desktop viewers | Existing phone pairing/list/input/files remain compatible. |

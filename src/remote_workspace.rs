@@ -25,7 +25,12 @@ impl Selection {
 
 pub fn validate(snapshot: &WorkspaceSnapshot) -> Result<(), &'static str> {
     let local = &snapshot.local;
-    if local.canvas.width == 0
+    if local.folders.len() > crate::desktop_protocol::MAX_FOLDERS
+        || local
+            .folders
+            .iter()
+            .any(|folder| folder.len() > crate::desktop_protocol::MAX_WORKSPACE)
+        || local.canvas.width == 0
         || local.canvas.height == 0
         || local.canvas.width > 32768
         || local.canvas.height > 32768
@@ -142,7 +147,8 @@ pub fn fixture() -> WorkspaceSnapshot {
     serde_json::from_value(serde_json::json!({
         "machineId":"a".repeat(32), "epoch":"host-one", "revision":1,
         "canvas":{"x":0,"y":0,"width":1920,"height":1080,"scale":2.0,"topInset":56},
-        "workspace":"/project", "homeDirectory":"/home/host", "visibleHarnesses":["shell"],
+        "workspace":"/project", "folders":["/project","/work/notes"],
+        "homeDirectory":"/home/host", "visibleHarnesses":["shell"],
         "harnessTypes":[{"id":"shell","name":"Shell","available":true}],
         "cards":[{"cardId":"card-one","sessionName":"sd_term_one","agentType":"shell",
         "title":"Host shell","status":"RUNNING","sessionAlive":true,"workspace":"/project",

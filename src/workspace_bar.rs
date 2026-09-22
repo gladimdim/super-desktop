@@ -47,10 +47,220 @@ const SUGGEST_MAX: usize = 10;
 const FS_MATCH_CAP: usize = 24;
 
 /// The top bar field and the history popover it owns.
+#[derive(Clone)]
 pub struct WorkspaceBar {
     pub widget: GtkBox,
     pub popover: Popover,
     pub entry: Entry,
+}
+
+impl WorkspaceBar {
+    /// Show a folder that was chosen elsewhere — a viewer asking this machine
+    /// to work somewhere else. The state write is the caller's: this only keeps
+    /// the field the user reads in step with it.
+    pub fn show_folder(&self, dir: &str) {
+        self.entry.remove_css_class("ws-entry-invalid");
+        self.entry.set_has_tooltip(false);
+        self.entry.set_text(dir);
+        self.entry.set_position(-1);
+    }
+}
+
+/// The same folder control, for a host's workspace.
+///
+/// One difference, and it is the capability: a viewer cannot type a path on
+/// another machine, so the field shows the folder that host reports and the ▾
+/// list offers the folders that host published. Picking one asks it to work
+/// there; the field and the list follow its answer, like everything else in a
+/// remote workspace.
+pub struct RemoteFolderBar {
+    pub widget: GtkBox,
+    popover: Popover,
+    entry: Entry,
+    folders: Rc<RefCell<Vec<String>>>,
+}
+
+impl RemoteFolderBar {
+    /// Show the folder a host reports, and offer the folders it publishes.
+    pub fn apply(&self, workspace: &str, folders: &[String]) {
+        *self.folders.borrow_mut() = folders.to_vec();
+        self.entry.set_text(workspace);
+        self.entry.set_position(-1);
+    }
+
+    /// Show where a host's folders are not usable yet, or forget the last host.
+    pub fn clear(&self) {
+        self.folders.borrow_mut().clear();
+        self.entry.set_text("");
+        self.popover.popdown();
+    }
+}
+
+impl RemoteFolderBar {
+    /// The folder currently shown, so a check can see what the user reads.
+    #[cfg(test)]
+    pub fn shown_folder(&self) -> String {
+        self.entry.text().to_string()
+    }
+
+    /// The folders this host offered, in the order it offered them.
+    #[cfg(test)]
+    pub fn offered(&self) -> Vec<String> {
+        self.folders.borrow().clone()
+    }
+}
+
+/// Build the folder control for one remote workspace. `on_pick` is what asks
+/// that host to work in a folder: nothing here writes this machine's state.
+pub fn build_remote_folder_bar(on_pick: Rc<dyn Fn(String)>) -> RemoteFolderBar {
+    let bar = GtkBox::new(Orientation::Vertical, 0);
+    bar.add_css_class("ws-bar");
+    bar.set_valign(Align::Center);
+    bar.set_hexpand(false);
+
+    let subtitle = Label::new(Some("working directory on that PC"));
+    subtitle.add_css_class("ws-subtitle");
+    subtitle.set_halign(Align::Start);
+    bar.append(&subtitle);
+
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.set_valign(Align::Center);
+    let icon = Label::new(Some("📁"));
+    icon.add_css_class("ws-icon");
+    row.append(&icon);
+
+    // The same field the local workspace shows, minus the typing: it is an
+    // entry so it looks and spaces identically, but a remote path is not this
+    // machine's to spell.
+    let entry = Entry::new();
+    entry.add_css_class("ws-entry");
+    entry.set_width_chars(18);
+    entry.set_max_width_chars(42);
+    entry.set_valign(Align::Center);
+    entry.set_hexpand(false);
+    entry.set_editable(false);
+    entry.set_can_focus(false);
+    entry.set_focus_on_click(false);
+    entry.set_has_tooltip(false);
+    row.append(&entry);
+
+    let menu_btn = Button::with_label("▾");
+    menu_btn.add_css_class("ws-menu-btn");
+    menu_btn.set_valign(Align::Center);
+    menu_btn.set_tooltip_text(Some("Folders that PC offers"));
+    row.append(&menu_btn);
+    bar.append(&row);
+
+    let folders: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let popover = Popover::new();
+    popover.add_css_class("ws-pop");
+    popover.set_position(PositionType::Bottom);
+    popover.set_has_arrow(false);
+    popover.set_offset(0, 6);
+    popover.set_can_focus(false);
+    popover.set_parent(&entry);
+
+    {
+        // The list is built from what the host last reported, so it is as fresh
+        // as the snapshot the rest of the view is drawn from.
+        let pop = popover.clone();
+        let folders_show = Rc::clone(&folders);
+        let entry_show = entry.clone();
+        let pick = Rc::clone(&on_pick);
+        popover.connect_show(move |_| {
+            let dirs = folders_show.borrow().clone();
+            let fallback = entry_show.text().to_string();
+            paint_remote_rows(&pop, &dirs, &fallback, &pick);
+        });
+    }
+    let pop_toggle = popover.clone();
+    menu_btn.connect_clicked(move |_| {
+        if pop_toggle.is_visible() {
+            pop_toggle.popdown();
+        } else {
+            pop_toggle.popup();
+        }
+    });
+    // Clicking the field opens the same list: the whole control is one target,
+    // exactly like the local bar.
+    for widget in [entry.clone().upcast::<gtk4::Widget>(), icon.clone().upcast(), subtitle.clone().upcast()] {
+        let pop_click = popover.clone();
+        let click = GestureClick::new();
+        click.connect_pressed(move |_, _, _, _| {
+            if !pop_click.is_visible() {
+                pop_click.popup();
+            }
+        });
+        widget.add_controller(click);
+    }
+
+    RemoteFolderBar {
+        widget: bar,
+        popover,
+        entry,
+        folders,
+    }
+}
+
+/// One row per folder a host offers: the same shape as this machine's own
+/// history menu, with the same check mark for the folder in use.
+fn paint_remote_rows(
+    popover: &Popover,
+    dirs: &[String],
+    current: &str,
+    on_pick: &Rc<dyn Fn(String)>,
+) {
+    let container = GtkBox::new(Orientation::Vertical, 2);
+    container.add_css_class("ws-pop-box");
+    if dirs.is_empty() {
+        let empty = Label::new(Some("That PC offers no other folder yet."));
+        empty.add_css_class("ws-empty");
+        empty.set_halign(Align::Start);
+        container.append(&empty);
+        popover.set_child(Some(&container));
+        return;
+    }
+    for dir in dirs {
+        let active = dir == current;
+        let row = GtkBox::new(Orientation::Horizontal, 4);
+        row.add_css_class("ws-row");
+        row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
+
+        let pick = Button::new();
+        pick.add_css_class("ws-row-pick");
+        pick.set_hexpand(true);
+        pick.set_can_focus(false);
+        pick.set_focus_on_click(false);
+        pick.set_tooltip_text(Some(dir));
+
+        let label_row = GtkBox::new(Orientation::Horizontal, 8);
+        let mark = Label::new(Some(if active { "✓" } else { " " }));
+        mark.add_css_class("ws-row-mark");
+        label_row.append(&mark);
+        let name = Label::new(Some(&row_name(dir)));
+        name.add_css_class("ws-row-name");
+        label_row.append(&name);
+        let path = Label::new(Some(&display_dir(dir)));
+        path.add_css_class("ws-row-path");
+        path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+        path.set_halign(Align::End);
+        path.set_hexpand(true);
+        label_row.append(&path);
+        pick.set_child(Some(&label_row));
+        row.append(&pick);
+
+        {
+            let dir = dir.clone();
+            let pop = popover.clone();
+            let on_pick = Rc::clone(on_pick);
+            pick.connect_clicked(move |_| {
+                pop.popdown();
+                on_pick(dir.clone());
+            });
+        }
+        container.append(&row);
+    }
+    popover.set_child(Some(&container));
 }
 
 /// Live autocomplete / history-list state for one workspace field.
@@ -941,6 +1151,64 @@ fn row_name(dir: &str) -> String {
 mod tests {
     use super::*;
     use crate::state::{TerminalData, RECENT_DIRS_MAX};
+
+    #[test]
+    fn a_remote_folder_control_is_the_local_one_without_the_typing() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::remote_folder_inner");
+    }
+
+    #[test]
+    fn remote_folder_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let picked: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let bar = build_remote_folder_bar(Rc::new({
+            let picked = Rc::clone(&picked);
+            move |dir: String| picked.borrow_mut().push(dir)
+        }));
+
+        // The same control a local workspace shows: same classes, same field,
+        // same menu button.
+        assert!(bar.widget.has_css_class("ws-bar"));
+        assert!(bar.entry.has_css_class("ws-entry"));
+        // And it cannot be typed into: a remote path is not this machine's to
+        // spell.
+        assert!(!bar.entry.is_editable() && !bar.entry.can_focus());
+
+        bar.apply("/work/notes", &["/work/notes".into(), "/work/other".into()]);
+        assert_eq!(bar.shown_folder(), "/work/notes");
+        assert_eq!(bar.offered().len(), 2);
+
+        // Picking from the list asks the host for exactly that folder. The
+        // list is built fresh from what the host last offered, so it is as
+        // fresh as the snapshot the rest of the view is drawn from.
+        let popover = Popover::new();
+        popover.add_css_class("ws-pop");
+        let dirs = bar.offered();
+        let on_pick: Rc<dyn Fn(String)> = Rc::new({
+            let picked = Rc::clone(&picked);
+            move |dir: String| picked.borrow_mut().push(dir)
+        });
+        paint_remote_rows(&popover, &dirs, "/work/notes", &on_pick);
+        let container = popover.child().expect("one container");
+        let second = container
+            .first_child()
+            .and_then(|row| row.next_sibling())
+            .expect("a row per folder");
+        second
+            .first_child()
+            .expect("a pick button")
+            .downcast::<Button>()
+            .unwrap()
+            .emit_clicked();
+        assert_eq!(picked.borrow().as_slice(), ["/work/other".to_string()]);
+
+        // Leaving that PC forgets its folders.
+        bar.clear();
+        assert!(bar.shown_folder().is_empty() && bar.offered().is_empty());
+    }
 
     #[test]
     fn test_row_name_uses_the_last_component() {

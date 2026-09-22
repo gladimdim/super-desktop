@@ -19,7 +19,9 @@ class DesktopStub:
                 "epoch": "daemon-one", "revision": 1,
                 "canvas": {"x": 0, "y": 0, "width": 1920, "height": 1080,
                            "scale": 1.0, "topInset": 56},
-                "workspace": "/remote/project with spaces", "homeDirectory": "/remote",
+                "workspace": "/remote/project with spaces",
+                "folders": ["/remote/project with spaces", "/remote/other"],
+                "homeDirectory": "/remote",
                 "visibleHarnesses": ["shell"],
                 "harnessTypes": [{"id": "shell", "name": "Shell", "available": True}],
                 "cards": [{
@@ -254,6 +256,28 @@ def check_desktop_commands(request, token, machine_id, directory):
         assert json.loads(stub.commands[-1].split(" ", 1)[1])["command"] == {
             "type": "createTerminal", "agentType": "shell",
             "workspace": "/remote/project with spaces"}
+
+        # A folder change names a folder from the owner's own list and the
+        # workspace revision it saw.
+        stub.answer_commands_with(command_outcome(
+            True, revision=5, expanded=None))
+        status, body = request("/api/v1/desktop/commands",
+            {"requestId": "r11", "machineId": machine_id, "expectedEpoch": "daemon-one",
+             "command": {"type": "setWorkspace", "workspace": "/remote/project with spaces",
+                         "expectedRevision": 1}}, token=token)
+        assert status == 200 and body["result"]["type"] == "applied", body
+        assert json.loads(stub.commands[-1].split(" ", 1)[1])["command"] == {
+            "type": "setWorkspace", "workspace": "/remote/project with spaces",
+            "expectedRevision": 1}
+        # Whether a folder is one the host offers is the owner's rule, but the
+        # envelope's shape is the bridge's: an empty folder never reaches it.
+        before = len(stub.commands)
+        status, body = request("/api/v1/desktop/commands",
+            {"requestId": "r12", "machineId": machine_id, "expectedEpoch": "daemon-one",
+             "command": {"type": "setWorkspace", "workspace": "",
+                         "expectedRevision": 1}}, token=token)
+        assert status == 400 and body["error"] == "invalid_command", body
+        assert len(stub.commands) == before, stub.commands
 
         # Expanding and collapsing travel as their own command, because the
         # owner's `expanded` is presentation and is not part of saved geometry.
