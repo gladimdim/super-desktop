@@ -1,54 +1,62 @@
 //! Live remote consoles, drawn at the host's own card geometry.
 //!
-//! The host owns the terminal grid and the layout; this view renders what the
-//! host reports and does not write card geometry back. Cards keep the host's
-//! positions, sizes, stacking order and iconified state. Each streamed card is
-//! a VTE widget fed by the network stream. Keystrokes, paste and IME are the
-//! bytes VTE commits for that widget: they are forwarded only after the host's
-//! `attached` handshake, and a hide or machine switch drops anything still
-//! queued. Dragging a card tells the host to move and raise it, with the
-//! revision this view drew, so a concurrent host edit is refused instead of
-//! overwritten. The viewer sends nothing to a host that does not advertise
-//! `workspace-layout-v1`, and creating, closing and resizing have no viewer
-//! control yet.
-use crate::desktop_protocol::{DesktopCard, TerminalSize, WorkspaceSnapshot, MAX_REMOTE_VIEWERS};
+//! The consoles here are the *same* card widget the local workspace uses
+//! (`MiniTerminalCard`): same chrome, same header buttons, same drag, resize,
+//! expand and close gestures. Only the source differs, and this view supplies
+//! it: a host session streamed over the pinned WebSocket instead of a tmux
+//! session on this machine, and a snapshot instead of `state.json`.
+//!
+//! Every control therefore means the same thing in both workspaces, and on a
+//! remote card it means it *on the host*: minimize, maximize, close and resize
+//! are one typed command each, carrying the card revision this view drew, so a
+//! concurrent host edit is answered with a conflict instead of being
+//! overwritten. The host's snapshot is the truth this view mirrors.
+use crate::desktop_protocol::{
+    CardLayout, CommandReply, DesktopCard, WorkspaceSnapshot, WorkspaceCommand, MAX_REMOTE_VIEWERS,
+};
+use crate::mini_terminal::MiniTerminalCard;
 use crate::peer_client::{self, Peer};
-use crate::peer_terminal::{Event as StreamEvent, TerminalStream};
-use crate::remote_workspace::{self, Rect};
-use futures_util::StreamExt;
+use crate::remote_workspace;
+use crate::state::TerminalData;
 use gtk4::{glib, prelude::*};
-use vte4::prelude::*;
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
-use std::time::{Duration, Instant};
 
-/// A failed or ended attachment waits this long before the next attempt, so
-/// eight cards cannot hammer an offline or refusing host.
-const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// Header height at 100% scale. Every other card dimension comes from the
-/// host's logical rectangle, multiplied by the viewer's fit scale.
+/// host's logical rectangle, multiplied by this view's fit scale.
 const HEADER_HEIGHT: f64 = 30.0;
-/// Font bounds for the fitted terminal. A card too small for the host grid
-/// clips, exactly like a small local card does.
-const MIN_FONT: f64 = 3.0;
-const MAX_FONT: f64 = 40.0;
 
 /// The host's workspace, rendered live inside the viewer's canvas.
 pub struct RemoteCanvas {
     /// `message` (status/errors) or `canvas` (live cards).
     pub area: gtk4::Stack,
     canvas: gtk4::Fixed,
-    cards: RefCell<HashMap<String, Rc<RemoteCard>>>,
-    snapshot: RefCell<Option<WorkspaceSnapshot>>,
-    peer: RefCell<Option<Peer>>,
+    cards: RefCell<HashMap<String, Rc<MiniTerminalCard>>>,
+    /// Where each card was last placed inside the fitted canvas, as
+    /// `(x, y, width)`; the overlay's slide-out animates between these.
+    placed: RefCell<HashMap<String, (f64, f64, f64)>>,
+    /// Cards a gesture owns right now: a snapshot must not pull a card back to
+    /// where the host last reported it while the user is still moving it.
+    gesturing: RefCell<HashSet<String>>,
     /// Drops the host has not confirmed yet, in host pixels. A refresh that
     /// still has the old origin keeps the card where it was released.
     pending_moves: RefCell<HashMap<String, (i32, i32)>>,
-    /// The host advertises `workspace-layout-v1`, so it accepts layout
-    /// commands. A host that does not keeps its own geometry: a drop is
-    /// dropped rather than guessed at, and no command is ever sent.
+    /// The host's stacking order as this view last imposed it, so a local
+    /// click-raise is not undone by every poll.
+    stacking: RefCell<Vec<String>>,
+    /// Shared with the cards' hover handlers, so a card opened elsewhere does
+    /// not steal the pointer path.
+    hover_lock: crate::mini_terminal::HoverRaiseLock,
+    snapshot: RefCell<Option<WorkspaceSnapshot>>,
+    peer: RefCell<Option<Peer>>,
+    /// The host advertises `workspace-layout-v1`, so it accepts commands. A
+    /// host that does not keeps its own layout: a drop is dropped rather than
+    /// guessed at, and no command is ever sent.
     layout_writable: Cell<bool>,
+    /// Asked for a fresh snapshot after a command whose effect the answer
+    /// cannot describe, so the viewer does not wait out the poll.
+    on_changed: RefCell<Option<Rc<dyn Fn()>>>,
     message: gtk4::Label,
 }
 
@@ -75,10 +83,15 @@ impl RemoteCanvas {
             area,
             canvas,
             cards: RefCell::new(HashMap::new()),
+            placed: RefCell::new(HashMap::new()),
+            gesturing: RefCell::new(HashSet::new()),
+            pending_moves: RefCell::new(HashMap::new()),
+            stacking: RefCell::new(Vec::new()),
+            hover_lock: crate::mini_terminal::HoverRaiseLock::new(),
             snapshot: RefCell::new(None),
             peer: RefCell::new(None),
-            pending_moves: RefCell::new(HashMap::new()),
             layout_writable: Cell::new(false),
+            on_changed: RefCell::new(None),
             message,
         });
         // The viewer's own monitor can change while the overlay stays mapped
@@ -94,6 +107,13 @@ impl RemoteCanvas {
         view
     }
 
+    /// Called after a command whose effect this view cannot apply by itself
+    /// (close, expand): the owner asks for a fresh snapshot instead of waiting
+    /// out the poll.
+    pub fn set_on_changed(&self, callback: Rc<dyn Fn()>) {
+        *self.on_changed.borrow_mut() = Some(callback);
+    }
+
     /// Number of rendered cards. Used by regression tests, which cannot open a
     /// real remote connection.
     #[cfg(test)]
@@ -107,7 +127,8 @@ impl RemoteCanvas {
         self.layout_writable.get()
     }
 
-    /// The revision this view holds for one card, which is what a drop sends.
+    /// The revision this view holds for one card, which is what a gesture
+    /// sends with its command.
     #[cfg(test)]
     pub fn card_revision(&self, card_id: &str) -> Option<u64> {
         self.card(card_id).map(|card| card.revision)
@@ -119,7 +140,15 @@ impl RemoteCanvas {
         self.card(card_id).map(|card| (card.layout.x, card.layout.y))
     }
 
+    /// The rendered card widget for a host card, so a check can look at the
+    /// chrome the user actually sees.
     #[cfg(test)]
+    pub fn card_widget(&self, card_id: &str) -> Option<Rc<MiniTerminalCard>> {
+        self.cards.borrow().get(card_id).cloned()
+    }
+
+    /// The host's own card as the last snapshot reported it. Every command
+    /// needs it: its revision is what the owner checks.
     fn card(&self, card_id: &str) -> Option<DesktopCard> {
         self.snapshot
             .borrow()
@@ -138,7 +167,9 @@ impl RemoteCanvas {
     /// without a failure backoff.
     pub fn suspend(&self) {
         for card in self.cards.borrow().values() {
-            card.suspend();
+            if let Some(session) = card.remote_session() {
+                session.suspend();
+            }
         }
     }
 
@@ -150,13 +181,14 @@ impl RemoteCanvas {
         // The fitted canvas is centered in the viewer's area, so its left edge
         // is what turns canvas coordinates into screen coordinates.
         let offset = ((self.area.width() - self.canvas.width()) as f64 / 2.0).max(0.0);
+        let placed = self.placed.borrow().clone();
         self.cards
             .borrow()
-            .values()
-            .filter_map(|card| {
-                let (x, y, width) = card.rest()?;
+            .iter()
+            .filter_map(|(id, card)| {
+                let (x, y, width) = placed.get(id).copied()?;
                 Some((
-                    card.root.clone().upcast::<gtk4::Widget>(),
+                    card.container.clone().upcast::<gtk4::Widget>(),
                     x,
                     y,
                     width,
@@ -178,12 +210,15 @@ impl RemoteCanvas {
     pub fn clear(&self) {
         let cards = std::mem::take(&mut *self.cards.borrow_mut());
         for (_, card) in cards {
-            card.detach();
-            self.canvas.remove(&card.root);
+            card.close_session();
+            self.canvas.remove(&card.container);
         }
+        self.placed.borrow_mut().clear();
+        self.gesturing.borrow_mut().clear();
+        self.pending_moves.borrow_mut().clear();
+        self.stacking.borrow_mut().clear();
         *self.snapshot.borrow_mut() = None;
         *self.peer.borrow_mut() = None;
-        self.pending_moves.borrow_mut().clear();
         // Another PC decides for itself whether it accepts layout commands.
         self.layout_writable.set(false);
     }
@@ -192,7 +227,7 @@ impl RemoteCanvas {
     /// widget, their scrollback and their live stream.
     ///
     /// `layout_writable` is the host's own `workspace-layout-v1` answer: only a
-    /// host that accepts layout commands gets drags.
+    /// host that accepts commands gets drags, resizes and button presses.
     pub fn apply(
         self: &Rc<Self>,
         peer: &Peer,
@@ -218,28 +253,28 @@ impl RemoteCanvas {
         // refused as stale because of a slow snapshot.
         let snapshot = self.newest(incoming);
         *self.snapshot.borrow_mut() = Some(snapshot.clone());
+        let local = &snapshot.local;
+
         let stale: Vec<String> = self
             .cards
             .borrow()
             .keys()
-            .filter(|id| {
-                !snapshot
-                    .local
-                    .cards
-                    .iter()
-                    .any(|card| &card.card_id == *id)
-            })
+            .filter(|id| !local.cards.iter().any(|card| &card.card_id == *id))
             .cloned()
             .collect();
         for id in stale {
             if let Some(card) = self.cards.borrow_mut().remove(&id) {
-                card.detach();
-                self.canvas.remove(&card.root);
+                card.close_session();
+                self.canvas.remove(&card.container);
             }
+            self.placed.borrow_mut().remove(&id);
+            self.gesturing.borrow_mut().remove(&id);
+            self.pending_moves.borrow_mut().remove(&id);
         }
+
         // Topmost first: when the host shows more consoles than the attach
         // budget allows, the ones in front are the ones with live output.
-        let mut ordered: Vec<&DesktopCard> = snapshot.local.cards.iter().collect();
+        let mut ordered: Vec<&DesktopCard> = local.cards.iter().collect();
         ordered.sort_by_key(|card| (card.expanded, card.stacking_order));
         let live: Vec<String> = ordered
             .iter()
@@ -247,23 +282,304 @@ impl RemoteCanvas {
             .take(MAX_REMOTE_VIEWERS)
             .map(|card| card.card_id.clone())
             .collect();
-        for card in &ordered {
-            let existing = self.cards.borrow().get(&card.card_id).cloned();
-            let widget = match existing {
-                Some(widget) => widget,
+        let scale = self.scale();
+        for host in &ordered {
+            // Bound before the match: the borrow in a match scrutinee lives for
+            // the whole match, and the empty arm inserts into the same map.
+            let existing = self.cards.borrow().get(&host.card_id).cloned();
+            let card = match existing {
+                Some(card) => card,
                 None => {
-                    let widget = RemoteCard::new(card);
-                    widget.install_drag(self.canvas.clone(), Rc::downgrade(self));
-                    self.canvas.put(&widget.root, 0.0, 0.0);
+                    let card = self.build_card(peer, host, scale);
+                    self.canvas.put(&card.container, 0.0, 0.0);
                     self.cards
                         .borrow_mut()
-                        .insert(card.card_id.clone(), Rc::clone(&widget));
-                    widget
+                        .insert(host.card_id.clone(), Rc::clone(&card));
+                    card
                 }
             };
-            widget.update(card, live.contains(&card.card_id), peer);
+            // The host owns the mode: an iconified or expanded card is drawn
+            // that way because the host says so, not because this viewer
+            // decided it.
+            card.mirror_host_mode(host.layout.iconified, host.expanded);
+            let live_now = live.contains(&host.card_id);
+            let message = self.card_message(&card, host, live_now);
+            card.apply_host_state(&host.title, host.session_alive, message);
+            self.drive_stream(&card, host, live_now);
         }
         self.relayout();
+    }
+
+    /// What to say about one card, in the viewer's own words: the stream's own
+    /// report first, then why this view is not streaming it.
+    fn card_message(
+        &self,
+        card: &Rc<MiniTerminalCard>,
+        host: &DesktopCard,
+        live: bool,
+    ) -> Option<&'static str> {
+        if host.session_alive == Some(false) {
+            return Some("Host session ended");
+        }
+        card.remote_session()
+            .and_then(|session| session.message())
+            .or(if live {
+                None
+            } else {
+                Some("Preview only · at most 8 live consoles")
+            })
+    }
+
+    /// Attach, keep, or release this card's stream, according to the host's own
+    /// state and this view's attachment budget.
+    fn drive_stream(self: &Rc<Self>, card: &Rc<MiniTerminalCard>, host: &DesktopCard, live: bool) {
+        let Some(session) = card.remote_session().cloned() else {
+            return;
+        };
+        if host.session_alive == Some(false) {
+            // The host's session is gone: release the stream and keep the last
+            // frame, exactly like a stream that ended on its own.
+            session.stop();
+            return;
+        }
+        if host.layout.iconified {
+            // An icon is not a terminal. `mirror_host_mode` already released
+            // this, and the budget belongs to a card that can use it.
+            return;
+        }
+        if !live {
+            session.detach();
+            return;
+        }
+        // Building the emulator starts the stream (see `spawn_vte`); a card
+        // that still has its emulator from an earlier attachment only needs a
+        // new stream.
+        card.attach_vte();
+        session.attach();
+    }
+
+    /// One remote console, built by the same widget the local workspace uses.
+    fn build_card(
+        self: &Rc<Self>,
+        peer: &Peer,
+        host: &DesktopCard,
+        scale: f64,
+    ) -> Rc<MiniTerminalCard> {
+        let id = host.card_id.clone();
+        let canvas_for_drag = self.canvas.clone();
+        let canvas_for_raise = self.canvas.clone();
+        // The resize preview needs the card, which does not exist until the
+        // widget is built; this slot closes that loop.
+        let slot: Rc<RefCell<Option<Rc<MiniTerminalCard>>>> = Rc::new(RefCell::new(None));
+
+        let weak_update = Rc::downgrade(self);
+        let id_update = id.clone();
+        let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
+            // The gesture owns this card's geometry until it ends: a snapshot
+            // that arrives mid-drag must not pull the card back.
+            if let Some(view) = weak_update.upgrade() {
+                view.gesturing.borrow_mut().insert(id_update.clone());
+            }
+            canvas_for_drag.move_(&widget, x, y);
+        };
+        let weak_end = Rc::downgrade(self);
+        let id_end = id.clone();
+        let on_drag_end = move |_: gtk4::Widget, data: &TerminalData| {
+            if let Some(view) = weak_end.upgrade() {
+                view.commit_card_layout(&id_end, data);
+            }
+        };
+        let weak_toggle = Rc::downgrade(self);
+        let id_toggle = id.clone();
+        let on_toggle = move |_data: &TerminalData| {
+            if let Some(view) = weak_toggle.upgrade() {
+                view.toggle_expanded(&id_toggle);
+            }
+        };
+        let weak_close = Rc::downgrade(self);
+        let on_close = move |session: String| {
+            if let Some(view) = weak_close.upgrade() {
+                view.close_card(&session);
+            }
+        };
+        let weak_resize = Rc::downgrade(self);
+        let id_resize = id.clone();
+        let resize_slot = Rc::clone(&slot);
+        let canvas_for_resize = self.canvas.clone();
+        let on_resize_ghost = move |x: f64, y: f64, width: i32, height: i32, _icon: bool| {
+            // The local workspace previews a resize with a dashed outline; a
+            // remote card has the host's card to draw instead, so it resizes as
+            // the edge is dragged. The commit at the end is what the host is
+            // told about.
+            if let Some(card) = resize_slot.borrow().as_ref() {
+                canvas_for_resize.move_(&card.container, x, y);
+                card.container.set_size_request(width, height);
+            }
+            if let Some(view) = weak_resize.upgrade() {
+                view.gesturing.borrow_mut().insert(id_resize.clone());
+            }
+        };
+        let weak_resize_end = Rc::downgrade(self);
+        let id_resize_end = id.clone();
+        let on_resize_end = move || {
+            if let Some(view) = weak_resize_end.upgrade() {
+                view.gesturing.borrow_mut().remove(&id_resize_end);
+            }
+        };
+        let canvas_for_raise = canvas_for_raise.clone();
+        let on_raise = move |widget: gtk4::Widget| {
+            crate::window::raise_canvas_child(&canvas_for_raise, &widget);
+        };
+        let on_session_persist = |_data: &TerminalData| {};
+        let on_interaction = || {};
+
+        let (screen_w, screen_h) = self.fitted_size();
+        let card = Rc::new(MiniTerminalCard::new(
+            terminal_data(host, scale),
+            on_drag_update,
+            on_drag_end,
+            on_toggle,
+            on_close,
+            on_resize_ghost,
+            on_resize_end,
+            on_raise,
+            on_session_persist,
+            on_interaction,
+            screen_w,
+            screen_h,
+            None,
+            self.hover_lock.clone(),
+            crate::card_source::CardSource::Remote {
+                peer: peer.clone(),
+                card_id: id,
+                scale,
+            },
+        ));
+        *slot.borrow_mut() = Some(Rc::clone(&card));
+        card
+    }
+
+    /// Ask the host to store the geometry a gesture just ended with.
+    ///
+    /// The gesture worked in this canvas's own pixels; the host owns host
+    /// pixels, so the drop is converted back and clamped there. The card's
+    /// revision travels with it, so a concurrent host edit is refused as a
+    /// conflict rather than overwritten.
+    fn commit_card_layout(self: &Rc<Self>, card_id: &str, data: &TerminalData) {
+        self.gesturing.borrow_mut().remove(card_id);
+        let Some(host) = self.card(card_id) else {
+            self.relayout();
+            return;
+        };
+        let scale = self.scale();
+        let Some(layout) = host_layout(&host, data, scale) else {
+            self.relayout();
+            return;
+        };
+        // Keep the card where it was released until the host confirms it, so a
+        // poll that started before this command cannot pull it back.
+        let origin = if layout.iconified {
+            (
+                layout.icon_x.unwrap_or(layout.x),
+                layout.icon_y.unwrap_or(layout.y),
+            )
+        } else {
+            (layout.x, layout.y)
+        };
+        if shown_origin(&host) != origin {
+            self.pending_moves
+                .borrow_mut()
+                .insert(card_id.to_string(), origin);
+        }
+        self.send(
+            card_id,
+            WorkspaceCommand::SetLayout {
+                card_id: card_id.to_string(),
+                expected_revision: host.revision,
+                layout,
+            },
+        );
+    }
+
+    /// The card's maximize button or its header double-click: the host owns
+    /// whether a card is expanded, so this asks for the opposite of what the
+    /// host last reported.
+    fn toggle_expanded(self: &Rc<Self>, card_id: &str) {
+        let Some(host) = self.card(card_id) else {
+            return;
+        };
+        self.send(
+            card_id,
+            WorkspaceCommand::SetExpanded {
+                card_id: card_id.to_string(),
+                expected_revision: host.revision,
+                expanded: !host.expanded,
+            },
+        );
+    }
+
+    /// A remote console's close button: the host removes its own card, its
+    /// widget and its session, and the next snapshot no longer carries it.
+    fn close_card(self: &Rc<Self>, session_name: &str) {
+        let Some(host) = self.snapshot.borrow().as_ref().and_then(|snapshot| {
+            snapshot
+                .local
+                .cards
+                .iter()
+                .find(|card| card.session_name == session_name)
+                .cloned()
+        }) else {
+            return;
+        };
+        self.send(
+            &host.card_id,
+            WorkspaceCommand::CloseTerminal {
+                card_id: host.card_id.clone(),
+                expected_revision: host.revision,
+            },
+        );
+    }
+
+    /// Send one command for a card and take the host's answer as the truth.
+    ///
+    /// Nothing here is retried. An accepted command and a conflict both carry
+    /// the host's published revision and geometry, so this view redraws what
+    /// the host really has; the owner is asked for a fresh snapshot as well,
+    /// because a close changes the set of cards rather than one card's state.
+    fn send(self: &Rc<Self>, card_id: &str, command: WorkspaceCommand) {
+        let (Some(peer), Some(epoch)) = (
+            self.peer.borrow().clone(),
+            self.snapshot
+                .borrow()
+                .as_ref()
+                .map(|snapshot| snapshot.local.epoch.clone()),
+        ) else {
+            self.relayout();
+            return;
+        };
+        let request = peer_client::request(&peer, &epoch, command);
+        let id = card_id.to_string();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let reply =
+                gtk4::gio::spawn_blocking(move || peer_client::command(&peer, &request)).await;
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            match reply {
+                Ok(Ok(reply)) => {
+                    view.adopt(&id, &reply);
+                    if let Some(changed) = view.on_changed.borrow().clone() {
+                        changed();
+                    }
+                }
+                _ => {
+                    view.pending_moves.borrow_mut().remove(&id);
+                    view.gesturing.borrow_mut().remove(&id);
+                    view.relayout();
+                }
+            }
+        });
     }
 
     /// The snapshot to draw: the host's, with anything we already know to be
@@ -301,22 +617,24 @@ impl RemoteCanvas {
     /// Both an accepted command and a conflict carry that state: on a conflict
     /// the card snaps to the geometry the host actually has instead of keeping
     /// an edit the host refused.
-    fn adopt(self: &Rc<Self>, card_id: &str, reply: &crate::desktop_protocol::CommandReply) {
+    fn adopt(self: &Rc<Self>, card_id: &str, reply: &CommandReply) {
         use crate::desktop_protocol::CommandResult;
         let published = match &reply.result {
             CommandResult::Applied {
                 card_revision,
                 layout,
+                expanded,
                 ..
             }
             | CommandResult::Conflict {
                 card_revision,
                 layout,
+                expanded,
                 ..
-            } => card_revision.zip(layout.clone()),
+            } => Some((*card_revision, layout.clone(), *expanded)),
             CommandResult::Rejected { .. } => None,
         };
-        if let Some((revision, layout)) = published {
+        if let Some((revision, layout, expanded)) = published {
             if let Some(snapshot) = self.snapshot.borrow_mut().as_mut() {
                 snapshot.local.revision = reply.revision;
                 if let Some(card) = snapshot
@@ -325,58 +643,21 @@ impl RemoteCanvas {
                     .iter_mut()
                     .find(|card| card.card_id == card_id)
                 {
-                    card.revision = revision;
-                    card.layout = layout;
+                    if let Some(revision) = revision {
+                        card.revision = revision;
+                    }
+                    if let Some(layout) = layout {
+                        card.layout = layout;
+                    }
+                    if let Some(expanded) = expanded {
+                        card.expanded = expanded;
+                    }
                 }
             }
         }
         self.pending_moves.borrow_mut().remove(card_id);
+        self.gesturing.borrow_mut().remove(card_id);
         self.relayout();
-    }
-
-    fn relayout(self: &Rc<Self>) {
-        let Some(snapshot) = self.presented_snapshot() else {
-            return;
-        };
-        let (scale, ..) = remote_workspace::fit(
-            snapshot.local.canvas.width,
-            snapshot.local.canvas.height,
-            self.area.width() as f64,
-            self.area.height() as f64,
-        );
-        self.canvas.set_size_request(
-            (snapshot.local.canvas.width as f64 * scale).round() as i32,
-            (snapshot.local.canvas.height as f64 * scale).round() as i32,
-        );
-        let cards = self.cards.borrow().clone();
-        for (id, card) in cards {
-            let Some(host) = snapshot
-                .local
-                .cards
-                .iter()
-                .find(|candidate| candidate.card_id == id)
-            else {
-                continue;
-            };
-            let rect = remote_workspace::card_rect(
-                host,
-                snapshot.local.canvas.width,
-                snapshot.local.canvas.height,
-            );
-            // A card under the pointer keeps the position the gesture set.
-            // The next layout after the drop uses the host origin.
-            if card.dragging.get() {
-                continue;
-            }
-            self.canvas.move_(&card.root, rect.x * scale, rect.y * scale);
-            card.set_rest(
-                rect.x * scale,
-                rect.y * scale,
-                (rect.width * scale).round(),
-            );
-            card.fit(&rect, scale);
-        }
-        self.area.set_visible_child_name("canvas");
     }
 
     /// Snapshot plus drops the host has not echoed yet.
@@ -400,90 +681,169 @@ impl RemoteCanvas {
         Some(snapshot)
     }
 
-    /// Convert a fitted drop into host pixels, keep it on screen through the
-    /// next refresh, and ask the host to store it.
-    ///
-    /// The drop carries the card's revision, so a host edit that happened in
-    /// between is answered with a conflict and the host's own geometry rather
-    /// than being overwritten. A host that does not advertise layout commands
-    /// keeps its own layout: the drop reverts and no command is sent.
-    fn commit_move(self: &Rc<Self>, card_id: &str, view_x: f64, view_y: f64) {
-        let Some(snapshot) = self.snapshot.borrow().clone() else {
+    /// Place and size every card at the host's own geometry, fitted to this
+    /// canvas. A card a gesture owns keeps the position the gesture set.
+    fn relayout(self: &Rc<Self>) {
+        let Some(snapshot) = self.presented_snapshot() else {
             return;
         };
-        let (scale, ..) = remote_workspace::fit(
+        let local = &snapshot.local;
+        let (scale, ..) = self.fit();
+        self.canvas.set_size_request(
+            (f64::from(local.canvas.width) * scale).round() as i32,
+            (f64::from(local.canvas.height) * scale).round() as i32,
+        );
+        let cards = self.cards.borrow().clone();
+        for (id, card) in &cards {
+            let Some(host) = local.cards.iter().find(|host| &host.card_id == id) else {
+                continue;
+            };
+            if self.gesturing.borrow().contains(id) {
+                continue;
+            }
+            let rect = remote_workspace::card_rect(host, local.canvas.width, local.canvas.height);
+            let (x, y) = (rect.x * scale, rect.y * scale);
+            let width = (rect.width * scale).round().max(24.0) as i32;
+            let height = (rect.height * scale).round().max(24.0) as i32;
+            {
+                let mut data = card.data.borrow_mut();
+                crate::mini_terminal::set_displayed_pos(
+                    &mut data,
+                    x.round() as i32,
+                    y.round() as i32,
+                );
+                data.width = width;
+                data.height = height;
+                data.restored_width =
+                    (f64::from(host.layout.restored_width) * scale).round().max(1.0) as i32;
+                data.restored_height =
+                    (f64::from(host.layout.restored_height) * scale).round().max(1.0) as i32;
+                data.tag = host.layout.tag;
+                data.workspace_dir = Some(host.workspace.clone());
+            }
+            card.adopt_host_geometry(width, height);
+            // The font follows the host's grid, not this machine's theme: the
+            // emulator has to line up with the host's own columns and rows.
+            let header = if card.header_visible() {
+                ((HEADER_HEIGHT * scale).round() as i32).clamp(16, (height / 2).max(16))
+            } else {
+                0
+            };
+            card.set_fit(width as f64, f64::from((height - header).max(1)), scale);
+            self.canvas.move_(&card.container, x, y);
+            self.placed
+                .borrow_mut()
+                .insert(id.clone(), (x, y, width as f64));
+        }
+        // The host owns stacking. Re-impose it only when it changed, so a local
+        // click-raise is not undone by every poll.
+        let order: Vec<String> = {
+            let mut ordered: Vec<&DesktopCard> = local.cards.iter().collect();
+            ordered.sort_by_key(|card| (card.expanded, card.stacking_order));
+            ordered.iter().map(|card| card.card_id.clone()).collect()
+        };
+        if *self.stacking.borrow() != order {
+            for id in &order {
+                if let Some(card) = cards.get(id) {
+                    crate::window::raise_canvas_child(&self.canvas, &card.container);
+                }
+            }
+            *self.stacking.borrow_mut() = order;
+        }
+        self.area.set_visible_child_name("canvas");
+    }
+
+    /// The fit scale for the current snapshot: the rule the plan states, which
+    /// never enlarges a host card.
+    fn fit(&self) -> (f64, f64, f64) {
+        let Some(snapshot) = self.snapshot.borrow().clone() else {
+            return (1.0, 0.0, 0.0);
+        };
+        remote_workspace::fit(
             snapshot.local.canvas.width,
             snapshot.local.canvas.height,
             self.area.width() as f64,
             self.area.height() as f64,
-        );
-        let Some((x, y)) = remote_workspace::host_origin(scale, view_x, view_y) else {
-            self.relayout();
-            return;
-        };
-        let (x, y) = remote_workspace::clamp_card_origin(
-            snapshot.local.canvas.width,
-            snapshot.local.canvas.height,
-            x,
-            y,
-        );
-        // A click on the header starts and ends a drag without moving. Leave
-        // the host alone; the card is already where this snapshot drew it.
-        if snapshot
-            .local
-            .cards
-            .iter()
-            .any(|card| card.card_id == card_id && shown_origin(card) == (x, y))
-        {
-            self.relayout();
-            return;
-        }
-        let Some(card) = snapshot
-            .local
-            .cards
-            .iter()
-            .find(|card| card.card_id == card_id)
-            .cloned()
-        else {
-            self.relayout();
-            return;
-        };
-        let (Some(peer), true) = (self.peer.borrow().clone(), self.layout_writable.get()) else {
-            self.relayout();
-            return;
-        };
-        self.pending_moves
-            .borrow_mut()
-            .insert(card_id.to_string(), (x, y));
-        if let Some(card) = self.cards.borrow().get(card_id) {
-            let placed_x = f64::from(x) * scale;
-            let placed_y = f64::from(y) * scale;
-            self.canvas.move_(&card.root, placed_x, placed_y);
-            let width = card.rest().map(|(_, _, width)| width).unwrap_or(0.0);
-            card.set_rest(placed_x, placed_y, width);
-        }
-        let epoch = snapshot.local.epoch.clone();
-        let id = card_id.to_string();
-        let weak = Rc::downgrade(self);
-        glib::MainContext::default().spawn_local(async move {
-            let reply = gtk4::gio::spawn_blocking(move || {
-                peer_client::move_card(&peer, &epoch, &card, x, y)
-            })
-            .await;
-            let Some(view) = weak.upgrade() else {
-                return;
-            };
-            match reply {
-                // Accepted or refused with the host's own geometry: both are
-                // current state this view can trust.
-                Ok(Ok(reply)) => view.adopt(&id, &reply),
-                _ => {
-                    view.pending_moves.borrow_mut().remove(&id);
-                    view.relayout();
-                }
-            }
-        });
+        )
     }
+
+    fn scale(&self) -> f64 {
+        self.fit().0
+    }
+
+    /// The whole host canvas in this view's pixels. A card's own gestures are
+    /// bounded by it, exactly as a local card is bounded by the screen.
+    fn fitted_size(&self) -> (i32, i32) {
+        let Some(snapshot) = self.snapshot.borrow().clone() else {
+            return (0, 0);
+        };
+        let (scale, ..) = self.fit();
+        (
+            (f64::from(snapshot.local.canvas.width) * scale).round() as i32,
+            (f64::from(snapshot.local.canvas.height) * scale).round() as i32,
+        )
+    }
+}
+
+/// The card data a remote console is built from. Its geometry is this canvas's
+/// own pixels; the host's is what `relayout` fits into them.
+fn terminal_data(host: &DesktopCard, scale: f64) -> TerminalData {
+    TerminalData {
+        id: host.card_id.clone(),
+        session_name: host.session_name.clone(),
+        agent_type: host.agent_type.clone(),
+        // A remote card starts no process here, so it has no command of its own.
+        command: String::new(),
+        x: (f64::from(host.layout.x) * scale).round() as i32,
+        y: (f64::from(host.layout.y) * scale).round() as i32,
+        width: 1,
+        height: 1,
+        restored_width: (f64::from(host.layout.restored_width) * scale).round().max(1.0) as i32,
+        restored_height: (f64::from(host.layout.restored_height) * scale)
+            .round()
+            .max(1.0) as i32,
+        iconified: host.layout.iconified,
+        icon_x: host.layout.icon_x.map(|x| (f64::from(x) * scale).round() as i32),
+        icon_y: host.layout.icon_y.map(|y| (f64::from(y) * scale).round() as i32),
+        created_at: 0.0,
+        tag: host.layout.tag,
+        agent_session_id: None,
+        workspace_dir: Some(host.workspace.clone()),
+    }
+}
+
+/// The layout to ask the host for, translated out of this canvas's pixels.
+///
+/// Moving, resizing and iconifying are the same command because the card's own
+/// gestures already wrote all of them into `data`: one drop carries whatever
+/// the user changed.
+fn host_layout(host: &DesktopCard, data: &TerminalData, scale: f64) -> Option<CardLayout> {
+    if !scale.is_finite() || scale <= 0.0 {
+        return None;
+    }
+    const MAX: i32 = 32768;
+    let to_host = |value: f64| (value / scale).round() as i32;
+    let mut layout = host.layout.clone();
+    if data.iconified {
+        layout.iconified = true;
+        let (x, y) = (
+            data.icon_x.unwrap_or(data.x),
+            data.icon_y.unwrap_or(data.y),
+        );
+        layout.icon_x = Some(to_host(f64::from(x)).clamp(-MAX, MAX));
+        layout.icon_y = Some(to_host(f64::from(y)).clamp(-MAX, MAX));
+    } else {
+        layout.iconified = false;
+        layout.x = to_host(f64::from(data.x)).clamp(-MAX, MAX);
+        layout.y = to_host(f64::from(data.y)).clamp(-MAX, MAX);
+        let width = to_host(f64::from(data.width)).clamp(1, MAX) as u32;
+        let height = to_host(f64::from(data.height)).clamp(1, MAX) as u32;
+        layout.width = width;
+        layout.height = height;
+        layout.restored_width = width;
+        layout.restored_height = height;
+    }
+    Some(layout)
 }
 
 /// Where the card is drawn on the host: the icon spot when minimized, otherwise
@@ -499,664 +859,15 @@ fn shown_origin(card: &DesktopCard) -> (i32, i32) {
     }
 }
 
-/// Pointer position in the remote canvas. Event coordinates are surface
-/// coordinates; the canvas is centered inside the viewer, not at the origin.
-fn pointer_on_canvas(canvas: &gtk4::Fixed, gesture: &gtk4::GestureDrag) -> Option<(f64, f64)> {
-    let (x, y) = gesture.current_event()?.position()?;
-    let root = canvas.root()?;
-    let translated = root.compute_point(
-        canvas,
-        &gtk4::graphene::Point::new(x as f32, y as f32),
-    )?;
-    Some((f64::from(translated.x()), f64::from(translated.y())))
-}
-
-/// A card holds a live stream when the host session exists and the card shows a
-/// console rather than an icon. Iconified cards keep the host's compact tile.
+/// Whether this card should hold one of the viewer's attachments. An icon is
+/// not a terminal, and a session the host reports as gone has nothing to show.
 fn streamable(card: &DesktopCard) -> bool {
     !card.layout.iconified && card.session_alive != Some(false)
-}
-
-struct RemoteCard {
-    card_id: String,
-    root: gtk4::Box,
-    header: gtk4::Box,
-    title: gtk4::Label,
-    status: gtk4::Label,
-    body: gtk4::Overlay,
-    placeholder: gtk4::Label,
-    terminal: RefCell<Option<vte4::Terminal>>,
-    stream: RefCell<Option<TerminalStream>>,
-    grid: Cell<Option<TerminalSize>>,
-    /// Earliest time a new attachment may be attempted.
-    next_attempt: Cell<Instant>,
-    /// Last applied geometry, so an unchanged card does not restyle its font.
-    fitted: Cell<Option<(i32, i32, i32, u64)>>,
-    /// Rest pose inside the fitted canvas: where the slide starts and ends.
-    rest: Cell<Option<(f64, f64, f64)>>,
-    /// Last measured body size and fit scale, so a grid that arrives after
-    /// layout can still size the font for it.
-    body_size: Cell<Option<(f64, f64, f64)>>,
-    /// The stream was stopped on purpose (hide, or a card that is not
-    /// streamable), so its end must not look like a failure.
-    suspended: Cell<bool>,
-    /// Whether any host bytes ever reached the emulator. A stream that ends
-    /// before the first byte leaves an empty terminal overlay hiding the
-    /// placeholder; that widget must step aside so the reason is visible.
-    fed: Cell<bool>,
-    /// The current stream has received the host's `attached` frame. Commits
-    /// before that, and after suspend, are dropped rather than queued across
-    /// a reconnect.
-    input_ready: Cell<bool>,
-    iconified: Cell<bool>,
-    expanded: Cell<bool>,
-    /// Pointer is currently moving this card, so a snapshot refresh must not
-    /// pull it back to the origin it had at the start of the gesture.
-    dragging: Cell<bool>,
-}
-
-impl RemoteCard {
-    fn new(card: &DesktopCard) -> Rc<Self> {
-        let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        root.add_css_class("mini-terminal");
-        root.add_css_class("term-remote");
-        root.add_css_class(&format!(
-            "agent-card-{}",
-            peer_client::label(&card.agent_type)
-        ));
-
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-        header.add_css_class("term-header");
-        let title = gtk4::Label::new(None);
-        title.add_css_class("term-title");
-        title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-        title.set_single_line_mode(true);
-        title.set_hexpand(true);
-        title.set_halign(gtk4::Align::Start);
-        header.append(&title);
-        let status = gtk4::Label::new(None);
-        status.add_css_class("term-status-badge");
-        status.add_css_class("status-idle");
-        status.set_halign(gtk4::Align::End);
-        header.append(&status);
-        root.append(&header);
-
-        // `Overlay` gives its main child the whole body, so a terminal grid can
-        // never grow a card beyond the host's rectangle.
-        let body = gtk4::Overlay::new();
-        // Without these the body collapses to its minimum inside the card's
-        // vertical box while the chrome keeps full size: the emulator paints
-        // into a sliver and the card looks black despite a live byte stream.
-        body.set_hexpand(true);
-        body.set_vexpand(true);
-        let placeholder = gtk4::Label::new(None);
-        placeholder.set_wrap(true);
-        placeholder.set_justify(gtk4::Justification::Center);
-        placeholder.set_valign(gtk4::Align::Center);
-        placeholder.add_css_class("term-preview-text");
-        body.set_child(Some(&placeholder));
-        root.append(&body);
-
-        Rc::new(Self {
-            card_id: card.card_id.clone(),
-            root,
-            header,
-            title,
-            status,
-            body,
-            placeholder,
-            terminal: RefCell::new(None),
-            stream: RefCell::new(None),
-            grid: Cell::new(None),
-            next_attempt: Cell::new(Instant::now()),
-            fitted: Cell::new(None),
-            rest: Cell::new(None),
-            body_size: Cell::new(None),
-            suspended: Cell::new(false),
-            fed: Cell::new(false),
-            input_ready: Cell::new(false),
-            iconified: Cell::new(card.layout.iconified),
-            expanded: Cell::new(card.expanded),
-            dragging: Cell::new(false),
-        })
-    }
-
-    /// Apply host content and stream state. Called on every snapshot refresh,
-    /// so it must be safe to repeat with unchanged data.
-    fn update(self: &Rc<Self>, card: &DesktopCard, live: bool, peer: &Peer) {
-        self.iconified.set(card.layout.iconified);
-        self.expanded.set(card.expanded);
-        self.title.set_text(&peer_client::label(&card.title));
-        self.status.set_text(match card.session_alive {
-            Some(false) => "○ EXITED",
-            _ => "● REMOTE",
-        });
-        for class in ["status-idle", "status-busy", "status-exited"] {
-            self.status.remove_css_class(class);
-        }
-        self.status.add_css_class(match card.session_alive {
-            Some(false) => "status-exited",
-            _ => "status-idle",
-        });
-        if card.layout.iconified {
-            self.root.add_css_class("term-compact");
-            self.header.set_visible(false);
-            self.placeholder.add_css_class("term-agent-icon");
-            self.placeholder.set_text(&format!(
-                "{}\n{}",
-                agent_icon(&card.agent_type),
-                peer_client::label(&card.title)
-            ));
-            self.detach();
-            return;
-        }
-        self.root.remove_css_class("term-compact");
-        self.header.set_visible(true);
-        self.placeholder.remove_css_class("term-agent-icon");
-        if live {
-            self.attach(peer);
-            return;
-        }
-        self.detach();
-        self.placeholder.set_visible(true);
-        self.placeholder.set_text(if card.session_alive == Some(false) {
-            "Host session exited"
-        } else {
-            "Preview only · at most 8 live consoles"
-        });
-    }
-
-    /// Size the card to the host's fitted rectangle and match the terminal grid
-    /// to the card body, so cells line up with the host's own rendering.
-    fn fit(&self, rect: &Rect, scale: f64) {
-        let width = (rect.width * scale).round().max(24.0) as i32;
-        let height = (rect.height * scale).round().max(24.0) as i32;
-        let header = if self.header.is_visible() {
-            ((HEADER_HEIGHT * scale).round() as i32).clamp(16, (height / 2).max(16))
-        } else {
-            0
-        };
-        let signature = (width, height, header, scale.to_bits());
-        if self.fitted.get() == Some(signature) {
-            return;
-        }
-        self.fitted.set(Some(signature));
-        self.root.set_size_request(width, height);
-        self.header.set_size_request(-1, header);
-        let body_width = (width as f64).max(1.0);
-        let body_height = f64::from((height - header).max(1));
-        self.body_size.set(Some((body_width, body_height, scale)));
-        if let Some(terminal) = self.terminal.borrow().as_ref() {
-            fit_font(terminal, body_width, body_height, self.grid.get(), scale);
-        }
-    }
-
-    /// Attach a stream when none is running and the backoff has expired.
-    fn attach(self: &Rc<Self>, peer: &Peer) {
-        if self.stream.borrow().is_some() || Instant::now() < self.next_attempt.get() {
-            return;
-        }
-        // A new attachment has not completed its handshake. Keys typed at the
-        // previous session must not ride along.
-        self.input_ready.set(false);
-        // The emulator exists before the first byte arrives, so the host's
-        // initial redraw is never dropped.
-        let _ = self.terminal();
-        let (stream, mut events) = TerminalStream::open(peer.clone(), &self.card_id);
-        *self.stream.borrow_mut() = Some(stream);
-        // A new stream starts clean: the next end is a real end unless this
-        // card is deliberately suspended again.
-        self.suspended.set(false);
-        self.next_attempt.set(Instant::now() + RETRY_AFTER);
-        self.placeholder.set_text("Connecting…");
-        self.placeholder.set_visible(true);
-        let weak = Rc::downgrade(self);
-        glib::MainContext::default().spawn_local(async move {
-            while let Some(event) = events.next().await {
-                let Some(card) = weak.upgrade() else {
-                    return;
-                };
-                match event {
-                    StreamEvent::Attached { columns, rows } => {
-                        // Typing is armed only for this attachment. A later
-                        // reconnect clears the flag before its own handshake.
-                        card.input_ready.set(true);
-                        card.note_grid(columns, rows);
-                    }
-                    StreamEvent::Grid { columns, rows } => card.note_grid(columns, rows),
-                    StreamEvent::Bytes(bytes) => card.feed(&bytes),
-                    StreamEvent::Closed(reason) => {
-                        card.ended(reason);
-                        return;
-                    }
-                }
-            }
-            if let Some(card) = weak.upgrade() {
-                card.ended("closed");
-            }
-        });
-    }
-
-    /// The card's emulator, created on first use.
-    ///
-    /// There is no local PTY. VTE still translates keys, paste and IME against
-    /// the terminal state it has parsed from the host (application cursor
-    /// keys, bracketed paste) and reports the resulting bytes on `commit`.
-    fn terminal(self: &Rc<Self>) -> Option<vte4::Terminal> {
-        if let Some(terminal) = self.terminal.borrow().as_ref() {
-            return Some(terminal.clone());
-        }
-        let terminal = vte4::Terminal::new();
-        terminal.set_hexpand(true);
-        terminal.set_vexpand(true);
-        terminal.set_input_enabled(true);
-        terminal.set_can_focus(true);
-        terminal.set_focusable(true);
-        terminal.set_scroll_on_keystroke(true);
-        terminal.set_scroll_on_output(true);
-        terminal.set_scrollback_lines(2000);
-        terminal.add_css_class("term-vte");
-        let weak_commit = Rc::downgrade(self);
-        connect_host_input(&terminal, move |bytes| {
-            if let Some(card) = weak_commit.upgrade() {
-                card.type_on_host(bytes);
-            }
-        });
-        // Return never arrives as a commit on this PTY-less emulator: the
-        // input method and the window's activate-default binding consume it,
-        // while letters still come through `commit`. Catch it on the way in
-        // and send the carriage return the host shell treats as "run this".
-        let keys = gtk4::EventControllerKey::new();
-        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        let weak_key = Rc::downgrade(self);
-        keys.connect_key_pressed(move |_, keyval, _, state| {
-            if !is_submit_key(keyval, state) {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(card) = weak_key.upgrade() {
-                card.type_on_host(b"\r");
-            }
-            glib::Propagation::Stop
-        });
-        terminal.add_controller(keys);
-        let weak_focus = Rc::downgrade(self);
-        let click = gtk4::GestureClick::new();
-        click.connect_pressed(move |_, _, _, _| {
-            if let Some(card) = weak_focus.upgrade() {
-                if let Some(term) = card.terminal.borrow().as_ref() {
-                    term.grab_focus();
-                }
-            }
-        });
-        terminal.add_controller(click);
-        // The title is outside the emulator. Focusing from there is what lets
-        // a click on the header reach the host session.
-        let weak_header = Rc::downgrade(self);
-        let header_click = gtk4::GestureClick::new();
-        header_click.connect_pressed(move |_, _, _, _| {
-            if let Some(card) = weak_header.upgrade() {
-                if let Some(term) = card.terminal.borrow().as_ref() {
-                    term.grab_focus();
-                }
-            }
-        });
-        self.header.add_controller(header_click);
-        crate::mini_terminal::apply_vte_theme(&terminal, 10.0);
-        self.body.add_overlay(&terminal);
-        if let Some(grid) = self.grid.get() {
-            terminal.set_size(grid.columns as i64, grid.rows as i64);
-        }
-        *self.terminal.borrow_mut() = Some(terminal.clone());
-        Some(terminal)
-    }
-
-    /// Header drag moves an open card. An icon drags from anywhere on its tile.
-    /// Expanded cards do not move: that rectangle is not the saved origin.
-    fn install_drag(self: &Rc<Self>, canvas: gtk4::Fixed, view: std::rc::Weak<RemoteCanvas>) {
-        self.attach_drag(&canvas, view.clone(), false);
-        self.attach_drag(&canvas, view, true);
-    }
-
-    fn attach_drag(
-        self: &Rc<Self>,
-        canvas: &gtk4::Fixed,
-        view: std::rc::Weak<RemoteCanvas>,
-        icon_only: bool,
-    ) {
-        let drag = gtk4::GestureDrag::new();
-        let active = Rc::new(Cell::new(false));
-        let start = Rc::new(Cell::new((0.0, 0.0)));
-        let grab: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
-        let card_begin = Rc::downgrade(self);
-        let canvas_begin = canvas.clone();
-        let active_begin = Rc::clone(&active);
-        let start_begin = Rc::clone(&start);
-        let grab_begin = Rc::clone(&grab);
-        drag.connect_drag_begin(move |gesture, _, _| {
-            let Some(card) = card_begin.upgrade() else {
-                return;
-            };
-            let icon = card.iconified.get();
-            if card.expanded.get() || icon_only != icon {
-                active_begin.set(false);
-                return;
-            }
-            active_begin.set(true);
-            card.dragging.set(true);
-            card.root.add_css_class("dragging");
-            crate::window::raise_canvas_child(&canvas_begin, &card.root);
-            let (px, py, _) = card.rest().unwrap_or((0.0, 0.0, 0.0));
-            start_begin.set((px, py));
-            grab_begin.set(
-                pointer_on_canvas(&canvas_begin, gesture).map(|(mx, my)| (mx - px, my - py)),
-            );
-        });
-        let card_update = Rc::downgrade(self);
-        let canvas_update = canvas.clone();
-        let active_update = Rc::clone(&active);
-        let start_update = Rc::clone(&start);
-        let grab_update = Rc::clone(&grab);
-        drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-            if !active_update.get() {
-                return;
-            }
-            let Some(card) = card_update.upgrade() else {
-                return;
-            };
-            if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
-                gesture.set_state(gtk4::EventSequenceState::Claimed);
-            }
-            let (nx, ny) = match (
-                grab_update.get(),
-                pointer_on_canvas(&canvas_update, gesture),
-            ) {
-                (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
-                _ => {
-                    let (sx, sy) = start_update.get();
-                    (sx + offset_x, sy + offset_y)
-                }
-            };
-            canvas_update.move_(&card.root, nx, ny);
-            let width = card.rest().map(|(_, _, width)| width).unwrap_or(0.0);
-            card.set_rest(nx, ny, width);
-        });
-        let card_end = Rc::downgrade(self);
-        let canvas_end = canvas.clone();
-        let view_end = view;
-        let active_end = active;
-        let start_end = start;
-        let grab_end = grab;
-        drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            if !active_end.replace(false) {
-                return;
-            }
-            let Some(card) = card_end.upgrade() else {
-                return;
-            };
-            card.dragging.set(false);
-            card.root.remove_css_class("dragging");
-            let (nx, ny) = match (grab_end.get(), pointer_on_canvas(&canvas_end, gesture)) {
-                (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
-                _ => {
-                    let (sx, sy) = start_end.get();
-                    (sx + offset_x, sy + offset_y)
-                }
-            };
-            if let Some(view) = view_end.upgrade() {
-                view.commit_move(&card.card_id, nx, ny);
-            }
-        });
-        if icon_only {
-            self.root.add_controller(drag);
-        } else {
-            self.header.add_controller(drag);
-        }
-    }
-
-    /// Forward one VTE commit to the host, after this attachment's handshake.
-    fn type_on_host(&self, bytes: &[u8]) {
-        if bytes.is_empty() || !self.input_ready.get() {
-            return;
-        }
-        let stream = self.stream.borrow();
-        let Some(stream) = stream.as_ref() else {
-            return;
-        };
-        stream.send_input(bytes);
-    }
-
-    fn note_grid(&self, columns: u16, rows: u16) {
-        self.set_grid(TerminalSize { columns, rows });
-        // Confirm the grid back to the host, which verifies it against its
-        // own live grid before applying anything.
-        if let Some(stream) = self.stream.borrow().as_ref() {
-            stream.observe_grid(TerminalSize { columns, rows });
-        }
-    }
-
-    /// Rest position and width inside the fitted canvas, once laid out.
-    fn rest(&self) -> Option<(f64, f64, f64)> {
-        self.rest.get()
-    }
-
-    fn set_rest(&self, x: f64, y: f64, width: f64) {
-        self.rest.set(Some((x, y, width)));
-    }
-
-    /// Stop the stream on purpose: the last frame stays on screen and the next
-    /// snapshot restarts the stream immediately.
-    fn suspend(&self) {
-        // Drop the handshake before the stream, so a commit that lands while
-        // the worker is still exiting cannot queue into a dying attachment.
-        self.input_ready.set(false);
-        self.suspended.set(true);
-        if let Some(stream) = self.stream.borrow_mut().take() {
-            stream.stop();
-        }
-    }
-
-    fn set_grid(&self, grid: TerminalSize) {
-        if self.grid.get() == Some(grid) {
-            return;
-        }
-        self.grid.set(Some(grid));
-        let Some(terminal) = self.terminal.borrow().as_ref().cloned() else {
-            return;
-        };
-        terminal.set_size(grid.columns as i64, grid.rows as i64);
-        // The grid usually arrives after the first layout, so the font is sized
-        // for it here as well as on every later resize.
-        if let Some((width, height, scale)) = self.body_size.get() {
-            fit_font(&terminal, width, height, Some(grid), scale);
-        }
-    }
-
-    fn feed(&self, bytes: &[u8]) {
-        if let Some(terminal) = self.terminal.borrow().as_ref() {
-            terminal.feed(bytes);
-        }
-        self.fed.set(true);
-        self.placeholder.set_visible(false);
-    }
-
-    /// The stream ended. Stay on screen with an explanation and let the next
-    /// snapshot refresh retry after the backoff.
-    fn ended(self: &Rc<Self>, reason: &'static str) {
-        // A deliberate stop is not a failure: keep the last frame and let the
-        // next snapshot attach again at once.
-        if self.suspended.replace(false) {
-            self.next_attempt.set(Instant::now());
-            return;
-        }
-        self.detach();
-        // An emulator that never received a byte is just a black overlay
-        // hiding the explanation: step aside so the reason can be read. A
-        // card with content keeps its last frame behind the message.
-        if !self.fed.get() {
-            if let Some(terminal) = self.terminal.borrow_mut().take() {
-                self.body.remove_overlay(&terminal);
-            }
-        }
-        self.placeholder.set_visible(true);
-        self.placeholder.set_text(match reason {
-            "unknown_card" | "terminal_exited" => "Host session ended",
-            "update_remote_super_desktop" => "Update SUPER DESKTOP on the host",
-            "peer_revoked_or_expired" | "invalid_peer_response" => {
-                "Pairing required · add this PC again"
-            }
-            "attachment_limit" => "Too many live consoles",
-            "connection_failed_or_pin_mismatch" => "Cannot reach this PC",
-            _ => "Reconnecting…",
-        });
-    }
-
-    /// Stop the stream on purpose without changing what the card says. Dropping
-    /// the stream closes only this viewer's tmux client on the host.
-    fn detach(&self) {
-        self.suspend();
-        self.grid.set(None);
-    }
-}
-
-/// Size the terminal's font so the host's whole grid fits the card body.
-///
-/// VTE cell metrics scale with the font size, so two or three passes converge;
-/// the result matches the host's own layout scale, and the host's grid is never
-/// changed by it.
-fn fit_font(
-    terminal: &vte4::Terminal,
-    body_width: f64,
-    body_height: f64,
-    grid: Option<TerminalSize>,
-    scale: f64,
-) {
-    let Some(grid) = grid else {
-        return;
-    };
-    let target_width = body_width / f64::from(grid.columns.max(1));
-    let target_height = body_height / f64::from(grid.rows.max(1));
-    let mut size = (10.0 * scale).clamp(MIN_FONT, MAX_FONT);
-    for _ in 0..3 {
-        crate::mini_terminal::apply_vte_theme(terminal, size);
-        let cell_width = terminal.char_width() as f64;
-        let cell_height = terminal.char_height() as f64;
-        if cell_width <= 0.0 || cell_height <= 0.0 {
-            return;
-        }
-        let factor = (target_width / cell_width).min(target_height / cell_height);
-        if !factor.is_finite() || (factor - 1.0).abs() < 0.02 {
-            return;
-        }
-        size = (size * factor).clamp(MIN_FONT, MAX_FONT);
-    }
-}
-
-/// Enter, keypad Enter and the ISO Enter key submit the line.
-///
-/// Ctrl and Alt stay with VTE (Ctrl+Enter is a different sequence). Shift and
-/// Lock do not: a shell still treats Shift+Enter as submit.
-fn is_submit_key(keyval: gtk4::gdk::Key, state: gtk4::gdk::ModifierType) -> bool {
-    if state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
-        || state.contains(gtk4::gdk::ModifierType::ALT_MASK)
-    {
-        return false;
-    }
-    matches!(
-        keyval,
-        gtk4::gdk::Key::Return | gtk4::gdk::Key::KP_Enter | gtk4::gdk::Key::ISO_Enter
-    )
-}
-
-/// Subscribe to VTE's `commit` signal and forward the bytes the host should see.
-///
-/// VTE emits the payload with its real length, then GObject delivers `text` as
-/// a C string. Reading `size` bytes past the first NUL walks off that string.
-/// A commit that is only a NUL (Ctrl+Space) arrives as an empty C string with
-/// `size == 1`; anything after an interior NUL is already gone. The closure
-/// is freed with the widget.
-fn connect_host_input<F>(terminal: &vte4::Terminal, forward: F)
-where
-    F: Fn(&[u8]) + 'static,
-{
-    unsafe extern "C" fn trampoline<F: Fn(&[u8]) + 'static>(
-        _terminal: *mut vte4::ffi::VteTerminal,
-        text: *mut std::ffi::c_char,
-        size: std::ffi::c_uint,
-        data: gtk4::glib::ffi::gpointer,
-    ) {
-        if data.is_null() || text.is_null() || size == 0 {
-            return;
-        }
-        let forward = unsafe { &*(data as *const F) };
-        let available = unsafe { libc::strlen(text) };
-        if available == 0 {
-            forward(&[0]);
-            return;
-        }
-        let n = (size as usize).min(available);
-        let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, n) };
-        forward(bytes);
-    }
-    let boxed = Box::new(forward);
-    unsafe {
-        gtk4::glib::signal::connect_raw(
-            terminal.as_ptr() as *mut gtk4::glib::gobject_ffi::GObject,
-            c"commit".as_ptr(),
-            Some(std::mem::transmute::<*const (), unsafe extern "C" fn()>(
-                trampoline::<F> as *const (),
-            )),
-            Box::into_raw(boxed),
-        );
-    }
-}
-
-fn agent_icon(agent_type: &str) -> &'static str {
-    crate::tmux::get_agent_config(&peer_client::label(agent_type)).icon
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn enter_submits_and_modified_enter_does_not() {
-        use gtk4::gdk::{Key, ModifierType};
-        let none = ModifierType::empty();
-        assert!(is_submit_key(Key::Return, none));
-        assert!(is_submit_key(Key::KP_Enter, none));
-        assert!(is_submit_key(Key::ISO_Enter, none));
-        assert!(is_submit_key(Key::Return, ModifierType::SHIFT_MASK));
-        assert!(!is_submit_key(Key::Return, ModifierType::CONTROL_MASK));
-        assert!(!is_submit_key(Key::Return, ModifierType::ALT_MASK));
-        assert!(!is_submit_key(Key::a, none));
-    }
-
-    #[test]
-    fn committed_bytes_keep_their_length_including_a_nul() {
-        crate::gtk_test::run_in_child_process("remote_terminal::tests::commit_bytes_inner");
-    }
-
-    #[test]
-    fn commit_bytes_inner() {
-        if !crate::gtk_test::is_child() {
-            return;
-        }
-        gtk4::init().expect("a graphical session is required for GTK checks");
-        let terminal = vte4::Terminal::new();
-        terminal.set_input_enabled(true);
-        let got = Rc::new(RefCell::new(Vec::new()));
-        let slot = Rc::clone(&got);
-        connect_host_input(&terminal, move |bytes| {
-            slot.borrow_mut().extend_from_slice(bytes);
-        });
-        // feed_child is the same path a keystroke takes on a PTY-less VTE.
-        // Ctrl+C is a single control byte. Ctrl+Space is a NUL, which GObject
-        // delivers as an empty C string; it must still be forwarded.
-        terminal.feed_child(b"hi");
-        terminal.feed_child(&[0x03]);
-        terminal.feed_child(&[0]);
-        assert_eq!(&*got.borrow(), b"hi\x03\x00");
-    }
 
     #[test]
     fn only_visible_live_consoles_get_a_stream() {
@@ -1170,88 +881,62 @@ mod tests {
     }
 
     #[test]
-    fn card_geometry_is_the_host_rectangle_scaled_uniformly() {
-        crate::gtk_test::run_in_child_process("remote_terminal::tests::geometry_inner");
+    fn a_gesture_is_translated_out_of_the_view_s_own_pixels() {
+        let host = crate::remote_workspace::fixture().local.cards.remove(0);
+        let mut data = terminal_data(&host, 0.5);
+        data.x = 350;
+        data.y = 100;
+        data.width = 320;
+        data.height = 240;
+        let layout = host_layout(&host, &data, 0.5).unwrap();
+        // At half scale everything doubles on its way back to host pixels.
+        assert_eq!((layout.x, layout.y), (700, 200));
+        assert_eq!((layout.width, layout.height), (640, 480));
+        // A scale that cannot be inverted is refused rather than guessed at.
+        assert!(host_layout(&host, &data, 0.0).is_none());
+
+        // An icon moves in its own slot and keeps the saved card origin.
+        data.iconified = true;
+        data.icon_x = Some(20);
+        data.icon_y = Some(40);
+        let layout = host_layout(&host, &data, 0.5).unwrap();
+        assert!(layout.iconified);
+        assert_eq!((layout.icon_x, layout.icon_y), (Some(40), Some(80)));
+        assert_eq!((layout.x, layout.y), (host.layout.x, host.layout.y));
     }
 
     #[test]
-    fn geometry_inner() {
+    fn remote_consoles_are_the_same_widget_the_local_workspace_uses() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::widget_inner");
+    }
+
+    #[test]
+    fn widget_inner() {
         if !crate::gtk_test::is_child() {
             return;
         }
-        gtk4::init().expect("a graphical session is required for GTK checks");
-        let card = crate::remote_workspace::fixture().local.cards.remove(0);
-        let widget = RemoteCard::new(&card);
-        widget.set_grid(TerminalSize {
-            columns: 80,
-            rows: 24,
-        });
-        let rect = Rect {
-            x: 100.0,
-            y: 200.0,
-            width: 640.0,
-            height: 480.0,
-        };
-        widget.fit(&rect, 0.5);
-        assert_eq!(widget.root.width_request(), 320);
-        assert_eq!(widget.root.height_request(), 240);
-        assert_eq!(widget.header.height_request(), 16);
-        // The fit is idempotent: a repeated refresh must not restyle the font.
-        let fitted = widget.fitted.get();
-        widget.fit(&rect, 0.5);
-        assert_eq!(widget.fitted.get(), fitted);
+        gtk4::init().unwrap();
+        let canvas = RemoteCanvas::new();
+        // A host whose session is gone renders as a card but is never streamed,
+        // so this check opens no socket.
+        let mut snapshot = crate::remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        canvas.apply(&peer_client::test_peer('a'), &snapshot, true);
 
-        // The rest pose is what the overlay's slide-out animates between.
-        widget.set_rest(100.0, 200.0, 320.0);
-        assert_eq!(widget.rest(), Some((100.0, 200.0, 320.0)));
+        let card = canvas.card_widget("card-one").expect("one remote console");
+        // The same widget, with the same chrome and gestures the local
+        // workspace shows: that is what makes one UI serve both.
+        assert!(card.remote_session().is_some());
+        assert!(card.data.borrow().session_name.starts_with("sd_term_"));
+        // It says what the host said, not what this machine's tmux knows: the
+        // title comes from the snapshot, and the badge marks it as remote.
+        assert_eq!(canvas.card_count(), 1);
+        assert!(card.footer_text().contains("Host session ended"));
 
-        // Hiding suspends the stream without ending the view: the card keeps
-        // its last frame, and the next snapshot attaches again immediately
-        // instead of waiting out a failure backoff.
-        widget.suspend();
-        assert!(widget.suspended.get());
-        assert!(widget.stream.borrow().is_none());
-        widget.ended("closed");
-        assert!(!widget.suspended.get());
-        assert_eq!(widget.placeholder.text(), "", "last frame stays untouched");
-
-        // A real failure does explain itself to the user.
-        widget.ended("terminal_exited");
-        assert_eq!(widget.placeholder.text(), "Host session ended");
-        assert!(widget.placeholder.is_visible());
-
-        // The fit loop relies on VTE recomputing cell metrics synchronously
-        // from the font: without that, a fitted grid would never line up.
-        let terminal = vte4::Terminal::new();
-        crate::mini_terminal::apply_vte_theme(&terminal, 10.0);
-        let small = terminal.char_width();
-        crate::mini_terminal::apply_vte_theme(&terminal, 20.0);
-        assert!(
-            terminal.char_width() > small,
-            "font size must drive cell width ({} → {})",
-            small,
-            terminal.char_width()
-        );
-        // And the fit itself: the whole host grid has to land inside the body.
-        fit_font(
-            &terminal,
-            640.0,
-            400.0,
-            Some(TerminalSize {
-                columns: 80,
-                rows: 24,
-            }),
-            1.0,
-        );
-        let grid_width = terminal.char_width() as f64 * 80.0;
-        let grid_height = terminal.char_height() as f64 * 24.0;
-        assert!(
-            grid_width <= 640.0 * 1.05 && grid_height <= 400.0 * 1.05,
-            "fitted grid {grid_width}x{grid_height} must fit 640x400"
-        );
-        assert!(
-            grid_width > 640.0 * 0.6,
-            "fitted grid {grid_width} must fill the card, not shrink into a corner"
-        );
+        // The host's card leaves: the widget goes with it, and the stream that
+        // fed it is released.
+        snapshot.local.cards.clear();
+        canvas.apply(&peer_client::test_peer('a'), &snapshot, true);
+        assert_eq!(canvas.card_count(), 0);
     }
 }

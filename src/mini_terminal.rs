@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use vte4::prelude::*;
 use vte4::{PtyFlags, Terminal as VteTerminal};
 
+use crate::card_source::{CardSource, RemoteSession};
 use crate::state::TerminalData;
 use crate::tmux::{
     capture_pane_text, ensure_session_with_inventory, extract_composer_draft,
@@ -27,6 +28,47 @@ pub const NEW_TERM_HEIGHT: i32 = 480;
 pub const MIN_CARD_WIDTH: i32 = 320;
 pub const MIN_CARD_HEIGHT: i32 = 180;
 pub const ICON_SIZE: i32 = 128;
+/// What every card's footer says when nothing more important is happening.
+pub const CARD_HINT: &str = "Double-click to expand • drag any edge to resize";
+
+/// The smallest a card may be in a given workspace's own pixel space.
+///
+/// A local card's minimum is absolute; a remote card is drawn fitted into the
+/// viewer's canvas, so the same host card is smaller on a smaller screen and
+/// its minimum has to follow.
+pub fn min_card_size(scale: f64) -> (i32, i32) {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    (
+        ((MIN_CARD_WIDTH as f64) * scale).round() as i32,
+        ((MIN_CARD_HEIGHT as f64) * scale).round() as i32,
+    )
+}
+
+/// The footer hint: what the card's source wants to say, or the standing
+/// invitation to expand and resize.
+fn card_hint(message: &Rc<RefCell<Option<String>>>) -> String {
+    card_hint_or(message, CARD_HINT)
+}
+
+fn card_hint_or(message: &Rc<RefCell<Option<String>>>, fallback: &str) -> String {
+    message
+        .borrow()
+        .clone()
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// Clamp a card size in a workspace whose smallest card is `scale` times this
+/// machine's: one rule for the local workspace (scale 1) and a fitted one.
+pub fn clamp_card_size_at(w: i32, h: i32, screen_w: i32, screen_h: i32, scale: f64) -> (i32, i32) {
+    let (min_w, min_h) = min_card_size(scale);
+    let max_w = ((screen_w as f64) * 0.70).round() as i32;
+    let max_h = ((screen_h as f64) * 0.75).round() as i32;
+    (
+        w.clamp(min_w, max_w.max(min_w)),
+        h.clamp(min_h, max_h.max(min_h)),
+    )
+}
+
 pub const EXPAND_RATIO: f64 = 0.80;
 /// Newly opened harnesses ignore hover-raise on other cards for this long
 /// so the pointer can travel to the new card without burying it.
@@ -252,6 +294,17 @@ pub struct MiniTerminalCard {
     hover_lock: HoverRaiseLock,
     /// Pointer and typing signals for the overlap ghosts (`user_is_active`).
     activity: Rc<CardActivity>,
+    /// Who runs this card's session: this machine's tmux, or a host that
+    /// streams it here. Everything else about the card is the same either way.
+    source: CardSource,
+    /// This card's host session, when its source is remote.
+    remote: Option<Rc<RemoteSession>>,
+    /// The body size and fit scale a remote view sized this card to, so its
+    /// font follows the host's grid.
+    fit: Rc<Cell<(f64, f64, f64)>>,
+    /// The last thing the source said about this card's session. A chrome
+    /// change of our own must not lose it.
+    source_message: Rc<RefCell<Option<String>>>,
     /// Set after construction: see [`CardAction`]. A remote layout command must
     /// not grow a second copy of an action that could drift from the button's.
     iconify_action: CardAction,
@@ -275,6 +328,7 @@ impl MiniTerminalCard {
         screen_h: i32,
         startup_inventory: Option<Arc<crate::tmux::SessionInventory>>,
         hover_lock: HoverRaiseLock,
+        source: CardSource,
     ) -> Self
     where
         FDragUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
@@ -290,16 +344,23 @@ impl MiniTerminalCard {
         // that state.
         FInteraction: Fn() + 'static,
     {
+        let scale = source.scale();
         if term_data.iconified {
             term_data.width = ICON_SIZE;
             term_data.height = ICON_SIZE;
         } else {
-            let (cw, ch) = clamp_card_size(term_data.width, term_data.height, screen_w, screen_h);
+            let (cw, ch) =
+                clamp_card_size_at(term_data.width, term_data.height, screen_w, screen_h, scale);
             term_data.width = cw;
             term_data.height = ch;
         }
 
-        if term_data.restored_width < MIN_CARD_WIDTH || term_data.restored_height < MIN_CARD_HEIGHT {
+        // A remote card's rectangle is the host's, already fitted to this
+        // canvas: it is never replaced by this machine's defaults.
+        let (min_w, min_h) = min_card_size(scale);
+        if !source.is_remote()
+            && (term_data.restored_width < min_w || term_data.restored_height < min_h)
+        {
             term_data.restored_width = CARD_WIDTH;
             term_data.restored_height = CARD_HEIGHT;
         }
@@ -310,6 +371,8 @@ impl MiniTerminalCard {
         let data = Rc::new(RefCell::new(term_data));
         let expanded = Rc::new(RefCell::new(false));
         let vte = Rc::new(RefCell::new(None));
+        let fit: Rc<Cell<(f64, f64, f64)>> = Rc::new(Cell::new((0.0, 0.0, scale)));
+        let source_message: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let on_toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(on_toggle);
         let on_close = Rc::new(on_close);
         let on_drag_update = Rc::new(on_drag_update);
@@ -404,7 +467,11 @@ impl MiniTerminalCard {
         status_badge.add_css_class("status-idle");
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
-        header.append(&crate::asset_view::button(data.borrow().session_name.clone()));
+        // File previews read this machine's own sessions, so a remote card
+        // never gets that button.
+        if !source.is_remote() {
+            header.append(&crate::asset_view::button(data.borrow().session_name.clone()));
+        }
 
         // Iconify button: iconifies the window into 128x128 size
         let iconify_btn = Button::with_label("🗕");
@@ -494,7 +561,7 @@ impl MiniTerminalCard {
         meta_label.set_halign(Align::Start);
         footer.append(&meta_label);
 
-        let hint_label = Label::new(Some("Double-click to expand • drag any edge to resize"));
+        let hint_label = Label::new(Some(CARD_HINT));
         hint_label.add_css_class("term-hint");
         hint_label.set_hexpand(true);
         hint_label.set_halign(Align::End);
@@ -567,6 +634,52 @@ impl MiniTerminalCard {
         // session without waiting for the DB mapping to re-resolve.
         let opencode_session = Rc::new(RefCell::new(data.borrow().agent_session_id.clone()));
         let on_session_persist: Rc<dyn Fn(&TerminalData)> = Rc::new(on_session_persist);
+        // A remote card owns the stream that feeds it. The widget is the same
+        // either way; this is the only place a session lives.
+        let remote = match &source {
+            CardSource::Remote { peer, card_id, .. } => {
+                let feed = Rc::clone(&vte);
+                let fit_for_grid = Rc::clone(&fit);
+                let slot = Rc::clone(&source_message);
+                let used = Rc::clone(&vte);
+                let used_feed = Rc::clone(&used);
+                let message_data = Rc::clone(&data);
+                let message_expanded = Rc::clone(&expanded);
+                let message_preview = preview_label.clone();
+                let message_hint = hint_label.clone();
+                Some(RemoteSession::new(crate::card_source::RemoteView {
+                    peer: peer.clone(),
+                    card_id: card_id.clone(),
+                    vte: feed,
+                    on_grid: Rc::new(move |grid| {
+                        let Some(terminal) = used.borrow().as_ref().cloned() else {
+                            return;
+                        };
+                        let (width, height, scale) = fit_for_grid.get();
+                        crate::card_source::fit_font(
+                            &terminal,
+                            width,
+                            height,
+                            Some(grid),
+                            scale,
+                        );
+                    }),
+                    on_message: Rc::new(move |text| {
+                        *slot.borrow_mut() = text.map(str::to_string);
+                        let compact =
+                            !*message_expanded.borrow() && message_data.borrow().iconified;
+                        if !compact && !*message_expanded.borrow() && used_feed.borrow().is_none()
+                        {
+                            message_preview.set_text(text.unwrap_or("Connecting…"));
+                            message_preview.set_visible(true);
+                        }
+                        message_hint.set_label(text.unwrap_or(CARD_HINT));
+                    }),
+                }))
+            }
+            CardSource::Local => None,
+        };
+
         let card = Self {
             session_task: Arc::new(crate::session_task::SessionTask::default()),
             container: root,
@@ -604,6 +717,10 @@ impl MiniTerminalCard {
             on_session_persist: Rc::clone(&on_session_persist),
             hover_lock: hover_lock.clone(),
             activity,
+            source,
+            remote,
+            fit,
+            source_message: Rc::clone(&source_message),
             iconify_action: Rc::new(RefCell::new(None)),
             restore_action: Rc::new(RefCell::new(None)),
             geometry_commit: Rc::new(RefCell::new(None)),
@@ -657,7 +774,9 @@ impl MiniTerminalCard {
             let compact_top_bar = card.compact_top_bar.clone();
             let expand_btn = card.expand_btn.clone();
             let hint_label = card.hint_label.clone();
+            let source_message = Rc::clone(&source_message);
             let compact_restore_btn = card.compact_restore_btn.clone();
+            let remote = card.remote.clone();
             let on_save = Rc::clone(&on_drag_end);
             Rc::new(move || {
                 if *expanded.borrow() {
@@ -665,7 +784,7 @@ impl MiniTerminalCard {
                     container.remove_css_class("term-expanded");
                     expand_btn.set_label("⛶");
                     expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
-                    hint_label.set_label("Double-click to expand • drag any edge to resize");
+                    hint_label.set_label(&card_hint(&source_message));
                 }
                 remove_vte(&vte, &preview_box);
                 {
@@ -700,6 +819,11 @@ impl MiniTerminalCard {
                     false,
                 );
                 on_save(container.clone().upcast(), &data.borrow());
+                // A remote icon is not a terminal: release the stream. The next
+                // snapshot reattaches if the host restores the card.
+                if let Some(session) = &remote {
+                    session.detach();
+                }
             })
         };
 
@@ -718,31 +842,35 @@ impl MiniTerminalCard {
             let expand_btn = card.expand_btn.clone();
             let restore_btn = card.restore_btn.clone();
             let hint_label = card.hint_label.clone();
+            let source_message = Rc::clone(&source_message);
+            let fit = Rc::clone(&card.fit);
             let on_save = Rc::clone(&on_drag_end);
             let on_toggle_restore = Rc::clone(&on_toggle);
             let hover_lock_restore = card.hover_lock.clone();
             let activity_restore = Rc::clone(&card.activity);
+            let remote_restore = card.remote.clone();
             Rc::new(move || {
                 if *expanded.borrow() {
                     *expanded.borrow_mut() = false;
                     container.remove_css_class("term-expanded");
                     expand_btn.set_label("⛶");
                     expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
-                    hint_label.set_label("Double-click to expand • drag any edge to resize");
+                    hint_label.set_label(&card_hint(&source_message));
                 }
+                let (min_w, min_h) = min_card_size(fit.get().2);
                 let (nw, nh) = {
                     let d = data.borrow();
-                    let rw = if d.restored_width >= MIN_CARD_WIDTH {
+                    let rw = if d.restored_width >= min_w {
                         d.restored_width
                     } else {
                         CARD_WIDTH
                     };
-                    let rh = if d.restored_height >= MIN_CARD_HEIGHT {
+                    let rh = if d.restored_height >= min_h {
                         d.restored_height
                     } else {
                         CARD_HEIGHT
                     };
-                    clamp_card_size(rw, rh, screen_w, screen_h)
+                    clamp_card_size_at(rw, rh, screen_w, screen_h, fit.get().2)
                 };
                 {
                     let mut d = data.borrow_mut();
@@ -756,7 +884,7 @@ impl MiniTerminalCard {
                 container.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
-                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore);
+                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore, remote_restore.clone(), &fit);
                 } else if let Some(term) = vte.borrow().as_ref() {
                     let theme = crate::theme::current_theme();
                     let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
@@ -1045,7 +1173,7 @@ impl MiniTerminalCard {
         self.expand_btn
             .set_tooltip_text(Some("Collapse back to overlay card"));
         self.hint_label
-            .set_label("Double-click header to collapse");
+            .set_label(&card_hint_or(&self.source_message, "Double-click header to collapse"));
 
         if self.vte.borrow().is_none() {
             self.attach_vte();
@@ -1083,7 +1211,7 @@ impl MiniTerminalCard {
         self.expand_btn
             .set_tooltip_text(Some("Expand to 80% overlay"));
         self.hint_label
-            .set_label("Double-click to expand • drag any edge to resize");
+            .set_label(&card_hint(&self.source_message));
         self.apply_chrome();
         self.refresh_status();
     }
@@ -1150,6 +1278,117 @@ impl MiniTerminalCard {
         );
     }
 
+    /// What the card's footer is telling the user, so a view can check that the
+    /// host's state reached the chrome.
+    #[cfg(test)]
+    pub fn footer_text(&self) -> String {
+        self.hint_label.label().to_string()
+    }
+
+    /// Whether the header is on screen. A compact or expanded card is not
+    /// showing it, and a view sizing a card's terminal has to know.
+    pub fn header_visible(&self) -> bool {
+        self.header.is_visible()
+    }
+
+    pub fn remote_session(&self) -> Option<&Rc<RemoteSession>> {
+        self.remote.as_ref()
+    }
+
+    /// Remember the size and fit scale the owning view drew this card at, and
+    /// size the emulator's font for the host's grid.
+    pub fn set_fit(&self, body_width: f64, body_height: f64, scale: f64) {
+        self.fit.set((body_width, body_height, scale));
+        let Some(terminal) = self.vte.borrow().as_ref().cloned() else {
+            return;
+        };
+        let grid = self.remote.as_ref().and_then(|session| session.grid());
+        crate::card_source::fit_font(&terminal, body_width, body_height, grid, scale);
+    }
+
+    /// Show what the host reports about this card: its title, whether its
+    /// session is alive, and anything to say about the stream.
+    pub fn apply_host_state(&self, title: &str, alive: Option<bool>, message: Option<&str>) {
+        let title = title.trim();
+        if !title.is_empty() && self.title_label.label() != title {
+            self.title_label.set_label(title);
+            self.title_label.set_tooltip_text(Some(title));
+        }
+        apply_status_view(
+            &self.status_badge,
+            &self.compact_status,
+            match alive {
+                Some(false) => "EXITED",
+                // The host's session is alive but its state is the host's
+                // business: this card only claims that it is remote.
+                _ => "REMOTE",
+            },
+        );
+        let (workspace, session) = {
+            let data = self.data.borrow();
+            (data.workspace_dir.clone(), data.session_name.clone())
+        };
+        let meta = match workspace.as_deref().and_then(|dir| {
+            std::path::Path::new(dir)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        }) {
+            Some(name) => format!("Remote · {name}"),
+            None => format!("Remote · {session}"),
+        };
+        if self.meta_label.label() != meta {
+            self.meta_label.set_label(&meta);
+        }
+        *self.source_message.borrow_mut() = message.map(str::to_string);
+        self.paint_source_message();
+    }
+
+    /// Mirror the host's own card mode. The host decides whether a card is
+    /// iconified or expanded, so this never asks for anything: it is what a
+    /// snapshot does to a card.
+    pub fn mirror_host_mode(&self, iconified: bool, expanded: bool) {
+        let was_icon = self.data.borrow().iconified;
+        {
+            let mut data = self.data.borrow_mut();
+            data.iconified = iconified;
+        }
+        *self.expanded.borrow_mut() = expanded;
+        if iconified && !was_icon {
+            // An icon is not a terminal: stop drawing and stop streaming.
+            self.detach_vte();
+            if let Some(session) = &self.remote {
+                session.detach();
+            }
+        }
+        self.apply_chrome();
+        self.paint_source_message();
+    }
+
+    /// Adopt the size the owning view fitted this card to, without saving
+    /// anything or asking for anything: the host's rectangle is the truth.
+    pub fn adopt_host_geometry(&self, width: i32, height: i32) {
+        self.container.set_size_request(width, height);
+        *self.visual_pos.borrow_mut() = displayed_pos(&self.data.borrow());
+        self.apply_chrome();
+        self.paint_source_message();
+    }
+
+    /// The footer hint, or the body when there is nothing to show there,
+    /// carries whatever the card's source is saying.
+    fn paint_source_message(&self) {
+        if !self.source.is_remote() {
+            return;
+        }
+        let message = self.source_message.borrow().clone();
+        if self.vte.borrow().is_none() && !self.is_compact() && !self.is_expanded() {
+            self.preview_label
+                .set_text(message.as_deref().unwrap_or("Connecting…"));
+            self.preview_label.set_visible(true);
+        }
+        self.hint_label
+            .set_label(&card_hint_or(&self.source_message, CARD_HINT));
+    }
+
     pub fn attach_vte(&self) {
         self.attach_vte_with_inventory(None);
     }
@@ -1177,10 +1416,18 @@ impl MiniTerminalCard {
             inventory,
             self.hover_lock.clone(),
             &self.activity,
+            self.remote.clone(),
+            &self.fit,
         );
     }
 
     pub fn close_session(&self) {
+        if let Some(session) = &self.remote {
+            // The host owns the session: this card only stops reading it.
+            session.stop();
+            self.detach_vte();
+            return;
+        }
         self.session_task.close();
         self.detach_vte();
         let task = Arc::clone(&self.session_task);
@@ -1213,6 +1460,12 @@ impl MiniTerminalCard {
     }
 
     pub fn refresh_status(&self) {
+        // A remote card's title, badge and preview come from the host's
+        // snapshot: probing this machine's tmux or agent databases for another
+        // machine's session would describe the wrong session.
+        if self.source.is_remote() {
+            return;
+        }
         if self.refresh_in_flight.get() {
             return;
         }
@@ -1366,6 +1619,9 @@ fn status_view_texts(status: &str) -> (&'static str, &'static str, &'static str)
     match status {
         "BUSY" | "WORKING" => ("● WORKING", "●", "status-busy"),
         "EXITED" => ("○ EXITED", "○", "status-exited"),
+        // A live card whose session runs on another machine says so, rather
+        // than claiming to be idle here.
+        "REMOTE" => ("● REMOTE", "●", "status-idle"),
         _ => ("● IDLE", "●", "status-idle"),
     }
 }
@@ -1426,6 +1682,7 @@ fn remove_vte(vte: &Rc<RefCell<Option<VteTerminal>>>, preview_box: &gtk4::Box) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_vte(
     vte: &Rc<RefCell<Option<VteTerminal>>>,
     preview_box: &gtk4::Box,
@@ -1437,6 +1694,8 @@ fn spawn_vte(
     inventory: Option<Arc<crate::tmux::SessionInventory>>,
     hover_lock: HoverRaiseLock,
     activity: &Rc<CardActivity>,
+    remote: Option<Rc<RemoteSession>>,
+    fit: &Rc<Cell<(f64, f64, f64)>>,
 ) {
     if session_task.is_closed() { return; }
     remove_vte(vte, preview_box);
@@ -1454,6 +1713,9 @@ fn spawn_vte(
 
     let font_size = if is_expanded { 11.0 } else { 10.0 };
     apply_vte_theme(&term, font_size);
+    // The font of a remote card follows the host's own grid instead of this
+    // machine's theme: the emulator must line up with the columns and rows the
+    // host decided. See below, where the grid is known.
 
     let term_click = GestureClick::new();
     let term_weak = term.downgrade();
@@ -1501,6 +1763,42 @@ fn spawn_vte(
         }
     });
     term.add_controller(term_hover);
+    if let Some(session) = remote {
+        // A remote card has no local process at all. The host's bytes are fed
+        // into this emulator, and every committed keystroke goes to the host
+        // session rather than to a PTY here.
+        term.set_scrollback_lines(crate::card_source::REMOTE_SCROLLBACK);
+        let input_session = Rc::clone(&session);
+        crate::card_source::connect_host_input(&term, move |bytes| {
+            input_session.input(bytes);
+        });
+        // Return never arrives as a commit on this PTY-less emulator: the input
+        // method and the window's activate-default binding consume it, while
+        // letters still come through `commit`. Catch it on the way in and send
+        // the carriage return the host shell treats as "run this".
+        let return_session = Rc::clone(&session);
+        let keys = EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed(move |_, keyval, _, state| {
+            if !crate::card_source::is_submit_key(keyval, state) {
+                return glib::Propagation::Proceed;
+            }
+            return_session.input(b"\r");
+            glib::Propagation::Stop
+        });
+        term.add_controller(keys);
+        // Size the font for the host's grid once this card has a body: until
+        // then the theme font stands in and the view refits after layout.
+        let (body_width, body_height, scale) = fit.get();
+        if body_width > 1.0 && body_height > 1.0 {
+            crate::card_source::fit_font(&term, body_width, body_height, session.grid(), scale);
+        }
+        preview_box.append(&term);
+        *vte.borrow_mut() = Some(term);
+        session.attach();
+        return;
+    }
+
     let agent_type = data.borrow().agent_type.clone();
     let cmd = data.borrow().command.clone();
     let agent_session_id = data.borrow().agent_session_id.clone();
@@ -1809,7 +2107,8 @@ mod tests {
         let toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(|_| {});
         spawn_vte(&slot, &preview, &Rc::new(RefCell::new(data)), false,
             &toggle, &Rc::new(RefCell::new(false)), &task, None, HoverRaiseLock::new(),
-            &Rc::new(CardActivity::new(Rc::new(|| {}))));
+            &Rc::new(CardActivity::new(Rc::new(|| {}))), None,
+            &Rc::new(Cell::new((0.0, 0.0, 1.0))));
         assert!(slot.borrow().is_some(), "placeholder exists before async setup");
         task.close();
         remove_vte(&slot, &preview);

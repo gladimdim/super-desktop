@@ -84,9 +84,16 @@ viewer is refused with the daemon's current geometry instead of overwriting a
 concurrent edit. Request ids are deduplicated per credential inside one epoch
 (16 per device, 256 overall, dropped on an epoch change); a request whose owner
 never answered is remembered as uncertain and its retry is refused rather than
-applied twice. `workspace-layout-v1` is advertised because `setLayout`, `closeTerminal` and
-`createTerminal` are implemented; `setWorkspace` is refused with
-`unsupported_command`.
+applied twice. `workspace-layout-v1` is advertised because `setLayout`, `setExpanded`,
+`closeTerminal` and `createTerminal` are implemented; `setWorkspace` is refused
+with `unsupported_command`.
+
+`setExpanded` is presentation only: it is the same expand/collapse the host's own
+double-click performs, it writes no saved geometry, and it leaves the host's
+layer-shell keyboard mode alone, so a viewer can look into a card without taking
+that machine's keyboard. The buttons that send these commands are the host's own
+card and bar widgets rendered by the viewer, so a remote console offers exactly
+the controls a local one does and nothing more.
 
 A create is the one command that makes something new, so it is bounded by the
 host's own snapshot: `agentType` must be one of the harnesses that host lists as

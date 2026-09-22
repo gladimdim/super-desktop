@@ -19,3 +19,4 @@ GTK *symbolic* SVGs (recolored from the Omarchy palette at runtime):
 |---|---|---|
 | `sd-gears-symbolic.svg` | ⚙ Settings button | Hand-drawn dual-gear glyph, no trademark involved |
 | `sd-arrange-symbolic.svg` | Arrange button | Hand-drawn two-column layout glyph, no trademark involved |
+| `sd-hide-symbolic.svg` | Hide button | Hand-drawn eye-off (slash) glyph, no trademark involved |

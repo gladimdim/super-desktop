@@ -242,19 +242,19 @@ impl SuperDesktopWindow {
         let terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>> =
             Rc::new(RefCell::new(Vec::new()));
 
-        // Top-bar harness launch buttons, keyed by agent type: the ⚙ settings
-        // panel shows/hides them, so every button is built once and visibility
-        // is just `set_visible` (no HUD rebuild).
-        let harness_buttons: Rc<RefCell<Vec<(String, Button)>>> =
-            Rc::new(RefCell::new(Vec::new()));
-
         // HUD pieces the ⚙ panel writes to when the shortcut changes. They are
         // built here (and appended to `hud` further down) so the panel's
         // callback can capture them.
         let on_close_rc = Rc::new(on_request_close);
-        let btn_close = Button::with_label("✕ Hide");
+        // Hide — icon-only symbolic SVG; `.hud-button-danger` recolors it red.
+        let btn_close = Button::from_icon_name("sd-hide-symbolic");
+        btn_close.update_property(&[gtk4::accessible::Property::Label("Hide Super Desktop")]);
         btn_close.add_css_class("hud-button");
         btn_close.add_css_class("hud-button-danger");
+        btn_close.add_css_class("hud-icon-btn");
+        if let Some(img) = btn_close.child().and_downcast::<Image>() {
+            img.set_pixel_size(20);
+        }
         let hint = Label::new(None);
         hint.add_css_class("hud-shortcut");
         paint_shortcut_hints(&hint, &btn_close, &state.borrow());
@@ -262,6 +262,10 @@ impl SuperDesktopWindow {
         // The settings panel is built before the dock. This holder lets its
         // size buttons repaint the live dock once construction has finished.
         let hud_for_settings: Rc<RefCell<Option<gtk4::Box>>> = Rc::new(RefCell::new(None));
+        // The harness bar is built with the dock, after this panel; its size
+        // buttons and its harness toggles reach it through this holder.
+        let harness_bar_for_settings: Rc<RefCell<Option<Rc<crate::harness_bar::HarnessBar>>>> =
+            Rc::new(RefCell::new(None));
         // The remote workspace has its own bar, which has to follow the same
         // choice; it is built after this panel, hence another holder.
         let machine_for_settings: Rc<
@@ -272,7 +276,7 @@ impl SuperDesktopWindow {
             Rc::clone(&state),
             Rc::new({
                 let state = Rc::clone(&state);
-                let harness_buttons = Rc::clone(&harness_buttons);
+                let bar_slot = Rc::clone(&harness_bar_for_settings);
                 move |keys: Vec<String>| {
                     let snapshot = {
                         let mut s = state.borrow_mut();
@@ -280,8 +284,13 @@ impl SuperDesktopWindow {
                         s.clone()
                     };
                     crate::state::save_state_async(snapshot);
-                    for (key, btn) in harness_buttons.borrow().iter() {
-                        btn.set_visible(keys.iter().any(|k| k == key));
+                    // The same call a remote view makes with a host's list: the
+                    // bar only ever reflects what its owner says is offered.
+                    if let Some(bar) = bar_slot.borrow().as_ref() {
+                        bar.apply(&crate::harness_bar::HarnessState {
+                            keys,
+                            ready: true,
+                        });
                     }
                 }
             }),
@@ -333,7 +342,7 @@ impl SuperDesktopWindow {
         *hud_for_settings.borrow_mut() = Some(hud.clone());
 
         // Left chrome (brand, folder, + Note) and right chrome (icon-only
-        // arrange / gears / Hide) sit in a full-width row. The harness launch list is an overlay
+        // Icon-only arrange / gears / Hide) sit in a full-width row. The harness launch list is an overlay
         // with Align::Center so it stays on the display midline even when the
         // two chrome groups have different widths.
         let hud_overlay = Overlay::new();
@@ -400,14 +409,6 @@ impl SuperDesktopWindow {
         chrome.append(&hud_right);
 
         hud_overlay.set_child(Some(&chrome));
-
-        let hud_launchers = gtk4::Box::new(Orientation::Horizontal, 10);
-        hud_launchers.add_css_class("hud-launchers");
-        hud_launchers.set_halign(Align::Center);
-        hud_launchers.set_valign(Align::Center);
-        hud_launchers.set_hexpand(false);
-        hud_launchers.set_vexpand(false);
-        hud_overlay.add_overlay(&hud_launchers);
 
         hud.append(&hud_overlay);
 
@@ -549,54 +550,41 @@ impl SuperDesktopWindow {
         });
         hud_left.append(&btn_note);
 
-        // Agents (company logo + name; emoji label if the SVG is missing).
-        // Driven by `HARNESS_KEYS` so the launch buttons and the ⚙ settings
-        // panel can never disagree about what this app can run; the visible
-        // subset comes from the stored selection ∩ what is installed here.
+        // Harnesses (company logo + name; emoji label if the SVG is missing).
+        // The bar is the same widget a remote PC's workspace shows: it is told
+        // which keys this machine offers and what a click means, and everything
+        // else about it — order, labels, logos, tooltips, the launch line — is
+        // shared code. Driven by `HARNESS_KEYS` so the launch buttons and the ⚙
+        // settings panel can never disagree about what this app can run; the
+        // visible subset comes from the stored selection ∩ what is installed.
         let detected = crate::tmux::detect_harnesses();
         let visible_keys = crate::harness_settings::resolve_visible(
             win_rc.state.borrow().visible_harnesses.as_deref(),
             &detected,
         );
-
         let light_theme = crate::theme::current_theme().mode == "light";
-        for agent_key in crate::tmux::HARNESS_KEYS.iter().copied() {
-            let (name, emoji) = crate::remote_launcher::harness_label(agent_key);
-            let btn = Button::new();
-            btn.add_css_class("hud-button");
-            if let Some(logo) = crate::brand::logo_path(agent_key, light_theme) {
-                let row = gtk4::Box::new(Orientation::Horizontal, 6);
-                let img = Image::from_file(&logo);
-                img.set_pixel_size(crate::brand::BRAND_ICON_SIZE);
-                row.append(&img);
-                row.append(&Label::new(Some(name)));
-                btn.set_child(Some(&row));
-                brand_images.borrow_mut().push((img, agent_key.to_string()));
-            } else {
-                btn.set_label(&format!("{emoji} {name}"));
-            }
-            // Shared with the remote launch bar, so the same harness never
-            // reads differently on the machine that runs it and the one
-            // looking at it.
-            let tooltip = crate::remote_launcher::harness_tooltip(agent_key);
-            let has_usage = crate::usage::usage_id_for_agent(agent_key).is_some();
-            if !has_usage {
-                // Usage buttons render their launch hint inside the hover
-                // card instead, so the native tooltip never double-renders
-                // on top of it.
-                btn.set_tooltip_text(Some(tooltip));
-            }
-            let win_w = Rc::downgrade(&win_rc);
-            let a_key = agent_key.to_string();
-            btn.connect_clicked(move |_| {
-                if let Some(w) = win_w.upgrade() {
-                    w.create_new_terminal(&a_key, None, None, None);
+        let harness_bar = crate::harness_bar::HarnessBar::new(
+            Rc::new({
+                let win_w = Rc::downgrade(&win_rc);
+                move |key: &str| {
+                    if let Some(w) = win_w.upgrade() {
+                        w.create_new_terminal(key, None, None, None);
+                    }
                 }
-            });
-
-            // Hover usage card: Omarchy quota/tokens in a popover that hangs
-            // flush under the provider button, headed by the button itself.
-            if let Some(usage_id) = crate::usage::usage_id_for_agent(agent_key) {
+            }),
+            Rc::new(move |button: &Button, key: &str| {
+                // The usage card is this PC's own provider state, so only the
+                // local bar has one: a remote host's usage is not this
+                // machine's business. Returns whether it claimed the button's
+                // hover, because the native tooltip would double-render on top.
+                let Some(key) = crate::tmux::HARNESS_KEYS.iter().copied().find(|k| *k == key)
+                else {
+                    return false;
+                };
+                let Some(usage_id) = crate::usage::usage_id_for_agent(key) else {
+                    return false;
+                };
+                let (name, emoji) = crate::harness_bar::harness_label(key);
                 let pop = Popover::new();
                 pop.add_css_class("usage-pop");
                 pop.set_position(PositionType::Bottom);
@@ -604,13 +592,13 @@ impl SuperDesktopWindow {
                 pop.set_offset(0, 4);
                 pop.set_autohide(false);
                 pop.set_can_focus(false);
-                pop.set_parent(&btn);
+                pop.set_parent(button);
 
                 let motion = EventControllerMotion::new();
                 let pop_enter = pop.clone();
                 let card = crate::usage::UsageCardInfo {
                     usage_id,
-                    agent_key,
+                    agent_key: key,
                     display_name: name,
                     emoji,
                     light_theme,
@@ -625,20 +613,27 @@ impl SuperDesktopWindow {
                 motion.connect_leave(move |_| {
                     pop_leave.popdown();
                 });
-                btn.add_controller(motion);
+                button.add_controller(motion);
 
                 // Don't leave a stale hover card behind after launching.
                 let pop_click = pop.clone();
-                btn.connect_clicked(move |_| {
+                button.connect_clicked(move |_| {
                     pop_click.popdown();
                 });
-            }
-            btn.set_visible(visible_keys.iter().any(|k| k == agent_key));
-            hud_launchers.append(&btn);
-            harness_buttons
-                .borrow_mut()
-                .push((agent_key.to_string(), btn));
-        }
+                true
+            }),
+        );
+        harness_bar.apply(&crate::harness_bar::HarnessState {
+            keys: visible_keys,
+            ready: true,
+        });
+        *harness_bar_for_settings.borrow_mut() = Some(Rc::clone(&harness_bar));
+        // The same brand logos the remote bar draws, so a light/dark switch
+        // swaps both from the one list.
+        brand_images
+            .borrow_mut()
+            .extend(harness_bar.brand_images());
+        hud_overlay.add_overlay(&harness_bar.group);
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
         let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
@@ -1390,6 +1385,9 @@ impl SuperDesktopWindow {
             sh,
             startup_inventory,
             hover_lock,
+            // The local workspace's own session: this machine's tmux, attached
+            // by the card's emulator.
+            crate::card_source::CardSource::Local,
         );
         let card = Rc::new(card);
         canvas.put(&card.container, x, y);
@@ -1776,6 +1774,11 @@ impl SuperDesktopWindow {
                 agent_type,
                 workspace,
             } => self.create_terminal_card(agent_type, workspace).map(Some),
+            Command::SetExpanded {
+                card_id, expanded, ..
+            } => self
+                .set_terminal_card_expanded(card_id, *expanded)
+                .map(|()| None),
             // Declared in the protocol, refused until its handler exists: a
             // capability must never promise more than the host implements.
             Command::SetWorkspace { .. } => Err("unsupported_command"),
@@ -1804,6 +1807,48 @@ impl SuperDesktopWindow {
             return Err("terminal_unavailable");
         }
         Ok(session)
+    }
+
+    /// Expand or collapse one card at a viewer's request.
+    ///
+    /// The card's rectangle, its VTE and the other cards' outlines end up
+    /// exactly as they would after a local double-click on its header. The
+    /// host's own layer-shell keyboard mode is left alone: a viewer may look
+    /// into this card, but it does not take this machine's keyboard.
+    fn set_terminal_card_expanded(
+        &self,
+        card_id: &str,
+        expanded: bool,
+    ) -> Result<(), &'static str> {
+        // An expanded card accepts this one: collapsing is how it stops being
+        // expanded, and `SetLayout` is the command that stays refused.
+        let card = self.any_terminal_card(card_id)?;
+        if card.is_expanded() == expanded {
+            return Ok(());
+        }
+        if expanded {
+            // At most one card is expanded, exactly like a local expand.
+            let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+            for other in cards.iter() {
+                if other.is_expanded() && other.data.borrow().id != card.data.borrow().id {
+                    other.collapse();
+                    let (px, py) = displayed_pos(&other.data.borrow());
+                    self.canvas.move_(&other.container, px, py);
+                }
+            }
+            card.expand(self.screen_width, self.screen_height);
+            let (x, y, _, _) = expanded_rect(self.screen_width, self.screen_height);
+            self.canvas.remove(&card.container);
+            self.canvas.put(&card.container, x, y);
+        } else {
+            card.collapse();
+            let (px, py) = displayed_pos(&card.data.borrow());
+            self.canvas.move_(&card.container, px, py);
+        }
+        // Cards the expanded one covers lose their outlines, and a collapse
+        // sets them free again.
+        self.ghosts.refresh();
+        Ok(())
     }
 
     /// Move, resize and iconify one card to a viewer's request, clamped to this

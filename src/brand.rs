@@ -121,7 +121,11 @@ mod tests {
         let Some(root) = find_icons_root() else {
             return;
         };
-        for name in ["sd-gears-symbolic.svg", "sd-arrange-symbolic.svg"] {
+        for name in [
+            "sd-gears-symbolic.svg",
+            "sd-arrange-symbolic.svg",
+            "sd-hide-symbolic.svg",
+        ] {
             let p = root.join("hicolor/scalable/actions").join(name);
             assert!(p.is_file(), "missing vendored HUD icon {name}");
             let text = std::fs::read_to_string(&p).unwrap();

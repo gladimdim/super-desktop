@@ -335,6 +335,14 @@ pub enum WorkspaceCommand {
         expected_revision: u64,
         layout: CardLayout,
     },
+    /// Expand or collapse one card. This is presentation, not saved geometry:
+    /// the owner exports `expanded` with the card, so a viewer mirrors whatever
+    /// it decides.
+    SetExpanded {
+        card_id: String,
+        expected_revision: u64,
+        expanded: bool,
+    },
     SetWorkspace {
         workspace: String,
         expected_revision: u64,
@@ -347,7 +355,9 @@ impl WorkspaceCommand {
     pub fn card_id(&self) -> Option<&str> {
         match self {
             Self::CreateTerminal { .. } | Self::SetWorkspace { .. } => None,
-            Self::CloseTerminal { card_id, .. } | Self::SetLayout { card_id, .. } => Some(card_id),
+            Self::CloseTerminal { card_id, .. }
+            | Self::SetLayout { card_id, .. }
+            | Self::SetExpanded { card_id, .. } => Some(card_id),
         }
     }
 
@@ -361,6 +371,9 @@ impl WorkspaceCommand {
                 expected_revision, ..
             }
             | Self::SetLayout {
+                expected_revision, ..
+            }
+            | Self::SetExpanded {
                 expected_revision, ..
             }
             | Self::SetWorkspace {
@@ -384,7 +397,9 @@ impl WorkspaceCommand {
                     && workspace.len() <= MAX_WORKSPACE
                     && !workspace.contains('\0')
             }
-            Self::CloseTerminal { card_id, .. } => valid_card_id(card_id),
+            Self::CloseTerminal { card_id, .. } | Self::SetExpanded { card_id, .. } => {
+                valid_card_id(card_id)
+            }
             Self::SetLayout { card_id, layout, .. } => {
                 let bounded = |value: i32| (-LAYOUT_MAX_COORD..=LAYOUT_MAX_COORD).contains(&value);
                 valid_card_id(card_id)
@@ -502,6 +517,9 @@ pub enum CommandResult {
         card_id: Option<String>,
         card_revision: Option<u64>,
         layout: Option<CardLayout>,
+        /// The owner's own `expanded`, which is presentation and so is not part
+        /// of the saved layout: a viewer mirrors it from here.
+        expanded: Option<bool>,
     },
     /// Refused because the addressed card changed since the viewer's snapshot.
     /// The owner's current geometry comes along, so the viewer redraws the real
@@ -510,6 +528,7 @@ pub enum CommandResult {
         card_id: String,
         card_revision: Option<u64>,
         layout: Option<CardLayout>,
+        expanded: Option<bool>,
     },
     /// Refused for any other stable reason; `error` is one of
     /// [`COMMAND_ERRORS`].
@@ -528,6 +547,7 @@ pub struct CommandOutcome {
     pub card_id: Option<String>,
     pub card_revision: Option<u64>,
     pub layout: Option<CardLayout>,
+    pub expanded: Option<bool>,
     pub error: Option<String>,
 }
 
@@ -544,6 +564,7 @@ impl CommandOutcome {
             card_id,
             card_revision: card.map(|card| card.revision),
             layout: card.map(|card| card.layout.clone()),
+            expanded: card.map(|card| card.expanded),
             error: None,
         }
     }
@@ -557,6 +578,7 @@ impl CommandOutcome {
             card_id: Some(card.card_id.clone()),
             card_revision: Some(card.revision),
             layout: Some(card.layout.clone()),
+            expanded: Some(card.expanded),
             error: Some("conflict".into()),
         }
     }
@@ -570,6 +592,7 @@ impl CommandOutcome {
             card_id: None,
             card_revision: None,
             layout: None,
+            expanded: None,
             error: Some(
                 known_command_error(error)
                     .unwrap_or("invalid_command")
@@ -593,6 +616,7 @@ impl CommandOutcome {
                 card_id: self.card_id,
                 card_revision: self.card_revision,
                 layout: self.layout,
+                expanded: self.expanded,
             }
         } else {
             match self.error.as_deref() {
@@ -600,6 +624,7 @@ impl CommandOutcome {
                     card_id: self.card_id.unwrap_or_default(),
                     card_revision: self.card_revision,
                     layout: self.layout,
+                    expanded: self.expanded,
                 },
                 other => CommandResult::Rejected {
                     error: known_command_error(other.unwrap_or("invalid_command"))
@@ -911,6 +936,26 @@ mod tests {
             expected_revision: 1,
         };
         check_command(&expanded, &close).unwrap();
+
+        // Expanding and collapsing are allowed on an expanded card (collapsing
+        // is how it stops being expanded), unlike a layout write.
+        let mut toggle = set_layout_request(1);
+        toggle.command = WorkspaceCommand::SetExpanded {
+            card_id: "card-one".into(),
+            expected_revision: 1,
+            expanded: false,
+        };
+        check_command(&expanded, &toggle).unwrap();
+        check_command(&snapshot, &toggle).unwrap();
+        toggle.command = WorkspaceCommand::SetExpanded {
+            card_id: "card-one".into(),
+            expected_revision: 9,
+            expanded: true,
+        };
+        assert_eq!(
+            check_command(&snapshot, &toggle).err().unwrap().error.as_deref(),
+            Some("conflict")
+        );
     }
 
     #[test]
@@ -964,6 +1009,7 @@ mod tests {
                 "requestId": "r1", "machineId": "machine-b",
                 "epoch": "host-one", "revision": 7,
                 "result": {"type": "applied", "cardId": "card-one", "cardRevision": 7,
+                           "expanded": false,
                            "layout": serde_json::to_value(&snapshot.cards[0].layout).unwrap()}
             })
         );
@@ -973,11 +1019,15 @@ mod tests {
         closed.cards.clear();
         closed.revision = 8;
         let applied = CommandOutcome::applied(&closed, Some("card-one".into()));
-        assert_eq!(applied.into_reply("machine-b", "r2").result, CommandResult::Applied {
-            card_id: Some("card-one".into()),
-            card_revision: None,
-            layout: None,
-        });
+        assert_eq!(
+            applied.into_reply("machine-b", "r2").result,
+            CommandResult::Applied {
+                card_id: Some("card-one".into()),
+                card_revision: None,
+                layout: None,
+                expanded: None,
+            }
+        );
 
         let refusal = CommandOutcome::rejected(&snapshot, "conflict");
         assert_eq!(refusal.status(), (409, "Conflict"));

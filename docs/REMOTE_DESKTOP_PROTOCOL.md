@@ -6,13 +6,15 @@ are streamed over pinned WSS and rendered in real VTE widgets at the host's own
 positions, sizes, stacking order and iconified state. Clicking a console and
 typing (including paste and Ctrl+C) writes into that host session, and dragging
 its header moves and raises the host's own card, and the top bar offers that
-PC's own harness buttons, so a click launches the harness on that PC.
-Implemented: protocol negotiation, a daemon-owned local workspace model,
+PC's own harness buttons, so a click launches the harness on that PC. The remote
+workspace is drawn by the same widgets a local one uses — the same harness bar
+and the same card, with its own buttons, drags and edges — and only their source
+differs. Implemented: protocol negotiation, a daemon-owned local workspace model,
 authenticated workspace snapshots/events, persisted terminal stacking order, the
 host-side PTY attach transport with a host-owned grid, viewer keystrokes on that
 stream, the viewer's live consoles, and the typed command route with `setLayout`,
-`closeTerminal` and `createTerminal` behind epoch/revision checks and per-device
-deduplication.
+`closeTerminal`, `setExpanded` and `createTerminal` behind epoch/revision checks
+and per-device deduplication.
 Outgoing certificate-pinned pairing, remote snapshot retrieval and a
 `peer-attach` streaming CLI are available too (see below). The default-folder
 command, the viewer's own close/iconify controls and live outgoing workspace
@@ -45,16 +47,22 @@ route lets the host apply a resize, an iconify or a close — those are implemen
 and tested host-side, and the viewer's own controls for them are the next
 milestone.
 
-The remote top bar also carries the host's own harness list: the same buttons,
-labels, logos, tooltips and order its local toolbar shows, taken from that host's
-snapshot (`harnessTypes` plus `visibleHarnesses`, which is the host's stored
-selection minus what is not installed there). Clicking one sends `createTerminal`
-and the host creates the card in the folder it published, exactly like a local
-launch, without showing its own overlay. A host that does not advertise
-`workspace-layout-v1` shows no buttons and says to update it, there are no usage
-cards here (those numbers describe this PC, not that one), and choosing another
-folder on that PC is not available yet. Cards the host shows in front are the
-ones
+A remote console is the same card a local one is, so its own header buttons work
+on the host: minimize and maximize send `setLayout` and `setExpanded`, close
+sends `closeTerminal`, and dragging the header or an edge sends one `setLayout`
+carrying whatever the gesture changed. The host's snapshot is what this view
+draws, so a control never invents a state the host did not report.
+
+The top bar is the same bar too: the host's own harness list, with the same
+buttons, labels, logos, tooltips and order its local toolbar shows, taken from
+that host's snapshot (`harnessTypes` plus `visibleHarnesses`, which is the host's
+stored selection minus what is not installed there). Clicking one sends
+`createTerminal` and the host creates the card in the folder it published,
+exactly like a local launch, without showing its own overlay. A host that does
+not advertise `workspace-layout-v1` shows no buttons and says to update it, there
+are no usage cards here (those numbers describe this PC, not that one), and
+choosing another folder on that PC is not available yet. Cards the host shows in
+front are the ones
 that get live output; the rest keep their chrome with an explanation. While
 the overlay is hidden the streams are released (the host keeps its sessions and
 every card keeps its last frame), and showing it again reconnects at once.
@@ -142,7 +150,10 @@ name the revision it was based on is exactly what this route exists to refuse.
 }
 ```
 
-`closeTerminal` takes `cardId` and `expectedRevision`. `createTerminal` takes
+`closeTerminal` takes `cardId` and `expectedRevision`. `setExpanded` takes those
+and a boolean: it is the host's presentation (its maximize/minimize state), which
+the snapshot already exports as `expanded`, so the viewer mirrors whatever the
+host decides. `createTerminal` takes
 `agentType` and `workspace`, and is accepted only when the host itself offers
 that harness (it is in the snapshot's `visibleHarnesses`) and that workspace is
 the folder the host itself published: a viewer never names a command, a flag, a
@@ -161,6 +172,7 @@ Refusals, all with a stable code from the shared command list:
 | Unknown card | 404 | `unknown_card` |
 | Malformed envelope, bounds or identity | 400 | `invalid_command`, `invalid_layout`, `unsupported_command` |
 | A create names a harness the host does not offer | 400 | `unsupported_harness` |
+| A layout command on a card the host shows expanded | 409 | `terminal_expanded` (a close or an expand is still accepted) |
 | A create names a folder the host did not publish | 400 | `invalid_workspace` |
 | Command addressed to another machine | 409 | `wrong_machine` |
 | Owner unavailable / warming up / timed out | 503 / 503 / 504 | `desktop_unavailable`, `desktop_not_ready`, `desktop_timeout` |
@@ -345,10 +357,11 @@ and epoch reset.
 Viewer keystrokes, the prompt-transaction input guard and the attach handshake
 gate are in place: bytes VTE commits (keys, paste, IME, and mouse reports the
 host application has enabled) are written after `attached` and dropped on
-disconnect. Host-driven commands (`setLayout`, `closeTerminal`, `createTerminal`)
-are delivered on the command route, with the host's harness list in the remote
-top bar; the viewer's own close/iconify controls and folder selection are still
-pending. Do not bypass the input guard or replay queued keys.
+disconnect. Host-driven commands (`setLayout`, `setExpanded`, `closeTerminal`,
+`createTerminal`) are delivered on the command route, and the buttons that send
+them are the local workspace's own card and bar widgets, with the host's state
+behind them. The remote folder list is still pending. Do not bypass the input
+guard or replay queued keys.
 
 ## Test on another Linux desktop
 
@@ -482,19 +495,21 @@ Selecting a peer displays its host workspace path, harness names and console
 layout, and each visible console is a real terminal showing that host session's
 live output.
 
-Cards keep the host's positions, sizes, stacking order, iconified state and
-expanded geometry, uniformly scaled to fit the viewer and **never enlarged**
+Cards are the local workspace's own card widget, so they show the host's
+positions, sizes, stacking order, iconified state and expanded geometry,
+uniformly scaled to fit the viewer and **never enlarged**
 (`s = min(1, Vw/Hw, Vh/Hh)`, as the plan specifies). The scale is applied to
 positions, sizes and the terminal font, so the host's cell grid fits the card
 just as it does on the host. Physical monitor scale is not applied again to the
 host's logical coordinates.
 
-Remote cards are their own widgets and never enter local session creation.
-Their emulators forward VTE's committed bytes to the host. A drag ends in one
-typed `setLayout` command carrying the revision the viewer drew, so the host
-either applies it or refuses it with its own geometry; a host that does not
-advertise `workspace-layout-v1` and a card the host shows expanded are left
-alone. The local canvas and widgets stay alive while hidden, so switching
+Remote cards never enter local session creation: their source is a host stream,
+not a session on this machine, which is the only thing about them that differs
+from a local card. Their emulators forward VTE's committed bytes to the host. A
+drag, a resize or a header button ends in one typed command carrying the revision
+the viewer drew, so the host either applies it or refuses it with its own
+geometry; a layout command for a card the host shows expanded, and any command to
+a host that does not advertise `workspace-layout-v1`, are left alone. The local canvas and widgets stay alive while hidden, so switching
 back to This PC restores their existing state. Local launch and arrange
 controls are absent from remote mode, and Ctrl+N cannot create a local note
 while a remote PC is selected.
@@ -520,9 +535,9 @@ remote workspace hides the way a local one does.
 
 This increment still uses bounded HTTPS polling for layout at two-second
 intervals. Live WSS workspace subscriptions, graphical peer removal, the remote
-folder list and the viewer's own close/iconify controls remain pending. Viewer
-typing is delivered on the attach stream, and layout, close and create commands
-are delivered on the command route.
+folder list and conflict feedback in the card chrome remain pending. Viewer
+typing is delivered on the attach stream, and layout, expand, close and create
+commands are delivered on the command route.
 
 
 ## Add a PC from the selector

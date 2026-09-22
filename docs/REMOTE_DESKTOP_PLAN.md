@@ -1,9 +1,10 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
-Status: pairing, a live remote workspace, its terminal transport, viewer typing,
-the first commands (move/resize/iconify/close) and launching the host's own
-harnesses from the remote top bar are delivered; folder selection, the remaining
-viewer command UI and live outgoing subscriptions remain in progress.
+Status: pairing, a live remote workspace, its terminal transport, viewer typing
+and the host's own harness bar and card chrome are delivered, and both
+workspaces now run the *same* UI code with only the source swapped; folder
+selection, the 100% + pan/zoom mode and live outgoing subscriptions remain in
+progress.
 Updated 2026-09-22 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
@@ -46,15 +47,25 @@ PCs:
   viewer's own edge-resize and close/iconify controls are the next milestone. A
   card the host shows expanded, or a host that does not advertise
   `workspace-layout-v1`, keeps its own layout.
-- The remote workspace has the **same top bar** as a local one: machine selector
-  and brand on the left, the host's own harness buttons centered in the host's
-  order, with the same labels, logos and tooltips the host's toolbar uses, and
-  that host's console count and folder beside them. Clicking one sends a typed
-  `createTerminal` command and the host builds the card exactly like a local
-  launch — its own inventory, sandbox flags and folder — without being forced to
-  show its overlay. The bar is offered only by a host that advertises
-  `workspace-layout-v1`, is inert while a launch is in flight, and names only
-  harnesses and folders that host published.
+- **One UI, two sources.** A remote workspace is drawn by the same two widgets a
+  local one is: `src/harness_bar.rs` owns the harness bar (buttons, labels,
+  logos, tooltips, order and the launch line) and `src/mini_terminal.rs` owns the
+  card (chrome, header buttons, drag, resize, expand and close). The only
+  difference is the source they are given (`src/card_source.rs`): this machine's
+  tmux and `state.json`, or a host's streamed session and its snapshot. A remote
+  workspace's top bar is therefore the local one, showing the host's own harness
+  list in the host's order, and its consoles carry the same buttons.
+- Every remote control acts **on the host**, and the viewer mirrors the host's
+  snapshot: minimize, maximize, close and resize are one typed command each
+  (`setLayout`, `setExpanded`, `closeTerminal`), carrying the card revision this
+  view drew, so a concurrent host edit is refused with the host's own geometry
+  instead of being overwritten. A card's click-raise is local until the host's
+  own stacking order changes.
+- Clicking a harness button sends a typed `createTerminal` command and the host
+  builds the card exactly like a local launch — its own inventory, sandbox flags
+  and folder — without being forced to show its overlay. The bar is offered only
+  by a host that advertises `workspace-layout-v1`, is inert while a launch is in
+  flight, and names only harnesses and folders that host published.
 - Each visible remote console is a real VTE terminal fed by the host's own tmux
   attach output over pinned WSS (`GET /api/v1/desktop/terminals/<card-id>/attach`),
   so output, colours, alternate-screen applications and redraws match the host.
@@ -69,19 +80,18 @@ PCs:
   bridge can otherwise keep serving port 8759 and return a 404 for the desktop
   capability route after the source has been updated.
 
-This is a **live view you can type into, rearrange and launch from**, not the
-finished interactive feature. It shows the host's terminal pixels, sends
-keystrokes, paste and Ctrl+C to the focused session, moves, resizes, iconifies
-and closes the host's own cards through the command route, and launches that
-host's harnesses from the top bar. It changes no folder: `setWorkspace` is
-accepted by the protocol and refused with `unsupported_command` until its
-handler exists, so a new card always starts in the folder that host publishes.
-The viewer still has no close/resize/iconify controls of its own — the host
-keeps those until that UI lands. A host that says “Update and rebuild SUPER
-DESKTOP on the host” is serving an older bridge without `terminal-pty-v1`, and
-its workspace is drawn as chrome without live consoles. Hosts that hide their
-overlay release their viewers' streams, and reopening the overlay reconnects
-them.
+This is a **live view you can type into, rearrange and launch from**: the same
+widgets as a local workspace, with a host on the other end. It shows the host's
+terminal pixels, sends keystrokes, paste and Ctrl+C to the focused session, and
+its cards' own buttons, drags and edges move, resize, iconify, expand and close
+the host's cards. It changes no folder: `setWorkspace` is accepted by the
+protocol and refused with `unsupported_command` until its handler exists, so a
+new card always starts in the folder that host publishes. What is still missing
+is the 100% + pan/zoom mode, conflict feedback in the chrome, and the host's own
+folder list. A host that says “Update and rebuild SUPER DESKTOP on the host” is
+serving an older bridge without `terminal-pty-v1`, and its workspace is drawn as
+chrome without live consoles. Hosts that hide their overlay release their
+viewers' streams, and reopening the overlay reconnects them.
 
 ### Two-PC update and smoke check
 
@@ -128,17 +138,18 @@ automatically.
    `expectedEpoch`, card id, `expectedRevision`), machine/epoch/revision checks,
    rejected-with-geometry conflicts, a bounded per-device request cache for
    deduplication inside one epoch, and no automatic replay after an ambiguous
-   timeout. `setLayout` (move, resize, iconify) and `closeTerminal` are applied
-   through the daemon's own card actions, `createTerminal` builds a card exactly
-   like a local launch, and `workspace-layout-v1` is advertised because those
-   handlers exist. The viewer's drag drop and its top-bar harness buttons are the
-   callers. `setWorkspace` is declared and refused with `unsupported_command`.
-4. Next: the rest of the viewer's command UI — close/iconify from remote card
-   controls, conflict feedback, and the 100% + pan/scroll mode with fit/100%
-   coordinate transforms — then the host's folder list with `setWorkspace`, live
-   WSS workspace events in place of the two-second poll, and two-PC regression
-   coverage for switching, concurrent edits, bridge/daemon restart and
-   revocation. Viewer input (delivered) stays
+   timeout. `setLayout` (move, resize, iconify), `setExpanded` (the two
+   presentation modes) and `closeTerminal` are applied through the daemon's own
+   card actions, `createTerminal` builds a card exactly like a local launch, and
+   `workspace-layout-v1` is advertised because those handlers exist. Every caller
+   is now the same UI a local workspace runs: the card's own buttons and
+   gestures, and the harness bar. `setWorkspace` is declared and refused with
+   `unsupported_command`.
+4. Next: conflict feedback in the card chrome, the 100% + pan/scroll mode with
+   fit/100% coordinate transforms, then the host's folder list with
+   `setWorkspace`, live WSS workspace events in place of the two-second poll, and
+   two-PC regression coverage for switching, concurrent edits, bridge/daemon
+   restart and revocation. Viewer input (delivered) stays
    behind the current-selection handshake and the prompt-transaction guard, and
    keys are never replayed after a disconnect.
 
@@ -297,7 +308,7 @@ Delivered endpoints (`✓`) and the ones still to build:
 | ✓ `GET /api/v1/desktop/workspace` | Authoritative local-workspace snapshot from the host daemon. |
 | ✓ `GET /api/v1/desktop/events` (WSS) | Initial snapshot, then changed snapshots and host availability. |
 | ✓ `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live PTY transport for one owned session: host output as binary frames, viewer keystrokes back. |
-| ✓ `POST /api/v1/desktop/commands` | Typed commands with request IDs, epoch and card revisions: `setLayout`, `closeTerminal` and `createTerminal` are applied; `setWorkspace` is refused with `unsupported_command` until it is. |
+| ✓ `POST /api/v1/desktop/commands` | Typed commands with request IDs, epoch and card revisions: `setLayout`, `setExpanded`, `closeTerminal` and `createTerminal` are applied; `setWorkspace` is refused with `unsupported_command` until it is. |
 
 Reuse existing authenticated workspace/harness-type endpoints where their
 semantics fit. New desktop mutations should use the command envelope so create
@@ -510,9 +521,9 @@ required for the first release; follow-ups in section 1 are separate work.
    touches local session preparation.
 6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids,
    stream budgeting, the inverse drag transform, revision conflicts with the
-   host's own geometry and routed move/resize/iconify/close commands are
-   delivered. The viewer's own controls for close/resize/iconify, the 100% +
-   pan/scroll mode and conflict feedback remain, together with a two-PC check
+   host's own geometry, the shared bar and card widgets and every routed
+   move/resize/iconify/expand/close control are delivered. The 100% + pan/scroll
+   mode and conflict feedback in the chrome remain, together with a two-PC check
    that B can view C while A operates B, and that A/B can view each other
    without recursion or exported peer state.
 7. **Regression, documentation and release — ongoing.** Complete the matrix below, update

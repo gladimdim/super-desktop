@@ -160,8 +160,8 @@ button.machine-peer-selected {{
     border-radius: 12px;
 }}
 
-/* Icon-only HUD chrome (⚙ settings, arrange): symbolic SVGs recolored by the
-   Omarchy palette through `color`, oversized into a clear hit target so they
+/* Icon-only HUD chrome (⚙ settings, arrange, Hide): symbolic SVGs recolored by
+   the Omarchy palette through `color`, oversized into a clear hit target so they
    read as icons rather than one more pill among the labels. */
 .hud-gear,
 .hud-icon-btn {{
@@ -1534,13 +1534,17 @@ mod tests {
 
     #[test]
     fn test_hud_gear_style_exists() {
-        // The ⚙ settings / arrange toggles are icon-only symbolic SVGs:
+        // The ⚙ settings / arrange / Hide toggles are icon-only symbolic SVGs:
         // without this rule they render as empty pills, not a sized icon.
         let css = generate_css(&current_theme());
         assert!(css.contains(".hud-gear"), "missing CSS rule for .hud-gear");
         assert!(
             css.contains(".hud-icon-btn"),
             "missing CSS rule for .hud-icon-btn"
+        );
+        assert!(
+            css.contains(".hud-button-danger"),
+            "missing CSS rule for .hud-button-danger"
         );
     }
 

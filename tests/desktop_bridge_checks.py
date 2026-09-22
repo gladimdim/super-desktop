@@ -118,7 +118,7 @@ def command_outcome(ok, **fields):
     """One typed owner answer, shaped exactly like CommandOutcome."""
     return dict({"ok": ok, "epoch": "daemon-one", "revision": 2,
                  "cardId": None, "cardRevision": None, "layout": None,
-                 "error": None}, **fields)
+                 "expanded": None, "error": None}, **fields)
 
 
 def set_layout_command(layout, request_id="r1", machine_id=None, epoch="daemon-one",
@@ -175,7 +175,8 @@ def check_desktop_commands(request, token, machine_id, directory):
         assert body == {"requestId": "r1", "machineId": machine_id, "epoch": "daemon-one",
                         "revision": 2,
                         "result": {"type": "applied", "cardId": "saved-card",
-                                   "cardRevision": 2, "layout": moved}}, body
+                                   "cardRevision": 2, "expanded": None,
+                                   "layout": moved}}, body
         assert len(stub.commands) == 1
         sent = json.loads(stub.commands[0].split(" ", 1)[1])
         assert sent["command"]["type"] == "setLayout"
@@ -199,7 +200,8 @@ def check_desktop_commands(request, token, machine_id, directory):
             set_layout_command(layout, request_id="r2", machine_id=machine_id), token=token)
         assert status == 409, body
         assert body["result"] == {"type": "conflict", "cardId": "saved-card",
-                                  "cardRevision": 2, "layout": moved}, body
+                                  "cardRevision": 2, "expanded": None,
+                                  "layout": moved}, body
 
         # A refused card and an expired epoch are typed refusals too.
         stub.answer_commands_with(command_outcome(False, error="unknown_card"))
@@ -247,10 +249,24 @@ def check_desktop_commands(request, token, machine_id, directory):
                          "workspace": "/remote/project with spaces"}}, token=token)
         assert status == 200, body
         assert body["result"] == {"type": "applied", "cardId": "sd_term_new",
-                                  "cardRevision": 3, "layout": created}, body
+                                  "cardRevision": 3, "expanded": None,
+                                  "layout": created}, body
         assert json.loads(stub.commands[-1].split(" ", 1)[1])["command"] == {
             "type": "createTerminal", "agentType": "shell",
             "workspace": "/remote/project with spaces"}
+
+        # Expanding and collapsing travel as their own command, because the
+        # owner's `expanded` is presentation and is not part of saved geometry.
+        stub.answer_commands_with(command_outcome(
+            True, revision=4, cardId="saved-card", cardRevision=4, layout=layout))
+        status, body = request("/api/v1/desktop/commands",
+            {"requestId": "r10", "machineId": machine_id, "expectedEpoch": "daemon-one",
+             "command": {"type": "setExpanded", "cardId": "saved-card",
+                         "expectedRevision": 3, "expanded": True}}, token=token)
+        assert status == 200 and body["result"]["type"] == "applied", body
+        assert json.loads(stub.commands[-1].split(" ", 1)[1])["command"] == {
+            "type": "setExpanded", "cardId": "saved-card", "expectedRevision": 3,
+            "expanded": True}
 
         # An owner that is simply not running never received the command, so its
         # outcome is known: the retry after the owner returns is applied instead

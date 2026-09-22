@@ -14,9 +14,9 @@ use std::{
     time::Duration,
 };
 
-/// Set after construction: the launcher cannot hold a handle to the view it
+/// Set after construction: the launch bar cannot hold a handle to the view it
 /// belongs to while that view is still being built.
-type OnLaunched = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+type OnLaunch = Rc<RefCell<Option<Rc<dyn Fn(&str)>>>>;
 
 pub struct MachineView {
     pub stack: gtk4::Stack,
@@ -26,8 +26,12 @@ pub struct MachineView {
     remote_toolbar: gtk4::Overlay,
     selection: RefCell<Selection>,
     canvas: Rc<RemoteCanvas>,
-    /// The host's own harness list, as launch buttons in the top bar.
-    launcher: Rc<crate::remote_launcher::RemoteLauncher>,
+    /// The host's own harness list, in the shared launch bar.
+    bar: Rc<crate::harness_bar::HarnessBar>,
+    /// Where a launch on the selected host goes, from the last snapshot.
+    target: RefCell<Option<crate::harness_bar::RemoteTarget>>,
+    /// One launch at a time: a slow host must not make two cards per click.
+    launching: Cell<bool>,
     status: gtk4::Label,
     details: gtk4::Label,
     busy: Cell<bool>,
@@ -74,18 +78,23 @@ impl MachineView {
 
         // The launcher refreshes this view the moment a card is created on the
         // host, instead of leaving the user to wait for the next poll.
-        let on_launched: OnLaunched = Rc::new(RefCell::new(None));
-        let launcher = crate::remote_launcher::RemoteLauncher::new(Rc::new({
-            let on_launched = Rc::clone(&on_launched);
-            move || {
-                if let Some(refresh) = on_launched.borrow().as_ref() {
-                    refresh();
+        let on_launch: OnLaunch = Rc::new(RefCell::new(None));
+        let bar = crate::harness_bar::HarnessBar::new(
+            Rc::new({
+                let on_launch = Rc::clone(&on_launch);
+                move |key: &str| {
+                    if let Some(launch) = on_launch.borrow().as_ref() {
+                        launch(key);
+                    }
                 }
-            }
-        }));
-        toolbar.add_overlay(&launcher.widget);
+            }),
+            // No usage card: those numbers come from this PC's own provider
+            // state and would describe the wrong machine.
+            Rc::new(|_: &gtk4::Button, _: &str| false),
+        );
+        toolbar.add_overlay(&bar.group);
         remote.append(&toolbar);
-        remote.append(&launcher.note);
+        remote.append(&bar.note);
         let canvas = RemoteCanvas::new();
         canvas.area.set_tooltip_text(Some(
             "The host's consoles, streamed live and scaled to fit. Click a console and type, or drag its header to move it on that PC. This view refreshes every two seconds.",
@@ -101,13 +110,25 @@ impl MachineView {
             remote_toolbar: toolbar,
             selection: RefCell::new(Selection::default()),
             canvas,
-            launcher,
+            bar,
+            target: RefCell::new(None),
+            launching: Cell::new(false),
             status,
             details,
             busy: Cell::new(false),
             on_switch,
         });
-        *on_launched.borrow_mut() = Some(Rc::new({
+        *on_launch.borrow_mut() = Some(Rc::new({
+            let weak = Rc::downgrade(&view);
+            move |key: &str| {
+                if let Some(view) = weak.upgrade() {
+                    view.launch_on_host(key);
+                }
+            }
+        }));
+        // A command whose effect the answer cannot describe — a close, an
+        // expand — asks for a fresh snapshot instead of waiting out the poll.
+        view.canvas.set_on_changed(Rc::new({
             let weak = Rc::downgrade(&view);
             move || {
                 if let Some(view) = weak.upgrade() {
@@ -155,7 +176,7 @@ impl MachineView {
 
     /// The remote bar's harness logos, for the window's theme swap.
     pub fn brand_images(&self) -> Vec<(gtk4::Image, String)> {
-        self.launcher.brand_images()
+        self.bar.brand_images()
     }
 
     /// Match the local dock's top-bar size, so the toolbar does not change
@@ -163,6 +184,64 @@ impl MachineView {
     pub fn paint_top_bar_size(&self, size: crate::state::TopBarSize, screen_width: i32) {
         crate::window::paint_top_bar_size(&self.remote_toolbar, size, screen_width);
     }
+    /// Launch one harness on the selected PC, through the same bar the local
+    /// workspace uses.
+    ///
+    /// One command per click, never retried: the host deduplicates on the
+    /// request id, so a repeat cannot make two cards, and an answer whose
+    /// outcome is unknown is reported instead of guessed at.
+    fn launch_on_host(self: &Rc<Self>, agent_key: &str) {
+        let Some(target) = self.target.borrow().clone() else {
+            return;
+        };
+        if self.launching.replace(true) {
+            return;
+        }
+        let (name, _) = crate::harness_bar::harness_label(agent_key);
+        self.bar.set_busy(true);
+        self.bar.starting(&format!("Launching {name} on that PC…"));
+        let request = crate::harness_bar::create_request(&target, agent_key);
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let reply = gtk4::gio::spawn_blocking(move || {
+                peer_client::command(&target.peer, &request)
+            })
+            .await;
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            view.launching.set(false);
+            view.bar.set_busy(false);
+            match reply {
+                Ok(Ok(reply)) => {
+                    match reply.result {
+                        // The new card belongs to the host and is already in its
+                        // next snapshot. The card appearing is the success the
+                        // user sees, so this line goes back to describing it.
+                        crate::desktop_protocol::CommandResult::Applied { .. } => {
+                            view.bar.note("")
+                        }
+                        crate::desktop_protocol::CommandResult::Conflict { .. } => {
+                            view.bar.fail("That PC changed · try launching again")
+                        }
+                        crate::desktop_protocol::CommandResult::Rejected { error } => {
+                            view.bar.fail(crate::harness_bar::launch_error(&error))
+                        }
+                    }
+                    // A refusal usually means this view is behind that host
+                    // (its folder or epoch moved on), and "try again" only works
+                    // once the bar shows what it reports now. On success this is
+                    // how the new card shows up at once.
+                    view.refresh();
+                }
+                Ok(Err(failure)) => view
+                    .bar
+                    .fail(crate::harness_bar::launch_error(failure.0)),
+                Err(_) => view.bar.fail("That PC did not answer · try again"),
+            }
+        });
+    }
+
     pub fn dismiss(&self) {
         self.local_button.popdown();
         self.remote_button.popdown();
@@ -347,7 +426,9 @@ impl MachineView {
         // Leaving a PC — or picking another one — must release this viewer's
         // terminal streams before anything else. The host keeps its sessions.
         self.canvas.clear();
-        self.launcher.clear();
+        *self.target.borrow_mut() = None;
+        self.bar.apply(&crate::harness_bar::HarnessState::none());
+        self.bar.note("");
         self.details.set_text("");
         match peer {
             None => {
@@ -428,13 +509,20 @@ impl MachineView {
                         peer_client::label(&snapshot.local.workspace),
                         harnesses
                     ));
-                    // The host's own harness list, and only a host that
-                    // accepts commands becomes a launch target.
-                    view.launcher.apply(
-                        &peer,
-                        &snapshot,
-                        capabilities.supports_remote_desktop(),
-                    );
+                    // The host's own harness list, offered by the same bar the
+                    // local workspace uses; only a host that accepts commands
+                    // becomes a launch target.
+                    let writable = capabilities.supports_remote_desktop();
+                    *view.target.borrow_mut() =
+                        writable.then(|| crate::harness_bar::RemoteTarget::of(&peer, &snapshot));
+                    view.bar.apply(&crate::harness_bar::HarnessState::of_snapshot(
+                        &snapshot, writable,
+                    ));
+                    view.bar.note(match (writable, snapshot.local.visible_harnesses.len()) {
+                        (false, _) => "Update SUPER DESKTOP on that PC to launch harnesses there",
+                        (true, 0) => "That PC offers no harnesses to launch",
+                        (true, _) => "",
+                    });
                     // Live output is only carried for a host that advertises
                     // the terminal transport; anything else is a layout-only
                     // preview, never a snapshot emulation. Layout commands and
@@ -458,7 +546,9 @@ impl MachineView {
                     // A late failure must not leave another PC's consoles on
                     // screen: disconnected content is not current content.
                     view.canvas.clear();
-                    view.launcher.clear();
+                    *view.target.borrow_mut() = None;
+                    view.bar.apply(&crate::harness_bar::HarnessState::none());
+                    view.bar.note("");
                     view.canvas.show_message(remote_status(error));
                     view.details.set_text("");
                 }
@@ -668,9 +758,9 @@ mod tests {
         assert_eq!(view.canvas.card_count(), 1);
         // The remote workspace carries the host's own launch bar in its top
         // bar, and it is inert until that host reports what it can run.
-        assert!(view.launcher.widget.parent().is_some());
-        assert!(view.launcher.note.parent().is_some());
-        assert!(!view.launcher.sensitive("shell"));
+        assert!(view.bar.group.parent().is_some());
+        assert!(view.bar.note.parent().is_some());
+        assert!(!view.bar.sensitive("shell"));
         assert_eq!(
             view.canvas.area.visible_child_name().as_deref(),
             Some("canvas")

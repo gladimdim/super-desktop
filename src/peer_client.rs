@@ -645,38 +645,19 @@ pub fn command(
     Ok(reply)
 }
 
-/// Ask the host to move one of its own cards, as the whole layout it already
-/// reported plus the drop position. The card's own revision travels with it, so
-/// a concurrent host edit is refused as a conflict instead of being
-/// overwritten. Coordinates are host pixels; the host clamps and raises.
-pub fn move_card(
+/// One command addressed to a host: the envelope's identity, epoch and a fresh
+/// request id, built in one place so no caller can forget one of them.
+pub fn request(
     peer: &Peer,
     epoch: &str,
-    card: &crate::desktop_protocol::DesktopCard,
-    x: i32,
-    y: i32,
-) -> Result<crate::desktop_protocol::CommandReply> {
-    let mut layout = card.layout.clone();
-    if layout.iconified {
-        layout.icon_x = Some(x);
-        layout.icon_y = Some(y);
-    } else {
-        layout.x = x;
-        layout.y = y;
+    command: crate::desktop_protocol::WorkspaceCommand,
+) -> crate::desktop_protocol::CommandRequest {
+    crate::desktop_protocol::CommandRequest {
+        request_id: next_request_id(),
+        machine_id: peer.machine_id.clone(),
+        expected_epoch: epoch.to_string(),
+        command,
     }
-    command(
-        peer,
-        &crate::desktop_protocol::CommandRequest {
-            request_id: next_request_id(),
-            machine_id: peer.machine_id.clone(),
-            expected_epoch: epoch.to_string(),
-            command: crate::desktop_protocol::WorkspaceCommand::SetLayout {
-                card_id: card.card_id.clone(),
-                expected_revision: card.revision,
-                layout,
-            },
-        },
-    )
 }
 
 /// A fresh id for one attempt. The host deduplicates on it, so it is unique per
