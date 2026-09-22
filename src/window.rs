@@ -15,6 +15,7 @@ use crate::mini_terminal::{
     clamp_card_size, displayed_pos, expanded_rect, set_displayed_pos, HoverRaiseLock,
     MiniTerminalCard, NEW_TERM_HEIGHT, NEW_TERM_WIDTH,
 };
+use crate::overlap_ghost::GhostLayer;
 use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
 use crate::tag::DEFAULT_TERMINAL_TAG;
@@ -145,6 +146,9 @@ pub struct SuperDesktopWindow {
     /// that panic kills the whole daemon.
     note_cards: Rc<RefCell<Vec<Rc<StickyNote>>>>,
     terminal_cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
+    /// Dotted outlines drawn over terminals that another card hides. Shared with
+    /// the cards' callbacks, which have no `Rc<Self>` to reach the window.
+    ghosts: Rc<GhostLayer>,
     hud: gtk4::Box,
     screen_width: i32,
     screen_height: i32,
@@ -400,6 +404,15 @@ impl SuperDesktopWindow {
         let slide = Rc::new(SlideAnim::new());
         let on_slide_hidden: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
         let brand_images: Rc<RefCell<Vec<(Image, String)>>> = Rc::new(RefCell::new(Vec::new()));
+        // Built before the cards (they are loaded further down) because every
+        // card callback needs a handle on it.
+        let ghosts = GhostLayer::new(
+            &canvas,
+            &hud,
+            Rc::clone(&terminal_cards),
+            screen_width,
+            screen_height,
+        );
 
         let win_rc = Rc::new(Self {
             window,
@@ -410,6 +423,7 @@ impl SuperDesktopWindow {
             state,
             note_cards,
             terminal_cards,
+            ghosts,
             hud: hud.clone(),
             screen_width,
             screen_height,
@@ -1067,6 +1081,9 @@ impl SuperDesktopWindow {
         let canvas = self.canvas.clone();
         let state = Rc::clone(&self.state);
         let term_cards = Rc::clone(&self.terminal_cards);
+        // This card's callbacks have no `Rc<Self>`, so they hold the ghost
+        // layer directly and redraw the buried-card outlines themselves.
+        let ghosts = Rc::clone(&self.ghosts);
 
         let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
@@ -1074,6 +1091,7 @@ impl SuperDesktopWindow {
         let sh = self.screen_height;
 
         let canvas_for_tick = canvas.clone();
+        let ghosts_drag = Rc::clone(&ghosts);
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
             // Perf: .dragging disables hover transitions/shadows (see CSS)
             // so the card paints cheaply while it moves at 120Hz.
@@ -1089,6 +1107,7 @@ impl SuperDesktopWindow {
                 let dp = Rc::clone(&drag_pending_update);
                 let dta = Rc::clone(&drag_tick_active);
                 let c = canvas_for_tick.clone();
+                let ghosts_tick = Rc::clone(&ghosts_drag);
 
                 canvas_for_tick.add_tick_callback(move |_, _| {
                     if dp.borrow().is_empty() {
@@ -1099,6 +1118,9 @@ impl SuperDesktopWindow {
                     for (w, (px, py)) in items {
                         c.move_(&w, px, py);
                     }
+                    // A card dragged over another one hides it: keep that
+                    // card's ghost outline following the drag.
+                    ghosts_tick.refresh();
                     glib::ControlFlow::Continue
                 });
             }
@@ -1107,6 +1129,7 @@ impl SuperDesktopWindow {
         let canvas_term_end = canvas.clone();
         let drag_pending_term_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
+        let ghosts_end = Rc::clone(&ghosts);
         let on_drag_end = move |widget: gtk4::Widget, data: &TerminalData| {
             widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
@@ -1132,16 +1155,21 @@ impl SuperDesktopWindow {
             let snapshot = s.clone();
             drop(s);
             crate::state::save_state_async(snapshot);
+            // A card that just landed on another one buries it (and an iconify
+            // or restore commit arrives through this same callback).
+            ghosts_end.refresh();
         };
 
         let terminal_cards_toggle = Rc::clone(&term_cards);
         let canvas_toggle = canvas.clone();
         let window_toggle = self.window.clone();
+        let ghosts_toggle = Rc::clone(&ghosts);
         let on_double_click = move |data: &TerminalData| {
             apply_terminal_expand(
                 &terminal_cards_toggle,
                 &canvas_toggle,
                 &window_toggle,
+                &ghosts_toggle,
                 sw,
                 sh,
                 &data.session_name,
@@ -1151,6 +1179,7 @@ impl SuperDesktopWindow {
         let canvas_del = canvas.clone();
         let state_del = Rc::clone(&state);
         let term_cards_del = Rc::clone(&term_cards);
+        let ghosts_del = Rc::clone(&ghosts);
 
         let on_close = move |sess: String| {
             // Pull the card out of the shared list and drop the borrow BEFORE
@@ -1176,6 +1205,9 @@ impl SuperDesktopWindow {
             let snapshot = s.clone();
             drop(s);
             crate::state::save_state_async(snapshot);
+            // The closed card's outline is dropped and the cards it used to
+            // hide become visible again.
+            ghosts_del.refresh();
         };
 
         // Restored cards reappear wherever their current mode lives: an
@@ -1258,6 +1290,7 @@ impl SuperDesktopWindow {
         let sess_name = term_data.session_name.clone();
         let card_id_raise = term_data.id.clone();
         let state_raise = Rc::clone(&state);
+        let ghosts_raise = Rc::clone(&ghosts);
         let on_raise = move |widget: gtk4::Widget| {
             if let Some(last) = canvas_raise.last_child() {
                 if &last != &widget {
@@ -1268,7 +1301,8 @@ impl SuperDesktopWindow {
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
             // already happened, so just skip the bookkeeping instead of
-            // panicking on an active borrow.
+            // panicking on an active borrow. The ghosts are recomputed below,
+            // where the lists are free again.
             let Ok(mut cards) = term_cards_raise.try_borrow_mut() else {
                 return;
             };
@@ -1278,14 +1312,20 @@ impl SuperDesktopWindow {
             }
             drop(cards);
             let mut state = state_raise.borrow_mut();
-            if state.terminal_order.last() != Some(&card_id_raise)
-                && state.terminals.iter().any(|t| t.id == card_id_raise) {
+            let persisted = state.terminal_order.last() != Some(&card_id_raise)
+                && state.terminals.iter().any(|t| t.id == card_id_raise);
+            if persisted {
                 state.terminal_order.retain(|id| id != &card_id_raise);
                 state.terminal_order.push(card_id_raise.clone());
                 let snapshot = state.clone();
                 drop(state);
                 crate::state::save_state_async(snapshot);
+            } else {
+                drop(state);
             }
+            // A raise changes which card covers which: the buried ones may now
+            // need an outline (or lost the one they had).
+            ghosts_raise.refresh();
         };
 
         let state_sess = Rc::clone(&state);
@@ -1311,6 +1351,8 @@ impl SuperDesktopWindow {
             // toward this newly opened harness cannot bury it.
             hover_lock.lock(&term_data.session_name);
         }
+        let ghosts_interaction = Rc::clone(&ghosts);
+        let on_interaction = move || ghosts_interaction.refresh();
         let card = MiniTerminalCard::new(
             term_data,
             on_drag_update,
@@ -1321,6 +1363,7 @@ impl SuperDesktopWindow {
             on_resize_end,
             on_raise,
             on_session_persist,
+            on_interaction,
             sw,
             sh,
             startup_inventory,
@@ -1333,6 +1376,9 @@ impl SuperDesktopWindow {
         }
         term_cards.borrow_mut().push(Rc::clone(&card));
         raise_canvas_child(&canvas, &self.hud);
+        // A new card can land on top of an existing one (they cascade 32px):
+        // its outline shows up right away while the user works in neither.
+        ghosts.refresh();
     }
 
     pub fn auto_arrange(&self) {
@@ -1405,9 +1451,14 @@ impl SuperDesktopWindow {
         let snapshot = s.clone();
         drop(s);
         crate::state::save_state_async(snapshot);
+        // Arrange can stack a column of cards on top of each other.
+        self.ghosts.refresh();
     }
 
     pub fn start_slide_in(&self) {
+        // Outlines are placed from rest geometry: a ghost must not hang in
+        // mid-air while the cards are still on their way in.
+        self.ghosts.suspend();
         self.ensure_slide_trajectories(!self.slide.running.get());
         self.add_remote_slide_targets();
         if !self.slide.running.get() {
@@ -1424,6 +1475,8 @@ impl SuperDesktopWindow {
 
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
         self.machine_view.dismiss();
+        // Outlines describe rest positions, so they go away with the cards.
+        self.ghosts.suspend();
         // Live terminals slide out with their content, so hide reads as one
         // motion instead of a blank frame followed by an unmap. Their GPU
         // surfaces are dropped in `hide_now`, at the unmap itself: with VRAM
@@ -1526,6 +1579,7 @@ impl SuperDesktopWindow {
         let slide = Rc::clone(&self.slide);
         let canvas = self.canvas.clone();
         let on_hidden = Rc::clone(&self.on_slide_hidden);
+        let ghosts = Rc::clone(&self.ghosts);
 
         // Tick the window, not the canvas: the layer-shell surface owns the
         // GDK frame clock, which Hyprland drives at the monitor refresh rate.
@@ -1562,10 +1616,12 @@ impl SuperDesktopWindow {
                     paint_slide_widget(widget, *traj, target);
                 }
                 canvas.remove_css_class("sliding");
-                if !appear {
-                    if let Some(cb) = on_hidden.borrow().clone() {
-                        cb();
-                    }
+                if appear {
+                    // The cards are at rest again: the buried ones can have
+                    // their outlines back.
+                    ghosts.resume();
+                } else if let Some(cb) = on_hidden.borrow().clone() {
+                    cb();
                 }
                 return glib::ControlFlow::Break;
             }
@@ -1618,6 +1674,7 @@ impl SuperDesktopWindow {
         let snapshot = s.clone();
         drop(s);
         crate::state::save_state_async(snapshot);
+        self.ghosts.refresh();
         true
     }
 
@@ -1683,6 +1740,8 @@ impl SuperDesktopWindow {
 
     /// Unmap the window but keep the whole widget tree alive for the next show.
     fn hide_now(&self) {
+        // Outlines are hints on a visible desk: they do not survive the unmap.
+        self.ghosts.suspend();
         // Stop a vsync tick that may never fire (GPU stall) from later
         // painting or calling `on_slide_hidden` after we already unmapped.
         self.slide.running.set(false);
@@ -1716,6 +1775,10 @@ impl SuperDesktopWindow {
         if crate::theme::check_theme_changed() {
             self.reload_theme();
         }
+        // Safety net for the overlap ghosts: pointer and focus callbacks cover
+        // the interactive cases, and this catches anything that changed while
+        // they could not run. A refresh that changes nothing draws nothing.
+        self.ghosts.refresh();
         let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
         for card in cards.iter() {
             card.refresh_status();
@@ -1776,7 +1839,7 @@ fn card_slide_offscreen(tx: f64, ty: f64, w: f64, screen_w: f64) -> (f64, f64) {
     (sx, ty)
 }
 
-fn raise_canvas_child(canvas: &Fixed, widget: &impl gtk4::glib::object::IsA<gtk4::Widget>) {
+pub(crate) fn raise_canvas_child(canvas: &Fixed, widget: &impl gtk4::glib::object::IsA<gtk4::Widget>) {
     let widget = widget.as_ref();
     if let Some(last) = canvas.last_child() {
         if &last != widget {
@@ -1803,20 +1866,15 @@ fn hud_slide_pose(_hud_w: f64, hud_h: f64, _screen_w: f64) -> (f64, f64, f64, f6
 }
 
 fn terminal_slide_geom(term: &MiniTerminalCard, sw: i32, sh: i32) -> (f64, f64, f64, f64) {
-    let (w, h) = term.size(sw, sh);
-    if term.is_expanded() {
-        let (x, y, _, _) = expanded_rect(sw, sh);
-        (x, y, w, h)
-    } else {
-        let (px, py) = displayed_pos(&term.data.borrow());
-        (px, py, w, h)
-    }
+    let rect = term.canvas_rect(sw, sh);
+    (rect.x, rect.y, rect.width as f64, rect.height as f64)
 }
 
 fn apply_terminal_expand(
     terminal_cards: &Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
     canvas: &gtk4::Fixed,
     window: &ApplicationWindow,
+    ghosts: &Rc<GhostLayer>,
     sw: i32,
     sh: i32,
     session_name: &str,
@@ -1861,6 +1919,9 @@ fn apply_terminal_expand(
     } else {
         KeyboardMode::OnDemand
     });
+    // Expanding buries everything under the card that grew; collapsing sets
+    // the stacked cards free again.
+    ghosts.refresh();
 }
 
 #[cfg(test)]

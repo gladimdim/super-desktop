@@ -672,6 +672,18 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     border-color: {bright_yellow};
 }}
 
+/* ================= Buried Terminal Ghosts =================
+   A terminal covered by another card, while the user is
+   working in neither, keeps a dotted outline so the desk still
+   shows that it is there. It is drawn over the card that hides
+   it and never takes a click. */
+.term-overlap-ghost {{
+    border: 2px dotted {overlap_ghost_border};
+    border-radius: 14px;
+    background-color: transparent;
+    box-shadow: 0 0 12px {overlap_ghost_glow};
+}}
+
 .mini-terminal.term-compact {{
     border-radius: 18px;
     background-color: {compact_bg};
@@ -1242,6 +1254,8 @@ separator.launcher-sep {{
         ghost_label_bg = theme.rgba_darker_bg(0.88),
         ghost_label_border = theme.rgba_accent(0.85),
         ghost_icon_border = OmarchyTheme::hex_to_rgba(&theme.bright_blue, 0.85),
+        overlap_ghost_border = theme.accent,
+        overlap_ghost_glow = theme.rgba_accent(0.35),
         compact_bg = theme.rgba_dark_bg(0.94),
         compact_actions_bg = theme.rgba_lighter_bg(0.85),
         darker_background = theme.darker_background,
@@ -1507,6 +1521,22 @@ mod tests {
         assert!(
             css.contains(".hud-gear"),
             "missing CSS rule for .hud-gear"
+        );
+    }
+
+    #[test]
+    fn test_overlap_ghost_styles_exist() {
+        // The dotted outline over a terminal that another card hides. Without
+        // the rule the ghost box is invisible (or a solid rectangle painted
+        // over the card that covers the terminal).
+        let css = generate_css(&current_theme());
+        assert!(
+            css.contains(".term-overlap-ghost"),
+            "missing CSS rule for .term-overlap-ghost"
+        );
+        assert!(
+            css.contains("border: 2px dotted"),
+            "the buried-card ghost must be a dotted outline, got:\n{css}"
         );
     }
 }

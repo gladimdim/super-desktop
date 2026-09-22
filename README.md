@@ -184,9 +184,9 @@ the rebuild also restarts the separate bridge process. The
 also pairs PCs, fetches remote layouts and can stream one console to a terminal
 (`peer-attach`).
 
-Remote consoles are a **read-only live view** for now: clicking, typing and
-remote layout changes are not implemented, and the host keeps its own grid.
-`workspace-layout-v1` and `terminal-pty-v1` in
+Click a remote console and type: keystrokes, paste and Ctrl+C go to that
+host session. The host keeps its own grid, and remote create, close and drag
+are not implemented yet. `workspace-layout-v1` and `terminal-pty-v1` in
 [the protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md) record what each PC
 advertises.
 

@@ -1,15 +1,17 @@
 # Desktop protocol and PC-to-PC increment status
 
 This document accompanies [the implementation plan](REMOTE_DESKTOP_PLAN.md).
-The machine selector now opens a **live read-only remote workspace**: the host's
-consoles are streamed over pinned WSS and rendered in real VTE widgets at the
-host's own positions, sizes, stacking order and iconified state.
+The machine selector now opens a **live remote workspace**: the host's consoles
+are streamed over pinned WSS and rendered in real VTE widgets at the host's own
+positions, sizes, stacking order and iconified state. Clicking a console and
+typing (including paste and Ctrl+C) writes into that host session.
 Implemented: protocol negotiation, a daemon-owned local workspace model,
 authenticated workspace snapshots/events, persisted terminal stacking order, the
-host-side PTY attach transport with a host-owned grid, and the viewer's live
-consoles. Outgoing certificate-pinned pairing, remote snapshot retrieval and a
-`peer-attach` streaming CLI are available too (see below). Remote mutations and
-viewer input remain pending; this is still an incremental development branch.
+host-side PTY attach transport with a host-owned grid, viewer keystrokes on
+that stream, and the viewer's live consoles. Outgoing certificate-pinned
+pairing, remote snapshot retrieval and a `peer-attach` streaming CLI are
+available too (see below). Remote layout and lifecycle mutations remain
+pending; this is still an incremental development branch.
 
 ## Delivered user flow and current limit
 
@@ -20,12 +22,15 @@ six-digit-code comparison remain mandatory. Once approved, the peer is selected
 and its workspace is drawn live: every visible console is a real terminal that
 shows the host session's output, in colour, as it happens.
 
-This is a **read-only live view**. Nothing in the viewer can reach a host
-session: the transport carries no input frames, the emulators are read-only, and
-the viewer holds at most eight attachments at once. Remote create, close,
-drag/resize, folder selection and typing are deliberately disabled until typed
-host commands and input arbitration exist. Cards the host shows in front are the
-ones that get live output; the rest keep their chrome with an explanation. While
+Click a console and type. VTE translates the keystroke (application cursor
+keys, bracketed paste, IME) and the viewer sends those bytes after the host's
+`attached` frame. The host writes them into the session PTY behind the same
+input guard as phone and image-prompt input, and drops them if that guard is
+busy or the PTY cannot accept them. Keys are not replayed after a disconnect,
+a hide, or a switch to another PC. The viewer holds at most eight attachments
+at once. Remote create, close, drag/resize and folder selection stay on the
+host until typed commands exist. Cards the host shows in front are the ones
+that get live output; the rest keep their chrome with an explanation. While
 the overlay is hidden the streams are released (the host keeps its sessions and
 every card keeps its last frame), and showing it again reconnects at once.
 
@@ -68,7 +73,7 @@ remains v3; Android endpoints and credentials are unchanged.
 | --- | --- |
 | `GET /api/v1/desktop/workspace` | Complete current workspace snapshot, retrieved from the local daemon via Unix IPC. |
 | `GET /api/v1/desktop/events` (WSS) | Initial complete snapshot, then changed snapshots and five-second heartbeats. |
-| `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live read-only output of one owned card's session: binary frames are raw terminal bytes. |
+| `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live bytes of one owned card's session. Host→viewer binary frames are terminal output; viewer→host binary frames are terminal input. |
 
 Events use `{"type":"snapshot","workspace":{...}}` or
 `{"type":"unavailable","error":"desktop_unavailable"}`. Events poll the owning
@@ -107,17 +112,20 @@ After the upgrade the host streams, in order:
   changes (for example when the host resizes its own card), plus WebSocket pings
   every 15 seconds.
 
-The only control frame a viewer can send is
+The only text frame a viewer can send is
 `{"type":"grid","columns":N,"rows":M}`: the host compares it with its own live
 grid and applies it only when they are already equal, otherwise it answers with
 the authoritative grid. Unknown fields, unknown frame types, invalid sizes and
-out-of-range values are refused. **There is no input frame**: binary frames from
-a viewer are consumed and dropped, so the transport cannot type into a host
-session even if a future client tried. Attachments are bounded to 8 per
-credential and 16 per bridge as a whole, are closed when the credential is
-revoked or expires, and end after 30 minutes with a `reconnect` close frame.
-Dropping an attachment reaps exactly its own tmux client on the host — never the
-session, its panes or its processes.
+out-of-range values are refused. **Keystrokes are binary frames**, up to 16 KiB
+of raw terminal bytes, written into the host PTY. The viewer sends them only
+after it has accepted `attached` for the stream it still has selected. The host
+takes the per-session input guard and drops the frame when the guard is busy,
+the chunk is empty or oversized, or the PTY cannot accept the write. Nothing
+is buffered to replay after that. Attachments are bounded to 8 per credential
+and 16 per bridge as a whole, are closed when the credential is revoked or
+expires, and end after 30 minutes with a `reconnect` close frame. Dropping an
+attachment reaps exactly its own tmux client on the host — never the session,
+its panes or its processes.
 
 ## Initial contracts
 
@@ -242,9 +250,11 @@ attach, live coloured bytes, card ownership (`unknown_card` for a foreign or
 unknown card), revocation tearing the stream down, and the host session
 surviving every detach.
 
-Still pending before interactive release: viewer input and its arbitration, the
-prompt-transaction input guard, mouse/paste/IME through a real viewer, selection
-handshake, and host-driven layout commands. Do not bypass these gates.
+Viewer keystrokes, the prompt-transaction input guard and the attach handshake
+gate are in place: bytes VTE commits (keys, paste, IME, and mouse reports the
+host application has enabled) are written after `attached` and dropped on
+disconnect. Still pending before the interactive release: host-driven layout
+commands. Do not bypass the input guard or replay queued keys.
 
 ## Test on another Linux desktop
 
@@ -335,7 +345,8 @@ displayed workspace.
 `peer-workspace` returns the host's typed layout snapshot, including card
 positions, sizes and stacking order, and the card ids `peer-attach` takes.
 `peer-attach` upgrades the same pinned, authenticated connection to the attach
-route and prints the console's raw bytes; it never sends input. The host desktop
+route and prints the console's raw bytes. Piped stdin is written to the host
+session as input frames; a terminal on stdin stays output-only. The host desktop
 daemon must be running.
 It checks the pinned certificate, persistent machine identity and desktop
 capabilities before fetching the layout. Errors contain no credentials or
@@ -382,12 +393,12 @@ positions, sizes and the terminal font, so the host's cell grid fits the card
 just as it does on the host. Physical monitor scale is not applied again to the
 host's logical coordinates.
 
-This is explicitly **read-only**. No remote content is passed to the local
-terminal/session creation code: remote cards are their own widgets, their
-emulators have input disabled, the transport carries no input frames, and the
-local canvas and widgets stay alive while hidden, so switching back to This PC
-restores their existing state. Local launch and arrange controls are absent from
-remote mode, and Ctrl+N cannot create a local note while a remote PC is selected.
+Remote cards are their own widgets and never enter local session creation.
+Their emulators forward VTE's committed bytes to the host and do not write
+layout back. The local canvas and widgets stay alive while hidden, so switching
+back to This PC restores their existing state. Local launch and arrange
+controls are absent from remote mode, and Ctrl+N cannot create a local note
+while a remote PC is selected.
 Incoming bridge snapshots still describe this PC's local model even while it is
 viewing another PC.
 
@@ -409,8 +420,8 @@ moves remote consoles to their nearest border exactly like local cards, so a
 remote workspace hides the way a local one does.
 
 This increment still uses bounded HTTPS polling for layout. Live WSS workspace
-subscriptions, graphical peer removal, viewer input and remote layout mutations
-remain pending.
+subscriptions, graphical peer removal and remote layout mutations remain
+pending. Viewer typing is delivered on the attach stream.
 
 
 ## Add a PC from the selector

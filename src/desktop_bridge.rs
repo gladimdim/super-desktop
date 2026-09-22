@@ -208,12 +208,12 @@ pub(super) fn resolve_attach(
     })
 }
 
-/// Live read-only terminal output for one card, over an upgraded WSS stream.
+/// Live terminal output for one card, over an upgraded WSS stream.
 ///
 /// The host attaches its own tmux client at the grid it already owns and
-/// forwards raw PTY bytes in binary frames. This is one-way by construction:
-/// binary frames from the viewer are ignored, and no frame type can type into
-/// the host session.
+/// forwards raw PTY bytes in binary frames. The viewer may type back with its
+/// own binary frames (see [`apply_input`]); text frames stay control-only and
+/// anything else is ignored.
 pub(super) fn attach_terminal(mut stream: Connection, target: AttachTarget) {
     match PtyAttachment::open_at(&target.session, target.grid) {
         Ok((pty, grid)) => pump(stream, pty, grid, &target.card_id),
@@ -400,10 +400,39 @@ fn client_frame(stream: &mut Connection, pty: &mut PtyAttachment) -> Peer {
             }
         }
         Ok(Some(crate::ws::Frame::Text(text))) => apply_control(stream, pty, &text),
-        // Terminal input is not part of this increment. Binary frames are
-        // consumed and dropped, never replayed into the host session.
+        // Keystrokes from the viewer: raw terminal bytes for the host PTY.
+        // Control frames and unrecognized opcodes stay ignored.
+        Ok(Some(crate::ws::Frame::Binary(bytes))) => {
+            apply_input(pty, &bytes);
+            Peer::Idle
+        }
         Ok(Some(_)) => Peer::Idle,
         Err(_) => Peer::Closed,
+    }
+}
+
+/// Write viewer keystrokes into the host PTY behind the shared input guard.
+///
+/// The guard serializes remote input against local, phone and image-prompt
+/// transactions on the same session. It never blocks: a busy guard, a slow
+/// PTY or a closed stream drops the input instead of queueing keys for a
+/// later, surprising replay. `read_frame` already bounds the chunk, so no
+/// partial escape sequence or UTF-8 character can corrupt the session: the
+/// PTY reassembles the byte stream.
+fn apply_input(pty: &mut PtyAttachment, bytes: &[u8]) {
+    if bytes.is_empty() || bytes.len() > crate::desktop_protocol::ATTACH_MAX_CHUNK {
+        return;
+    }
+    let Ok(_guard) = crate::prompt_image::input_guard(pty.session()) else {
+        return;
+    };
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        match pty.write_input(rest) {
+            Ok(0) => return,
+            Ok(n) => rest = &rest[n..],
+            Err(_) => return,
+        }
     }
 }
 

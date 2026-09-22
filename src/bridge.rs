@@ -1218,8 +1218,8 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
         }
     }
 
-    // Live terminal output for one owned card: WSS binary frames of raw PTY
-    // bytes, plus bounded text control frames. Read-only by construction.
+    // Live terminal bytes for one owned card: host output and viewer keystrokes
+    // are WSS binary frames, plus bounded text control frames.
     if let Some(rest) = path.strip_prefix("/api/v1/desktop/terminals/") {
         if let Some(card_id) = rest.strip_suffix("/attach") {
             if req.method != "GET" || card_id.contains('/') {

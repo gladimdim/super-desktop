@@ -50,6 +50,13 @@ impl PtyAttachment {
         Ok((Self::spawn(tmux_command, session, grid)?, grid))
     }
 
+    /// The owned session this attachment belongs to. Already validated as an
+    /// `sd_term_*` name; used to arbitrate remote input against the same
+    /// per-session guard as local and phone input.
+    pub fn session(&self) -> &str {
+        &self.session
+    }
+
     /// The host's live client grid for this session. The host is the only
     /// authority: a viewer's reported size is applied only when it equals this.
     pub fn host_grid(&self) -> io::Result<TerminalSize> {
@@ -479,6 +486,28 @@ mod tests {
         let mut reconnected = server.attach(120, 40);
         until_output(&mut reconnected, "SD_ALIVE");
         assert_eq!(server.pane(), original);
+    }
+
+    #[test]
+    fn typed_input_reaches_the_shell_and_detach_keeps_the_session() {
+        // The same write path remote keystrokes take: bytes into the PTY
+        // master, shell echo and output back out, detach reaping only its
+        // own tmux client.
+        let server = Server::new();
+        let before = server.pane();
+        let mut pty = server.attach(120, 40);
+        until_output(&mut pty, "SD_PROMPT>");
+        pty.write_input(b"echo TRANSPORT_DUPLEX_MARK\n").unwrap();
+        let out = until_output(&mut pty, "TRANSPORT_DUPLEX_MARK");
+        assert!(String::from_utf8_lossy(&out).contains("TRANSPORT_DUPLEX_MARK"));
+        // An interrupt is just another byte on the same path.
+        pty.write_input(b"sleep 30\n").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        pty.write_input(b"\x03").unwrap();
+        until_output(&mut pty, "SD_PROMPT>");
+        drop(pty);
+        wait_clients(&server, 0);
+        assert_eq!(server.pane(), before);
     }
 
     #[test]

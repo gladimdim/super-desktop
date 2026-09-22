@@ -153,9 +153,12 @@ pub enum AttachEvent {
     Grid { columns: u16, rows: u16 },
 }
 
-/// Viewer→host control frames. Raw terminal input is deliberately absent: this
-/// increment is a live output view, so nothing here can type into a host
-/// session. Unknown fields and unknown frame types are rejected.
+/// Viewer→host control frames (WebSocket text). Keystrokes travel as binary
+/// frames instead: up to `ATTACH_MAX_CHUNK` raw terminal bytes per frame,
+/// written into the host PTY behind the same input guard that arbitrates
+/// local and phone input. Binary frames are never buffered for replay: a
+/// busy guard or a slow PTY drops them. Unknown text fields and unknown frame
+/// types are rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -374,9 +377,11 @@ mod tests {
                 rows: 24
             }
         );
-        // No input frame exists, and malformed/oversized controls are refused.
+        // No text input frame exists (keystrokes travel as binary frames),
+        // and malformed/oversized controls are refused.
         for bad in [
             r#"{"type":"write","data":"rm -rf /"}"#,
+            r#"{"type":"input","data":"aGk="}"#,
             r#"{"type":"grid","columns":0,"rows":24}"#,
             r#"{"type":"grid","columns":80,"rows":24,"extra":1}"#,
             r#"{"type":"grid","columns":80}"#,

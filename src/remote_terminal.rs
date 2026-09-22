@@ -1,11 +1,12 @@
 //! Live remote consoles, drawn at the host's own card geometry.
 //!
-//! The host owns the terminal grid and the layout; this view only renders what
-//! the host reports and never writes back. Cards keep the host's positions,
-//! sizes, stacking order and iconified state, and each streamed card shows the
-//! host session's real pixels through a VTE widget fed by the network stream.
-//! Nothing here can type into a remote session: the emulators are read-only and
-//! the transport carries no input frames.
+//! The host owns the terminal grid and the layout; this view renders what the
+//! host reports and does not write card geometry back. Cards keep the host's
+//! positions, sizes, stacking order and iconified state. Each streamed card is
+//! a VTE widget fed by the network stream. Keystrokes, paste and IME are the
+//! bytes VTE commits for that widget: they are forwarded only after the host's
+//! `attached` handshake, and a hide or machine switch drops anything still
+//! queued. Creating, closing and dragging cards stay local to the host.
 use crate::desktop_protocol::{DesktopCard, TerminalSize, WorkspaceSnapshot, MAX_REMOTE_VIEWERS};
 use crate::peer_client::{self, Peer};
 use crate::peer_terminal::{Event as StreamEvent, TerminalStream};
@@ -267,6 +268,10 @@ struct RemoteCard {
     /// before the first byte leaves an empty terminal overlay hiding the
     /// placeholder; that widget must step aside so the reason is visible.
     fed: Cell<bool>,
+    /// The current stream has received the host's `attached` frame. Commits
+    /// before that, and after suspend, are dropped rather than queued across
+    /// a reconnect.
+    input_ready: Cell<bool>,
 }
 
 impl RemoteCard {
@@ -328,6 +333,7 @@ impl RemoteCard {
             body_size: Cell::new(None),
             suspended: Cell::new(false),
             fed: Cell::new(false),
+            input_ready: Cell::new(false),
         })
     }
 
@@ -404,6 +410,9 @@ impl RemoteCard {
         if self.stream.borrow().is_some() || Instant::now() < self.next_attempt.get() {
             return;
         }
+        // A new attachment has not completed its handshake. Keys typed at the
+        // previous session must not ride along.
+        self.input_ready.set(false);
         // The emulator exists before the first byte arrives, so the host's
         // initial redraw is never dropped.
         let _ = self.terminal();
@@ -416,44 +425,37 @@ impl RemoteCard {
         self.placeholder.set_text("Connecting…");
         self.placeholder.set_visible(true);
         let weak = Rc::downgrade(self);
-        let debug_id = self.card_id.clone();
-        eprintln!("SD-REMOTE-DBG attach {}", debug_id);
         glib::MainContext::default().spawn_local(async move {
             while let Some(event) = events.next().await {
                 let Some(card) = weak.upgrade() else {
                     return;
                 };
                 match event {
-                    StreamEvent::Attached { columns, rows }
-                    | StreamEvent::Grid { columns, rows } => {
-                        eprintln!("SD-REMOTE-DBG {debug_id} grid {columns}x{rows}");
-                        card.set_grid(TerminalSize { columns, rows });
-                        // Confirm the grid back to the host, which verifies it
-                        // against its own live grid before applying anything.
-                        if let Some(stream) = card.stream.borrow().as_ref() {
-                            stream.observe_grid(TerminalSize { columns, rows });
-                        }
+                    StreamEvent::Attached { columns, rows } => {
+                        // Typing is armed only for this attachment. A later
+                        // reconnect clears the flag before its own handshake.
+                        card.input_ready.set(true);
+                        card.note_grid(columns, rows);
                     }
-                    StreamEvent::Bytes(bytes) => {
-                        eprintln!("SD-REMOTE-DBG {debug_id} bytes {}", bytes.len());
-                        card.feed(&bytes);
-                    }
+                    StreamEvent::Grid { columns, rows } => card.note_grid(columns, rows),
+                    StreamEvent::Bytes(bytes) => card.feed(&bytes),
                     StreamEvent::Closed(reason) => {
-                        eprintln!("SD-REMOTE-DBG {debug_id} closed {reason}");
                         card.ended(reason);
                         return;
                     }
                 }
             }
             if let Some(card) = weak.upgrade() {
-                eprintln!("SD-REMOTE-DBG {debug_id} channel-closed");
                 card.ended("closed");
             }
         });
     }
 
-    /// The card's emulator, created on first use. Read-only by construction:
-    /// this widget never forwards a keystroke anywhere.
+    /// The card's emulator, created on first use.
+    ///
+    /// There is no local PTY. VTE still translates keys, paste and IME against
+    /// the terminal state it has parsed from the host (application cursor
+    /// keys, bracketed paste) and reports the resulting bytes on `commit`.
     fn terminal(self: &Rc<Self>) -> Option<vte4::Terminal> {
         if let Some(terminal) = self.terminal.borrow().as_ref() {
             return Some(terminal.clone());
@@ -461,12 +463,41 @@ impl RemoteCard {
         let terminal = vte4::Terminal::new();
         terminal.set_hexpand(true);
         terminal.set_vexpand(true);
-        terminal.set_input_enabled(false);
-        terminal.set_can_focus(false);
+        terminal.set_input_enabled(true);
+        terminal.set_can_focus(true);
+        terminal.set_focusable(true);
+        terminal.set_scroll_on_keystroke(true);
         terminal.set_scroll_on_output(true);
         terminal.set_scrollback_lines(2000);
         terminal.add_css_class("term-vte");
-        // Placeholder text keeps showing until the first frame of real output.
+        let weak_commit = Rc::downgrade(self);
+        connect_host_input(&terminal, move |bytes| {
+            if let Some(card) = weak_commit.upgrade() {
+                card.type_on_host(bytes);
+            }
+        });
+        let weak_focus = Rc::downgrade(self);
+        let click = gtk4::GestureClick::new();
+        click.connect_pressed(move |_, _, _, _| {
+            if let Some(card) = weak_focus.upgrade() {
+                if let Some(term) = card.terminal.borrow().as_ref() {
+                    term.grab_focus();
+                }
+            }
+        });
+        terminal.add_controller(click);
+        // The title is outside the emulator. Focusing from there is what lets
+        // a click on the header reach the host session.
+        let weak_header = Rc::downgrade(self);
+        let header_click = gtk4::GestureClick::new();
+        header_click.connect_pressed(move |_, _, _, _| {
+            if let Some(card) = weak_header.upgrade() {
+                if let Some(term) = card.terminal.borrow().as_ref() {
+                    term.grab_focus();
+                }
+            }
+        });
+        self.header.add_controller(header_click);
         crate::mini_terminal::apply_vte_theme(&terminal, 10.0);
         self.body.add_overlay(&terminal);
         if let Some(grid) = self.grid.get() {
@@ -474,6 +505,27 @@ impl RemoteCard {
         }
         *self.terminal.borrow_mut() = Some(terminal.clone());
         Some(terminal)
+    }
+
+    /// Forward one VTE commit to the host, after this attachment's handshake.
+    fn type_on_host(&self, bytes: &[u8]) {
+        if bytes.is_empty() || !self.input_ready.get() {
+            return;
+        }
+        let stream = self.stream.borrow();
+        let Some(stream) = stream.as_ref() else {
+            return;
+        };
+        stream.send_input(bytes);
+    }
+
+    fn note_grid(&self, columns: u16, rows: u16) {
+        self.set_grid(TerminalSize { columns, rows });
+        // Confirm the grid back to the host, which verifies it against its
+        // own live grid before applying anything.
+        if let Some(stream) = self.stream.borrow().as_ref() {
+            stream.observe_grid(TerminalSize { columns, rows });
+        }
     }
 
     /// Rest position and width inside the fitted canvas, once laid out.
@@ -488,6 +540,9 @@ impl RemoteCard {
     /// Stop the stream on purpose: the last frame stays on screen and the next
     /// snapshot restarts the stream immediately.
     fn suspend(&self) {
+        // Drop the handshake before the stream, so a commit that lands while
+        // the worker is still exiting cannot queue into a dying attachment.
+        self.input_ready.set(false);
         self.suspended.set(true);
         if let Some(stream) = self.stream.borrow_mut().take() {
             stream.stop();
@@ -590,6 +645,49 @@ fn fit_font(
     }
 }
 
+/// Subscribe to VTE's `commit` signal and forward the bytes the host should see.
+///
+/// VTE emits the payload with its real length, then GObject delivers `text` as
+/// a C string. Reading `size` bytes past the first NUL walks off that string.
+/// A commit that is only a NUL (Ctrl+Space) arrives as an empty C string with
+/// `size == 1`; anything after an interior NUL is already gone. The closure
+/// is freed with the widget.
+fn connect_host_input<F>(terminal: &vte4::Terminal, forward: F)
+where
+    F: Fn(&[u8]) + 'static,
+{
+    unsafe extern "C" fn trampoline<F: Fn(&[u8]) + 'static>(
+        _terminal: *mut vte4::ffi::VteTerminal,
+        text: *mut std::ffi::c_char,
+        size: std::ffi::c_uint,
+        data: gtk4::glib::ffi::gpointer,
+    ) {
+        if data.is_null() || text.is_null() || size == 0 {
+            return;
+        }
+        let forward = unsafe { &*(data as *const F) };
+        let available = unsafe { libc::strlen(text) };
+        if available == 0 {
+            forward(&[0]);
+            return;
+        }
+        let n = (size as usize).min(available);
+        let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, n) };
+        forward(bytes);
+    }
+    let boxed = Box::new(forward);
+    unsafe {
+        gtk4::glib::signal::connect_raw(
+            terminal.as_ptr() as *mut gtk4::glib::gobject_ffi::GObject,
+            c"commit".as_ptr(),
+            Some(std::mem::transmute::<*const (), unsafe extern "C" fn()>(
+                trampoline::<F> as *const (),
+            )),
+            Box::into_raw(boxed),
+        );
+    }
+}
+
 fn agent_icon(agent_type: &str) -> &'static str {
     crate::tmux::get_agent_config(&peer_client::label(agent_type)).icon
 }
@@ -597,6 +695,33 @@ fn agent_icon(agent_type: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_bytes_keep_their_length_including_a_nul() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::commit_bytes_inner");
+    }
+
+    #[test]
+    fn commit_bytes_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().expect("a graphical session is required for GTK checks");
+        let terminal = vte4::Terminal::new();
+        terminal.set_input_enabled(true);
+        let got = Rc::new(RefCell::new(Vec::new()));
+        let slot = Rc::clone(&got);
+        connect_host_input(&terminal, move |bytes| {
+            slot.borrow_mut().extend_from_slice(bytes);
+        });
+        // feed_child is the same path a keystroke takes on a PTY-less VTE.
+        // Ctrl+C is a single control byte. Ctrl+Space is a NUL, which GObject
+        // delivers as an empty C string; it must still be forwarded.
+        terminal.feed_child(b"hi");
+        terminal.feed_child(&[0x03]);
+        terminal.feed_child(&[0]);
+        assert_eq!(&*got.borrow(), b"hi\x03\x00");
+    }
 
     #[test]
     fn only_visible_live_consoles_get_a_stream() {

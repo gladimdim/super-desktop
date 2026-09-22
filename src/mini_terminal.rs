@@ -181,10 +181,15 @@ pub struct MiniTerminalCard {
     on_toggle: Rc<dyn Fn(&TerminalData)>,
     on_session_persist: Rc<dyn Fn(&TerminalData)>,
     hover_lock: HoverRaiseLock,
+    /// The pointer is over this card. See `user_is_active`.
+    pointer_inside: Rc<Cell<bool>>,
+    /// The keyboard focus of this card was claimed on purpose (click, launch,
+    /// expand) rather than by hover-raise. See `user_is_active`.
+    focus_claimed: Rc<Cell<bool>>,
 }
 
 impl MiniTerminalCard {
-    pub fn new<FDragUpdate, FDragEnd, FToggle, FClose, FResizeGhost, FResizeEnd, FRaise, FSessionSave>(
+    pub fn new<FDragUpdate, FDragEnd, FToggle, FClose, FResizeGhost, FResizeEnd, FRaise, FSessionSave, FInteraction>(
         mut term_data: TerminalData,
         on_drag_update: FDragUpdate,
         on_drag_end: FDragEnd,
@@ -194,6 +199,7 @@ impl MiniTerminalCard {
         on_resize_end: FResizeEnd,
         on_raise: FRaise,
         on_session_persist: FSessionSave,
+        on_interaction: FInteraction,
         screen_w: i32,
         screen_h: i32,
         startup_inventory: Option<Arc<crate::tmux::SessionInventory>>,
@@ -208,6 +214,10 @@ impl MiniTerminalCard {
         FResizeEnd: Fn() + 'static,
         FRaise: Fn(gtk4::Widget) + 'static,
         FSessionSave: Fn(&TerminalData) + 'static,
+        // Called when the user's attention on this card changed (pointer in or
+        // out, focus claimed or lost): the overlap ghosts are recomputed from
+        // that state.
+        FInteraction: Fn() + 'static,
     {
         if term_data.iconified {
             term_data.width = ICON_SIZE;
@@ -236,6 +246,10 @@ impl MiniTerminalCard {
         let on_resize_ghost = Rc::new(on_resize_ghost);
         let on_resize_end = Rc::new(on_resize_end);
         let on_raise_rc = Rc::new(on_raise);
+        let on_interaction: Rc<dyn Fn()> = Rc::new(on_interaction);
+        // Attention on this card, for the overlap ghosts (`user_is_active`).
+        let pointer_inside = Rc::new(Cell::new(false));
+        let focus_claimed = Rc::new(Cell::new(false));
         let visual_pos = Rc::new(RefCell::new(displayed_pos(&data.borrow())));
 
         let root = Overlay::new();
@@ -248,8 +262,17 @@ impl MiniTerminalCard {
         let on_raise_click = Rc::clone(&on_raise_rc);
         let click_lock = hover_lock.clone();
         let click_session = data.borrow().session_name.clone();
+        let claim_click = Rc::clone(&focus_claimed);
+        let notify_click = Rc::clone(&on_interaction);
         click_raise.connect_pressed(move |_, _, _, _| {
+            // A click is an explicit claim on the card's focus (see
+            // `user_is_active`), and it is the user's intent even when the
+            // click lands on chrome that never takes focus at all.
+            let changed = !claim_click.replace(true);
             click_lock.on_click(&click_session);
+            if changed {
+                notify_click();
+            }
             if let Some(c) = container_weak_click.upgrade() {
                 on_raise_click(c.upcast());
             }
@@ -265,6 +288,10 @@ impl MiniTerminalCard {
                 on_raise_focus(c.upcast());
             }
         });
+        // Focus that leaves the card ends its "in use" state without a raise,
+        // so tell the overlap ghosts about it directly.
+        let notify_focus_leave = Rc::clone(&on_interaction);
+        focus_raise.connect_leave(move |_| notify_focus_leave());
         root.add_controller(focus_raise);
 
         let body = gtk4::Box::new(Orientation::Vertical, 0);
@@ -519,6 +546,8 @@ impl MiniTerminalCard {
             on_toggle: Rc::clone(&on_toggle),
             on_session_persist: Rc::clone(&on_session_persist),
             hover_lock: hover_lock.clone(),
+            pointer_inside,
+            focus_claimed,
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -531,7 +560,14 @@ impl MiniTerminalCard {
         let on_raise_hover = Rc::clone(&on_raise_rc);
         let hover_lock_enter = hover_lock.clone();
         let hover_session = card.data.borrow().session_name.clone();
+        let pointer_enter = Rc::clone(&card.pointer_inside);
+        let notify_enter = Rc::clone(&on_interaction);
         hover.connect_enter(move |_, _, _| {
+            // Attention bookkeeping comes first: it must happen even while the
+            // hover lock below skips the raise.
+            if !pointer_enter.replace(true) {
+                notify_enter();
+            }
             if !hover_lock_enter.allows_hover(&hover_session) {
                 return;
             }
@@ -545,6 +581,13 @@ impl MiniTerminalCard {
                 if !t.has_focus() {
                     t.grab_focus();
                 }
+            }
+        });
+        let pointer_leave = Rc::clone(&card.pointer_inside);
+        let notify_leave = Rc::clone(&on_interaction);
+        hover.connect_leave(move |_| {
+            if pointer_leave.replace(false) {
+                notify_leave();
             }
         });
         card.container.add_controller(hover);
@@ -890,6 +933,43 @@ impl MiniTerminalCard {
         }
     }
 
+    /// Where this card is drawn on the overlay canvas, in whichever form is
+    /// currently up: the 80% expanded card, the 128×128 icon, or the plain
+    /// card. Shared by the slide animation and the overlap ghosts.
+    pub fn canvas_rect(&self, screen_w: i32, screen_h: i32) -> crate::card_resize::Rect {
+        let (width, height) = self.size(screen_w, screen_h);
+        let (x, y) = if self.is_expanded() {
+            let (x, y, _, _) = expanded_rect(screen_w, screen_h);
+            (x, y)
+        } else {
+            displayed_pos(&self.data.borrow())
+        };
+        crate::card_resize::Rect {
+            x,
+            y,
+            width: width.round() as i32,
+            height: height.round() as i32,
+        }
+    }
+
+    /// True while the user is working in this card, which keeps the dotted
+    /// ghost outlines of the cards it hides off the screen.
+    ///
+    /// Hovering a card raises it *and* grabs keyboard focus, so keyboard focus
+    /// alone would keep a card "in use" long after the pointer walked away —
+    /// and the ghost would come back only by accident. The pointer is the
+    /// source of truth; keyboard focus counts while an explicit act claimed it
+    /// (a click into the card, a launch, an expand), which is what keeps the
+    /// ghost away from a terminal the user is typing in.
+    pub fn user_is_active(&self) -> bool {
+        self.pointer_inside.get()
+            || (self.focus_claimed.get()
+                && self
+                    .container
+                    .state_flags()
+                    .contains(gtk4::StateFlags::FOCUS_WITHIN))
+    }
+
     pub fn expand(&self, screen_w: i32, screen_h: i32) {
         if *self.expanded.borrow() {
             return;
@@ -948,6 +1028,10 @@ impl MiniTerminalCard {
     }
 
     pub fn focus_terminal(&self) {
+        // A launch or an expand deliberately puts the keyboard focus here, so
+        // the card is the one the user is working in (`user_is_active`) even
+        // before the first click.
+        self.focus_claimed.set(true);
         if let Some(term) = self.vte.borrow().as_ref() {
             term.grab_focus();
         }
@@ -1712,4 +1796,71 @@ mod tests {
         assert_eq!(format_card_title("⚡ Claude Code", Some("")), "⚡ Claude Code");
         assert_eq!(format_card_title("⚡ Claude Code", Some("   ")), "⚡ Claude Code");
     }
+
+    /// `grab_focus` on the widget inside a card marks the card itself, which is
+    /// what `user_is_active` reads (the VTE is the focus owner, never the card).
+    #[test]
+    fn focus_within_marks_the_card_that_holds_the_focus() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::focus_within_gtk");
+    }
+
+    #[test]
+    fn focus_within_gtk() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(
+            Some("com.superdesktop.FocusWithinTest"),
+            gtk4::gio::ApplicationFlags::NON_UNIQUE,
+        );
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let window = gtk4::ApplicationWindow::new(&app);
+
+        let first = gtk4::Box::new(Orientation::Vertical, 0);
+        let first_terminal = gtk4::Button::new();
+        first.append(&first_terminal);
+        let second = gtk4::Box::new(Orientation::Vertical, 0);
+        let second_terminal = gtk4::Button::new();
+        second.append(&second_terminal);
+
+        let row = gtk4::Box::new(Orientation::Horizontal, 0);
+        row.append(&first);
+        row.append(&second);
+        window.set_child(Some(&row));
+        window.present();
+        // GTK assigns the initial focus while the window is being mapped and
+        // propagates `:focus-within` over the following frames, so wait for the
+        // state instead of assuming it is there after a fixed number of frames.
+        let wait_for = |what: &str, reached: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while std::time::Instant::now() < deadline {
+                if reached() {
+                    return;
+                }
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("timed out waiting for {what}");
+        };
+
+        let focused_within = |card: &gtk4::Box| {
+            card.state_flags().contains(gtk4::StateFlags::FOCUS_WITHIN)
+        };
+        first_terminal.grab_focus();
+        wait_for("the first card to own the focus", &|| focused_within(&first));
+        assert!(!focused_within(&second), "the other card is not marked");
+
+        // Typing moves on: the first card stops counting as "in use".
+        second_terminal.grab_focus();
+        wait_for("the second card to own the focus", &|| focused_within(&second));
+        assert!(!focused_within(&first));
+
+        vte4::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
+        wait_for("the focus to leave both cards", &|| {
+            !focused_within(&first) && !focused_within(&second)
+        });
+        window.close();
+    }
 }
+

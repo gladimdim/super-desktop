@@ -152,10 +152,19 @@ def scenario():
 
             result = cli("peer-attach", machine, CARD, "--seconds", "4")
             assert b"attached 100x30" in result.stderr, result.stderr
-            assert b"read-only" in result.stderr
             # Raw bytes, colors included: the viewer paints what the host paints.
             assert b"SD_COLOR_MARK" in result.stdout, result.stdout
             assert COLOR_SGR.search(result.stdout), result.stdout
+
+            # Duplex: piped stdin types into the host shell and the echo comes
+            # back over the same stream. Ctrl+C is just another byte.
+            marker = "SD_DUPLEX_%d" % os.getpid()
+            sender = subprocess.run(
+                [BINARY, "peer-attach", machine, CARD, "--seconds", "8"],
+                input=("echo %s\n" % marker).encode(), env=client_env,
+                capture_output=True, timeout=30)
+            assert sender.returncode == 0, sender.stderr
+            assert marker.encode() in sender.stdout, sender.stderr
 
             # Only an owned card can be addressed, and only its own session.
             refused = cli("peer-attach", machine, "no-such-card", expected=1).stderr
@@ -186,4 +195,4 @@ def scenario():
 
 scenario()
 print("Desktop terminal smoke passed: pinned WSS attach, live colored output, "
-      "card ownership, revocation teardown, host session survival")
+      "typed stdin, card ownership, revocation teardown, host session survival")

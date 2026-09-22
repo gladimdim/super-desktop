@@ -56,18 +56,21 @@ daemon's local in-memory model over Unix IPC, not from a peer it may later be
 viewing. Export is capped at 256 cards and 1 MiB of IPC data. Events reuse bridge
 connection bounds, write deadlines, stream lifetime and live revocation.
 
-The attach stream is **output-only**: it carries the bytes of one owned
-`sd_term_*` session, and binary frames from a viewer are consumed and dropped, so
-no frame type can type into a host session or run a command there. A card id is
-resolved against the daemon's own workspace snapshot, so an unowned or unrelated
-tmux session is not addressable. Attachments are limited to 8 per credential and
-16 per bridge, are refused with a stable code before the WebSocket upgrade, are
-torn down when the credential is revoked or expires, and end after 30 minutes.
-The host attaches its own tmux client at the grid it already owns, which is what
-prevents a viewer from resizing host panes, and dropping the stream reaps exactly
-that client. No remote mutation endpoint is enabled yet, so
-`workspace-layout-v1` is not advertised; security protocol v3 and existing
-Android credentials are unchanged.
+The attach stream carries the bytes of one owned `sd_term_*` session in both
+directions. Binary frames from an authenticated viewer are raw terminal input:
+the bridge writes them into that session's PTY behind the same per-session
+input guard that serializes phone keystrokes and image-prompt submission. A
+busy guard or a PTY that cannot accept the bytes drops them; they are never
+queued for a later write. Text frames remain control-only (`grid`). A card id
+is resolved against the daemon's own workspace snapshot, so an unowned or
+unrelated tmux session is not addressable. Attachments are limited to 8 per
+credential and 16 per bridge, are refused with a stable code before the
+WebSocket upgrade, are torn down when the credential is revoked or expires,
+and end after 30 minutes. The host attaches its own tmux client at the grid it
+already owns, which is what prevents a viewer from resizing host panes, and
+dropping the stream reaps exactly that client. No remote mutation endpoint is
+enabled yet, so `workspace-layout-v1` is not advertised; security protocol v3
+and existing Android credentials are unchanged.
 
 ## Resource bounds
 

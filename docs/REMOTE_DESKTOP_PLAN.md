@@ -1,7 +1,7 @@
 # PC-to-PC SUPER DESKTOP implementation plan
 
-Status: pairing, a live read-only remote workspace and its terminal transport are
-delivered; the interactive remote-desktop release remains in progress.
+Status: pairing, a live remote workspace, its terminal transport and viewer
+typing are delivered; remote layout commands remain in progress.
 Updated 2026-09-22 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
@@ -11,8 +11,9 @@ snapshot/event routes and the host-side PTY attach transport with a host-owned
 grid are implemented. Outgoing certificate-pinned PC pairing, private peer
 storage, remote snapshot retrieval and a `peer-attach` streaming CLI are testable
 through the CLI, and the top-left selector renders the host's consoles live at
-their own positions and sizes. Lifecycle mutation extraction, remote commands,
-live outgoing workspace subscriptions and viewer input remain pending.
+their own positions and sizes. Typing into a focused remote console reaches
+that host session after the attach handshake. Lifecycle mutation extraction,
+remote commands and live outgoing workspace subscriptions remain pending.
 
 ## Current delivery status
 
@@ -44,10 +45,10 @@ PCs:
   bridge can otherwise keep serving port 8759 and return a 404 for the desktop
   capability route after the source has been updated.
 
-This is a **read-only live view**, not the finished interactive feature. It shows
-the host's terminal pixels but accepts no input, creates or closes no cards and
-writes no card geometry on the selected host; the transport has no input frame at
-all. A host that says “Update and rebuild SUPER DESKTOP on the host” is serving an
+This is a **live view you can type into**, not the finished interactive feature.
+It shows the host's terminal pixels and sends keystrokes, paste and Ctrl+C to
+the focused session. It creates or closes no cards and writes no card geometry
+on the selected host. A host that says “Update and rebuild SUPER DESKTOP on the host” is serving an
 older bridge without `terminal-pty-v1`, and its workspace is drawn as chrome
 without live consoles. Hosts that hide their overlay release their viewers'
 streams, and reopening the overlay reconnects them.
@@ -138,9 +139,9 @@ Notes are deferred in the first release: show only the selected host's terminals
 hide local notes in remote mode, and disable remote New Note with an explanation.
 Do not silently create local notes while viewing a remote PC. Remote file previews
 and image prompts are a follow-up; hide/disable those buttons until routed through
-the authenticated host APIs. Live terminal output is delivered, but full
-interaction is still required for release: a read-only stream does not complete
-this feature.
+the authenticated host APIs. Live terminal output and viewer typing are
+delivered. Remote create, close and layout changes are still required before
+this feature is complete.
 
 ## 2. What exists and where to change it
 
@@ -304,7 +305,7 @@ or an ambiguous timeout; refresh state and show an uncertain outcome. Persisting
 deduplication across crashes is a later improvement, not an exactly-once claim.
 Terminal keystrokes are never replayed after disconnect.
 
-## 6. Full interactive terminal transport — delivered as a read-only stream
+## 6. Full interactive terminal transport — output and viewer typing delivered
 
 Delivered: the host creates a **dedicated tmux attach client on a server-side
 PTY** per remote view and bridges its bytes over authenticated WSS into the
@@ -331,11 +332,11 @@ presentation only and never writes layout back. The residual case — a host wit
 no client of its own whose only remaining client is a viewer — is documented
 rather than hidden, and can only pin the host to a grid the host itself reported.
 
-**Not yet implemented:** viewer input. The transport has no input frame, binary
-frames from a viewer are ignored, and the plan's requirements for input still
-gate the interactive release: send input only after a ready handshake for the
-currently selected machine, keep the prompt-transaction guard, arbitrate
-per-session input, and never replay keys after a disconnect or switch.
+**Viewer input is delivered.** Binary frames from the viewer are raw terminal
+bytes. They are sent only after the `attached` handshake for the stream that
+is still selected, written behind the prompt-transaction input guard, and
+dropped (never replayed) when that guard is busy, the PTY cannot accept them,
+or the viewer disconnects, hides or switches machines.
 
 Terminals are shared sessions. Concurrent local/remote/phone input may interleave;
 show remote connection presence and document shared control. An exclusive control
@@ -452,11 +453,12 @@ required for the first release; follow-ups in section 1 are separate work.
    cancellation and reconnect, and `src/peer_terminal.rs` carries live terminal
    bytes to the viewer with a bounded queue. Tested without GTK, both in unit
    tests and through the `peer-attach` CLI.
-5. **Selector and remote card view — delivered as live read-only consoles.** `src/machine_selector.rs` owns the
+5. **Selector and remote card view — delivered as live consoles.** `src/machine_selector.rs` owns the
    selector, the pairing form, disconnect states and guarded asynchronous
    callbacks; `src/remote_terminal.rs` renders each host card as chrome plus a
-   read-only VTE fed by the network stream, keeps host geometry and stacking,
-   budgets the attachments and never touches local session preparation.
+   VTE fed by the network stream, forwards that VTE's committed bytes to the
+   host, keeps host geometry and stacking, budgets the attachments and never
+   touches local session preparation.
 6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids and
    stream budgeting are delivered. Fit/100% modes, the inverse drag transform,
    revision conflicts and routed remote controls remain, together with a two-PC
@@ -491,8 +493,10 @@ Automated coverage must test behavior across boundaries, especially:
   `desktop_protocol` (capability and frame schema) and
   `tests/desktop_terminal_smoke.py` (real bridge, private tmux server, real
   viewer CLI: pinned attach, live coloured bytes, card ownership, revocation
-  teardown, host session survival). Control keys, IME, bracketed paste, mouse
-  and viewer input remain to cover with the input increment.
+  teardown, host session survival, and piped stdin reaching the host shell).
+  VTE commit forwarding covers paste, IME and the control bytes VTE emits,
+  including an interior NUL. Mouse tracking follows whatever the host
+  application has enabled, because those reports are commit bytes too.
 - Stale results after A→B→A cannot attach to, close, resize or send input to the
   wrong host. Incoming bridge and local CLI stay local regardless of selection.
 - Geometry round trips on equal/different aspect ratios, fractional display
@@ -506,7 +510,7 @@ Manual acceptance matrix:
 | Pair A→B and A→C | Both PCs selectable with verified identities; reverse access needs separate pairing. |
 | Equal-sized displays | Host positions, card sizes, icon state and order match. |
 | Different sizes/scales | Fit or 100% view is usable; all cards reachable; viewing never writes layout back. |
-| Shell + installed harness + full-screen app | Live console output, colour and full-screen redraws match the host; typing is not yet routed. |
+| Shell + installed harness + full-screen app | Live console output, colour and full-screen redraws match the host; typing, paste and Ctrl+C reach the focused session. |
 | Drag/resize from either machine | Other view updates; conflicts visible; no resizing oscillation. |
 | Create/close on B from A | B owns the lifecycle and folder; A's local state is unchanged. |
 | Rapid switching and hide/show | No keys reach the wrong PC and no harness is killed. |

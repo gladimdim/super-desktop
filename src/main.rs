@@ -23,6 +23,7 @@ mod hotcorner;
 mod jev;
 mod launcher_settings;
 mod mini_terminal;
+mod overlap_ghost;
 mod shortcut;
 mod sleep_lock;
 mod session_task;

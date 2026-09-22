@@ -26,12 +26,14 @@ pub fn run(action: &str, args: &[String]) -> Result<()> {
     }
 }
 
-/// Stream one host console's raw bytes to stdout, read-only.
+/// Stream one host console to stdout, and type stdin back when it is a pipe.
 ///
 /// A debugging and verification tool: it exercises the same pinned WSS attach
 /// path the remote panel uses, so a two-PC problem can be narrowed to the
 /// transport or to the viewer. Terminal output is written unchanged, which
-/// means a real terminal shows exactly the host's colors.
+/// means a real terminal shows exactly the host's colors. An interactive
+/// terminal keeps stdin for itself; a pipe (the smoke test, a here-string)
+/// is written to the host session as raw terminal bytes.
 fn attach(args: &[String]) -> Result<()> {
     let mut seconds = None;
     let mut positionals = Vec::new();
@@ -58,6 +60,32 @@ fn attach(args: &[String]) -> Result<()> {
     };
     let peer = PeerStore::default_store()?.get(machine_id)?;
     let (stream, mut events) = TerminalStream::open(peer, card_id);
+    // Piped stdin types into the host session: the same binary viewer→host
+    // frames the graphical remote cards use. An interactive terminal keeps
+    // stdin, so this command does not steal the keyboard.
+    let typing = !std::io::stdin().is_terminal();
+    if typing {
+        let sender = stream.sender();
+        std::thread::Builder::new()
+            .name("peer-attach-stdin".into())
+            .spawn(move || {
+                let mut input = std::io::stdin().lock();
+                let mut chunk = [0u8; 4096];
+                loop {
+                    match input.read(&mut chunk) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            sender.send_input(&chunk[..n]);
+                            if sender.is_stopped() {
+                                return;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+            })
+            .ok();
+    }
     let deadline = seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
     let mut stdout = std::io::stdout().lock();
     loop {
@@ -67,7 +95,14 @@ fn attach(args: &[String]) -> Result<()> {
                 .and_then(|()| stdout.flush())
                 .map_err(|_| PeerError("output_failed"))?,
             Ok(Event::Attached { columns, rows }) => {
-                eprintln!("attached {columns}x{rows} · read-only live view")
+                eprintln!(
+                    "attached {columns}x{rows} · {}",
+                    if typing {
+                        "typing stdin into the host session"
+                    } else {
+                        "output only"
+                    }
+                )
             }
             Ok(Event::Grid { columns, rows }) => eprintln!("host grid {columns}x{rows}"),
             // Normal endings are not failures; anything else keeps its code so

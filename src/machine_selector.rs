@@ -51,7 +51,7 @@ impl MachineView {
         toolbar.append(&hide);
         remote.append(&toolbar);
         let notice = gtk4::Label::new(Some(
-            "Live consoles from this PC · read-only — typing and remote controls are not available yet",
+            "Live remote consoles at the host's own positions and sizes · click a console and type; remote create/close/drag and file previews are not available yet",
         ));
         notice.set_wrap(true);
         remote.append(&notice);
