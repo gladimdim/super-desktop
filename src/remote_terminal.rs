@@ -263,6 +263,10 @@ struct RemoteCard {
     /// The stream was stopped on purpose (hide, or a card that is not
     /// streamable), so its end must not look like a failure.
     suspended: Cell<bool>,
+    /// Whether any host bytes ever reached the emulator. A stream that ends
+    /// before the first byte leaves an empty terminal overlay hiding the
+    /// placeholder; that widget must step aside so the reason is visible.
+    fed: Cell<bool>,
 }
 
 impl RemoteCard {
@@ -294,6 +298,11 @@ impl RemoteCard {
         // `Overlay` gives its main child the whole body, so a terminal grid can
         // never grow a card beyond the host's rectangle.
         let body = gtk4::Overlay::new();
+        // Without these the body collapses to its minimum inside the card's
+        // vertical box while the chrome keeps full size: the emulator paints
+        // into a sliver and the card looks black despite a live byte stream.
+        body.set_hexpand(true);
+        body.set_vexpand(true);
         let placeholder = gtk4::Label::new(None);
         placeholder.set_wrap(true);
         placeholder.set_justify(gtk4::Justification::Center);
@@ -318,6 +327,7 @@ impl RemoteCard {
             rest: Cell::new(None),
             body_size: Cell::new(None),
             suspended: Cell::new(false),
+            fed: Cell::new(false),
         })
     }
 
@@ -406,6 +416,8 @@ impl RemoteCard {
         self.placeholder.set_text("Connecting…");
         self.placeholder.set_visible(true);
         let weak = Rc::downgrade(self);
+        let debug_id = self.card_id.clone();
+        eprintln!("SD-REMOTE-DBG attach {}", debug_id);
         glib::MainContext::default().spawn_local(async move {
             while let Some(event) = events.next().await {
                 let Some(card) = weak.upgrade() else {
@@ -414,6 +426,7 @@ impl RemoteCard {
                 match event {
                     StreamEvent::Attached { columns, rows }
                     | StreamEvent::Grid { columns, rows } => {
+                        eprintln!("SD-REMOTE-DBG {debug_id} grid {columns}x{rows}");
                         card.set_grid(TerminalSize { columns, rows });
                         // Confirm the grid back to the host, which verifies it
                         // against its own live grid before applying anything.
@@ -421,14 +434,19 @@ impl RemoteCard {
                             stream.observe_grid(TerminalSize { columns, rows });
                         }
                     }
-                    StreamEvent::Bytes(bytes) => card.feed(&bytes),
+                    StreamEvent::Bytes(bytes) => {
+                        eprintln!("SD-REMOTE-DBG {debug_id} bytes {}", bytes.len());
+                        card.feed(&bytes);
+                    }
                     StreamEvent::Closed(reason) => {
+                        eprintln!("SD-REMOTE-DBG {debug_id} closed {reason}");
                         card.ended(reason);
                         return;
                     }
                 }
             }
             if let Some(card) = weak.upgrade() {
+                eprintln!("SD-REMOTE-DBG {debug_id} channel-closed");
                 card.ended("closed");
             }
         });
@@ -496,6 +514,7 @@ impl RemoteCard {
         if let Some(terminal) = self.terminal.borrow().as_ref() {
             terminal.feed(bytes);
         }
+        self.fed.set(true);
         self.placeholder.set_visible(false);
     }
 
@@ -509,6 +528,14 @@ impl RemoteCard {
             return;
         }
         self.detach();
+        // An emulator that never received a byte is just a black overlay
+        // hiding the explanation: step aside so the reason can be read. A
+        // card with content keeps its last frame behind the message.
+        if !self.fed.get() {
+            if let Some(terminal) = self.terminal.borrow_mut().take() {
+                self.body.remove_overlay(&terminal);
+            }
+        }
         self.placeholder.set_visible(true);
         self.placeholder.set_text(match reason {
             "unknown_card" | "terminal_exited" => "Host session ended",
