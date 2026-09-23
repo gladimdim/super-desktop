@@ -1,10 +1,8 @@
 //! Harness bridge hosted by super-desktop (Rust-only backend).
 //!
-//! Re-exports this machine's `sd_term_*` tmux sessions over LAN / Tailscale
-//! as JSON for the OmarchyAILauncher Android client. The launcher only reads
-//! this API and reacts to user actions — all session truth lives here,
-//! reusing `crate::tmux` status/prompt helpers directly (no shell-out
-//! re-implementation of the heuristics).
+//! Exposes this machine's harnesses to the Android launcher and its local
+//! workspace to paired SUPER DESKTOP PCs over LAN / Tailscale. The owning
+//! daemon remains authoritative for card layout and lifecycle.
 //!
 //! Endpoints (see OmarchyAILauncher/PROTOCOL.md, wire v1):
 //!   GET  /api/v1/ping
@@ -13,8 +11,8 @@
 //!   DELETE /api/v1/harnesses/<id>     (Bearer token)
 //!   POST /api/v1/pair                 (open; requests desktop approval)
 //!   POST /api/v1/pair/poll            (unguessable request capability)
-//!   GET  /api/v1/pair/state           (loopback-only pending requests)
-//!   POST /api/v1/pair/approve, /deny   (loopback-only decision)
+//!   GET  /api/v1/pair/state           (owner-only Unix control socket)
+//!   POST /api/v1/pair/approve, /deny   (owner-only Unix control socket)
 
 use serde::{Deserialize, Serialize};
 #[path = "bridge_pairing.rs"]
@@ -701,8 +699,8 @@ fn bearer(headers: &HashMap<String, String>) -> &str {
     }
 }
 
-/// All network routes, whether used by Android or another PC, require a
-/// registered bearer token. The owner-only Unix pairing routes are separate.
+/// Protected Android and desktop routes require a registered bearer token.
+/// Public ping and pairing, and owner-only Unix routes, are dispatched separately.
 fn authorize(req: &Request) -> bool {
     pair_state()
             .lock()
