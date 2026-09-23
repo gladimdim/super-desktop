@@ -1,4 +1,4 @@
-//! Charger-only logind inhibitors. The daemon owns the file descriptor, so
+//! External-power logind inhibitors (including mains-powered desktops). The daemon owns the file descriptor, so
 //! exiting or crashing releases the lock without a helper process or config edits.
 use gio::prelude::*;
 use glib::variant::ToVariant;
@@ -16,11 +16,21 @@ enum Power {
     Unknown,
 }
 
-fn power_source(root: &Path) -> Power {
+fn desktop_chassis(value: &str) -> bool {
+    // SMBIOS desktop, low-profile desktop, pizza box, tower, mini tower,
+    // all-in-one, space-saving, lunchbox, server, and rack-mount chassis.
+    matches!(
+        value.trim(),
+        "3" | "4" | "5" | "6" | "7" | "13" | "15" | "16" | "17" | "23"
+    )
+}
+
+fn power_source(root: &Path, desktop: bool) -> Power {
     let Ok(entries) = fs::read_dir(root) else {
         return Power::Unknown;
     };
     let mut offline = false;
+    let mut system_supply = false;
     for entry in entries.flatten() {
         let path = entry.path();
         let read = |name| {
@@ -33,6 +43,7 @@ fn power_source(root: &Path) -> Power {
         if read("scope") == "Device" {
             continue;
         }
+        system_supply = true;
         match read("type").as_str() {
             "Mains" | "USB" | "USB_C" | "USB_PD" | "USB_PD_DRP" | "USB_DCP" | "USB_CDP"
             | "USB_ACA" | "Wireless" => match read("online").as_str() {
@@ -46,6 +57,11 @@ fn power_source(root: &Path) -> Power {
     }
     if offline {
         Power::Battery
+    } else if desktop && !system_supply {
+        // Desktop PCs commonly expose no power_supply entries at all. Only
+        // use this fallback for a known desktop chassis; unknown laptop power
+        // and unreadable sysfs must still release the inhibitor.
+        Power::External
     } else {
         Power::Unknown
     }
@@ -75,9 +91,9 @@ fn acquire() -> Result<OwnedFd, String> {
     let bus = gio::bus_get_sync(gio::BusType::System, gio::Cancellable::NONE)
         .map_err(|e| e.to_string())?;
     let parameters = (
-        "sleep:handle-lid-switch",
+        "idle:sleep:handle-lid-switch",
         "SUPER DESKTOP",
-        "Keep AI harnesses available while on charger power",
+        "Keep the bridge and AI harnesses available on external power",
         "block",
     )
         .to_variant();
@@ -138,6 +154,9 @@ pub fn set_enabled(enabled: bool) {
         std::thread::Builder::new()
             .name("sleep-lock".into())
             .spawn(move || {
+                let desktop = desktop_chassis(
+                    &fs::read_to_string("/sys/class/dmi/id/chassis_type").unwrap_or_default(),
+                );
                 let mut enabled = false;
                 let mut lease = Lease::<OwnedFd> { held: None };
                 loop {
@@ -149,14 +168,14 @@ pub fn set_enabled(enabled: bool) {
                     while let Ok(value) = receiver.try_recv() {
                         enabled = value;
                     }
-                    let power = power_source(Path::new("/sys/class/power_supply"));
+                    let power = power_source(Path::new("/sys/class/power_supply"), desktop);
                     if lease.held.as_ref().is_some_and(|fd| !alive(fd)) {
                         lease.held = None;
                     }
                     let result = lease.update(enabled, power, acquire);
                     // Power may have changed while logind was processing the request.
                     if lease.held.is_some()
-                        && power_source(Path::new("/sys/class/power_supply")) != Power::External
+                        && power_source(Path::new("/sys/class/power_supply"), desktop) != Power::External
                     {
                         lease.held = None;
                     }
@@ -164,7 +183,7 @@ pub fn set_enabled(enabled: bool) {
                         Err(error) => format!("Sleep lock unavailable: {error}"),
                         _ if !enabled => "Off — normal sleep behavior.".into(),
                         _ if lease.held.is_some() => {
-                            "Active on charger — sleep and lid-close suspend are blocked.".into()
+                            "Active on external power — idle, sleep and lid-close suspend are blocked.".into()
                         }
                         _ if power == Power::Unknown => {
                             "Waiting — charger power could not be detected.".into()
@@ -236,20 +255,37 @@ mod tests {
                 fs::write(path.join(file), value).unwrap();
             }
         };
-        assert_eq!(power_source(&root), Power::Unknown);
+        assert_eq!(power_source(&root, false), Power::Unknown);
+        assert_eq!(power_source(&root, true), Power::External);
         supply("mouse", "USB", "1", "Device");
-        assert_eq!(power_source(&root), Power::Unknown);
+        assert_eq!(power_source(&root, true), Power::External);
+        supply("BAT0", "Battery", "", "System");
+        assert_eq!(power_source(&root, true), Power::Unknown);
+        fs::write(root.join("BAT0/status"), "Discharging").unwrap();
+        assert_eq!(power_source(&root, true), Power::Battery);
+        fs::remove_dir_all(root.join("BAT0")).unwrap();
+        assert_eq!(power_source(&root, false), Power::Unknown);
         supply("AC0", "Mains", "0", "");
-        assert_eq!(power_source(&root), Power::Battery);
+        assert_eq!(power_source(&root, false), Power::Battery);
         supply("AC0", "Mains", "1", "");
-        assert_eq!(power_source(&root), Power::External);
+        assert_eq!(power_source(&root, false), Power::External);
         supply("AC0", "Mains", "0", "");
         supply("usb", "USB_PD", "1", "System");
-        assert_eq!(power_source(&root), Power::External);
+        assert_eq!(power_source(&root, false), Power::External);
         supply("usb", "USB_PD", "broken", "System");
-        assert_eq!(power_source(&root), Power::Battery);
+        assert_eq!(power_source(&root, false), Power::Battery);
         fs::remove_dir_all(&root).unwrap();
-        assert_eq!(power_source(&root), Power::Unknown);
+        assert_eq!(power_source(&root, true), Power::Unknown);
+        assert_eq!(power_source(&root, false), Power::Unknown);
+    }
+
+    #[test]
+    fn only_known_desktops_get_the_mains_fallback() {
+        assert!(desktop_chassis("3\n"));
+        assert!(desktop_chassis("7"));
+        for value in ["", "unknown", "8", "9", "10", "14", "30", "31", "32"] {
+            assert!(!desktop_chassis(value), "{value}");
+        }
     }
 
     #[test]
@@ -276,6 +312,22 @@ mod tests {
             .unwrap();
         let output = String::from_utf8_lossy(&output.stdout);
         assert!(output.contains("SUPER DESKTOP"), "{output}");
+        let own_pid = std::process::id().to_string();
+        let row = output
+            .lines()
+            .find(|line| {
+                line.contains("SUPER DESKTOP")
+                    && line.split_whitespace().any(|word| word == own_pid)
+            })
+            .expect("test inhibitor should be listed");
+        for kind in ["idle", "sleep", "handle-lid-switch"] {
+            assert!(
+                row.split_whitespace()
+                    .flat_map(|word| word.split(':'))
+                    .any(|word| word == kind),
+                "{row}"
+            );
+        }
         drop(fd);
     }
 }

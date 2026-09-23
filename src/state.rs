@@ -355,9 +355,20 @@ pub fn load_state() -> AppState {
             }
         }
     }
-    let default_state = AppState::default();
+    let default_state = fresh_install_state(&crate::tmux::detect_harnesses());
     save_state(&default_state);
     default_state
+}
+
+/// Save the initial choice explicitly, so rescanning does not grow the toolbar
+/// and existing installations (including legacy `None` selections) keep theirs.
+fn fresh_install_state(detected: &[crate::tmux::HarnessInfo]) -> AppState {
+    AppState {
+        visible_harnesses: Some(
+            detected.iter().take(3).map(|h| h.key.to_string()).collect(),
+        ),
+        ..AppState::default()
+    }
 }
 
 pub fn save_state(state: &AppState) {
@@ -572,6 +583,28 @@ mod tests {
     fn test_default_state_starts_unconfigured() {
         assert_eq!(AppState::default().visible_harnesses, None);
         assert_eq!(AppState::default().top_bar_size, TopBarSize::Large);
+    }
+
+    #[test]
+    fn fresh_install_selects_at_most_three_detected_harnesses() {
+        let detected: Vec<_> = ["claude", "codex", "opencode", "gemini", "shell"]
+            .into_iter()
+            .map(|key| crate::tmux::HarnessInfo {
+                key,
+                name: key,
+                icon: "",
+                command: key.to_string(),
+            })
+            .collect();
+        for count in 0..=detected.len() {
+            let state = fresh_install_state(&detected[..count]);
+            let expected: Vec<_> = detected[..count.min(3)]
+                .iter().map(|h| h.key.to_string()).collect();
+            assert_eq!(state.visible_harnesses, Some(expected.clone()));
+            let saved = serde_json::to_string(&state).unwrap();
+            let restored: AppState = serde_json::from_str(&saved).unwrap();
+            assert_eq!(restored.visible_harnesses, Some(expected));
+        }
     }
 
     #[test]

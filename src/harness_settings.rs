@@ -434,7 +434,7 @@ pub fn build_harness_settings_panel(
     home_root.append(&btn_top_bar_page);
 
     let (btn_sleep_lock, _) = settings_entry(
-        "☀", "Sleep lock", "Keep AI harnesses awake while the laptop is on charger power.",
+        "☀", "Sleep lock", "Keep the bridge and AI harnesses awake on external power.",
         "settings-sleep-lock-entry",
     );
     home_root.append(&btn_sleep_lock);
@@ -756,7 +756,7 @@ pub fn build_harness_settings_panel(
 
     let sleep_root = Box::new(Orientation::Vertical, 10);
     sleep_root.add_css_class("launcher-body");
-    let (_, sleep_body) = section_card(&sleep_root, "", "Stay awake on charger");
+    let (_, sleep_body) = section_card(&sleep_root, "", "Stay awake on external power");
     let sleep_row = Box::new(Orientation::Horizontal, 12);
     let sleep_label = Label::new(Some("Prevent sleep while plugged in"));
     sleep_label.set_hexpand(true);
@@ -766,11 +766,11 @@ pub fn build_harness_settings_panel(
     sleep_toggle.add_css_class("sleep-lock-toggle");
     sleep_toggle.set_valign(Align::Center);
     sleep_toggle.set_active(state.borrow().sleep_lock_on_ac);
-    sleep_toggle.set_tooltip_text(Some("Keep AI harnesses running on charger power, including with the lid closed"));
+    sleep_toggle.set_tooltip_text(Some("Keep the bridge and AI harnesses running on mains or charger power, including with the lid closed"));
     sleep_row.append(&sleep_label);
     sleep_row.append(&sleep_toggle);
     sleep_body.append(&sleep_row);
-    let sleep_help = Label::new(Some("Keeps this laptop awake, including with the lid closed, while SUPER DESKTOP is running and charger power is detected. Normal sleep behavior returns on battery. The screen can still turn off and lock. Turn this off before manually suspending."));
+    let sleep_help = Label::new(Some("Keeps this PC and its bridge awake while SUPER DESKTOP is running on mains or charger power, including with a laptop lid closed. Normal sleep behavior returns on battery. The screen can still turn off and lock. Turn this off before manually suspending."));
     sleep_help.set_wrap(true);
     sleep_help.set_xalign(0.0);
     sleep_help.add_css_class("launcher-hint");

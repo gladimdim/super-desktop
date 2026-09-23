@@ -26,13 +26,14 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 ### Sleep lock on charger
 
 In **Settings → Sleep lock**, enable **Prevent sleep while plugged in** to keep
-AI harnesses reachable while SUPER DESKTOP runs on charger power, including with
-the laptop lid closed. The setting persists across app restarts and defaults off.
+the bridge and AI harnesses reachable while SUPER DESKTOP runs on mains or charger
+power, including with the laptop lid closed. Recognized desktop chassis without
+power-supply entries are treated as mains-powered. The setting persists across app restarts and defaults off.
 It releases the lock within a few seconds of unplugging, disabling the setting,
 or losing power-source information. Screen locking and display power saving
 continue normally. Disable the setting before manually suspending.
 
-This uses systemd-logind's `sleep:handle-lid-switch` block inhibitor; no root
+This uses systemd-logind's `idle:sleep:handle-lid-switch` block inhibitor; no root
 access, logind configuration edits, or helper service is required. The settings
 page reports active, battery, unknown-power, or permission/service errors rather
 than claiming protection when the lock could not be acquired. Forced sleep and
@@ -76,11 +77,18 @@ to an idle Codex terminal. See [image prompts, compatibility and upload limits](
 | 🌐 T3 Code server | `t3 serve` (open the web UI in a browser) |
 | 💻 Shell | `bash` / `zsh` / `fish` |
 
+Fresh installations show the first three detected harnesses in the toolbar (or
+fewer if fewer are installed). Settings → Harness launchers lets you enable more;
+existing installations keep their selection. Arrange, Settings, and Hide stay at
+the display's right edge, with horizontal scrolling for toolbar groups that do
+not fit on smaller or scaled screens. Narrow displays hide the brand label and
+shortcut hint to leave room for controls; Hide's tooltip still shows the shortcut.
+
 Only launchers actually installed on the machine can be started. Settings →
 Harness launchers lists both detected tools and supported tools that are not
 installed yet. Press **Rescan** after installing a CLI; it checks the current
 `PATH` and common user bin directories, then updates the top bar immediately.
-If you previously customized which launchers are visible, turn on a newly
+On a fresh installation or after customizing which launchers are visible, turn on a newly
 detected launcher with its toggle. An installation in another, nonstandard
 directory may need to be added as a custom launcher.
 

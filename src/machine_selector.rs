@@ -25,7 +25,7 @@ pub struct MachineView {
     pub local_button: gtk4::MenuButton,
     remote_button: gtk4::MenuButton,
     remote: gtk4::Box,
-    remote_toolbar: gtk4::Overlay,
+    remote_toolbar: gtk4::Box,
     selection: RefCell<Selection>,
     canvas: Rc<RemoteCanvas>,
     /// The host's own harness list, in the shared launch bar.
@@ -46,12 +46,14 @@ impl MachineView {
     pub fn new(local: &gtk4::Fixed, on_switch: Rc<dyn Fn()>, on_hide: Rc<dyn Fn()>) -> Rc<Self> {
         let stack = gtk4::Stack::new();
         stack.set_transition_type(gtk4::StackTransitionType::None);
+        stack.set_hhomogeneous(false);
+        stack.set_vhomogeneous(false);
         stack.add_named(local, Some("local"));
         let remote = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
         // The same top bar as the local workspace: the machine selector and the
         // brand on the left, the host's own harness buttons centered, the
         // connection state and Hide on the right.
-        let toolbar = gtk4::Overlay::new();
+        let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         toolbar.add_css_class("hud-bar");
         let chrome = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
         chrome.set_hexpand(true);
@@ -78,21 +80,19 @@ impl MachineView {
             }
         }));
         chrome.append(&folder_bar.widget);
-        let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
-        spacer.set_hexpand(true);
-        chrome.append(&spacer);
+        let right = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        right.set_valign(gtk4::Align::Center);
         let details = gtk4::Label::new(None);
         details.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-        chrome.append(&details);
+        right.append(&details);
         let status = gtk4::Label::new(Some("Connecting…"));
         status.set_xalign(0.0);
-        chrome.append(&status);
+        right.append(&status);
         let hide = gtk4::Button::with_label("✕ Hide");
         hide.add_css_class("hud-button");
         hide.add_css_class("hud-button-danger");
         hide.connect_clicked(move |_| on_hide());
-        chrome.append(&hide);
-        toolbar.set_child(Some(&chrome));
+        right.append(&hide);
 
         // The launcher refreshes this view the moment a card is created on the
         // host, instead of leaving the user to wait for the next poll.
@@ -110,7 +110,7 @@ impl MachineView {
             // state and would describe the wrong machine.
             Rc::new(|_: &gtk4::Button, _: &str| false),
         );
-        toolbar.add_overlay(&bar.group);
+        toolbar.append(&crate::window::top_bar_content(&chrome, &bar.group, &right));
         remote.append(&toolbar);
         remote.append(&bar.note);
         let canvas = RemoteCanvas::new();
@@ -214,8 +214,8 @@ impl MachineView {
 
     /// Match the local dock's top-bar size, so the toolbar does not change
     /// height when the user switches between this PC and another one.
-    pub fn paint_top_bar_size(&self, size: crate::state::TopBarSize, screen_width: i32) {
-        crate::window::paint_top_bar_size(&self.remote_toolbar, size, screen_width);
+    pub fn paint_top_bar_size(&self, size: crate::state::TopBarSize) {
+        crate::window::paint_top_bar_size(&self.remote_toolbar, size);
     }
     /// Ask the selected PC to work in another of its own folders.
     ///

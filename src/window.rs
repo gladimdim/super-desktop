@@ -61,7 +61,7 @@ fn top_bar_height(size: TopBarSize) -> i32 {
 
 /// One bar style for both the local dock and the remote one, so switching PCs
 /// never changes the size of the toolbar the user is reading.
-pub fn paint_top_bar_size(bar: &impl IsA<gtk4::Widget>, size: TopBarSize, screen_width: i32) {
+pub fn paint_top_bar_size(bar: &impl IsA<gtk4::Widget>, size: TopBarSize) {
     for class in ["hud-size-small", "hud-size-medium", "hud-size-large"] {
         bar.remove_css_class(class);
     }
@@ -70,7 +70,55 @@ pub fn paint_top_bar_size(bar: &impl IsA<gtk4::Widget>, size: TopBarSize, screen
         TopBarSize::Medium => "hud-size-medium",
         TopBarSize::Large => "hud-size-large",
     });
-    bar.set_size_request(screen_width, top_bar_height(size));
+    bar.set_height_request(top_bar_height(size));
+}
+
+/// The controls on the right are outside every scrolling viewport. The left
+/// and launcher groups share the remaining space and scroll when necessary.
+pub fn top_bar_content(
+    left: &impl IsA<gtk4::Widget>,
+    launchers: &impl IsA<gtk4::Widget>,
+    right: &impl IsA<gtk4::Widget>,
+) -> gtk4::Box {
+    let scroll_group = |child: &gtk4::Widget| {
+        let scroll = gtk4::ScrolledWindow::new();
+        scroll.set_policy(gtk4::PolicyType::External, gtk4::PolicyType::Never);
+        scroll.set_propagate_natural_width(true);
+        scroll.set_child(Some(child));
+        scroll
+    };
+    let row = gtk4::CenterBox::new();
+    row.set_halign(Align::Fill);
+    row.set_valign(Align::Fill);
+    row.set_start_widget(Some(&scroll_group(left.as_ref())));
+    row.set_center_widget(Some(&scroll_group(launchers.as_ref())));
+    // Fixed allocates children at their natural size. Do not let long folder
+    // names or many launchers inflate the dock beyond its requested width.
+    let viewport = gtk4::ScrolledWindow::new();
+    viewport.set_policy(gtk4::PolicyType::External, gtk4::PolicyType::Never);
+    viewport.set_hexpand(true);
+    viewport.set_vexpand(true);
+    viewport.set_child(Some(&row));
+    let content = gtk4::Box::new(Orientation::Horizontal, 10);
+    content.set_hexpand(true);
+    content.set_vexpand(true);
+    content.append(&viewport);
+    content.append(right);
+    content
+}
+
+/// Cards may extend past the output while being dragged, restored from a
+/// larger display, or animated off screen. Their extents must never become
+/// the layer-shell window's minimum size.
+fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
+    let root = Overlay::new();
+    root.set_child(Some(&gtk4::Box::new(Orientation::Vertical, 0)));
+    workspace.set_halign(Align::Fill);
+    workspace.set_valign(Align::Fill);
+    root.add_overlay(workspace);
+    root.set_measure_overlay(workspace, false);
+    root.set_clip_overlay(workspace, true);
+    root
 }
 
 /// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
@@ -216,12 +264,11 @@ impl SuperDesktopWindow {
             let monitors = display.monitors();
             if let Some(mon) = monitors.item(0).and_then(|m| m.downcast::<gdk::Monitor>().ok()) {
                 let geo = mon.geometry();
-                screen_width = geo.width().max(1920);
-                screen_height = geo.height().max(1080);
+                screen_width = geo.width().max(1);
+                screen_height = geo.height().max(1);
             }
         }
 
-        let root_overlay = Overlay::new();
         let canvas = Fixed::new();
         canvas.set_hexpand(true);
         canvas.set_vexpand(true);
@@ -340,10 +387,10 @@ impl SuperDesktopWindow {
                         s.clone()
                     };
                     if let Some(hud) = hud_for_settings.borrow().as_ref() {
-                        paint_top_bar_size(hud, size, screen_width);
+                        paint_top_bar_size(hud, size);
                     }
                     if let Some(view) = machine_for_settings.borrow().as_ref() {
-                        view.paint_top_bar_size(size, screen_width);
+                        view.paint_top_bar_size(size);
                     }
                     crate::state::save_state_async(snapshot);
                 }
@@ -355,24 +402,9 @@ impl SuperDesktopWindow {
 
         let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
-        paint_top_bar_size(&hud, state.borrow().top_bar_size, screen_width);
+        paint_top_bar_size(&hud, state.borrow().top_bar_size);
+        hud.set_width_request(screen_width);
         *hud_for_settings.borrow_mut() = Some(hud.clone());
-
-        // Left chrome (brand, folder, + Note) and right chrome (icon-only
-        // Icon-only arrange / gears / Hide) sit in a full-width row. The harness launch list is an overlay
-        // with Align::Center so it stays on the display midline even when the
-        // two chrome groups have different widths.
-        let hud_overlay = Overlay::new();
-        hud_overlay.set_hexpand(true);
-        hud_overlay.set_vexpand(true);
-        hud_overlay.set_halign(Align::Fill);
-        hud_overlay.set_valign(Align::Fill);
-
-        let chrome = gtk4::Box::new(Orientation::Horizontal, 10);
-        chrome.set_hexpand(true);
-        chrome.set_vexpand(true);
-        chrome.set_halign(Align::Fill);
-        chrome.set_valign(Align::Fill);
 
         let hud_left = gtk4::Box::new(Orientation::Horizontal, 10);
         hud_left.set_valign(Align::Center);
@@ -419,9 +451,9 @@ impl SuperDesktopWindow {
             }
         }));
         machine_view.bind_keyboard(&window);
-        machine_view.paint_top_bar_size(state.borrow().top_bar_size, screen_width);
+        machine_view.paint_top_bar_size(state.borrow().top_bar_size);
         *machine_for_settings.borrow_mut() = Some(Rc::clone(&machine_view));
-        root_overlay.set_child(Some(&machine_view.stack));
+        let root_overlay = desktop_overlay(&machine_view.stack);
         hud_left.append(&machine_view.local_button);
 
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
@@ -441,20 +473,9 @@ impl SuperDesktopWindow {
             let popover = workspace_bar.popover.clone();
             workspace_bar.widget.connect_unmap(move |_| popover.popdown());
         }
-        chrome.append(&hud_left);
-
-        let chrome_spacer = gtk4::Box::new(Orientation::Horizontal, 0);
-        chrome_spacer.set_hexpand(true);
-        chrome.append(&chrome_spacer);
-
         let hud_right = gtk4::Box::new(Orientation::Horizontal, 10);
         hud_right.set_valign(Align::Center);
         hud_right.set_halign(Align::End);
-        chrome.append(&hud_right);
-
-        hud_overlay.set_child(Some(&chrome));
-
-        hud.append(&hud_overlay);
 
         let drag_pending = Rc::new(RefCell::new(HashMap::new()));
         let drag_tick_active = Rc::new(RefCell::new(false));
@@ -677,7 +698,7 @@ impl SuperDesktopWindow {
         brand_images
             .borrow_mut()
             .extend(harness_bar.brand_images());
-        hud_overlay.add_overlay(&harness_bar.group);
+        hud.append(&top_bar_content(&hud_left, &harness_bar.group, &hud_right));
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
         let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
@@ -734,6 +755,27 @@ impl SuperDesktopWindow {
         hud_right.append(&btn_close);
 
         hud_right.append(&hint);
+
+        // Layer-shell chooses the output. Its allocated logical width is the
+        // authority, including after a monitor or scale change.
+        hud.add_tick_callback({
+            let window = win_rc.window.downgrade();
+            let hint = hint.clone();
+            let brand = brand.clone();
+            move |hud, _| {
+                if let Some(window) = window.upgrade() {
+                    let width = window.width();
+                    if width > 0 && hud.width_request() != width {
+                        hud.set_width_request(width);
+                    }
+                    // The shortcut remains on Hide's tooltip; compact screens
+                    // prioritize the folder, launchers, and action buttons.
+                    hint.set_visible(width >= 1200);
+                    brand.set_visible(width >= 1000);
+                }
+                glib::ControlFlow::Continue
+            }
+        });
 
         // On the canvas, not an Overlay child: Fixed.move_ translates the
         // full-width dock as one widget, same as the cards.
@@ -2309,6 +2351,114 @@ mod tests {
     #[test]
     fn slide_moves_a_card_inside_its_own_canvas() {
         crate::gtk_test::run_in_child_process("window::tests::slide_inside_own_canvas_inner");
+    }
+
+    #[test]
+    fn toolbar_controls_stay_on_screen() {
+        crate::gtk_test::run_in_child_process("window::tests::toolbar_controls_inner");
+    }
+
+    #[test]
+    fn toolbar_controls_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let left = gtk4::Box::new(Orientation::Horizontal, 0);
+        left.set_size_request(800, 36);
+        let launchers = gtk4::Box::new(Orientation::Horizontal, 0);
+        launchers.set_size_request(1400, 36);
+        let right = gtk4::Box::new(Orientation::Horizontal, 10);
+        for label in ["Arrange", "Settings", "Hide"] {
+            right.append(&Button::with_label(label));
+        }
+        let hud = gtk4::Box::new(Orientation::Horizontal, 0);
+        hud.add_css_class("hud-bar");
+        hud.append(&top_bar_content(&left, &launchers, &right));
+        for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
+            paint_top_bar_size(&hud, size);
+            // Shrink, enlarge, then shrink again, as with output/scale changes.
+            for width in [1280, 800, 2560, 640, 1024] {
+                hud.set_width_request(width);
+                let (_, natural, _, _) = hud.measure(Orientation::Horizontal, -1);
+                assert_eq!(natural, width, "contents must not inflate the dock");
+                let (_, height, _, _) = hud.measure(Orientation::Vertical, width);
+                hud.allocate(width, height, -1, None);
+                let bounds = right.compute_bounds(&hud).unwrap();
+                assert!(bounds.x() >= 0.0);
+                // GTK widget coordinates exclude the dock's CSS padding.
+                assert!((bounds.x() + bounds.width() - hud.width() as f32).abs() < 1.0,
+                    "right controls must meet the display edge at {width}: {bounds:?}");
+                let last = right.last_child().unwrap().compute_bounds(&hud).unwrap();
+                assert!(last.x() + last.width() <= width as f32);
+            }
+        }
+
+        // Reproduce the real failure: a saved/off-screen card enlarges Fixed's
+        // minimum size, then the toolbar follows that oversized window.
+        let canvas = Fixed::new();
+        let offscreen = Label::new(Some("off-screen card"));
+        offscreen.set_size_request(640, 480);
+        canvas.put(&offscreen, 5000.0, 2000.0);
+        canvas.put(&hud, 0.0, 0.0);
+        let stack = gtk4::Stack::new();
+        stack.add_named(&canvas, Some("local"));
+        let root = desktop_overlay(&stack);
+        assert!(canvas.measure(Orientation::Horizontal, -1).0 > 5000);
+        assert_eq!(root.measure(Orientation::Horizontal, -1).0, 0);
+        assert_eq!(root.measure(Orientation::Vertical, -1).0, 0);
+
+        let window = gtk4::Window::new();
+        window.set_default_size(1024, 600);
+        window.set_resizable(false);
+        window.set_child(Some(&root));
+        hud.add_tick_callback({
+            let window = window.downgrade();
+            move |hud, _| {
+                if let Some(window) = window.upgrade() {
+                    if window.width() > 0 && hud.width_request() != window.width() {
+                        hud.set_width_request(window.width());
+                    }
+                }
+                glib::ControlFlow::Continue
+            }
+        });
+        window.present();
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        let mut settled = 0;
+        while std::time::Instant::now() < until {
+            while glib::MainContext::default().iteration(false) {}
+            let fits = right.compute_bounds(&window).is_some_and(|bounds| {
+                bounds.width() > 0.0 && bounds.x() >= 0.0
+                    && bounds.x() + bounds.width() <= window.width() as f32
+                    && hud.width_request() == window.width()
+            });
+            settled = if fits { settled + 1 } else { 0 };
+            if settled >= 5 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(window.width() > 0 && window.width() < 5000);
+        assert_eq!(hud.width_request(), window.width());
+        let bounds = right.compute_bounds(&window).unwrap();
+        assert!(bounds.x() >= 0.0 && bounds.x() + bounds.width() <= window.width() as f32,
+            "mapped controls {bounds:?} exceed window width {}", window.width());
+        // Visible geometry alone is insufficient: every action must also be
+        // hittable through the mapped window and its clipped canvas.
+        let mut child = right.first_child();
+        while let Some(button) = child {
+            let bounds = button.compute_bounds(&window).unwrap();
+            let picked = window.pick(
+                bounds.x() as f64 + bounds.width() as f64 / 2.0,
+                bounds.y() as f64 + bounds.height() as f64 / 2.0,
+                gtk4::PickFlags::DEFAULT,
+            ).expect("toolbar action must be hittable");
+            assert!(picked == button || picked.is_ancestor(&button));
+            child = button.next_sibling();
+        }
+        window.close();
     }
 
     #[test]
