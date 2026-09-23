@@ -275,6 +275,7 @@ fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Butt
 pub fn build_lazy_harness_settings_panel(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<dyn Fn(Vec<String>)>,
+    on_detected: Rc<dyn Fn(Vec<String>)>,
     on_shortcut_change: Rc<dyn Fn(String)>,
     on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
 ) -> HarnessSettingsPanel {
@@ -292,6 +293,7 @@ pub fn build_lazy_harness_settings_panel(
         if !host.is_visible() { return; }
         let built = build_harness_settings_panel(
             Rc::clone(&state), Rc::clone(&on_change),
+            Rc::clone(&on_detected),
             Rc::clone(&on_shortcut_change), Rc::clone(&on_top_bar_size_change),
         );
         // The panel's close button hides its root; mirror that on the host so
@@ -315,6 +317,7 @@ pub fn build_lazy_harness_settings_panel(
 pub fn build_harness_settings_panel(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<dyn Fn(Vec<String>)>,
+    on_detected: Rc<dyn Fn(Vec<String>)>,
     on_shortcut_change: Rc<dyn Fn(String)>,
     on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
 ) -> HarnessSettingsPanel {
@@ -523,6 +526,10 @@ pub fn build_harness_settings_panel(
     let (head, body) = section_card(&harnesses_root, "", "Harnesses on this machine");
     let count_chip = chip("…");
     head.append(&count_chip);
+    let btn_rescan = Button::with_label("⟳ Rescan");
+    btn_rescan.add_css_class("launcher-btn");
+    btn_rescan.set_tooltip_text(Some("Find harnesses installed since SUPER DESKTOP started"));
+    head.append(&btn_rescan);
 
     let rows = Box::new(Orientation::Vertical, 2);
     rows.add_css_class("harness-rows");
@@ -541,6 +548,11 @@ pub fn build_harness_settings_panel(
     detected_hint.set_xalign(0.0);
     detected_hint.set_wrap(true);
     body.append(&detected_hint);
+    let rescan_status = Label::new(None);
+    rescan_status.add_css_class("launcher-hint");
+    rescan_status.set_xalign(0.0);
+    rescan_status.set_wrap(true);
+    body.append(&rescan_status);
 
     let summary = Label::new(None);
     summary.add_css_class("launcher-status-text");
@@ -663,8 +675,22 @@ pub fn build_harness_settings_panel(
     note.set_wrap(true);
     body.append(&note);
 
+    let (missing_head, missing_body) = section_card(&harnesses_root, "", "More supported launchers");
+    let missing_count = chip("…");
+    missing_head.append(&missing_count);
+    let missing_hint = Label::new(Some(
+        "These are available once installed on this PC. Herder runs a job worker; T3 Code runs a web server."
+    ));
+    missing_hint.add_css_class("launcher-hint");
+    missing_hint.set_xalign(0.0);
+    missing_hint.set_wrap(true);
+    missing_body.append(&missing_hint);
+    let missing_rows = Box::new(Orientation::Vertical, 2);
+    missing_rows.add_css_class("harness-rows");
+    missing_body.append(&missing_rows);
+
     let footer = Label::new(Some(
-        "Built-ins detected with which / npx · custom launchers stored in state.json",
+        "Built-ins detected from PATH and common user bin folders · custom launchers stored in state.json",
     ));
     footer.add_css_class("launcher-footer");
     footer.set_xalign(0.5);
@@ -1164,6 +1190,9 @@ pub fn build_harness_settings_panel(
     // Re-detect and rebuild the rows; the overlay calls this on every open.
     let refresh: Rc<dyn Fn()> = {
         let rows = rows.clone();
+        let rescan_status = rescan_status.clone();
+        let missing_rows = missing_rows.clone();
+        let missing_count = missing_count.clone();
         let order = Rc::clone(&order);
         let row_buttons = Rc::clone(&row_buttons);
         let selection = Rc::clone(&selection);
@@ -1180,6 +1209,7 @@ pub fn build_harness_settings_panel(
         let editing_custom = Rc::clone(&editing_custom);
         let refresh_custom = Rc::downgrade(&refresh_custom);
         let on_change = Rc::clone(&on_change);
+        let on_detected = Rc::clone(&on_detected);
         // Reopening (or restyling on a theme switch) must never leave a
         // recording armed with the keyboard held.
         let stop_recording = Rc::clone(&stop_recording);
@@ -1187,6 +1217,7 @@ pub fn build_harness_settings_panel(
         let paint_size = Rc::clone(&paint_size);
         let firewall_notice_refresh = Rc::clone(&firewall_notice_refresh);
         Rc::new(move || {
+            rescan_status.set_text("");
             stop_recording(None);
             paint_recorder();
             paint_size();
@@ -1198,7 +1229,25 @@ pub fn build_harness_settings_panel(
             while let Some(child) = rows.first_child() {
                 rows.remove(&child);
             }
+            while let Some(child) = missing_rows.first_child() {
+                missing_rows.remove(&child);
+            }
             row_buttons.borrow_mut().clear();
+
+            let mut missing = 0;
+            for key in crate::tmux::HARNESS_KEYS {
+                if detected.iter().any(|info| info.key == *key) { continue; }
+                let cfg = crate::tmux::get_agent_config(key);
+                let info = HarnessInfo {
+                    key, name: cfg.name, icon: cfg.icon,
+                    command: format!("Not installed · {}", cfg.commands[0]),
+                };
+                let (row, toggle) = harness_row(&info, light_theme);
+                row.remove(&toggle);
+                missing_rows.append(&row);
+                missing += 1;
+            }
+            missing_count.set_text(&missing.to_string());
 
             for info in &detected {
                 let (row, btn) = harness_row(info, light_theme);
@@ -1268,10 +1317,31 @@ pub fn build_harness_settings_panel(
                 .chain(state.borrow().custom_harnesses.iter().filter(|item| item.available()).map(|item| item.id.clone())).collect();
             *selection.borrow_mut() = visible_keys(&state.borrow(), &detected);
             paint();
+            on_detected(selection.borrow().clone());
         })
     };
 
     *refresh_custom.borrow_mut() = Some(Rc::clone(&refresh));
+    btn_rescan.connect_clicked({
+        let refresh = Rc::clone(&refresh);
+        let order = Rc::clone(&order);
+        let status = rescan_status.clone();
+        move |_| {
+            let before = order.borrow().clone();
+            refresh();
+            let new: Vec<_> = order.borrow().iter()
+                .filter(|key| !before.contains(key) && crate::tmux::HARNESS_KEYS.contains(&key.as_str()))
+                .map(|key| crate::tmux::get_agent_config(key).name)
+                .collect();
+            let message = if new.is_empty() {
+                format!("Scan complete. {} installed launchers available.",
+                    order.borrow().iter().filter(|key| crate::tmux::HARNESS_KEYS.contains(&key.as_str())).count())
+            } else {
+                format!("Found: {}. The top bar is updated; use the toggles to change visibility.", new.join(", "))
+            };
+            status.set_text(&message);
+        }
+    });
     btn_save_custom.connect_clicked({
         let state = Rc::clone(&state); let name = custom_name.clone();
         let path = custom_path.clone(); let args = custom_args.clone();
@@ -1340,7 +1410,7 @@ mod tests {
         if gtk4::init().is_err() { return; }
         let panel = build_lazy_harness_settings_panel(
             Rc::new(RefCell::new(AppState::default())),
-            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
         );
         assert!(panel.widget.first_child().is_none());
         (panel.refresh)(); // Theme changes while unopened must remain cheap.
@@ -1392,6 +1462,44 @@ mod tests {
     }
 
     #[test]
+    fn rescan_discovers_a_later_install_and_updates_launchers_without_saving_visibility() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("harness_settings::tests::rescan_discovers_a_later_install_and_updates_launchers_without_saving_visibility");
+            return;
+        }
+        gtk4::init().unwrap();
+        let home = std::env::temp_dir().join(format!("sd-rescan-ui-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::env::set_var("HOME", &home);
+        if crate::tmux::detect_harness_command("t3code").is_some() {
+            std::fs::remove_dir_all(&home).unwrap();
+            return;
+        }
+        let state = Rc::new(RefCell::new(AppState::default()));
+        let detected = Rc::new(RefCell::new(Vec::<String>::new()));
+        let captured = Rc::clone(&detected);
+        let panel = build_harness_settings_panel(
+            Rc::clone(&state),
+            Rc::new(|_| panic!("rescan must not persist the visibility preference")),
+            Rc::new(move |keys| *captured.borrow_mut() = keys),
+            Rc::new(|_| {}), Rc::new(|_| {}),
+        );
+        assert!(!detected.borrow().contains(&"t3code".to_string()));
+        let t3 = bin.join("t3");
+        std::fs::write(&t3, "#!/bin/sh\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&t3, std::fs::Permissions::from_mode(0o755)).unwrap();
+        find_buttons(&panel.widget, "launcher-btn").into_iter()
+            .find(|button| button.label().as_deref() == Some("⟳ Rescan"))
+            .unwrap().emit_clicked();
+        assert!(detected.borrow().contains(&"t3code".to_string()));
+        assert_eq!(state.borrow().visible_harnesses, None);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn custom_launcher_form_saves_and_removes() {
         use std::os::unix::fs::PermissionsExt;
         if !crate::gtk_test::is_child() {
@@ -1410,7 +1518,7 @@ mod tests {
                 saved.borrow_mut().visible_harnesses = Some(keys);
                 crate::state::save_state_async(saved.borrow().clone());
             }),
-            Rc::new(|_| {}), Rc::new(|_| {}),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
         );
         let buttons = find_buttons(&panel.widget, "launcher-btn");
         buttons.iter().find(|button| button.label().as_deref() == Some("＋ Add a harness")).unwrap().emit_clicked();
@@ -1514,6 +1622,7 @@ mod tests {
         let panel = build_harness_settings_panel(
             Rc::clone(&app_state),
             Rc::new(move |keys: Vec<String>| seen_cb.borrow_mut().push(keys)),
+            Rc::new(|_| {}),
             Rc::new(move |combo: String| shortcut_cb.borrow_mut().push(combo)),
             Rc::new(move |size| size_cb.borrow_mut().push(size)),
         );
@@ -1528,9 +1637,9 @@ mod tests {
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![0, 1, 1, 1, 3, 1]);
+        assert_eq!(sections, vec![0, 1, 2, 1, 3, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 7);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 8);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.

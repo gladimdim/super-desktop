@@ -299,6 +299,19 @@ impl SuperDesktopWindow {
                 }
             }),
             Rc::new({
+                let state = Rc::clone(&state);
+                let bar_slot = Rc::clone(&harness_bar_for_settings);
+                move |keys: Vec<String>| {
+                    if let Some(bar) = bar_slot.borrow().as_ref() {
+                        bar.apply(&crate::harness_bar::HarnessState {
+                            keys,
+                            custom: state.borrow().custom_harnesses.iter().map(Into::into).collect(),
+                            ready: true,
+                        });
+                    }
+                }
+            }),
+            Rc::new({
                 // The panel has already written the binding into
                 // bindings.lua and reloaded Hyprland; all that is left is to
                 // remember the choice and to stop the HUD advertising the old

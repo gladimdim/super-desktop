@@ -63,9 +63,26 @@ to an idle Codex terminal. See [image prompts, compatibility and upload limits](
 | 🚀 Grok CLI | `grok` |
 | 🧭 Reasonix | `reasonix code` (or `npx -y reasonix code`) |
 | 🧠 Aider | `aider` |
+| ✦ Gemini CLI | `gemini` |
+| 🪽 Hermes Agent | `hermes` |
+| 🥧 Pi | `pi` |
+| 🪿 Goose | `goose session` |
+| 🌟 Qwen Code | `qwen` |
+| 💘 Crush | `crush` |
+| 🌙 Kimi Code | `kimi` |
+| 🧰 Kiro CLI | `kiro-cli` |
+| 🎯 Cursor Agent | `cursor-agent` |
+| 🐑 Herder worker | `herder worker` (job supervisor, not an interactive chat) |
+| 🌐 T3 Code server | `t3 serve` (open the web UI in a browser) |
 | 💻 Shell | `bash` / `zsh` / `fish` |
 
-Only harnesses actually installed on the machine are offered (⚙ Settings panel).
+Only launchers actually installed on the machine can be started. Settings →
+Harness launchers lists both detected tools and supported tools that are not
+installed yet. Press **Rescan** after installing a CLI; it checks the current
+`PATH` and common user bin directories, then updates the top bar immediately.
+If you previously customized which launchers are visible, turn on a newly
+detected launcher with its toggle. An installation in another, nonstandard
+directory may need to be added as a custom launcher.
 To add another CLI, open **Settings → Harness launchers → Add a harness**. Pick one
 of eight icons, enter a name and the absolute path to its executable, and add
 optional arguments (quote arguments containing spaces). Save it to add a button
@@ -91,7 +108,7 @@ only while this PC offers it.
 super-desktop toggle          # show / hide
 super-desktop status          # visible? how many notes / terminals
 super-desktop add-note "Buy milk"
-super-desktop add-term claude # claude | antigravity | codex | opencode | grok | reasonix | aider | shell
+super-desktop add-term claude # see Settings → Harness launchers for installed types
 super-desktop reload-theme    # re-read Omarchy theme colors
 super-desktop kill            # stop the background daemon
 super-desktop harnesses       # one-shot JSON dump of sessions (debug)

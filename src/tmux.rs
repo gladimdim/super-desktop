@@ -57,6 +57,52 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
             default_args: &["--yes-always"],
             npx_package: None,
         },
+        "gemini" => AgentConfig {
+            name: "Gemini CLI", icon: "✦", commands: &["gemini"],
+            default_args: &[], npx_package: None,
+        },
+        "hermes" => AgentConfig {
+            name: "Hermes Agent", icon: "🪽", commands: &["hermes"],
+            default_args: &[], npx_package: None,
+        },
+        "pi" => AgentConfig {
+            name: "Pi", icon: "🥧", commands: &["pi"],
+            default_args: &[], npx_package: None,
+        },
+        "goose" => AgentConfig {
+            name: "Goose", icon: "🪿", commands: &["goose"],
+            default_args: &["session"], npx_package: None,
+        },
+        "qwen" => AgentConfig {
+            name: "Qwen Code", icon: "🌟", commands: &["qwen"],
+            default_args: &[], npx_package: None,
+        },
+        "crush" => AgentConfig {
+            name: "Crush", icon: "💘", commands: &["crush"],
+            default_args: &[], npx_package: None,
+        },
+        "kimi" => AgentConfig {
+            name: "Kimi Code", icon: "🌙", commands: &["kimi"],
+            default_args: &[], npx_package: None,
+        },
+        "kiro" => AgentConfig {
+            name: "Kiro CLI", icon: "🧰", commands: &["kiro-cli"],
+            default_args: &[], npx_package: None,
+        },
+        "cursor" => AgentConfig {
+            name: "Cursor Agent", icon: "🎯", commands: &["cursor-agent"],
+            default_args: &[], npx_package: None,
+        },
+        // These two are useful alongside terminal agents, but are not
+        // interactive coding-agent chats. Keep their actual role visible.
+        "herder" => AgentConfig {
+            name: "Herder worker", icon: "🐑", commands: &["herder"],
+            default_args: &["worker"], npx_package: None,
+        },
+        "t3code" => AgentConfig {
+            name: "T3 Code server", icon: "🌐", commands: &["t3"],
+            default_args: &["serve"], npx_package: None,
+        },
         // `code` opens Reasonix' interactive coding session. Deliberately no
         // permission flag: Reasonix keeps its own `workspace-write` sandbox
         // (in-workspace writes approved, everything else asked in the card).
@@ -98,6 +144,17 @@ pub const HARNESS_KEYS: &[&str] = &[
     "grok",
     "reasonix",
     "aider",
+    "gemini",
+    "hermes",
+    "pi",
+    "goose",
+    "qwen",
+    "crush",
+    "kimi",
+    "kiro",
+    "cursor",
+    "herder",
+    "t3code",
     "shell",
 ];
 
@@ -116,7 +173,7 @@ pub struct HarnessInfo {
     pub command: String,
 }
 
-/// `which <cmd>` → absolute path, or `None` when it is not on PATH.
+/// `which <cmd>` → absolute path, or `None` when it is not installed.
 ///
 /// Done in-process instead of shelling out: harness detection alone asks ~12
 /// times per window build, and forking `which` costs tens of milliseconds on a
@@ -130,7 +187,24 @@ fn which(cmd: &str) -> Option<String> {
         let p = Path::new(cmd);
         return is_executable(p).then(|| cmd.to_string());
     }
-    which_in_path(cmd, &std::env::var_os("PATH")?)
+    std::env::var_os("PATH")
+        .and_then(|path| which_in_path(cmd, &path))
+        .or_else(|| std::env::var_os("HOME")
+            .and_then(|home| which_in_common_user_bins(cmd, Path::new(&home))))
+}
+
+/// Desktop launchers inherit a PATH captured when the user session started.
+/// Check common per-user installer locations too, so a fresh CLI can be found
+/// by Rescan without logging out or restarting the daemon.
+fn which_in_common_user_bins(cmd: &str, home: &Path) -> Option<String> {
+    const USER_BINS: &[&str] = &[
+        ".local/bin", ".cargo/bin", ".bun/bin", ".npm-global/bin",
+        ".volta/bin", ".local/share/mise/shims",
+    ];
+    USER_BINS.iter().find_map(|dir| {
+        let candidate = home.join(dir).join(cmd);
+        is_executable(&candidate).then(|| candidate.to_string_lossy().into_owned())
+    })
 }
 
 /// PATH lookup split out of `which` so it can be tested without mutating the
@@ -1981,6 +2055,42 @@ mod tests {
         assert!(which(file.to_str().unwrap()).is_some(), "explicit paths are checked as-is");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_rescan_finds_new_user_bin_executable_without_restarting() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("sd-user-bin-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&bin).expect("create user bin");
+        assert_eq!(which_in_common_user_bins("sd_new_harness", &home), None);
+        let command = bin.join("sd_new_harness");
+        std::fs::write(&command, "#!/bin/sh\n").expect("write executable");
+        assert_eq!(which_in_common_user_bins("sd_new_harness", &home), None);
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x");
+        assert_eq!(which_in_common_user_bins("sd_new_harness", &home).as_deref(), command.to_str());
+        std::fs::remove_dir_all(&home).expect("remove user bin");
+        assert_eq!(which_in_common_user_bins("sd_new_harness", &home), None);
+    }
+
+    #[test]
+    fn test_new_catalog_uses_installed_cli_commands() {
+        for (key, command, args) in [
+            ("gemini", "gemini", &[][..]), ("hermes", "hermes", &[][..]),
+            ("pi", "pi", &[][..]), ("goose", "goose", &["session"][..]),
+            ("qwen", "qwen", &[][..]), ("crush", "crush", &[][..]),
+            ("kimi", "kimi", &[][..]), ("herder", "herder", &["worker"][..]),
+            ("kiro", "kiro-cli", &[][..]), ("cursor", "cursor-agent", &[][..]),
+            ("t3code", "t3", &["serve"][..]),
+        ] {
+            assert!(HARNESS_KEYS.contains(&key));
+            let cfg = get_agent_config(key);
+            assert_eq!(cfg.commands, &[command]);
+            assert_eq!(cfg.default_args, args);
+            assert_eq!(cfg.npx_package, None);
+        }
     }
 
     #[test]
