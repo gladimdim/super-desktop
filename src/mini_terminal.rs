@@ -279,7 +279,6 @@ pub struct MiniTerminalCard {
     meta_label: Label,
     hint_label: Label,
     _iconify_btn: Button,
-    restore_btn: Button,
     expand_btn: Button,
     compact_restore_btn: Button,
     _compact_kill_btn: Button,
@@ -481,16 +480,6 @@ impl MiniTerminalCard {
         iconify_btn.set_tooltip_text(Some("Iconify to 128×128"));
         iconify_btn.add_css_class("term-btn");
         header.append(&iconify_btn);
-
-        // Restore / Expand larger size button
-        let restore_btn = Button::with_label("🗖");
-        restore_btn.set_tooltip_text(Some(&format!(
-            "Restore larger size ({}×{})",
-            data.borrow().restored_width,
-            data.borrow().restored_height
-        )));
-        restore_btn.add_css_class("term-btn");
-        header.append(&restore_btn);
 
         // Expand to 80% overlay button
         let expand_btn = Button::with_label("⛶");
@@ -708,7 +697,6 @@ impl MiniTerminalCard {
             meta_label,
             hint_label,
             _iconify_btn: iconify_btn.clone(),
-            restore_btn: restore_btn.clone(),
             expand_btn,
             compact_restore_btn: compact_restore_btn.clone(),
             _compact_kill_btn: compact_kill_btn.clone(),
@@ -843,7 +831,6 @@ impl MiniTerminalCard {
             let icon_box = card.icon_box.clone();
             let compact_top_bar = card.compact_top_bar.clone();
             let expand_btn = card.expand_btn.clone();
-            let restore_btn = card.restore_btn.clone();
             let hint_label = card.hint_label.clone();
             let source_message = Rc::clone(&source_message);
             let fit = Rc::clone(&card.fit);
@@ -882,7 +869,6 @@ impl MiniTerminalCard {
                     d.iconified = false;
                     d.restored_width = nw;
                     d.restored_height = nh;
-                    restore_btn.set_tooltip_text(Some(&format!("Restore size ({}×{})", nw, nh)));
                 }
                 container.set_size_request(nw, nh);
 
@@ -920,11 +906,6 @@ impl MiniTerminalCard {
         // Wire up buttons
         iconify_btn.connect_clicked({
             let action = Rc::clone(&iconify_action);
-            move |_| action()
-        });
-
-        restore_btn.connect_clicked({
-            let action = Rc::clone(&restore_action);
             move |_| action()
         });
 
@@ -1055,7 +1036,6 @@ impl MiniTerminalCard {
         let root_commit = card.container.clone();
         let data_commit = Rc::clone(&card.data);
         let visual_commit = Rc::clone(&card.visual_pos);
-        let restore_btn_commit = card.restore_btn.clone();
         let on_drag_end_resize = Rc::clone(&on_drag_end);
         let on_ghost_end = Rc::clone(&on_resize_end);
         let on_commit: Rc<dyn Fn(crate::card_resize::Rect)> = Rc::new(move |rect| {
@@ -1072,10 +1052,6 @@ impl MiniTerminalCard {
             }
             *visual_commit.borrow_mut() = (rect.x, rect.y);
             root_commit.set_size_request(rect.width, rect.height);
-            restore_btn_commit.set_tooltip_text(Some(&format!(
-                "Restore size ({}×{})",
-                rect.width, rect.height
-            )));
             on_drag_end_resize(root_commit.clone().upcast(), &data_commit.borrow());
         });
         *card.geometry_commit.borrow_mut() = Some(Rc::clone(&on_commit));
