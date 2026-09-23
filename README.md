@@ -83,12 +83,13 @@ installed yet. Press **Rescan** after installing a CLI; it checks the current
 If you previously customized which launchers are visible, turn on a newly
 detected launcher with its toggle. An installation in another, nonstandard
 directory may need to be added as a custom launcher.
-To add another CLI, open **Settings → Harness launchers → Add a harness**. Pick one
-of eight icons, enter a name and the absolute path to its executable, and add
-optional arguments (quote arguments containing spaces). Save it to add a button
-to this PC's top bar. You can edit, hide, or remove it from the same list. Its
-command runs in the selected workspace folder; a connected PC can launch it
-only while this PC offers it.
+
+To add another CLI, open **Settings → Harness launchers → Add a harness**. Its
+own page lets you pick one of eight icons, enter a name and the absolute path
+to its executable, and add optional arguments (quote arguments containing
+spaces). Save it to add a button to this PC's top bar. You can edit, hide, or
+remove it from the same list. Its command runs in the selected workspace
+folder; a connected PC can launch it only while this PC offers it.
 
 ### Keybindings
 

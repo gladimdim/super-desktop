@@ -48,6 +48,7 @@ enum SettingsPage {
     Home,
     Shortcut,
     Harnesses,
+    CustomHarness,
     TopBar,
     SleepLock,
     Android,
@@ -348,7 +349,7 @@ pub fn build_harness_settings_panel(
     titles.append(&subtitle);
     header.append(&titles);
 
-    // Shown only while the 📱 launcher page is up (see `nav`).
+    // Shown on every page after the settings hub (see `nav`).
     let btn_back = Button::with_label("←");
     btn_back.set_tooltip_text(Some("Back to settings"));
     btn_back.add_css_class("term-btn");
@@ -574,12 +575,15 @@ pub fn build_harness_settings_panel(
     actions.append(&btn_none);
     body.append(&actions);
 
-    let btn_add_custom = Button::with_label("＋ Add a harness");
-    btn_add_custom.add_css_class("launcher-btn");
-    btn_add_custom.add_css_class("launcher-btn-primary");
+    let (btn_add_custom, _) = settings_entry(
+        "＋", "Add a harness", "Choose an icon and executable for a new launcher.",
+        "settings-add-harness-entry",
+    );
     body.append(&btn_add_custom);
+    let custom_root = Box::new(Orientation::Vertical, 10);
+    custom_root.add_css_class("launcher-body");
+    let (_, custom_body) = section_card(&custom_root, "", "Launcher details");
     let custom_form = Box::new(Orientation::Vertical, 8);
-    custom_form.set_visible(false);
     let form_help = Label::new(Some("Choose an icon, name the launcher, and point it to an executable on this PC. Arguments are optional; use quotes to keep words together."));
     form_help.set_wrap(true);
     form_help.set_xalign(0.0);
@@ -648,24 +652,9 @@ pub fn build_harness_settings_panel(
     form_actions.append(&btn_save_custom);
     form_actions.append(&btn_cancel_custom);
     custom_form.append(&form_actions);
-    body.append(&custom_form);
+    custom_body.append(&custom_form);
     let editing_custom: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let refresh_custom: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    btn_add_custom.connect_clicked({
-        let form = custom_form.clone(); let name = custom_name.clone(); let path = custom_path.clone();
-        let args = custom_args.clone(); let status = form_status.clone();
-        let editing = Rc::clone(&editing_custom); let selected = Rc::clone(&selected_icon);
-        let paint = Rc::clone(&paint_icons);
-        move |_| {
-            *editing.borrow_mut() = None;
-            name.set_text(""); path.set_text(""); args.set_text(""); status.set_text("");
-            selected.set(0); paint(); form.set_visible(true); name.grab_focus();
-        }
-    });
-    btn_cancel_custom.connect_clicked({
-        let form = custom_form.clone();
-        move |_| form.set_visible(false)
-    });
 
     let note = Label::new(Some(
         "Hiding a launcher only removes its top-bar button; it does not remove the executable or saved configuration.",
@@ -794,6 +783,7 @@ pub fn build_harness_settings_panel(
     let home_view = settings_scroll(&home_root);
     let shortcut_view = settings_scroll(&shortcut_root);
     let harnesses_view = settings_scroll(&harnesses_root);
+    let custom_view = settings_scroll(&custom_root);
     let top_bar_view = settings_scroll(&top_bar_root);
     let sleep_view = settings_scroll(&sleep_root);
 
@@ -808,20 +798,24 @@ pub fn build_harness_settings_panel(
     pages.append(&home_view);
     pages.append(&shortcut_view);
     pages.append(&harnesses_view);
+    pages.append(&custom_view);
     pages.append(&top_bar_view);
     pages.append(&launcher_view);
     pages.append(&sleep_view);
     shortcut_view.set_visible(false);
     harnesses_view.set_visible(false);
+    custom_view.set_visible(false);
     top_bar_view.set_visible(false);
     launcher_view.set_visible(false);
     sleep_view.set_visible(false);
     outer.append(&pages);
 
+    let current_page = Rc::new(Cell::new(SettingsPage::Home));
     let nav: Rc<dyn Fn(SettingsPage)> = {
         let home_view = home_view.clone();
         let shortcut_view = shortcut_view.clone();
         let harnesses_view = harnesses_view.clone();
+        let custom_view = custom_view.clone();
         let top_bar_view = top_bar_view.clone();
         let launcher_view = launcher_view.clone();
         let sleep_view = sleep_view.clone();
@@ -830,14 +824,23 @@ pub fn build_harness_settings_panel(
         let title = title.clone();
         let subtitle = subtitle.clone();
         let launcher_refresh = Rc::clone(&launcher_page.refresh);
+        let editing_custom = Rc::clone(&editing_custom);
+        let current_page = Rc::clone(&current_page);
         Rc::new(move |page| {
+            current_page.set(page);
             home_view.set_visible(page == SettingsPage::Home);
             shortcut_view.set_visible(page == SettingsPage::Shortcut);
             harnesses_view.set_visible(page == SettingsPage::Harnesses);
+            custom_view.set_visible(page == SettingsPage::CustomHarness);
             top_bar_view.set_visible(page == SettingsPage::TopBar);
             launcher_view.set_visible(page == SettingsPage::Android);
             sleep_view.set_visible(page == SettingsPage::SleepLock);
             btn_back.set_visible(page != SettingsPage::Home);
+            btn_back.set_tooltip_text(Some(if page == SettingsPage::CustomHarness {
+                "Back to harness launchers"
+            } else {
+                "Back to settings"
+            }));
 
             match page {
                 SettingsPage::Home => {
@@ -854,6 +857,11 @@ pub fn build_harness_settings_panel(
                     badge.set_label("⌘");
                     title.set_label("Harness launchers");
                     subtitle.set_label("Choose what appears in the top bar");
+                }
+                SettingsPage::CustomHarness => {
+                    badge.set_label("＋");
+                    title.set_label(if editing_custom.borrow().is_some() { "Edit harness" } else { "Add a harness" });
+                    subtitle.set_label("Icon · name · executable · arguments");
                 }
                 SettingsPage::TopBar => {
                     badge.set_label("▤");
@@ -919,10 +927,31 @@ pub fn build_harness_settings_panel(
     btn_back.connect_clicked({
         let nav = Rc::clone(&nav);
         let refresh = Rc::clone(&firewall_notice_refresh);
+        let current_page = Rc::clone(&current_page);
         move |_| {
-            nav(SettingsPage::Home);
-            refresh();
+            if current_page.get() == SettingsPage::CustomHarness {
+                nav(SettingsPage::Harnesses);
+            } else {
+                nav(SettingsPage::Home);
+                refresh();
+            }
         }
+    });
+
+    btn_add_custom.connect_clicked({
+        let name = custom_name.clone(); let path = custom_path.clone();
+        let args = custom_args.clone(); let status = form_status.clone();
+        let editing = Rc::clone(&editing_custom); let selected = Rc::clone(&selected_icon);
+        let paint = Rc::clone(&paint_icons); let nav = Rc::clone(&nav);
+        move |_| {
+            *editing.borrow_mut() = None;
+            name.set_text(""); path.set_text(""); args.set_text(""); status.set_text("");
+            selected.set(0); paint(); nav(SettingsPage::CustomHarness); name.grab_focus();
+        }
+    });
+    btn_cancel_custom.connect_clicked({
+        let nav = Rc::clone(&nav);
+        move |_| nav(SettingsPage::Harnesses)
     });
 
     // ---- shortcut recorder ----
@@ -1199,7 +1228,6 @@ pub fn build_harness_settings_panel(
         let paint = Rc::clone(&paint);
         let apply = Rc::clone(&apply);
         let state = Rc::clone(&state);
-        let custom_form = custom_form.clone();
         let custom_name = custom_name.clone();
         let custom_path = custom_path.clone();
         let custom_args = custom_args.clone();
@@ -1207,6 +1235,7 @@ pub fn build_harness_settings_panel(
         let selected_icon = Rc::clone(&selected_icon);
         let paint_icons = Rc::clone(&paint_icons);
         let editing_custom = Rc::clone(&editing_custom);
+        let nav = Rc::clone(&nav);
         let refresh_custom = Rc::downgrade(&refresh_custom);
         let on_change = Rc::clone(&on_change);
         let on_detected = Rc::clone(&on_detected);
@@ -1282,18 +1311,19 @@ pub fn build_harness_settings_panel(
                     }
                 });
                 edit.connect_clicked({
-                    let form = custom_form.clone(); let name = custom_name.clone();
+                    let name = custom_name.clone();
                     let path = custom_path.clone(); let args = custom_args.clone();
                     let status = form_status.clone();
                     let selected = Rc::clone(&selected_icon); let paint = Rc::clone(&paint_icons);
                     let editing = Rc::clone(&editing_custom); let item = item.clone();
+                    let nav = Rc::clone(&nav);
                     move |_| {
                         *editing.borrow_mut() = Some(item.id.clone());
                         status.set_text("");
                         name.set_text(&item.name); path.set_text(&item.executable);
                         args.set_text(&item.arguments.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'"))).collect::<Vec<_>>().join(" "));
                         selected.set(crate::custom_harness::ICONS.iter().position(|icon| *icon == item.icon).unwrap_or(0));
-                        paint(); form.set_visible(true); name.grab_focus();
+                        paint(); nav(SettingsPage::CustomHarness); name.grab_focus();
                     }
                 });
                 remove.connect_clicked({
@@ -1346,7 +1376,7 @@ pub fn build_harness_settings_panel(
         let state = Rc::clone(&state); let name = custom_name.clone();
         let path = custom_path.clone(); let args = custom_args.clone();
         let selected = Rc::clone(&selected_icon); let editing = Rc::clone(&editing_custom);
-        let status = form_status.clone(); let form = custom_form.clone();
+        let status = form_status.clone(); let nav = Rc::clone(&nav);
         let on_change = Rc::clone(&on_change); let refresh = Rc::downgrade(&refresh_custom);
         move |_| {
             let icon = crate::custom_harness::ICONS[selected.get()];
@@ -1365,9 +1395,9 @@ pub fn build_harness_settings_panel(
                     drop(s);
                     on_change(selected);
                     crate::state::flush_state_saves();
-                    form.set_visible(false);
                     status.set_text("");
                     if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
+                    nav(SettingsPage::Harnesses);
                 }
                 Err(error) => status.set_text(&error),
             }
@@ -1520,8 +1550,15 @@ mod tests {
             }),
             Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
         );
+        find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        let pages = find_widgets(&panel.widget, "harness-page");
+        let add = find_buttons(&panel.widget, "settings-add-harness-entry").remove(0);
+        add.emit_clicked();
+        assert!(shown(&pages[3]));
+        assert_eq!(title_text(&panel.widget), "Add a harness");
         let buttons = find_buttons(&panel.widget, "launcher-btn");
-        buttons.iter().find(|button| button.label().as_deref() == Some("＋ Add a harness")).unwrap().emit_clicked();
+        buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        assert!(shown(&pages[3]), "invalid details keep the form open");
         buttons.iter().find(|button| button.label().as_deref() == Some("🧭")).unwrap().emit_clicked();
         let entries = find_widgets(&panel.widget, "ws-entry");
         for (placeholder, value) in [
@@ -1533,6 +1570,8 @@ mod tests {
                 .find(|entry| entry.placeholder_text().as_deref() == Some(placeholder)).unwrap().set_text(value);
         }
         buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        assert!(shown(&pages[2]));
+        assert_eq!(title_text(&panel.widget), "Harness launchers");
         let item = state.borrow().custom_harnesses[0].clone();
         assert_eq!(item.name, "My Echo");
         assert_eq!(item.icon, "🧭");
@@ -1542,12 +1581,20 @@ mod tests {
         let edit = find_buttons(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("Edit")).unwrap();
         edit.emit_clicked();
+        assert!(shown(&pages[3]));
+        assert_eq!(title_text(&panel.widget), "Edit harness");
         entries.iter().filter_map(|widget| widget.clone().downcast::<gtk4::Entry>().ok())
             .find(|entry| entry.placeholder_text().as_deref() == Some("Harness name")).unwrap().set_text("Echo again");
         buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        assert!(shown(&pages[2]));
         assert_eq!(state.borrow().custom_harnesses.len(), 1);
         assert_eq!(state.borrow().custom_harnesses[0].name, "Echo again");
         assert_eq!(state.borrow().custom_harnesses[0].id, item.id);
+        add.emit_clicked();
+        assert!(shown(&pages[3]));
+        buttons.iter().find(|button| button.label().as_deref() == Some("Cancel")).unwrap().emit_clicked();
+        assert!(shown(&pages[2]), "cancel returns to the launcher list");
+        assert_eq!(state.borrow().custom_harnesses.len(), 1);
         let remove = find_buttons(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("Remove")).unwrap();
         remove.emit_clicked();
@@ -1632,14 +1679,14 @@ mod tests {
         // page, with Android keeping its existing connection, pairing and
         // device sections together.
         let pages = find_widgets(&panel.widget, "harness-page");
-        assert_eq!(pages.len(), 6, "hub + five destination pages");
+        assert_eq!(pages.len(), 7, "hub + five destinations + custom harness page");
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![0, 1, 2, 1, 2, 1]);
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 7);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 8);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -1655,9 +1702,9 @@ mod tests {
         for (class, page_index, page_title) in [
             ("settings-shortcut-entry", 1, "Keyboard shortcut"),
             ("settings-harnesses-entry", 2, "Harness launchers"),
-            ("settings-top-bar-entry", 3, "Top bar"),
-            ("android-settings-entry", 4, "Connections"),
-            ("settings-sleep-lock-entry", 5, "Sleep lock"),
+            ("settings-top-bar-entry", 4, "Top bar"),
+            ("android-settings-entry", 5, "Connections"),
+            ("settings-sleep-lock-entry", 6, "Sleep lock"),
         ] {
             let button = find_buttons(&panel.widget, class)
                 .into_iter()
@@ -1678,6 +1725,16 @@ mod tests {
             assert_eq!(title_text(&panel.widget), "Settings");
         }
 
+        find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        find_buttons(&panel.widget, "settings-add-harness-entry")[0].emit_clicked();
+        assert!(shown(&pages[3]));
+        assert_eq!(title_text(&panel.widget), "Add a harness");
+        btn_back.emit_clicked();
+        assert!(shown(&pages[2]), "back from the form returns to harness launchers");
+        assert_eq!(title_text(&panel.widget), "Harness launchers");
+        btn_back.emit_clicked();
+        assert!(shown(&pages[0]));
+
         // Reopening returns to the hub even when Android was the last page.
         let btn_launcher = find_buttons(&panel.widget, "android-settings-entry")
             .into_iter()
@@ -1685,7 +1742,7 @@ mod tests {
             .expect("the Android destination must offer a navigation button");
         panel.widget.set_visible(false);
         btn_launcher.emit_clicked();
-        assert!(shown(&pages[4]));
+        assert!(shown(&pages[5]));
         panel.widget.set_visible(true);
         assert!(shown(&pages[0]), "reopening resets to the settings hub");
         assert!(pages[1..].iter().all(|page| !shown(page)));
