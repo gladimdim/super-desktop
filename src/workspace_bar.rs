@@ -47,8 +47,8 @@ const SUGGEST_MAX: usize = 10;
 const FS_MATCH_CAP: usize = 24;
 const FIELD_MIN_CHARS: i32 = 14;
 const FIELD_MAX_CHARS: i32 = 34;
-const RESIZE_MIN_CHARS: i32 = 8;
-const RESIZE_MAX_CHARS: i32 = 48;
+const RESIZE_MIN_WIDTH: i32 = 80;
+const RESIZE_MAX_WIDTH: i32 = 480;
 
 /// A narrow drag target after ▾ changes only this viewer's folder field width.
 fn append_resize_handle(row: &GtkBox, entry: &Entry) {
@@ -58,27 +58,38 @@ fn append_resize_handle(row: &GtkBox, entry: &Entry) {
     handle.set_tooltip_text(Some("Drag to resize the working directory field"));
 
     let drag = GestureDrag::new();
-    let start_chars = Rc::new(Cell::new(FIELD_MIN_CHARS));
-    let pixels_per_char = Rc::new(Cell::new(8.0_f64));
+    let start = Rc::new(Cell::new(None::<(f64, i32)>));
     let begin_entry = entry.clone();
-    let begin_chars = Rc::clone(&start_chars);
-    let begin_pixels = Rc::clone(&pixels_per_char);
-    drag.connect_drag_begin(move |_, _, _| {
-        let chars = if begin_entry.width_chars() == begin_entry.max_width_chars() {
-            begin_entry.width_chars()
-        } else {
-            (begin_entry.text().chars().count() as i32)
-                .clamp(FIELD_MIN_CHARS, FIELD_MAX_CHARS)
-        };
-        begin_chars.set(chars);
-        begin_pixels.set((begin_entry.width() as f64 / chars as f64).max(5.0));
+    let begin_start = Rc::clone(&start);
+    drag.connect_drag_begin(move |gesture, _, _| {
+        let origin = gesture.current_event().and_then(|event| event.position());
+        let width = begin_entry.compute_bounds(&begin_entry)
+            .map(|bounds| bounds.width().round() as i32)
+            .unwrap_or_else(|| begin_entry.width());
+        begin_start.set(origin.map(|(x, _)| (x, width)));
+        if origin.is_some() {
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+            // Preserve the actual allocation, including CSS padding. Once
+            // dragged, use pixels so text length cannot change the width.
+            begin_entry.set_width_request(width);
+            begin_entry.set_width_chars(0);
+            begin_entry.set_max_width_chars(0);
+        }
     });
     let update_entry = entry.clone();
-    drag.connect_drag_update(move |_, delta_x, _| {
-        let chars = (start_chars.get() as f64 + delta_x / pixels_per_char.get()).round() as i32;
-        let chars = chars.clamp(RESIZE_MIN_CHARS, RESIZE_MAX_CHARS);
-        update_entry.set_width_chars(chars);
-        update_entry.set_max_width_chars(chars);
+    drag.connect_drag_update(move |gesture, _, _| {
+        let Some((origin_x, width)) = start.get() else { return };
+        let Some((pointer_x, _)) = gesture.current_event().and_then(|event| event.position()) else {
+            return;
+        };
+        // GDK positions are relative to the surface. GestureDrag offsets are
+        // relative to the handle, which moves as the field is resized: using
+        // those offsets feeds the resize back into itself and causes jitter.
+        let width = (width as f64 + pointer_x - origin_x).round() as i32;
+        let width = width.clamp(RESIZE_MIN_WIDTH, RESIZE_MAX_WIDTH);
+        if update_entry.width_request() != width {
+            update_entry.set_width_request(width);
+        }
     });
     handle.add_controller(drag);
     row.append(&handle);
