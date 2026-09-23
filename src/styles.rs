@@ -263,6 +263,18 @@ entry.ws-entry.ws-entry-invalid {{
     color: {bright_foreground};
 }}
 
+.ws-resize-handle {{
+    color: {dark_foreground};
+    min-width: 10px;
+    min-height: 22px;
+    margin-left: 1px;
+    font-size: 13px;
+}}
+
+.ws-resize-handle:hover {{
+    color: {accent};
+}}
+
 popover.ws-pop {{
     background-color: {hud_bg};
     border: 1px solid {hud_border};

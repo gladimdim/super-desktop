@@ -27,10 +27,10 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick, Label, Orientation,
+    Align, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick, GestureDrag, Label, Orientation,
     Popover, PositionType, PropagationPhase,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -45,6 +45,44 @@ use crate::state::{
 const SUGGEST_MAX: usize = 10;
 /// Hard cap when listing a parent directory so `/` cannot stall a keystroke.
 const FS_MATCH_CAP: usize = 24;
+const FIELD_MIN_CHARS: i32 = 14;
+const FIELD_MAX_CHARS: i32 = 34;
+const RESIZE_MIN_CHARS: i32 = 8;
+const RESIZE_MAX_CHARS: i32 = 48;
+
+/// A narrow drag target after ▾ changes only this viewer's folder field width.
+fn append_resize_handle(row: &GtkBox, entry: &Entry) {
+    let handle = Label::new(Some("│"));
+    handle.add_css_class("ws-resize-handle");
+    handle.set_cursor_from_name(Some("col-resize"));
+    handle.set_tooltip_text(Some("Drag to resize the working directory field"));
+
+    let drag = GestureDrag::new();
+    let start_chars = Rc::new(Cell::new(FIELD_MIN_CHARS));
+    let pixels_per_char = Rc::new(Cell::new(8.0_f64));
+    let begin_entry = entry.clone();
+    let begin_chars = Rc::clone(&start_chars);
+    let begin_pixels = Rc::clone(&pixels_per_char);
+    drag.connect_drag_begin(move |_, _, _| {
+        let chars = if begin_entry.width_chars() == begin_entry.max_width_chars() {
+            begin_entry.width_chars()
+        } else {
+            (begin_entry.text().chars().count() as i32)
+                .clamp(FIELD_MIN_CHARS, FIELD_MAX_CHARS)
+        };
+        begin_chars.set(chars);
+        begin_pixels.set((begin_entry.width() as f64 / chars as f64).max(5.0));
+    });
+    let update_entry = entry.clone();
+    drag.connect_drag_update(move |_, delta_x, _| {
+        let chars = (start_chars.get() as f64 + delta_x / pixels_per_char.get()).round() as i32;
+        let chars = chars.clamp(RESIZE_MIN_CHARS, RESIZE_MAX_CHARS);
+        update_entry.set_width_chars(chars);
+        update_entry.set_max_width_chars(chars);
+    });
+    handle.add_controller(drag);
+    row.append(&handle);
+}
 
 /// The top bar field and the history popover it owns.
 #[derive(Clone)]
@@ -134,8 +172,8 @@ pub fn build_remote_folder_bar(on_pick: Rc<dyn Fn(String)>) -> RemoteFolderBar {
     // machine's to spell.
     let entry = Entry::new();
     entry.add_css_class("ws-entry");
-    entry.set_width_chars(18);
-    entry.set_max_width_chars(42);
+    entry.set_width_chars(FIELD_MIN_CHARS);
+    entry.set_max_width_chars(FIELD_MAX_CHARS);
     entry.set_valign(Align::Center);
     entry.set_hexpand(false);
     entry.set_editable(false);
@@ -149,6 +187,7 @@ pub fn build_remote_folder_bar(on_pick: Rc<dyn Fn(String)>) -> RemoteFolderBar {
     menu_btn.set_valign(Align::Center);
     menu_btn.set_tooltip_text(Some("Folders that PC offers"));
     row.append(&menu_btn);
+    append_resize_handle(&row, &entry);
     bar.append(&row);
 
     let folders: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
@@ -350,10 +389,9 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
 
     let entry = Entry::new();
     entry.add_css_class("ws-entry");
-    // Twice the previous compact field, so a project path remains readable
-    // without opening the history or moving the caret through it.
-    entry.set_width_chars(18);
-    entry.set_max_width_chars(42);
+    // About 20% narrower than the original 18–42 character field.
+    entry.set_width_chars(FIELD_MIN_CHARS);
+    entry.set_max_width_chars(FIELD_MAX_CHARS);
     entry.set_valign(Align::Center);
     // GTK entries expand by default; the field claims its configured text
     // width so the other dock controls keep their own space.
@@ -374,6 +412,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
     menu_btn.set_valign(Align::Center);
     menu_btn.set_tooltip_text(Some("Folders used before"));
     row.append(&menu_btn);
+    append_resize_handle(&row, &entry);
     bar.append(&row);
 
     let popover = Popover::new();
@@ -1464,8 +1503,9 @@ mod tests {
             !entry.has_tooltip(),
             "a hover tooltip would cover the field and steal clicks"
         );
-        assert_eq!(entry.width_chars(), 18);
-        assert_eq!(entry.max_width_chars(), 42);
+        assert_eq!(entry.width_chars(), FIELD_MIN_CHARS);
+        assert_eq!(entry.max_width_chars(), FIELD_MAX_CHARS);
+        assert_eq!(count_class(bar.widget.upcast_ref(), "ws-resize-handle"), 1);
 
         // The ▾ list has one row per remembered folder, each with its own ✕.
         rebuild_recent(&bar.popover, &state, &entry, Rc::clone(&persist), None);
