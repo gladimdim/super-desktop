@@ -126,11 +126,10 @@ pub fn build_launcher_page() -> LauncherPage {
 
     // ---- 1 · bridge status + controls ----
     let (head, body) = section_card(&root, "", "This computer");
-    let v_bridge_state = chip("…");
-    v_bridge_state.add_css_class("launcher-offline");
+    let v_bridge_state = chip("Checking…");
     head.append(&v_bridge_state);
 
-    let status = Label::new(None);
+    let status = Label::new(Some("Checking the bridge in the background…"));
     status.add_css_class("launcher-status-text");
     status.set_xalign(0.0);
     status.set_wrap(true);
@@ -143,6 +142,8 @@ pub fn build_launcher_page() -> LauncherPage {
     btn_start.add_css_class("launcher-btn");
     btn_start.add_css_class("launcher-btn-primary");
     let btn_stop = Button::with_label("Stop");
+    btn_start.set_visible(false);
+    btn_stop.set_visible(false);
     btn_stop.set_tooltip_text(Some("Stop the local harness bridge"));
     btn_stop.add_css_class("launcher-btn");
     btn_stop.add_css_class("launcher-btn-danger");
@@ -152,7 +153,7 @@ pub fn build_launcher_page() -> LauncherPage {
     let start_weak = btn_start.downgrade();
     let stop_weak = btn_stop.downgrade();
 
-    let port_hint = Label::new(Some("Encrypted end to end · Wi-Fi or Tailscale"));
+    let port_hint = Label::new(Some("Encrypted end to end · Wi-Fi or Tailscale · Automatically recovers while SUPER DESKTOP is running"));
     port_hint.add_css_class("launcher-hint");
     port_hint.set_xalign(0.0);
     port_hint.set_wrap(true);
@@ -520,7 +521,7 @@ pub fn build_launcher_page() -> LauncherPage {
             glib::MainContext::default().spawn_local(async move {
                 match gtk4::gio::spawn_blocking(op).await {
                     Ok(Ok(())) => {
-                        note.set_text(&format!("● Bridge answering on :{}", bridge::BRIDGE_PORT));
+                        note.set_visible(false);
                     }
                     Ok(Err(e)) => {
                         note.add_css_class("launcher-note-error");

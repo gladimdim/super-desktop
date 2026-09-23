@@ -92,8 +92,9 @@ stop_desktop() {
 
 start_desktop() {
   echo "--> Starting fresh daemon (hidden)..."
-  # Detached so it survives the terminal; daemon comes up hidden, overlay builds warm.
-  nohup "$BIN_DST" daemon >/tmp/super-desktop-daemon.log 2>&1 & disown || true
+  # A separate session survives launcher process-group cleanup as well as
+  # terminal hangup; nohup alone only protects against SIGHUP.
+  nohup setsid "$BIN_DST" daemon </dev/null >/tmp/super-desktop-daemon.log 2>&1 & disown || true
 
   echo "--> Waiting for daemon IPC..."
   for _ in $(seq 1 50); do

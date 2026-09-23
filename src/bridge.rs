@@ -20,6 +20,9 @@ mod pairing;
 pub use pairing::{pending_requests, decide_request, paired_devices, revoke_device, pairing_invitation};
 #[path = "bridge_security.rs"]
 mod security;
+#[path = "bridge_lifecycle.rs"]
+mod lifecycle;
+pub use lifecycle::supervise as supervise_bridge;
 use security::Connection;
 use std::collections::HashMap;
 use std::fs;
@@ -1605,12 +1608,15 @@ fn tailscale_ip_uncached() -> Option<String> {
 
 /// True when a bridge answers on loopback (this laptop).
 pub fn bridge_running(port: u16) -> bool {
-    bridge_ping_body(port).is_some()
+    bridge_ping_body(port)
+        .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+        .is_some_and(|body| body["status"] == "ok" && body["service"] == SERVICE_NAME)
 }
 
 fn bridge_ping_body(_port: u16) -> Option<String> {
     let mut s = std::os::unix::net::UnixStream::connect(security::control_path()).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+    s.set_write_timeout(Some(Duration::from_secs(3))).ok()?;
     s.write_all(b"GET /api/v1/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .ok()?;
     let mut resp = String::new();
@@ -1634,13 +1640,19 @@ fn bridge_ping_body(_port: u16) -> Option<String> {
 /// config) and its tail is folded into the error string, so the 📱 panel can
 /// show WHY a start failed instead of doing nothing.
 pub fn start_bridge() -> Result<(), String> {
+    let mut lifecycle = lifecycle::LIFECYCLE.lock().unwrap();
+    lifecycle.enable(true);
+    start_bridge_inner()
+}
+
+fn start_bridge_inner() -> Result<(), String> {
     if bridge_running(BRIDGE_PORT) {
         return Ok(());
     }
     if port_taken(BRIDGE_PORT) {
         // Something is on our port: if it is a wedged bridge of ours, drop it
         // and take the port over; otherwise say who holds it.
-        let _ = stop_bridge();
+        let _ = stop_bridge_inner();
         if bridge_running(BRIDGE_PORT) {
             return Ok(());
         }
@@ -1655,7 +1667,10 @@ pub fn start_bridge() -> Result<(), String> {
     // The log is a diagnostic, never a precondition: on a read-only state dir
     // the bridge must still start (it would otherwise fail with a confusing
     // "Read-only file system" instead of serving).
-    let log = fs::File::create(bridge_log_path()).ok();
+    let log_path = bridge_log_path();
+    // Keep the last run's diagnostics when recovering an unexpected exit.
+    let _ = fs::rename(&log_path, log_path.with_file_name("bridge.previous.log"));
+    let log = fs::File::create(log_path).ok();
     let log_err = log.as_ref().and_then(|f| f.try_clone().ok());
 
     let mut command = Command::new(&exe);
@@ -1664,6 +1679,7 @@ pub fn start_bridge() -> Result<(), String> {
         // Stable argv[0]: `stop_bridge()` and a user's `pkill` match on
         // "super-desktop harness-bridge" whichever path we re-executed.
         .arg0("super-desktop")
+        .process_group(0)
         .stdin(Stdio::null());
     match (log, log_err) {
         (Some(out), Some(err)) => {
@@ -1673,12 +1689,20 @@ pub fn start_bridge() -> Result<(), String> {
             command.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
-    command
+    let mut child = command
         .spawn()
         .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+    std::thread::spawn(move || {
+        // Reap recovered children and retain the exit reason in the daemon log.
+        match child.wait() {
+            Ok(status) => eprintln!("SUPER DESKTOP: bridge process exited: {status}"),
+            Err(error) => eprintln!("SUPER DESKTOP: could not wait for bridge: {error}"),
+        }
+    });
 
     // The first start of a desktop session can be slow (cold binary, busy box).
-    for _ in 0..50 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
         if bridge_running(BRIDGE_PORT) {
             return Ok(());
         }
@@ -1752,6 +1776,12 @@ fn bridge_log_tail() -> Option<String> {
 /// SIGTERM, and one that keeps holding the port is exactly what makes every
 /// later start fail. Success means the port is free again, not merely "quiet".
 pub fn stop_bridge() -> Result<(), String> {
+    let mut lifecycle = lifecycle::LIFECYCLE.lock().unwrap();
+    lifecycle.enable(false);
+    stop_bridge_inner()
+}
+
+fn stop_bridge_inner() -> Result<(), String> {
     // pkill exits 1 when nothing matched — that means already stopped.
     if pkill_bridge(&["-f", "super-desktop harness-bridge"])? == 1 {
         return Ok(());

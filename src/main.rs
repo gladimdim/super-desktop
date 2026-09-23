@@ -96,6 +96,7 @@ use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{channel, Sender};
@@ -323,6 +324,8 @@ fn main() {
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
         let _ = std::process::Command::new(exe)
             .arg("daemon")
+            // Outlive the launcher's terminal/process-group cleanup.
+            .process_group(0)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -424,14 +427,10 @@ fn run_daemon(start_visible: bool) {
     // socket: a duplicate daemon exits in `start_ipc_thread` and must not
     // restart or disturb the bridge.
     if let Err(error) = thread::Builder::new()
-        .name("super-desktop-bridge-start".to_string())
-        .spawn(|| {
-            if let Err(error) = bridge::start_bridge() {
-                eprintln!("SUPER DESKTOP: could not auto-start bridge: {error}");
-            }
-        })
+        .name("super-desktop-bridge-watch".to_string())
+        .spawn(bridge::supervise_bridge)
     {
-        eprintln!("SUPER DESKTOP: could not schedule bridge auto-start: {error}");
+        eprintln!("SUPER DESKTOP: could not start bridge supervision: {error}");
     }
 
     // Warm the UI right after start, never on the startup path: startup stays
