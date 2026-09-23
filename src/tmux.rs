@@ -548,6 +548,7 @@ pub fn create_session(
 ) -> (String, String) {
     let session_name = unique_session_name();
     let cmd = resolve_command(agent_type, custom_command);
+    let launch = crate::shell_title::launch_command(agent_type, &cmd);
     let cwd = resolve_workspace_dir(workspace_dir);
 
     let _ = Command::new("tmux")
@@ -562,7 +563,7 @@ pub fn create_session(
             "120",
             "-y",
             "35",
-            &cmd,
+            &launch,
         ])
         .output();
 
@@ -685,6 +686,7 @@ pub fn ensure_session_with_inventory(
         // terminals in create_session() still launch fresh.
         let cmd =
             resolve_resume_command_with_session(agent_type, custom_command, agent_session_id);
+        let launch = crate::shell_title::launch_command(agent_type, &cmd);
         let cwd = resolve_workspace_dir(workspace_dir);
         let _ = Command::new("tmux")
             .args([
@@ -698,7 +700,7 @@ pub fn ensure_session_with_inventory(
                 "120",
                 "-y",
                 "35",
-                &cmd,
+                &launch,
             ])
             .output();
     }

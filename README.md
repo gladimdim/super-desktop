@@ -48,6 +48,15 @@ rollout user messages and the owned OpenCode session provide fallbacks for
 older sessions. Unsupported terminal editing (such as history recall) keeps the
 previous tracked prompt rather than guessing from the response screen.
 
+Regular terminal cards use the command that launched the task, never output
+lines. Newly created plain Bash terminals record the submitted shell command,
+including history recall and Tab completion, and keep it after the task finishes.
+Input sent to the running task cannot replace this title. Existing terminals and
+other shells use the foreground process's arguments when available, then tracked
+input; exact original quoting, aliases, and pipelines require the Bash hook.
+Titles remain shortened to fit the card. This also applies to remote PC and
+Android labels; AI harness prompt titles are unchanged.
+
 Android's per-terminal bell can report explicit Codex response completion, including
 while the phone UI is hidden using an opt-in foreground monitor. Other harnesses
 do not yet have verified completion adapters. See [completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).

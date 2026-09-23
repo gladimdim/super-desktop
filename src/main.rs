@@ -5,6 +5,7 @@ mod completion;
 mod custom_harness;
 mod prompt_image;
 mod prompt_history;
+mod shell_title;
 mod asset_pdf;
 mod asset_view;
 mod bridge;

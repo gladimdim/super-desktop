@@ -36,10 +36,10 @@ use std::time::Duration;
 
 use crate::state::load_state;
 use crate::tmux::{
-    capture_pane_text, extract_last_prompt, get_agent_config,
+    capture_pane_text, get_agent_config,
     get_composer_draft, get_opencode_user_text_by_id, inspect_status,
     inspect_status_with_screen, resolve_own_opencode_id, resolve_workspace_dir,
-    strip_terminal_escapes, truncate_prompt_title, SessionStatus,
+    strip_terminal_escapes, SessionStatus,
 };
 
 pub const BRIDGE_PORT: u16 = 8759;
@@ -191,8 +191,11 @@ pub(crate) fn last_user_text(
     session: &str,
     agent_type: &str,
     persisted: Option<&str>,
-    screen: &str,
+    _screen: &str,
 ) -> Option<String> {
+    if is_regular_terminal(agent_type) {
+        return crate::shell_title::last(session);
+    }
     if let Some(prompt) = crate::prompt_history::last(session) {
         return Some(prompt);
     }
@@ -210,15 +213,11 @@ pub(crate) fn last_user_text(
         }
     }
     // Response text is never a fallback for AI harness titles.
-    if is_regular_terminal(agent_type) {
-        extract_last_prompt(screen).map(|s| truncate_prompt_title(&s))
-    } else {
-        None
-    }
+    None
 }
 
 fn is_regular_terminal(agent_type: &str) -> bool {
-    matches!(agent_type, "shell" | "bash" | "terminal")
+    crate::shell_title::is_regular(agent_type)
 }
 
 /// Pick the directory the launcher should describe. Harness rows show the
@@ -2086,6 +2085,10 @@ mod tests {
 
     #[test]
     fn agent_response_markers_are_not_prompt_fallbacks() {
+        assert_eq!(last_user_text(
+            "sd_term_missing_prompt_test", "shell", None,
+            "Task output costs $5\n# Build summary\n> noisy output",
+        ), None);
         assert_eq!(last_user_text(
             "sd_term_missing_prompt_test", "claude", None,
             "Answer costs $5\n# Summary\n> Last sentence of the response",
