@@ -1291,7 +1291,6 @@ impl MiniTerminalCard {
         let title = title.trim();
         if !title.is_empty() && self.title_label.label() != title {
             self.title_label.set_label(title);
-            self.title_label.set_tooltip_text(Some(title));
         }
         apply_status_view(
             &self.status_badge,

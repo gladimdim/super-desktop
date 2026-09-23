@@ -114,9 +114,6 @@ impl MachineView {
         remote.append(&toolbar);
         remote.append(&bar.note);
         let canvas = RemoteCanvas::new();
-        canvas.area.set_tooltip_text(Some(
-            "The host's consoles, streamed live and scaled to fit. Click a console and type, or drag its header to move it on that PC. This view refreshes every two seconds.",
-        ));
         remote.append(&canvas.area);
         stack.add_named(&remote, Some("remote"));
         stack.set_visible_child_name("local");
