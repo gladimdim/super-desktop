@@ -294,6 +294,9 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             .cloned()
             .unwrap_or_else(|| ("shell".to_string(), String::new(), None, 0, None));
         let cfg = get_agent_config(&agent_type);
+        let custom = state.custom_harnesses.iter().find(|item| item.id == agent_type);
+        let agent_name = custom.map_or(cfg.name, |item| item.name.as_str());
+        let agent_icon = custom.map_or(cfg.icon, |item| item.icon.as_str());
         let screen = capture_pane_text(&session).unwrap_or_default();
         let (model, effort) = harness_model_effort(&agent_type, &screen);
         let status = inspect_status_with_screen(&session, &agent_type, &screen);
@@ -313,10 +316,10 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
         out.push(serde_json::json!({
             "id": session,
             "agentType": agent_type,
-            "agentName": cfg.name,
+            "agentName": agent_name,
             "model": model,
             "effort": effort,
-            "icon": cfg.icon,
+            "icon": agent_icon,
             "status": status.status,
             "label": status.label,
             "pid": status.pid,
@@ -1142,21 +1145,29 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             };
         }
         if req.method == "GET" && path == "/api/v1/harness-types" {
+            let state = load_state();
             let types: Vec<_> = crate::tmux::HARNESS_KEYS.iter().map(|key| {
                 let config = get_agent_config(key);
                 serde_json::json!({"id":key,"name":config.name,"icon":config.icon,
                     "available":crate::tmux::detect_harness_command(key).is_some()})
-            }).collect();
+            }).chain(state.custom_harnesses.iter().map(|item| {
+                serde_json::json!({"id":item.id,"name":item.name,"icon":item.icon,"available":item.available()})
+            })).collect();
             return respond(&mut stream, 200, "OK", &serde_json::json!({"types":types,
-                "workspace":crate::state::effective_workspace_dir(&load_state())}));
+                "workspace":crate::state::effective_workspace_dir(&state)}));
         }
         if req.method == "POST" && path == "/api/v1/harnesses" {
             let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or(serde_json::Value::Null);
             let agent = body.get("agentType").and_then(|v| v.as_str()).unwrap_or("");
-            if !crate::tmux::HARNESS_KEYS.contains(&agent) {
+            let custom = load_state().custom_harnesses.into_iter().find(|item| item.id == agent);
+            if !crate::tmux::HARNESS_KEYS.contains(&agent) && custom.is_none() {
                 return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"unsupported_harness"}));
             }
-            if crate::tmux::detect_harness_command(agent).is_none() {
+            let available = custom.as_ref().map_or_else(
+                || crate::tmux::detect_harness_command(agent).is_some(),
+                |item| item.validate().is_ok(),
+            );
+            if !available {
                 return respond(&mut stream, 409, "Conflict", &serde_json::json!({"error":"harness_not_installed"}));
             }
             let Some(command) = creation_command(agent, &body) else {

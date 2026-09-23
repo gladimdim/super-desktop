@@ -286,12 +286,13 @@ impl SuperDesktopWindow {
                         s.visible_harnesses = Some(keys.clone());
                         s.clone()
                     };
-                    crate::state::save_state_async(snapshot);
+                    crate::state::save_state_async(snapshot.clone());
                     // The same call a remote view makes with a host's list: the
                     // bar only ever reflects what its owner says is offered.
                     if let Some(bar) = bar_slot.borrow().as_ref() {
                         bar.apply(&crate::harness_bar::HarnessState {
                             keys,
+                            custom: snapshot.custom_harnesses.iter().map(Into::into).collect(),
                             ready: true,
                         });
                     }
@@ -590,10 +591,7 @@ impl SuperDesktopWindow {
         // settings panel can never disagree about what this app can run; the
         // visible subset comes from the stored selection ∩ what is installed.
         let detected = crate::tmux::detect_harnesses();
-        let visible_keys = crate::harness_settings::resolve_visible(
-            win_rc.state.borrow().visible_harnesses.as_deref(),
-            &detected,
-        );
+        let visible_keys = crate::harness_settings::visible_keys(&win_rc.state.borrow(), &detected);
         let light_theme = crate::theme::current_theme().mode == "light";
         let harness_bar = crate::harness_bar::HarnessBar::new(
             Rc::new({
@@ -657,6 +655,7 @@ impl SuperDesktopWindow {
         );
         harness_bar.apply(&crate::harness_bar::HarnessState {
             keys: visible_keys,
+            custom: win_rc.state.borrow().custom_harnesses.iter().map(Into::into).collect(),
             ready: true,
         });
         *harness_bar_for_settings.borrow_mut() = Some(Rc::clone(&harness_bar));
@@ -1093,7 +1092,10 @@ impl SuperDesktopWindow {
         let workspace_dir = directory.map(str::to_owned)
             .unwrap_or_else(|| crate::state::effective_workspace_dir(&self.state.borrow()));
         crate::state::remember_workspace_dir(&mut self.state.borrow_mut(), &workspace_dir);
-        let (sess, cmd_run) = create_session(agent_type, cmd, Some(&workspace_dir));
+        let custom_command = self.state.borrow().custom_harnesses.iter()
+            .find(|item| item.id == agent_type && item.validate().is_ok())
+            .map(|item| item.command());
+        let (sess, cmd_run) = create_session(agent_type, custom_command.as_deref().or(cmd), Some(&workspace_dir));
         let idx = self.terminal_cards.borrow().len();
 
         // Default size for a new harness: 640x480, clamped to the screen.
@@ -1839,7 +1841,8 @@ impl SuperDesktopWindow {
         agent_type: &str,
         workspace: &str,
     ) -> Result<String, &'static str> {
-        if !crate::tmux::HARNESS_KEYS.contains(&agent_type) {
+        if !crate::tmux::HARNESS_KEYS.contains(&agent_type)
+            && !self.state.borrow().custom_harnesses.iter().any(|item| item.id == agent_type && item.validate().is_ok()) {
             return Err("unsupported_harness");
         }
         let Some(directory) = crate::state::clean_dir(workspace) else {

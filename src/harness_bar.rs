@@ -54,7 +54,17 @@ type HoverCard = Rc<dyn Fn(&gtk4::Button, &str) -> bool>;
 #[derive(Clone, Debug, PartialEq)]
 pub struct HarnessState {
     pub keys: Vec<String>,
+    pub custom: Vec<CustomButton>,
     pub ready: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomButton { pub id: String, pub name: String, pub icon: String }
+
+impl From<&crate::custom_harness::CustomHarness> for CustomButton {
+    fn from(value: &crate::custom_harness::CustomHarness) -> Self {
+        Self { id: value.id.clone(), name: value.name.clone(), icon: value.icon.clone() }
+    }
 }
 
 impl HarnessState {
@@ -62,6 +72,7 @@ impl HarnessState {
     pub fn none() -> Self {
         Self {
             keys: Vec::new(),
+            custom: Vec::new(),
             ready: false,
         }
     }
@@ -69,11 +80,16 @@ impl HarnessState {
     /// The keys a host's snapshot reports it can run, in `HARNESS_KEYS` order.
     pub fn of_snapshot(snapshot: &WorkspaceSnapshot, ready: bool) -> Self {
         Self {
-            keys: crate::tmux::HARNESS_KEYS
-                .iter()
-                .filter(|key| snapshot.local.visible_harnesses.iter().any(|k| k == *key))
+            keys: crate::tmux::HARNESS_KEYS.iter()
+                .filter(|key| snapshot.local.visible_harnesses.iter().any(|offered| offered == **key))
                 .map(|key| (*key).to_string())
+                .chain(snapshot.local.visible_harnesses.iter()
+                    .filter(|key| key.starts_with("custom-")).cloned())
                 .collect(),
+            custom: snapshot.local.harness_types.iter()
+                .filter(|item| item.id.starts_with("custom-") && snapshot.local.visible_harnesses.contains(&item.id))
+                .map(|item| CustomButton { id: item.id.clone(), name: item.name.clone(),
+                    icon: item.icon.clone().unwrap_or_else(|| "💻".into()) }).collect(),
             ready,
         }
     }
@@ -87,7 +103,7 @@ pub struct HarnessBar {
     /// say: a launch in flight, a refusal, or a host that cannot be launched
     /// into yet.
     pub note: gtk4::Label,
-    buttons: Vec<(String, gtk4::Button)>,
+    buttons: RefCell<Vec<(String, gtk4::Button)>>,
     /// Logo images, so a theme switch can swap them like the local bar does.
     images: Rc<RefCell<Vec<(gtk4::Image, String)>>>,
     on_launch: LaunchAction,
@@ -147,7 +163,7 @@ impl HarnessBar {
         let bar = Rc::new(Self {
             group,
             note,
-            buttons,
+            buttons: RefCell::new(buttons),
             images,
             on_launch,
             on_hover,
@@ -155,7 +171,7 @@ impl HarnessBar {
             busy: Cell::new(false),
             failed: Cell::new(false),
         });
-        for (key, button) in &bar.buttons {
+        for (key, button) in bar.buttons.borrow().iter() {
             let weak = Rc::downgrade(&bar);
             let launched = key.clone();
             button.connect_clicked(move |_| {
@@ -172,8 +188,39 @@ impl HarnessBar {
 
     /// Offer this set of harnesses. Called by the local workspace whenever the
     /// user changes the setting, and by a remote view on every snapshot.
-    pub fn apply(&self, state: &HarnessState) {
-        for (key, button) in &self.buttons {
+    pub fn apply(self: &Rc<Self>, state: &HarnessState) {
+        let builtins = crate::tmux::HARNESS_KEYS;
+        let stale = self.buttons.borrow().iter()
+            .filter(|(key, _)| !builtins.contains(&key.as_str()) && !state.custom.iter().any(|item| item.id == *key))
+            .map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        for key in stale {
+            if let Some((_, button)) = self.buttons.borrow_mut().iter().find(|(id, _)| id == &key).cloned() {
+                self.group.remove(&button);
+            }
+            self.buttons.borrow_mut().retain(|(id, _)| id != &key);
+        }
+        for item in &state.custom {
+            if let Some((_, button)) = self.buttons.borrow().iter().find(|(key, _)| key == &item.id) {
+                button.set_label(&format!("{} {}", item.icon, item.name));
+                button.set_tooltip_text(Some(&format!("Launch {}", item.name)));
+                continue;
+            }
+            let button = gtk4::Button::with_label(&format!("{} {}", item.icon, item.name));
+            button.add_css_class("hud-button");
+            if let Some(label) = button.child().and_downcast::<gtk4::Label>() {
+                label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                label.set_max_width_chars(18);
+            }
+            button.set_tooltip_text(Some(&format!("Launch {}", item.name)));
+            let key = item.id.clone();
+            let weak = Rc::downgrade(self);
+            button.connect_clicked(move |_| {
+                if let Some(bar) = weak.upgrade() { (bar.on_launch)(&key); }
+            });
+            self.group.append(&button);
+            self.buttons.borrow_mut().push((item.id.clone(), button));
+        }
+        for (key, button) in self.buttons.borrow().iter() {
             button.set_visible(state.keys.iter().any(|offered| offered == key));
         }
         self.ready.set(state.ready);
@@ -220,7 +267,7 @@ impl HarnessBar {
     /// The launch buttons, keyed by harness. Used by tests to click one.
     #[cfg(test)]
     pub fn buttons(&self) -> Vec<(String, gtk4::Button)> {
-        self.buttons.clone()
+        self.buttons.borrow().clone()
     }
 
     fn set_note(&self, text: &str) {
@@ -230,7 +277,7 @@ impl HarnessBar {
 
     fn paint_sensitivity(&self) {
         let ready = self.ready.get() && !self.busy.get();
-        for (_, button) in &self.buttons {
+        for (_, button) in self.buttons.borrow().iter() {
             button.set_sensitive(ready && button.is_visible());
         }
     }
@@ -238,7 +285,7 @@ impl HarnessBar {
     /// Whether this workspace currently offers `key`.
     #[cfg(test)]
     pub fn offered(&self, key: &str) -> bool {
-        self.buttons
+        self.buttons.borrow()
             .iter()
             .find(|(button_key, _)| button_key == key)
             .is_some_and(|(_, button)| button.is_visible())
@@ -246,7 +293,7 @@ impl HarnessBar {
 
     #[cfg(test)]
     pub fn sensitive(&self, key: &str) -> bool {
-        self.buttons
+        self.buttons.borrow()
             .iter()
             .find(|(button_key, _)| button_key == key)
             .is_some_and(|(_, button)| button.is_sensitive())
@@ -374,9 +421,22 @@ mod tests {
 
         bar.apply(&HarnessState {
             keys: vec!["shell".into()],
+            custom: vec![],
             ready: true,
         });
         assert!(bar.offered("shell") && bar.sensitive("shell"));
+        bar.apply(&HarnessState {
+            keys: vec!["shell".into(), "custom-test".into()],
+            custom: vec![CustomButton { id: "custom-test".into(), name: "My CLI".into(), icon: "🧭".into() }],
+            ready: true,
+        });
+        assert!(bar.offered("custom-test") && bar.sensitive("custom-test"));
+        let custom = bar.buttons().into_iter().find(|(key, _)| key == "custom-test").unwrap().1;
+        assert_eq!(custom.label().as_deref(), Some("🧭 My CLI"));
+        custom.emit_clicked();
+        assert_eq!(relaunches.borrow().last().map(String::as_str), Some("custom-test"));
+        bar.apply(&HarnessState { keys: vec!["shell".into()], custom: vec![], ready: true });
+        assert!(!bar.offered("custom-test"));
         // A harness the source does not list is not offered at all.
         assert!(!bar.offered("claude"));
 
@@ -387,17 +447,19 @@ mod tests {
             .unwrap()
             .1
             .emit_clicked();
-        assert_eq!(relaunches.borrow().as_slice(), ["shell".to_string()]);
+        assert_eq!(relaunches.borrow().as_slice(), ["custom-test".to_string(), "shell".to_string()]);
 
         // A source that cannot accept a click keeps the bar inert, and an
         // in-flight launch closes the door on a second one.
         bar.apply(&HarnessState {
             keys: vec!["shell".into()],
+            custom: vec![],
             ready: false,
         });
         assert!(bar.offered("shell") && !bar.sensitive("shell"));
         bar.apply(&HarnessState {
             keys: vec!["shell".into()],
+            custom: vec![],
             ready: true,
         });
         bar.set_busy(true);

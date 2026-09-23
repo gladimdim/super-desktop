@@ -272,6 +272,8 @@ pub struct DesktopCard {
 pub struct HarnessType {
     pub id: String,
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     pub available: Option<bool>,
 }
 
@@ -402,7 +404,7 @@ impl WorkspaceCommand {
                 workspace,
             } => {
                 !agent_type.is_empty()
-                    && agent_type.len() <= 32
+                    && agent_type.len() <= 64
                     && agent_type.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
                     && !workspace.is_empty()
                     && workspace.len() <= MAX_WORKSPACE

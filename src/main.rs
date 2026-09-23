@@ -2,6 +2,7 @@ mod brand;
 mod assets;
 mod asset_history;
 mod completion;
+mod custom_harness;
 mod prompt_image;
 mod prompt_history;
 mod asset_pdf;
@@ -820,7 +821,8 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let payload = cmd.strip_prefix("add-term-in ").unwrap_or("");
             let request: serde_json::Value = serde_json::from_str(payload).unwrap_or_default();
             let agent = request["agentType"].as_str().unwrap_or("");
-            if !tmux::HARNESS_KEYS.contains(&agent) {
+            if !tmux::HARNESS_KEYS.contains(&agent)
+                && !state::load_state().custom_harnesses.iter().any(|item| item.id == agent && item.validate().is_ok()) {
                 return json!({"ok":false,"error":"unsupported_harness"}).to_string();
             }
             let Some(directory) = request["workspace"].as_str().and_then(state::clean_dir) else {

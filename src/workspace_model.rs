@@ -88,8 +88,13 @@ impl LocalWorkspace {
             .map(|id| HarnessType {
                 id: (*id).into(),
                 name: crate::tmux::get_agent_config(id).name.into(),
+                icon: Some(crate::tmux::get_agent_config(id).icon.into()),
                 available: runtime.harnesses.as_ref().map(|keys| keys.contains(*id)),
             })
+            .chain(state.custom_harnesses.iter().map(|item| HarnessType {
+                id: item.id.clone(), name: item.name.clone(), icon: Some(item.icon.clone()),
+                available: runtime.harnesses.as_ref().map(|keys| keys.contains(&item.id)),
+            }))
             .collect();
         let visible_harnesses = harness_types
             .iter()
@@ -129,7 +134,10 @@ impl LocalWorkspace {
                 agent_type: card.agent_type.clone(),
                 title: view
                     .map(|v| v.title.clone())
-                    .unwrap_or_else(|| crate::tmux::get_agent_config(&card.agent_type).name.into()),
+                    .unwrap_or_else(|| state.custom_harnesses.iter()
+                        .find(|item| item.id == card.agent_type)
+                        .map(|item| item.name.clone())
+                        .unwrap_or_else(|| crate::tmux::get_agent_config(&card.agent_type).name.into())),
                 status: match alive {
                     Some(true) => "RUNNING",
                     Some(false) => "EXITED",
@@ -291,12 +299,10 @@ fn collect_runtime() -> Runtime {
         .env_remove("TMUX").env_remove("TMUX_PANE");
     Runtime {
         sessions: bounded_output(command).and_then(|bytes| parse_panes(&bytes)),
-        harnesses: Some(
-            crate::tmux::detect_harnesses()
-                .iter()
-                .map(|h| h.key.to_string())
-                .collect(),
-        ),
+        harnesses: Some(crate::tmux::detect_harnesses().iter().map(|h| h.key.to_string())
+            .chain(crate::state::load_state().custom_harnesses.into_iter()
+                .filter(|item| item.validate().is_ok()).map(|item| item.id))
+            .collect()),
     }
 }
 
@@ -441,6 +447,25 @@ mod tests {
         assert_eq!(changed, snapshot(&model));
         let json = serde_json::to_string(&changed).unwrap();
         assert!(!json.contains("DO_NOT_EXPORT") && !json.contains("PRIVATE_NOTE"));
+    }
+
+    #[test]
+    fn custom_launchers_are_advertised_with_owner_metadata() {
+        let mut state = AppState::default();
+        let item = crate::custom_harness::CustomHarness::create("My CLI", "🧭", "/bin/echo", "hello").unwrap();
+        let id = item.id.clone();
+        state.custom_harnesses.push(item);
+        let model = LocalWorkspace::with_epoch(state, "epoch-custom".into());
+        let runtime = Runtime { harnesses: Some([id.clone()].into_iter().collect()), ..Runtime::default() };
+        let snapshot = model.snapshot_with_runtime(canvas(), &HashMap::new(), &runtime).unwrap();
+        assert!(snapshot.visible_harnesses.contains(&id));
+        let advertised = snapshot.harness_types.iter().find(|item| item.id == id).unwrap();
+        assert_eq!(advertised.name, "My CLI");
+        assert_eq!(advertised.icon.as_deref(), Some("🧭"));
+        assert_eq!(advertised.available, Some(true));
+        model.state().borrow_mut().visible_harnesses = Some(vec!["shell".into()]);
+        let hidden = model.snapshot_with_runtime(canvas(), &HashMap::new(), &runtime).unwrap();
+        assert!(!hidden.visible_harnesses.contains(&id));
     }
 
     #[test]

@@ -97,6 +97,8 @@ pub struct TerminalData {
 pub struct AppState {
     pub notes: Vec<NoteData>,
     pub terminals: Vec<TerminalData>,
+    #[serde(default)]
+    pub custom_harnesses: Vec<crate::custom_harness::CustomHarness>,
     /// Terminal card IDs, back to front. Missing legacy entries are appended
     /// in creation order; notes retain their existing independent stacking.
     #[serde(default)]
@@ -104,8 +106,8 @@ pub struct AppState {
     /// Harness keys (see `tmux::HARNESS_KEYS`) the user wants as launch
     /// buttons in the overlay's top bar, chosen in the ⚙ Settings panel.
     ///
-    /// `None` = never configured → every harness detected on this machine
-    /// (`tmux::detect_harnesses`) is shown, which is what older state files
+    /// `None` = never configured → every built-in harness detected on this
+    /// machine and every available custom launcher is shown. Older state files
     /// (written before this field existed) deserialize to.
     #[serde(default)]
     pub visible_harnesses: Option<Vec<String>>,
@@ -162,6 +164,7 @@ impl Default for AppState {
                 tag: 0,
             }],
             terminals: Vec::new(),
+            custom_harnesses: Vec::new(),
             terminal_order: Vec::new(),
             visible_harnesses: None,
             toggle_shortcut: None,
@@ -401,9 +404,14 @@ impl StateWriter {
     fn new(path: PathBuf) -> Self {
         Self::with_writer(move |state| {
             use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
             // A different process loading state must not share our temp file.
             let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-            let mut file = std::io::BufWriter::new(fs::File::create(&temp)?);
+            let file = fs::OpenOptions::new().write(true).create(true).truncate(true)
+                .mode(0o600).open(&temp)?;
+            // A stale temp file from an older build may have wider permissions.
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            let mut file = std::io::BufWriter::new(file);
             serde_json::to_writer_pretty(&mut file, state)?;
             file.flush()?;
             fs::rename(temp, &path)

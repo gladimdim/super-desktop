@@ -417,6 +417,10 @@ impl MiniTerminalCard {
 
         let agent_type = data.borrow().agent_type.clone();
         let cfg = get_agent_config(&agent_type);
+        let custom = crate::state::load_state().custom_harnesses.into_iter()
+            .find(|item| item.id == agent_type);
+        let display_name = custom.as_ref().map_or(cfg.name, |item| item.name.as_str());
+        let display_icon = custom.as_ref().map_or(cfg.icon, |item| item.icon.as_str());
 
         root.set_size_request(initial_w, initial_h);
         root.add_css_class("mini-terminal");
@@ -452,7 +456,7 @@ impl MiniTerminalCard {
         tag_sync.borrow_mut().push(header_tag.downgrade());
         header.append(&header_tag);
 
-        let title = Label::new(Some(&format!("{} {}", cfg.icon, cfg.name)));
+        let title = Label::new(Some(&format!("{} {}", display_icon, display_name)));
         title.add_css_class("term-title");
         title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         title.set_single_line_mode(true);
@@ -536,14 +540,14 @@ impl MiniTerminalCard {
         icon_box.set_halign(Align::Center);
         icon_box.set_valign(Align::Center);
 
-        let icon_label = Label::new(Some(cfg.icon));
+        let icon_label = Label::new(Some(display_icon));
         icon_label.add_css_class("term-agent-icon");
         let attrs = gtk4::pango::AttrList::new();
         attrs.insert(gtk4::pango::AttrSize::new(38 * gtk4::pango::SCALE));
         icon_label.set_attributes(Some(&attrs));
         icon_box.append(&icon_label);
 
-        let icon_name_label = Label::new(Some(cfg.name));
+        let icon_name_label = Label::new(Some(display_name));
         icon_name_label.add_css_class("term-agent-name");
         icon_box.append(&icon_name_label);
 
@@ -628,7 +632,7 @@ impl MiniTerminalCard {
         compact_top_bar.append(&compact_actions);
         root.add_overlay(&compact_top_bar);
 
-        let title_prefix = format!("{} {}", cfg.icon, cfg.name);
+        let title_prefix = format!("{} {}", display_icon, display_name);
         // Seed from persisted state so rebooted cards resume the SAME agent
         // session without waiting for the DB mapping to re-resolve.
         let opencode_session = Rc::new(RefCell::new(data.borrow().agent_session_id.clone()));

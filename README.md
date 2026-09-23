@@ -66,6 +66,12 @@ to an idle Codex terminal. See [image prompts, compatibility and upload limits](
 | 💻 Shell | `bash` / `zsh` / `fish` |
 
 Only harnesses actually installed on the machine are offered (⚙ Settings panel).
+To add another CLI, open **Settings → Harness launchers → Add a harness**. Pick one
+of eight icons, enter a name and the absolute path to its executable, and add
+optional arguments (quote arguments containing spaces). Save it to add a button
+to this PC's top bar. You can edit, hide, or remove it from the same list. Its
+command runs in the selected workspace folder; a connected PC can launch it
+only while this PC offers it.
 
 ### Keybindings
 

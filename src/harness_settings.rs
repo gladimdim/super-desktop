@@ -133,6 +133,16 @@ pub fn resolve_visible(configured: Option<&[String]>, detected: &[HarnessInfo]) 
     }
 }
 
+pub fn visible_keys(state: &AppState, detected: &[HarnessInfo]) -> Vec<String> {
+    let mut keys = resolve_visible(state.visible_harnesses.as_deref(), detected);
+    for item in &state.custom_harnesses {
+        if item.validate().is_ok() && state.visible_harnesses.as_ref().is_none_or(|list| list.contains(&item.id)) {
+            keys.push(item.id.clone());
+        }
+    }
+    keys
+}
+
 /// Flip `key` in `selection`, re-inserting it at its `order` position when it
 /// is turned back on.
 pub fn toggle(selection: &mut Vec<String>, key: &str, order: &[String]) {
@@ -221,6 +231,36 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
     row.append(&btn);
 
     (row, btn)
+}
+
+fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Button, Button) {
+    let row = Box::new(Orientation::Horizontal, 8);
+    row.add_css_class("harness-row");
+    let icon = Label::new(Some(&item.icon));
+    icon.add_css_class("harness-icon");
+    row.append(&icon);
+    let name = Label::new(Some(&item.name));
+    name.add_css_class("harness-name");
+    row.append(&name);
+    let command = Label::new(Some(if item.available() { &item.executable } else { "Executable unavailable" }));
+    command.add_css_class("harness-cmd");
+    command.set_xalign(0.0);
+    command.set_hexpand(true);
+    command.set_ellipsize(pango::EllipsizeMode::Middle);
+    command.set_tooltip_text(Some(&item.command()));
+    row.append(&command);
+    let edit = Button::with_label("Edit");
+    edit.add_css_class("launcher-btn");
+    row.append(&edit);
+    let remove = Button::with_label("Remove");
+    remove.add_css_class("launcher-btn");
+    remove.add_css_class("launcher-btn-danger");
+    row.append(&remove);
+    let toggle = Button::new();
+    toggle.add_css_class("harness-toggle");
+    toggle.set_sensitive(item.available());
+    row.append(&toggle);
+    (row, toggle, edit, remove)
 }
 
 /// Build the panel.
@@ -495,7 +535,7 @@ pub fn build_harness_settings_panel(
     body.append(&empty);
 
     let detected_hint = Label::new(Some(
-        "Only harnesses whose CLI resolves here are listed · install one, then reopen this panel.",
+        "Built-in harnesses appear when installed. Custom launchers remain editable if their executable goes missing.",
     ));
     detected_hint.add_css_class("launcher-hint");
     detected_hint.set_xalign(0.0);
@@ -522,8 +562,101 @@ pub fn build_harness_settings_panel(
     actions.append(&btn_none);
     body.append(&actions);
 
+    let btn_add_custom = Button::with_label("＋ Add a harness");
+    btn_add_custom.add_css_class("launcher-btn");
+    btn_add_custom.add_css_class("launcher-btn-primary");
+    body.append(&btn_add_custom);
+    let custom_form = Box::new(Orientation::Vertical, 8);
+    custom_form.set_visible(false);
+    let form_help = Label::new(Some("Choose an icon, name the launcher, and point it to an executable on this PC. Arguments are optional; use quotes to keep words together."));
+    form_help.set_wrap(true);
+    form_help.set_xalign(0.0);
+    form_help.add_css_class("launcher-hint");
+    custom_form.append(&form_help);
+    let icon_choices = Box::new(Orientation::Horizontal, 6);
+    let selected_icon = Rc::new(Cell::new(0usize));
+    let icon_buttons: Rc<Vec<Button>> = Rc::new(crate::custom_harness::ICONS.iter().enumerate().map(|(index, icon)| {
+        let button = Button::with_label(icon);
+        button.add_css_class("launcher-btn");
+        let selected = Rc::clone(&selected_icon);
+        button.connect_clicked(move |_| selected.set(index));
+        icon_choices.append(&button);
+        button
+    }).collect());
+    let paint_icons: Rc<dyn Fn()> = {
+        let selected = Rc::clone(&selected_icon);
+        let buttons = Rc::clone(&icon_buttons);
+        Rc::new(move || for (index, button) in buttons.iter().enumerate() {
+            if selected.get() == index { button.add_css_class("launcher-btn-primary"); }
+            else { button.remove_css_class("launcher-btn-primary"); }
+        })
+    };
+    for button in icon_buttons.iter() {
+        let paint = Rc::clone(&paint_icons);
+        button.connect_clicked(move |_| paint());
+    }
+    paint_icons();
+    custom_form.append(&icon_choices);
+    let name_label = Label::new(Some("Name"));
+    name_label.add_css_class("launcher-hint");
+    name_label.set_xalign(0.0);
+    custom_form.append(&name_label);
+    let custom_name = gtk4::Entry::new();
+    custom_name.set_placeholder_text(Some("Harness name"));
+    custom_name.set_max_length(48);
+    custom_name.add_css_class("ws-entry");
+    custom_form.append(&custom_name);
+    let path_label = Label::new(Some("Executable path"));
+    path_label.add_css_class("launcher-hint");
+    path_label.set_xalign(0.0);
+    custom_form.append(&path_label);
+    let custom_path = gtk4::Entry::new();
+    custom_path.set_placeholder_text(Some("/absolute/path/to/executable"));
+    custom_path.add_css_class("ws-entry");
+    custom_form.append(&custom_path);
+    let args_label = Label::new(Some("Arguments (optional)"));
+    args_label.add_css_class("launcher-hint");
+    args_label.set_xalign(0.0);
+    custom_form.append(&args_label);
+    let custom_args = gtk4::Entry::new();
+    custom_args.set_placeholder_text(Some("Optional arguments, e.g. --model 'my model'"));
+    custom_args.add_css_class("ws-entry");
+    custom_form.append(&custom_args);
+    let form_status = Label::new(None);
+    form_status.add_css_class("launcher-hint");
+    form_status.set_xalign(0.0);
+    form_status.set_wrap(true);
+    custom_form.append(&form_status);
+    let form_actions = Box::new(Orientation::Horizontal, 8);
+    let btn_save_custom = Button::with_label("Save harness");
+    btn_save_custom.add_css_class("launcher-btn");
+    btn_save_custom.add_css_class("launcher-btn-primary");
+    let btn_cancel_custom = Button::with_label("Cancel");
+    btn_cancel_custom.add_css_class("launcher-btn");
+    form_actions.append(&btn_save_custom);
+    form_actions.append(&btn_cancel_custom);
+    custom_form.append(&form_actions);
+    body.append(&custom_form);
+    let editing_custom: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let refresh_custom: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    btn_add_custom.connect_clicked({
+        let form = custom_form.clone(); let name = custom_name.clone(); let path = custom_path.clone();
+        let args = custom_args.clone(); let status = form_status.clone();
+        let editing = Rc::clone(&editing_custom); let selected = Rc::clone(&selected_icon);
+        let paint = Rc::clone(&paint_icons);
+        move |_| {
+            *editing.borrow_mut() = None;
+            name.set_text(""); path.set_text(""); args.set_text(""); status.set_text("");
+            selected.set(0); paint(); form.set_visible(true); name.grab_focus();
+        }
+    });
+    btn_cancel_custom.connect_clicked({
+        let form = custom_form.clone();
+        move |_| form.set_visible(false)
+    });
+
     let note = Label::new(Some(
-        "Hidden harnesses stay installed — `super-desktop add-term <key>` still launches one.",
+        "Hiding a launcher only removes its top-bar button; it does not remove the executable or saved configuration.",
     ));
     note.add_css_class("launcher-hint");
     note.set_xalign(0.0);
@@ -531,7 +664,7 @@ pub fn build_harness_settings_panel(
     body.append(&note);
 
     let footer = Label::new(Some(
-        "Detected with which / npx · selection stored in state.json",
+        "Built-ins detected with which / npx · custom launchers stored in state.json",
     ));
     footer.add_css_class("launcher-footer");
     footer.set_xalign(0.5);
@@ -1037,6 +1170,16 @@ pub fn build_harness_settings_panel(
         let paint = Rc::clone(&paint);
         let apply = Rc::clone(&apply);
         let state = Rc::clone(&state);
+        let custom_form = custom_form.clone();
+        let custom_name = custom_name.clone();
+        let custom_path = custom_path.clone();
+        let custom_args = custom_args.clone();
+        let form_status = form_status.clone();
+        let selected_icon = Rc::clone(&selected_icon);
+        let paint_icons = Rc::clone(&paint_icons);
+        let editing_custom = Rc::clone(&editing_custom);
+        let refresh_custom = Rc::downgrade(&refresh_custom);
+        let on_change = Rc::clone(&on_change);
         // Reopening (or restyling on a theme switch) must never leave a
         // recording armed with the keyboard held.
         let stop_recording = Rc::clone(&stop_recording);
@@ -1075,12 +1218,91 @@ pub fn build_harness_settings_panel(
                 row_buttons.borrow_mut().push((key, btn));
             }
 
-            *order.borrow_mut() = detected_keys(&detected);
-            *selection.borrow_mut() =
-                resolve_visible(state.borrow().visible_harnesses.as_deref(), &detected);
+            for item in state.borrow().custom_harnesses.clone() {
+                let (row, btn, edit, remove) = custom_row(&item);
+                let key = item.id.clone();
+                let order = Rc::clone(&order);
+                let selection = Rc::clone(&selection);
+                let apply = Rc::clone(&apply);
+                btn.connect_clicked({
+                    let key = key.clone();
+                    move |_| {
+                        let mut sel = selection.borrow().clone();
+                        toggle(&mut sel, &key, &order.borrow());
+                        apply(sel);
+                    }
+                });
+                edit.connect_clicked({
+                    let form = custom_form.clone(); let name = custom_name.clone();
+                    let path = custom_path.clone(); let args = custom_args.clone();
+                    let status = form_status.clone();
+                    let selected = Rc::clone(&selected_icon); let paint = Rc::clone(&paint_icons);
+                    let editing = Rc::clone(&editing_custom); let item = item.clone();
+                    move |_| {
+                        *editing.borrow_mut() = Some(item.id.clone());
+                        status.set_text("");
+                        name.set_text(&item.name); path.set_text(&item.executable);
+                        args.set_text(&item.arguments.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'"))).collect::<Vec<_>>().join(" "));
+                        selected.set(crate::custom_harness::ICONS.iter().position(|icon| *icon == item.icon).unwrap_or(0));
+                        paint(); form.set_visible(true); name.grab_focus();
+                    }
+                });
+                remove.connect_clicked({
+                    let state = Rc::clone(&state); let on_change = Rc::clone(&on_change);
+                    let refresh = refresh_custom.clone();
+                    move |_| {
+                        let mut s = state.borrow_mut();
+                        s.custom_harnesses.retain(|item| item.id != key);
+                        if let Some(visible) = &mut s.visible_harnesses { visible.retain(|id| id != &key); }
+                        let selected = visible_keys(&s, &detect_harnesses());
+                        drop(s);
+                        on_change(selected);
+                        if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
+                    }
+                });
+                rows.append(&row);
+                row_buttons.borrow_mut().push((item.id.clone(), btn));
+            }
+
+            *order.borrow_mut() = detected_keys(&detected).into_iter()
+                .chain(state.borrow().custom_harnesses.iter().filter(|item| item.available()).map(|item| item.id.clone())).collect();
+            *selection.borrow_mut() = visible_keys(&state.borrow(), &detected);
             paint();
         })
     };
+
+    *refresh_custom.borrow_mut() = Some(Rc::clone(&refresh));
+    btn_save_custom.connect_clicked({
+        let state = Rc::clone(&state); let name = custom_name.clone();
+        let path = custom_path.clone(); let args = custom_args.clone();
+        let selected = Rc::clone(&selected_icon); let editing = Rc::clone(&editing_custom);
+        let status = form_status.clone(); let form = custom_form.clone();
+        let on_change = Rc::clone(&on_change); let refresh = Rc::downgrade(&refresh_custom);
+        move |_| {
+            let icon = crate::custom_harness::ICONS[selected.get()];
+            match crate::custom_harness::CustomHarness::create(&name.text(), icon, &path.text(), &args.text()) {
+                Ok(mut item) => {
+                    let mut s = state.borrow_mut();
+                    if let Some(id) = editing.borrow().as_ref() { item.id = id.clone(); }
+                    if s.custom_harnesses.iter().any(|old| old.id == item.id) {
+                        if let Some(old) = s.custom_harnesses.iter_mut().find(|old| old.id == item.id) { *old = item; }
+                    } else {
+                        let id = item.id.clone();
+                        s.custom_harnesses.push(item);
+                        if let Some(visible) = &mut s.visible_harnesses { visible.push(id); }
+                    }
+                    let selected = visible_keys(&s, &detect_harnesses());
+                    drop(s);
+                    on_change(selected);
+                    crate::state::flush_state_saves();
+                    form.set_visible(false);
+                    status.set_text("");
+                    if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
+                }
+                Err(error) => status.set_text(&error),
+            }
+        }
+    });
 
     btn_all.connect_clicked({
         let order = Rc::clone(&order);
@@ -1094,6 +1316,11 @@ pub fn build_harness_settings_panel(
 
     refresh();
 
+    let refresh: Rc<dyn Fn()> = Rc::new({
+        let slot = Rc::clone(&refresh_custom);
+        let run = Rc::clone(&refresh);
+        move || { let _keep_alive = &slot; run(); }
+    });
     HarnessSettingsPanel {
         widget: outer.upcast(),
         refresh: Rc::clone(&refresh),
@@ -1150,6 +1377,76 @@ mod tests {
             resolve_visible(None, &detected),
             vec!["claude".to_string(), "shell".to_string()]
         );
+    }
+
+    #[test]
+    fn saved_custom_harness_respects_visibility_and_availability() {
+        let mut state = AppState::default();
+        let item = crate::custom_harness::CustomHarness::create("Echo", "💻", "/bin/echo", "hello").unwrap();
+        let id = item.id.clone();
+        state.custom_harnesses.push(item);
+        let detected = vec![info("shell")];
+        assert_eq!(visible_keys(&state, &detected), vec!["shell".to_string(), id.clone()]);
+        state.visible_harnesses = Some(vec![id.clone()]);
+        assert_eq!(visible_keys(&state, &detected), vec![id]);
+    }
+
+    #[test]
+    fn custom_launcher_form_saves_and_removes() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("harness_settings::tests::custom_launcher_form_saves_and_removes");
+            return;
+        }
+        gtk4::init().unwrap();
+        let home = std::env::temp_dir().join(format!("sd-custom-ui-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::env::set_var("HOME", &home);
+        let state = Rc::new(RefCell::new(AppState::default()));
+        let saved = Rc::clone(&state);
+        let panel = build_harness_settings_panel(
+            Rc::clone(&state),
+            Rc::new(move |keys| {
+                saved.borrow_mut().visible_harnesses = Some(keys);
+                crate::state::save_state_async(saved.borrow().clone());
+            }),
+            Rc::new(|_| {}), Rc::new(|_| {}),
+        );
+        let buttons = find_buttons(&panel.widget, "launcher-btn");
+        buttons.iter().find(|button| button.label().as_deref() == Some("＋ Add a harness")).unwrap().emit_clicked();
+        buttons.iter().find(|button| button.label().as_deref() == Some("🧭")).unwrap().emit_clicked();
+        let entries = find_widgets(&panel.widget, "ws-entry");
+        for (placeholder, value) in [
+            ("Harness name", "My Echo"),
+            ("/absolute/path/to/executable", "/bin/echo"),
+            ("Optional arguments, e.g. --model 'my model'", "hello 'two words'"),
+        ] {
+            entries.iter().filter_map(|widget| widget.clone().downcast::<gtk4::Entry>().ok())
+                .find(|entry| entry.placeholder_text().as_deref() == Some(placeholder)).unwrap().set_text(value);
+        }
+        buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        let item = state.borrow().custom_harnesses[0].clone();
+        assert_eq!(item.name, "My Echo");
+        assert_eq!(item.icon, "🧭");
+        assert_eq!(item.arguments, ["hello", "two words"]);
+        assert_eq!(crate::state::load_state().custom_harnesses, vec![item.clone()]);
+        assert_eq!(std::fs::metadata(crate::state::get_state_path()).unwrap().permissions().mode() & 0o777, 0o600);
+        let edit = find_buttons(&panel.widget, "launcher-btn").into_iter()
+            .find(|button| button.label().as_deref() == Some("Edit")).unwrap();
+        edit.emit_clicked();
+        entries.iter().filter_map(|widget| widget.clone().downcast::<gtk4::Entry>().ok())
+            .find(|entry| entry.placeholder_text().as_deref() == Some("Harness name")).unwrap().set_text("Echo again");
+        buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        assert_eq!(state.borrow().custom_harnesses.len(), 1);
+        assert_eq!(state.borrow().custom_harnesses[0].name, "Echo again");
+        assert_eq!(state.borrow().custom_harnesses[0].id, item.id);
+        let remove = find_buttons(&panel.widget, "launcher-btn").into_iter()
+            .find(|button| button.label().as_deref() == Some("Remove")).unwrap();
+        remove.emit_clicked();
+        crate::state::flush_state_saves();
+        assert!(state.borrow().custom_harnesses.is_empty());
+        assert!(crate::state::load_state().custom_harnesses.is_empty());
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
