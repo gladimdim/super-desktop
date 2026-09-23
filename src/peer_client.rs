@@ -277,11 +277,16 @@ pub type PinnedStream = rustls::StreamOwned<rustls::ClientConnection, std::net::
 /// can notice that the viewer no longer wants this stream.
 pub const STREAM_READ_TIMEOUT: Duration = Duration::from_millis(250);
 
-pub fn pinned_stream(peer: &Peer) -> Result<PinnedStream> {
+fn validate_peer_access(peer: &Peer) -> Result<()> {
     peer.validate()?;
     if peer.summary().expired {
         return Err(PeerError("peer_revoked_or_expired"));
     }
+    Ok(())
+}
+
+pub fn pinned_stream(peer: &Peer) -> Result<PinnedStream> {
+    validate_peer_access(peer)?;
     let config = pinned_tls(&peer.fingerprint)?;
     let name = rustls::pki_types::ServerName::try_from(peer.endpoint.host.clone())
         .map_err(|_| PeerError("invalid_peer_address"))?;
@@ -323,6 +328,34 @@ struct PinnedClient {
     http: Client,
     endpoint: Endpoint,
 }
+
+#[derive(Clone, Copy)]
+enum ResponsePolicy {
+    Read,
+    Command,
+}
+
+/// Command conflicts carry a typed owner response. Ordinary reads treat any
+/// 4xx as a failed request, so callers never mistake a refusal for data.
+fn check_response_status(status: u16, policy: ResponsePolicy) -> Result<()> {
+    match status {
+        200..=299 => Ok(()),
+        400 | 409 if matches!(policy, ResponsePolicy::Command) => Ok(()),
+        300..=399 => Err(PeerError("redirect_rejected")),
+        401 => Err(PeerError("peer_revoked_or_expired")),
+        403 if matches!(policy, ResponsePolicy::Read) => Err(PeerError("invitation_rejected")),
+        404 => Err(PeerError("peer_endpoint_unavailable")),
+        429 => Err(PeerError("pairing_rate_limited")),
+        503 => Err(PeerError("remote_desktop_unavailable")),
+        _ => Err(PeerError("peer_request_rejected")),
+    }
+}
+
+fn peer_client(peer: &Peer) -> Result<PinnedClient> {
+    validate_peer_access(peer)?;
+    PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)
+}
+
 impl PinnedClient {
     fn new(endpoint: Endpoint, fingerprint: &str) -> Result<Self> {
         let tls = pinned_tls(fingerprint)?;
@@ -396,16 +429,7 @@ impl PinnedClient {
         token: Option<&str>,
     ) -> Result<T> {
         let (status, bytes) = self.raw(path, body, token)?;
-        match status {
-            200..=299 => {}
-            300..=399 => return Err(PeerError("redirect_rejected")),
-            401 => return Err(PeerError("peer_revoked_or_expired")),
-            403 => return Err(PeerError("invitation_rejected")),
-            404 => return Err(PeerError("peer_endpoint_unavailable")),
-            429 => return Err(PeerError("pairing_rate_limited")),
-            503 => return Err(PeerError("remote_desktop_unavailable")),
-            _ => return Err(PeerError("peer_request_rejected")),
-        }
+        check_response_status(status, ResponsePolicy::Read)?;
         serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))
     }
 
@@ -414,15 +438,7 @@ impl PinnedClient {
     /// the refusal. Transport failures stay errors.
     fn command(&self, path: &str, body: Value, token: Option<&str>) -> Result<Value> {
         let (status, bytes) = self.raw(path, Some(body), token)?;
-        match status {
-            200..=299 | 400 | 409 => {}
-            300..=399 => return Err(PeerError("redirect_rejected")),
-            401 => return Err(PeerError("peer_revoked_or_expired")),
-            404 => return Err(PeerError("peer_endpoint_unavailable")),
-            429 => return Err(PeerError("pairing_rate_limited")),
-            503 => return Err(PeerError("remote_desktop_unavailable")),
-            _ => return Err(PeerError("peer_request_rejected")),
-        }
+        check_response_status(status, ResponsePolicy::Command)?;
         let document: Value =
             serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))?;
         // An answer without a result never reached the owner. Its code is still
@@ -568,12 +584,10 @@ impl Pairing {
 ///
 /// Checks the pinned certificate, the persistent bridge identity and a
 /// supported desktop API version before anything else is attempted.
-pub fn capabilities(peer: &Peer) -> Result<crate::desktop_protocol::Capabilities> {
-    peer.validate()?;
-    if peer.summary().expired {
-        return Err(PeerError("peer_revoked_or_expired"));
-    }
-    let client = PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)?;
+fn capabilities_with(
+    client: &PinnedClient,
+    peer: &Peer,
+) -> Result<crate::desktop_protocol::Capabilities> {
     if client.identity()?.bridge_id != peer.machine_id {
         return Err(PeerError("peer_identity_changed"));
     }
@@ -588,6 +602,11 @@ pub fn capabilities(peer: &Peer) -> Result<crate::desktop_protocol::Capabilities
     Ok(capabilities)
 }
 
+pub fn capabilities(peer: &Peer) -> Result<crate::desktop_protocol::Capabilities> {
+    let client = peer_client(peer)?;
+    capabilities_with(&client, peer)
+}
+
 /// One verified round of peer discovery: identity, capabilities and workspace.
 ///
 /// The capability document is returned so a caller can decide what to enable
@@ -599,7 +618,8 @@ pub fn verified_workspace(
     crate::desktop_protocol::Capabilities,
     crate::desktop_protocol::WorkspaceSnapshot,
 )> {
-    let capabilities = capabilities(peer)?;
+    let client = peer_client(peer)?;
+    let capabilities = capabilities_with(&client, peer)?;
     if !capabilities
         .capabilities
         .iter()
@@ -607,7 +627,6 @@ pub fn verified_workspace(
     {
         return Err(PeerError("update_remote_super_desktop"));
     }
-    let client = PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)?;
     let workspace: crate::desktop_protocol::WorkspaceSnapshot =
         client.request("/api/v1/desktop/workspace", None, Some(&peer.token))?;
     if workspace.machine_id != peer.machine_id {
@@ -633,7 +652,10 @@ pub fn command(
     if let Some(error) = request.command.shape_error() {
         return Err(PeerError(error));
     }
-    let client = PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)?;
+    if request.machine_id != peer.machine_id {
+        return Err(PeerError("invalid_command"));
+    }
+    let client = peer_client(peer)?;
     let body = serde_json::to_value(request).map_err(|_| PeerError("invalid_command"))?;
     let document = client.command("/api/v1/desktop/commands", body, Some(&peer.token))?;
     let reply: crate::desktop_protocol::CommandReply =
@@ -843,5 +865,25 @@ mod tests {
             workspace(&expired).err(),
             Some(PeerError("peer_revoked_or_expired"))
         );
+    }
+
+    #[test]
+    fn desktop_commands_reject_expired_or_misdirected_peers_before_network_io() {
+        let peer = test_peer('a');
+        let request = request(
+            &peer,
+            "epoch",
+            crate::desktop_protocol::WorkspaceCommand::CloseTerminal {
+                card_id: "card-one".into(),
+                expected_revision: 1,
+            },
+        );
+        let mut expired = peer.clone();
+        expired.expires_at = Some(1.0);
+        assert_eq!(command(&expired, &request).err(), Some(PeerError("peer_revoked_or_expired")));
+
+        let mut misdirected = request;
+        misdirected.machine_id = "b".repeat(32);
+        assert_eq!(command(&peer, &misdirected).err(), Some(PeerError("invalid_command")));
     }
 }

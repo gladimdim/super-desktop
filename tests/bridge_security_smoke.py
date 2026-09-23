@@ -62,6 +62,8 @@ def main():
                     connection.close()
 
             assert request("/api/v1/ping")[0] == 200
+            assert request("/api/v1/desktop/capabilities") == (401, {"error": "not_paired"})
+            assert request("/api/v1/harnesses") == (401, {"status": "error", "error": "not_paired"})
             for path in ["/api/v1/desktop/capabilities", "/api/v1/desktop/workspace", "/api/v1/desktop/events", "/api/v1/desktop/commands", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
                          "/api/v1/harnesses/sd_term_probe/assets", "/api/v1/harnesses/sd_term_probe/assets/id/content",
                          "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
@@ -99,6 +101,8 @@ def main():
             desktop_live = check_desktop_routes(request, context, port, token, directory)
             check_desktop_commands(request, token, bridge_id, directory)
             assert request("/api/v1/theme", token=token)[0] == 200
+            status, harnesses = request("/api/v1/harnesses", token=token)
+            assert status == 200 and set(harnesses) == {"protocolVersion", "timestamp", "harnesses", "usage", "theme"}
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Content-Length": "99999999"})[0] == 413
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {"requestId": "a" * 32, "text": "hello", "imageBase64": "invalid"}, token=token)[0] == 409

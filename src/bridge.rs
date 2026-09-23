@@ -8,9 +8,9 @@
 //!
 //! Endpoints (see OmarchyAILauncher/PROTOCOL.md, wire v1):
 //!   GET  /api/v1/ping
-//!   GET  /api/v1/harnesses            (Bearer token or loopback)
-//!   GET  /api/v1/theme                 (Bearer token or loopback)
-//!   DELETE /api/v1/harnesses/<id>     (Bearer token or loopback)
+//!   GET  /api/v1/harnesses            (Bearer token)
+//!   GET  /api/v1/theme                 (Bearer token)
+//!   DELETE /api/v1/harnesses/<id>     (Bearer token)
 //!   POST /api/v1/pair                 (open; requests desktop approval)
 //!   POST /api/v1/pair/poll            (unguessable request capability)
 //!   GET  /api/v1/pair/state           (loopback-only pending requests)
@@ -94,6 +94,17 @@ fn theme_document() -> serde_json::Value {
         "brightMagenta": t.bright_magenta,
         "fontFamily": t.font_family,
         "fontSize": t.font_size,
+    })
+}
+
+/// The Android snapshot and its live stream share one document contract.
+fn harness_document() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": PROTOCOL_VERSION,
+        "timestamp": utc_now_iso(),
+        "harnesses": collect_harnesses(),
+        "usage": crate::usage::launcher_usage(),
+        "theme": theme_document(),
     })
 }
 
@@ -516,7 +527,12 @@ impl PairState {
 
     fn valid(&mut self, token: &str) -> bool {
         self.refresh();
-        !token.is_empty() && self.cfg.devices.iter().any(|d| d.expires > now_epoch() && security::equal(&d.token_hash, &security::digest(token.as_bytes())))
+        if token.is_empty() {
+            return false;
+        }
+        let hash = security::digest(token.as_bytes());
+        let now = now_epoch();
+        self.cfg.devices.iter().any(|d| d.expires > now && security::equal(&d.token_hash, &hash))
     }
 }
 
@@ -623,8 +639,7 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
             respond(stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
             return None;
         }
-        if !authorize(&head, false) {
-            respond(stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+        if !require_pairing(stream, &head, AuthReply::Plain) {
             return None;
         }
         if content_len > crate::prompt_image::MAX_BODY {
@@ -637,8 +652,8 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
             return None;
         }
         let token = bearer(&headers);
-        stream.credential(&token);
-        if let Some(guard) = admission { guard.identify(&token); }
+        stream.credential(token);
+        if let Some(guard) = admission { guard.identify(token); }
         stream.upload_deadline();
     } else if content_len > 16384 { return None; }
     let mut body = buf[header_end..total].to_vec();
@@ -677,21 +692,43 @@ fn respond(stream: &mut Connection, code: u16, reason: &str, value: &serde_json:
     let _ = stream.flush();
 }
 
-fn bearer(headers: &HashMap<String, String>) -> String {
-    let h = headers.get("authorization").cloned().unwrap_or_default();
+fn bearer(headers: &HashMap<String, String>) -> &str {
+    let h = headers.get("authorization").map(String::as_str).unwrap_or("");
     if h.get(..7).is_some_and(|s| s.eq_ignore_ascii_case("bearer ")) {
-        h.get(7..).unwrap_or("").trim().to_string()
+        h.get(7..).unwrap_or("").trim()
     } else {
-        String::new()
+        ""
     }
 }
 
-/// Bearer-token or loopback authorization (same rule as `/api/v1/harnesses`).
-fn authorize(req: &Request, _local: bool) -> bool {
+/// All network routes, whether used by Android or another PC, require a
+/// registered bearer token. The owner-only Unix pairing routes are separate.
+fn authorize(req: &Request) -> bool {
     pair_state()
             .lock()
-            .map(|mut s| s.valid(&bearer(&req.headers)))
+            .map(|mut s| s.valid(bearer(&req.headers)))
             .unwrap_or(false)
+}
+
+#[derive(Clone, Copy)]
+enum AuthReply {
+    Plain,
+    StatusEnvelope,
+}
+
+/// Keep the established `status` envelope on older Android routes while
+/// sharing the token check. Other routes use the plain error document.
+/// Every caller returns immediately on `false`.
+fn require_pairing(stream: &mut Connection, req: &Request, reply: AuthReply) -> bool {
+    if authorize(req) {
+        return true;
+    }
+    let body = match reply {
+        AuthReply::Plain => serde_json::json!({"error":"not_paired"}),
+        AuthReply::StatusEnvelope => serde_json::json!({"status":"error","error":"not_paired"}),
+    };
+    respond(stream, 401, "Unauthorized", &body);
+    false
 }
 
 /// Complete a WebSocket upgrade; `false` when this is not a WS request (the
@@ -749,13 +786,7 @@ fn stream_harness_list(mut stream: Connection) {
         if !ws_client_alive(&mut stream) {
             return;
         }
-        let document = serde_json::json!({
-            "protocolVersion": PROTOCOL_VERSION,
-            "timestamp": utc_now_iso(),
-            "harnesses": collect_harnesses(),
-            "usage": crate::usage::launcher_usage(),
-            "theme": theme_document(),
-        });
+        let document = harness_document();
         if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
             return;
         }
@@ -925,14 +956,9 @@ fn session_meta(session: &str) -> (String, u8) {
 ///
 /// Body: `{"text": "ls -la", "enter": true}`. `text` is optional (so the phone
 /// can send a bare Return, or a control byte such as `\u0003` for Ctrl-C).
-fn handle_keys(stream: &mut Connection, req: &Request, id: &str, local: bool) {
-    if !authorize(req, local) {
-        return respond(
-            stream,
-            401,
-            "Unauthorized",
-            &serde_json::json!({"status": "error", "error": "not_paired"}),
-        );
+fn handle_keys(stream: &mut Connection, req: &Request, id: &str) {
+    if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
+        return;
     }
     if !crate::tmux::session_alive(id) {
         return respond(
@@ -976,14 +1002,9 @@ fn handle_keys(stream: &mut Connection, req: &Request, id: &str, local: bool) {
 }
 
 /// `DELETE /api/v1/harnesses/<id>` — close one launcher-visible harness.
-fn handle_close_harness(stream: &mut Connection, req: &Request, id: &str, local: bool) {
-    if !authorize(req, local) {
-        return respond(
-            stream,
-            401,
-            "Unauthorized",
-            &serde_json::json!({"status": "error", "error": "not_paired"}),
-        );
+fn handle_close_harness(stream: &mut Connection, req: &Request, id: &str) {
+    if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
+        return;
     }
     if !id.starts_with("sd_term_") {
         return respond(
@@ -1043,19 +1064,19 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     if req.headers.contains_key("origin") || req.headers.contains_key("sec-fetch-site") {
         return respond(&mut stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
     }
-    if let Some(guard) = &admission { guard.identify(&bearer(&req.headers)); }
+    if let Some(guard) = &admission { guard.identify(bearer(&req.headers)); }
     // Recheck on each stream I/O as well as closing the socket: TLS may already
     // have buffered input when a device is revoked.
-    if authorize(&req, false) {
+    if authorize(&req) {
         let token = bearer(&req.headers);
-        security::note_activity(&token);
-        stream.credential(&token);
+        security::note_activity(token);
+        stream.credential(token);
     }
     let path = req.path.split('?').next().unwrap_or("").to_string();
     if req.method == "POST" {
         if let Some(session) = crate::prompt_image::route(&path) {
-            if !authorize(&req, local) {
-                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                return;
             }
             stream.streaming();
             let body = serde_json::from_str(&req.body).unwrap_or_default();
@@ -1077,8 +1098,8 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
         let parts: Vec<_> = rest.split('/').collect();
         if parts.get(1) == Some(&"assets") {
-            if !authorize(&req, local) {
-                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                return;
             }
             // Authenticated asset work has its own bounded renderer timeout;
             // the initial TLS/header/body deadline no longer applies.
@@ -1130,8 +1151,8 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     }
 
     if path == "/api/v1/workspaces" || path == "/api/v1/harness-types" || (path == "/api/v1/harnesses" && req.method == "POST") {
-        if !authorize(&req, local) {
-            return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+        if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            return;
         }
         if req.method == "GET" && path == "/api/v1/workspaces" {
             return match crate::ipc_request("workspace-choices") {
@@ -1186,14 +1207,14 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     // cannot type into unrelated tmux sessions.
     if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
         if req.method == "DELETE" && !rest.contains('/') {
-            return handle_close_harness(&mut stream, &req, rest, local);
+            return handle_close_harness(&mut stream, &req, rest);
         }
         if let Some((id, action)) = rest.rsplit_once('/') {
             if id.starts_with("sd_term_") {
                 match (req.method.as_str(), action) {
                     ("GET", "input") => {
-                        if !authorize(&req, local) {
-                            return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+                        if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                            return;
                         }
                         if !crate::tmux::session_alive(id) {
                             return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"no_such_session"}));
@@ -1202,13 +1223,8 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                         return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
                     }
                     ("GET", "stream") => {
-                        if !authorize(&req, local) {
-                            return respond(
-                                &mut stream,
-                                401,
-                                "Unauthorized",
-                                &serde_json::json!({"status": "error", "error": "not_paired"}),
-                            );
+                        if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+                            return;
                         }
                         return match ws_upgrade(&mut stream, &req) {
                             true => stream_one_harness(stream, id),
@@ -1220,7 +1236,7 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                             ),
                         };
                     }
-                    ("POST", "keys") => return handle_keys(&mut stream, &req, id, local),
+                    ("POST", "keys") => return handle_keys(&mut stream, &req, id),
                     _ => {}
                 }
             }
@@ -1234,8 +1250,8 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             if req.method != "GET" || card_id.contains('/') {
                 return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"not_found"}));
             }
-            if !authorize(&req, local) {
-                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                return;
             }
             // Ownership, session liveness, the host-owned grid and this
             // device's attachment budget are all settled before the upgrade, so
@@ -1260,13 +1276,8 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     if path == "/api/v1/desktop/commands" {
         // Authorization comes before the method check, like every other desktop
         // route: an unpaired caller learns nothing about the route's shape.
-        if !authorize(&req, local) {
-            return respond(
-                &mut stream,
-                401,
-                "Unauthorized",
-                &serde_json::json!({"error": "not_paired"}),
-            );
+        if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            return;
         }
         if req.method != "POST" {
             return respond(
@@ -1284,16 +1295,16 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
 
     match (req.method.as_str(), path.as_str()) {
         ("GET", "/api/v1/desktop/capabilities") => {
-            if !authorize(&req, local) {
-                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                return;
             }
             let machine_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
             let capabilities = crate::desktop_protocol::Capabilities::current(machine_id);
             respond(&mut stream, 200, "OK", &serde_json::to_value(capabilities).unwrap());
         }
         ("GET", "/api/v1/desktop/workspace" | "/api/v1/desktop/events") => {
-            if !authorize(&req, local) {
-                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                return;
             }
             if path.ends_with("/events") {
                 if !ws_upgrade(&mut stream, &req) {
@@ -1324,34 +1335,14 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             }),
         ) },
         ("GET", "/api/v1/harnesses") => {
-            let ok = pair_state()
-                    .lock()
-                    .map(|mut s| s.valid(&bearer(&req.headers)))
-                    .unwrap_or(false);
-            if !ok {
-                return respond(
-                    &mut stream,
-                    401,
-                    "Unauthorized",
-                    &serde_json::json!({"status": "error", "error": "not_paired"}),
-                );
+            if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+                return;
             }
-            respond(
-                &mut stream,
-                200,
-                "OK",
-                &serde_json::json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "timestamp": utc_now_iso(),
-                    "harnesses": collect_harnesses(),
-                    "usage": crate::usage::launcher_usage(),
-                    "theme": theme_document(),
-                }),
-            );
+            respond(&mut stream, 200, "OK", &harness_document());
         }
         ("POST", "/api/v1/completions") => {
-            if !authorize(&req, local) {
-                return respond(&mut stream, 401, "Unauthorized", &serde_json::json!({"error":"not_paired"}));
+            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                return;
             }
             let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
             let ids: Option<Vec<String>> = body["sessions"].as_array().filter(|v| v.len() <= 32).and_then(|v| {
@@ -1366,25 +1357,15 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             respond(&mut stream, 200, "OK", &serde_json::json!({"terminals": crate::completion::collect(&ids)}));
         }
         ("GET", "/api/v1/theme") => {
-            if !authorize(&req, local) {
-                return respond(
-                    &mut stream,
-                    401,
-                    "Unauthorized",
-                    &serde_json::json!({"status": "error", "error": "not_paired"}),
-                );
+            if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+                return;
             }
             respond(&mut stream, 200, "OK", &theme_document());
         }
         // PROTOCOL.md: full document on connect, then on every change (1s poll).
         ("GET", "/api/v1/harnesses/stream") => {
-            if !authorize(&req, local) {
-                return respond(
-                    &mut stream,
-                    401,
-                    "Unauthorized",
-                    &serde_json::json!({"status": "error", "error": "not_paired"}),
-                );
+            if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+                return;
             }
             if !ws_upgrade(&mut stream, &req) {
                 return respond(
@@ -1969,7 +1950,15 @@ mod tests {
         let mut control = crate::tmux_control::Control::open(&_session.0).unwrap();
         assert_eq!(control.capture().unwrap(), crate::tmux::capture_pane_ansi(&_session.0).unwrap());
         control.send("literal ' ; $() \\ Ukrainian: привіт", true).unwrap();
-        assert!(control.capture().unwrap().contains("literal ' ; $() \\ Ukrainian: привіт"));
+        let expected = "literal ' ; $() \\ Ukrainian: привіт";
+        let appeared = (0..20).any(|_| {
+            if control.capture().unwrap().contains(expected) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            false
+        });
+        assert!(appeared, "tmux never rendered the acknowledged input");
         drop(client);
         worker.join().unwrap();
     }
