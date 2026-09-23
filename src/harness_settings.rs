@@ -23,6 +23,7 @@ use gtk4::{
     PropagationPhase, ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
+use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -100,6 +101,11 @@ fn settings_scroll(content: &Box) -> ScrolledWindow {
     scroll.set_vexpand(true);
     scroll.set_hexpand(true);
     scroll
+}
+
+fn suggested_harness_name(executable: &str) -> Option<String> {
+    let filename = Path::new(executable.trim()).file_name()?.to_str()?.trim();
+    (!filename.is_empty()).then(|| filename.chars().take(48).collect())
 }
 
 
@@ -584,11 +590,19 @@ pub fn build_harness_settings_panel(
     custom_root.add_css_class("launcher-body");
     let (_, custom_body) = section_card(&custom_root, "", "Launcher details");
     let custom_form = Box::new(Orientation::Vertical, 8);
-    let form_help = Label::new(Some("Choose an icon, name the launcher, and point it to an executable on this PC. Arguments are optional; use quotes to keep words together."));
+    let form_help = Label::new(Some("Choose an icon and an executable on this PC. The name defaults to the executable filename. Arguments are optional; use quotes to keep words together."));
     form_help.set_wrap(true);
     form_help.set_xalign(0.0);
     form_help.add_css_class("launcher-hint");
     custom_form.append(&form_help);
+    let form_status = Label::new(None);
+    form_status.add_css_class("launcher-note");
+    form_status.add_css_class("launcher-note-error");
+    form_status.add_css_class("custom-harness-error");
+    form_status.set_xalign(0.0);
+    form_status.set_wrap(true);
+    form_status.set_visible(false);
+    custom_form.append(&form_status);
     let icon_choices = Box::new(Orientation::Horizontal, 6);
     let selected_icon = Rc::new(Cell::new(0usize));
     let icon_buttons: Rc<Vec<Button>> = Rc::new(crate::custom_harness::ICONS.iter().enumerate().map(|(index, icon)| {
@@ -613,7 +627,7 @@ pub fn build_harness_settings_panel(
     }
     paint_icons();
     custom_form.append(&icon_choices);
-    let name_label = Label::new(Some("Name"));
+    let name_label = Label::new(Some("Name (defaults to executable name)"));
     name_label.add_css_class("launcher-hint");
     name_label.set_xalign(0.0);
     custom_form.append(&name_label);
@@ -638,11 +652,6 @@ pub fn build_harness_settings_panel(
     custom_args.set_placeholder_text(Some("Optional arguments, e.g. --model 'my model'"));
     custom_args.add_css_class("ws-entry");
     custom_form.append(&custom_args);
-    let form_status = Label::new(None);
-    form_status.add_css_class("launcher-hint");
-    form_status.set_xalign(0.0);
-    form_status.set_wrap(true);
-    custom_form.append(&form_status);
     let form_actions = Box::new(Orientation::Horizontal, 8);
     let btn_save_custom = Button::with_label("Save harness");
     btn_save_custom.add_css_class("launcher-btn");
@@ -655,6 +664,16 @@ pub fn build_harness_settings_panel(
     custom_body.append(&custom_form);
     let editing_custom: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let refresh_custom: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+    for entry in [&custom_name, &custom_path, &custom_args] {
+        let status = form_status.clone();
+        let subtitle = subtitle.clone();
+        entry.connect_changed(move |entry| {
+            entry.remove_css_class("ws-entry-invalid");
+            status.set_visible(false);
+            subtitle.remove_css_class("launcher-note-error");
+            subtitle.set_label("Icon · name · executable · arguments");
+        });
+    }
 
     let note = Label::new(Some(
         "Hiding a launcher only removes its top-bar button; it does not remove the executable or saved configuration.",
@@ -828,6 +847,7 @@ pub fn build_harness_settings_panel(
         let current_page = Rc::clone(&current_page);
         Rc::new(move |page| {
             current_page.set(page);
+            subtitle.remove_css_class("launcher-note-error");
             home_view.set_visible(page == SettingsPage::Home);
             shortcut_view.set_visible(page == SettingsPage::Shortcut);
             harnesses_view.set_visible(page == SettingsPage::Harnesses);
@@ -945,7 +965,8 @@ pub fn build_harness_settings_panel(
         let paint = Rc::clone(&paint_icons); let nav = Rc::clone(&nav);
         move |_| {
             *editing.borrow_mut() = None;
-            name.set_text(""); path.set_text(""); args.set_text(""); status.set_text("");
+            for entry in [&name, &path, &args] { entry.remove_css_class("ws-entry-invalid"); }
+            name.set_text(""); path.set_text(""); args.set_text(""); status.set_text(""); status.set_visible(false);
             selected.set(0); paint(); nav(SettingsPage::CustomHarness); name.grab_focus();
         }
     });
@@ -1319,7 +1340,8 @@ pub fn build_harness_settings_panel(
                     let nav = Rc::clone(&nav);
                     move |_| {
                         *editing.borrow_mut() = Some(item.id.clone());
-                        status.set_text("");
+                        for entry in [&name, &path, &args] { entry.remove_css_class("ws-entry-invalid"); }
+                        status.set_text(""); status.set_visible(false);
                         name.set_text(&item.name); path.set_text(&item.executable);
                         args.set_text(&item.arguments.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'"))).collect::<Vec<_>>().join(" "));
                         selected.set(crate::custom_harness::ICONS.iter().position(|icon| *icon == item.icon).unwrap_or(0));
@@ -1376,11 +1398,17 @@ pub fn build_harness_settings_panel(
         let state = Rc::clone(&state); let name = custom_name.clone();
         let path = custom_path.clone(); let args = custom_args.clone();
         let selected = Rc::clone(&selected_icon); let editing = Rc::clone(&editing_custom);
-        let status = form_status.clone(); let nav = Rc::clone(&nav);
+        let status = form_status.clone(); let subtitle = subtitle.clone(); let nav = Rc::clone(&nav);
         let on_change = Rc::clone(&on_change); let refresh = Rc::downgrade(&refresh_custom);
         move |_| {
+            let entered_name = name.text();
+            let effective_name = if entered_name.trim().is_empty() {
+                suggested_harness_name(&path.text()).unwrap_or_default()
+            } else {
+                entered_name.to_string()
+            };
             let icon = crate::custom_harness::ICONS[selected.get()];
-            match crate::custom_harness::CustomHarness::create(&name.text(), icon, &path.text(), &args.text()) {
+            match crate::custom_harness::CustomHarness::create(&effective_name, icon, &path.text(), &args.text()) {
                 Ok(mut item) => {
                     let mut s = state.borrow_mut();
                     if let Some(id) = editing.borrow().as_ref() { item.id = id.clone(); }
@@ -1395,11 +1423,23 @@ pub fn build_harness_settings_panel(
                     drop(s);
                     on_change(selected);
                     crate::state::flush_state_saves();
-                    status.set_text("");
+                    status.set_text(""); status.set_visible(false);
                     if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
                     nav(SettingsPage::Harnesses);
                 }
-                Err(error) => status.set_text(&error),
+                Err(error) => {
+                    status.set_text(&error);
+                    status.set_visible(true);
+                    subtitle.set_label(&error);
+                    subtitle.add_css_class("launcher-note-error");
+                    let invalid = match error.as_str() {
+                        "Enter a name of up to 48 characters" => &name,
+                        "Arguments have an unmatched quote" | "Use at most 32 arguments of up to 1024 characters each" => &args,
+                        _ => &path,
+                    };
+                    invalid.add_css_class("ws-entry-invalid");
+                    invalid.grab_focus();
+                }
             }
         }
     });
@@ -1559,6 +1599,9 @@ mod tests {
         let buttons = find_buttons(&panel.widget, "launcher-btn");
         buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
         assert!(shown(&pages[3]), "invalid details keep the form open");
+        let error = find_widgets(&panel.widget, "custom-harness-error")[0].clone().downcast::<Label>().unwrap();
+        assert!(error.is_visible());
+        assert_eq!(error.text().as_str(), "Enter a name of up to 48 characters");
         buttons.iter().find(|button| button.label().as_deref() == Some("🧭")).unwrap().emit_clicked();
         let entries = find_widgets(&panel.widget, "ws-entry");
         for (placeholder, value) in [
@@ -1601,6 +1644,28 @@ mod tests {
         crate::state::flush_state_saves();
         assert!(state.borrow().custom_harnesses.is_empty());
         assert!(crate::state::load_state().custom_harnesses.is_empty());
+
+        // A path alone is enough: derive the name from its filename. If the
+        // executable is missing, the error stays visible until it is fixed.
+        add.emit_clicked();
+        let path = entries.iter().filter_map(|widget| widget.clone().downcast::<gtk4::Entry>().ok())
+            .find(|entry| entry.placeholder_text().as_deref() == Some("/absolute/path/to/executable")).unwrap();
+        path.set_text("/missing/harness");
+        buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        assert!(shown(&pages[3]));
+        assert!(error.is_visible());
+        assert_eq!(error.text().as_str(), "The path is not an executable file");
+        assert!(path.has_css_class("ws-entry-invalid"));
+        path.set_text("/bin/echo");
+        assert!(!error.is_visible());
+        assert!(!path.has_css_class("ws-entry-invalid"));
+        buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
+        assert!(shown(&pages[2]));
+        assert_eq!(state.borrow().custom_harnesses[0].name, "echo");
+        find_buttons(&panel.widget, "launcher-btn").into_iter()
+            .find(|button| button.label().as_deref() == Some("Remove")).unwrap().emit_clicked();
+        crate::state::flush_state_saves();
+        assert!(state.borrow().custom_harnesses.is_empty());
         std::fs::remove_dir_all(home).unwrap();
     }
 
