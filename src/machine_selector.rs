@@ -672,6 +672,118 @@ fn style_peer_button(button: &gtk4::Button, selected: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toolbar_remote_fits_after_workspace_switches() {
+        crate::gtk_test::run_in_child_process("machine_selector::tests::toolbar_remote_inner");
+    }
+
+    #[test]
+    fn toolbar_remote_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let local = gtk4::Fixed::new();
+        let card = gtk4::Label::new(Some("saved on a larger output"));
+        local.put(&card, 6000.0, 0.0);
+        let view = MachineView::new(&local, Rc::new(|| {}), Rc::new(|| {}));
+        view.remote_button
+            .set_label(&"A very long paired computer name ".repeat(12));
+        view.folder_bar
+            .apply(&format!("/home/user/{}", "project/".repeat(60)), &[]);
+        view.status.set_text("Connected · 123 consoles");
+        view.details
+            .set_text(&"Claude, Codex, OpenCode, Custom launcher, ".repeat(10));
+        view.bar.apply(&crate::harness_bar::HarnessState {
+            keys: crate::tmux::HARNESS_KEYS
+                .iter()
+                .map(|key| key.to_string())
+                .collect(),
+            custom: Vec::new(),
+            ready: true,
+        });
+        fn find_hide(widget: &gtk4::Widget) -> Option<gtk4::Button> {
+            if widget.has_css_class("hud-button-danger") {
+                return widget.clone().downcast().ok();
+            }
+            let mut child = widget.first_child();
+            while let Some(widget) = child {
+                if let Some(button) = find_hide(&widget) {
+                    return Some(button);
+                }
+                child = widget.next_sibling();
+            }
+            None
+        }
+        let hide = find_hide(view.remote_toolbar.upcast_ref()).unwrap();
+        for size in [
+            crate::state::TopBarSize::Small,
+            crate::state::TopBarSize::Medium,
+            crate::state::TopBarSize::Large,
+        ] {
+            view.paint_top_bar_size(size);
+            for width in [1280, 320, 3440, 640, 480, 1024] {
+                view.stack.set_visible_child_name("local");
+                assert!(view.stack.measure(gtk4::Orientation::Horizontal, -1).0 > 6000);
+                view.stack.set_visible_child_name("remote");
+                assert!(
+                    view.stack.measure(gtk4::Orientation::Horizontal, -1).0 <= width,
+                    "remote workspace minimum must fit {width} logical pixels"
+                );
+                view.stack.allocate(width, 600, -1, None);
+                let bounds = hide.compute_bounds(&view.stack).unwrap();
+                assert!(hide.is_visible() && hide.is_sensitive());
+                assert!(bounds.width() > 0.0 && bounds.x() >= 0.0);
+                assert!(
+                    bounds.x() + bounds.width() <= width as f32,
+                    "remote Hide must fit {width}: {bounds:?}"
+                );
+                let inset = match size {
+                    crate::state::TopBarSize::Small => 10,
+                    crate::state::TopBarSize::Medium => 12,
+                    crate::state::TopBarSize::Large => 16,
+                };
+                assert!((bounds.x() + bounds.width() - (width - inset) as f32).abs() < 1.0);
+            }
+        }
+        let window = gtk4::Window::new();
+        window.set_default_size(640, 600);
+        window.set_resizable(false);
+        window.set_child(Some(&view.stack));
+        window.present();
+        let until = std::time::Instant::now() + Duration::from_secs(3);
+        let mut hittable = false;
+        while std::time::Instant::now() < until {
+            while glib::MainContext::default().iteration(false) {}
+            if let Some(bounds) = hide.compute_bounds(&window) {
+                if bounds.width() > 0.0
+                    && bounds.x() >= 0.0
+                    && bounds.x() + bounds.width() <= window.width() as f32
+                {
+                    hittable = window
+                        .pick(
+                            (bounds.x() + bounds.width() / 2.0) as f64,
+                            (bounds.y() + bounds.height() / 2.0) as f64,
+                            gtk4::PickFlags::DEFAULT,
+                        )
+                        .is_some_and(|picked| picked == hide || picked.is_ancestor(&hide));
+                }
+            }
+            if hittable {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(window.width(), 640);
+        assert!(
+            hittable,
+            "remote Hide must remain hittable in the mapped window"
+        );
+        window.close();
+    }
+
     #[test]
     #[ignore = "requires a real Wayland compositor with layer-shell"]
     fn layer_popup_stays_open() {

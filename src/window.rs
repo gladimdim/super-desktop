@@ -121,6 +121,38 @@ fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
     root
 }
 
+fn fit_top_bar(hud: &gtk4::Box, width: i32, brand: &Label, hint: &Label) {
+    // An unmapped window has no allocation yet. Keep the initial monitor size
+    // until the compositor supplies a positive logical width.
+    if width <= 0 {
+        return;
+    }
+    if hud.width_request() != width {
+        hud.set_width_request(width);
+    }
+    // Hide's tooltip retains the shortcut when its optional label is hidden.
+    hint.set_visible(width >= 1200);
+    brand.set_visible(width >= 1000);
+}
+
+fn bind_top_bar_width(
+    hud: &gtk4::Box,
+    window: &impl IsA<gtk4::Window>,
+    brand: &Label,
+    hint: &Label,
+) {
+    // The compositor's allocation is authoritative, never the canvas extents.
+    let window = window.as_ref().downgrade();
+    let brand = brand.clone();
+    let hint = hint.clone();
+    hud.add_tick_callback(move |hud, _| {
+        if let Some(window) = window.upgrade() {
+            fit_top_bar(hud, window.width(), &brand, &hint);
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
 /// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
 /// Motion is a critically damped spring sampled on the GTK frame clock (the
 /// Wayland surface's vsync: 60–240 Hz). Reversing only changes the target;
@@ -758,24 +790,7 @@ impl SuperDesktopWindow {
 
         // Layer-shell chooses the output. Its allocated logical width is the
         // authority, including after a monitor or scale change.
-        hud.add_tick_callback({
-            let window = win_rc.window.downgrade();
-            let hint = hint.clone();
-            let brand = brand.clone();
-            move |hud, _| {
-                if let Some(window) = window.upgrade() {
-                    let width = window.width();
-                    if width > 0 && hud.width_request() != width {
-                        hud.set_width_request(width);
-                    }
-                    // The shortcut remains on Hide's tooltip; compact screens
-                    // prioritize the folder, launchers, and action buttons.
-                    hint.set_visible(width >= 1200);
-                    brand.set_visible(width >= 1000);
-                }
-                glib::ControlFlow::Continue
-            }
-        });
+        bind_top_bar_width(&hud, &win_rc.window, &brand, &hint);
 
         // On the canvas, not an Overlay child: Fixed.move_ translates the
         // full-width dock as one widget, same as the cards.
@@ -2366,32 +2381,84 @@ mod tests {
         gtk4::init().unwrap();
         crate::styles::apply_styles();
         let left = gtk4::Box::new(Orientation::Horizontal, 0);
-        left.set_size_request(800, 36);
+        let brand = Label::new(Some("SUPER DESKTOP"));
+        left.append(&brand);
+        let folder = gtk4::Entry::new();
+        folder.set_text(&format!("/home/user/{}", "long-project-folder/".repeat(30)));
+        folder.set_width_chars(60);
+        left.append(&folder);
         let launchers = gtk4::Box::new(Orientation::Horizontal, 0);
-        launchers.set_size_request(1400, 36);
+        let launcher_buttons: Vec<_> = (0..24)
+            .map(|index| {
+                let button = Button::with_label(&format!("Custom harness {index}"));
+                launchers.append(&button);
+                button
+            })
+            .collect();
         let right = gtk4::Box::new(Orientation::Horizontal, 10);
-        for label in ["Arrange", "Settings", "Hide"] {
-            right.append(&Button::with_label(label));
-        }
+        right.set_valign(Align::Center);
+        let actions: Vec<_> = [
+            "sd-arrange-symbolic",
+            "sd-gears-symbolic",
+            "sd-hide-symbolic",
+        ]
+        .into_iter()
+        .map(|icon| {
+            let button = Button::from_icon_name(icon);
+            button.add_css_class("hud-button");
+            button.add_css_class("hud-icon-btn");
+            right.append(&button);
+            button
+        })
+        .collect();
+        let hint = Label::new(Some("[SUPER + SHIFT + Q]"));
+        right.append(&hint);
         let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
         hud.append(&top_bar_content(&left, &launchers, &right));
-        for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
-            paint_top_bar_size(&hud, size);
-            // Shrink, enlarge, then shrink again, as with output/scale changes.
-            for width in [1280, 800, 2560, 640, 1024] {
-                hud.set_width_request(width);
-                let (_, natural, _, _) = hud.measure(Orientation::Horizontal, -1);
-                assert_eq!(natural, width, "contents must not inflate the dock");
-                let (_, height, _, _) = hud.measure(Orientation::Vertical, width);
-                hud.allocate(width, height, -1, None);
-                let bounds = right.compute_bounds(&hud).unwrap();
-                assert!(bounds.x() >= 0.0);
-                // GTK widget coordinates exclude the dock's CSS padding.
-                assert!((bounds.x() + bounds.width() - hud.width() as f32).abs() < 1.0,
-                    "right controls must meet the display edge at {width}: {bounds:?}");
-                let last = right.last_child().unwrap().compute_bounds(&hud).unwrap();
-                assert!(last.x() + last.width() <= width as f32);
+        hud.set_width_request(1024);
+        fit_top_bar(&hud, 0, &brand, &hint);
+        assert_eq!(
+            hud.width_request(),
+            1024,
+            "an unmapped window must not collapse the toolbar"
+        );
+        for count in [0, 3, 24] {
+            for (index, button) in launcher_buttons.iter().enumerate() {
+                button.set_visible(index < count);
+            }
+            for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
+                paint_top_bar_size(&hud, size);
+                // Shrink, enlarge, then shrink again, as with output/scale changes.
+                // Logical widths also cover scaled outputs, e.g. 1920/1.5=1280
+                // and 2560/2=1280. Cross the compact-label breakpoints both ways.
+                for width in [
+                    1280, 320, 800, 2560, 640, 999, 1000, 1199, 1200, 480, 3440, 1024,
+                ] {
+                    fit_top_bar(&hud, width, &brand, &hint);
+                    assert_eq!(brand.is_visible(), width >= 1000);
+                    assert_eq!(hint.is_visible(), width >= 1200);
+                    let (_, natural, _, _) = hud.measure(Orientation::Horizontal, -1);
+                    assert_eq!(natural, width, "contents must not inflate the dock");
+                    let (_, height, _, _) = hud.measure(Orientation::Vertical, width);
+                    hud.allocate(width, height, -1, None);
+                    let bounds = right.compute_bounds(&hud).unwrap();
+                    assert!(bounds.x() >= 0.0);
+                    // GTK widget coordinates exclude the dock's CSS padding.
+                    assert!(
+                        (bounds.x() + bounds.width() - hud.width() as f32).abs() < 1.0,
+                        "right controls must meet the display edge at {width}: {bounds:?}"
+                    );
+                    for button in &actions {
+                        let bounds = button.compute_bounds(&hud).unwrap();
+                        assert!(button.is_visible() && button.is_sensitive());
+                        assert!(bounds.width() > 0.0 && bounds.height() > 0.0);
+                        assert!(bounds.x() >= 0.0 && bounds.x() + bounds.width() <= hud.width() as f32);
+                        assert!(
+                            bounds.y() >= 0.0 && bounds.y() + bounds.height() <= hud.height() as f32
+                        );
+                    }
+                }
             }
         }
 
@@ -2413,50 +2480,55 @@ mod tests {
         window.set_default_size(1024, 600);
         window.set_resizable(false);
         window.set_child(Some(&root));
-        hud.add_tick_callback({
-            let window = window.downgrade();
-            move |hud, _| {
-                if let Some(window) = window.upgrade() {
-                    if window.width() > 0 && hud.width_request() != window.width() {
-                        hud.set_width_request(window.width());
-                    }
-                }
-                glib::ControlFlow::Continue
-            }
-        });
+        bind_top_bar_width(&hud, &window, &brand, &hint);
         window.present();
-        let until = std::time::Instant::now() + Duration::from_secs(3);
-        let mut settled = 0;
-        while std::time::Instant::now() < until {
-            while glib::MainContext::default().iteration(false) {}
-            let fits = right.compute_bounds(&window).is_some_and(|bounds| {
-                bounds.width() > 0.0 && bounds.x() >= 0.0
-                    && bounds.x() + bounds.width() <= window.width() as f32
-                    && hud.width_request() == window.width()
-            });
-            settled = if fits { settled + 1 } else { 0 };
-            if settled >= 5 {
-                break;
+        for width in [1024, 640, 1600, 480, 1280] {
+            window.set_default_size(width, 600);
+            let until = std::time::Instant::now() + Duration::from_secs(3);
+            let mut settled = 0;
+            while std::time::Instant::now() < until {
+                while glib::MainContext::default().iteration(false) {}
+                let fits = right.compute_bounds(&window).is_some_and(|bounds| {
+                    bounds.width() > 0.0
+                        && bounds.x() >= 0.0
+                        && bounds.x() + bounds.width() <= window.width() as f32
+                        && hud.width_request() == window.width()
+                        && window.width() == width
+                });
+                settled = if fits { settled + 1 } else { 0 };
+                if settled >= 5 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(window.width() > 0 && window.width() < 5000);
-        assert_eq!(hud.width_request(), window.width());
-        let bounds = right.compute_bounds(&window).unwrap();
-        assert!(bounds.x() >= 0.0 && bounds.x() + bounds.width() <= window.width() as f32,
-            "mapped controls {bounds:?} exceed window width {}", window.width());
-        // Visible geometry alone is insufficient: every action must also be
-        // hittable through the mapped window and its clipped canvas.
-        let mut child = right.first_child();
-        while let Some(button) = child {
-            let bounds = button.compute_bounds(&window).unwrap();
-            let picked = window.pick(
-                bounds.x() as f64 + bounds.width() as f64 / 2.0,
-                bounds.y() as f64 + bounds.height() as f64 / 2.0,
-                gtk4::PickFlags::DEFAULT,
-            ).expect("toolbar action must be hittable");
-            assert!(picked == button || picked.is_ancestor(&button));
-            child = button.next_sibling();
+            assert!(window.width() > 0 && window.width() < 5000);
+            assert_eq!(
+                window.width(),
+                width,
+                "the mapped window must accept the new size"
+            );
+            assert_eq!(hud.width_request(), window.width());
+            assert_eq!(brand.is_visible(), width >= 1000);
+            assert_eq!(hint.is_visible(), width >= 1200);
+            let bounds = right.compute_bounds(&window).unwrap();
+            assert!(
+                bounds.x() >= 0.0 && bounds.x() + bounds.width() <= window.width() as f32,
+                "mapped controls {bounds:?} exceed window width {}",
+                window.width()
+            );
+            // Visible geometry alone is insufficient: every action must also be
+            // hittable through the mapped window and its clipped canvas.
+            for button in &actions {
+                let bounds = button.compute_bounds(&window).unwrap();
+                let picked = window
+                    .pick(
+                        bounds.x() as f64 + bounds.width() as f64 / 2.0,
+                        bounds.y() as f64 + bounds.height() as f64 / 2.0,
+                        gtk4::PickFlags::DEFAULT,
+                    )
+                    .expect("toolbar action must be hittable");
+                assert!(picked == *button || picked.is_ancestor(button));
+            }
         }
         window.close();
     }
