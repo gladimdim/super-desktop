@@ -196,6 +196,9 @@ pub(crate) fn last_user_text(
     if is_regular_terminal(agent_type) {
         return crate::shell_title::last(session);
     }
+    if let Some(metadata) = crate::harness_metadata::inspect(session, agent_type) {
+        return (!metadata.prompt.is_empty()).then(|| crate::tmux::truncate_prompt_title(&metadata.prompt));
+    }
     if let Some(prompt) = crate::prompt_history::last(session) {
         return Some(prompt);
     }
@@ -218,6 +221,14 @@ pub(crate) fn last_user_text(
 
 fn is_regular_terminal(agent_type: &str) -> bool {
     crate::shell_title::is_regular(agent_type)
+}
+
+pub(crate) fn session_title(session: &str, agent_type: &str, pane_pid: &str) -> Option<String> {
+    if let Some(title) = crate::harness_metadata::title(session, agent_type) {
+        return Some(title);
+    }
+    if agent_type != "codex" { return None; }
+    crate::completion::session_title(pane_pid.parse().ok()?)
 }
 
 /// Pick the directory the launcher should describe. Harness rows show the
@@ -301,6 +312,8 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
         let agent_icon = custom.map_or(cfg.icon, |item| item.icon.as_str());
         let screen = capture_pane_text(&session).unwrap_or_default();
         let (model, effort) = harness_model_effort(&agent_type, &screen);
+        let model = crate::harness_metadata::inspect(&session, &agent_type)
+            .map(|value| value.model).filter(|model| !model.is_empty()).or(model);
         let status = inspect_status_with_screen(&session, &agent_type, &screen);
         let harness_home = resolve_workspace_dir(workspace_dir.as_deref());
         let (directory, directory_kind) =
@@ -326,6 +339,7 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
             "label": status.label,
             "pid": status.pid,
             "cmd": cmd,
+            "sessionTitle": session_title(&session, &agent_type, &status.pid),
             "lastPrompt": last_user_text(
                 &session,
                 &agent_type,
@@ -795,6 +809,7 @@ fn stream_one_harness(mut stream: Connection, id: &str) {
         return;
     };
     let mut cached_status = inspect_status(id, &agent_type);
+    let mut cached_title = session_title(id, &agent_type, &cached_status.pid);
     let mut status_updated = std::time::Instant::now();
     // The pane's own grid, read on the status tick: a client rendering this
     // session's captured text needs the columns it was rendered at, and the
@@ -824,6 +839,7 @@ fn stream_one_harness(mut stream: Connection, id: &str) {
             };
         } else if status_updated.elapsed() >= Duration::from_millis(500) {
             cached_status = inspect_status_with_screen(id, &agent_type, plain_tail.as_deref().unwrap_or(""));
+            cached_title = session_title(id, &agent_type, &cached_status.pid);
             cached_grid = crate::tmux::pane_grid(id);
             status_updated = std::time::Instant::now();
         }
@@ -832,6 +848,7 @@ fn stream_one_harness(mut stream: Connection, id: &str) {
             "id": id,
             "agentType": agent_type,
             "status": status.status,
+            "sessionTitle": cached_title,
             "label": status.label,
             "tag": tag,
             "tagColor": tag_color(tag),

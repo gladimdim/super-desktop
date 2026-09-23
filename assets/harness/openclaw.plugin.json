@@ -1,0 +1,1 @@
+{"id":"super-desktop-metadata","name":"SUPER DESKTOP metadata","description":"Observe dedicated SUPER DESKTOP TUI sessions without modifying agent actions.","configSchema":{"type":"object","properties":{},"additionalProperties":false}}

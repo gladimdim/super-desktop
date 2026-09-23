@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::MetadataExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Default, Serialize)]
@@ -123,6 +123,59 @@ fn rollout(pane_pid: u32) -> Option<(PathBuf, String)> {
                 queue.push_back((child, depth + 1));
             }
         }
+    }
+    None
+}
+
+/// Codex's generated/renamed conversation name, attributed through the live
+/// CLI's open rollout. Never guess by cwd, timestamps, or the latest session.
+pub(crate) fn session_title(pane_pid: u32) -> Option<String> {
+    let (fd, identity) = rollout(pane_pid)?;
+    title_for_rollout(&fd, Path::new(&identity))
+}
+
+fn title_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
+    let file = File::open(fd).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
+        return None;
+    }
+    let mut header = Vec::new();
+    BufReader::new(file.take(64 * 1024)).read_until(b'\n', &mut header).ok()?;
+    if !header.ends_with(b"\n") { return None; }
+    let record: Value = serde_json::from_slice(&header).ok()?;
+    if record["type"] != "session_meta" || record["payload"]["source"] != "cli" {
+        return None;
+    }
+    let id = record["payload"]["id"].as_str().filter(|id| !id.is_empty())?;
+    // Derive CODEX_HOME from this rollout, including nondefault installations.
+    let home = identity.ancestors().find(|path| {
+        path.file_name().is_some_and(|name| name == "sessions" || name == "archived_sessions")
+    })?.parent()?;
+    let mut index = File::open(home.join("session_index.jsonl")).ok()?;
+    let meta = index.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    // The append-only index records names separately from raw first prompts.
+    // Bound work per refresh, and never interpret an incomplete JSON record.
+    let start = meta.len().saturating_sub(4 * 1024 * 1024);
+    index.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    index.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
+    let tail = if start > 0 {
+        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
+    } else { &bytes };
+    title_from_index(tail, id)
+}
+
+fn title_from_index(bytes: &[u8], id: &str) -> Option<String> {
+    for line in bytes.split_inclusive(|b| *b == b'\n').rev() {
+        if !line.ends_with(b"\n") { continue; }
+        let Ok(record) = serde_json::from_slice::<Value>(line) else { continue; };
+        if record["id"].as_str() != Some(id) { continue; }
+        let name = record["thread_name"].as_str()?;
+        let clean = crate::tmux::strip_terminal_escapes(name)
+            .split_whitespace().collect::<Vec<_>>().join(" ");
+        return (!clean.is_empty()).then(|| clean.chars().take(240).collect());
     }
     None
 }
@@ -360,10 +413,16 @@ mod tests {
             "sd-completion-{}",
             crate::tmux::unique_session_name()
         ));
-        std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("rollout-fixture.jsonl");
-        let header = "{\"type\":\"session_meta\",\"payload\":{\"source\":\"cli\"}}\n";
+        let sessions = directory.join("sessions/2026/09/23");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join("rollout-fixture.jsonl");
+        let header = "{\"type\":\"session_meta\",\"payload\":{\"source\":\"cli\",\"id\":\"own-thread\"}}\n";
         std::fs::write(&path, format!("{header}{DONE}")).unwrap();
+        let index = directory.join("session_index.jsonl");
+        std::fs::write(&index, concat!(
+            "{\"id\":\"own-thread\",\"thread_name\":\"Fix toolbar sizing\"}\n",
+            "{\"id\":\"another-thread\",\"thread_name\":\"Wrong conversation\"}\n",
+        )).unwrap();
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -387,6 +446,10 @@ mod tests {
         let first = inspect("test", child.id());
         assert!(first.supported);
         assert_eq!(first.state, "completed");
+        assert_eq!(session_title(child.id()).as_deref(), Some("Fix toolbar sizing"));
+        std::fs::OpenOptions::new().append(true).open(&index).unwrap()
+            .write_all(b"{\"id\":\"own-thread\",\"thread_name\":\"Renamed conversation\"}\n").unwrap();
+        assert_eq!(session_title(child.id()).as_deref(), Some("Renamed conversation"));
         assert_eq!(
             inspect("test", child.id()).completion_id,
             first.completion_id
@@ -404,10 +467,32 @@ mod tests {
         )
         .unwrap();
         assert!(!inspect("test", child.id()).supported);
+        assert!(session_title(child.id()).is_none(), "subagent metadata must not name the parent terminal");
         drop(child.stdin.take());
         assert!(child.wait().unwrap().success());
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn session_titles_require_exact_identity_and_complete_name_records() {
+        let records = concat!(
+            "{\"id\":\"own\",\"thread_name\":\" First name \"}\n",
+            "{\"id\":\"other\",\"thread_name\":\"Do not use this\"}\n",
+            "invalid json\n",
+            "{\"id\":\"own\",\"thread_name\":\"  Fix\\n toolbar 🛠  \"}\n",
+            "{\"id\":\"own\",\"thread_name\":\"Incomplete",
+        );
+        assert_eq!(title_from_index(records.as_bytes(), "own").as_deref(), Some("Fix toolbar 🛠"));
+        assert!(title_from_index(records.as_bytes(), "missing").is_none());
+        for newest in [
+            "{\"id\":\"own\",\"thread_name\":\" \"}\n",
+            "{\"id\":\"own\",\"thread_name\":null}\n",
+        ] {
+            assert!(title_from_index(format!("{records}\n{newest}").as_bytes(), "own").is_none());
+        }
+        assert!(title_from_index(b"{\"id\":\"own\",\"title\":\"Raw first prompt\"}\n", "own").is_none());
+        let long = serde_json::json!({"id": "own", "thread_name": "🙂".repeat(300)}).to_string() + "\n";
+        assert_eq!(title_from_index(long.as_bytes(), "own").unwrap().chars().count(), 240);
     }
 }
 

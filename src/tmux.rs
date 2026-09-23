@@ -69,6 +69,10 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
             name: "Pi", icon: "🥧", commands: &["pi"],
             default_args: &[], npx_package: None,
         },
+        "openclaw" => AgentConfig {
+            name: "OpenClaw", icon: "🦞", commands: &["openclaw"],
+            default_args: &["tui"], npx_package: None,
+        },
         "goose" => AgentConfig {
             name: "Goose", icon: "🪿", commands: &["goose"],
             default_args: &["session"], npx_package: None,
@@ -147,6 +151,7 @@ pub const HARNESS_KEYS: &[&str] = &[
     "gemini",
     "hermes",
     "pi",
+    "openclaw",
     "goose",
     "qwen",
     "crush",
@@ -549,6 +554,7 @@ pub fn create_session(
     let session_name = unique_session_name();
     let cmd = resolve_command(agent_type, custom_command);
     let launch = crate::shell_title::launch_command(agent_type, &cmd);
+    let launch = crate::harness_metadata::prepare(&session_name, agent_type, &launch);
     let cwd = resolve_workspace_dir(workspace_dir);
 
     let _ = Command::new("tmux")
@@ -563,11 +569,12 @@ pub fn create_session(
             "120",
             "-y",
             "35",
-            &launch,
+            &launch.command,
         ])
         .output();
 
     pin_client_exit(&session_name);
+    launch.register(&session_name);
 
     (session_name, cmd)
 }
@@ -687,6 +694,7 @@ pub fn ensure_session_with_inventory(
         let cmd =
             resolve_resume_command_with_session(agent_type, custom_command, agent_session_id);
         let launch = crate::shell_title::launch_command(agent_type, &cmd);
+        let launch = crate::harness_metadata::prepare(session_name, agent_type, &launch);
         let cwd = resolve_workspace_dir(workspace_dir);
         let _ = Command::new("tmux")
             .args([
@@ -700,9 +708,10 @@ pub fn ensure_session_with_inventory(
                 "120",
                 "-y",
                 "35",
-                &launch,
+                &launch.command,
             ])
             .output();
+        launch.register(session_name);
     }
 
     pin_client_exit(session_name);
@@ -920,6 +929,17 @@ fn inspect_status_impl(
                     let completion = crate::completion::inspect(session_name, p_num);
                     if let Some((status, label)) = explicit_turn_status(&completion.state) {
                         return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+                    }
+                    if completion.supported {
+                        return SessionStatus { status: "UNKNOWN", label: "? UNKNOWN", pid: display_pid, cmd: display_cmd, cwd };
+                    }
+                }
+
+                if matches!(agent_type, "claude" | "opencode" | "pi" | "openclaw") {
+                    if let Some(metadata) = crate::harness_metadata::inspect(session_name, agent_type) {
+                        if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
+                            return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+                        }
                     }
                 }
 
@@ -1631,6 +1651,9 @@ pub fn resolve_own_opencode_id(
     session_name: &str,
     persisted: Option<&str>,
 ) -> Option<String> {
+    if let Some(metadata) = crate::harness_metadata::inspect(session_name, "opencode") {
+        if !metadata.native_session.is_empty() { return Some(metadata.native_session); }
+    }
     let flags = flag_claims(&live_pane_pids().unwrap_or_default());
     if let Some(id) = flags.get(session_name) {
         return Some(id.clone());
@@ -1740,6 +1763,13 @@ pub fn get_opencode_user_text_by_id(opencode_session_id: &str) -> Option<String>
     } else {
         None
     }
+}
+
+pub fn get_opencode_title_by_id(session_id: &str) -> Option<String> {
+    let title = sqlite_query(&opencode_db_path()?, &format!(
+        "SELECT title FROM session WHERE id = '{}' LIMIT 1;", sql_escape(session_id)))?;
+    let title = strip_terminal_escapes(&title).split_whitespace().collect::<Vec<_>>().join(" ");
+    (!title.is_empty()).then(|| title.chars().take(240).collect())
 }
 
 #[cfg(test)]

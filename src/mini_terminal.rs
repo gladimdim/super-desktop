@@ -1521,6 +1521,7 @@ impl MiniTerminalCard {
                 let prompt = crate::bridge::last_user_text(
                     &sess_name, &agent_type, oc_id.as_deref(), screen.as_deref().unwrap_or(""),
                 );
+                let prompt = crate::bridge::session_title(&sess_name, &agent_type, &status.pid).or(prompt);
                 (status, preview, prompt, oc_id)
             });
             let Ok((status_info, preview, prompt, oc_id)) = handle.await else {
@@ -1585,6 +1586,9 @@ fn status_view_texts(status: &str) -> (&'static str, &'static str, &'static str)
     match status {
         "BUSY" | "WORKING" => ("● WORKING", "●", "status-busy"),
         "FINISHED" => ("✓ FINISHED", "✓", "status-idle"),
+        "WAITING" => ("◌ WAITING", "◌", "status-idle"),
+        "ERROR" => ("⚠ ERROR", "⚠", "status-exited"),
+        "UNKNOWN" => ("? UNKNOWN", "?", "status-idle"),
         "EXITED" => ("○ EXITED", "○", "status-exited"),
         // A live card whose session runs on another machine says so, rather
         // than claiming to be idle here.

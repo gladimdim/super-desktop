@@ -41,7 +41,15 @@ other components that bypass logind inhibitors are outside its control.
 
 ### Supported AI harnesses
 
-PC card titles and Android prompt labels share the last submitted input for each
+Claude Code, OpenCode and Pi now have scoped native metadata adapters for new
+terminal sessions. They report conversation names where available, submitted
+prompts, working/idle, permission waits and errors. Codex uses its own rollout
+events and conversation index. OpenClaw TUI is discoverable after installation
+and has an optional gateway plugin. See [integration coverage, setup and remaining
+validation](docs/HARNESS_INTEGRATIONS.md); launcher availability alone does not
+mean a harness has a verified native adapter.
+
+PC card title fallbacks and Android prompt labels share the last submitted input for each
 tmux session. New input sent through the desktop, remote desktop, or Android
 updates that value; response output and unsent drafts cannot replace it. Codex
 rollout user messages and the owned OpenCode session provide fallbacks for

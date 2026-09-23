@@ -6,6 +6,7 @@ mod custom_harness;
 mod prompt_image;
 mod prompt_history;
 mod shell_title;
+mod harness_metadata;
 mod asset_pdf;
 mod asset_view;
 mod bridge;
@@ -224,6 +225,18 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
+
+    if action == "harness-event" {
+        harness_metadata::record(args.get(2).map(String::as_str).unwrap_or(""));
+        return;
+    }
+    if action == "integrate-openclaw" {
+        if let Err(error) = harness_metadata::install_openclaw() {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-forget") {
         if let Err(error) = peer_cli::run(action, &args[2..]) {
