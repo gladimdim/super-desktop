@@ -192,7 +192,7 @@ pub fn submit(
         return Err("image_prompts_require_codex".into());
     }
     let status = crate::tmux::inspect_status(session, "codex");
-    if status.status != "IDLE" || status.cmd != "codex" {
+    if !matches!(status.status, "IDLE" | "FINISHED") || status.cmd != "codex" {
         return Err("wait_for_idle_terminal".into());
     }
     let mut control = crate::tmux_control::Control::open(session)?;

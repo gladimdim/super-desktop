@@ -893,7 +893,7 @@ fn stream_keys(mut stream: Connection, id: &str) {
                     let _input = crate::prompt_image::input_guard(id)?;
                     if value.len() > 4096 { return Err("text_too_long".into()); }
                     if body["checkIdle"].as_bool().unwrap_or(false) {
-                        if inspect_status(id, &agent).status != "IDLE" {
+                        if !matches!(inspect_status(id, &agent).status, "IDLE" | "FINISHED") {
                             return Err("Wait for the harness to become idle.".into());
                         }
                         if get_composer_draft(id).is_some_and(|s| !s.trim().is_empty()) {

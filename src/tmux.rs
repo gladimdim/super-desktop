@@ -773,53 +773,41 @@ fn get_direct_children(pid: u32) -> Vec<u32> {
     Vec::new()
 }
 
-fn is_transient_prompt_tool(comm: &str) -> bool {
-    comm == "starship" || comm == "direnv" || comm == "oh-my-posh" || comm == "powerline"
+/// Compare the shell's process group with the terminal's foreground group.
+/// Background jobs and persistent helpers are not evidence of a busy prompt.
+fn foreground_job_from_stat(stat: &str) -> bool {
+    let Some((_, rest)) = stat.rsplit_once(')') else { return false; };
+    let fields: Vec<_> = rest.split_whitespace().collect();
+    let pgrp = fields.get(2).and_then(|v| v.parse::<i32>().ok());
+    let foreground = fields.get(5).and_then(|v| v.parse::<i32>().ok());
+    matches!((pgrp, foreground), (Some(group), Some(fg)) if fg > 0 && group != fg)
 }
 
-fn has_active_subprocesses(pid_num: u32, is_shell_agent: bool) -> bool {
-    let comm = get_proc_comm(pid_num);
-    let is_shell_proc = comm == "bash" || comm == "zsh" || comm == "fish" || comm == "sh";
-    let direct = get_direct_children(pid_num);
-
-    if is_shell_agent {
-        // Plain shell session: any non-transient child process means a foreground command is executing
-        return direct
-            .into_iter()
-            .any(|p| !is_transient_prompt_tool(&get_proc_comm(p)));
+fn explicit_turn_status(state: &str) -> Option<(&'static str, &'static str)> {
+    match state {
+        "working" => Some(("WORKING", "● WORKING")),
+        "completed" => Some(("FINISHED", "✓ FINISHED")),
+        _ => None,
     }
+}
 
-    // AI agent session
-    if is_shell_proc {
-        // The pane PID is tmux's shell wrapper launching the agent
-        // The direct child is the agent process itself
-        for child_pid in direct {
-            let child_comm = get_proc_comm(child_pid);
-            if is_transient_prompt_tool(&child_comm) {
-                continue;
-            }
-            if child_comm != "bash" && child_comm != "zsh" && child_comm != "sh" {
-                // This child is the agent. Check if the agent has spawned child tools
-                if get_direct_children(child_pid)
-                    .into_iter()
-                    .any(|p| !is_transient_prompt_tool(&get_proc_comm(p)))
-                {
-                    return true;
-                }
-            } else if get_direct_children(child_pid)
-                .into_iter()
-                .any(|p| !is_transient_prompt_tool(&get_proc_comm(p)))
-            {
-                return true;
-            }
-        }
-        false
-    } else {
-        // The pane PID is the agent itself directly
-        direct
-            .into_iter()
-            .any(|p| !is_transient_prompt_tool(&get_proc_comm(p)))
-    }
+fn screen_indicates_work(screen: &str, height: usize) -> bool {
+    let plain = strip_terminal_escapes(screen);
+    let working = recent_status_lines(&plain, height).any(|line| {
+        // Inspect status-shaped lines, never arbitrary prose, code or quoted prompts.
+        let first = line.chars().next().unwrap_or(' ');
+        let spinner = ('\u{2801}'..='\u{28ff}').contains(&first);
+        let decorated = spinner || "•✻✽✶✳✢*".contains(first);
+        let text = line.trim_start_matches(|c: char| c.is_whitespace() || "•✻✽✶✳✢*".contains(c)
+            || ('\u{2801}'..='\u{28ff}').contains(&c)).to_lowercase();
+        let interrupt = ["esc to cancel", "esc to interrupt", "ctrl+c to cancel", "ctrl+c to interrupt", "press esc to stop"];
+        if interrupt.iter().any(|hint| text.starts_with(hint)) { return true; }
+        if !decorated { return false; }
+        if interrupt.iter().any(|hint| text.contains(hint)) { return true; }
+        ["thinking", "generating", "streaming", "working", "building", "compiling", "editing", "running", "analyzing"]
+            .iter().any(|word| text.starts_with(&format!("{word}…")) || text.starts_with(&format!("{word}...")))
+    });
+    working
 }
 
 fn resolve_effective_pid(pid_num: u32, is_shell_agent: bool) -> u32 {
@@ -924,111 +912,38 @@ fn inspect_status_impl(
                     cmd.clone()
                 };
 
-                // Check 1: Does the process have active child subprocesses running?
-                // E.g. running a build, executing a tool, subshell command
-                if p_num != 0 && has_active_subprocesses(p_num, is_shell_agent) {
+                // Codex's own rollout belongs to this exact pane process. Explicit
+                // turn events override stale screen text and long-lived tool helpers.
+                if agent_type == "codex" && p_num != 0 {
+                    let completion = crate::completion::inspect(session_name, p_num);
+                    if let Some((status, label)) = explicit_turn_status(&completion.state) {
+                        return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+                    }
+                }
+
+                let is_shell_cmd = matches!(cmd.as_str(), "bash" | "zsh" | "fish" | "sh");
+                if is_shell_agent {
+                    let foreground = std::fs::read_to_string(format!("/proc/{p_num}/stat"))
+                        .map(|stat| foreground_job_from_stat(&stat)).unwrap_or(false);
+                    let busy = foreground || (!is_shell_cmd && !cmd.is_empty());
                     return SessionStatus {
-                        status: "WORKING",
-                        label: "● WORKING",
-                        pid: display_pid,
-                        cmd: display_cmd,
-                        cwd,
+                        status: if busy { "WORKING" } else { "IDLE" },
+                        label: if busy { "● WORKING" } else { "● IDLE" },
+                        pid: display_pid, cmd: display_cmd, cwd,
                     };
                 }
 
-                // Check 2: Shell session foreground command check
-                let is_shell_cmd = cmd == "bash" || cmd == "zsh" || cmd == "fish" || cmd == "sh";
-                if is_shell_agent && !is_shell_cmd && !cmd.is_empty() {
-                    return SessionStatus {
-                        status: "WORKING",
-                        label: "● WORKING",
-                        pid: display_pid,
-                        cmd: display_cmd,
-                        cwd,
-                    };
-                }
-
-                // Check 3: Screen capture of bottom lines for spinners, cancel hints, or status words
+                // Other agents use conservative visible status indicators. Child
+                // process existence alone says nothing about a response in progress.
                 let captured = screen.map(std::borrow::Cow::Borrowed).or_else(|| {
                     let output = Command::new("tmux")
-                        .args(["capture-pane", "-p", "-t", session_name, "-S", "-15"])
-                        .output()
-                        .ok()?;
-                    output.status.success().then(|| {
-                        std::borrow::Cow::Owned(
-                            String::from_utf8_lossy(&output.stdout).into_owned(),
-                        )
-                    })
+                        .args(["capture-pane", "-p", "-t", session_name])
+                        .output().ok()?;
+                    output.status.success().then(|| std::borrow::Cow::Owned(
+                        String::from_utf8_lossy(&output.stdout).into_owned()))
                 });
-                if let Some(cap_text) = captured {
-                    for line in recent_status_lines(&cap_text, height) {
-                        // Check for Braille spinner characters (U+2801 to U+28FF)
-                        let has_braille =
-                            line.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c));
-                        if has_braille {
-                            return SessionStatus {
-                                status: "WORKING",
-                                label: "● WORKING",
-                                pid: display_pid,
-                                cmd: display_cmd,
-                                cwd,
-                            };
-                        }
-
-                        let line_lower = line.to_lowercase();
-
-                        // Check for interrupt hints
-                        if line_lower.contains("esc to cancel")
-                            || line_lower.contains("esc to interrupt")
-                            || line_lower.contains("ctrl+c to cancel")
-                            || line_lower.contains("ctrl+c to interrupt")
-                            || line_lower.contains("press esc to stop")
-                            || line_lower.contains("press ctrl-c to stop")
-                            || line_lower.contains("to interrupt")
-                            || line_lower.contains("to cancel")
-                        {
-                            return SessionStatus {
-                                status: "WORKING",
-                                label: "● WORKING",
-                                pid: display_pid,
-                                cmd: display_cmd,
-                                cwd,
-                            };
-                        }
-
-                        // Check for active progress words
-                        if line_lower.contains("thinking...")
-                            || line_lower.contains("thinking…")
-                            || line_lower.contains("generating...")
-                            || line_lower.contains("generating…")
-                            || line_lower.contains("streaming...")
-                            || line_lower.contains("streaming…")
-                            || line_lower.contains("working...")
-                            || line_lower.contains("working…")
-                            || line_lower.contains("building...")
-                            || line_lower.contains("building…")
-                            || line_lower.contains("compiling...")
-                            || line_lower.contains("compiling…")
-                            || line_lower.contains("editing files...")
-                            || line_lower.contains("editing files…")
-                            || line_lower.contains("editing...")
-                            || line_lower.contains("editing…")
-                            || line_lower.contains("running...")
-                            || line_lower.contains("running…")
-                            || line_lower.contains("calling tool")
-                            || line_lower.contains("running tool")
-                            || line_lower.contains("analyzing...")
-                            || line_lower.contains("analyzing…")
-                        {
-                            return SessionStatus {
-                                status: "WORKING",
-                                label: "● WORKING",
-                                pid: display_pid,
-                                cmd: display_cmd,
-                                cwd,
-                            };
-                        }
-                    }
+                if captured.as_deref().is_some_and(|text| screen_indicates_work(text, height)) {
+                    return SessionStatus { status: "WORKING", label: "● WORKING", pid: display_pid, cmd: display_cmd, cwd };
                 }
 
                 return SessionStatus {
@@ -1051,14 +966,12 @@ fn inspect_status_impl(
     }
 }
 
-/// Match capture-pane -S -15: visible rows plus 15 rows of history. Limiting
-/// before skipping blank rows prevents old scrollback spinners marking an
-/// idle card busy when we reuse the deeper title capture.
+/// Only visible rows can describe the current TUI state. Ignore scrollback.
 fn recent_status_lines(screen: &str, height: usize) -> impl Iterator<Item = &str> {
     screen
         .lines()
         .rev()
-        .take(height.saturating_add(15))
+        .take(height)
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .take(8)
@@ -1830,6 +1743,27 @@ pub fn get_opencode_user_text_by_id(opencode_session_id: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_uses_turn_events_and_not_response_text() {
+        assert_eq!(explicit_turn_status("completed"), Some(("FINISHED", "✓ FINISHED")));
+        assert_eq!(explicit_turn_status("working"), Some(("WORKING", "● WORKING")));
+        assert_eq!(explicit_turn_status("unknown"), None);
+        assert!(!screen_indicates_work("Use Ctrl+C to cancel this command.\nThe output contains ⠋ and thinking...\n› Ask anything", 24));
+        assert!(!screen_indicates_work("› explain working... and esc to interrupt", 24));
+        assert!(screen_indicates_work("• Working (2m 10s · esc to interrupt)\n› Ask anything", 24));
+        assert!(screen_indicates_work("✻ Thinking… (esc to interrupt)", 24));
+        assert!(screen_indicates_work("⠋ Generating…", 24));
+        assert!(!screen_indicates_work(&format!("⠋ Generating…\n{}Ready", "\n".repeat(30)), 24));
+    }
+
+    #[test]
+    fn background_children_do_not_make_shell_busy() {
+        assert!(!foreground_job_from_stat("10 (bash) S 1 10 10 123 10 0 0"));
+        assert!(foreground_job_from_stat("10 (bash) S 1 10 10 123 20 0 0"));
+        assert!(!foreground_job_from_stat("10 (bash) S 1 10 10 0 -1 0 0"));
+        assert!(!foreground_job_from_stat("bad stat"));
+    }
 
     #[test]
     fn shared_capture_keeps_status_within_the_original_history_window() {

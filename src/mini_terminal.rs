@@ -1585,6 +1585,7 @@ impl MiniTerminalCard {
 fn status_view_texts(status: &str) -> (&'static str, &'static str, &'static str) {
     match status {
         "BUSY" | "WORKING" => ("● WORKING", "●", "status-busy"),
+        "FINISHED" => ("✓ FINISHED", "✓", "status-idle"),
         "EXITED" => ("○ EXITED", "○", "status-exited"),
         // A live card whose session runs on another machine says so, rather
         // than claiming to be idle here.

@@ -166,7 +166,7 @@ type Stamp = (u64, u64, u64, i64, i64);
 type Cached = (Stamp, (String, Option<String>));
 static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
 
-fn inspect(id: &str, pid: u32) -> Completion {
+pub(crate) fn inspect(id: &str, pid: u32) -> Completion {
     let mut result = unknown(id);
     let Some((fd, identity)) = rollout(pid) else {
         return result;
