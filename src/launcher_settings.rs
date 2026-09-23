@@ -1,7 +1,7 @@
-//! 📱 Launcher connection page of the ⚙ settings card in the overlay HUD.
+//! Connections page of the settings card in the overlay HUD.
 //!
 //! The overlay is a single layer-shell surface (never a separate Hyprland
-//! window), and the ⚙ card is a settings hub. This file builds its Android
+//! window), and the ⚙ card is a settings hub. This file builds its Connections
 //! destination, with everything needed to connect the OmarchyAILauncher app:
 //! bridge status (start/stop), firewall unlock, LAN + Tailscale IPs, port, the
 //! pending phone requests and explicit approval. The card chrome, the header and
@@ -40,6 +40,7 @@ struct LauncherSnapshot {
     mdns: String,
     pending: Vec<serde_json::Value>,
     devices: Vec<serde_json::Value>,
+    pcs: Vec<serde_json::Value>,
 }
 
 impl LauncherSnapshot {
@@ -63,6 +64,9 @@ impl LauncherSnapshot {
                 vec![]
             },
             devices: bridge::paired_devices(),
+            pcs: crate::peer_store::PeerStore::default_store()
+                .and_then(|store| store.peers()).unwrap_or_default().iter()
+                .map(|peer| serde_json::to_value(peer.summary()).unwrap_or_default()).collect(),
         }
     }
 }
@@ -121,7 +125,7 @@ pub fn build_launcher_page() -> LauncherPage {
     let network = Box::new(Orientation::Vertical, 10);
 
     // ---- 1 · bridge status + controls ----
-    let (head, body) = section_card(&root, "", "Connection");
+    let (head, body) = section_card(&root, "", "This computer");
     let v_bridge_state = chip("…");
     v_bridge_state.add_css_class("launcher-offline");
     head.append(&v_bridge_state);
@@ -190,7 +194,7 @@ pub fn build_launcher_page() -> LauncherPage {
 
     // ---- 3 · connect to ----
     let (_, body) = section_card(&network, "", "Network addresses");
-    let v_host = kv(&body, "Laptop");
+    let v_host = kv(&body, "Computer");
     body.append(&row_sep());
     let v_lan = kv(&body, "LAN IP");
     body.append(&row_sep());
@@ -201,15 +205,15 @@ pub fn build_launcher_page() -> LauncherPage {
     let v_mdns = kv(&body, "mDNS");
 
     // ---- 4 · pairing ----
-    let (_, body) = section_card(&root, "", "Pair a phone");
+    let (_, body) = section_card(&root, "", "Add a device");
     let explanation = Label::new(Some(
-        "Scan the QR on your phone, then approve the matching code here.",
+        "Scan a QR on Android or copy an invitation to another PC. Approve the matching code here.",
     ));
     explanation.add_css_class("launcher-hint");
     explanation.set_wrap(true);
     explanation.set_xalign(0.0);
     body.append(&explanation);
-    let invite_button = Button::with_label("＋ Pair Android device");
+    let invite_button = Button::with_label("＋ Create pairing invitation");
     invite_button.add_css_class("launcher-btn");
     invite_button.add_css_class("launcher-btn-primary");
     invite_button.set_halign(Align::Start);
@@ -248,7 +252,7 @@ pub fn build_launcher_page() -> LauncherPage {
                     });
                     qr_box.append(&area);
                 }
-                let help = Label::new(Some("Scan and tap Open in SUPER DESKTOP.\nIf your camera does not offer Open, use Bridges → Scan pairing QR.\nSingle-use invitation · expires in 5 minutes."));
+                let help = Label::new(Some("Scan and tap Open in SUPER DESKTOP.\nIf your camera does not offer Open, use Settings → Connections → Add connection → Scan pairing QR.\nSingle-use invitation · expires in 5 minutes."));
                 help.set_xalign(0.0); help.set_wrap(true);
                 qr_box.append(&help);
                 // The long URI has no useful word-breaks. Keep it in a compact,
@@ -298,14 +302,30 @@ pub fn build_launcher_page() -> LauncherPage {
     let pending_rows = Box::new(Orientation::Vertical, 8);
     body.append(&pending_rows);
     let previous_requests = std::cell::RefCell::new(None);
-    let (device_head, body) = section_card(&root, "", "Android devices");
-    let device_count = chip("0/0");
-    device_count.set_tooltip_text(Some(
-        "Active / registered devices. Active means connected or seen in the last 60 seconds.",
-    ));
-    device_head.append(&device_count);
-    let device_rows = Box::new(Orientation::Vertical, 8);
-    body.append(&device_rows);
+    let devices_section = Box::new(Orientation::Vertical, 16);
+    devices_section.add_css_class("connections-list");
+    // Put devices ahead of pairing and troubleshooting so the list is easy to find.
+    root.insert_child_after(&devices_section, root.first_child().as_ref());
+    let mut groups = Vec::new();
+    for (key, title, icon) in [("pc", "PCs", "computer-symbolic"), ("android", "Android devices", "phone-symbolic"), ("mobile", "Other mobile devices", "phone-symbolic"), ("unknown", "Other devices", "network-workgroup-symbolic")] {
+        let group = Box::new(Orientation::Vertical, 4);
+        let heading = Box::new(Orientation::Horizontal, 8);
+        let glyph = gtk4::Image::from_icon_name(icon);
+        glyph.add_css_class("connections-icon");
+        heading.append(&glyph);
+        let title = Label::new(Some(title));
+        title.add_css_class("connections-group-title");
+        title.set_xalign(0.0);
+        title.set_hexpand(true);
+        heading.append(&title);
+        let count = chip("0");
+        heading.append(&count);
+        group.append(&heading);
+        let rows = Box::new(Orientation::Vertical, 0);
+        group.append(&rows);
+        devices_section.append(&group);
+        groups.push((key, group, count, rows));
+    }
     let previous_devices = std::cell::RefCell::new(None);
 
     let advanced = gtk4::Expander::new(Some("Network & troubleshooting"));
@@ -361,7 +381,7 @@ pub fn build_launcher_page() -> LauncherPage {
             );
         } else {
             set_text(&v_bridge_state, "○ OFFLINE");
-            set_text(&status, "Start the bridge, then pair the phone below.");
+            set_text(&status, "Start sharing to allow paired devices to connect.");
         }
         let (fw_text, fw_can_unlock) = snapshot.firewall;
         set_text(&v_fw, &fw_text);
@@ -376,15 +396,6 @@ pub fn build_launcher_page() -> LauncherPage {
         );
         set_text(&v_port, &bridge::BRIDGE_PORT.to_string());
         set_text(&v_mdns, &snapshot.mdns);
-        let active = snapshot
-            .devices
-            .iter()
-            .filter(|d| d["active"] == true)
-            .count();
-        set_text(
-            &device_count,
-            &format!("{active}/{}", snapshot.devices.len()),
-        );
         if previous_requests.borrow().as_ref() != Some(&snapshot.pending) {
             while let Some(child) = pending_rows.first_child() {
                 pending_rows.remove(&child);
@@ -395,7 +406,7 @@ pub fn build_launcher_page() -> LauncherPage {
                 row.add_css_class("android-request");
                 let label = Label::new(Some(&format!(
                     "{} · {}\nVerification code: {}",
-                    request["deviceName"].as_str().unwrap_or("Phone"),
+                    request["deviceName"].as_str().unwrap_or("Device"),
                     request["address"].as_str().unwrap_or(""),
                     request["code"].as_str().unwrap_or("")
                 )));
@@ -416,8 +427,8 @@ pub fn build_launcher_page() -> LauncherPage {
                         glib::MainContext::default().spawn_local(async move {
                             let result = gtk4::gio::spawn_blocking(move || bridge::decide_request(&id, approve)).await;
                             label.set_text(match result {
-                                Ok(Ok(())) => if approve {"Phone approved."} else {"Request denied."},
-                                _ => "Decision failed or request expired. Request pairing again on the phone.",
+                                Ok(Ok(())) => if approve {"Device approved."} else {"Request denied."},
+                                _ => "Decision failed or request expired. Request pairing again on the device.",
                             });
                         });
                     });
@@ -428,55 +439,55 @@ pub fn build_launcher_page() -> LauncherPage {
             }
             *previous_requests.borrow_mut() = Some(snapshot.pending);
         }
-        if previous_devices.borrow().as_ref() != Some(&snapshot.devices) {
-            while let Some(child) = device_rows.first_child() {
-                device_rows.remove(&child);
-            }
-            if snapshot.devices.is_empty() {
-                let empty = Label::new(Some(
-                    "No devices yet\nPair your first phone using the QR above.",
-                ));
-                empty.add_css_class("android-empty");
-                empty.set_xalign(0.0);
-                device_rows.append(&empty);
-            }
-            for device in &snapshot.devices {
-                let row = Box::new(Orientation::Horizontal, 8);
-                row.add_css_class("android-device-row");
-                let name = Label::new(Some(device["name"].as_str().unwrap_or("Phone")));
-                name.set_wrap(true);
-                name.set_hexpand(true);
-                name.set_xalign(0.0);
-                row.append(&name);
-                let active = device["active"] == true;
-                let state = chip(if active { "● Active" } else { "Offline" });
-                state.add_css_class(if active {
-                    "launcher-online"
-                } else {
-                    "launcher-offline"
-                });
-                row.append(&state);
-                let revoke = Button::with_label("Revoke access");
-                revoke.add_css_class("launcher-btn");
-                revoke.add_css_class("launcher-btn-danger");
-                let id = device["id"].as_str().unwrap_or("").to_string();
-                revoke.connect_clicked(move |button| {
-                    button.set_sensitive(false);
-                    let button = button.clone();
-                    let id = id.clone();
-                    glib::MainContext::default().spawn_local(async move {
-                        let ok = matches!(
-                            gtk4::gio::spawn_blocking(move || bridge::revoke_device(&id)).await,
-                            Ok(Ok(()))
-                        );
-                        button.set_label(if ok { "Revoked" } else { "Retry revoke" });
-                        button.set_sensitive(!ok);
+        let device_data = (snapshot.devices, snapshot.pcs);
+        if previous_devices.borrow().as_ref() != Some(&device_data) {
+            for (key, group, count, rows) in &groups {
+                while let Some(child) = rows.first_child() { rows.remove(&child); }
+                let devices: Vec<_> = device_data.0.iter().filter(|d| connection_group(d) == *key).collect();
+                let pcs = if *key == "pc" { device_data.1.as_slice() } else { &[] };
+                let total = devices.len() + pcs.len();
+                // Always show the two main categories; uncommon types appear when present.
+                group.set_visible(total > 0 || *key == "pc" || *key == "android");
+                set_text(count, &total.to_string());
+                if total == 0 {
+                    let empty = Label::new(Some(if *key == "pc" { "No PCs connected. Use Add PC in the machine selector." } else { "No identified Android devices paired yet." }));
+                    empty.add_css_class("android-empty");
+                    empty.set_xalign(0.0);
+                    empty.set_wrap(true);
+                    rows.append(&empty);
+                }
+                for pc in pcs {
+                    let host = pc["endpoint"]["host"].as_str().unwrap_or("");
+                    let detail = format!("Remote workspace · {host}");
+                    let (row, _) = connection_row(pc["label"].as_str().unwrap_or("PC"), &detail,
+                        if pc["expired"] == true { "Expired" } else { "Paired" }, false);
+                    rows.append(&row);
+                }
+                for device in devices {
+                    let active = device["active"] == true;
+                    let detail = if *key == "unknown" { "Access to this computer · type not reported" } else { "Access to this computer" };
+                    let (row, actions) = connection_row(device["name"].as_str().unwrap_or("Device"), detail,
+                        if active { "● Active" } else { "Offline" }, active);
+                    let revoke = Button::with_label("Revoke");
+                    revoke.set_tooltip_text(Some("Revoke this device’s access to this computer"));
+                    revoke.add_css_class("launcher-btn");
+                    revoke.add_css_class("launcher-btn-danger");
+                    let id = device["id"].as_str().unwrap_or("").to_string();
+                    revoke.connect_clicked(move |button| {
+                        button.set_sensitive(false);
+                        let button = button.clone();
+                        let id = id.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            let ok = matches!(gtk4::gio::spawn_blocking(move || bridge::revoke_device(&id)).await, Ok(Ok(())));
+                            button.set_label(if ok { "Revoked" } else { "Retry" });
+                            button.set_sensitive(!ok);
+                        });
                     });
-                });
-                row.append(&revoke);
-                device_rows.append(&row);
+                    actions.append(&revoke);
+                    rows.append(&row);
+                }
             }
-            *previous_devices.borrow_mut() = Some(snapshot.devices);
+            *previous_devices.borrow_mut() = Some(device_data);
         }
     });
 
@@ -603,6 +614,40 @@ pub fn build_launcher_page() -> LauncherPage {
     }
 }
 
+fn connection_group(device: &serde_json::Value) -> &str {
+    match device["deviceType"].as_str() {
+        Some("pc") => "pc",
+        Some("android") => "android",
+        Some("mobile") => "mobile",
+        _ => "unknown",
+    }
+}
+
+fn connection_row(name: &str, detail: &str, state: &str, active: bool) -> (Box, Box) {
+    let row = Box::new(Orientation::Horizontal, 12);
+    row.add_css_class("connections-device");
+    let labels = Box::new(Orientation::Vertical, 4);
+    labels.set_hexpand(true);
+    let title = Label::new(Some(name));
+    title.set_xalign(0.0);
+    title.set_wrap(true);
+    title.add_css_class("connections-device-name");
+    labels.append(&title);
+    let subtitle = Label::new(Some(detail));
+    subtitle.set_xalign(0.0);
+    subtitle.set_wrap(true);
+    subtitle.add_css_class("connections-device-detail");
+    labels.append(&subtitle);
+    row.append(&labels);
+    let actions = Box::new(Orientation::Horizontal, 8);
+    actions.set_valign(Align::Center);
+    let badge = chip(state);
+    badge.add_css_class(if active { "launcher-online" } else { "launcher-offline" });
+    actions.append(&badge);
+    row.append(&actions);
+    (row, actions)
+}
+
 /// Bordered section panel with a numbered head.
 ///
 /// Returns `(head, body)`: callers may drop a status chip into `head` and
@@ -681,7 +726,7 @@ mod tests {
         crate::styles::apply_styles();
         let page = build_launcher_page();
         let window = gtk4::Window::new();
-        window.set_title(Some("SUPER DESKTOP · Android settings preview"));
+        window.set_title(Some("SUPER DESKTOP · Connections preview"));
         window.set_default_size(600, 700);
         window.add_css_class("mini-terminal");
         window.set_child(Some(&page.widget));
@@ -746,10 +791,10 @@ mod tests {
         assert!(page.widget.downcast_ref::<ScrolledWindow>().is_some());
         assert!(!page.widget.has_css_class("mini-terminal"));
 
-        // Only connection, pairing and devices are shown initially.
-        assert_eq!(count_class(&page.widget, "launcher-section"), 3);
+        // Only bridge controls and pairing use cards; device groups are flat.
+        assert_eq!(count_class(&page.widget, "launcher-section"), 2);
         assert_eq!(count_class(&page.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&page.widget, "launcher-section-title"), 3);
+        assert_eq!(count_class(&page.widget, "launcher-section-title"), 2);
 
         // No legacy PIN panel; five address rows and four phone steps.
         assert_eq!(count_class(&page.widget, "launcher-pin-box"), 0);
@@ -762,7 +807,7 @@ mod tests {
         // Navigation calls this on every entry: it must not panic and must
         // leave the bridge chip in one of its two styled states.
         (page.refresh)();
-        assert_eq!(count_class(&page.widget, "term-status-badge"), 2);
+        assert_eq!(count_class(&page.widget, "term-status-badge"), 5);
     }
 
     fn check_background_refresh() {

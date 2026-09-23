@@ -341,7 +341,7 @@ pub fn build_harness_settings_panel(
     let title = Label::new(Some("Settings"));
     title.add_css_class("term-title");
     title.set_halign(Align::Start);
-    let subtitle = Label::new(Some("Android · shortcuts · top bar"));
+    let subtitle = Label::new(Some("Connections · shortcuts · top bar"));
     subtitle.add_css_class("launcher-subtitle");
     subtitle.set_halign(Align::Start);
     titles.append(&title);
@@ -382,7 +382,7 @@ pub fn build_harness_settings_panel(
     firewall_notice.set_visible(false);
     let firewall_words = Box::new(Orientation::Vertical, 2);
     firewall_words.set_hexpand(true);
-    let firewall_title = Label::new(Some("Android connection needs attention"));
+    let firewall_title = Label::new(Some("Connections need attention"));
     firewall_title.add_css_class("settings-firewall-warning-title");
     firewall_title.set_xalign(0.0);
     firewall_words.append(&firewall_title);
@@ -434,15 +434,15 @@ pub fn build_harness_settings_panel(
 
     let (btn_launcher, launcher_trailing) = settings_entry(
         "▣",
-        "SUPER DESKTOP on Android",
+        "Connections",
         "Pair devices and manage secure connections.",
         "android-settings-entry",
     );
-    btn_launcher.set_tooltip_text(Some("Manage Android devices and secure pairing"));
+    btn_launcher.set_tooltip_text(Some("Manage PCs, mobile devices and secure pairing"));
     let counts = chip("…/…");
     counts.add_css_class("android-connection-count");
     counts.set_tooltip_text(Some(
-        "Active / registered phones. Active means connected or seen in the last 60 seconds.",
+        "Active / registered devices with access to this computer. Active means connected or seen in the last 60 seconds.",
     ));
     launcher_trailing.prepend(&counts);
     home_root.append(&btn_launcher);
@@ -866,8 +866,8 @@ pub fn build_harness_settings_panel(
                     subtitle.set_label("Keep harnesses available on charger power");
                 }
                 SettingsPage::Android => {
-                    badge.set_label("📱");
-                    title.set_label("SUPER DESKTOP on Android");
+                    badge.set_label("⇄");
+                    title.set_label("Connections");
                     subtitle.set_label("Devices · encrypted connections");
                     launcher_refresh();
                 }
@@ -1637,9 +1637,9 @@ mod tests {
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![0, 1, 2, 1, 3, 1]);
+        assert_eq!(sections, vec![0, 1, 2, 1, 2, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 8);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 7);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -1656,7 +1656,7 @@ mod tests {
             ("settings-shortcut-entry", 1, "Keyboard shortcut"),
             ("settings-harnesses-entry", 2, "Harness launchers"),
             ("settings-top-bar-entry", 3, "Top bar"),
-            ("android-settings-entry", 4, "SUPER DESKTOP on Android"),
+            ("android-settings-entry", 4, "Connections"),
             ("settings-sleep-lock-entry", 5, "Sleep lock"),
         ] {
             let button = find_buttons(&panel.widget, class)

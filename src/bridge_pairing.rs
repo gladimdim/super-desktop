@@ -3,11 +3,22 @@
 use super::*;
 use serde_json::{json, Value};
 
+// Descriptive metadata only; never used to grant permissions. Unknown clients stay unclassified.
+fn device_type(body: &Value) -> &str {
+    match body["deviceType"].as_str() {
+        Some("pc") => "pc",
+        Some("android") => "android",
+        Some("mobile") => "mobile",
+        _ => "unknown",
+    }
+}
+
 #[derive(Clone)]
 struct Pending {
     id: String,
     code: String,
     device: String,
+    device_type: String,
     peer: String,
     expires: f64,
     decision: Option<bool>,
@@ -54,7 +65,7 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
         }
         ("GET", "/api/v1/pair/devices") => {
             let paired = pair_state().lock().unwrap();
-            let devices: Vec<_> = paired.cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"expires":d.expires,
+            let devices: Vec<_> = paired.cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"deviceType":d.device_type,"expires":d.expires,
                 "active":d.expires > now && security::device_active(&d.token_hash)})).collect();
             respond(stream, 200, "OK", &json!({"devices":devices}));
         }
@@ -85,17 +96,17 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             if state.entries.len() >= 8 || state.entries.iter().any(|p| p.peer == peer) {
                 return respond(stream, 429, "Too Many Requests", &json!({"error":"pairing_request_already_pending_or_rate_limited"}));
             }
-            let device: String = body["deviceName"].as_str().unwrap_or("Android phone")
+            let device: String = body["deviceName"].as_str().unwrap_or("Device")
                 .chars().filter(|c| !c.is_control()).take(64).collect();
             let id = random_hex(24);
             let code = format!("{:06}", u32::from_str_radix(&random_hex(4), 16).unwrap() % 1_000_000);
-            state.entries.push(Pending { id: id.clone(), code: code.clone(), device, peer,
+            state.entries.push(Pending { id: id.clone(), code: code.clone(), device, device_type: device_type(&body).into(), peer,
                 expires: now + 120.0, decision: None, token: None });
             *invitation = None;
             // Constant notification text: remote device names are untrusted.
             if !cfg!(test) { std::thread::spawn(|| {
                 let _ = Command::new("notify-send").args(["SUPER DESKTOP: device pairing request",
-                    "Open SUPER DESKTOP settings → Android. Compare the code on your device, then Approve or Deny."]).status();
+                    "Open SUPER DESKTOP settings → Connections. Compare the code on your device, then Approve or Deny."]).status();
             }); }
             respond(stream, 202, "Accepted", &json!({"status":"pending","requestId":id,"code":code,"expiresIn":120}));
         }
@@ -118,7 +129,7 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                     return respond(stream, 409, "Conflict", &json!({"error":"revoke_old_devices_first"}));
                 }
                 let device_id = random_hex(16);
-                paired.cfg.devices.push(PairedDevice { id: device_id.clone(), name: request.device.clone(),
+                paired.cfg.devices.push(PairedDevice { id: device_id.clone(), name: request.device.clone(), device_type: request.device_type.clone(),
                     token_hash: security::digest(token.as_bytes()), expires: now + 90.0 * 86400.0 });
                 if !paired.save() {
                     paired.cfg.devices.retain(|d| d.id != device_id);
@@ -179,7 +190,7 @@ pub fn paired_devices() -> Vec<Value> {
             // Keep the registered count when the bridge is stopped; never initialize
             // or rewrite its credential store from the UI process.
             fs::read(state_path()).ok().and_then(|bytes| serde_json::from_slice::<BridgeConfig>(&bytes).ok())
-                .map(|cfg| cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"expires":d.expires,"active":false})).collect())
+                .map(|cfg| cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"deviceType":d.device_type,"expires":d.expires,"active":false})).collect())
                 .unwrap_or_default()
         })
 }
@@ -193,7 +204,20 @@ pub fn pairing_invitation() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn pending() -> Pending { Pending { id:"secret".into(), code:"123456".into(), device:"phone".into(), peer:"ip".into(), expires:120.0, decision:None, token:None } }
+    fn pending() -> Pending { Pending { id:"secret".into(), code:"123456".into(), device:"phone".into(), device_type:"android".into(), peer:"ip".into(), expires:120.0, decision:None, token:None } }
+    #[test]
+    fn old_pairings_keep_access_without_inventing_a_device_type() {
+        let old = json!({"id":"id", "name":"Samsung PC", "token_hash":"hash", "expires":123.0});
+        let device: PairedDevice = serde_json::from_value(old).unwrap();
+        assert!(device.device_type.is_empty());
+        assert_eq!(device.token_hash, "hash");
+        let mut device = device;
+        device.device_type = device_type(&json!({"deviceType":"android"})).into();
+        let restored: PairedDevice = serde_json::from_value(serde_json::to_value(device).unwrap()).unwrap();
+        assert_eq!(restored.device_type, "android");
+        assert_eq!(device_type(&json!({"deviceType":"unexpected"})), "unknown");
+        assert_eq!(device_type(&json!({"deviceName":"Android phone"})), "unknown");
+    }
     #[test] fn requests_require_explicit_decisions() {
         let mut requests = Requests { entries: vec![pending()] };
         assert!(requests.entries[0].token.is_none());

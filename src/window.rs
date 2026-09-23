@@ -702,7 +702,7 @@ impl SuperDesktopWindow {
         // the ⚙ card — shortcut, top-bar harnesses, and the 📱 launcher page.
         let btn_settings = Button::from_icon_name("sd-gears-symbolic");
         btn_settings.update_property(&[gtk4::accessible::Property::Label("Settings")]);
-        btn_settings.set_tooltip_text(Some("Settings: Android devices, shortcuts and top bar"));
+        btn_settings.set_tooltip_text(Some("Settings: connections, shortcuts and top bar"));
         btn_settings.add_css_class("hud-button");
         btn_settings.add_css_class("hud-gear");
         if let Some(img) = btn_settings.child().and_downcast::<Image>() {

@@ -993,6 +993,17 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     min-width: 300px;
 }}
 .android-page .launcher-section-body {{ border-spacing: 8px; }}
+/* Flat device groups inherit the current Omarchy palette in both modes. */
+.connections-list {{ padding: 8px 0; }}
+.connections-icon {{ color: {accent}; min-width: 24px; }}
+.connections-group-title {{ color: {accent}; font-weight: 700; font-size: 12px; }}
+.connections-device {{
+    padding: 12px 0;
+    border-bottom: 1px solid {launcher_section_border};
+}}
+.connections-device-name {{ color: {foreground}; font-weight: 600; font-size: 12px; }}
+.connections-device-detail {{ color: {dark_foreground}; font-size: 10px; }}
+.connections-device .launcher-btn {{ background: transparent; }}
 .android-device-row {{ padding: 9px 0; }}
 .android-empty {{ color: {dark_foreground}; padding: 12px 0; }}
 .android-request {{

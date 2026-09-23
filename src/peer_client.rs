@@ -511,7 +511,7 @@ impl Pairing {
             .request(
                 "/api/v1/pair",
                 Some(json!({"secret":invitation.secret,
-            "deviceName": label(local_name)})),
+            "deviceType": "pc", "deviceName": label(local_name)})),
                 None,
             )
             .map_err(|error| {

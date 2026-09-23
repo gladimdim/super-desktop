@@ -389,7 +389,10 @@ struct BridgeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct PairedDevice { id: String, name: String, token_hash: String, expires: f64 }
+struct PairedDevice { id: String, name: String, token_hash: String, expires: f64,
+    #[serde(default)]
+    device_type: String,
+}
 
 fn new_bridge_id() -> String { random_hex(16) }
 

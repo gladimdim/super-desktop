@@ -196,7 +196,7 @@ fn add(args: &[String]) -> Result<()> {
         &crate::bridge::hostname(),
         name,
     )?;
-    eprintln!("Compare code {} on the host. Approve in SUPER DESKTOP Settings → Android only if it matches.", pairing.code);
+    eprintln!("Compare code {} on the host. Approve in SUPER DESKTOP Settings → Connections only if it matches.", pairing.code);
     loop {
         if let Some(peer) = pairing.poll()? {
             let summary = peer.summary();
