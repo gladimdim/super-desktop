@@ -40,6 +40,7 @@ pub struct MachineView {
     details: gtk4::Label,
     busy: Cell<bool>,
     on_switch: Rc<dyn Fn()>,
+    on_add_pc: RefCell<Option<Rc<dyn Fn()>>>,
 }
 impl MachineView {
     pub fn new(local: &gtk4::Fixed, on_switch: Rc<dyn Fn()>, on_hide: Rc<dyn Fn()>) -> Rc<Self> {
@@ -135,6 +136,7 @@ impl MachineView {
             details,
             busy: Cell::new(false),
             on_switch,
+            on_add_pc: RefCell::new(None),
         });
         *on_launch.borrow_mut() = Some(Rc::new({
             let weak = Rc::downgrade(&view);
@@ -198,6 +200,14 @@ impl MachineView {
     }
     pub fn is_remote(&self) -> bool {
         self.selection.borrow().request().is_some()
+    }
+
+    pub fn set_add_pc_action(&self, action: Rc<dyn Fn()>) {
+        *self.on_add_pc.borrow_mut() = Some(action);
+    }
+
+    pub fn select_saved_peer(self: &Rc<Self>, peer: peer_client::PeerSummary) {
+        self.select(Some((peer.machine_id, peer.label)));
     }
 
     /// The remote bar's harness logos, for the window's theme swap.
@@ -420,29 +430,17 @@ impl MachineView {
             let pop = pop.downgrade();
             add.connect_clicked(move |_| {
                 if let (Some(view), Some(pop)) = (weak.upgrade(), pop.upgrade()) {
-                    view.pairing_form(&pop);
+                    let open = view.on_add_pc.borrow().clone();
+                    pop.popdown();
+                    if let Some(open) = open {
+                        // Let the popover release its Wayland keyboard grab
+                        // before the centered wizard claims keyboard focus.
+                        glib::idle_add_local_once(move || open());
+                    }
                 }
             });
             list.append(&add);
         });
-    }
-    fn pairing_form(self: &Rc<Self>, popover: &gtk4::Popover) {
-        let weak = Rc::downgrade(self);
-        let pop = popover.downgrade();
-        let back = Rc::new(move || {
-            if let (Some(view), Some(pop)) = (weak.upgrade(), pop.upgrade()) {
-                view.populate(&pop);
-            }
-        });
-        let weak = Rc::downgrade(self);
-        let pop = popover.downgrade();
-        let saved = Rc::new(move |peer: peer_client::PeerSummary| {
-            if let (Some(view), Some(pop)) = (weak.upgrade(), pop.upgrade()) {
-                pop.popdown();
-                view.select(Some((peer.machine_id, peer.label)));
-            }
-        });
-        popover.set_child(Some(&crate::peer_pairing_ui::build(back, saved)));
     }
     pub fn bind_keyboard(self: &Rc<Self>, window: &gtk4::ApplicationWindow) {
         // Observe outside clicks without consuming them: the clicked local
@@ -740,9 +738,26 @@ mod tests {
             "selector closed during layer keyboard transition"
         );
         assert_eq!(window.keyboard_mode(), KeyboardMode::Exclusive);
-        view.pairing_form(&pop);
+        let opened = Rc::new(Cell::new(false));
+        let opened_on_click = Rc::clone(&opened);
+        view.set_add_pc_action(Rc::new(move || opened_on_click.set(true)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let add = loop {
+            pump();
+            if let Some(add) = pop.child().and_then(|list| list.last_child())
+                .and_then(|child| child.downcast::<gtk4::Button>().ok())
+            {
+                if add.label().as_deref() == Some("＋ Add a PC") { break add; }
+            }
+            assert!(std::time::Instant::now() < deadline, "Add a PC did not appear");
+        };
+        add.emit_clicked();
         pump();
-        assert!(pop.is_visible(), "pairing form disappeared");
+        assert!(opened.get(), "Add a PC did not open the centered wizard");
+        assert!(!pop.is_visible(), "selector remained over the wizard");
+        view.local_button.popup();
+        pump();
+        assert!(pop.is_visible(), "selector could not reopen");
         assert!(view.contains_menu_widget(&pop.child().unwrap()));
         assert!(!view.contains_menu_widget(local.upcast_ref()));
         let controllers = window.observe_controllers();

@@ -22,12 +22,14 @@ subscriptions remain pending; this is still an incremental development branch.
 
 ## Delivered user flow and current limit
 
-The top-left **This PC** control is the machine selector. **Add a PC** has two
-flows: create/copy a single-use connection link to let another PC connect here,
-or paste a link from another PC to connect this PC there. Host approval and
-six-digit-code comparison remain mandatory. Once approved, the peer is selected
-and its workspace is drawn live: every visible console is a real terminal that
-shows the host session's output, in colour, as it happens.
+The top-left **This PC** control is the machine selector. **Add a PC** opens a
+centered setup wizard in the overlay. Choose whether to connect to another PC
+and view its harnesses, or make this PC's harnesses available on another PC.
+The host creates a single-use connection link in the wizard; the viewer pastes
+it into its wizard. Both PCs show the six-digit code, and the host wizard can
+approve or deny the request after its user confirms the codes match. Once
+approved, the peer is selected and its workspace is drawn live: every visible
+console is a real terminal that shows the host session's output in colour.
 
 Click a console and type. VTE translates the keystroke (application cursor
 keys, bracketed paste, IME) and the viewer sends those bytes after the host's
@@ -566,25 +568,31 @@ commands are delivered on the command route.
 
 ## Add a PC from the selector
 
-Open the top-left selector and choose **Add a PC**. On the host, open
-Settings → Android, enable the bridge, generate an invitation and expand
-**Copy pairing link**. Paste that link into the viewer's form. A friendly name
-and connection address/port overrides are optional. Click **Connect**, compare
-the six-digit code on both PCs, and approve on the host. The approved peer is
-saved and its read-only layout preview opens automatically.
+Open the top-left selector and choose **Add a PC**. A centered wizard offers two
+paths:
+
+1. On the PC whose harnesses will be shared, choose **I want this PC's harnesses
+   to be available on another PC**. Click **Create connection link** (the wizard
+   starts the bridge if necessary) and **Copy link**. Leave the wizard open.
+2. On the viewing PC, choose **I want to connect to another PC and view its
+   harnesses**. Paste the link, optionally enter a friendly name or network
+   address/port override, and click **Connect to PC**.
+3. Compare the six-digit code shown on both PCs. On the host, check **The code
+   matches the other PC**, then click **Approve this PC**. The viewing PC saves
+   the peer and opens its live workspace. The host can click **Deny** instead.
 
 The invitation field is hidden and cleared after submission or closing the
-form. Network requests and private-store writes run on a worker. Only one
-pairing worker can run at a time. Use Cancel/Back to stop an unfinished
-attempt. The selector may transiently close while the Wayland layer surface
-changes focus; the pending request continues so a host approval can save and
-select the peer. A request already submitted to the host can remain pending
-there: deny it on the host, and use a fresh invitation for another attempt.
+wizard. Network requests and private-store writes run on workers. Only one
+viewer pairing worker can run at a time. Use Cancel/Back to stop an unfinished
+viewer attempt. The selector may transiently close while the Wayland layer
+surface changes focus; the wizard and its pending request continue. A request
+already submitted to the host can remain pending there: deny it on the host,
+and use a fresh invitation for another attempt.
 Cancellation before saving claims completion prevents a late approval from
 writing a peer; a save already begun is allowed to finish. Host revocation
 remains authoritative if access must be withdrawn.
 
-The existing isolated pairing smoke test can also drive the real GTK form
+The isolated pairing smoke test drives both paths of the real GTK wizard
 without opening a production window. Build tests with `cargo test --no-run`,
 then supply the main test executable as a second argument:
 
@@ -592,5 +600,6 @@ then supply the main test executable as a second argument:
 python3 tests/peer_pairing_smoke.py target/release/super-desktop target/debug/deps/super_desktop-TEST_HASH
 ```
 
-This exercises GUI approval, denial and cancellation before a late host
-approval, then checks persisted peers, layout retrieval and host revocation.
+This exercises viewer approval, denial and cancellation before a late host
+approval, plus host-wizard code display and approval through the owner-only
+control socket. It then checks persisted peers, layout retrieval and revocation.

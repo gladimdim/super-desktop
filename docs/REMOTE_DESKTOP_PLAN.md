@@ -31,10 +31,13 @@ PCs:
 - The top-left **This PC** selector defaults to the local machine and retains a
   selected remote PC while the overlay is hidden. Restarting the daemon returns
   to the local machine.
-- **Add a PC** supports both directions in one Omarchy-styled panel: create and
-  copy a one-time connection link to share this PC, or paste a link created on
-  the other PC to connect this PC. Approval and the verification code still
-  happen on the host PC.
+- **Add a PC** closes the selector popover and opens a centered Omarchy-styled
+  wizard in the SUPER DESKTOP overlay. Its first page asks whether to view
+  another PC's harnesses or make this PC's harnesses available elsewhere. The
+  viewer path explains where to get a link, accepts it and shows the verification
+  code. The host path starts the bridge if needed, creates and copies a one-time
+  link, then displays pending requests with their codes and Approve/Deny controls.
+  Approval requires checking a “codes match” box on the host.
 - Approved, certificate-pinned peers are stored privately and appear in the
   selector. The viewer polls the host's authenticated workspace snapshot and
   draws terminal cards in their host positions, sizes, iconified positions and
@@ -78,8 +81,9 @@ PCs:
   from resizing the host's panes, and pushes `grid` frames when that grid
   changes. Attachments are bounded (8 per credential, 16 per bridge), end on
   revocation and are released when the overlay is hidden.
-- The Android bridge's connection-link popover is compact. Closing the
-  selector popover no longer cancels an already submitted pairing request.
+- The Android bridge's connection-link popover is compact. The selector only
+  lists PCs; closing it does not cancel a pairing request already submitted in
+  the wizard. Explicit Cancel, Close and overlay hide end the viewer's attempt.
 - `./rebuild.sh` now stops both the desktop daemon and its separate
   `harness-bridge` process before restarting. This is required because an old
   bridge can otherwise keep serving port 8759 and return a 404 for the desktop

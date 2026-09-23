@@ -134,6 +134,7 @@ pub struct SuperDesktopWindow {
     pub window: ApplicationWindow,
     canvas: Fixed,
     machine_view: Rc<crate::machine_selector::MachineView>,
+    pairing_wizard: Rc<crate::peer_pairing_ui::PairingWizard>,
     ghost_box: gtk4::Box,
     ghost_label: Label,
     state: Rc<RefCell<AppState>>,
@@ -363,19 +364,46 @@ impl SuperDesktopWindow {
         hud_left.set_valign(Align::Center);
         hud_left.set_halign(Align::Start);
 
+        let pairing_target: Rc<RefCell<Option<std::rc::Weak<crate::machine_selector::MachineView>>>> =
+            Rc::new(RefCell::new(None));
+        let pairing_wizard = crate::peer_pairing_ui::PairingWizard::new(
+            &window,
+            Rc::new({
+                let pairing_target = Rc::clone(&pairing_target);
+                move |peer| {
+                    if let Some(view) = pairing_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                        view.select_saved_peer(peer);
+                    }
+                }
+            }),
+        );
+
         let machine_view = crate::machine_selector::MachineView::new(
             &canvas,
             Rc::new({
                 let window = window.clone();
                 let settings = settings_panel.widget.clone();
+                let wizard = Rc::clone(&pairing_wizard);
                 move || {
                     settings.set_visible(false);
+                    wizard.close();
                     vte4::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
                     window.set_keyboard_mode(KeyboardMode::OnDemand);
                 }
             }),
             on_close_rc.clone(),
         );
+        *pairing_target.borrow_mut() = Some(Rc::downgrade(&machine_view));
+        machine_view.set_add_pc_action(Rc::new({
+            let wizard = Rc::clone(&pairing_wizard);
+            let settings = settings_panel.widget.clone();
+            let window = window.clone();
+            move || {
+                if !window.is_visible() { return; }
+                settings.set_visible(false);
+                wizard.open();
+            }
+        }));
         machine_view.bind_keyboard(&window);
         machine_view.paint_top_bar_size(state.borrow().top_bar_size, screen_width);
         *machine_for_settings.borrow_mut() = Some(Rc::clone(&machine_view));
@@ -440,6 +468,7 @@ impl SuperDesktopWindow {
             window,
             canvas,
             machine_view,
+            pairing_wizard: Rc::clone(&pairing_wizard),
             ghost_box,
             ghost_label,
             state,
@@ -669,8 +698,12 @@ impl SuperDesktopWindow {
         }
         let settings_w = settings_panel.widget.clone();
         let settings_refresh = Rc::clone(&settings_panel.refresh);
+        let wizard_for_settings = Rc::clone(&win_rc.pairing_wizard);
         btn_settings.connect_clicked(move |_| {
             let show = !settings_w.is_visible();
+            if show {
+                wizard_for_settings.close();
+            }
             settings_w.set_visible(show);
             if show {
                 // Re-detect here: a harness installed while the app runs
@@ -701,6 +734,7 @@ impl SuperDesktopWindow {
 
         // Added after the HUD so the settings card floats above it.
         root_overlay.add_overlay(&settings_panel.widget);
+        root_overlay.add_overlay(&pairing_wizard.widget);
 
         // Esc key
         let key_ctrl = EventControllerKey::new();
@@ -709,6 +743,12 @@ impl SuperDesktopWindow {
         let ws_popover = workspace_bar.popover.clone();
         key_ctrl.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::Escape {
+                if let Some(w) = win_w.upgrade() {
+                    if w.pairing_wizard.is_open() {
+                        w.pairing_wizard.close();
+                        return glib::Propagation::Stop;
+                    }
+                }
                 if win_w.upgrade().is_some_and(|w| w.machine_view.dismiss_if_open()) {
                     return glib::Propagation::Stop;
                 }
@@ -2058,6 +2098,7 @@ impl SuperDesktopWindow {
         for panel in &self.overlay_panels {
             panel.set_visible(false);
         }
+        self.pairing_wizard.close();
         // …and neither may the workspace list, which is not part of the
         // overlay's widget tree (it is its own popup surface).
         self.ws_popover.popdown();

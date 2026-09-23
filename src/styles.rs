@@ -915,6 +915,50 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 .settings-entry-summary {{ color: {dark_foreground}; font-size: 10.5px; }}
 .settings-entry-arrow {{ color: {dark_foreground}; font-size: 22px; }}
 
+/* PC setup is a centered overlay card, with one decision or task per page. */
+.pc-wizard {{
+    border: 1px solid {hud_border};
+}}
+.pc-wizard-page {{
+    padding: 24px 28px;
+}}
+.pc-wizard-page > .settings-entry-title {{
+    font-size: 18px;
+}}
+.pc-wizard-page > .settings-entry-summary {{
+    font-size: 12px;
+    line-height: 1.45;
+}}
+.pc-wizard-page .settings-entry {{
+    padding: 18px;
+    margin-top: 8px;
+}}
+.pc-wizard-page .settings-entry-title {{
+    font-size: 13px;
+}}
+.pc-wizard-page .ws-entry {{
+    min-height: 34px;
+}}
+.pc-wizard-status {{
+    color: {light_foreground};
+    font-size: 12px;
+    min-height: 20px;
+}}
+.pc-wizard-code {{
+    color: {accent};
+    font-size: 30px;
+    font-weight: 800;
+    letter-spacing: 5px;
+    margin: 12px 0;
+}}
+.pc-wizard-request {{
+    background: {launcher_section_bg};
+    border: 1px solid {accent};
+    border-radius: 8px;
+    padding: 16px;
+    margin-top: 14px;
+}}
+
 /* This is deliberately the first child of the Settings hub: without an open
    8759/tcp rule the Android page can look configured while every phone fails
    to reach the bridge. */
