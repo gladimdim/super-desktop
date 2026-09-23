@@ -1148,7 +1148,7 @@ impl MiniTerminalCard {
         *self.visual_pos.borrow_mut() = (x, y);
         self.container.set_size_request(w as i32, h as i32);
         self.container.add_css_class("term-expanded");
-        self.expand_btn.set_label("🗕");
+        self.expand_btn.set_label("❐");
         self.expand_btn
             .set_tooltip_text(Some("Collapse back to overlay card"));
         self.hint_label
