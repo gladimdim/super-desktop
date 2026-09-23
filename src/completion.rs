@@ -127,6 +127,41 @@ fn rollout(pane_pid: u32) -> Option<(PathBuf, String)> {
     None
 }
 
+/// Read explicit user-message records from the rollout owned by this pane.
+/// This is a fallback for sessions opened before input tracking was attached.
+pub fn last_user_prompt(session: &str) -> Option<String> {
+    let out = std::process::Command::new(crate::tmux::tmux_bin())
+        .args(["display-message", "-p", "-t", session, "#{pane_pid}"])
+        .output().ok()?;
+    if !out.status.success() { return None; }
+    let pid = String::from_utf8(out.stdout).ok()?.trim().parse().ok()?;
+    let (fd, _) = rollout(pid)?;
+    let mut file = File::open(fd).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    // Bounded tail read; incomplete records and all response/tool records are ignored.
+    let start = meta.len().saturating_sub(1024 * 1024);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
+    let tail = if start > 0 {
+        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
+    } else { &bytes };
+    prompt_from_records(tail)
+}
+
+fn prompt_from_records(bytes: &[u8]) -> Option<String> {
+    bytes.split_inclusive(|b| *b == b'\n').rev().find_map(|line| {
+        if !line.ends_with(b"\n") { return None; }
+        let record: Value = serde_json::from_slice(line).ok()?;
+        if record["type"] != "event_msg" || record["payload"]["type"] != "user_message" {
+            return None;
+        }
+        let text = record["payload"]["message"].as_str()?;
+        (!text.trim().is_empty()).then(|| crate::tmux::truncate_prompt_title(text))
+    })
+}
+
 type Stamp = (u64, u64, u64, i64, i64);
 type Cached = (Stamp, (String, Option<String>));
 static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
@@ -373,5 +408,19 @@ mod tests {
         assert!(child.wait().unwrap().success());
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    #[test]
+    fn user_messages_win_over_response_text_and_partial_records() {
+        let records = concat!(
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Fix the layout\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"# Here is the final response\"}}\n",
+            "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"partial",
+        );
+        assert_eq!(super::prompt_from_records(records.as_bytes()).as_deref(), Some("Fix the layout"));
+        assert_eq!(super::prompt_from_records(b"# response\n$ tool output\n"), None);
     }
 }

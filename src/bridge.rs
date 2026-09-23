@@ -184,18 +184,17 @@ fn live_sessions() -> Vec<String> {
     sessions.into_iter().map(|(n, _)| n).collect()
 }
 
-fn last_user_text(
+pub(crate) fn last_user_text(
     session: &str,
     agent_type: &str,
     persisted: Option<&str>,
     screen: &str,
 ) -> Option<String> {
-    // Codex sets the pane title to its submitted task and workspace. The
-    // terminal screen may contain only the response, so parse this first.
+    if let Some(prompt) = crate::prompt_history::last(session) {
+        return Some(prompt);
+    }
     if agent_type == "codex" {
-        if let Some(prompt) = codex_prompt_from_pane_title(session) {
-            return Some(prompt);
-        }
+        return crate::completion::last_user_prompt(session);
     }
     // Exact opencode DB text is resolved to the session OWNED by this pane
     // (own `--session` flag, else a claims-aware match), so a closed console's
@@ -207,31 +206,12 @@ fn last_user_text(
             }
         }
     }
-    extract_last_prompt(screen)
-        .map(|s| truncate_prompt_title(&s))
-}
-
-fn codex_prompt_from_pane_title(session: &str) -> Option<String> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", session, "#{pane_title}"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    // Response text is never a fallback for AI harness titles.
+    if is_regular_terminal(agent_type) {
+        extract_last_prompt(screen).map(|s| truncate_prompt_title(&s))
+    } else {
+        None
     }
-    codex_prompt_from_title(&String::from_utf8_lossy(&output.stdout))
-}
-
-/// Codex titles end in the workspace. When action is required, the title is
-/// `status | prompt | workspace`, so the prompt is always the penultimate part.
-fn codex_prompt_from_title(title: &str) -> Option<String> {
-    let parts: Vec<_> = title.split('|').map(str::trim).filter(|part| !part.is_empty()).collect();
-    let candidate = parts.get(parts.len().checked_sub(2)?).copied()?;
-    let candidate = candidate.trim_start_matches(|c: char| {
-        c.is_whitespace() || ('\u{2801}'..='\u{28FF}').contains(&c)
-    });
-    let cleaned = candidate.split_whitespace().collect::<Vec<_>>().join(" ");
-    (cleaned.chars().count() >= 2).then(|| truncate_prompt_title(&cleaned))
 }
 
 fn is_regular_terminal(agent_type: &str) -> bool {
@@ -2061,16 +2041,11 @@ mod tests {
     }
 
     #[test]
-    fn codex_pane_titles_provide_the_submitted_prompt() {
-        assert_eq!(
-            codex_prompt_from_title("⠧ Remove the bottom-right resize icon | super-desktop"),
-            Some("Remove the bottom-right resize icon".into()),
-        );
-        assert_eq!(
-            codex_prompt_from_title("[ ! ] Action Required | Add directory selector | super-desktop"),
-            Some("Add directory selector".into()),
-        );
-        assert_eq!(codex_prompt_from_title("OpenAI Codex"), None);
+    fn agent_response_markers_are_not_prompt_fallbacks() {
+        assert_eq!(last_user_text(
+            "sd_term_missing_prompt_test", "claude", None,
+            "Answer costs $5\n# Summary\n> Last sentence of the response",
+        ), None);
     }
 
     #[test]

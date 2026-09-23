@@ -29,6 +29,7 @@ pub struct PtyAttachment {
     master: File,
     child: Child,
     session: String,
+    prompt_input: crate::prompt_history::InputTracker,
 }
 
 impl PtyAttachment {
@@ -131,6 +132,7 @@ impl PtyAttachment {
             master,
             child,
             session: session.to_string(),
+            prompt_input: crate::prompt_history::InputTracker::default(),
         })
     }
 
@@ -170,7 +172,11 @@ impl PtyAttachment {
         if bytes.len() > MAX_CHUNK {
             return Err(invalid("input_chunk_too_large"));
         }
-        self.master.write(bytes)
+        let count = self.master.write(bytes)?;
+        for prompt in self.prompt_input.feed(&bytes[..count]) {
+            crate::prompt_history::record(&self.session, &prompt);
+        }
+        Ok(count)
     }
 
     /// Change this client's own viewport. The attachment carries `ignore-size`,

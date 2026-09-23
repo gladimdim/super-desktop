@@ -657,6 +657,9 @@ pub fn send_keys(session_name: &str, text: &str, enter: bool) -> Result<(), Stri
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
     }
+    if enter && !text.trim().is_empty() {
+        crate::prompt_history::record(session_name, text);
+    }
     Ok(())
 }
 

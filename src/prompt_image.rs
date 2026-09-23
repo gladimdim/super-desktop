@@ -217,6 +217,7 @@ pub fn submit(
     }
     prepare_composer(&mut control, &path, text, &authorized)?;
     control.send("", true)?;
+    crate::prompt_history::record(session, text);
     Ok(())
 }
 

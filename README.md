@@ -40,6 +40,13 @@ other components that bypass logind inhibitors are outside its control.
 
 ### Supported AI harnesses
 
+PC card titles and Android prompt labels share the last submitted input for each
+tmux session. New input sent through the desktop, remote desktop, or Android
+updates that value; response output and unsent drafts cannot replace it. Codex
+rollout user messages and the owned OpenCode session provide fallbacks for
+older sessions. Unsupported terminal editing (such as history recall) keeps the
+previous tracked prompt rather than guessing from the response screen.
+
 Android's per-terminal bell can report explicit Codex response completion, including
 while the phone UI is hidden using an opt-in foreground monitor. Other harnesses
 do not yet have verified completion adapters. See [completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).

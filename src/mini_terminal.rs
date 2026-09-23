@@ -15,10 +15,9 @@ use vte4::{PtyFlags, Terminal as VteTerminal};
 use crate::card_source::{CardSource, RemoteSession};
 use crate::state::TerminalData;
 use crate::tmux::{
-    capture_pane_text, ensure_session_with_inventory, extract_composer_draft,
-    extract_last_prompt, get_agent_config, get_opencode_user_text_by_id,
+    capture_pane_text, ensure_session_with_inventory, get_agent_config,
     inspect_status_with_screen, preview_from_screen, resolve_own_opencode_id,
-    tmux_bin, truncate_prompt_title,
+    tmux_bin,
 };
 
 pub const CARD_WIDTH: i32 = 380;
@@ -1517,12 +1516,7 @@ impl MiniTerminalCard {
                 return;
             }
             let handle = gtk4::gio::spawn_blocking(move || {
-                // Single screen capture feeds both detectors. Priority for the
-                // title is strictly USER-entered text:
-                //   1. composer draft (typed, not yet submitted),
-                //   2. last submitted user message (opencode session DB),
-                //   3. shell-history prompt (`~ ❯ cmd` on plain shells),
-                //   4. default `icon + agent name` (never agent output).
+                // Use the same submitted-prompt source as the Android bridge.
                 let screen = capture_pane_text(&sess_name);
                 let status = inspect_status_with_screen(
                     &sess_name,
@@ -1534,11 +1528,6 @@ impl MiniTerminalCard {
                     None if status.status == "EXITED" => "Session offline or ended.".into(),
                     None => "Ready. Waiting for input...".into(),
                 });
-                let history = screen
-                    .as_deref()
-                    .and_then(extract_last_prompt)
-                    .map(|s| truncate_prompt_title(&s));
-                let draft = screen.as_deref().and_then(extract_composer_draft);
                 // `resolve_own_opencode_id` only ever returns THIS pane's own
                 // session (own `--session` flag, else a claims-aware match),
                 // so `db_text` is the prompt typed INTO this harness — never
@@ -1550,14 +1539,12 @@ impl MiniTerminalCard {
                         oc_id = fresh;
                     }
                 }
-                let db_text = if agent_type == "opencode" && draft.is_none() {
-                    oc_id.as_deref().and_then(get_opencode_user_text_by_id)
-                } else {
-                    None
-                };
-                (status, preview, history, draft, db_text, oc_id)
+                let prompt = crate::bridge::last_user_text(
+                    &sess_name, &agent_type, oc_id.as_deref(), screen.as_deref().unwrap_or(""),
+                );
+                (status, preview, prompt, oc_id)
             });
-            let Ok((status_info, preview, history, draft, db_text, oc_id)) = handle.await else {
+            let Ok((status_info, preview, prompt, oc_id)) = handle.await else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -1581,7 +1568,7 @@ impl MiniTerminalCard {
             }
 
             if let Some(title) = title_label.upgrade() {
-                let user_text = draft.or(db_text).or(history);
+                let user_text = prompt;
                 let new_title = format_card_title(&title_prefix, user_text.as_deref());
                 if title.label().as_str() != new_title {
                     title.set_label(&new_title);
@@ -1798,6 +1785,15 @@ fn spawn_vte(
         session.attach();
         return;
     }
+
+    // Observe bytes VTE sends, not key labels or the response painted on screen.
+    let prompt_session = session.clone();
+    let prompt_input = RefCell::new(crate::prompt_history::InputTracker::default());
+    crate::card_source::connect_host_input(&term, move |bytes| {
+        for prompt in prompt_input.borrow_mut().feed(bytes) {
+            crate::prompt_history::record(&prompt_session, &prompt);
+        }
+    });
 
     let agent_type = data.borrow().agent_type.clone();
     let cmd = data.borrow().command.clone();
