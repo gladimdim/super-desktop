@@ -105,6 +105,13 @@
   details { margin-top: 12px; }
   summary { cursor: pointer; color: var(--accent); padding: 10px 0; }
   details figure { margin-top: 12px; }
+  .tour { display: grid; gap: 28px; margin: 32px 0 24px; }
+  .tour figure { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 24px; align-items: center; }
+  .tour h3 { margin: 0 0 6px; font-size: 19px; }
+  .tour p { margin: 0; color: var(--muted); }
+  .tour .shot { display: flex; justify-content: center; align-items: center; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: #070a10; }
+  .tour .shot img { display: block; max-width: 100%; height: auto; border-radius: 6px; }
+  @media (max-width: 760px) { .tour figure { grid-template-columns: minmax(0, 1fr); gap: 12px; } }
   #install { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
   #install h2 { margin-top: 0; }
   .news { border: 1px solid var(--border); border-left: 4px solid var(--accent2); border-radius: var(--radius); padding: 24px; background: var(--panel); }
@@ -145,14 +152,39 @@
     <p class="sub">Chrome stays underneath. One shortcut brings your live AI workspace into view.</p>
     <figure>
       <div class="screenshot-link">
-        <img id="workspace-demo" src="screenshots/desktop-toggle-poster.webp" width="1440" height="602" fetchpriority="high" alt="Chrome showing the SUPER DESKTOP website. Play the demo to see live terminal cards slide into view, then hide again.">
+        <picture>
+          <source srcset="screenshots/desktop-toggle-poster.webp" media="(prefers-reduced-motion: reduce)">
+          <img id="workspace-demo" src="screenshots/desktop-toggle.gif" width="1440" height="602" fetchpriority="high" alt="Chrome showing the SUPER DESKTOP website. Pressing SUPER + SHIFT + Q brings live terminal cards into view: access all your harnesses with one button press. Three seconds later the same shortcut hides them again so you can keep working.">
+        </picture>
       </div>
       <div class="demo-controls">
-        <button id="demo-toggle" class="btn primary" type="button" aria-controls="workspace-demo" aria-pressed="false" hidden>Play demo</button>
+        <button id="demo-toggle" class="btn primary" type="button" aria-controls="workspace-demo" aria-pressed="true" hidden>Pause demo</button>
         <a href="screenshots/desktop-toggle.gif">Open GIF</a>
       </div>
-      <figcaption><span class="kbd">F1</span> shows and hides the workspace in this demo. F1 is a custom binding; the default is <span class="kbd">SUPER + SHIFT + Q</span>. Set your own shortcut in Settings.</figcaption>
     </figure>
+    <div class="tour">
+      <figure>
+        <figcaption>
+          <h3>Every harness, one click away</h3>
+          <p>The top bar lists the coding agents installed on this PC, here Claude Code, Codex, OpenCode, Grok and Reasonix, plus a plain shell. Click one and a new live terminal card starts that agent in the selected folder.</p>
+        </figcaption>
+        <div class="shot"><img src="screenshots/harness-bar.webp" width="680" height="64" loading="lazy" alt="SUPER DESKTOP top bar with launcher buttons for Claude, Codex, OpenCode, Grok, Reasonix and Shell."></div>
+      </figure>
+      <figure>
+        <figcaption>
+          <h3>Your other PCs, right in the overlay</h3>
+          <p>The <strong>This PC</strong> menu lists the computers you have paired. Pick one to see and type into its live workspace, or choose <strong>Add a PC</strong> to connect a new machine with a one-time link and a matching code.</p>
+        </figcaption>
+        <div class="shot"><img src="screenshots/pc-selector.webp" width="316" height="214" loading="lazy" alt="The This PC menu open, listing This PC, a paired computer named gladimdim-b9, and an Add a PC action."></div>
+      </figure>
+      <figure>
+        <figcaption>
+          <h3>Choose where each harness starts</h3>
+          <p>The folder next to the logo is the working directory for the next harness. Your recent project folders are one click away, and <strong>×</strong> removes one from the list.</p>
+        </figcaption>
+        <div class="shot"><img src="screenshots/folder-picker.webp" width="640" height="290" loading="lazy" alt="Working-directory dropdown open under the top bar, listing recent project folders such as Star_Chumaki, super-desktop and OmarchyAILauncher with their paths."></div>
+      </figure>
+    </div>
     <details>
       <summary>View the desktop screenshots</summary>
       <figure>
@@ -298,19 +330,21 @@ super-desktop reload-theme
 <script>
   const demo = document.getElementById('workspace-demo');
   const toggle = document.getElementById('demo-toggle');
+  const demoSource = demo.parentElement.querySelector('source');
   const poster = 'screenshots/desktop-toggle-poster.webp';
   const animation = 'screenshots/desktop-toggle.gif';
   function setDemoPlaying(playing) {
+    // The reduced-motion <source> would otherwise override an explicit Play.
+    if (demoSource) demoSource.remove();
     demo.src = playing ? animation : poster;
-    toggle.textContent = playing ? 'Stop demo' : 'Play demo';
+    toggle.textContent = playing ? 'Pause demo' : 'Play demo';
     toggle.setAttribute('aria-pressed', String(playing));
   }
-  // Start still, including for reduced motion. Playback requires an explicit click.
+  // Autoplay, except for visitors who prefer reduced motion; they start on the still.
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   toggle.hidden = false;
+  if (reduceMotion) setDemoPlaying(false);
   toggle.addEventListener('click', () => setDemoPlaying(toggle.getAttribute('aria-pressed') !== 'true'));
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) setDemoPlaying(false);
-  });
 </script>
 </body>
 </html>
