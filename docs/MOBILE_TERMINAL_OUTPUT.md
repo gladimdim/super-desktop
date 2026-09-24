@@ -32,7 +32,8 @@ Phone input wakes only the streams of the session it was sent to.
 | OpenCode | `--mini` | Installed 1.18.31 default uses alternate screen; mini startup uses main screen. |
 | Pi | `--tui-mode regular` | Installed 0.87.1 regular startup exposes history; fullscreen does not. |
 | Hermes | `--cli` | Installed 0.19.0 classic startup uses main screen; provider-authenticated long response not exercised. |
-| Claude, Gemini, Cursor | Existing defaults | Startup/main screen only; login/onboarding prevents claiming full-response verification. |
+| Claude Code | `--settings` with `"tui": "default"` (merged into the launcher's hook settings) | 2.1.281 with a user `"tui": "fullscreen"` setting: default launch used the alternate screen (no history); the override kept the main screen and a local `!seq 1 200` produced 196 history lines. |
+| Gemini, Cursor | Existing defaults | Startup/main screen only; login/onboarding prevents claiming full-response verification. |
 | OpenClaw | Existing `tui` | Installed 2026.9.5 constructs `TuiMainScreen`, whose renderer uses main screen and scrollback. Live gateway response not exercised here. |
 | Crush | Existing fullscreen UI + remote paging | Installed 0.96.1 long saved-response fixture verifies Tab, Page Up, and Page Down. |
 | Other/custom agents | Existing defaults + remote paging keys | No blanket compatibility claim; unavailable CLIs not exercised. |

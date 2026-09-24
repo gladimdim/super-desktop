@@ -161,7 +161,10 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
                     json!([{ "hooks": [{"type":"command", "command":reporter, "timeout":3}]}]),
                 );
             }
-            args.extend(["--settings".into(), json!({"hooks":hooks}).to_string()]);
+            // Main-screen rendering keeps Claude's output in tmux scrollback, which
+            // the phone snapshot reads (like Codex's --no-alt-screen). The flag
+            // outranks a user's "tui": "fullscreen" for this session only.
+            args.extend(["--settings".into(), json!({"tui":"default","hooks":hooks}).to_string()]);
         }
         "pi" => args.extend([
             "--extension".into(),
@@ -721,6 +724,9 @@ mod tests {
             assert_eq!(metadata.agent, agent);
             assert_eq!(metadata.launcher, "custom-test");
             assert!(launch.command.contains("SD_HARNESS_PID"));
+            if agent == "claude" {
+                assert!(launch.command.contains(r#""tui":"default""#), "{}", launch.command);
+            }
         }
         for command in [
             "'/opt/tools/wrapper' claude",
