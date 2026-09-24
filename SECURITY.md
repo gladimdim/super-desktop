@@ -20,15 +20,21 @@ it has the desktop's trusted certificate pin.
 
 ## Pairing and access
 
-1. Desktop settings → Android → Show secure pairing QR. The compact QR contains
-   `superdesktop://pair?data=<base64url invitation JSON>`; its copyable link is expandable.
-2. Scan with a camera that supports custom-scheme links and tap Open, or use
-   Android → Bridges → Scan pairing QR, or paste the invitation. External links
-   require explicit confirmation and never automatically approve a device. Manual address
-   selection can override the invitation's LAN route without changing its pin.
+1. Desktop Settings → Connections → Add a device → Pair a phone (or Share this
+   PC, for another PC). The page checks the bridge, firewall and network, then
+   shows a compact QR (phones only) and a copyable link, both
+   `superdesktop://pair?data=<base64url invitation JSON>`.
+2. Scan with a camera that supports custom-scheme links and tap Open, or use the
+   Android app's Settings → Connections → Add connection, or paste the
+   invitation. External links require explicit confirmation and never
+   automatically approve a device. Manual address selection can override the
+   invitation's LAN route without changing its pin.
 3. Android requests approval using the QR's random 192-bit, single-use secret.
    Invitations expire after 300 seconds. Approval requests expire after 120 seconds.
-4. Compare the displayed code and approve on the desktop. Names are untrusted labels.
+4. Compare the code both devices show and approve in the desktop's connection
+   request panel. It opens at once over a visible overlay; otherwise a
+   notification with constant text opens it when clicked. Names, device types
+   and installation IDs are untrusted labels.
 5. The phone receives a separate random 192-bit bearer credential, valid for 90 days.
 
 Desktop state stores SHA-256 credential hashes, not bearer credentials. Android
@@ -36,8 +42,9 @@ stores credentials and pins in Keystore-backed encrypted preferences; backups an
 preference device transfer are disabled. Old HTTP-era credentials are invalidated
 on upgrade and phones must pair again. Certificates persist across restarts.
 
-Desktop approval, invitations, device listing, and revocation are available only
-over an owner-only Unix socket inside a 0700 state directory. Network localhost
+Desktop approval, invitations, device listing, the rejected-device list and
+revocation are available only over an owner-only Unix socket inside a 0700 state
+directory. Network localhost
 has no authentication bypass. Requests with browser Origin/Sec-Fetch-Site headers
 are rejected. Revoke access disconnects the device's active sockets and invalidates
 its credential; removing a connection on Android alone does not revoke it.
@@ -45,6 +52,18 @@ The desktop's active/registered counter counts distinct devices, not sockets.
 Active means an open authenticated connection or authenticated activity within
 the last 60 seconds. Expired/revoked devices are never counted active; registered
 devices remain visible while the bridge is stopped.
+
+**Reject** also blocks. The bridge remembers the rejected device in its private
+state — by the 32-hex installation ID a SUPER DESKTOP PC sends as `deviceId`,
+otherwise by name and source address — and answers its later pairing requests
+with `403 pairing_blocked` before any desktop prompt and without consuming the
+invitation (the invitation is still checked first). This is a nuisance filter,
+not an authorization boundary: every value it matches is reported by the device,
+so a device that changes them can ask again, and still needs a fresh invitation
+and explicit approval. The owner removes entries in Settings → Connections →
+Rejected devices (owner-only `GET /api/v1/pair/rejected`, `POST
+/api/v1/pair/rejected/remove`); the list is shown from saved state while the
+bridge is stopped.
 
 The additive `/api/v1/desktop/capabilities`, `/api/v1/desktop/workspace`,
 `/api/v1/desktop/events`, `/api/v1/desktop/commands` and
@@ -89,9 +108,9 @@ viewer is refused with the daemon's current geometry instead of overwriting a
 concurrent edit. Request ids are deduplicated per credential inside one epoch
 (16 per device, 256 overall, dropped on an epoch change); a request whose owner
 never answered is remembered as uncertain and its retry is refused rather than
-applied twice. `workspace-layout-v1` is advertised because `setLayout`, `setExpanded`,
-`closeTerminal` and `createTerminal` are implemented; `setWorkspace` is refused
-with `unsupported_command`.
+applied twice. `workspace-layout-v1` is advertised because every command variant
+— `setLayout`, `setExpanded`, `closeTerminal`, `createTerminal` and `setWorkspace`
+— has a handler; an unknown variant is refused with `unsupported_command`.
 
 `setExpanded` is presentation only: it is the same expand/collapse the host's own
 double-click performs, it writes no saved geometry, and it leaves the host's
@@ -114,6 +133,29 @@ host, and a card is reported only when its session is alive. A refused create
 creates nothing. The host is not forced to show its overlay, and no peer can
 choose a command, a flag or a path. Security protocol v3 and existing Android
 credentials are unchanged.
+
+## Connecting to another PC
+
+A PC that opens another PC's workspace is a client of that PC's bridge, exactly
+like a phone: it pairs with a single-use link and explicit approval on the host,
+and receives a bearer credential for that host only, valid for 90 days. Pairing
+is never reciprocal: approving A on B lets A open B, not B open A. The viewer
+keeps each approved PC — machine ID, label, address, certificate pin, credential
+and expiry — in `~/.local/state/super-desktop/peers.json`, 0600 inside a 0700
+directory, written atomically under a lock; a symlinked registry is refused and a
+corrupt one is preserved rather than overwritten. `peer-list` and the settings
+pages never show a credential.
+
+Every viewer request uses the pinned certificate over HTTPS/WSS with no
+environment proxies, no redirects, no cookies and no plaintext fallback. A
+changed certificate or machine ID is refused (`peer_identity_changed`) and needs
+a new link. The viewer never replays a command after an ambiguous failure, and
+releases every stream when its overlay is hidden or another PC is selected.
+Revoking the viewer on the host (Settings → Connections → PCs) ends its
+attachments and event subscriptions within a second; `super-desktop peer-forget`
+on the viewer only deletes the local record, so revoke on the host to withdraw
+access. A host serves only its own daemon's workspace, never one it is viewing,
+so A viewing B while B views C gives A nothing of C.
 
 ## Resource bounds
 
@@ -144,7 +186,8 @@ re-encoded and privately staged; no client-selected file paths or overwrites.
 See [image prompt security and retention](docs/IMAGE_PROMPTS.md).
 Pairing is invitation-
 gated and limited to eight pending/recent requests and one per source per 120 seconds.
-At most 64 paired devices. These bounds mitigate abuse, not volumetric network DoS.
+At most 64 paired devices and 256 rejected devices (the oldest rejection is
+dropped first). These bounds mitigate abuse, not volumetric network DoS.
 
 ## Trust boundary and recovery
 

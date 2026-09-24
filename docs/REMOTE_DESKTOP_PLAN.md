@@ -8,7 +8,10 @@ between Fit and 100% + pan/zoom, and the host pushes live workspace events in
 place of the viewer's two-second poll. The two-PC regression matrix is
 delivered as a simulated matrix on one machine (`python3 tests/two_pc_matrix.py`,
 section 10); the rows that need two physical machines remain manual checks.
-Updated 2026-09-24 against `master`.
+The README has a user guide (pairing, viewing, known limits and recovery) and
+SECURITY covers the rejected-device block and the viewer's outgoing credentials.
+What remains for the first release is the real two-PC walkthrough and its
+measurements (section 9, phase 7). Updated 2026-09-24 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
 The original architecture below remains the target. Capability negotiation,
@@ -53,8 +56,8 @@ PCs:
   ends with one typed `POST /api/v1/desktop/commands` (`setLayout`) that carries
   the card revision the viewer drew, so a concurrent host edit is answered with
   `conflict` and the host's own geometry instead of being overwritten. The same
-  command route applies resize, iconify and `closeTerminal` on the host; the
-  viewer's own edge-resize and close/iconify controls are the next milestone. A
+  command route applies resize, iconify and `closeTerminal` on the host, driven
+  by the card's own edge-resize and close/iconify controls. A
   card the host shows expanded, or a host that does not advertise
   `workspace-layout-v1`, keeps its own layout.
 - **One UI, two sources.** A remote workspace is drawn by the same two widgets a
@@ -248,6 +251,11 @@ two-PC matrix (section 10) on one machine.
    four bugs (see section 10). Viewer input stays behind the current-selection
    handshake and the prompt-transaction guard, and keys are never replayed
    after a disconnect.
+8. **Delivered:** user and security documentation — the README guide (pairing,
+   viewing, known limits, recovery) and SECURITY's rejected-device and
+   outgoing-credential sections.
+9. **Next:** the real two-PC walkthrough and measurements (section 10's manual
+   rows and performance targets), recorded in the release PR.
 
 ## 1. Intended experience and scope
 
@@ -283,8 +291,8 @@ hide local notes in remote mode, and disable remote New Note with an explanation
 Do not silently create local notes while viewing a remote PC. Remote file previews
 and image prompts are a follow-up; hide/disable those buttons until routed through
 the authenticated host APIs. Live terminal output, viewer typing, remote create,
-close and layout changes are delivered; the host's own folder list and the rest
-of the viewer's command UI are still required before this feature is complete.
+close and layout changes, the host's own folder list and the rest of the
+viewer's command UI are delivered.
 
 ## 2. What exists and where to change it
 
@@ -622,19 +630,21 @@ required for the first release; follow-ups in section 1 are separate work.
    VTE fed by the network stream, forwards that VTE's committed bytes to the
    host, keeps host geometry and stacking, budgets the attachments and never
    touches local session preparation.
-6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids,
+6. **Layout and simultaneous use — delivered; one manual check remains.** Host-owned grids,
    stream budgeting, the inverse drag transform, revision conflicts with the
-   host's own geometry, the shared bar and card widgets and every routed
-   move/resize/iconify/expand/close control are delivered, and so is conflict
-   feedback in the chrome. The 100% + pan/scroll mode remains, together with a two-PC check
-   that B can view C while A operates B, and that A/B can view each other
-   without recursion or exported peer state.
-7. **Regression, documentation and release — matrix delivered (simulated).** The
+   host's own geometry, the shared bar and card widgets, every routed
+   move/resize/iconify/expand/close control, conflict feedback in the chrome
+   and the 100% + pan/scroll mode are delivered. Still to run on real machines:
+   B views C while A operates B, and A/B view each other without recursion or
+   exported peer state (section 10).
+7. **Regression, documentation and release — matrix and documentation delivered; next.** The
    automated two-PC matrix is `tests/two_pc_matrix.py`; the manual rows it
-   cannot reach are listed in section 10. Update
-   README and SECURITY (device terminology, outgoing credentials, new routes,
-   resource limits), and document known limits and recovery. Include an actual
-   two-PC walkthrough and measured performance results in the implementation PR.
+   cannot reach are listed in section 10. README has the user guide (pairing,
+   viewing, known limits and a recovery table) and SECURITY covers the new
+   routes, the rejected-device block, outgoing credentials and resource limits.
+   Remaining: an actual two-PC walkthrough and the measured performance results
+   of section 10 (p95 echo latency, idle CPU/network for 1/4/8 consoles,
+   bounded memory/descriptors/attach clients after repeated reconnects).
 
 Suggested file names are boundaries, not a requirement to create empty modules.
 Before each phase, inspect the preceding implementation and tests; do not treat

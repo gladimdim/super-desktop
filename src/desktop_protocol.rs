@@ -94,9 +94,8 @@ impl Capabilities {
             desktop_api_version: DESKTOP_API_VERSION,
             // Enable only once the complete endpoint behavior is available.
             // `workspace-layout-v1` is advertised because `POST
-            // /api/v1/desktop/commands` accepts layout and close commands now;
-            // create and default-folder commands are refused with
-            // `unsupported_command` until their handlers exist.
+            // /api/v1/desktop/commands` has a handler for every command
+            // variant: layout, expand, close, create and default folder.
             capabilities: vec![
                 WORKSPACE_SNAPSHOT.into(),
                 WORKSPACE_LAYOUT.into(),

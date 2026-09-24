@@ -9,7 +9,46 @@
 
 ---
 
-## 👤 For humans — what is this?
+## 👤 For humans
+
+### Step 1 — Install manually
+
+On an **Omarchy desktop**, open a terminal and run these commands as your normal
+user (do not run `install.sh` with `sudo`):
+
+```bash
+mkdir -p ~/GitHub
+git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
+cd ~/GitHub/super-desktop
+./install.sh
+```
+
+The installer builds the app from source, adds it to your application launcher,
+and configures the shortcut, startup, and Omarchy theme integration. Follow any
+package-install prompts; the first build can take a few minutes. Keep the cloned
+folder: the installed command points to the binary built inside it.
+
+If required tools or libraries are missing, install them and rerun `./install.sh`:
+
+```bash
+omarchy pkg add git tmux pkg-config gtk4 gtk-layer-shell vte4 rustup
+rustup default stable
+```
+
+Then press **SUPER + SHIFT + Q** (SUPER is usually the Windows key), or run
+`super-desktop toggle`, to open the overlay. Choose a project folder and click
+an installed harness in the top bar. Install and sign in to your preferred AI
+CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
+
+To update later:
+
+```bash
+cd ~/GitHub/super-desktop
+git pull
+./rebuild.sh
+```
+
+### What you get
 
 SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy workspace:
 
@@ -22,6 +61,83 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **🎨 Native Omarchy theming** — colors, fonts, and terminal palette are read from the active Omarchy theme and update instantly when you switch themes (no restart).
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
 - **🔌 Phone bridge (optional)** — encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Connections*. A background supervisor checks every five seconds and recovers the bridge after three consecutive failed checks, even with the overlay hidden or screen locked. Stop pauses recovery until Start (or the next daemon launch). Failed starts are retried, and `bridge.previous.log` preserves the previous run beside `bridge.log`. To stay reachable while unattended on external power, enable *Settings → Sleep lock*; recovery cannot run while the PC is suspended. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
+- **🖥 Other PCs** — pair two PCs and open the other one's workspace from the top-left **This PC** selector: its consoles stream live and every action runs on that PC. See [Use another PC's harnesses](#use-another-pcs-harnesses).
+
+### Use another PC's harnesses
+
+Pair two PCs running SUPER DESKTOP, and either one can open the other's
+workspace from the top-left **This PC** selector. A remote workspace uses the
+same top bar and console cards as a local one, and everything in it acts *on
+that PC*:
+- Its consoles stream live, in colour, at that PC's own positions, sizes and
+  stacking order.
+- Typing, paste and Ctrl+C reach the focused session there.
+- Dragging, edge-resizing, minimizing, maximizing and closing a card do the
+  same on that PC.
+- Its harness buttons launch harnesses there, and the folder field lists the
+  folders that PC offers.
+
+Changes made on that PC appear as soon as it publishes them. Pairing is one-way:
+approving a PC lets it open this one, not the reverse. Install the same current
+build on both PCs (`git pull && ./rebuild.sh`, which also restarts the separate
+bridge process).
+
+**Pair two PCs**
+
+1. On the PC you want to open (the host), go to ⚙ Settings → **Connections** →
+   **Add a device** → **Share this PC**. You can also use **This PC** → **Add a
+   PC** → *I want this PC's harnesses to be available on another PC*. It checks
+   the bridge, the firewall rule for port 8759/tcp and the network, then shows a
+   single-use link that expires in five minutes. Click **Copy link**, then send
+   it to the other PC over a channel you trust.
+2. On the viewing PC, go to **This PC** → **Add a PC** → *I want to connect to
+   another PC and view its harnesses*, or Settings → Connections → Add a device
+   → **View another PC**. Paste the link and click **Connect to PC**.
+3. The host's **connection request panel** opens. If the overlay is hidden,
+   click the notification to open it. Click **Approve** only if its six-digit
+   code matches the one on the viewing PC. **Reject** refuses the request and
+   blocks that PC until you remove it from Settings → Connections → **Rejected
+   devices**.
+
+The viewing PC then selects the host and draws its workspace. To withdraw
+access, go to the host's Settings → Connections → **PCs** → *Can open this PC*
+and click **Revoke**. The viewer's streams close within a second.
+
+**Viewing a remote workspace**
+
+- **Fit / 100%** (left of Hide) chooses how the workspace is drawn. **Fit**
+  shows all of it, scaled down and never enlarged. **100%** shows one host pixel
+  per logical pixel. To pan, drag empty canvas, use the scrollbars, or scroll.
+  To zoom (25–300%), use Ctrl+scroll or pinch; click the button to return to
+  100%. Terminals are redrawn at the new font size rather than scaled. The view
+  is never sent to the host or saved.
+- Each action reports its result in a short line under the card's header, or
+  under the top bar for launches and folder picks. The line clears itself.
+  - *Changed on that PC · showing its layout*: someone changed that card there
+    first, so the card moves back to that PC's layout.
+  - *Cannot reach that PC · change not applied*: the request never arrived.
+  - *Result unknown · check before retrying*: the request was sent but no
+    answer came back. It is never resent automatically.
+- Switching back to **This PC**, hiding the overlay, or restarting either PC
+  leaves every harness running.
+
+**Not available for a remote PC yet:** sticky notes (a remote workspace shows
+only that PC's consoles, and Ctrl+N makes no note there), the **Files & links**
+button, and removing a saved PC from the GUI. To remove a saved PC, run
+`super-desktop peer-forget MACHINE_ID`; `super-desktop peer-list` shows the IDs.
+
+| You see | Do this |
+| --- | --- |
+| *Update SUPER DESKTOP on the host* (or *on that PC*) | That PC runs an older build: `git pull && ./rebuild.sh` there. |
+| *Pairing required · Add this PC again* | The host revoked this PC, or its 90-day credential expired. Pair again with a new link. |
+| *Cannot reach this PC* or *Reconnecting…* | Check that the host is on, SUPER DESKTOP is running there, and port 8759/tcp is reachable over LAN or Tailscale. Consoles reconnect on their own. |
+| *That PC restarted · change not applied* | Its SUPER DESKTOP restarted before the change arrived, and the view has refreshed. Repeat the action if you still want it. |
+| *The other PC rejected this PC earlier…* | On the host, remove this PC in Settings → Connections → Rejected devices, then use a new link. |
+| *The other PC already has a request from this address* | Wait two minutes for that request to expire, then use a new link. |
+| The host answers 404 for `/api/v1/desktop/capabilities` | An old bridge is still running there. `./rebuild.sh` on the host restarts both processes. |
+
+Design and protocol details: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md)
+and [protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md).
 
 ### Sleep lock on charger
 
@@ -276,50 +392,16 @@ super-desktop status
 
 ## 🏗️ Project layout (for contributors)
 
-PC-to-PC workspace switching: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md).
-Use **Add a PC** in the top-left machine selector to pair another computer and
-open its workspace: the host's consoles are streamed live, in colour, at the
-host's own positions, sizes, stacking order and iconified state. The panel can
-either create a one-time connection link for another PC or accept one from it;
-approval stays on the host PC. Update and run `./rebuild.sh` on both PCs, since
-the rebuild also restarts the separate bridge process. The
+PC-to-PC workspaces (user guide: [Use another PC's harnesses](#use-another-pcs-harnesses)):
+see the [implementation plan](docs/REMOTE_DESKTOP_PLAN.md) and the
+[protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md). A remote workspace is drawn
+by the same widgets a local one is (`harness_bar.rs`, `mini_terminal.rs`) with
+only the source swapped (`card_source.rs`); every remote control is one typed
+command carrying the card revision this view drew. The
 [peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
-also pairs PCs, fetches remote layouts and can stream one console to a terminal
-(`peer-attach`).
-
-A remote workspace is drawn by the **same widgets** a local one is — the same
-top bar with that PC's own harness buttons, and the same console cards with the
-same minimize/maximize/close buttons, drag and edge-resize — with only the
-source swapped. Every control therefore means the same thing, and on a remote
-console it means it *on that PC*: click and type, drag the header to move it,
-drag an edge to resize it, and use its buttons to minimize, maximize or close it
-there. Each action is one typed command carrying the card revision this view
-drew, so a concurrent edit on the host is refused as a conflict and the console
-glides back to the host's real geometry. The console says what happened in a
-short line under its header that clears itself after a few seconds: "Changed on
-that PC · showing its layout" after a conflict, "Cannot reach that PC · change
-not applied" when the request never arrived, and "Result unknown · check before
-retrying" when the request left but no answer came back — the view refreshes
-from that PC, and the command is never sent again on your behalf. Launches and
-folder picks report the same way in the line under the top bar. The host keeps its own grid, and clicking a
-harness button launches it on that PC, without forcing its overlay to show. The
-folder field beside it is that PC's too: open its list to pick one of the folders
-that PC offers as the working directory for the next harness there (it becomes
-that PC's folder, exactly as if you had typed it on that machine).
-
-The **Fit / 100%** toggle left of Hide chooses how that PC's workspace is drawn.
-**Fit** (the default) shows the whole workspace, scaled down to fit and never
-enlarged. **100%** shows one host pixel per logical pixel, so consoles are as
-large and readable as on that PC: drag empty canvas, use the scrollbars or
-scroll with the touchpad or wheel to pan, and Ctrl+scroll or pinch to zoom
-(25–300%, shown on the button; click 100% again to return to exactly 100%).
-Terminals are redrawn at the new font size rather than scaled, so they stay
-sharp, and zooming never changes the host's own terminal grid. Every drag,
-resize and button still acts on that PC at its own coordinates in either mode.
-The choice is remembered per PC until SUPER DESKTOP restarts.
-`workspace-layout-v1` and `terminal-pty-v1` in
-[the protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md) record what each PC
-advertises.
+pairs PCs, fetches remote layouts, streams one console (`peer-attach`) or its
+events (`peer-events`) and sends one command (`peer-command`);
+`python3 tests/two_pc_matrix.py` runs the simulated two-PC regression matrix.
 
 ```
 ~/GitHub/super-desktop/
