@@ -384,6 +384,21 @@ fn gateway_error(status: u16, bytes: &[u8]) -> Option<PeerError> {
     }
 }
 
+/// Status policy for the command route. The bridge answers a command for a
+/// card that no longer exists with 404 *and* a typed `rejected` result
+/// (`unknown_card`); that is the host's answer — "already closed on that PC" —
+/// not a missing endpoint, so it must reach the chrome as such. A 404 without
+/// a typed result is still an endpoint this host does not have.
+fn check_command_status(status: u16, bytes: &[u8]) -> Result<()> {
+    if status == 404
+        && serde_json::from_slice::<Value>(bytes)
+            .is_ok_and(|document| document.get("result").is_some())
+    {
+        return Ok(());
+    }
+    check_response_status(status, ResponsePolicy::Command)
+}
+
 fn peer_client(peer: &Peer) -> Result<PinnedClient> {
     validate_peer_access(peer)?;
     PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)
@@ -484,7 +499,7 @@ impl PinnedClient {
         if let Some(error) = gateway_error(status, &bytes) {
             return Err(error);
         }
-        check_response_status(status, ResponsePolicy::Command)?;
+        check_command_status(status, &bytes)?;
         let document: Value =
             serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))?;
         // An answer without a result never reached the owner. Its code is still
@@ -965,6 +980,30 @@ mod tests {
         assert_eq!(
             send_failure(false, ResponsePolicy::Read),
             PeerError("connection_failed_or_pin_mismatch")
+        );
+    }
+
+    #[test]
+    fn a_typed_unknown_card_is_the_host_s_answer_not_a_missing_route() {
+        let typed = serde_json::to_vec(&json!({
+            "requestId": "m1", "machineId": "a", "epoch": "e", "revision": 3,
+            "result": {"type": "rejected", "error": "unknown_card"}
+        }))
+        .unwrap();
+        assert_eq!(check_command_status(404, &typed), Ok(()));
+        // An older bridge without the route answers 404 with no result.
+        assert_eq!(
+            check_command_status(404, br#"{"error":"not_found"}"#),
+            Err(PeerError("peer_endpoint_unavailable"))
+        );
+        assert_eq!(
+            check_command_status(404, b"<html>"),
+            Err(PeerError("peer_endpoint_unavailable"))
+        );
+        assert_eq!(check_command_status(409, &typed), Ok(()));
+        assert_eq!(
+            check_command_status(401, &typed),
+            Err(PeerError("peer_revoked_or_expired"))
         );
     }
 

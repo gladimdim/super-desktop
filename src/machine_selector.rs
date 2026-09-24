@@ -271,13 +271,19 @@ impl MachineView {
         });
         let weak = Rc::downgrade(&view);
         // The fallback for hosts without `workspace-events-v1`, and for the
-        // time a subscription is down: a live subscription replaces it.
+        // time a subscription is down: a live subscription replaces it. While
+        // it is live, a quiet host sends no snapshot that would retry a
+        // console whose stream dropped, so the tick does that locally.
         glib::timeout_add_local(Duration::from_secs(2), move || {
             let Some(view) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if view.remote.is_mapped() && !view.live.get() {
-                view.refresh();
+            if view.remote.is_mapped() {
+                if view.live.get() {
+                    view.canvas.retry_streams();
+                } else {
+                    view.refresh();
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -1452,5 +1458,318 @@ mod tests {
         canvas.apply(&peer, &restarted, true);
         assert_eq!(canvas.card_revision("card-one"), Some(1));
         assert_eq!(canvas.card_position("card-one"), Some((100, 200)));
+    }
+
+    /// Sockets this process holds to a local port, in any TCP state.
+    fn own_connections(port: u16) -> usize {
+        let inodes: std::collections::HashSet<String> = std::fs::read_dir("/proc/self/fd")
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                    .filter_map(|link| {
+                        let link = link.to_string_lossy().to_string();
+                        link.strip_prefix("socket:[")
+                            .and_then(|rest| rest.strip_suffix(']'))
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let wanted = format!(":{port:04X}");
+        ["/proc/self/net/tcp", "/proc/self/net/tcp6"]
+            .iter()
+            .filter_map(|table| std::fs::read_to_string(table).ok())
+            .flat_map(|table| table.lines().skip(1).map(str::to_string).collect::<Vec<_>>())
+            .filter(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                fields.len() > 9 && fields[2].ends_with(&wanted) && inodes.contains(fields[9])
+            })
+            .count()
+    }
+
+    /// Driven by tests/two_pc_matrix.py: the real selector and remote canvas
+    /// against isolated hosts (real bridges, private tmux servers, a stateful
+    /// owner). Host-side actions are requested through files in `control`.
+    #[test]
+    fn two_pc_inner() {
+        let Ok(spec) = std::env::var("SUPER_DESKTOP_TWO_PC_TEST_INPUT") else {
+            return;
+        };
+        use std::time::Instant;
+        let spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(spec).unwrap()).unwrap();
+        let control = std::path::PathBuf::from(spec["control"].as_str().unwrap());
+        struct Host {
+            id: String,
+            port: u16,
+            tmux: String,
+            cards: Vec<String>,
+        }
+        let host = |name: &str| {
+            let host = &spec["hosts"][name];
+            Host {
+                id: host["machineId"].as_str().unwrap().to_string(),
+                port: host["port"].as_u64().unwrap() as u16,
+                tmux: host["tmuxTmpdir"].as_str().unwrap().to_string(),
+                cards: host["cards"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|card| card.as_str().unwrap().to_string())
+                    .collect(),
+            }
+        };
+        let (a, b, c) = (host("a"), host("b"), host("c"));
+        let tmux = |host: &Host, args: &[&str]| {
+            let output = std::process::Command::new("tmux")
+                .args(args)
+                .env("TMUX_TMPDIR", &host.tmux)
+                .env_remove("TMUX")
+                .env_remove("TMUX_PANE")
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout).to_string()
+        };
+        let clients = |host: &Host| {
+            tmux(host, &["list-clients", "-F", "#{client_name}"])
+                .lines()
+                .filter(|line| !line.is_empty())
+                .count()
+        };
+
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let view = MachineView::new(&gtk4::Fixed::new(), Rc::new(|| {}), Rc::new(|| {}));
+        let window = gtk4::Window::new();
+        window.set_default_size(1280, 800);
+        window.set_child(Some(&view.stack));
+        window.present();
+
+        // Every pump checks that no card of another PC is ever on screen.
+        let allowed: RefCell<Vec<String>> = RefCell::new(Vec::new());
+        let pump = || {
+            while glib::MainContext::default().iteration(false) {}
+            let ids = view.canvas.card_ids();
+            let allowed = allowed.borrow();
+            assert!(
+                ids.iter().all(|id| allowed.iter().any(|prefix| id.starts_with(prefix.as_str()))),
+                "cards of another PC on screen: {ids:?}, allowed {allowed:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let until = |seconds: f64, what: &str, done: &dyn Fn() -> bool| -> f64 {
+            let started = Instant::now();
+            while !done() {
+                assert!(
+                    started.elapsed().as_secs_f64() < seconds,
+                    "timed out after {seconds}s: {what} (status {:?}, cards {:?}, streams {}, live {})",
+                    view.status.text(),
+                    view.canvas.card_ids(),
+                    view.canvas.live_streams(),
+                    view.live.get()
+                );
+                pump();
+            }
+            started.elapsed().as_secs_f64()
+        };
+        let step = Cell::new(0);
+        // `pumping: false` holds GTK still while the host acts, so an event the
+        // action causes cannot be drawn before the next line runs.
+        let ask = |action: serde_json::Value, pumping: bool| -> serde_json::Value {
+            let n = step.get();
+            step.set(n + 1);
+            std::fs::write(
+                control.join(format!("request-{n}.json")),
+                serde_json::to_vec(&action).unwrap(),
+            )
+            .unwrap();
+            let done = control.join(format!("done-{n}.json"));
+            let started = Instant::now();
+            while !done.exists() {
+                assert!(started.elapsed() < Duration::from_secs(60), "host action {action}");
+                if pumping {
+                    pump();
+                } else {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            serde_json::from_slice(&std::fs::read(done).unwrap()).unwrap()
+        };
+        let report = |row: &str, message: String| println!("TWO-PC {row}: {message}");
+        let showing = |host: &Host| {
+            view.canvas.card_ids() == {
+                let mut ids = host.cards.clone();
+                ids.sort();
+                ids
+            }
+        };
+        let streaming = |host: &Host| {
+            showing(host)
+                && view.live.get()
+                && view.canvas.live_streams() == host.cards.len()
+                && clients(host) == host.cards.len()
+        };
+        let released = |host: &Host| clients(host) == 0 && own_connections(host.port) == 0;
+        let select = |host: &Host, label: &str| {
+            *allowed.borrow_mut() = vec![format!("{}-", label.to_lowercase())];
+            view.select(Some((host.id.clone(), format!("PC {label}"))));
+        };
+
+        // 1. Select A: its cards, one event subscription, one stream per card.
+        select(&a, "A");
+        let took = until(20.0, "A shown and streaming", &|| streaming(&a));
+        report("Select a PC (GUI)", format!(
+            "A's {} consoles drawn and streaming with a live subscription {took:.1}s after selecting it",
+            a.cards.len()));
+
+        // 2. A move made on A arrives as an event: the poll stays down.
+        let moved = Instant::now();
+        ask(serde_json::json!({"do": "host_move", "host": "a", "card": "a-card-1", "x": 900}), true);
+        until(5.0, "host move drawn", &|| {
+            assert!(view.live.get(), "the subscription stayed up");
+            view.canvas.card_position("a-card-1").is_some_and(|(x, _)| x == 900)
+        });
+        report("Live events (GUI)", format!(
+            "a move made on A was drawn {:.2}s later from the event stream, without polling",
+            moved.elapsed().as_secs_f64()));
+
+        // 3. Switch to B: A's cards go at once, A's streams and subscription
+        //    are released, and nothing of A ever comes back on screen.
+        select(&b, "B");
+        assert_eq!(view.canvas.card_count(), 0, "A's cards left with the switch");
+        let took = until(20.0, "B shown and streaming", &|| streaming(&b));
+        let freed = until(3.0, "A released", &|| released(&a));
+        report("Switch A→B (GUI)", format!(
+            "B streaming {took:.1}s after the switch; A's tmux clients and sockets released \
+             {freed:.2}s later; no A card ever drawn"));
+
+        // 4. Keys typed into B's console reach B, never A.
+        let marker = format!("SD_GUI_KEYS_{}", std::process::id());
+        let card = view.canvas.card_widget("b-card-1").unwrap();
+        card.remote_session()
+            .unwrap()
+            .input(format!("echo {marker}\r").as_bytes());
+        until(5.0, "keys reached B", &|| {
+            tmux(&b, &["capture-pane", "-p", "-t", "sd_term_b_1"]).contains(&marker)
+        });
+        for session in ["sd_term_a_1", "sd_term_a_2"] {
+            assert!(!tmux(&a, &["capture-pane", "-p", "-t", session]).contains(&marker));
+        }
+        report("Keys reach only the selected PC", "typed bytes appeared in B's pane and in none of A's".into());
+
+        // 5. Concurrent edit: B's own user moves the card while this view
+        //    drags the revision it drew. The drop is refused with B's geometry
+        //    and the card glides there, saying why.
+        let drawn = view.canvas.card_revision("b-card-2").unwrap();
+        ask(serde_json::json!({"do": "host_move", "host": "b", "card": "b-card-2", "x": 1100, "y": 420}),
+            false);
+        let before = view.canvas.card_position("b-card-2").unwrap();
+        view.canvas.drag_card_in_view("b-card-2", (10.0, 10.0), (60.0, 90.0));
+        assert_eq!(view.canvas.card_revision("b-card-2"), Some(drawn), "the drop used the drawn revision");
+        until(5.0, "conflict shown on the card", &|| {
+            view.canvas.card_widget("b-card-2").and_then(|card| card.notice_text()).as_deref()
+                == Some("Changed on that PC · showing its layout")
+        });
+        until(3.0, "card at B's geometry", &|| {
+            view.canvas.card_position("b-card-2") == Some((1100, 420))
+        });
+        assert!(view.canvas.card_revision("b-card-2").unwrap() > drawn);
+        report("Drag from either machine (GUI)", format!(
+            "a drop from {before:?} at revision {drawn} after B moved the card: conflict notice on \
+             the card, card at B's (1100, 420), B's edit kept"));
+
+        // 6. A console stream that drops while the subscription stays up is
+        //    retried, not left saying "Reconnecting…" until the host changes.
+        ask(serde_json::json!({"do": "detach_clients", "host": "b"}), true);
+        until(5.0, "streams dropped", &|| view.canvas.live_streams() < b.cards.len());
+        let took = until(15.0, "streams back without a host change", &|| {
+            assert!(view.live.get(), "the subscription stayed up");
+            streaming(&b)
+        });
+        report("Dropped console reconnects (GUI)", format!(
+            "both of B's consoles re-attached {took:.1}s after their tmux clients were dropped, \
+             with the event subscription up and no host change"));
+
+        // 7. Back to A, then a burst of switches: only the last PC remains.
+        select(&a, "A");
+        until(20.0, "A again", &|| streaming(&a));
+        until(3.0, "B released", &|| released(&b));
+        view.select(Some((b.id.clone(), "PC B".into())));
+        view.select(Some((a.id.clone(), "PC A".into())));
+        view.select(Some((b.id.clone(), "PC B".into())));
+        select(&a, "A");
+        let took = until(20.0, "A after rapid switching", &|| streaming(&a));
+        until(3.0, "B released after rapid switching", &|| released(&b));
+        report("Rapid switching (GUI)", format!(
+            "A→B→A→B→A in one frame settled on A {took:.1}s later; B never drawn, its clients and \
+             sockets released"));
+
+        // 8. Hide releases everything; show brings it back. (The overlay's
+        //    hide unmaps the window and suspends the streams; its show maps it.)
+        window.set_visible(false);
+        view.suspend_streams();
+        let freed = until(3.0, "hidden: A released", &|| {
+            clients(&a) == 0 && own_connections(a.port) == 0
+        });
+        window.set_visible(true);
+        let took = until(15.0, "shown again", &|| streaming(&a));
+        report("Hide/show (GUI)", format!(
+            "hide released A's clients and sockets in {freed:.2}s; show re-attached in {took:.1}s"));
+
+        // 9. A's bridge restarts: the subscription and every console come back,
+        //    and no command is sent again.
+        let commands = ask(serde_json::json!({"do": "commands", "host": "a"}), true);
+        let restarted = Instant::now();
+        ask(serde_json::json!({"do": "restart_bridge", "host": "a", "down": 1.0}), true);
+        until(30.0, "A back after its bridge restarted", &|| streaming(&a));
+        let after = ask(serde_json::json!({"do": "commands", "host": "a"}), true);
+        assert_eq!(commands["log"], after["log"], "no command replayed");
+        report("Bridge restart (GUI)", format!(
+            "subscription and both consoles back {:.1}s after the bridge went down; no command resent",
+            restarted.elapsed().as_secs_f64()));
+
+        // 10. A's daemon restarts: the new epoch is drawn, consoles return,
+        //     and the new daemon never receives a replayed command.
+        let restarted = Instant::now();
+        ask(serde_json::json!({"do": "restart_daemon", "host": "a", "epoch": "a-epoch-gui"}), true);
+        until(30.0, "A's new epoch", &|| {
+            view.canvas.snapshot_epoch().as_deref() == Some("a-epoch-gui") && streaming(&a)
+        });
+        let after = ask(serde_json::json!({"do": "commands", "host": "a"}), true);
+        assert_eq!(after["log"], serde_json::json!([]), "the new daemon got no command");
+        report("Daemon restart (GUI)", format!(
+            "new epoch drawn and consoles streaming {:.1}s after the daemon restarted; it received no command",
+            restarted.elapsed().as_secs_f64()));
+
+        // 11. An old host without workspace-events-v1 is polled instead.
+        select(&c, "C");
+        until(20.0, "old host shown", &|| showing(&c) && view.canvas.live_streams() == c.cards.len());
+        assert!(!view.live.get() && view.events.borrow().is_none(), "no subscription to an old host");
+        let moved = Instant::now();
+        ask(serde_json::json!({"do": "host_move", "host": "c", "card": "c-card-1", "x": 777}), true);
+        until(5.0, "old host polled", &|| {
+            view.canvas.card_position("c-card-1").is_some_and(|(x, _)| x == 777)
+        });
+        assert!(view.events.borrow().is_none());
+        report("Old host fallback (GUI)", format!(
+            "no subscription; a move on the old host was drawn {:.1}s later by the two-second poll",
+            moved.elapsed().as_secs_f64()));
+
+        // 12. Revocation ends everything promptly and says why.
+        select(&a, "A");
+        until(20.0, "A before revocation", &|| streaming(&a));
+        let revoked = Instant::now();
+        ask(serde_json::json!({"do": "revoke", "host": "a"}), true);
+        let ended = until(2.0, "revoked streams released on A", &|| clients(&a) == 0);
+        until(6.0, "revocation explained", &|| {
+            view.status.text() == "Pairing required · Add this PC again" && view.canvas.card_count() == 0
+        });
+        until(3.0, "no socket kept to a revoked host", &|| own_connections(a.port) == 0);
+        report("Revoke (GUI)", format!(
+            "A reaped this viewer's consoles {ended:.2}s after revocation; the view cleared and said \
+             “Pairing required” {:.1}s after", revoked.elapsed().as_secs_f64()));
+        window.close();
     }
 }

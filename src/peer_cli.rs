@@ -23,7 +23,8 @@ pub fn run(action: &str, args: &[String]) -> Result<()> {
         }
         "peer-attach" if !args.is_empty() => attach(args),
         "peer-events" if !args.is_empty() => events(args),
-        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-attach ID CARD [--seconds N] | peer-events ID [--seconds N] | peer-forget ID")),
+        "peer-command" if args.len() == 1 => command(&args[0]),
+        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-attach ID CARD [--seconds N] | peer-events ID [--seconds N] | peer-command ID < COMMAND.json | peer-forget ID")),
     }
 }
 
@@ -168,6 +169,84 @@ fn events(args: &[String]) -> Result<()> {
             return Ok(());
         }
     }
+}
+
+/// Send one typed workspace command, read as JSON from stdin, and print the
+/// host's answer together with what the remote workspace would show for it.
+///
+/// Input: `{"command": {...}}`, optionally with `expectedEpoch` (otherwise the
+/// host's current epoch is fetched first) and `requestId` (otherwise a fresh
+/// one). The same `peer_client::command` and `command_feedback` decision the
+/// card chrome and the top bar use, so a two-PC problem — a conflict, an
+/// unreachable host, an unknown outcome — can be reproduced from a shell.
+/// Nothing is retried: the command is sent at most once per invocation. Exits
+/// 0 when the host answered (applied, conflict or a typed refusal) and 1 when
+/// no answer came back, after printing the same JSON either way.
+fn command(machine_id: &str) -> Result<()> {
+    use crate::command_feedback::{self, CardCommand, Outcome, WorkspaceAction};
+    use crate::desktop_protocol::{CommandRequest, WorkspaceCommand};
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct Input {
+        command: WorkspaceCommand,
+        expected_epoch: Option<String>,
+        request_id: Option<String>,
+    }
+    let mut text = String::new();
+    std::io::stdin()
+        .lock()
+        // The host refuses a command document larger than this anyway.
+        .take(8 * 1024)
+        .read_to_string(&mut text)
+        .map_err(|_| PeerError("command_input_failed"))?;
+    let input: Input = serde_json::from_str(&text).map_err(|_| PeerError("invalid_command"))?;
+    let peer = PeerStore::default_store()?.get(machine_id)?;
+    let epoch = match input.expected_epoch {
+        Some(epoch) => epoch,
+        None => peer_client::workspace(&peer)?.local.epoch,
+    };
+    let mut request: CommandRequest = peer_client::request(&peer, &epoch, input.command);
+    if let Some(request_id) = input.request_id {
+        request.request_id = request_id;
+    }
+    let result = peer_client::command(&peer, &request);
+    let outcome = match &result {
+        Ok(reply) => Outcome::of_reply(reply),
+        Err(error) => Outcome::Failed(error.0),
+    };
+    let tone = |tone: command_feedback::Tone| match tone {
+        command_feedback::Tone::Info => "info",
+        command_feedback::Tone::Warning => "warning",
+        command_feedback::Tone::Error => "error",
+    };
+    let (notice, geometry, refresh) = match CardCommand::of(&request.command) {
+        Some(kind) => {
+            let feedback = command_feedback::for_card(kind, outcome);
+            let geometry = match feedback.geometry {
+                command_feedback::Geometry::Adopt => "adopt",
+                command_feedback::Geometry::SnapToHost => "snapToHost",
+                command_feedback::Geometry::Revert => "revert",
+            };
+            (feedback.notice, Some(geometry), Some(feedback.refresh))
+        }
+        None => {
+            let action = match request.command {
+                WorkspaceCommand::SetWorkspace { .. } => WorkspaceAction::Folder,
+                _ => WorkspaceAction::Create,
+            };
+            (command_feedback::for_workspace(action, outcome), None, None)
+        }
+    };
+    output(&serde_json::json!({
+        "requestId": request.request_id,
+        "reply": result.as_ref().ok(),
+        "error": result.as_ref().err().map(|error| error.0),
+        "notice": notice.map(|notice| notice.text),
+        "tone": notice.map(|notice| tone(notice.tone)),
+        "geometry": geometry,
+        "refresh": refresh,
+    }))?;
+    result.map(|_| ())
 }
 
 fn output(value: &impl serde::Serialize) -> Result<()> {

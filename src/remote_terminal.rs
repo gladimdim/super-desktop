@@ -12,7 +12,8 @@
 //! concurrent host edit is answered with a conflict instead of being
 //! overwritten. The host's snapshot is the truth this view mirrors.
 use crate::desktop_protocol::{
-    CardLayout, CommandReply, DesktopCard, WorkspaceSnapshot, WorkspaceCommand, MAX_REMOTE_VIEWERS,
+    CardLayout, CommandReply, DesktopCard, LocalWorkspaceSnapshot, WorkspaceSnapshot,
+    WorkspaceCommand, MAX_REMOTE_VIEWERS,
 };
 use crate::command_feedback::{self, CardCommand, Geometry, Outcome};
 use crate::mini_terminal::MiniTerminalCard;
@@ -419,6 +420,33 @@ impl RemoteCanvas {
         self.cards.borrow().len()
     }
 
+    /// The host card ids on screen, sorted.
+    #[cfg(test)]
+    pub fn card_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.cards.borrow().keys().cloned().collect();
+        ids.sort();
+        ids
+    }
+
+    /// Cards whose stream has completed the host's `attached` handshake.
+    #[cfg(test)]
+    pub fn live_streams(&self) -> usize {
+        self.cards
+            .borrow()
+            .values()
+            .filter(|card| card.remote_session().is_some_and(|session| session.is_attached()))
+            .count()
+    }
+
+    /// The host epoch of the snapshot on screen.
+    #[cfg(test)]
+    pub fn snapshot_epoch(&self) -> Option<String> {
+        self.snapshot
+            .borrow()
+            .as_ref()
+            .map(|snapshot| snapshot.local.epoch.clone())
+    }
+
     /// Whether the host accepts layout commands, as its last answer said.
     #[cfg(test)]
     pub fn layout_is_writable(&self) -> bool {
@@ -636,16 +664,8 @@ impl RemoteCanvas {
             self.glides.borrow_mut().remove(&id);
         }
 
-        // Topmost first: when the host shows more consoles than the attach
-        // budget allows, the ones in front are the ones with live output.
-        let mut ordered: Vec<&DesktopCard> = local.cards.iter().collect();
-        ordered.sort_by_key(|card| (card.expanded, card.stacking_order));
-        let live: Vec<String> = ordered
-            .iter()
-            .filter(|card| streamable(card))
-            .take(MAX_REMOTE_VIEWERS)
-            .map(|card| card.card_id.clone())
-            .collect();
+        let ordered = stacked(local);
+        let live = live_cards(&ordered);
         let scale = self.scale();
         for host in &ordered {
             // Bound before the match: the borrow in a match scrutinee lives for
@@ -672,6 +692,31 @@ impl RemoteCanvas {
             self.drive_stream(&card, host, live_now);
         }
         self.relayout();
+    }
+
+    /// Re-attach any console that should be live but lost its stream.
+    ///
+    /// A stream that ends (a network blip, the host reaping its tmux client)
+    /// is retried by the next snapshot this view draws, after the session's
+    /// own backoff. With live workspace events a quiet host sends no further
+    /// snapshot, so the owner calls this on its regular tick instead: it reads
+    /// nothing from the network and changes nothing about the layout, it only
+    /// asks each live card's session to attach again when its backoff allows.
+    pub fn retry_streams(self: &Rc<Self>) {
+        let Some(snapshot) = self.snapshot.borrow().clone() else {
+            return;
+        };
+        let ordered = stacked(&snapshot.local);
+        let live = live_cards(&ordered);
+        for host in ordered {
+            if !live.contains(&host.card_id) {
+                continue;
+            }
+            let card = self.cards.borrow().get(&host.card_id).cloned();
+            if let Some(card) = card {
+                self.drive_stream(&card, host, true);
+            }
+        }
     }
 
     /// What to say about one card, in the viewer's own words: the stream's own
@@ -1356,6 +1401,25 @@ fn shown_origin(card: &DesktopCard) -> (i32, i32) {
     } else {
         (card.layout.x, card.layout.y)
     }
+}
+
+/// The host's cards back to front, with expanded ones on top, as the host
+/// stacks them.
+fn stacked(local: &LocalWorkspaceSnapshot) -> Vec<&DesktopCard> {
+    let mut ordered: Vec<&DesktopCard> = local.cards.iter().collect();
+    ordered.sort_by_key(|card| (card.expanded, card.stacking_order));
+    ordered
+}
+
+/// Topmost first: when the host shows more consoles than the attach budget
+/// allows, the ones in front are the ones with live output.
+fn live_cards(ordered: &[&DesktopCard]) -> Vec<String> {
+    ordered
+        .iter()
+        .filter(|card| streamable(card))
+        .take(MAX_REMOTE_VIEWERS)
+        .map(|card| card.card_id.clone())
+        .collect()
 }
 
 /// Whether this card should hold one of the viewer's attachments. An icon is

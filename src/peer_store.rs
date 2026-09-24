@@ -44,6 +44,9 @@ fn private(file: &File, directory: bool) -> Result<()> {
     }
     Ok(())
 }
+/// Longest wait for another process (or worker) to finish with the registry.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
 impl PeerStore {
     pub fn default_store() -> Result<Self> {
         let path = std::env::var_os("SUPER_DESKTOP_PEERS_STATE_DIR")
@@ -72,8 +75,16 @@ impl PeerStore {
         };
         let lock = store.file("peers.lock", libc::O_RDWR | libc::O_CREAT)?;
         private(&lock, false)?;
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(PeerError("peer_store_busy"));
+        // Every holder keeps the lock for one read or one atomic replace, so a
+        // short wait is enough. Without it, the selector's refresh, the settings
+        // page and a `peer-*` command that happen to overlap turned a busy
+        // registry into a failed connection (and a cleared remote view).
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        while unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            if std::time::Instant::now() >= deadline {
+                return Err(PeerError("peer_store_busy"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
         }
         store._lock = lock;
         Ok(store)
@@ -184,7 +195,17 @@ mod tests {
     fn private_atomic_registry_and_locking() {
         let path = std::env::temp_dir().join(format!("sd-peers-{}", unique_name()));
         let store = PeerStore::open(&path).unwrap();
-        assert!(PeerStore::open(&path).is_err());
+        // A held lock is waited for, briefly, and then reported as busy.
+        let asked = std::time::Instant::now();
+        assert!(matches!(PeerStore::open(&path), Err(PeerError("peer_store_busy"))));
+        assert!(asked.elapsed() >= LOCK_WAIT);
+        // A holder that finishes within the wait is not an error.
+        let path_for_waiter = path.clone();
+        let waiter = std::thread::spawn(move || PeerStore::open(&path_for_waiter).map(|_| ()));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        drop(store);
+        assert!(waiter.join().unwrap().is_ok());
+        let store = PeerStore::open(&path).unwrap();
         store.upsert(crate::peer_client::test_peer('a')).unwrap();
         store.upsert(crate::peer_client::test_peer('b')).unwrap();
         assert_eq!(store.peers().unwrap().len(), 2);

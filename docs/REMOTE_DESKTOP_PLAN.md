@@ -5,7 +5,9 @@ and the host's own harness bar, folder picker and card chrome are delivered, and
 both workspaces now run the *same* UI code with only the source swapped, and
 every remote command reports its result in the chrome, the view can switch
 between Fit and 100% + pan/zoom, and the host pushes live workspace events in
-place of the viewer's two-second poll; the two-PC regression matrix remains.
+place of the viewer's two-second poll. The two-PC regression matrix is
+delivered as a simulated matrix on one machine (`python3 tests/two_pc_matrix.py`,
+section 10); the rows that need two physical machines remain manual checks.
 Updated 2026-09-24 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
@@ -22,8 +24,8 @@ with epoch/revision checks and per-device deduplication. While a remote PC is
 selected its top bar offers that PC's own harness buttons, and a click launches
 that harness there. Default folder selection, the viewer's own close/resize and
 iconify controls, the 100% + pan/zoom mode and live workspace events
-(`workspace-events-v1`) are delivered; the two-PC regression matrix remains
-pending.
+(`workspace-events-v1`) are delivered, and so is the simulated two-PC
+regression matrix (section 10).
 
 ## Current delivery status
 
@@ -192,11 +194,14 @@ To check the transport from a shell without the GUI:
 super-desktop peer-workspace MACHINE_ID | python -m json.tool   # card ids
 super-desktop peer-attach MACHINE_ID CARD_ID --seconds 10 > out.raw
 super-desktop peer-events MACHINE_ID --seconds 30        # one JSON event per line
+echo '{"command":{"type":"setExpanded","cardId":"CARD_ID","expectedRevision":3,"expanded":true}}' \
+  | super-desktop peer-command MACHINE_ID               # reply + the notice it would show
 ```
 
 `peer-attach` writes raw host bytes, so running it in a terminal shows the host's
 own colours; `tests/desktop_terminal_smoke.py` drives the same path
-automatically.
+automatically, and `python3 tests/two_pc_matrix.py` runs the whole simulated
+two-PC matrix (section 10) on one machine.
 
 ### Next implementation commits
 
@@ -233,10 +238,13 @@ automatically.
    heartbeats, `resync` backpressure, per-credential/per-bridge budgets,
    revocation teardown, and a viewer that subscribes while the PC is shown,
    resyncs by fetching, and reconnects with backoff.
-7. Next: two-PC regression coverage for switching, concurrent
-   edits, bridge/daemon restart and revocation. Viewer input (delivered) stays
-   behind the current-selection handshake and the prompt-transaction guard, and
-   keys are never replayed after a disconnect.
+7. **Delivered:** two-PC regression coverage for switching, concurrent edits,
+   bridge/daemon restart, revocation, network drop and the old-host fallback,
+   as `tests/two_pc_matrix.py` (section 10): isolated host and viewer instances
+   on one machine, the real CLI and the real GTK selector. It found and fixed
+   four bugs (see section 10). Viewer input stays behind the current-selection
+   handshake and the prompt-transaction guard, and keys are never replayed
+   after a disconnect.
 
 ## 1. Intended experience and scope
 
@@ -618,7 +626,9 @@ required for the first release; follow-ups in section 1 are separate work.
    feedback in the chrome. The 100% + pan/scroll mode remains, together with a two-PC check
    that B can view C while A operates B, and that A/B can view each other
    without recursion or exported peer state.
-7. **Regression, documentation and release — ongoing.** Complete the matrix below, update
+7. **Regression, documentation and release — matrix delivered (simulated).** The
+   automated two-PC matrix is `tests/two_pc_matrix.py`; the manual rows it
+   cannot reach are listed in section 10. Update
    README and SECURITY (device terminology, outgoing credentials, new routes,
    resource limits), and document known limits and recovery. Include an actual
    two-PC walkthrough and measured performance results in the implementation PR.
@@ -687,6 +697,106 @@ Manual acceptance matrix:
 | Android plus desktop viewers | Existing phone pairing/list/input/files remain compatible. |
 | B views C while A views B | A sees and controls B's local workspace, never C's. |
 | Revoke A on B | Streams close promptly; A cannot keep typing; B's sessions survive. |
+
+### Two-PC regression matrix (delivered, simulated on one machine)
+
+```sh
+python3 tests/two_pc_matrix.py            # builds, then runs everything (~85 s)
+python3 tests/two_pc_matrix.py --no-gui   # CLI rows only, no display (~65 s)
+python3 tests/two_pc_matrix.py target/debug/super-desktop target/debug/deps/super_desktop-HASH
+```
+
+Only one physical PC is needed. The script starts three isolated **hosts**
+(A, B and C) and three **viewers**, all on this machine:
+
+- Each host has its own bridge state (machine id, TLS certificate, paired
+  devices), HOME/XDG directories, owner IPC socket, ephemeral bridge port and a
+  private tmux server (`TMUX_TMPDIR`, `$TMUX` dropped; the bridge uses tmux's
+  default socket name, so a per-host `TMUX_TMPDIR` is the `tmux -L`
+  equivalent). Hosts have no D-Bus or display, so pairing notifications never
+  reach the desktop.
+- Each viewer has its own peer registry and pairs through the real invitation,
+  code and approval flow, from its own loopback source address (a bridge
+  admits one pending pairing per source, as it would per PC).
+- The host *daemon* is `HostOwner`, a stateful model of the owner IPC contract
+  (epoch per lifetime, growing revisions, `desktop_protocol::check_command`'s
+  refusals, conflicts carrying the owner's geometry, the `desktop-watch` feed
+  with `idle` lines, and real tmux sessions for created cards). Everything else
+  is the shipped code: bridge routes, TLS/pin, credentials and revocation,
+  deduplication, the event hub, the PTY attach transport, `peer_client`, the
+  event worker, `command_feedback`, and — in the GTK phase — `MachineView` and
+  `RemoteCanvas` in a real window.
+- A TCP hop (`Proxy`) sits between viewer 1 and host A to refuse, reset,
+  freeze or cut the link, including "applied on the host, reply lost". An
+  old host is a TLS-terminating front (`LegacyHost`) on host C that presents
+  C's own certificate, strips `workspace-events-v1` and answers 404 on
+  `/events`, exactly like a bridge that predates it.
+- `super-desktop peer-command MACHINE_ID < command.json` (new) sends one typed
+  command through `peer_client::command` and prints the host's reply together
+  with the notice, geometry and refresh decision the card chrome would show.
+  It never retries. The input is `{"command": {...}}`, optionally with
+  `expectedEpoch` and `requestId`.
+
+Every process is stopped by its recorded PID and every directory is a private
+temp dir under `/tmp` (Unix socket paths must stay short). The user's daemon,
+bridge on port 8759, default tmux server, peers and `~/.config/super-desktop`
+are never touched. The GTK phase opens one ordinary test window for about
+twenty seconds; it needs a display, like the other GTK child-process tests.
+
+| Row | What the simulated matrix checks |
+| --- | --- |
+| Pair A→B and A→C | Both hosts listed with verified, distinct identities; a credential for one host is 401 on the other; `peer-list` never prints a credential. |
+| Switching / no cross-host leakage | A→B→A attaches carry only that host's bytes and release their tmux clients; B's card id is `unknown_card` on A (attach and command, “Already closed on that PC”); typed bytes reach only the attached host. GTK: A's cards leave in the same frame as the switch, A's tmux clients and sockets are released within ~0.2 s, a burst A→B→A→B→A settles on A with B never drawn, keys typed into B's console reach B's pane and none of A's. |
+| Concurrent edits | Host move pushed as an event; a viewer drop at the old revision is a conflict with the host's geometry (“Changed on that PC · showing its layout”, snap to host). Two viewers racing on one revision: exactly one applied, the loser gets the winner's geometry (3 rounds). Close vs move and two folder picks settle with one winner and the right notice. A repeated create request id makes one card. GTK: the real drag commit after a host move shows the conflict notice and glides to the host's rectangle. |
+| Bridge restart | Events notice at once, attach ends, commands say “Cannot reach that PC” (nothing sent), the bridge returns with the same identity, pin and credential, the subscription resubscribes within about a second, nothing is replayed. A request id replayed after a restart (the bridge's dedup cache is gone) is still refused by the owner's revision check. GTK: subscription and every console back within ~6 s. |
+| Daemon restart | The stream reports `unavailable`, commands say “desktop is not running”, the same subscription then pushes the new epoch, old-epoch commands are `epoch_changed` (“That PC restarted”), the new daemon receives no command, sessions survive. GTK: new epoch drawn and consoles streaming within ~1 s. |
+| Network drop | Refused or reset link → “Cannot reach that PC · change not applied”, no refresh, host untouched. Reply cut after the host applied → “Result unknown · check before retrying”, applied exactly once and never resent; a manual retry while the first is in flight is `unknown_outcome`, afterwards it replays the recorded answer. Frozen link → the same after the 8 s client timeout. Events back off 1 s → 2 s → 4 s (jittered), recover with the change made meanwhile, and a silent drop is detected by three missed heartbeats (~15 s). |
+| Revocation | Attach and events end within a second, the subscription exits with `peer_revoked_or_expired` instead of retrying, capabilities/workspace/commands/attach/events all answer 401, the host reaps the tmux clients, other viewers and host sessions are untouched. GTK: “Pairing required” and a cleared view within ~2 s. |
+| Old host | Missing capability → `peer-events` ends with `update_remote_super_desktop` without touching `/events`; snapshots and consoles still work. GTK: no subscription, a host move is drawn by the two-second poll. |
+| Hide/show | GTK: hiding releases every tmux client and socket within ~0.2 s; showing re-attaches. |
+
+Bugs this matrix found, each fixed with a focused change and its own unit
+test:
+
+1. **Dropped consoles never reconnected while events were live.** A console
+   whose stream ended (a network blip, the host reaping its tmux client) was
+   retried only by the next snapshot drawn, and a quiet host with a live
+   subscription sends none, so the card said “Reconnecting…” until something
+   changed on the host. The selector's two-second tick now asks the canvas to
+   re-attach (`RemoteCanvas::retry_streams`, local only, after the session's
+   own 5 s backoff) while the subscription is live.
+2. **A typed `unknown_card` answer read as “Cannot reach that PC”.** The bridge
+   answers a command for a card that is already gone with 404 and a typed
+   `rejected` result; the viewer treated every 404 as a missing endpoint, so a
+   close that lost a race said “Cannot reach” and skipped the refresh. A 404
+   carrying a typed result is now the host's answer (“Already closed on that
+   PC”); a 404 without one is still an endpoint the host does not have.
+3. **Long folder paths were cut off at the daemon.** The daemon read each IPC
+   command with one 1 KiB read, so a `createTerminal` or `setWorkspace` whose
+   folder path pushed the envelope past 1 KiB (paths may be 4 KiB) was
+   truncated and refused as `invalid_command` (“Update SUPER DESKTOP”). It now
+   reads to the newline, bounded at 16 KiB, with a 2 s stall limit. (The
+   matrix's owner is a model, so this is covered by `ipc_tests`, not by the
+   matrix itself.)
+4. **Concurrent registry readers failed instead of waiting.** The peer
+   registry lock was non-blocking, so the selector's refresh, the settings
+   page and any `peer-*` command that overlapped for a few milliseconds got
+   `peer_store_busy`, which the selector showed as a failed connection and a
+   cleared remote view. The lock now waits up to one second.
+
+Still manual (they need two physical machines, or a real daemon):
+
+- A real host daemon and its GTK workspace under the commands (the owner is a
+  model here): host-side overlay behaviour, card widgets moving on the host,
+  `state.json` persistence, and the long-path fix end to end.
+- A real network: Wi-Fi/Ethernet unplug, sleep/wake, NAT/VPN routing, MTU and
+  latency; p95 echo latency and idle CPU/network for 1/4/8 consoles.
+- Equal and different display sizes/scales between two real monitors,
+  fractional scaling and docking insets.
+- Installed harnesses and full-screen applications on the host, and Android
+  plus desktop viewers on the same host.
+- B views C while A views B (the matrix never runs a viewer and a host in one
+  instance), and the fresh-start/upgrade rows.
 
 Run `cargo test --bin super-desktop`, isolated bridge smoke tests (extend
 `tests/bridge_security_smoke.py` or add a desktop-specific companion), and the

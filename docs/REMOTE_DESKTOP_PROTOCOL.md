@@ -18,8 +18,10 @@ and per-device deduplication, and live workspace events that replace the
 viewer's two-second poll (`workspace-events-v1`).
 Outgoing certificate-pinned pairing, remote snapshot retrieval and the
 `peer-attach` and `peer-events` streaming CLIs are available too (see below).
-The two-PC regression matrix remains pending; this is still an incremental
-development branch.
+The two-PC regression matrix is delivered as `tests/two_pc_matrix.py`, which
+simulates the PCs as isolated instances on one machine (see
+[the plan, section 10](REMOTE_DESKTOP_PLAN.md#10-verification-and-release-acceptance));
+this is still an incremental development branch.
 
 ## Delivered user flow and current limit
 
@@ -512,8 +514,9 @@ installed, but this PC falls back to its shell. The same failure was reproduced
 on the unmodified base commit `013492a`, and `bridge::tests::test_port_taken_follows_the_listener`
 is a pre-existing flake: it re-uses a released ephemeral port and loses it to a
 parallel test's connection roughly once in eight full-suite runs, on the base
-commit included. With live workspace events the suite reports 379 passed,
-6 ignored and that same Antigravity failure. Coverage includes
+commit included. With the two-PC matrix's fixes the suite reports 382 passed,
+6 ignored and that same Antigravity failure (`two_pc_inner` passes trivially
+there; it only runs when `tests/two_pc_matrix.py` drives it). Coverage includes
 `desktop_protocol` (envelope, bounds, epoch/revision checks, typed outcome and
 reply), `terminal_transport`, `peer_terminal`, `remote_terminal`, `window` and
 `machine_selector`, plus the isolated terminal smoke test and the bridge smoke
@@ -531,6 +534,8 @@ super-desktop peer-list
 super-desktop peer-workspace MACHINE_ID
 super-desktop peer-attach MACHINE_ID CARD_ID --seconds 15
 super-desktop peer-events MACHINE_ID --seconds 30
+echo '{"command":{"type":"setExpanded","cardId":"CARD_ID","expectedRevision":3,"expanded":true}}' \
+  | super-desktop peer-command MACHINE_ID
 super-desktop peer-forget MACHINE_ID
 ```
 
@@ -550,7 +555,12 @@ positions, sizes and stacking order, and the card ids `peer-attach` takes.
 route and prints the console's raw bytes. `peer-events` runs the selector's own
 event subscription worker and prints one JSON event per line (connection
 changes on stderr); it exits with the code of a failure a reconnect cannot fix,
-such as `peer_revoked_or_expired`. Piped stdin is written to the host
+such as `peer_revoked_or_expired`. `peer-command` reads one typed command as
+JSON from stdin (`{"command": {...}}`, optionally `expectedEpoch` — otherwise
+the host's current epoch is fetched — and `requestId`), sends it once through
+the same client the card chrome uses, and prints the host's reply with the
+notice, geometry and refresh the chrome would apply; it exits 1 when no answer
+came back (unreachable host, unknown outcome). For `peer-attach`, piped stdin is written to the host
 session as input frames; a terminal on stdin stays output-only. The host desktop
 daemon must be running.
 It checks the pinned certificate, persistent machine identity and desktop

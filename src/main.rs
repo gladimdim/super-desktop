@@ -249,7 +249,7 @@ fn main() {
         return;
     }
 
-    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-events" | "peer-forget") {
+    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-events" | "peer-command" | "peer-forget") {
         if let Err(error) = peer_cli::run(action, &args[2..]) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -702,13 +702,8 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
     thread::spawn(move || {
         for stream in listener.incoming() {
             if let Ok(mut s) = stream {
-                let mut buf = [0u8; 1024];
-                if let Ok(n) = s.read(&mut buf) {
-                    if n == 0 {
-                        continue;
-                    }
-                    let line = String::from_utf8_lossy(&buf[..n]);
-                    let cmd = line.trim().to_string();
+                let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
+                if let Some(cmd) = read_ipc_command(&mut s) {
                     // A long-lived change feed for the bridge's desktop event
                     // route. It never reaches GTK and never holds this
                     // sequential listener: it gets a bounded thread of its own.
@@ -735,6 +730,32 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
             }
         }
     });
+}
+
+/// Longest command line the daemon reads from its IPC socket. A remote
+/// `desktop-command` carries a folder path of up to `MAX_WORKSPACE` bytes
+/// inside its JSON envelope, so one 1 KiB read is not enough.
+const MAX_IPC_COMMAND: usize = 16 * 1024;
+
+/// Read one command from an IPC client: until what it sent ends with a
+/// newline (every client writes `command\n` in one go and then waits), its EOF
+/// or `MAX_IPC_COMMAND` bytes, whichever comes first. A client that stalls
+/// mid-command is given two seconds, not the sequential listener forever.
+/// `None` for an empty or failed read.
+fn read_ipc_command(stream: &mut impl Read) -> Option<String> {
+    let mut command = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while command.last() != Some(&b'\n') && command.len() < MAX_IPC_COMMAND {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => command.extend_from_slice(&chunk[..n]),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => break,
+        }
+    }
+    command.truncate(MAX_IPC_COMMAND);
+    let command = String::from_utf8_lossy(&command).trim().to_string();
+    (!command.is_empty()).then_some(command)
 }
 
 /// A typed command refusal for something that never reached the model.
@@ -982,6 +1003,50 @@ mod ipc_tests {
             }
             assert_eq!(seen.get(), 42);
         }).unwrap();
+    }
+
+    /// A remote command carries a folder path of up to 4 KiB in its JSON
+    /// envelope; one 1 KiB read used to cut it off and refuse it as invalid.
+    #[test]
+    fn a_long_desktop_command_is_read_whole() {
+        let (mut client, mut daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+        let folder = format!("/home/user/{}", "deep/".repeat(700));
+        let command = format!(
+            "desktop-command {}",
+            json!({"requestId": "r1", "machineId": "m", "expectedEpoch": "e",
+                   "command": {"type": "setWorkspace", "workspace": folder,
+                               "expectedRevision": 3}})
+        );
+        assert!(command.len() > 3000);
+        // The client writes in pieces, as a busy socket may deliver it.
+        let sent = format!("{command}\n");
+        let writer = thread::spawn(move || {
+            for piece in sent.as_bytes().chunks(700) {
+                client.write_all(piece).unwrap();
+                thread::sleep(Duration::from_millis(5));
+            }
+            client
+        });
+        daemon.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        assert_eq!(read_ipc_command(&mut daemon).as_deref(), Some(command.as_str()));
+        let _client = writer.join().unwrap();
+
+        // Short commands, a client that closes without a newline and one that
+        // sends nothing at all keep their old meaning.
+        let (mut client, mut daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.write_all(b"status\n").unwrap();
+        assert_eq!(read_ipc_command(&mut daemon).as_deref(), Some("status"));
+        let (mut client, mut daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.write_all(b"toggle").unwrap();
+        drop(client);
+        assert_eq!(read_ipc_command(&mut daemon).as_deref(), Some("toggle"));
+        let (client, mut daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+        daemon.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+        assert_eq!(read_ipc_command(&mut daemon), None);
+        drop(client);
+        // Bounded: an endless client cannot grow the daemon's buffer.
+        let mut endless = std::io::repeat(b'x');
+        assert_eq!(read_ipc_command(&mut endless).map(|c| c.len()), Some(MAX_IPC_COMMAND));
     }
 
     /// Private dir so this test can never touch the user's real daemon.

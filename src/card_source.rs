@@ -122,6 +122,12 @@ impl RemoteSession {
         *self.message.borrow()
     }
 
+    /// Whether the current stream has completed the host's handshake.
+    #[cfg(test)]
+    pub fn is_attached(&self) -> bool {
+        self.input_ready.get() && self.stream.borrow().is_some()
+    }
+
     /// Start a stream when none is running and the backoff has expired.
     pub fn attach(self: &Rc<Self>) {
         if self.stream.borrow().is_some() || Instant::now() < self.next_attempt.get() {
