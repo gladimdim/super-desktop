@@ -51,6 +51,7 @@ mod styles;
 mod tag;
 mod theme;
 mod tmux;
+mod tmux_clipboard;
 mod tmux_control;
 mod terminal_transport;
 mod usage;
@@ -463,7 +464,10 @@ fn run_daemon(start_visible: bool) {
     // from a preloaded environment.
     let _ = thread::Builder::new()
         .name("super-desktop-tmux-env".to_string())
-        .spawn(preload::clean_tmux_global_env);
+        .spawn(|| {
+            preload::clean_tmux_global_env();
+            tmux_clipboard::install_existing_sessions();
+        });
 
     // The bridge waits for its child to become reachable, so keep that work
     // off GTK's main thread. Start it only after this process owns the daemon

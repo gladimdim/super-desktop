@@ -528,6 +528,8 @@ fn pin_client_exit(session_name: &str) {
     let _ = Command::new("tmux")
         .args(["set-option", "-t", session_name, "detach-on-destroy", "on"])
         .output();
+    // Same moments (create/attach): make mouse copies reach the clipboard.
+    crate::tmux_clipboard::install_session(session_name);
 }
 
 /// Existence + the pinned-client flag of one session, in a single `tmux` call:

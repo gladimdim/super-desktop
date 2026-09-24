@@ -160,8 +160,14 @@ other components that bypass logind inhibitors are outside its control.
 
 In local and remote PC terminal cards, select text and press **Ctrl+Shift+C**
 to copy, or **Ctrl+Shift+V** to paste the desktop clipboard. **Ctrl+C** keeps
-its normal terminal interrupt behavior. If a terminal app captures mouse input,
-hold **Shift** while dragging to select text. Paste uses VTE's native handling,
+its normal terminal interrupt behavior. In local cards a plain mouse drag (or a
+double/triple click) is tmux's selection: on release it is copied to the desktop
+clipboard and the card briefly shows "Copied to clipboard"; the highlight then
+clears, as usual in tmux. Copies an app makes itself over OSC 52 (for example
+fullscreen Claude Code's selection) reach the clipboard too. Both need
+`wl-copy` and apply to SUPER DESKTOP sessions only; other tmux sessions keep
+their own bindings. To keep a highlight and copy by keyboard instead, hold
+**Shift** while dragging, then press **Ctrl+Shift+C**. Paste uses VTE's native handling,
 including bracketed paste when enabled by the running app. In Codex cards,
 **Ctrl+V** also pastes text when the clipboard offers it, including Chrome
 selections with both plain text and HTML. This prevents Codex's image-paste
