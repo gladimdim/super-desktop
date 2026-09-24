@@ -14,8 +14,8 @@ installed CLI version and its permission/retry configuration.
 | Harness | Title and identity | Activity | Activation / validation |
 | --- | --- | --- | --- |
 | Codex | Own process's open CLI rollout and exact thread ID in its session index; generated/renamed name; own user messages | Explicit working and completed events; ambiguous/partial metadata is UNKNOWN, not guessed idle | Existing rollout adapter plus exact-name tests, including another conversation and a child agent |
-| Claude Code | Scoped hooks identify the native session; submitted prompts; native names and model switches | Session start/stop, prompt/tool activity, permission wait, API error, compaction; child hooks cannot overwrite parent state | Installed CLI accepts hooks and emits SessionStart in an isolated no-prompt run; lifecycle reducer tests |
-| OpenCode | Explicit TUI selection or submitted root prompt owns the card; background creation/update events and stale selection lookups cannot claim it | Native session status (busy/retry/idle), permissions/questions, error; deletion clears metadata | Installed-server smoke verifies selection, rename and switching; child-session/race contract tests |
+| Claude Code | Scoped hooks identify the native session; submitted prompts; native names and model switches | Session start/stop, prompt/tool activity, permission wait, API error, compaction; prompt-scoped final Stop supports completion alerts; child hooks cannot overwrite parent state | Installed CLI accepts hooks and emits SessionStart in an isolated no-prompt run; lifecycle reducer tests |
+| OpenCode | Explicit TUI selection or submitted root prompt owns the card; background creation/update events and stale selection lookups cannot claim it | Native session status (busy/retry/idle), permissions/questions, error; final successful own-prompt response produces FINISHED and completion alerts; deletion clears metadata | Installed-server smoke verifies selection, rename and switching; child-session/race contract tests; local-provider runtime completion/error/cancellation smoke |
 | Pi | Per-launch extension reads session ID/name/model and submitted prompt; session switches clear old data | Agent start, permission UI, error/abort and final settlement; successful final text response produces FINISHED and completion alerts | Installed offline RPC smoke uses a local fixture provider to verify success, provider failure, recovery, rename and session switching |
 | OpenClaw TUI | Dedicated `sd_term_*` key plus native session ID; exact session-store label/display name, refreshed while idle; model retained across hooks | Working/idle/error and native exec-approval waits; stale pre-reset/run events ignored; stopped-gateway observations expire to UNKNOWN | 2026.9.5 production plugin installation and real isolated gateway reset/SessionStart verified; approval transitions contract-tested |
 | Regular Bash terminals | Submitted command through the shell hook; foreground argv for older terminals | Foreground process group | See README's terminal command-title behavior |
@@ -23,9 +23,10 @@ installed CLI version and its permission/retry configuration.
 
 New WAITING, ERROR and UNKNOWN badges are distinct from IDLE. An exited tmux
 pane always wins over cached metadata. FINISHED/completion notifications support
-Codex and Pi. Pi requires final `agent_settled`, a completed outcome and a
+Codex, Pi and newly launched Claude Code/OpenCode. OpenCode verifies the latest native assistant message after idle: matching submitted user-message parent, completed timestamp, `stop` finish, nonempty text, no error or summary. It checks at most 16 messages and suppresses stale lookups after new activity or selection changes. It never alerts for history merely opened in the TUI. Pi requires final `agent_settled`, a completed outcome and a
 nonempty successful assistant text response, with a durable per-turn ID. A
-Claude Stop or OpenCode/OpenClaw idle hook is not a completion guarantee.
+Claude Stop without a tracked prompt and nonempty final text, or an
+OpenCode/OpenClaw idle hook alone, is not a completion guarantee.
 
 ## Activating integrations
 
@@ -88,6 +89,10 @@ Claude/Pi/OpenCode adapters in isolated homes without external model requests.
 Pi uses `tests/fixtures/pi-probe-provider.mjs` for real runtime success/error turns.
 `python3 tests/openclaw-harness-smoke.py` tests the production setup command and
 a real isolated gateway without changing the user's gateway or credentials.
+Run `python3 tests/opencode-completion-smoke.py` for installed OpenCode success,
+provider failure and cancellation against an isolated local fixture model.
+Run `python3 tests/claude-completion-smoke.py` for installed Claude Code Stop,
+StopFailure and interruption checks against an isolated local Anthropic fixture.
 Run the full Rust suite before rebuilding the installed desktop.
 
 Validation on 2026-09-23: 302 Rust tests passed, five were marked ignored, and
@@ -133,9 +138,39 @@ new/resumed/forked sessions, process crashes and simultaneous same-directory car
 The automated tests cover state transitions and isolation; they do not substitute
 for that live matrix. Remaining work includes real-provider permission/cancellation
 matrices, additional launcher adapters, remote OpenClaw gateway transport and
-completion adapters beyond Codex/Pi. The September 23 OpenClaw installation
+completion adapters beyond Codex/Claude/Pi/OpenCode. The September 23 OpenClaw installation
 blocker above is superseded by the September 24 isolated gateway smoke. Existing
 live/custom wrapper processes are deliberately not injected or restarted.
+
+OpenCode completion follow-up (2026-09-24): eight JS contract tests, ten metadata
+Rust tests and six completion Rust tests pass. Installed OpenCode 1.18.31 passes
+successful turns, distinct completion IDs, provider errors and cancellation using
+a local fixture model (no external model requests). The full desktop run reports
+309 passed, the same four documented baseline failures, and six existing ignores.
+Android unit tests, lint and debug build pass. Paid-provider permission matrices
+and physical-phone OpenCode notification delivery remain unverified. The installed
+desktop was not replaced or restarted; new adapter activation requires rebuilding
+it and launching a new OpenCode card.
+
+The native message shape and paginated chronological ordering were checked against
+[OpenCode v1.18.31 message records](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/session/message-v2.ts)
+and [plugin hooks](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/plugin/src/index.ts).
+
+Claude completion follow-up (2026-09-24): installed Claude Code 2.1.278 passed
+successful responses, distinct IDs for repeated prompts, API StopFailure and
+stream-JSON interruption using an isolated local fixture. Eleven metadata tests,
+six completion tests and eight JS adapter tests passed. Android unit tests, lint
+and debug build passed. Full Rust results: 313 passed, one known failure
+(`test_resolve_command_ai_agent_arguments`, Antigravity is absent), six existing
+ignored tests listed above. Previously intermittent GTK allocation tests passed
+in this run. Physical-phone Claude notification delivery remains unverified.
+No installed desktop binary or running harness was replaced/restarted.
+
+Claude completion uses the documented main-agent Stop final-text field, not
+transcript flushing. Capability requires updated scoped launch hooks; missing
+fields fail closed. Continued Stop hooks are conservatively suppressed. It is
+response completion, not a guarantee that other Stop hooks will not request more
+work, or that background tasks/goals are finished. See the completion-alert doc.
 
 ## Upstream contracts
 

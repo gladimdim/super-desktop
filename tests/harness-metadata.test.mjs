@@ -188,3 +188,50 @@ test("Pi completion requires final settlement and a successful final response", 
     assert.notEqual(f.events().at(-1).status,"completed");
   } finally { f.close(); }
 });
+
+test("OpenCode completion needs own successful final response and rejects stale idle lookups", async () => {
+  const f = fixture();
+  try {
+    let records = [], resolve;
+    const client = { session: {
+      get: async ({ path: { id } }) => ({ data: { id } }),
+      messages: async () => ({ data: records }),
+    }};
+    const hooks = await SuperDesktop({ client });
+    const chat = (id = "root", turn = "user-one") => hooks["chat.message"]({ sessionID: id },
+      { message: { id: turn }, parts: [{ type: "text", text: "Task" }] });
+    const event = (type, properties = {}) => hooks.event({ event: { type, properties: { sessionID: "root", ...properties } } });
+    const idle = () => event("session.status", { status: { type: "idle" } });
+    const user = { info: { id: "user-one", sessionID: "root", role: "user" }, parts: [] };
+    const assistant = { info: { id: "answer", sessionID: "root", role: "assistant", parentID: "user-one", finish: "stop", time: { completed: 123 } }, parts: [{ type: "text", text: "Done" }] };
+    await chat();
+    assert.equal(f.events().find(e => e.completionSupported)?.session, "root");
+    for (const patch of [{ finish: "tool-calls" }, { finish: "length" }, { error: { name: "AbortedError" } }, { summary: true }, { parentID: "other-user" }, { time: {} }]) {
+      records = [user, { ...assistant, info: { ...assistant.info, ...patch } }];
+      await idle();
+      assert.equal(f.events().at(-1).status, "idle");
+    }
+    records = [user, { ...assistant, parts: [] }];
+    await idle(); assert.equal(f.events().at(-1).status, "idle");
+    records = [user, assistant];
+    await idle(); assert.equal(f.events().at(-1).status, "completed");
+    assert.equal(f.events().at(-1).completionTurn, "user-one");
+    await event("session.error"); await idle();
+    assert.equal(f.events().at(-1).status, "error");
+    await chat();
+    client.session.messages = () => new Promise(r => { resolve = r; });
+    const harmless = idle();
+    await event("session.idle");
+    resolve({ data: records }); await harmless;
+    assert.equal(f.events().at(-1).status, "completed", "legacy idle notification must not invalidate native lookup");
+    const pending = idle();
+    await event("permission.asked");
+    resolve({ data: records }); await pending;
+    assert.equal(f.events().at(-1).status, "waiting");
+    const stale = idle();
+    await chat("other", "user-two");
+    resolve({ data: records }); await stale;
+    assert.equal(f.events().at(-1).session, "other");
+    assert.equal(f.events().at(-1).status, "working");
+  } finally { f.close(); }
+});

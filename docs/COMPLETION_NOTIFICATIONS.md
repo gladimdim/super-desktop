@@ -15,8 +15,25 @@ used as completion evidence. The bridge follows the exact tmux pane process to
 the nearest Codex process, then its open rollout descriptor. It does not search
 for the newest conversation in the workspace or modify user Codex configuration.
 Ambiguous/multi-pane sessions, subagent rollouts, and unsupported formats fail
-closed. Pi is also supported through the scoped extension described below.
+closed. Claude Code, Pi and OpenCode are also supported through scoped adapters described below.
 Other harnesses explain that reliable alerts are not yet supported.
+
+New Claude Code launches support prompt-scoped main-agent `Stop` hooks with
+nonempty `last_assistant_message` and `stop_hook_active: false`. User interrupts
+do not emit Stop; API failures emit StopFailure. Child hooks, permission waits,
+resumed history without a new prompt, empty/missing fields and stop-hook
+continuations do not alert. A persisted prompt counter plus launch/session
+identity provides stable duplicate suppression without storing response text.
+Changing sessions never resets that counter. Hook inputs over 64 KiB are rejected.
+Existing running processes need a new scoped launch after the desktop update.
+
+The final transcript record is not guaranteed to be flushed when Stop fires, so
+completion uses the documented final-text hook field, not transcript timing.
+This reports a completed response, not the end of background tasks or a larger
+goal. Other Stop hooks may request more work; subsequent observed activity clears
+completion, and continuation Stop hooks are conservatively suppressed. No hooks
+are overridden or used to make approval decisions.
+See [Claude Stop hooks](https://code.claude.com/docs/en/hooks#stop).
 
 New Pi launches with the updated desktop extension support completion through
 the notification-only `agent_settled` event. A completed outcome and a nonempty
@@ -26,6 +43,17 @@ not alert. IDs combine launch/native-session identity with a unique turn ID and
 are persisted in the private metadata file. New activity clears the completion.
 Direct custom Pi launchers use the same adapter; older already-running Pi
 sessions must be relaunched. Both updated Android and Linux builds are required.
+
+New OpenCode launches support alerts after a locally observed prompt and idle event.
+The adapter queries up to 16 native messages and requires the latest user to match
+that prompt, plus the final assistant's matching parent, completed timestamp,
+`stop` finish, nonempty nonsynthetic text, and no error or compaction summary.
+Idle alone, tool-only turns, length limits, cancellation, and unrelated sessions
+never establish completion. Selection/activity changes invalidate pending lookups.
+Missing records, unsupported APIs, timeout, and a prompt outside the bounded
+window suppress alerts. IDs include agent, launch, native session and user-message
+identity; duplicate idle events retain the same ID. Existing sessions need a new
+launch after updating the desktop; opening old conversation history does not alert.
 
 An explicit `event_msg/task_complete` with a turn ID and nonempty final assistant
 message marks a completed response. Later starts, user messages, aborts and

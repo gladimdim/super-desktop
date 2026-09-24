@@ -32,6 +32,8 @@ pub struct Metadata {
     pub observed_at_ms: u64,
     pub completion_supported: bool,
     pub completion_id: Option<String>,
+    pub claude_turn: u64,
+    pub claude_turn_active: bool,
 }
 
 fn root() -> Option<PathBuf> {
@@ -542,6 +544,7 @@ fn apply(data: &mut Metadata, event: &Value) {
             data.status = "unknown".into();
             data.completion_id = None;
             data.completion_supported = false;
+            data.claude_turn_active = false;
         }
     }
     if let Some(title) = event["title"].as_str() {
@@ -557,7 +560,10 @@ fn apply(data: &mut Metadata, event: &Value) {
         data.completion_id = None;
         if state == "completed" {
             use sha2::{Digest, Sha256};
-            if data.agent == "pi" && data.completion_supported && !data.native_session.is_empty() {
+            if matches!(data.agent.as_str(), "pi" | "opencode" | "claude")
+                && data.completion_supported
+                && !data.native_session.is_empty()
+            {
                 if let Some(turn) = event["completionTurn"]
                     .as_str()
                     .filter(|id| !id.is_empty() && id.len() <= 128)
@@ -565,8 +571,8 @@ fn apply(data: &mut Metadata, event: &Value) {
                     data.completion_id = Some(format!(
                         "{:x}",
                         Sha256::digest(format!(
-                            "pi\0{}\0{}\0{}\0{turn}",
-                            data.pid, data.process_start, data.native_session
+                            "{}\0{}\0{}\0{}\0{turn}",
+                            data.agent, data.pid, data.process_start, data.native_session
                         ))
                     ));
                 }
@@ -581,7 +587,7 @@ fn apply(data: &mut Metadata, event: &Value) {
             data.status = state.into();
         }
     }
-    if data.agent == "pi" && event["completionSupported"] == true {
+    if matches!(data.agent.as_str(), "pi" | "opencode" | "claude") && event["completionSupported"] == true {
         data.completion_supported = true;
     }
 }
@@ -648,7 +654,24 @@ fn apply_claude(data: &mut Metadata, input: &Value) {
             }
         }
     }
+    // Register capability before completion, but never turn resumed history into an alert.
+    patch["completionSupported"] = json!(true);
+    if event == "Stop" && matches!(data.status.as_str(), "working" | "completed") && data.claude_turn_active
+        && input["stop_hook_active"] == false
+        && input["last_assistant_message"].as_str().is_some_and(|text| !text.trim().is_empty())
+    {
+        patch["status"] = json!("completed");
+        patch["completionTurn"] = json!(format!("prompt-{}", data.claude_turn));
+    }
     apply(data, &patch);
+    match event {
+        "SessionStart" | "SessionEnd" | "StopFailure" => data.claude_turn_active = false,
+        "UserPromptSubmit" => {
+            data.claude_turn = data.claude_turn.saturating_add(1);
+            data.claude_turn_active = data.claude_turn < u64::MAX;
+        }
+        _ => {}
+    }
 }
 
 fn claude_transcript(path: &Path, session: &str) -> Option<(Option<String>, Option<String>)> {
@@ -717,6 +740,57 @@ fn claude_transcript_records(bytes: &[u8], session: &str) -> (Option<String>, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_completion_is_prompt_scoped_durable_and_fail_closed() {
+        let mut data = Metadata { agent: "claude".into(), pid: 42, process_start: "launch".into(), ..Default::default() };
+        let start = json!({"hook_event_name":"SessionStart","session_id":"own"});
+        let prompt = json!({"hook_event_name":"UserPromptSubmit","session_id":"own","prompt":"Same text"});
+        let stop = json!({"hook_event_name":"Stop","session_id":"own","stop_hook_active":false,"last_assistant_message":"Done"});
+        apply_claude(&mut data, &start);
+        assert!(data.completion_supported);
+        apply_claude(&mut data, &stop);
+        assert!(data.completion_id.is_none(), "Resumed history must not alert");
+        apply_claude(&mut data, &prompt);
+        apply_claude(&mut data, &stop);
+        let first = data.completion_id.clone().unwrap();
+        let mut data: Metadata = serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+        apply_claude(&mut data, &stop);
+        assert_eq!(data.completion_id.as_ref(), Some(&first));
+        apply_claude(&mut data, &prompt);
+        assert!(data.completion_id.is_none());
+        for extra in [json!({"agent_id":"child"}), json!({"session_id":"other"})] {
+            let mut event = stop.clone();
+            event.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            apply_claude(&mut data, &event);
+            assert!(data.completion_id.is_none());
+            assert_eq!(data.status, "working");
+        }
+        apply_claude(&mut data, &stop);
+        assert_ne!(data.completion_id.as_ref(), Some(&first));
+        for extra in [json!({"stop_hook_active":true}), json!({"stop_hook_active":null}), json!({"last_assistant_message":" "}), json!({"last_assistant_message":null})] {
+            apply_claude(&mut data, &prompt);
+            let mut event = stop.clone();
+            event.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            apply_claude(&mut data, &event);
+            assert!(data.completion_id.is_none());
+        }
+        for event in ["StopFailure", "PermissionRequest", "SessionEnd"] {
+            apply_claude(&mut data, &prompt);
+            apply_claude(&mut data, &json!({"hook_event_name":event,"session_id":"own"}));
+            apply_claude(&mut data, &stop);
+            assert!(data.completion_id.is_none());
+        }
+        apply_claude(&mut data, &prompt);
+        apply_claude(&mut data, &json!({"hook_event_name":"SessionStart","session_id":"new"}));
+        apply_claude(&mut data, &stop);
+        assert!(!data.claude_turn_active && data.completion_id.is_none());
+        apply_claude(&mut data, &start);
+        apply_claude(&mut data, &prompt);
+        apply_claude(&mut data, &stop);
+        assert!(data.completion_id.is_some());
+        assert_ne!(data.completion_id.as_ref(), Some(&first), "Returning to a session must not reuse turn IDs");
+    }
 
     #[test]
     fn claude_lifecycle_does_not_confuse_permissions_failures_or_subagents() {
@@ -861,6 +935,33 @@ mod tests {
     }
 
     #[test]
+    fn opencode_completion_requires_capability_and_is_agent_scoped() {
+        let mut data = Metadata {
+            agent: "opencode".into(),
+            ..Default::default()
+        };
+        apply(
+            &mut data,
+            &json!({"session":"root", "status":"completed", "completionTurn":"prompt"}),
+        );
+        assert_eq!(data.status, "unknown");
+        apply(&mut data, &json!({"completionSupported":true}));
+        let completed = json!({"status":"completed", "completionTurn":"prompt"});
+        apply(&mut data, &completed);
+        let id = data.completion_id.clone().unwrap();
+        apply(&mut data, &completed);
+        assert_eq!(data.completion_id.as_ref(), Some(&id));
+        data.agent = "pi".into();
+        apply(&mut data, &completed);
+        assert_ne!(data.completion_id.as_ref(), Some(&id));
+        apply(
+            &mut data,
+            &json!({"session":"other", "status":"completed", "completionTurn":"prompt"}),
+        );
+        assert!(data.completion_id.is_none());
+    }
+
+    #[test]
     fn pi_completion_is_scoped_durable_and_cleared_by_activity_or_session_switch() {
         let mut data = Metadata {
             agent: "pi".into(),
@@ -888,7 +989,7 @@ mod tests {
         );
         assert_eq!(data.status, "unknown");
         assert!(!data.completion_supported);
-        data.agent = "claude".into();
+        data.agent = "openclaw".into();
         data.completion_supported = true;
         apply(&mut data, &completed);
         assert!(data.completion_id.is_none());

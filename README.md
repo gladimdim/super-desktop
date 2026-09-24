@@ -104,7 +104,7 @@ input; exact original quoting, aliases, and pipelines require the Bash hook.
 Titles remain shortened to fit the card. This also applies to remote PC and
 Android labels; AI harness prompt titles are unchanged.
 
-Android's per-terminal bell can report explicit Codex and Pi response completion,
+Android's per-terminal bell can report explicit Codex, Claude Code, Pi and OpenCode response completion,
 including while the phone UI is hidden using an opt-in foreground monitor. Pi
 requires a new launch with the updated desktop extension and updated Android app.
 Other harnesses do not yet have verified completion adapters. See

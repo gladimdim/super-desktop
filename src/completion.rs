@@ -355,7 +355,7 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
 }
 
 fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
-    if metadata.agent != "pi" || !metadata.completion_supported {
+    if !matches!(metadata.agent.as_str(), "pi" | "opencode" | "claude") || !metadata.completion_supported {
         return unknown(id);
     }
     let state = match metadata.status.as_str() {
@@ -395,7 +395,11 @@ mod tests {
         }
         metadata.status = "completed".into();
         assert_eq!(native_completion("session", &metadata).state, "completed");
+        metadata.agent = "opencode".into();
+        assert_eq!(native_completion("session", &metadata).state, "completed");
         metadata.agent = "claude".into();
+        assert_eq!(native_completion("session", &metadata).state, "completed");
+        metadata.agent = "openclaw".into();
         assert!(!native_completion("session", &metadata).supported);
     }
     fn event(kind: &str) -> String {

@@ -4,6 +4,8 @@ export const SuperDesktop = async ({ client }) => {
   let selected;
   let failed = false;
   let selection = 0;
+  let revision = 0;
+  let turn;
   const sessions = new Map();
   const emit = (patch) => report("opencode", patch);
   // Session lookup filters tool-created child agents; cwd and creation order
@@ -22,16 +24,38 @@ export const SuperDesktop = async ({ client }) => {
     const session = await info(id);
     if (generation !== selection) return false;
     if (!session || session.parentID) return false;
-    if (selected !== id) failed = false;
+    if (selected !== id) { failed = false; turn = undefined; ++revision; }
     selected = id;
-    emit({ session: id, title: session.title ?? "" });
+    emit({ session: id, title: session.title ?? "", completionSupported: true });
     return true;
+  };
+  // Idle is only a trigger to inspect native records, never completion evidence.
+  const settle = async () => {
+    const session = selected, prompt = turn, version = revision, generation = selection;
+    if (!prompt || failed || typeof client.session.messages !== "function") return;
+    try {
+      const response = await client.session.messages({ path: { id: session }, query: { limit: 16 },
+        signal: AbortSignal.timeout(2000) });
+      if (session !== selected || prompt !== turn || version !== revision || generation !== selection || failed) return;
+      const messages = response.data;
+      if (!Array.isArray(messages) || messages.length > 16) return;
+      const own = messages.filter(m => m.info?.sessionID === session);
+      const users = own.filter(m => m.info.role === "user");
+      if (users.at(-1)?.info.id !== prompt) return;
+      const last = own.filter(m => m.info.role === "assistant").at(-1);
+      if (!last || last.info.parentID !== prompt || last.info.summary || last.info.error ||
+          last.info.finish !== "stop" || !last.info.time?.completed ||
+          !last.parts?.some(p => p.type === "text" && !p.synthetic && typeof p.text === "string" && p.text.trim())) return;
+      emit({ session, status: "completed", completionTurn: prompt });
+    } catch { /* Missing, unsupported or ambiguous native records fail closed. */ }
   };
   emit({ status: "unknown" });
   return {
     "chat.message": async (input, output) => {
       if (!await choose(input.sessionID)) return;
       failed = false;
+      ++revision;
+      turn = output.message?.id;
       emit({ session: selected, status: "working", model: input.model ? `${input.model.providerID}/${input.model.modelID}` : "",
         prompt: output.parts.filter(p => p.type === "text" && !p.synthetic).map(p => p.text).join(" ") });
     },
@@ -51,6 +75,8 @@ export const SuperDesktop = async ({ client }) => {
         sessions.delete(p.info?.id);
         if (p.info?.id === selected) {
           ++selection;
+          ++revision;
+          turn = undefined;
           emit({ session: selected, status: "unknown", title: "", prompt: "", model: "" });
           selected = undefined;
           failed = false;
@@ -59,14 +85,19 @@ export const SuperDesktop = async ({ client }) => {
       }
       if (p.sessionID !== selected || !selected) return;
       if (event.type === "session.status") {
+        ++revision;
         const status = p.status?.type;
         if (["busy", "retry"].includes(status)) failed = false;
         emit({ session: selected, status: status === "idle" ? (failed ? "error" : "idle") : ["busy", "retry"].includes(status) ? "working" : "unknown" });
+        if (status === "idle") await settle();
       } else if (event.type === "permission.asked" || event.type === "question.asked") {
+        ++revision;
         emit({ session: selected, status: "waiting" });
       } else if (event.type === "permission.replied" || event.type === "question.replied" || event.type === "question.rejected") {
+        ++revision;
         emit({ session: selected, status: "working" });
       } else if (event.type === "session.error") {
+        ++revision;
         failed = true;
         emit({ session: selected, status: "error" });
       }
