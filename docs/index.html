@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SUPER DESKTOP — hidden overlay workspace, remote sessions &amp; phone bridge for Omarchy</title>
+<title>SUPER DESKTOP — your AI workspace for Omarchy</title>
 <meta name="description" content="SUPER DESKTOP: a hidden overlay workspace for Hyprland/Omarchy with sticky notes and mini AI-terminal windows, live remote sessions from your other PCs, and an optional encrypted phone bridge. Press SUPER + SHIFT + Q.">
 <style>
   :root {
@@ -25,15 +25,15 @@
     color: var(--text);
     line-height: 1.6;
   }
-  .wrap { max-width: 960px; margin: 0 auto; padding: 0 20px 80px; }
-  header.hero { text-align: center; padding: 72px 20px 36px; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 20px 80px; }
+  header.hero { text-align: center; padding: 48px 20px 12px; }
   .bolt { font-size: 64px; }
   h1 { font-size: 44px; margin: 12px 0 8px; letter-spacing: -1px; }
   h1 .grad {
     background: linear-gradient(90deg, var(--accent), var(--accent2));
     -webkit-background-clip: text; background-clip: text; color: transparent;
   }
-  .tagline { font-size: 19px; color: var(--muted); max-width: 640px; margin: 0 auto; }
+  .tagline { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0 auto; }
   .cta { margin-top: 28px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
   .btn {
     display: inline-block; padding: 12px 26px; border-radius: 999px;
@@ -91,25 +91,89 @@
   footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
   footer a { color: var(--accent); }
   a { color: var(--accent); }
+  a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
+  section { scroll-margin-top: 24px; }
+  .news-link { display: inline-block; margin-bottom: 12px; text-decoration: none; }
+  .screenshots { margin-top: 24px; }
+  figure { margin: 0; }
+  .screenshot-link { display: block; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: #070a10; }
+  .screenshot-link img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 12px 0; color: var(--muted); font-size: 14px; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--accent); padding: 10px 0; }
+  details figure { margin-top: 12px; }
+  #install { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
+  #install h2 { margin-top: 0; }
+  .news { border: 1px solid var(--border); border-left: 4px solid var(--accent2); border-radius: var(--radius); padding: 24px; background: var(--panel); }
+  .news h2 { margin-top: 8px; }
+  .news p:last-child { margin-bottom: 0; }
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px 48px; }
+    header.hero { padding: 32px 0 8px; }
+    h1 { font-size: 34px; }
+    .tagline { font-size: 17px; }
+    h2 { font-size: 25px; }
+    section { margin-top: 36px; }
+    #install, .news { padding: 20px; }
+    table.keys, table.keys tbody, table.keys tr, table.keys td { display: block; }
+    table.keys td:first-child { width: auto; border-bottom: 0; padding-bottom: 0; white-space: normal; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
 
   <header class="hero">
-    <div class="bolt">⚡</div>
+    <div class="bolt" aria-hidden="true">⚡</div>
     <h1>SUPER <span class="grad">DESKTOP</span></h1>
-    <p class="tagline">A hidden overlay workspace for Hyprland / Omarchy — sticky notes and mini AI-terminal windows that slide in from the screen edges and vanish without a trace. Reach your <strong>other PCs'</strong> workspaces right here, or your sessions from your <strong>phone</strong>.</p>
+    <p class="tagline">Your AI terminals and notes, one shortcut away. SUPER DESKTOP is a hidden workspace for Omarchy / Hyprland that keeps your agents running and lets you reach them from another PC or your Android phone.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/gladimdim/super-desktop">GitHub repo</a>
-      <a class="btn ghost" href="#remote">Remote sessions</a>
-      <a class="btn ghost" href="#phone">Phone linking</a>
+      <a class="btn primary" href="#install">Install</a>
+      <a class="btn ghost" href="#features">Main features</a>
+      <a class="btn ghost" href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </div>
+    <p><a class="pill news-link" href="#ios">iPhone app in development →</a></p>
     <p style="margin-top:22px"><span class="kbd">SUPER + SHIFT + Q</span></p>
   </header>
 
-  <section>
-    <h2>What is this?</h2>
+  <main>
+  <section class="screenshots" aria-labelledby="screenshots-heading">
+    <h2 id="screenshots-heading">A real working desktop</h2>
+    <p class="sub">Captured from the running workspace on September 24, 2026. Open a screenshot for the full-size view.</p>
+    <figure>
+      <a class="screenshot-link" href="screenshots/live-desktop.webp" aria-label="Open full-size desktop screenshot">
+        <img src="screenshots/live-desktop.webp" width="3440" height="1440" fetchpriority="high" alt="SUPER DESKTOP overlay above a browser, with several live Codex and Claude Code terminal cards and the agent launcher toolbar.">
+      </a>
+      <figcaption>Several projects, one overlay. The terminals stay alive when the workspace is hidden.</figcaption>
+    </figure>
+    <details>
+      <summary>A closer look at the live terminals</summary>
+      <figure>
+        <a class="screenshot-link" href="screenshots/live-terminals.webp" aria-label="Open full-size terminal detail screenshot">
+          <img src="screenshots/live-terminals.webp" width="1715" height="815" loading="lazy" alt="Side-by-side Codex and Claude Code cards showing real development output, agent icons, status badges, and terminal controls.">
+        </a>
+        <figcaption>Codex and Claude Code working side by side, with separate output and controls.</figcaption>
+      </figure>
+    </details>
+  </section>
+
+  <section id="install" aria-labelledby="install-heading">
+    <h2 id="install-heading">Install</h2>
+    <p class="sub">Run these commands in a terminal on your Omarchy / Hyprland machine.</p>
+    <div class="note"><strong>Set up Rust before running <code>./install.sh</code>.</strong> Install a Rust toolchain with Cargo using <a href="https://rustup.rs/">rustup</a>. If rustup is already installed without a toolchain, run <code>rustup default stable</code>. Open a new terminal and check that both commands below succeed.</div>
+    <pre><code>rustc --version
+cargo --version</code></pre>
+    <p>Then clone and install SUPER DESKTOP. The script builds from source, so the first build can take a few minutes.</p>
+    <pre><code>git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
+cd ~/GitHub/super-desktop
+./install.sh</code></pre>
+    <p>Press <span class="kbd">SUPER + SHIFT + Q</span> to open your workspace.</p>
+    <div class="note"><strong>Using remote sessions?</strong> Install on the second PC too, then pair the two. Install the AI command-line tools you want to use separately.</div>
+    <p class="sub">Full prerequisites and troubleshooting: <a href="https://github.com/gladimdim/super-desktop#readme">installation guide</a>.</p>
+  </section>
+
+  <section id="features">
+    <h2>Main features</h2>
     <p class="sub">A second, invisible desktop on top of your Omarchy workspace. Press the shortcut — notes and AI terminals glide in. Press it again — your desktop is completely clean. Everything keeps running in the background.</p>
     <div class="grid">
       <div class="card"><h3>📝 Sticky notes</h3><p>Click and type. Notes follow your Omarchy theme, autosave, drag, resize, and take group color tags.</p></div>
@@ -119,8 +183,16 @@
       <div class="card"><h3>🎯 Hot corner</h3><p>Park the pointer in the top-left corner for two seconds and the overlay toggles — no keyboard needed.</p></div>
       <div class="card"><h3>⌨ Your own shortcut</h3><p>SUPER + SHIFT + Q out of the box — click <strong>Record</strong> in ⚙ Settings, press any combination, and it becomes the key that toggles the overlay.</p></div>
       <div class="card"><h3>🖥️ Remote sessions</h3><p>Pair another PC and its windows appear live in your overlay — same layout, same sessions, and you can type into them.</p></div>
-      <div class="card"><h3>📱 Phone linking</h3><p>Take your AI sessions with you. Pair an Android phone to watch and type into them on the move, and get notified when they finish. Optional.</p></div>
+      <div class="card"><h3>📱 Phone linking</h3><p>Watch and control sessions from Android, use two panes on wide screens, and receive completion alerts for supported agents. An iPhone app is in development.</p></div>
     </div>
+  </section>
+
+  <section id="ios" class="news" aria-labelledby="ios-heading">
+    <span class="pill">Development news · September 2026</span>
+    <h2 id="ios-heading">SUPER DESKTOP is coming to iPhone</h2>
+    <p>iOS development is underway. The goal is to bring your desktop AI sessions to iPhone, using the Android companion's behavior and design as the reference.</p>
+    <p class="sub">The implementation guide covers terminal streaming, remote keys, saved drafts, Files &amp; Links, and navigation. These are the reference for the port; the iPhone app is not available yet, and there is no announced release date.</p>
+    <p>Android is available today. Follow development in the <a href="https://github.com/gladimdim/super-desktop">project repository</a>.</p>
   </section>
 
   <section id="remote">
@@ -146,8 +218,10 @@
     <p class="sub">Take your AI sessions with you. Pair an Android phone and it reaches your SUPER DESKTOP terminals over your own network, with everything kept private between your devices.</p>
     <div class="grid">
       <div class="card"><h3>💻 Sessions in your pocket</h3><p>See your running sessions on your phone and type into them, with the terminal's output and colours kept intact.</p></div>
-      <div class="card"><h3>🔔 Know when it's done</h3><p>Get a notification the moment Codex finishes replying, so you don't have to keep checking back.</p></div>
-      <div class="card"><h3>🖼️ Send a picture</h3><p>Attach an image and send it together with a prompt to a waiting session.</p></div>
+      <div class="card"><h3>🔔 Know when it's done</h3><p>Opt into completion alerts for supported Codex and Pi sessions. Delivery depends on your connection and Android background settings.</p></div>
+      <div class="card"><h3>🖼️ Send a picture</h3><p>Attach an image and send it with a prompt to an idle Codex session.</p></div>
+      <div class="card"><h3>⌨ Remote keys &amp; saved drafts</h3><p>Send Enter, arrows, Tab, paging keys, and Ctrl-C without sending your draft. Unsent text is saved separately for each session.</p></div>
+      <div class="card"><h3>📂 Files &amp; Links</h3><p>Browse referenced images, PDFs, Markdown, and code, or open and copy links from the terminal output.</p></div>
       <div class="card"><h3>🔒 Pair once, revoke anytime</h3><p>Pair by scanning a QR code and confirming the matching code on your desktop. Access can be taken away from any phone whenever you like.</p></div>
     </div>
     <div class="note">A paired phone can <strong>operate</strong> your terminals, not just watch them — so only pair devices you trust, and remove any phone you no longer use.</div>
@@ -164,7 +238,7 @@
       <span class="harness"><img src="logos/google.svg" alt="">Antigravity</span>
       <span class="harness"><img src="logos/shell-white.svg" alt="">Aider · Reasonix · Shell</span>
     </div>
-    <p class="sub" style="margin-top:14px">On Android, SUPER DESKTOP can tell you when <strong>Codex</strong> has finished replying, and you can send a picture along with a prompt to a waiting Codex session. Other harnesses don't support these extras yet.</p>
+    <p class="sub" style="margin-top:14px">Android completion alerts support <strong>Codex and Pi</strong> with the updated bridge and compatible sessions. Image prompts currently support idle <strong>Codex</strong> sessions. Other agents remain available for terminal viewing and input; history access depends on the agent’s terminal mode.</p>
   </section>
 
   <section>
@@ -176,17 +250,6 @@
       <tr><td><span class="kbd">Ctrl + N</span> / <span class="kbd">Ctrl + T</span></td><td>New note / new terminal</td></tr>
       <tr><td>Double-click terminal</td><td>Expand to 80% / collapse back</td></tr>
     </table>
-  </section>
-
-  <section>
-    <h2>Install (humans, 2 minutes)</h2>
-    <pre><code><span class="c"># On your Omarchy machine, in a terminal:</span>
-git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
-cd ~/GitHub/super-desktop
-./install.sh
-<span class="c"># then press SUPER + SHIFT + Q</span></code></pre>
-    <div class="note"><strong>Using remote sessions?</strong> Install SUPER DESKTOP on the second computer too, then pair the two.</div>
-    <div class="note"><strong>🤖 Are you an AI assistant</strong> installing this for your human? Don't improvise — the repo README has a dedicated <a href="https://github.com/gladimdim/super-desktop#readme">step-by-step AI install section</a> (preconditions, verification, hard rules, troubleshooting).</div>
   </section>
 
   <section>
@@ -208,6 +271,8 @@ super-desktop reload-theme
       <div class="card"><h3>🌙 Sleep lock</h3><p>Keep your AI sessions reachable while your laptop is on charge, even with the lid closed.</p></div>
     </div>
   </section>
+
+  </main>
 
   <footer>
     Built in Rust (GTK4 · LayerShell · VTE · tmux) for Omarchy &amp; Hyprland.<br>
