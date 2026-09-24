@@ -45,7 +45,11 @@ In local and remote PC terminal cards, select text and press **Ctrl+Shift+C**
 to copy, or **Ctrl+Shift+V** to paste the desktop clipboard. **Ctrl+C** keeps
 its normal terminal interrupt behavior. If a terminal app captures mouse input,
 hold **Shift** while dragging to select text. Paste uses VTE's native handling,
-including bracketed paste when enabled by the running app.
+including bracketed paste when enabled by the running app. In Codex cards,
+**Ctrl+V** also pastes text when the clipboard offers it, including Chrome
+selections with both plain text and HTML. This prevents Codex's image-paste
+shortcut from misreading copied text. Image-only Ctrl+V still reaches Codex;
+other terminal apps keep their normal Ctrl+V behavior.
 
 The clipboard regression test owns its clipboard: run it on an isolated display,
 for example with `gtk4-broadwayd :37` running, then

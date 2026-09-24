@@ -1871,7 +1871,7 @@ fn spawn_vte(
     term.add_css_class("term-vte");
     term.set_can_focus(true);
     term.set_focusable(true);
-    crate::terminal_clipboard::install(&term);
+    crate::terminal_clipboard::install(&term, data.borrow().agent_type == "codex");
 
     let font_size = if is_expanded { 11.0 } else { 10.0 };
     apply_vte_theme(&term, font_size);
