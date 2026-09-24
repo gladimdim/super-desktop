@@ -338,7 +338,7 @@ fn parse_panes(bytes: &[u8]) -> Option<HashMap<String, Pane>> {
 
 /// A stuck tmux server must not accumulate workers or block GTK/IPC. Drain the
 /// pipe while running (it can exceed pipe capacity), with output/time bounds.
-fn bounded_output(mut command: Command) -> Option<Vec<u8>> {
+pub(crate) fn bounded_output(mut command: Command) -> Option<Vec<u8>> {
     struct Probe(Child);
     impl Drop for Probe {
         fn drop(&mut self) {

@@ -457,6 +457,7 @@ impl RemoteCanvas {
             screen_w,
             screen_h,
             None,
+            None,
             self.hover_lock.clone(),
             crate::card_source::CardSource::Remote {
                 peer: peer.clone(),

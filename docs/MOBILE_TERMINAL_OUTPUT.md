@@ -6,6 +6,23 @@ keep their history entirely in an alternate screen cannot expose that history
 through capture alone. Do not stitch repaint frames into a fabricated transcript
 or resize the shared desktop pane to force more text into a phone snapshot.
 
+## Stream frames (`WS /api/v1/harnesses/<id>/stream`)
+
+Each text frame carries `tail` (plain text) and `tailAnsi` (the same capture
+with SGR styling), plus `tailFormat`, `columns`, `rows`, status and title.
+Clients that derive plain text themselves may connect with `?ansiOnly=1`
+(`true` is also accepted): the bridge then omits the `tail` key whenever
+`tailAnsi` is present, roughly halving each frame. Without the parameter frames
+are unchanged. When the session is gone the final `EXITED` frame keeps
+`tail: null` and `tailAnsi: null` either way, then the socket closes with 1000
+`session ended`.
+
+Frames are pushed when the pane changes: the stream's private tmux control
+client listens for `%output` notifications (the payload is discarded) and
+re-captures at most about 30 times a second, with a 1 s safety capture in case a
+notification is missed. An unchanged frame is resent every 5 s as before.
+Phone input wakes only the streams of the session it was sent to.
+
 ## Launch defaults
 
 | Agent | Default | Verification on 2026-09-24 |

@@ -453,7 +453,7 @@ pub(super) fn resolve_attach(
 /// forwards raw PTY bytes in binary frames. The viewer may type back with its
 /// own binary frames (see [`apply_input`]); text frames stay control-only and
 /// anything else is ignored.
-pub(super) fn attach_terminal(mut stream: Connection, target: AttachTarget) {
+pub(super) fn attach_terminal(stream: &mut Connection, target: AttachTarget) {
     match PtyAttachment::open_at(&target.session, target.grid) {
         Ok((pty, grid)) => pump(stream, pty, grid, &target.card_id),
         Err(error) => {
@@ -465,7 +465,7 @@ pub(super) fn attach_terminal(mut stream: Connection, target: AttachTarget) {
                 "host_grid_mismatch" | "host_grid_unavailable" => "terminal_grid_unknown",
                 _ => "terminal_unavailable",
             };
-            let _ = crate::ws::write_close(&mut stream, 1011, reason);
+            let _ = crate::ws::write_close(stream, 1011, reason);
         }
     }
 }
@@ -476,7 +476,7 @@ enum Peer {
     Closed,
 }
 
-fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card_id: &str) {
+fn pump(stream: &mut Connection, mut pty: PtyAttachment, grid: TerminalSize, card_id: &str) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = stream.set_nodelay(true);
     let attached = AttachEvent::Attached {
@@ -484,7 +484,7 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
         columns: grid.columns,
         rows: grid.rows,
     };
-    if crate::ws::write_text(&mut stream, &serde_json::to_string(&attached).unwrap()).is_err() {
+    if crate::ws::write_text(stream, &serde_json::to_string(&attached).unwrap()).is_err() {
         return;
     }
     let deadline = Instant::now() + Duration::from_secs(ATTACH_MAX_SECS);
@@ -497,14 +497,14 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
         // them unread behind buffered TLS either.
         if draining {
             loop {
-                let readable = match peer_readable(&mut stream) {
+                let readable = match peer_readable(stream) {
                     Some(readable) => readable,
                     None => return,
                 };
                 if !readable {
                     break;
                 }
-                if matches!(client_frame(&mut stream, &mut pty), Peer::Closed) {
+                if matches!(client_frame(stream, &mut pty), Peer::Closed) {
                     return;
                 }
             }
@@ -517,7 +517,7 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
         } else {
             Duration::from_millis(500)
         };
-        let (peer_ready, pty_ready) = match wait_for_input(&stream, &pty, timeout) {
+        let (peer_ready, pty_ready) = match wait_for_input(stream, &pty, timeout) {
             Some(ready) => ready,
             None => return,
         };
@@ -527,7 +527,7 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
         if pty_ready {
             match pty.read_output(Duration::ZERO) {
                 Ok(crate::terminal_transport::Output::Bytes(bytes)) if !bytes.is_empty() => {
-                    if crate::ws::write_binary(&mut stream, &bytes).is_err() {
+                    if crate::ws::write_binary(stream, &bytes).is_err() {
                         return;
                     }
                     // A resize is followed by a full redraw, so this is where
@@ -537,7 +537,7 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
                         if let Ok(live) = pty.host_grid() {
                             if live != last_grid {
                                 last_grid = live;
-                                if send_grid(&mut stream, live).is_err() {
+                                if send_grid(stream, live).is_err() {
                                     return;
                                 }
                             }
@@ -547,7 +547,7 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
                 Ok(crate::terminal_transport::Output::Bytes(_)) => {}
                 Ok(crate::terminal_transport::Output::Pending) => {}
                 Ok(crate::terminal_transport::Output::Closed) => {
-                    let _ = crate::ws::write_close(&mut stream, 1000, "terminal_exited");
+                    let _ = crate::ws::write_close(stream, 1000, "terminal_exited");
                     return;
                 }
                 Err(_) => return,
@@ -555,12 +555,12 @@ fn pump(mut stream: Connection, mut pty: PtyAttachment, grid: TerminalSize, card
         }
         if heartbeat.elapsed() >= Duration::from_secs(15) {
             heartbeat = Instant::now();
-            if crate::ws::write_ping(&mut stream, &[]).is_err() {
+            if crate::ws::write_ping(stream, &[]).is_err() {
                 return;
             }
         }
     }
-    let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
+    let _ = crate::ws::write_close(stream, 1000, "reconnect");
 }
 
 fn send_grid(stream: &mut Connection, grid: TerminalSize) -> io::Result<()> {
@@ -699,13 +699,13 @@ fn apply_control(stream: &mut Connection, pty: &mut PtyAttachment, text: &str) -
     Peer::Idle
 }
 
-pub(super) fn stream_workspace(mut stream: Connection) {
+pub(super) fn stream_workspace(stream: &mut Connection) {
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
     let mut previous = String::new();
     let mut heartbeat = std::time::Instant::now();
     while std::time::Instant::now() < deadline {
-        if !ws_client_alive(&mut stream) {
+        if !ws_client_alive(stream) {
             return;
         }
         // Every message is a complete, independently usable snapshot. Polling
@@ -720,7 +720,7 @@ pub(super) fn stream_workspace(mut stream: Connection) {
         };
         let document = serde_json::to_string(&event).unwrap();
         if document != previous || heartbeat.elapsed() >= Duration::from_secs(5) {
-            if crate::ws::write_text(&mut stream, &document).is_err() {
+            if crate::ws::write_text(stream, &document).is_err() {
                 return;
             }
             previous = document;
@@ -728,7 +728,7 @@ pub(super) fn stream_workspace(mut stream: Connection) {
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
+    let _ = crate::ws::write_close(stream, 1000, "reconnect");
 }
 
 #[cfg(test)]

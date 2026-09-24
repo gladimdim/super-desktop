@@ -107,11 +107,33 @@ https://developer.android.com/develop/background-work/services/fgs/service-types
 the bridge (including localhost). Request: `{"sessions":["sd_term_..."]}`.
 Maximum 32 identifiers, each 1–128 ASCII letters/digits/underscores/hyphens.
 
-Response: `{"terminals":[{"id":"sd_term_...","supported":true,"state":"completed","completionId":"64-character lowercase SHA-256"}]}`.
+Response: `{"terminals":[{"id":"sd_term_...","supported":true,"state":"completed","completionId":"64-character lowercase SHA-256"}],"etag":"32 hex characters"}`.
 States are `working`, `completed`, or `unknown`. Missing/unsupported/unattributable
 sessions return `supported:false`, `state:unknown`, `completionId:null`.
 The endpoint exposes no process IDs, filesystem paths, prompts, or responses.
-It uses the existing four-job admission cap and bridge revocation enforcement.
+
+**Long poll (additive).** The request may also carry `"etag"` (the value from
+the previous response) and `"waitMs"` (integer, clamped to 0–25000; absent,
+negative or non-numeric means 0). Every response includes `etag`, an opaque
+digest of the canonical `terminals` result for the requested IDs (the same
+session list in the same order yields the same etag while nothing changes).
+
+- No `etag`, a different `etag`, or `waitMs` 0: answered immediately, exactly
+  as before apart from the added `etag` field.
+- Matching `etag` and `waitMs` > 0: the bridge re-collects about once a second
+  and answers as soon as the result (and therefore the etag) changes, or with
+  the unchanged result when `waitMs` elapses.
+- A held request is abandoned without a response when the client hangs up or
+  its device is revoked or expires (checked every 250 ms / 1 s).
+- At most eight requests are held at once across all devices; any excess is
+  answered immediately. Completion requests no longer take the four asset
+  transfer slots (the collection is a cached metadata read), so a held poll
+  never blocks asset downloads. Clients should use an HTTP read timeout of at
+  least `waitMs + 10 s` for held requests.
+
+Bridges without this extension ignore both fields and omit `etag`. Revocation
+enforcement is unchanged. See also the keep-alive notes in
+[PERFORMANCE.md](../PERFORMANCE.md#bridge-changes-2026-09-24).
 
 ## Verification / device checklist
 

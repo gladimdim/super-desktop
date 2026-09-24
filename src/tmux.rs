@@ -308,6 +308,8 @@ pub fn detect_harnesses() -> Vec<HarnessInfo> {
 /// This is the pane's own width and height — not a client's, which includes the
 /// status line — so a phone rendering the pane's captured text can size that
 /// text to the columns the pane actually has. Reads nothing and changes nothing.
+/// The phone stream asks over its control connection (`tmux_control`).
+#[cfg(test)]
 pub fn pane_grid(session_name: &str) -> Option<crate::desktop_protocol::TerminalSize> {
     if !session_name.starts_with("sd_term_")
         || session_name.len() > 128
@@ -332,7 +334,11 @@ pub fn pane_grid(session_name: &str) -> Option<crate::desktop_protocol::Terminal
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    parse_pane_grid(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// `#{pane_width} #{pane_height}` as a validated grid.
+pub fn parse_pane_grid(text: &str) -> Option<crate::desktop_protocol::TerminalSize> {
     let mut fields = text.split_whitespace();
     let columns = fields.next()?.parse::<u16>().ok()?;
     let rows = fields.next()?.parse::<u16>().ok()?;
@@ -894,107 +900,35 @@ fn inspect_status_impl(
             let text = String::from_utf8_lossy(&output.stdout);
             if let Some(first_line) = text.lines().next() {
                 let mut parts = first_line.splitn(5, "::");
-                let pid = parts.next().unwrap_or("").trim().to_string();
-                let cmd = parts.next().unwrap_or("").trim().to_string();
-                let dead = parts.next().unwrap_or("0").trim();
-                let height = parts
-                    .next()
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .unwrap_or(24);
-                let cwd = parts.next().unwrap_or("").trim().to_string();
-
-                if dead == "1" || pid.is_empty() {
-                    return SessionStatus {
-                        status: "EXITED",
-                        label: "○ EXITED",
-                        pid,
-                        cmd,
-                        cwd,
-                    };
-                }
-
-                let p_num = pid.parse::<u32>().unwrap_or(0);
-                if p_num != 0 && !std::path::Path::new(&format!("/proc/{}", p_num)).exists() {
-                    return SessionStatus {
-                        status: "EXITED",
-                        label: "○ EXITED",
-                        pid,
-                        cmd,
-                        cwd,
-                    };
-                }
-
-                let is_shell_agent =
-                    agent_type == "shell" || agent_type == "bash" || agent_type == "terminal";
-                let effective_pid = resolve_effective_pid(p_num, is_shell_agent);
-                let display_pid = if effective_pid != 0 {
-                    effective_pid.to_string()
-                } else {
-                    pid.clone()
+                let row = PaneRow {
+                    pid: parts.next().unwrap_or("").trim().to_string(),
+                    cmd: parts.next().unwrap_or("").trim().to_string(),
+                    dead: parts.next().unwrap_or("0").trim() == "1",
+                    height: parts
+                        .next()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(24),
+                    cwd: parts.next().unwrap_or("").trim().to_string(),
+                    ..Default::default()
                 };
-
-                let display_cmd = if cmd.is_empty() {
-                    agent_type.to_string()
-                } else {
-                    cmd.clone()
-                };
-
-                // Codex's own rollout belongs to this exact pane process. Explicit
-                // turn events override stale screen text and long-lived tool helpers.
-                if agent_type == "codex" && p_num != 0 {
-                    let completion = crate::completion::inspect(session_name, p_num);
-                    if let Some((status, label)) = explicit_turn_status(&completion.state) {
-                        return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
-                    }
-                    if completion.supported {
-                        return SessionStatus { status: "UNKNOWN", label: "? UNKNOWN", pid: display_pid, cmd: display_cmd, cwd };
-                    }
-                }
-
-                if crate::harness_metadata::native_agent(agent_type) || agent_type.starts_with("custom-") {
-                    if let Some(metadata) = crate::harness_metadata::inspect(session_name, agent_type) {
-                        if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
-                            return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
-                        }
-                    }
-                }
-
-                let is_shell_cmd = matches!(cmd.as_str(), "bash" | "zsh" | "fish" | "sh");
-                if is_shell_agent {
-                    let foreground = std::fs::read_to_string(format!("/proc/{p_num}/stat"))
-                        .map(|stat| foreground_job_from_stat(&stat)).unwrap_or(false);
-                    let busy = foreground || (!is_shell_cmd && !cmd.is_empty());
-                    return SessionStatus {
-                        status: if busy { "WORKING" } else { "IDLE" },
-                        label: if busy { "● WORKING" } else { "● IDLE" },
-                        pid: display_pid, cmd: display_cmd, cwd,
-                    };
-                }
-
-                // Other agents use conservative visible status indicators. Child
-                // process existence alone says nothing about a response in progress.
-                let captured = screen.map(std::borrow::Cow::Borrowed).or_else(|| {
-                    let output = Command::new("tmux")
-                        .args(["capture-pane", "-p", "-t", session_name])
-                        .output().ok()?;
-                    output.status.success().then(|| std::borrow::Cow::Owned(
-                        String::from_utf8_lossy(&output.stdout).into_owned()))
-                });
-                if captured.as_deref().is_some_and(|text| screen_indicates_work(text, height)) {
-                    return SessionStatus { status: "WORKING", label: "● WORKING", pid: display_pid, cmd: display_cmd, cwd };
-                }
-
-                return SessionStatus {
-                    status: "IDLE",
-                    label: "● IDLE",
-                    pid: display_pid,
-                    cmd: display_cmd,
-                    cwd,
-                };
+                return status_for_pane(
+                    session_name,
+                    agent_type,
+                    &row,
+                    &|| crate::harness_metadata::inspect(session_name, agent_type),
+                    &mut || match screen {
+                        Some(screen) => Some(screen.to_string()),
+                        None => capture_visible_screen(session_name),
+                    },
+                );
             }
         }
     }
+    exited_status(agent_type)
+}
 
+/// Status of a session whose pane tmux no longer lists.
+pub fn exited_status(agent_type: &str) -> SessionStatus {
     SessionStatus {
         status: "EXITED",
         label: "○ EXITED",
@@ -1002,6 +936,212 @@ fn inspect_status_impl(
         cmd: agent_type.to_string(),
         cwd: String::new(),
     }
+}
+
+/// Derive a card/bridge status from one already listed pane.
+///
+/// `metadata` and `screen` are only called when this agent's status depends
+/// on them, so a batched caller can skip reading native metadata or capturing
+/// the pane for everything else.
+pub fn status_for_pane(
+    session_name: &str,
+    agent_type: &str,
+    row: &PaneRow,
+    metadata: &dyn Fn() -> Option<crate::harness_metadata::Metadata>,
+    screen: &mut dyn FnMut() -> Option<String>,
+) -> SessionStatus {
+    let pid = row.pid.clone();
+    let cmd = row.cmd.clone();
+    let cwd = row.cwd.clone();
+    if row.dead || pid.is_empty() {
+        return SessionStatus { status: "EXITED", label: "○ EXITED", pid, cmd, cwd };
+    }
+
+    let p_num = pid.parse::<u32>().unwrap_or(0);
+    if p_num != 0 && !std::path::Path::new(&format!("/proc/{}", p_num)).exists() {
+        return SessionStatus { status: "EXITED", label: "○ EXITED", pid, cmd, cwd };
+    }
+
+    let is_shell_agent = agent_type == "shell" || agent_type == "bash" || agent_type == "terminal";
+    let effective_pid = resolve_effective_pid(p_num, is_shell_agent);
+    let display_pid = if effective_pid != 0 {
+        effective_pid.to_string()
+    } else {
+        pid.clone()
+    };
+
+    let display_cmd = if cmd.is_empty() {
+        agent_type.to_string()
+    } else {
+        cmd.clone()
+    };
+
+    // Codex's own rollout belongs to this exact pane process. Explicit
+    // turn events override stale screen text and long-lived tool helpers.
+    if agent_type == "codex" && p_num != 0 {
+        let completion = crate::completion::inspect(session_name, p_num);
+        if let Some((status, label)) = explicit_turn_status(&completion.state) {
+            return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+        }
+        if completion.supported {
+            return SessionStatus { status: "UNKNOWN", label: "? UNKNOWN", pid: display_pid, cmd: display_cmd, cwd };
+        }
+    }
+
+    if crate::harness_metadata::native_agent(agent_type) || agent_type.starts_with("custom-") {
+        if let Some(metadata) = metadata() {
+            if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
+                return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+            }
+        }
+    }
+
+    let is_shell_cmd = matches!(cmd.as_str(), "bash" | "zsh" | "fish" | "sh");
+    if is_shell_agent {
+        let foreground = std::fs::read_to_string(format!("/proc/{p_num}/stat"))
+            .map(|stat| foreground_job_from_stat(&stat)).unwrap_or(false);
+        let busy = foreground || (!is_shell_cmd && !cmd.is_empty());
+        return SessionStatus {
+            status: if busy { "WORKING" } else { "IDLE" },
+            label: if busy { "● WORKING" } else { "● IDLE" },
+            pid: display_pid, cmd: display_cmd, cwd,
+        };
+    }
+
+    // Other agents use conservative visible status indicators. Child
+    // process existence alone says nothing about a response in progress.
+    if screen().is_some_and(|text| screen_indicates_work(&text, row.height)) {
+        return SessionStatus { status: "WORKING", label: "● WORKING", pid: display_pid, cmd: display_cmd, cwd };
+    }
+
+    SessionStatus {
+        status: "IDLE",
+        label: "● IDLE",
+        pid: display_pid,
+        cmd: display_cmd,
+        cwd,
+    }
+}
+
+/// One pane of `tmux list-panes -a`: the first pane of each session's active
+/// window, with the session options the card refresh reads.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PaneRow {
+    pub pid: String,
+    pub cmd: String,
+    pub dead: bool,
+    pub height: usize,
+    pub cwd: String,
+    /// `@super_desktop_metadata` (path of the native adapter file).
+    pub metadata_option: String,
+    /// `@super_desktop_last_prompt` (see `prompt_history`).
+    pub last_prompt: String,
+    /// `@super_desktop_shell_tracking == 1` (see `shell_title`).
+    pub shell_tracking: bool,
+    /// `@super_desktop_shell_command`.
+    pub shell_command: String,
+}
+
+/// Every session's pane in one `tmux list-panes -a` call.
+#[derive(Default, Debug)]
+pub struct PaneSnapshot {
+    rows: std::collections::HashMap<String, PaneRow>,
+    /// Sessions whose row could not be parsed unambiguously (a value held a
+    /// separator): callers use the per-session queries for those.
+    damaged: std::collections::HashSet<String>,
+}
+
+pub enum PaneLookup<'a> {
+    Row(&'a PaneRow),
+    /// tmux answered and does not know this session.
+    Missing,
+    /// This session's row was ambiguous.
+    Unknown,
+}
+
+impl PaneSnapshot {
+    /// Every session tmux listed, including ones whose row was ambiguous.
+    pub fn sessions(&self) -> impl Iterator<Item = &String> {
+        self.rows.keys().chain(self.damaged.iter())
+    }
+
+    pub fn lookup(&self, session: &str) -> PaneLookup<'_> {
+        if self.damaged.contains(session) {
+            PaneLookup::Unknown
+        } else {
+            self.rows.get(session).map_or(PaneLookup::Missing, PaneLookup::Row)
+        }
+    }
+}
+
+// Records start with RS and fields are separated by US: neither occurs in
+// session names, paths or prompts in practice, and a value that does contain
+// one only makes that row fall back (field count), never misattributes data.
+// Records are split on RS, not newlines, so a value may contain newlines.
+const PANE_RECORD: char = '\u{1e}';
+const PANE_FIELD: char = '\u{1f}';
+const PANE_FORMAT_FIELDS: [&str; 11] = [
+    "#{session_name}",
+    "#{window_active}",
+    "#{pane_pid}",
+    "#{pane_current_command}",
+    "#{pane_dead}",
+    "#{pane_height}",
+    "#{pane_current_path}",
+    "#{@super_desktop_metadata}",
+    "#{@super_desktop_last_prompt}",
+    "#{@super_desktop_shell_tracking}",
+    "#{@super_desktop_shell_command}",
+];
+
+pub fn pane_snapshot_format() -> String {
+    format!(
+        "{PANE_RECORD}{}",
+        PANE_FORMAT_FIELDS.join(&PANE_FIELD.to_string())
+    )
+}
+
+/// One `tmux list-panes -a` for every card. `None` when tmux did not answer
+/// (bounded in time and size so a stuck server cannot pile up workers).
+pub fn pane_snapshot() -> Option<PaneSnapshot> {
+    let mut command = Command::new("tmux");
+    command.args(["list-panes", "-a", "-F", &pane_snapshot_format()]);
+    let bytes = crate::workspace_model::bounded_output(command)?;
+    Some(parse_pane_snapshot(&String::from_utf8_lossy(&bytes)))
+}
+
+pub fn parse_pane_snapshot(text: &str) -> PaneSnapshot {
+    let mut snapshot = PaneSnapshot::default();
+    for record in text.split(PANE_RECORD).skip(1) {
+        let record = record.strip_suffix('\n').unwrap_or(record);
+        let fields: Vec<&str> = record.split(PANE_FIELD).collect();
+        let Some(session) = fields.first().map(|s| s.to_string()) else {
+            continue;
+        };
+        if fields.len() != PANE_FORMAT_FIELDS.len() {
+            snapshot.damaged.insert(session);
+            continue;
+        }
+        // Like `list-panes -t <session>`: the first pane of the active window.
+        if fields[1] != "1" || snapshot.rows.contains_key(&session) {
+            continue;
+        }
+        snapshot.rows.insert(
+            session,
+            PaneRow {
+                pid: fields[2].trim().to_string(),
+                cmd: fields[3].trim().to_string(),
+                dead: fields[4].trim() == "1",
+                height: fields[5].trim().parse().unwrap_or(24),
+                cwd: fields[6].trim().to_string(),
+                metadata_option: fields[7].trim().to_string(),
+                last_prompt: fields[8].trim().to_string(),
+                shell_tracking: fields[9].trim() == "1",
+                shell_command: fields[10].trim().to_string(),
+            },
+        );
+    }
+    snapshot
 }
 
 /// Only visible rows can describe the current TUI state. Ignore scrollback.
@@ -1027,8 +1167,34 @@ pub const PROMPT_TITLE_MAX_CHARS: usize = 120;
 
 /// Capture the visible text of a tmux pane (TUI apps like opencode run
 /// fullscreen, so this is the current screen, not scrollback history).
+///
+/// Card previews (at most 28 lines), the bridge's launcher preview (11) and
+/// footer model/effort (6), and status (visible rows) only need the screen,
+/// so this reads the visible screen plus 30 lines of history. The phone's
+/// terminal stream keeps its own 300-line capture (`tmux_control`).
 pub fn capture_pane_text(session_name: &str) -> Option<String> {
-    capture_pane(session_name, false)
+    capture_pane(session_name, false, CARD_CAPTURE_HISTORY)
+}
+
+/// History lines above the visible screen kept by `capture_pane_text`.
+pub const CARD_CAPTURE_HISTORY: u32 = 30;
+
+/// Screen plus 300 lines of history, for callers that scan output history
+/// (asset discovery), not for per-second status work.
+pub fn capture_pane_history(session_name: &str) -> Option<String> {
+    capture_pane(session_name, false, 300)
+}
+
+/// Visible rows only: the status fallback for screen-based agents.
+pub fn capture_visible_screen(session_name: &str) -> Option<String> {
+    let output = Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", session_name])
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Capture tmux's real terminal styling as ANSI SGR sequences. The bridge
@@ -1036,17 +1202,19 @@ pub fn capture_pane_text(session_name: &str) -> Option<String> {
 /// the agent's colours without changing the desktop card path.
 #[cfg(test)]
 pub fn capture_pane_ansi(session_name: &str) -> Option<String> {
-    capture_pane(session_name, true)
+    // Must match the phone stream's `tmux_control::Control::capture` (300).
+    capture_pane(session_name, true, 300)
 }
 
-fn capture_pane(session_name: &str, ansi: bool) -> Option<String> {
+fn capture_pane(session_name: &str, ansi: bool, history: u32) -> Option<String> {
     let mut command = Command::new("tmux");
     command.arg("capture-pane");
     if ansi {
         command.arg("-e");
     }
+    let start = format!("-{history}");
     let output = command
-        .args(["-p", "-t", session_name, "-S", "-300"])
+        .args(["-p", "-t", session_name, "-S", &start])
         .output()
         .ok()?;
     if !output.status.success() {
@@ -1059,59 +1227,7 @@ fn capture_pane(session_name: &str, ansi: bool) -> Option<String> {
     Some(text)
 }
 
-/// Remove terminal control sequences while preserving the visible text.
-/// Handles CSI/OSC/DCS strings as well as two-byte ESC commands; tmux `-e`
-/// currently emits SGR CSI sequences, while the wider handling keeps the
-/// plain fallback safe if tmux expands what it preserves later.
-pub fn strip_terminal_escapes(input: &str) -> String {
-    let bytes = input.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            0x1b if i + 1 < bytes.len() => {
-                i += 1;
-                match bytes[i] {
-                    b'[' => {
-                        i += 1;
-                        while i < bytes.len() {
-                            let byte = bytes[i];
-                            i += 1;
-                            if (0x40..=0x7e).contains(&byte) {
-                                break;
-                            }
-                        }
-                    }
-                    b']' | b'P' | b'^' | b'_' => {
-                        i += 1;
-                        while i < bytes.len() {
-                            if bytes[i] == 0x07 {
-                                i += 1;
-                                break;
-                            }
-                            if bytes[i] == 0x1b
-                                && i + 1 < bytes.len()
-                                && bytes[i + 1] == b'\\'
-                            {
-                                i += 2;
-                                break;
-                            }
-                            i += 1;
-                        }
-                    }
-                    _ => i += 1,
-                }
-            }
-            0x1b => i += 1,
-            byte if byte < 0x20 && !matches!(byte, b'\n' | b'\r' | b'\t') => i += 1,
-            byte => {
-                out.push(byte);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+pub use crate::terminal_text::strip_terminal_escapes;
 
 /// Capture the last user prompt from a tmux session and return a short
 /// title-friendly snippet (first 10-30 chars of the prompt).
@@ -1324,7 +1440,63 @@ fn opencode_db_path() -> Option<std::path::PathBuf> {
     }
 }
 
+/// Size and modification time of the database and its WAL: opencode writes
+/// through the WAL, and a checkpoint rewrites the database itself.
+type DbStamp = [(u64, i64, i64); 2];
+
+fn db_stamp(db: &std::path::Path) -> Option<DbStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let stamp = |path: &std::path::Path| {
+        std::fs::metadata(path)
+            .map(|m| (m.len(), m.mtime(), m.mtime_nsec()))
+            .unwrap_or((0, 0, 0))
+    };
+    let mut wal = db.as_os_str().to_owned();
+    wal.push("-wal");
+    let main = std::fs::metadata(db).ok()?;
+    Some([
+        (main.len(), main.mtime(), main.mtime_nsec()),
+        stamp(std::path::Path::new(&wal)),
+    ])
+}
+
+/// `sqlite3` over a large database costs a process and a query per call, and
+/// cards ask the same questions every second: an unchanged database (and
+/// WAL) answers from memory.
 fn sqlite_query(db: &std::path::Path, sql: &str) -> Option<String> {
+    type Cache = std::collections::HashMap<(std::path::PathBuf, String), (DbStamp, Option<String>)>;
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    let key = (db.to_path_buf(), sql.to_string());
+    let Some(before) = db_stamp(db) else {
+        return sqlite_query_uncached(db, sql);
+    };
+    if let Some((stamp, value)) = cache.lock().unwrap().get(&key) {
+        if *stamp == before {
+            return value.clone();
+        }
+    }
+    let value = sqlite_query_uncached(db, sql);
+    // Only remember an answer that describes one unchanged database state.
+    if db_stamp(db) == Some(before) {
+        let mut cache = cache.lock().unwrap();
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(key, (before, value.clone()));
+    }
+    value
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `sqlite3` processes started by this test thread.
+    static SQLITE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn sqlite_query_uncached(db: &std::path::Path, sql: &str) -> Option<String> {
+    #[cfg(test)]
+    SQLITE_RUNS.with(|runs| runs.set(runs.get() + 1));
     let output = Command::new("sqlite3")
         .args([
             "-readonly",
@@ -1791,6 +1963,34 @@ pub fn get_opencode_title_by_id(session_id: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_database_answers_without_a_sqlite_process() {
+        let dir = std::env::temp_dir().join(format!("sd-sqlite-cache-{}", unique_session_name()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let run = |sql: &str| {
+            assert!(Command::new("sqlite3").arg(&db).arg(sql).status().unwrap().success());
+        };
+        run("PRAGMA journal_mode=WAL; CREATE TABLE session(id TEXT, title TEXT); INSERT INTO session VALUES('a','First');");
+        let runs = || SQLITE_RUNS.with(|runs| runs.get());
+        let sql = "SELECT title FROM session WHERE id = 'a';";
+        // The first reader of a closed WAL database recreates its (empty) WAL,
+        // which changes the stamp; opencode itself keeps the WAL open.
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
+        let before = runs();
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
+        assert_eq!(runs() - before, 1, "an unchanged database must be answered from memory");
+        let before = runs();
+        // A write (through the WAL or a checkpoint) must be seen.
+        run("UPDATE session SET title = 'Renamed' WHERE id = 'a';");
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("Renamed"));
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("Renamed"));
+        assert!(runs() - before >= 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn status_uses_turn_events_and_not_response_text() {

@@ -142,15 +142,66 @@ fn bind_top_bar_width(
     hint: &Label,
 ) {
     // The compositor's allocation is authoritative, never the canvas extents.
-    let window = window.as_ref().downgrade();
-    let brand = brand.clone();
-    let hint = hint.clone();
-    hud.add_tick_callback(move |hud, _| {
-        if let Some(window) = window.upgrade() {
-            fit_top_bar(hud, window.width(), &brand, &hint);
-        }
-        glib::ControlFlow::Continue
-    });
+    //
+    // Event-driven, not a tick callback: a tick callback keeps the frame clock
+    // running at the display's refresh rate for as long as the overlay lives,
+    // only to compare two integers. The frame clock's `layout` and
+    // `after-paint` signals fire only on frames GTK produces anyway — every
+    // configure (output, scale or window size change) is such a frame — and
+    // never while the window is unmapped. `layout` runs after the window's
+    // own allocation (its surface connected first), so the bar usually
+    // follows within the same frame; `after-paint` is the safety net for a
+    // frame whose layout ran before the new size was allocated.
+    let fit: Rc<dyn Fn()> = {
+        let window = window.as_ref().downgrade();
+        let hud = hud.downgrade();
+        let brand = brand.clone();
+        let hint = hint.clone();
+        Rc::new(move || {
+            if let (Some(window), Some(hud)) = (window.upgrade(), hud.upgrade()) {
+                fit_top_bar(&hud, window.width(), &brand, &hint);
+            }
+        })
+    };
+    type Connected = Option<(glib::WeakRef<gtk4::gdk::FrameClock>, Vec<glib::SignalHandlerId>)>;
+    let connected: Rc<RefCell<Connected>> = Rc::new(RefCell::new(None));
+    let disconnect: Rc<dyn Fn()> = {
+        let connected = Rc::clone(&connected);
+        Rc::new(move || {
+            if let Some((clock, handlers)) = connected.borrow_mut().take() {
+                if let Some(clock) = clock.upgrade() {
+                    for handler in handlers {
+                        clock.disconnect(handler);
+                    }
+                }
+            }
+        })
+    };
+    let connect: Rc<dyn Fn(&gtk4::Box)> = {
+        let fit = Rc::clone(&fit);
+        let disconnect = Rc::clone(&disconnect);
+        Rc::new(move |hud: &gtk4::Box| {
+            disconnect();
+            let Some(clock) = hud.frame_clock() else {
+                return;
+            };
+            let on_layout = Rc::clone(&fit);
+            let on_paint = Rc::clone(&fit);
+            let handlers = vec![
+                clock.connect_layout(move |_| on_layout()),
+                clock.connect_after_paint(move |_| on_paint()),
+            ];
+            *connected.borrow_mut() = Some((clock.downgrade(), handlers));
+            fit();
+        })
+    };
+    if hud.is_realized() {
+        connect(hud);
+    }
+    // A hidden layer surface may be unrealized and come back with a new
+    // frame clock: follow it.
+    hud.connect_realize(move |hud| connect(hud));
+    hud.connect_unrealize(move |_| disconnect());
 }
 
 /// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
@@ -917,8 +968,16 @@ impl SuperDesktopWindow {
         let order = self.state.borrow().terminal_order.clone();
         terminals.sort_by_key(|t| order.iter().position(|id| id == &t.id).unwrap_or(usize::MAX));
         let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::default());
+        // One state.json read for the whole batch, not one per card.
+        let custom = (!terminals.is_empty())
+            .then(|| Rc::new(crate::state::load_state().custom_harnesses));
         for term_data in terminals {
-            self.spawn_terminal_widget(term_data, false, Some(std::sync::Arc::clone(&inventory)));
+            self.spawn_terminal_widget(
+                term_data,
+                false,
+                Some(std::sync::Arc::clone(&inventory)),
+                custom.clone(),
+            );
         }
 
         let notes: Vec<NoteData> = self.state.borrow().notes.clone();
@@ -1205,11 +1264,17 @@ impl SuperDesktopWindow {
             workspace_dir: Some(workspace_dir),
         };
 
-        self.spawn_terminal_widget(data, true, None);
+        self.spawn_terminal_widget(data, true, None, None);
         sess
     }
 
-    fn spawn_terminal_widget(&self, term_data: TerminalData, save: bool, startup_inventory: Option<std::sync::Arc<crate::tmux::SessionInventory>>) {
+    fn spawn_terminal_widget(
+        &self,
+        term_data: TerminalData,
+        save: bool,
+        startup_inventory: Option<std::sync::Arc<crate::tmux::SessionInventory>>,
+        custom_harnesses: Option<Rc<Vec<crate::custom_harness::CustomHarness>>>,
+    ) {
         let canvas = self.canvas.clone();
         let state = Rc::clone(&self.state);
         let term_cards = Rc::clone(&self.terminal_cards);
@@ -1499,6 +1564,7 @@ impl SuperDesktopWindow {
             sw,
             sh,
             startup_inventory,
+            custom_harnesses,
             hover_lock,
             // The local workspace's own session: this machine's tmux, attached
             // by the card's emulator.
@@ -2201,10 +2267,12 @@ impl SuperDesktopWindow {
         if !self.slide.running.get() {
             self.ghosts.resume();
         }
+        // One worker and one `tmux list-panes -a` for every card, instead of
+        // several tmux processes per card per second.
         let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
-        for card in cards.iter() {
-            card.refresh_status();
-        }
+        crate::mini_terminal::run_status_refresh(
+            cards.iter().filter_map(|card| card.prepare_status_refresh()).collect(),
+        );
     }
 }
 
@@ -2482,8 +2550,7 @@ mod tests {
         window.set_child(Some(&root));
         bind_top_bar_width(&hud, &window, &brand, &hint);
         window.present();
-        for width in [1024, 640, 1600, 480, 1280] {
-            window.set_default_size(width, 600);
+        let check_mapped = |width: i32| {
             let until = std::time::Instant::now() + Duration::from_secs(3);
             let mut settled = 0;
             while std::time::Instant::now() < until {
@@ -2529,7 +2596,38 @@ mod tests {
                     .expect("toolbar action must be hittable");
                 assert!(picked == *button || picked.is_ancestor(button));
             }
+        };
+        for width in [1024, 640, 1600, 480, 1280] {
+            window.set_default_size(width, 600);
+            check_mapped(width);
         }
+        // Sizing is event-driven: an idle, settled overlay must not keep the
+        // frame clock running (the old per-frame tick callback did, at the
+        // display's refresh rate, for the overlay's whole lifetime).
+        let frames = Rc::new(Cell::new(0u32));
+        let clock = window.frame_clock().expect("mapped window has a frame clock");
+        let counter = Rc::clone(&frames);
+        let handler = clock.connect_after_paint(move |_| counter.set(counter.get() + 1));
+        let until = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < until {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        clock.disconnect(handler);
+        assert!(
+            frames.get() < 10,
+            "an idle toolbar must not repaint every frame ({} frames in 500 ms)",
+            frames.get()
+        );
+        // Hidden, resized while hidden, shown again: the surface may come
+        // back realized with a new frame clock, which the bar must follow.
+        window.set_visible(false);
+        while glib::MainContext::default().iteration(false) {}
+        window.set_default_size(900, 600);
+        window.set_visible(true);
+        check_mapped(900);
+        window.set_default_size(1400, 600);
+        check_mapped(1400);
         window.close();
     }
 

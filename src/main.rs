@@ -7,10 +7,14 @@ mod prompt_image;
 mod prompt_history;
 mod shell_title;
 mod harness_metadata;
+mod harness_record;
+mod preload;
+mod terminal_text;
 mod asset_pdf;
 mod asset_view;
 mod bridge;
 mod card_resize;
+mod card_status;
 mod crashlog;
 mod desktop_protocol;
 mod peer_client;
@@ -219,6 +223,10 @@ struct AppContext {
 }
 
 fn main() {
+    // Before anything else, and before any thread exists: layer-shell is
+    // already mapped into this process, and must not leak into tmux, card
+    // shells/agents, the bridge or any helper subprocess.
+    preload::strip_from_process_env();
     startup::mark("process entry");
     // First thing: release builds abort on panic and the daemon's stderr goes
     // to /dev/null, so without this a crash leaves no readable trace.
@@ -228,7 +236,7 @@ fn main() {
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
 
     if action == "harness-event" {
-        harness_metadata::record(args.get(2).map(String::as_str).unwrap_or(""));
+        harness_record::record(args.get(2).map(String::as_str).unwrap_or(""));
         return;
     }
     if action == "integrate-openclaw" {
@@ -337,7 +345,11 @@ fn main() {
     // Daemon not running -> spawn it
     if action == "toggle" || action == "show" {
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
-        let _ = std::process::Command::new(exe)
+        let mut command = std::process::Command::new(exe);
+        // This child is the overlay itself: it needs the preload that `main`
+        // stripped from the inherited environment.
+        preload::preload_layer_shell(&mut command);
+        let _ = command
             .arg("daemon")
             // Outlive the launcher's terminal/process-group cleanup.
             .process_group(0)
@@ -436,6 +448,12 @@ fn run_daemon(start_visible: bool) {
     });
     start_ipc_thread(ipc_tx);
     startup::mark("IPC listening");
+    // Panes created in an already running tmux server inherit its global
+    // environment, which still carries layer-shell if that server was started
+    // from a preloaded environment.
+    let _ = thread::Builder::new()
+        .name("super-desktop-tmux-env".to_string())
+        .spawn(preload::clean_tmux_global_env);
 
     // The bridge waits for its child to become reachable, so keep that work
     // off GTK's main thread. Start it only after this process owns the daemon

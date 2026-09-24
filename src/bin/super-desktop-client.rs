@@ -5,6 +5,15 @@ use std::os::unix::{net::UnixStream, process::CommandExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+// Agent hooks call `harness-event` once per tool call: handle it here, without
+// loading GTK, using the same recording code as the application.
+#[allow(dead_code)]
+#[path = "../terminal_text.rs"]
+mod terminal_text;
+#[allow(dead_code)]
+#[path = "../harness_record.rs"]
+mod harness_record;
+
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
     let mut stream = match UnixStream::connect(path) {
         Ok(stream) => stream,
@@ -35,6 +44,10 @@ fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let action = args.first().map(String::as_str).unwrap_or("toggle");
+    if action == "harness-event" {
+        harness_record::record(args.get(1).map(String::as_str).unwrap_or(""));
+        return;
+    }
     if args.len() <= 1 && matches!(action, "toggle" | "show" | "hide" | "status" | "kill") {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)

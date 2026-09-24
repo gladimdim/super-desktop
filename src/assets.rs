@@ -249,7 +249,7 @@ pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String>
         found.push(register(&root, session, path)?);
     }
     // This runs only when opening/refreshing the drawer, never per frame/keystroke.
-    let screen = crate::tmux::capture_pane_text(session).unwrap_or_default();
+    let screen = crate::tmux::capture_pane_history(session).unwrap_or_default();
     for path in candidates(&screen) {
         if let Ok(entry) = register(&root, session, &path) {
             found.push(entry);

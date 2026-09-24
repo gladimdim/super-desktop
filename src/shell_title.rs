@@ -61,6 +61,18 @@ pub fn last(session: &str) -> Option<String> {
     let pid = fields.next()?.trim().parse().ok()?;
     let tracked = fields.next()?.trim() == "1";
     let submitted = fields.next()?.trim();
+    last_from(pid, tracked, submitted, || crate::prompt_history::last(session))
+}
+
+/// `last` for pane fields already read by the caller (one batched
+/// `list-panes -a`); `history` supplies the session's recorded prompt.
+pub fn last_from(
+    pid: u32,
+    tracked: bool,
+    submitted: &str,
+    history: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let submitted = submitted.trim();
     if tracked && !submitted.is_empty() {
         return Some(crate::tmux::truncate_prompt_title(submitted));
     }
@@ -72,7 +84,7 @@ pub fn last(session: &str) -> Option<String> {
             if tracked {
                 None
             } else {
-                crate::prompt_history::last(session)
+                history()
             }
         })
 }

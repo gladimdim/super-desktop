@@ -15,8 +15,7 @@ use vte4::{PtyFlags, Terminal as VteTerminal};
 use crate::card_source::{CardSource, RemoteSession};
 use crate::state::TerminalData;
 use crate::tmux::{
-    capture_pane_text, ensure_session_with_inventory, get_agent_config,
-    inspect_status_with_screen, preview_from_screen, resolve_own_opencode_id,
+    ensure_session_with_inventory, get_agent_config,
     tmux_bin,
 };
 
@@ -326,6 +325,9 @@ impl MiniTerminalCard {
         screen_w: i32,
         screen_h: i32,
         startup_inventory: Option<Arc<crate::tmux::SessionInventory>>,
+        // Custom launchers loaded once for a restoration batch; `None` reads
+        // state.json for this one card.
+        custom_harnesses: Option<Rc<Vec<crate::custom_harness::CustomHarness>>>,
         hover_lock: HoverRaiseLock,
         source: CardSource,
     ) -> Self
@@ -417,8 +419,11 @@ impl MiniTerminalCard {
 
         let agent_type = data.borrow().agent_type.clone();
         let cfg = get_agent_config(&agent_type);
-        let custom = crate::state::load_state().custom_harnesses.into_iter()
-            .find(|item| item.id == agent_type);
+        let custom = match custom_harnesses {
+            Some(list) => list.iter().find(|item| item.id == agent_type).cloned(),
+            None => crate::state::load_state().custom_harnesses.into_iter()
+                .find(|item| item.id == agent_type),
+        };
         let display_name = custom.as_ref().map_or(cfg.name, |item| item.name.as_str());
         let display_icon = custom.as_ref().map_or(cfg.icon, |item| item.icon.as_str());
 
@@ -1459,15 +1464,23 @@ impl MiniTerminalCard {
         }
     }
 
+    /// Refresh this card alone (one worker, one tmux inventory).
     pub fn refresh_status(&self) {
+        run_status_refresh(self.prepare_status_refresh().into_iter().collect());
+    }
+
+    /// The worker request for this card's status/title/preview, plus how to
+    /// apply the answer on the main thread. `None` for a remote card or while
+    /// a previous refresh of this card is still running.
+    pub fn prepare_status_refresh(&self) -> Option<PendingRefresh> {
         // A remote card's title, badge and preview come from the host's
         // snapshot: probing this machine's tmux or agent databases for another
         // machine's session would describe the wrong session.
         if self.source.is_remote() {
-            return;
+            return None;
         }
         if self.refresh_in_flight.get() {
-            return;
+            return None;
         }
 
         let sess_name = self.data.borrow().session_name.clone();
@@ -1512,41 +1525,15 @@ impl MiniTerminalCard {
         let in_flight = Rc::downgrade(&self.refresh_in_flight);
         self.refresh_in_flight.set(true);
 
-        glib::MainContext::default().spawn_local(async move {
-            if in_flight.upgrade().is_none() {
-                return;
-            }
-            let handle = gtk4::gio::spawn_blocking(move || {
-                // Use the same submitted-prompt source as the Android bridge.
-                let screen = capture_pane_text(&sess_name);
-                let status = inspect_status_with_screen(
-                    &sess_name,
-                    &agent_type,
-                    screen.as_deref().unwrap_or(""),
-                );
-                let preview = preview_lines.map(|lines| match screen.as_deref() {
-                    Some(screen) => preview_from_screen(screen, lines),
-                    None if status.status == "EXITED" => "Session offline or ended.".into(),
-                    None => "Ready. Waiting for input...".into(),
-                });
-                // `resolve_own_opencode_id` only ever returns THIS pane's own
-                // session (own `--session` flag, else a claims-aware match),
-                // so `db_text` is the prompt typed INTO this harness — never
-                // another terminal's input. A stale cached guess heals here.
-                let mut oc_id = cached_oc_id;
-                if need_resolve {
-                    let fresh = resolve_own_opencode_id(&sess_name, oc_id.as_deref());
-                    if fresh != oc_id {
-                        oc_id = fresh;
-                    }
-                }
-                let prompt = crate::bridge::last_user_text(
-                    &sess_name, &agent_type, oc_id.as_deref(), screen.as_deref().unwrap_or(""),
-                );
-                let prompt = crate::bridge::session_title(&sess_name, &agent_type, &status.pid).or(prompt);
-                (status, preview, prompt, oc_id)
-            });
-            let Ok((status_info, preview, prompt, oc_id)) = handle.await else {
+        let request = crate::card_status::CardRequest {
+            session: sess_name,
+            agent: agent_type,
+            preview_lines,
+            oc_id: cached_oc_id,
+            need_resolve,
+        };
+        let apply = Box::new(move |update: Option<crate::card_status::CardUpdate>| {
+            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id }) = update else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -1601,7 +1588,40 @@ impl MiniTerminalCard {
                 flag.set(false);
             }
         });
+        Some(PendingRefresh { request, apply })
     }
+}
+
+/// One card's part of a batched status refresh.
+pub struct PendingRefresh {
+    request: crate::card_status::CardRequest,
+    apply: Box<dyn FnOnce(Option<crate::card_status::CardUpdate>)>,
+}
+
+/// Refresh several cards with one worker and one tmux inventory, then apply
+/// each answer on the main thread. Cards dropped meanwhile are skipped (the
+/// appliers only hold weak references).
+pub fn run_status_refresh(pending: Vec<PendingRefresh>) {
+    if pending.is_empty() {
+        return;
+    }
+    let (requests, appliers): (Vec<_>, Vec<_>) =
+        pending.into_iter().map(|p| (p.request, p.apply)).unzip();
+    glib::MainContext::default().spawn_local(async move {
+        let handle = gtk4::gio::spawn_blocking(move || crate::card_status::refresh(requests));
+        match handle.await {
+            Ok(updates) if updates.len() == appliers.len() => {
+                for (apply, update) in appliers.into_iter().zip(updates) {
+                    apply(Some(update));
+                }
+            }
+            _ => {
+                for apply in appliers {
+                    apply(None);
+                }
+            }
+        }
+    });
 }
 
 fn status_view_texts(status: &str) -> (&'static str, &'static str, &'static str) {

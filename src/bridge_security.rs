@@ -46,23 +46,61 @@ pub(super) enum Transport {
 }
 pub(super) struct Connection {
     transport: Transport,
-    peeked: Option<u8>,
+    /// Bytes already read from the transport but not yet consumed: a peeked
+    /// byte, or the start of a pipelined request read past the previous body.
+    pending: Vec<u8>,
     deadline: Option<std::time::Instant>,
     credential_hash: Option<String>,
+    /// Last revocation check for `credential_hash`; see `AuthCache`.
+    auth: AuthCache,
+    /// Read timeout last applied to the socket, so hot loops do not issue a
+    /// `setsockopt` for an unchanged value.
+    read_timeout: std::cell::Cell<Option<Option<Duration>>>,
+    /// The current response may leave the connection open for another request
+    /// (HTTP/1.1 keep-alive). Cleared by any route that takes the stream over.
+    pub(super) persist: bool,
+}
+
+/// How often an authenticated connection re-reads the paired-device list.
+/// Explicit revocation also shuts the socket down at once (`disconnect`), and
+/// the watchdog closes expired devices every 250 ms, so this bounds only the
+/// window in which already-buffered TLS input can still be processed.
+pub(super) const AUTH_RECHECK: Duration = Duration::from_secs(1);
+
+/// Throttled result of the paired-device check. A failed check is final for
+/// the connection: a revoked credential never becomes valid again.
+pub(super) struct AuthCache(std::cell::Cell<(Option<std::time::Instant>, bool)>);
+impl AuthCache {
+    pub(super) fn new() -> Self { Self(std::cell::Cell::new((None, true))) }
+    /// Mark the credential as verified now (the request was just authorized).
+    pub(super) fn verified(&self, now: std::time::Instant) { self.0.set((Some(now), true)); }
+    /// `check` runs at most once per `AUTH_RECHECK`.
+    pub(super) fn check(&self, now: std::time::Instant, check: impl FnOnce() -> bool) -> bool {
+        let (last, ok) = self.0.get();
+        if !ok { return false }
+        if last.is_some_and(|at| now.saturating_duration_since(at) < AUTH_RECHECK) { return true }
+        let ok = check();
+        self.0.set((Some(now), ok));
+        ok
+    }
 }
 impl Connection {
     pub(super) fn tls(socket: TcpStream, config: Arc<rustls::ServerConfig>) -> io::Result<Self> {
         socket.set_nodelay(true)?;
         socket.set_write_timeout(Some(Duration::from_secs(5)))?;
-        Ok(Self { transport: Transport::Tls(Box::new(rustls::StreamOwned::new(
-            rustls::ServerConnection::new(config).map_err(io::Error::other)?, socket))), peeked: None,
-            deadline: Some(std::time::Instant::now() + Duration::from_secs(5)), credential_hash: None })
+        Ok(Self::with(Transport::Tls(Box::new(rustls::StreamOwned::new(
+            rustls::ServerConnection::new(config).map_err(io::Error::other)?, socket))),
+            Some(std::time::Instant::now() + Duration::from_secs(5))))
     }
     pub(super) fn local(socket: UnixStream) -> Self {
-        Self { transport: Transport::Local(socket), peeked: None, deadline: Some(std::time::Instant::now()+Duration::from_secs(5)), credential_hash: None }
+        Self::with(Transport::Local(socket), Some(std::time::Instant::now()+Duration::from_secs(5)))
     }
     #[cfg(test)] pub(super) fn plain(socket: TcpStream) -> Self {
-        Self { transport: Transport::Plain(socket), peeked: None, deadline: None, credential_hash: None }
+        Self::with(Transport::Plain(socket), None)
+    }
+    fn with(transport: Transport, deadline: Option<std::time::Instant>) -> Self {
+        Self { transport, pending: Vec::new(), deadline, credential_hash: None, auth: AuthCache::new(),
+            read_timeout: std::cell::Cell::new(None), persist: false }
     }
     pub(super) fn is_local(&self) -> bool { matches!(self.transport, Transport::Local(_)) }
     pub(super) fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
@@ -70,8 +108,11 @@ impl Connection {
             #[cfg(test)] Transport::Plain(s) => s.peer_addr() }
     }
     pub(super) fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        if self.read_timeout.get() == Some(timeout) { return Ok(()) }
         match &self.transport { Transport::Tls(s) => s.sock.set_read_timeout(timeout), Transport::Local(s) => s.set_read_timeout(timeout),
-            #[cfg(test)] Transport::Plain(s) => s.set_read_timeout(timeout) }
+            #[cfg(test)] Transport::Plain(s) => s.set_read_timeout(timeout) }?;
+        self.read_timeout.set(Some(timeout));
+        Ok(())
     }
     pub(super) fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         match &self.transport { Transport::Tls(s) => s.sock.set_write_timeout(timeout), Transport::Local(s) => s.set_write_timeout(timeout),
@@ -83,16 +124,43 @@ impl Connection {
     }
     pub(super) fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() { return Ok(0) }
-        if self.peeked.is_none() {
+        if self.pending.is_empty() {
             let mut byte = [0];
             if self.read(&mut byte)? == 0 { return Ok(0) }
-            self.peeked = Some(byte[0]);
+            self.pending.push(byte[0]);
         }
-        buf[0] = self.peeked.unwrap(); Ok(1)
+        buf[0] = self.pending[0]; Ok(1)
+    }
+    /// Return bytes read past the end of one request (HTTP pipelining) so the
+    /// next `read` sees them first.
+    pub(super) fn unread(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() { return }
+        let mut pending = bytes.to_vec();
+        pending.append(&mut self.pending);
+        self.pending = pending;
+    }
+    /// Wait up to `idle` for the first byte of another request on a kept-alive
+    /// connection, then give that request the usual header/body deadline.
+    pub(super) fn await_next_request(&mut self, idle: Duration) -> bool {
+        self.deadline = None;
+        if self.pending.is_empty() && self.set_read_timeout(Some(idle)).is_err() { return false }
+        if !matches!(self.peek(&mut [0u8; 1]), Ok(1)) { return false }
+        self.deadline = Some(std::time::Instant::now() + Duration::from_secs(5));
+        true
     }
     pub(super) fn streaming(&mut self) { self.deadline = None; }
     pub(super) fn upload_deadline(&mut self) { self.deadline = Some(std::time::Instant::now() + Duration::from_secs(30)); }
-    pub(super) fn credential(&mut self, token: &str) { self.credential_hash = Some(digest(token.as_bytes())); }
+    pub(super) fn credential(&mut self, token: &str) {
+        self.credential_hash = Some(digest(token.as_bytes()));
+        // The caller has just validated this token.
+        self.auth = AuthCache::new();
+        self.auth.verified(std::time::Instant::now());
+    }
+    /// A kept-alive connection authenticates every request on its own.
+    pub(super) fn forget_credential(&mut self) {
+        self.credential_hash = None;
+        self.auth = AuthCache::new();
+    }
     /// Token hash this connection authenticated with, for per-device resource
     /// budgets. Never logged, never returned to a peer, never persisted here.
     pub(super) fn credential_id(&self) -> Option<&str> { self.credential_hash.as_deref() }
@@ -106,8 +174,12 @@ impl Connection {
             #[cfg(test)] Transport::Plain(s) => Some(s.as_raw_fd()),
         }
     }
+    /// Re-reads the paired-device list at most once per `AUTH_RECHECK`, not on
+    /// every socket read/write (streams poll their peer up to 60 times a
+    /// second, and the device list sits behind the global pairing mutex).
     pub(super) fn still_authorized(&self) -> bool {
-        self.credential_hash.as_ref().is_none_or(|hash| pair_state().lock().map(|p|
+        let Some(hash) = self.credential_hash.as_ref() else { return true };
+        self.auth.check(std::time::Instant::now(), || pair_state().lock().map(|p|
             p.cfg.devices.iter().any(|d| d.expires > now_epoch() && equal(hash, &d.token_hash))).unwrap_or(false))
     }
 }
@@ -115,7 +187,12 @@ impl Read for Connection {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if !self.still_authorized() { return Err(io::Error::new(io::ErrorKind::PermissionDenied,"device revoked or expired")) }
         if buf.is_empty() { return Ok(0) }
-        if let Some(b) = self.peeked.take() { buf[0] = b; return Ok(1) }
+        if !self.pending.is_empty() {
+            let n = self.pending.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.pending[..n]);
+            self.pending.drain(..n);
+            return Ok(n)
+        }
         if let Some(deadline) = self.deadline {
             let left = deadline.checked_duration_since(std::time::Instant::now()).ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut,"request deadline"))?;
             self.set_read_timeout(Some(left))?;
@@ -177,7 +254,7 @@ pub(super) fn serve_control() -> io::Result<()> {
     let listener = UnixListener::bind(&path)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     // Sequential owner-only requests cannot create unbounded threads.
-    std::thread::spawn(move || { for socket in listener.incoming().flatten() { handle_client(Connection::local(socket), None); } });
+    std::thread::spawn(move || { for socket in listener.incoming().flatten() { serve_connection(Connection::local(socket), None); } });
     // Enforce a total handshake/header/body deadline even if a TLS peer trickles
     // bytes fast enough to avoid individual socket read timeouts.
     std::thread::spawn(|| loop {
@@ -193,4 +270,60 @@ pub(super) fn serve_control() -> io::Result<()> {
         }
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn authorization_is_rechecked_at_most_once_per_interval() {
+        let cache = AuthCache::new();
+        let checks = std::cell::Cell::new(0);
+        let start = Instant::now();
+        let check = |result: bool| { checks.set(checks.get() + 1); result };
+        // First use checks; hot-loop uses inside the interval do not.
+        assert!(cache.check(start, || check(true)));
+        for ms in [1, 16, 500, 999] {
+            assert!(cache.check(start + Duration::from_millis(ms), || check(true)));
+        }
+        assert_eq!(checks.get(), 1);
+        // A revocation is seen on the first check after the interval ...
+        assert!(!cache.check(start + AUTH_RECHECK, || check(false)));
+        assert_eq!(checks.get(), 2);
+        // ... and is final: no later check can restore access.
+        assert!(!cache.check(start + AUTH_RECHECK * 5, || check(true)));
+        assert_eq!(checks.get(), 2);
+        // A just-authorized request does not need another lookup.
+        let fresh = AuthCache::new();
+        fresh.verified(start);
+        assert!(fresh.check(start + Duration::from_millis(10), || check(false)));
+        assert_eq!(checks.get(), 2);
+    }
+
+    #[test]
+    fn unauthenticated_connections_skip_the_device_lookup() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let connection = Connection::plain(server);
+        assert!(connection.still_authorized());
+    }
+
+    #[test]
+    fn pushed_back_bytes_are_read_first() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut connection = Connection::plain(server);
+        client.write_all(b"cd").unwrap();
+        connection.unread(b"ab");
+        let mut peeked = [0u8; 1];
+        assert_eq!(connection.peek(&mut peeked).unwrap(), 1);
+        assert_eq!(&peeked, b"a");
+        let mut all = [0u8; 4];
+        connection.read_exact(&mut all).unwrap();
+        assert_eq!(&all, b"abcd");
+    }
 }

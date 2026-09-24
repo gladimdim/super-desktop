@@ -77,9 +77,62 @@ fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
     (state.into(), completed)
 }
 
+/// Cached `rollout` answers: `(found_at, pane start time, answer)`.
+type RolloutEntry = (std::time::Instant, Option<String>, Option<(PathBuf, String)>);
+static ROLLOUTS: OnceLock<Mutex<HashMap<u32, RolloutEntry>>> = OnceLock::new();
+/// A validated rollout is re-discovered at most this often.
+const ROLLOUT_REWALK: std::time::Duration = std::time::Duration::from_secs(5);
+/// A pane without a Codex rollout is re-checked at most this often (one
+/// card refresh asks up to three times: status, title and prompt).
+const ROLLOUT_NEGATIVE: std::time::Duration = std::time::Duration::from_secs(1);
+
+fn process_start(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    Some(stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.to_owned())
+}
+
 /// Find only the nearest CLI's own open rollout, never "latest file in cwd".
-/// Don't descend into a Codex process: its tool children may run other agents.
+///
+/// Cached per pane process: a hit is only reused while the pane process is the
+/// same (start time) and the Codex descriptor still links to that rollout,
+/// and it is re-walked every few seconds regardless.
 fn rollout(pane_pid: u32) -> Option<(PathBuf, String)> {
+    let cache = ROLLOUTS.get_or_init(Mutex::default);
+    let start = process_start(pane_pid);
+    if let Some((at, cached_start, answer)) = cache.lock().unwrap().get(&pane_pid) {
+        if *cached_start == start {
+            match answer {
+                Some((fd, identity))
+                    if at.elapsed() < ROLLOUT_REWALK
+                        && std::fs::read_link(fd)
+                            .is_ok_and(|link| link.as_os_str() == identity.as_str()) =>
+                {
+                    return answer.clone();
+                }
+                None if at.elapsed() < ROLLOUT_NEGATIVE => return None,
+                _ => {}
+            }
+        }
+    }
+    let answer = rollout_walk(pane_pid);
+    let mut cache = cache.lock().unwrap();
+    if cache.len() >= 128 {
+        cache.clear();
+    }
+    cache.insert(pane_pid, (std::time::Instant::now(), start, answer.clone()));
+    answer
+}
+
+#[cfg(test)]
+thread_local! {
+    /// `/proc` walks made by this test thread.
+    static ROLLOUT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Don't descend into a Codex process: its tool children may run other agents.
+fn rollout_walk(pane_pid: u32) -> Option<(PathBuf, String)> {
+    #[cfg(test)]
+    ROLLOUT_WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut queue = VecDeque::from([(pane_pid, 0)]);
     let mut visited = HashSet::new();
     while let Some((pid, depth)) = queue.pop_front() {
@@ -134,27 +187,68 @@ pub(crate) fn session_title(pane_pid: u32) -> Option<String> {
     title_for_rollout(&fd, Path::new(&identity))
 }
 
+/// `(dev, inode, length, mtime s, mtime ns)`: changes whenever a file does.
+type Stamp = (u64, u64, u64, i64, i64);
+
+fn stamp(meta: &std::fs::Metadata) -> Stamp {
+    (meta.dev(), meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec())
+}
+
+/// Memo of a value derived from a file's content, reused while the file's
+/// stamp is unchanged. Refreshes re-ask every second; files change rarely.
+fn memo<T: Clone>(
+    cache: &'static OnceLock<Mutex<HashMap<String, (Stamp, T)>>>,
+    key: String,
+    stamp: Stamp,
+    compute: impl FnOnce() -> T,
+) -> T {
+    let cache = cache.get_or_init(Mutex::default);
+    if let Some((_, value)) = cache.lock().unwrap().get(&key).filter(|(s, _)| *s == stamp) {
+        return value.clone();
+    }
+    let value = compute();
+    let mut cache = cache.lock().unwrap();
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(key, (stamp, value.clone()));
+    value
+}
+
+static SESSION_IDS: OnceLock<Mutex<HashMap<String, (Stamp, Option<String>)>>> = OnceLock::new();
+static TITLES: OnceLock<Mutex<HashMap<String, (Stamp, Option<String>)>>> = OnceLock::new();
+static PROMPTS: OnceLock<Mutex<HashMap<String, (Stamp, Option<String>)>>> = OnceLock::new();
+
 fn title_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
     let file = File::open(fd).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
         return None;
     }
-    let mut header = Vec::new();
-    BufReader::new(file.take(64 * 1024)).read_until(b'\n', &mut header).ok()?;
-    if !header.ends_with(b"\n") { return None; }
-    let record: Value = serde_json::from_slice(&header).ok()?;
-    if record["type"] != "session_meta" || record["payload"]["source"] != "cli" {
-        return None;
-    }
-    let id = record["payload"]["id"].as_str().filter(|id| !id.is_empty())?;
+    // Keyed on the whole stamp: a rewritten file may carry another header.
+    let id = memo(&SESSION_IDS, identity.to_string_lossy().into_owned(), stamp(&meta), || {
+        let mut header = Vec::new();
+        BufReader::new(file.take(64 * 1024)).read_until(b'\n', &mut header).ok()?;
+        if !header.ends_with(b"\n") { return None; }
+        let record: Value = serde_json::from_slice(&header).ok()?;
+        if record["type"] != "session_meta" || record["payload"]["source"] != "cli" {
+            return None;
+        }
+        record["payload"]["id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
+    })?;
     // Derive CODEX_HOME from this rollout, including nondefault installations.
     let home = identity.ancestors().find(|path| {
         path.file_name().is_some_and(|name| name == "sessions" || name == "archived_sessions")
     })?.parent()?;
-    let mut index = File::open(home.join("session_index.jsonl")).ok()?;
+    let index_path = home.join("session_index.jsonl");
+    let mut index = File::open(&index_path).ok()?;
     let meta = index.metadata().ok()?;
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    let key = format!("{}\0{id}", index_path.display());
+    memo(&TITLES, key, stamp(&meta), move || title_from_index_file(&mut index, &meta, &id))
+}
+
+fn title_from_index_file(index: &mut File, meta: &std::fs::Metadata, id: &str) -> Option<String> {
     // The append-only index records names separately from raw first prompts.
     // Bound work per refresh, and never interpret an incomplete JSON record.
     let start = meta.len().saturating_sub(4 * 1024 * 1024);
@@ -187,11 +281,19 @@ pub fn last_user_prompt(session: &str) -> Option<String> {
         .args(["display-message", "-p", "-t", session, "#{pane_pid}"])
         .output().ok()?;
     if !out.status.success() { return None; }
-    let pid = String::from_utf8(out.stdout).ok()?.trim().parse().ok()?;
-    let (fd, _) = rollout(pid)?;
+    last_user_prompt_for_pid(String::from_utf8(out.stdout).ok()?.trim().parse().ok()?)
+}
+
+/// `last_user_prompt` for a pane process the caller already knows.
+pub fn last_user_prompt_for_pid(pid: u32) -> Option<String> {
+    let (fd, identity) = rollout(pid)?;
     let mut file = File::open(fd).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    memo(&PROMPTS, identity, stamp(&meta), move || prompt_from_rollout(&mut file, &meta))
+}
+
+fn prompt_from_rollout(file: &mut File, meta: &std::fs::Metadata) -> Option<String> {
     // Bounded tail read; incomplete records and all response/tool records are ignored.
     let start = meta.len().saturating_sub(1024 * 1024);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -215,7 +317,6 @@ fn prompt_from_records(bytes: &[u8]) -> Option<String> {
     })
 }
 
-type Stamp = (u64, u64, u64, i64, i64);
 type Cached = (Stamp, (String, Option<String>));
 static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
 
@@ -496,10 +597,16 @@ mod tests {
             }
             line.clear();
         }
+        let walks = || ROLLOUT_WALKS.with(|walks| walks.get());
+        let before = walks();
         let first = inspect("test", child.id());
         assert!(first.supported);
         assert_eq!(first.state, "completed");
         assert_eq!(session_title(child.id()).as_deref(), Some("Fix toolbar sizing"));
+        let _ = last_user_prompt_for_pid(child.id());
+        // Status, title and prompt of one refresh share one /proc walk while
+        // the descriptor still links to the same rollout.
+        assert_eq!(walks() - before, 1);
         std::fs::OpenOptions::new().append(true).open(&index).unwrap()
             .write_all(b"{\"id\":\"own-thread\",\"thread_name\":\"Renamed conversation\"}\n").unwrap();
         assert_eq!(session_title(child.id()).as_deref(), Some("Renamed conversation"));

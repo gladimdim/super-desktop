@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use crate::state::load_state;
 use crate::tmux::{
-    capture_pane_text, get_agent_config,
+    capture_pane_text, extract_composer_draft, get_agent_config,
     get_composer_draft, get_opencode_user_text_by_id, inspect_status,
     inspect_status_with_screen, resolve_own_opencode_id, resolve_workspace_dir,
     strip_terminal_escapes, SessionStatus,
@@ -47,13 +47,16 @@ const SERVICE_NAME: &str = "Omarchy Harness Bridge";
 const PROTOCOL_VERSION: u32 = 3;
 #[path = "desktop_bridge.rs"]
 mod desktop;
-static INPUT_ACTIVITY: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+#[path = "bridge_harness_list.rs"]
+mod harness_list;
+#[path = "bridge_terminal_stream.rs"]
+mod terminal_stream;
+#[path = "bridge_completions.rs"]
+mod completions;
 
-fn wake_terminal_streams() {
-    if let Ok(mut generation) = INPUT_ACTIVITY.0.lock() {
-        *generation = generation.wrapping_add(1);
-        INPUT_ACTIVITY.1.notify_all();
-    }
+/// Phone input reached `session`: wake that session's terminal streams only.
+fn wake_terminal_streams(session: &str) {
+    terminal_stream::wake(session);
 }
 type LauncherSessionMeta = (String, String, Option<String>, u8, Option<String>);
 
@@ -99,6 +102,7 @@ fn theme_document() -> serde_json::Value {
 }
 
 /// The Android snapshot and its live stream share one document contract.
+/// One `state.json` read and one tmux inventory per document.
 fn harness_document() -> serde_json::Value {
     serde_json::json!({
         "protocolVersion": PROTOCOL_VERSION,
@@ -154,38 +158,6 @@ fn now_epoch() -> f64 {
 }
 
 // ---------- session truth (reuses crate::tmux) ----------
-
-fn live_sessions() -> Vec<String> {
-    let out = Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output();
-    let mut sessions: Vec<(String, i64)> = vec![];
-    if let Ok(o) = out {
-        if o.status.success() {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
-                let name = line.trim().to_string();
-                if name.starts_with("sd_term_") {
-                    sessions.push((name, 0));
-                }
-            }
-        }
-    }
-    // Order oldest-first when creation times are known via state.json.
-    let state = load_state();
-    let order: HashMap<String, f64> = state
-        .terminals
-        .iter()
-        .map(|t| (t.session_name.clone(), t.created_at))
-        .collect();
-    sessions.sort_by(|a, b| {
-        order
-            .get(&a.0)
-            .unwrap_or(&f64::MAX)
-            .partial_cmp(order.get(&b.0).unwrap_or(&f64::MAX))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    sessions.into_iter().map(|(n, _)| n).collect()
-}
 
 pub(crate) fn last_user_text(
     session: &str,
@@ -281,87 +253,8 @@ fn tag_color(tag: u8) -> Option<&'static str> {
 
 pub fn collect_harnesses() -> Vec<serde_json::Value> {
     let state = load_state();
-    // agent type, fallback command, persisted agent session id and the user's
-    // group colour (super-desktop's 8-swatch tag) for every session we know
-    // about.
-    let meta: HashMap<String, LauncherSessionMeta> = state
-        .terminals
-        .iter()
-        .map(|t| {
-            (
-                t.session_name.clone(),
-                (
-                    t.agent_type.clone(),
-                    t.command.clone(),
-                    t.agent_session_id.clone(),
-                    t.tag,
-                    t.workspace_dir.clone(),
-                ),
-            )
-        })
-        .collect();
-    let mut out = vec![];
-    for session in live_sessions() {
-        let (agent_type, cmd_fallback, persisted_sid, tag, workspace_dir) = meta
-            .get(&session)
-            .cloned()
-            .unwrap_or_else(|| ("shell".to_string(), String::new(), None, 0, None));
-        let cfg = get_agent_config(&agent_type);
-        let custom = state.custom_harnesses.iter().find(|item| item.id == agent_type);
-        let agent_name = custom.map_or(cfg.name, |item| item.name.as_str());
-        let agent_icon = custom.map_or(cfg.icon, |item| item.icon.as_str());
-        let screen = capture_pane_text(&session).unwrap_or_default();
-        let (model, effort) = harness_model_effort(&agent_type, &screen);
-        let model = crate::harness_metadata::inspect(&session, &agent_type)
-            .map(|value| value.model).filter(|model| !model.is_empty()).or(model);
-        let status = inspect_status_with_screen(&session, &agent_type, &screen);
-        let harness_home = resolve_workspace_dir(workspace_dir.as_deref());
-        let (directory, directory_kind) =
-            launcher_directory(&agent_type, &harness_home, &status.cwd);
-        let directory_display = crate::state::display_dir(&directory);
-        let cmd = if status.cmd.is_empty() {
-            if cmd_fallback.is_empty() {
-                agent_type.clone()
-            } else {
-                cmd_fallback.clone()
-            }
-        } else {
-            status.cmd.clone()
-        };
-        out.push(serde_json::json!({
-            "id": session,
-            "agentType": agent_type,
-            "agentName": agent_name,
-            "model": model,
-            "effort": effort,
-            "icon": agent_icon,
-            "status": status.status,
-            "label": status.label,
-            "pid": status.pid,
-            "cmd": cmd,
-            "sessionTitle": session_title(&session, &agent_type, &status.pid),
-            "lastPrompt": last_user_text(
-                &session,
-                &agent_type,
-                persisted_sid.as_deref(),
-                &screen,
-            ),
-            "composerDraft": get_composer_draft(&session),
-            "preview": preview_with_directory(&screen, directory_kind, &directory_display),
-            "directory": &directory,
-            "directoryDisplay": &directory_display,
-            "directoryKind": directory_kind,
-            "homeDirectory": (directory_kind == "home").then_some(directory.as_str()),
-            "cwd": (directory_kind == "cwd").then_some(directory.as_str()),
-            // Group colour: the same 8-swatch tag the desktop card shows, so a
-            // phone row can be coloured identically (`tagColor` is null when
-            // the card has no tag).
-            "tag": tag,
-            "tagColor": tag_color(tag),
-            "updatedAt": utc_now_iso(),
-        }));
-    }
-    out
+    let snapshot = crate::tmux::pane_snapshot();
+    harness_list::collect(&state, snapshot.as_ref())
 }
 
 /// Read only recognized status-footer formats from the current pane bottom.
@@ -582,6 +475,10 @@ pub fn hostname() -> String {
 struct Request {
     method: String,
     path: String,
+    /// Raw query string (after `?`), empty when absent.
+    query: String,
+    /// HTTP/1.1 without `Connection: close` (HTTP/1.0 never persists).
+    keep_alive: bool,
     headers: HashMap<String, String>,
     body: String,
     _upload_slot: Option<crate::assets::Transfer>,
@@ -619,7 +516,11 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("GET").to_uppercase();
     let raw_path = parts.next().unwrap_or("/").to_string();
-    let path = raw_path.split('?').next().unwrap_or("/").to_string();
+    let (path, query) = match raw_path.split_once('?') {
+        Some((path, query)) => (path.to_string(), query.to_string()),
+        None => (raw_path.clone(), String::new()),
+    };
+    let http11 = parts.next().is_some_and(|v| v == "HTTP/1.1");
     let mut headers = HashMap::new();
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
@@ -630,11 +531,14 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
         .get("content-length")
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    let keep_alive = http11 && !headers.get("connection").is_some_and(|v| {
+        v.split(',').any(|token| token.trim().eq_ignore_ascii_case("close"))
+    });
     let image_upload = method == "POST" && crate::prompt_image::route(&path).is_some();
     if headers.contains_key("transfer-encoding") { return None; }
     let mut upload_slot = None;
     if image_upload {
-        let head = Request { method: method.clone(), path: path.clone(), headers: headers.clone(), body: String::new(), _upload_slot: None };
+        let head = Request { method: method.clone(), path: path.clone(), query: String::new(), keep_alive: false, headers: headers.clone(), body: String::new(), _upload_slot: None };
         if headers.contains_key("origin") || headers.contains_key("sec-fetch-site") {
             respond(stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
             return None;
@@ -656,7 +560,10 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
         if let Some(guard) = admission { guard.identify(token); }
         stream.upload_deadline();
     } else if content_len > 16384 { return None; }
-    let mut body = buf[header_end..total].to_vec();
+    // Bytes past this request's body belong to the next pipelined request.
+    let body_end = (header_end + content_len).min(total);
+    let mut body = buf[header_end..body_end].to_vec();
+    stream.unread(&buf[body_end..total]);
     while body.len() < content_len {
         let mut chunk = vec![0u8; (content_len - body.len()).min(8192)];
         let n = stream.read(&mut chunk).ok()?;
@@ -669,6 +576,8 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
     Some(Request {
         method,
         path,
+        query,
+        keep_alive,
         headers,
         body: String::from_utf8_lossy(&body).to_string(),
         _upload_slot: upload_slot,
@@ -677,8 +586,15 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
 
 fn respond(stream: &mut Connection, code: u16, reason: &str, value: &serde_json::Value) {
     let body = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
+    respond_body(stream, code, reason, &body);
+}
+
+/// `respond` for an already serialized JSON body. The connection stays open
+/// for another request only when `stream.persist` allows it.
+fn respond_body(stream: &mut Connection, code: u16, reason: &str, body: &str) {
+    let connection = if stream.persist { "keep-alive" } else { "close" };
     let head = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: {connection}\r\n\r\n",
         body.len()
     );
     // One write, not head-then-body: a WebSocket client that rejects an
@@ -746,6 +662,8 @@ fn ws_upgrade(stream: &mut Connection, req: &Request) -> bool {
     let Some(key) = req.headers.get("sec-websocket-key") else {
         return false;
     };
+    // The socket now belongs to the WebSocket, never to another HTTP request.
+    stream.persist = false;
     crate::ws::handshake(stream, key).is_ok()
 }
 
@@ -775,135 +693,19 @@ fn ws_client_alive(stream: &mut Connection) -> bool {
     }
 }
 
-/// Push the full `/harnesses` document once a second.
-///
-/// Liveness comes from writes: a client that vanished makes the write (or the
-/// 5s write timeout) fail, which ends the thread — no reader thread needed.
-fn stream_harness_list(mut stream: Connection) {
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
-    while std::time::Instant::now() < deadline {
-        if !ws_client_alive(&mut stream) {
-            return;
-        }
-        let document = harness_document();
-        if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(1000));
-    }
-    let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
-}
-
-/// Push changed terminal snapshots, waking immediately after phone input.
-///
-/// The first frame doubles as the "attached" signal; the phone renders `tail`
-/// in its terminal screen and stops when `status` turns `EXITED`.
-fn stream_one_harness(mut stream: Connection, id: &str) {
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
-    let (agent_type, tag) = session_meta(id);
-    let Ok(mut control) = crate::tmux_control::Control::open(id) else {
-        let _ = crate::ws::write_close(&mut stream, 1011, "terminal unavailable");
-        return;
-    };
-    let mut cached_status = inspect_status(id, &agent_type);
-    let mut cached_title = session_title(id, &agent_type, &cached_status.pid);
-    let mut status_updated = std::time::Instant::now();
-    // The pane's own grid, read on the status tick: a client rendering this
-    // session's captured text needs the columns it was rendered at, and the
-    // pane's size changes far less often than its output.
-    let mut cached_grid = crate::tmux::pane_grid(id);
-    let mut previous: Option<String> = None;
-    let mut active_until = std::time::Instant::now();
-    let mut heartbeat = std::time::Instant::now();
-    while std::time::Instant::now() < deadline {
-        let input_generation = INPUT_ACTIVITY.0.lock().map(|g| *g).unwrap_or(0);
-        if !ws_client_alive(&mut stream) {
-            return;
-        }
-        // One styled tmux capture drives both representations. This is cheaper
-        // than capturing once for status/plain text and again for colour.
-        let captured = control.capture();
-        let alive = captured.is_ok();
-        let ansi_tail = captured.ok();
-        let plain_tail = ansi_tail.as_deref().map(strip_terminal_escapes);
-        if !alive {
-            cached_status = SessionStatus {
-                status: "EXITED",
-                label: "○ EXITED",
-                pid: String::new(),
-                cmd: String::new(),
-                cwd: String::new(),
-            };
-        } else if status_updated.elapsed() >= Duration::from_millis(500) {
-            cached_status = inspect_status_with_screen(id, &agent_type, plain_tail.as_deref().unwrap_or(""));
-            cached_title = session_title(id, &agent_type, &cached_status.pid);
-            cached_grid = crate::tmux::pane_grid(id);
-            status_updated = std::time::Instant::now();
-        }
-        let status = &cached_status;
-        let mut document = serde_json::json!({
-            "id": id,
-            "agentType": agent_type,
-            "status": status.status,
-            "sessionTitle": cached_title,
-            "label": status.label,
-            "tag": tag,
-            "tagColor": tag_color(tag),
-            // `tail` remains plain for existing launchers. `tailAnsi` is the
-            // exact tmux styling for clients that render ANSI SGR attributes.
-            "tail": plain_tail,
-            "tailAnsi": ansi_tail,
-            "tailFormat": alive.then_some("ansi-sgr"),
-            // The pane's own grid, so a client can lay this text out at the
-            // width it was rendered at instead of guessing from the lines.
-            "columns": cached_grid.map(|grid| grid.columns),
-            "rows": cached_grid.map(|grid| grid.rows),
-        });
-        let frame = document.to_string();
-        let changed = previous.as_deref() != Some(frame.as_str());
-        if changed || heartbeat.elapsed() >= Duration::from_secs(5) {
-            if changed { active_until = std::time::Instant::now() + Duration::from_secs(2); }
-            document["updatedAt"] = serde_json::json!(utc_now_iso());
-            if crate::ws::write_text(&mut stream, &document.to_string()).is_err() {
-                return;
-            }
-            previous = Some(frame);
-            heartbeat = std::time::Instant::now();
-        }
-        if !alive {
-            let _ = crate::ws::write_close(&mut stream, 1000, "session ended");
-            return;
-        }
-        let delay = Duration::from_millis(if std::time::Instant::now() < active_until { 16 } else { 100 });
-        if let Ok(generation) = INPUT_ACTIVITY.0.lock() {
-            if let Ok((generation, _)) = INPUT_ACTIVITY.1.wait_timeout_while(
-                generation, delay, |g| *g == input_generation,
-            ) {
-                if *generation != input_generation {
-                    active_until = std::time::Instant::now() + Duration::from_secs(2);
-                }
-            }
-        }
-    }
-    let _ = crate::ws::write_close(&mut stream, 1000, "reconnect");
-}
-
 /// Ordered input on a persistent socket. Never replay an input after a lost
 /// acknowledgement: the client must treat that outcome as uncertain.
-fn stream_keys(mut stream: Connection, id: &str) {
+fn stream_keys(stream: &mut Connection, id: &str) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let (agent, _) = session_meta(id);
     let Ok(mut control) = crate::tmux_control::Control::open(id) else {
-        let _ = crate::ws::write_close(&mut stream, 1011, "terminal unavailable");
+        let _ = crate::ws::write_close(stream, 1011, "terminal unavailable");
         return;
     };
     loop {
-        match crate::ws::read_frame(&mut stream) {
+        match crate::ws::read_frame(stream) {
             Ok(Some(crate::ws::Frame::Text(text))) => {
                 let Ok(body) = serde_json::from_str::<serde_json::Value>(&text) else { break };
                 let value = body["text"].as_str().unwrap_or("");
@@ -921,7 +723,7 @@ fn stream_keys(mut stream: Connection, id: &str) {
                     }
                     if !stream.still_authorized() { return Err("device_revoked".into()); }
                     control.send(value, false)?;
-                    wake_terminal_streams();
+                    wake_terminal_streams(id);
                     // Codex paste detection needs settling, but it does not
                     // need another phone-to-bridge round trip.
                     if enter && !value.is_empty() && agent == "codex" {
@@ -935,15 +737,15 @@ fn stream_keys(mut stream: Connection, id: &str) {
                     if enter {
                         crate::prompt_history::record(id, value);
                     }
-                    wake_terminal_streams();
+                    wake_terminal_streams(id);
                     Ok(())
                 })();
                 let ack = serde_json::json!({"sequence": body["sequence"],
                     "ok": result.is_ok(), "error": result.err()});
-                if crate::ws::write_text(&mut stream, &ack.to_string()).is_err() { break; }
+                if crate::ws::write_text(stream, &ack.to_string()).is_err() { break; }
             }
             Ok(Some(crate::ws::Frame::Ping(payload))) => {
-                if crate::ws::write_pong(&mut stream, &payload).is_err() { break; }
+                if crate::ws::write_pong(stream, &payload).is_err() { break; }
             }
             Ok(Some(crate::ws::Frame::Pong(_))) => {},
             _ => break,
@@ -1064,19 +866,48 @@ fn creation_command(agent: &str, body: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn handle_client(mut stream: Connection, admission: Option<security::Admission>) {
-    let req = match read_request(&mut stream, admission.as_ref()) {
-        Some(r) => r,
-        None => return,
+/// Idle time a kept-alive connection waits for its next request.
+const KEEP_ALIVE_IDLE: Duration = Duration::from_secs(30);
+/// Requests served on one connection before it is closed.
+const KEEP_ALIVE_MAX_REQUESTS: usize = 200;
+
+/// Serve one connection: a single request, or several with HTTP/1.1
+/// keep-alive. Every request is parsed, checked (browser origin, pairing,
+/// revocation) and answered on its own; a WebSocket upgrade, a binary asset or
+/// `Connection: close` ends the loop. The owner-only Unix socket is served
+/// sequentially, so it never keeps a connection open.
+fn serve_connection(mut stream: Connection, admission: Option<security::Admission>) {
+    let mut served = 0;
+    while handle_client(&mut stream, admission.as_ref()) {
+        served += 1;
+        if served >= KEEP_ALIVE_MAX_REQUESTS || !stream.await_next_request(KEEP_ALIVE_IDLE) {
+            break;
+        }
+    }
+}
+
+/// Read and answer one request. Returns whether the connection may carry
+/// another one.
+fn handle_client(stream: &mut Connection, admission: Option<&security::Admission>) -> bool {
+    stream.persist = false;
+    stream.forget_credential();
+    let Some(req) = read_request(stream, admission) else {
+        return false;
     };
+    stream.persist = req.keep_alive && !stream.is_local();
+    route(stream, &req, admission);
+    stream.persist
+}
+
+fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Admission>) {
     let local = stream.is_local();
     if req.headers.contains_key("origin") || req.headers.contains_key("sec-fetch-site") {
-        return respond(&mut stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
+        return respond(stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
     }
-    if let Some(guard) = &admission { guard.identify(bearer(&req.headers)); }
+    if let Some(guard) = admission { guard.identify(bearer(&req.headers)); }
     // Recheck on each stream I/O as well as closing the socket: TLS may already
     // have buffered input when a device is revoked.
-    if authorize(&req) {
+    if authorize(req) {
         let token = bearer(&req.headers);
         security::note_activity(token);
         stream.credential(token);
@@ -1084,16 +915,18 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     let path = req.path.split('?').next().unwrap_or("").to_string();
     if req.method == "POST" {
         if let Some(session) = crate::prompt_image::route(&path) {
-            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
                 return;
             }
             stream.streaming();
+            // Uploads run under their own long deadline: never reuse the socket.
+            stream.persist = false;
             let body = serde_json::from_str(&req.body).unwrap_or_default();
             let result = crate::prompt_image::submit(session, &security::digest(bearer(&req.headers).as_bytes()), &body, || stream.still_authorized());
-            wake_terminal_streams();
+            wake_terminal_streams(session);
             return match result {
-                Ok(()) => respond(&mut stream, 200, "OK", &serde_json::json!({"status":"submitted"})),
-                Err(error) => respond(&mut stream, 409, "Conflict", &serde_json::json!({"error":error})),
+                Ok(()) => respond(stream, 200, "OK", &serde_json::json!({"status":"submitted"})),
+                Err(error) => respond(stream, 409, "Conflict", &serde_json::json!({"error":error})),
             };
         }
     }
@@ -1101,35 +934,36 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     // All pairing routes go through explicit desktop approval. In particular,
     // neither a legacy PIN nor an open window can mint a token any longer.
     if path == "/api/v1/pair" || path.starts_with("/api/v1/pair/") {
-        return pairing::handle(&mut stream, &req, local, &path);
+        return pairing::handle(stream, req, local, &path);
     }
 
     if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
         let parts: Vec<_> = rest.split('/').collect();
         if parts.get(1) == Some(&"assets") {
-            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
                 return;
             }
             // Authenticated asset work has its own bounded renderer timeout;
             // the initial TLS/header/body deadline no longer applies.
             stream.streaming();
             let Some(_permit) = crate::assets::Transfer::acquire() else {
-                return respond(&mut stream, 429, "Too Many Requests", &serde_json::json!({"error":"asset_transfer_busy"}));
+                return respond(stream, 429, "Too Many Requests", &serde_json::json!({"error":"asset_transfer_busy"}));
             };
             if parts.len() == 2 && (req.method == "GET" || req.method == "POST") {
                 let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
                 let explicit = body["path"].as_str();
                 if req.method == "POST" && explicit.is_none() {
-                    return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"missing_path"}));
+                    return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"missing_path"}));
                 }
                 return match crate::assets::list(parts[0], if req.method == "POST" { explicit } else { None }) {
-                    Ok(items) => respond(&mut stream, 200, "OK", &serde_json::json!({"assets":items,"maxFileBytes":crate::assets::MAX_FILE})),
-                    Err(error) => respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":error})),
+                    Ok(items) => respond(stream, 200, "OK", &serde_json::json!({"assets":items,"maxFileBytes":crate::assets::MAX_FILE})),
+                    Err(error) => respond(stream, 400, "Bad Request", &serde_json::json!({"error":error})),
                 };
             }
             if parts.len() == 4 && parts[3] == "content" && req.method == "GET" {
                 return match crate::assets::read(parts[0], parts[2]) {
                     Ok((asset, bytes)) => {
+                        stream.persist = false;
                         let header = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nContent-Disposition: attachment\r\nX-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", asset.mime_type, bytes.len());
                         if stream.write_all(header.as_bytes()).is_err() { return; }
                         // Connection checks revocation on every write, including buffered TLS.
@@ -1137,7 +971,7 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                             if stream.write_all(chunk).is_err() { break; }
                         }
                     }
-                    Err(error) => respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":error})),
+                    Err(error) => respond(stream, 404, "Not Found", &serde_json::json!({"error":error})),
                 };
             }
             if parts.len() == 5 && parts[3] == "pages" && req.method == "GET" {
@@ -1148,28 +982,29 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                 });
                 return match result {
                     Ok(bytes) => {
+                        stream.persist = false;
                         let header = format!("HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", bytes.len());
                         if stream.write_all(header.as_bytes()).is_err() { return; }
                         for chunk in bytes.chunks(64 * 1024) { if stream.write_all(chunk).is_err() { break; } }
                     }
-                    Err(error) => respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":error})),
+                    Err(error) => respond(stream, 400, "Bad Request", &serde_json::json!({"error":error})),
                 };
             }
-            return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"unknown_asset_route"}));
+            return respond(stream, 404, "Not Found", &serde_json::json!({"error":"unknown_asset_route"}));
         }
     }
 
     if path == "/api/v1/workspaces" || path == "/api/v1/harness-types" || (path == "/api/v1/harnesses" && req.method == "POST") {
-        if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+        if !require_pairing(stream, req, AuthReply::Plain) {
             return;
         }
         if req.method == "GET" && path == "/api/v1/workspaces" {
             return match crate::ipc_request("workspace-choices") {
                 crate::Ipc::Reply(reply) => match serde_json::from_str::<serde_json::Value>(&reply) {
-                    Ok(value) => respond(&mut stream, 200, "OK", &value),
-                    Err(_) => respond(&mut stream, 502, "Bad Gateway", &serde_json::json!({"error":"invalid_desktop_response"})),
+                    Ok(value) => respond(stream, 200, "OK", &value),
+                    Err(_) => respond(stream, 502, "Bad Gateway", &serde_json::json!({"error":"invalid_desktop_response"})),
                 },
-                _ => respond(&mut stream, 503, "Service Unavailable", &serde_json::json!({"error":"desktop_not_running"})),
+                _ => respond(stream, 503, "Service Unavailable", &serde_json::json!({"error":"desktop_not_running"})),
             };
         }
         if req.method == "GET" && path == "/api/v1/harness-types" {
@@ -1181,7 +1016,7 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             }).chain(state.custom_harnesses.iter().map(|item| {
                 serde_json::json!({"id":item.id,"name":item.name,"icon":item.icon,"available":item.available()})
             })).collect();
-            return respond(&mut stream, 200, "OK", &serde_json::json!({"types":types,
+            return respond(stream, 200, "OK", &serde_json::json!({"types":types,
                 "workspace":crate::state::effective_workspace_dir(&state)}));
         }
         if req.method == "POST" && path == "/api/v1/harnesses" {
@@ -1189,31 +1024,31 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             let agent = body.get("agentType").and_then(|v| v.as_str()).unwrap_or("");
             let custom = load_state().custom_harnesses.into_iter().find(|item| item.id == agent);
             if !crate::tmux::HARNESS_KEYS.contains(&agent) && custom.is_none() {
-                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"unsupported_harness"}));
+                return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"unsupported_harness"}));
             }
             let available = custom.as_ref().map_or_else(
                 || crate::tmux::detect_harness_command(agent).is_some(),
                 |item| item.validate().is_ok(),
             );
             if !available {
-                return respond(&mut stream, 409, "Conflict", &serde_json::json!({"error":"harness_not_installed"}));
+                return respond(stream, 409, "Conflict", &serde_json::json!({"error":"harness_not_installed"}));
             }
             let Some(command) = creation_command(agent, &body) else {
-                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_workspace"}));
+                return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_workspace"}));
             };
             return match crate::ipc_request(&command) {
                 crate::Ipc::Reply(reply) => {
                     let result: serde_json::Value = serde_json::from_str(&reply).unwrap_or(serde_json::Value::Null);
                     if result["ok"] == true {
-                        respond(&mut stream, 201, "Created", &result)
+                        respond(stream, 201, "Created", &result)
                     } else if result["error"] == "invalid_workspace" {
-                        respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_workspace"}))
+                        respond(stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_workspace"}))
                     } else {
-                        respond(&mut stream, 500, "Internal Server Error", &serde_json::json!({"error":"creation_failed"}))
+                        respond(stream, 500, "Internal Server Error", &serde_json::json!({"error":"creation_failed"}))
                     }
                 }
-                crate::Ipc::NoDaemon => respond(&mut stream, 503, "Service Unavailable", &serde_json::json!({"error":"desktop_not_running"})),
-                crate::Ipc::Stalled => respond(&mut stream, 504, "Gateway Timeout", &serde_json::json!({"error":"creation_timeout_check_machine_before_retry"})),
+                crate::Ipc::NoDaemon => respond(stream, 503, "Service Unavailable", &serde_json::json!({"error":"desktop_not_running"})),
+                crate::Ipc::Stalled => respond(stream, 504, "Gateway Timeout", &serde_json::json!({"error":"creation_timeout_check_machine_before_retry"})),
             };
         }
     }
@@ -1224,36 +1059,36 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     // cannot type into unrelated tmux sessions.
     if let Some(rest) = path.strip_prefix("/api/v1/harnesses/") {
         if req.method == "DELETE" && !rest.contains('/') {
-            return handle_close_harness(&mut stream, &req, rest);
+            return handle_close_harness(stream, req, rest);
         }
         if let Some((id, action)) = rest.rsplit_once('/') {
             if id.starts_with("sd_term_") {
                 match (req.method.as_str(), action) {
                     ("GET", "input") => {
-                        if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+                        if !require_pairing(stream, req, AuthReply::Plain) {
                             return;
                         }
                         if !crate::tmux::session_alive(id) {
-                            return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"no_such_session"}));
+                            return respond(stream, 404, "Not Found", &serde_json::json!({"error":"no_such_session"}));
                         }
-                        if ws_upgrade(&mut stream, &req) { return stream_keys(stream, id); }
-                        return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
+                        if ws_upgrade(stream, req) { return stream_keys(stream, id); }
+                        return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
                     }
                     ("GET", "stream") => {
-                        if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+                        if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
                             return;
                         }
-                        return match ws_upgrade(&mut stream, &req) {
-                            true => stream_one_harness(stream, id),
+                        return match ws_upgrade(stream, req) {
+                            true => terminal_stream::stream(stream, id, terminal_stream::ansi_only(&req.query)),
                             false => respond(
-                                &mut stream,
+                                stream,
                                 400,
                                 "Bad Request",
                                 &serde_json::json!({"status": "error", "error": "expected_websocket"}),
                             ),
                         };
                     }
-                    ("POST", "keys") => return handle_keys(&mut stream, &req, id),
+                    ("POST", "keys") => return handle_keys(stream, req, id),
                     _ => {}
                 }
             }
@@ -1265,9 +1100,9 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     if let Some(rest) = path.strip_prefix("/api/v1/desktop/terminals/") {
         if let Some(card_id) = rest.strip_suffix("/attach") {
             if req.method != "GET" || card_id.contains('/') {
-                return respond(&mut stream, 404, "Not Found", &serde_json::json!({"error":"not_found"}));
+                return respond(stream, 404, "Not Found", &serde_json::json!({"error":"not_found"}));
             }
-            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
                 return;
             }
             // Ownership, session liveness, the host-owned grid and this
@@ -1277,11 +1112,11 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             let target = match desktop::resolve_attach(card_id, device.as_deref()) {
                 Ok(target) => target,
                 Err(error) => {
-                    return respond(&mut stream, error.code, error.reason, &serde_json::json!({"error":error.error}))
+                    return respond(stream, error.code, error.reason, &serde_json::json!({"error":error.error}))
                 }
             };
-            if !ws_upgrade(&mut stream, &req) {
-                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
+            if !ws_upgrade(stream, req) {
+                return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
             }
             return desktop::attach_terminal(stream, target);
         }
@@ -1293,12 +1128,12 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
     if path == "/api/v1/desktop/commands" {
         // Authorization comes before the method check, like every other desktop
         // route: an unpaired caller learns nothing about the route's shape.
-        if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+        if !require_pairing(stream, req, AuthReply::Plain) {
             return;
         }
         if req.method != "POST" {
             return respond(
-                &mut stream,
+                stream,
                 405,
                 "Method Not Allowed",
                 &serde_json::json!({"error": "method_not_allowed"}),
@@ -1307,35 +1142,35 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
         // Deduplication is per credential, so a revoked device cannot replay
         // another device's request id.
         let device = stream.credential_id().map(str::to_string).unwrap_or_default();
-        return desktop::command(&mut stream, &device, &req.body);
+        return desktop::command(stream, &device, &req.body);
     }
 
     match (req.method.as_str(), path.as_str()) {
         ("GET", "/api/v1/desktop/capabilities") => {
-            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
                 return;
             }
             let machine_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
             let capabilities = crate::desktop_protocol::Capabilities::current(machine_id);
-            respond(&mut stream, 200, "OK", &serde_json::to_value(capabilities).unwrap());
+            respond(stream, 200, "OK", &serde_json::to_value(capabilities).unwrap());
         }
         ("GET", "/api/v1/desktop/workspace" | "/api/v1/desktop/events") => {
-            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
                 return;
             }
             if path.ends_with("/events") {
-                if !ws_upgrade(&mut stream, &req) {
-                    return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
+                if !ws_upgrade(stream, req) {
+                    return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
                 }
                 desktop::stream_workspace(stream);
             } else {
-                desktop::get_workspace(&mut stream);
+                desktop::get_workspace(stream);
             }
         }
         ("GET", "/api/v1/ping") => {
             let bridge_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
             respond(
-            &mut stream,
+            stream,
             200,
             "OK",
             &serde_json::json!({
@@ -1352,13 +1187,13 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
             }),
         ) },
         ("GET", "/api/v1/harnesses") => {
-            if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+            if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
                 return;
             }
-            respond(&mut stream, 200, "OK", &harness_document());
+            respond_body(stream, 200, "OK", &harness_list::current_document());
         }
         ("POST", "/api/v1/completions") => {
-            if !require_pairing(&mut stream, &req, AuthReply::Plain) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
                 return;
             }
             let body: serde_json::Value = serde_json::from_str(&req.body).unwrap_or_default();
@@ -1366,36 +1201,33 @@ fn handle_client(mut stream: Connection, admission: Option<security::Admission>)
                 v.iter().map(|id| id.as_str().filter(|s| !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')).map(str::to_string)).collect()
             });
             let Some(ids) = ids else {
-                return respond(&mut stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_sessions"}));
+                return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"invalid_sessions"}));
             };
-            let Some(_job) = crate::assets::Transfer::acquire() else {
-                return respond(&mut stream, 429, "Too Many Requests", &serde_json::json!({"error":"busy"}));
-            };
-            respond(&mut stream, 200, "OK", &serde_json::json!({"terminals": crate::completion::collect(&ids)}));
+            completions::handle(stream, &body, &ids);
         }
         ("GET", "/api/v1/theme") => {
-            if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+            if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
                 return;
             }
-            respond(&mut stream, 200, "OK", &theme_document());
+            respond(stream, 200, "OK", &theme_document());
         }
         // PROTOCOL.md: full document on connect, then on every change (1s poll).
         ("GET", "/api/v1/harnesses/stream") => {
-            if !require_pairing(&mut stream, &req, AuthReply::StatusEnvelope) {
+            if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
                 return;
             }
-            if !ws_upgrade(&mut stream, &req) {
+            if !ws_upgrade(stream, req) {
                 return respond(
-                    &mut stream,
+                    stream,
                     400,
                     "Bad Request",
                     &serde_json::json!({"status": "error", "error": "expected_websocket"}),
                 );
             }
-            stream_harness_list(stream);
+            harness_list::stream(stream);
         }
         _ => respond(
-            &mut stream,
+            stream,
             404,
             "Not Found",
             &serde_json::json!({"error": "not found"}),
@@ -1433,7 +1265,7 @@ pub fn serve(port: u16) {
                 if let Some(admission) = security::Admission::acquire(&s) {
                     let tls = tls.clone();
                     std::thread::spawn(move || {
-                        if let Ok(stream) = Connection::tls(s, tls) { handle_client(stream, Some(admission)); }
+                        if let Ok(stream) = Connection::tls(s, tls) { serve_connection(stream, Some(admission)); }
                     });
                 }
             }
@@ -1768,11 +1600,17 @@ fn bridge_exe() -> Result<PathBuf, String> {
 ///
 /// Says nothing about whether it is *our* bridge — see `start_bridge`.
 fn port_taken(port: u16) -> bool {
+    // A connect to a free port in the ephemeral range can "succeed" as a TCP
+    // self-connection when the kernel picks that same port as the source.
+    // Nobody is listening then, so it does not count.
     TcpStream::connect_timeout(
         &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
         Duration::from_millis(300),
     )
-    .is_ok()
+    .is_ok_and(|stream| match (stream.local_addr(), stream.peer_addr()) {
+        (Ok(local), Ok(peer)) => local != peer,
+        _ => true,
+    })
 }
 
 /// Log the detached bridge writes its banner and bind errors to.
@@ -1957,7 +1795,7 @@ mod tests {
         client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let worker = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            stream_keys(Connection::plain(stream), &id);
+            stream_keys(&mut Connection::plain(stream), &id);
         });
         fn send(client: &mut TcpStream, body: serde_json::Value) {
             let bytes = body.to_string().into_bytes();
@@ -2053,15 +1891,92 @@ mod tests {
     }
     use super::*;
 
+    /// Reads one HTTP response: (status, Connection header, body).
+    fn read_response(client: &mut TcpStream) -> (u16, String, String) {
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            client.read_exact(&mut byte).unwrap();
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let header = |name: &str| head.lines().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim().to_string())
+        });
+        let length: usize = header("content-length").unwrap().parse().unwrap();
+        let mut body = vec![0u8; length];
+        client.read_exact(&mut body).unwrap();
+        (head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            header("connection").unwrap(), String::from_utf8(body).unwrap())
+    }
+
+    #[test]
+    fn keep_alive_serves_pipelined_requests_and_honors_close() {
+        // Browser-origin requests are refused before any pairing lookup, so
+        // this exercises the connection loop without bridge credentials.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            serve_connection(Connection::plain(socket), None);
+        });
+        // Two requests in one write; the first has a body that must not leak
+        // into the second request's parse.
+        client.write_all(b"POST /api/v1/completions HTTP/1.1\r\nOrigin: https://x\r\nContent-Length: 5\r\n\r\nhello\
+GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
+        for _ in 0..2 {
+            let (status, connection, body) = read_response(&mut client);
+            assert_eq!((status, connection.as_str()), (403, "keep-alive"));
+            assert!(body.contains("browser_access_disabled"));
+        }
+        // A later request on the same socket, asking to close.
+        client.write_all(b"GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\nConnection: close\r\n\r\n").unwrap();
+        let (status, connection, _) = read_response(&mut client);
+        assert_eq!((status, connection.as_str()), (403, "close"));
+        let mut rest = Vec::new();
+        client.read_to_end(&mut rest).unwrap();
+        assert!(rest.is_empty(), "nothing after a close response");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn http10_requests_are_not_kept_alive() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            serve_connection(Connection::plain(socket), None);
+        });
+        client.write_all(b"GET /api/v1/ping HTTP/1.0\r\nOrigin: https://x\r\n\r\n").unwrap();
+        assert_eq!(read_response(&mut client).1, "close");
+        server.join().unwrap();
+    }
+
     #[test]
     fn test_port_taken_follows_the_listener() {
-        // Occupy an ephemeral port, then release it: `start_bridge` relies on
-        // this to tell "free" from "someone (maybe a wedged bridge) is there".
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
-        let port = listener.local_addr().unwrap().port();
+        // `start_bridge` relies on this to tell "free" from "someone (maybe a
+        // wedged bridge) is there". The port stays bound (reserved) for the
+        // whole test and only its listening state changes: releasing it let a
+        // parallel test's `bind(0)` take it, which made this test flaky.
+        use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
+        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        assert!(fd >= 0);
+        let socket = unsafe { OwnedFd::from_raw_fd(fd) };
+        let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        address.sin_family = libc::AF_INET as libc::sa_family_t;
+        address.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
+        let size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        assert_eq!(unsafe { libc::bind(socket.as_raw_fd(), (&address as *const libc::sockaddr_in).cast(), size) }, 0);
+        let mut bound = address;
+        let mut length = size;
+        assert_eq!(unsafe { libc::getsockname(socket.as_raw_fd(), (&mut bound as *mut libc::sockaddr_in).cast(), &mut length) }, 0);
+        let port = u16::from_be(bound.sin_port);
+        assert!(!port_taken(port), "a bound but not listening port must read as free");
+        assert_eq!(unsafe { libc::listen(socket.as_raw_fd(), 1) }, 0);
         assert!(port_taken(port), "listening port must read as taken");
-        drop(listener);
-        assert!(!port_taken(port), "released port must read as free");
     }
 
     #[test]
