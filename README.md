@@ -290,7 +290,13 @@ console it means it *on that PC*: click and type, drag the header to move it,
 drag an edge to resize it, and use its buttons to minimize, maximize or close it
 there. Each action is one typed command carrying the card revision this view
 drew, so a concurrent edit on the host is refused as a conflict and the console
-snaps to the host's real geometry. The host keeps its own grid, and clicking a
+glides back to the host's real geometry. The console says what happened in a
+short line under its header that clears itself after a few seconds: "Changed on
+that PC · showing its layout" after a conflict, "Cannot reach that PC · change
+not applied" when the request never arrived, and "Result unknown · check before
+retrying" when the request left but no answer came back — the view refreshes
+from that PC, and the command is never sent again on your behalf. Launches and
+folder picks report the same way in the line under the top bar. The host keeps its own grid, and clicking a
 harness button launches it on that PC, without forcing its overlay to show. The
 folder field beside it is that PC's too: open its list to pick one of the folders
 that PC offers as the working directory for the next harness there (it becomes

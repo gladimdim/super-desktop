@@ -41,8 +41,8 @@ at once.
 
 Dragging a card's header moves and raises it on the host: the gesture ends with
 one typed `setLayout` command carrying the card revision the viewer drew, so a
-concurrent host edit is refused as a conflict and the card snaps to the host's
-real geometry. Layout commands are sent only to a host that advertises
+concurrent host edit is refused as a conflict and the card glides to the host's
+real geometry, with a short notice under its header saying so. Layout commands are sent only to a host that advertises
 `workspace-layout-v1`; a host that does not keeps its own layout and the drop
 reverts, and a card the host shows expanded keeps its own rectangle. The same
 route lets the host apply a resize, an iconify or a close — those are implemented
@@ -204,7 +204,15 @@ entries per device, 256 overall, entries from another epoch dropped. A repeated
 request id replays the recorded answer and never applies the mutation twice. A
 request whose owner did not answer is remembered as *uncertain*: it is not
 retried automatically, and a retry is refused with `unknown_outcome` so the
-viewer refreshes its state instead of guessing. Nothing about a command is
+viewer refreshes its state instead of guessing.
+
+The viewer reports every answer in the chrome (`src/command_feedback.rs`): a
+conflict adopts the host's geometry and says “Changed on that PC · showing its
+layout”; a request whose connection never opened is “Cannot reach that PC ·
+change not applied”; and a request that left without an answer — a timeout
+after sending, a cut reply, a 504, `desktop_timeout` or `unknown_outcome` — is
+the transport code `command_outcome_unknown` and the notice “Result unknown ·
+check before retrying”, followed by a snapshot refresh and never a resend. Nothing about a command is
 persisted across a crash, so this is deduplication, not an exactly-once claim.
 
 The bridge validates the envelope's shape and bounds before any owner IPC, and
@@ -560,8 +568,9 @@ moves remote consoles to their nearest border exactly like local cards, so a
 remote workspace hides the way a local one does.
 
 This increment still uses bounded HTTPS polling for layout at two-second
-intervals. Live WSS workspace subscriptions, graphical peer removal, the remote
-folder list and conflict feedback in the card chrome remain pending. Viewer
+intervals. Live WSS workspace subscriptions, graphical peer removal and the remote
+folder list remain pending. Conflict feedback in the card chrome is delivered:
+see the viewer notes under the command route. Viewer
 typing is delivered on the attach stream, and layout, expand, close and create
 commands are delivered on the command route.
 

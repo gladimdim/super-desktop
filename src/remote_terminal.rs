@@ -14,6 +14,7 @@
 use crate::desktop_protocol::{
     CardLayout, CommandReply, DesktopCard, WorkspaceSnapshot, WorkspaceCommand, MAX_REMOTE_VIEWERS,
 };
+use crate::command_feedback::{self, CardCommand, Geometry, Outcome};
 use crate::mini_terminal::MiniTerminalCard;
 use crate::peer_client::{self, Peer};
 use crate::remote_workspace;
@@ -42,6 +43,11 @@ pub struct RemoteCanvas {
     /// Drops the host has not confirmed yet, in host pixels. A refresh that
     /// still has the old origin keeps the card where it was released.
     pending_moves: RefCell<HashMap<String, (i32, i32)>>,
+    /// Cards whose next placement is a refused edit snapping back to the host.
+    snapping: RefCell<HashSet<String>>,
+    /// Cards gliding to a host position right now, with their destination in
+    /// this canvas's pixels.
+    glides: RefCell<HashMap<String, (f64, f64)>>,
     /// The host's stacking order as this view last imposed it, so a local
     /// click-raise is not undone by every poll.
     stacking: RefCell<Vec<String>>,
@@ -86,6 +92,8 @@ impl RemoteCanvas {
             placed: RefCell::new(HashMap::new()),
             gesturing: RefCell::new(HashSet::new()),
             pending_moves: RefCell::new(HashMap::new()),
+            snapping: RefCell::new(HashSet::new()),
+            glides: RefCell::new(HashMap::new()),
             stacking: RefCell::new(Vec::new()),
             hover_lock: crate::mini_terminal::HoverRaiseLock::new(),
             snapshot: RefCell::new(None),
@@ -225,6 +233,7 @@ impl RemoteCanvas {
         self.placed.borrow_mut().clear();
         self.gesturing.borrow_mut().clear();
         self.pending_moves.borrow_mut().clear();
+        self.glides.borrow_mut().clear();
         self.stacking.borrow_mut().clear();
         *self.snapshot.borrow_mut() = None;
         *self.peer.borrow_mut() = None;
@@ -279,6 +288,7 @@ impl RemoteCanvas {
             self.placed.borrow_mut().remove(&id);
             self.gesturing.borrow_mut().remove(&id);
             self.pending_moves.borrow_mut().remove(&id);
+            self.glides.borrow_mut().remove(&id);
         }
 
         // Topmost first: when the host shows more consoles than the attach
@@ -554,8 +564,11 @@ impl RemoteCanvas {
     ///
     /// Nothing here is retried. An accepted command and a conflict both carry
     /// the host's published revision and geometry, so this view redraws what
-    /// the host really has; the owner is asked for a fresh snapshot as well,
-    /// because a close changes the set of cards rather than one card's state.
+    /// the host really has (a conflict glides the card there); the owner is
+    /// asked for a fresh snapshot as well, because a close changes the set of
+    /// cards rather than one card's state. Whatever happened is said on the
+    /// card itself (see `command_feedback`), and an unknown outcome is only
+    /// ever refreshed, never sent again.
     fn send(self: &Rc<Self>, card_id: &str, command: WorkspaceCommand) {
         let (Some(peer), Some(epoch)) = (
             self.peer.borrow().clone(),
@@ -567,6 +580,11 @@ impl RemoteCanvas {
             self.relayout();
             return;
         };
+        let Some(kind) = CardCommand::of(&command) else {
+            self.relayout();
+            return;
+        };
+        let machine = peer.machine_id.clone();
         let request = peer_client::request(&peer, &epoch, command);
         let id = card_id.to_string();
         let weak = Rc::downgrade(self);
@@ -576,20 +594,46 @@ impl RemoteCanvas {
             let Some(view) = weak.upgrade() else {
                 return;
             };
-            match reply {
-                Ok(Ok(reply)) => {
-                    view.adopt(&id, &reply);
-                    if let Some(changed) = view.on_changed.borrow().clone() {
-                        changed();
-                    }
-                }
-                _ => {
-                    view.pending_moves.borrow_mut().remove(&id);
-                    view.gesturing.borrow_mut().remove(&id);
-                    view.relayout();
-                }
+            // The user may have moved on to another PC (or away and back)
+            // while this was in flight: its answer describes cards that are
+            // no longer the ones on screen.
+            if view.peer.borrow().as_ref().map(|peer| &peer.machine_id) != Some(&machine) {
+                return;
             }
+            view.finish(&id, kind, &reply);
         });
+    }
+
+    /// Apply one command's answer: geometry first, then the notice, then a
+    /// refresh when the decision asks for one.
+    fn finish<E>(
+        self: &Rc<Self>,
+        card_id: &str,
+        kind: CardCommand,
+        reply: &Result<Result<CommandReply, peer_client::PeerError>, E>,
+    ) {
+        let feedback = command_feedback::for_card(kind, Outcome::of(reply));
+        match (reply, feedback.geometry) {
+            (Ok(Ok(reply)), Geometry::Adopt | Geometry::SnapToHost) => {
+                self.adopt(card_id, reply, feedback.geometry == Geometry::SnapToHost);
+            }
+            (Ok(Ok(reply)), Geometry::Revert) => self.adopt(card_id, reply, false),
+            _ => {
+                self.pending_moves.borrow_mut().remove(card_id);
+                self.gesturing.borrow_mut().remove(card_id);
+                self.relayout();
+            }
+        }
+        if let Some(notice) = feedback.notice {
+            if let Some(card) = self.cards.borrow().get(card_id) {
+                card.show_notice(notice);
+            }
+        }
+        if feedback.refresh {
+            if let Some(changed) = self.on_changed.borrow().clone() {
+                changed();
+            }
+        }
     }
 
     /// The snapshot to draw: the host's, with anything we already know to be
@@ -627,7 +671,7 @@ impl RemoteCanvas {
     /// Both an accepted command and a conflict carry that state: on a conflict
     /// the card snaps to the geometry the host actually has instead of keeping
     /// an edit the host refused.
-    fn adopt(self: &Rc<Self>, card_id: &str, reply: &CommandReply) {
+    fn adopt(self: &Rc<Self>, card_id: &str, reply: &CommandReply, glide: bool) {
         use crate::desktop_protocol::CommandResult;
         let published = match &reply.result {
             CommandResult::Applied {
@@ -667,7 +711,60 @@ impl RemoteCanvas {
         }
         self.pending_moves.borrow_mut().remove(card_id);
         self.gesturing.borrow_mut().remove(card_id);
+        if glide {
+            self.snapping.borrow_mut().insert(card_id.to_string());
+        }
         self.relayout();
+        self.snapping.borrow_mut().remove(card_id);
+    }
+
+    /// Move a card to its host position: at once, or — for a card the host
+    /// just refused to move — as a short glide from where the user left it,
+    /// so the snap back reads as the host's answer rather than a glitch.
+    fn place(self: &Rc<Self>, id: &str, card: &Rc<MiniTerminalCard>, x: f64, y: f64) {
+        if let Some(target) = self.glides.borrow_mut().get_mut(id) {
+            // Already gliding: a newer answer only moves the destination.
+            *target = (x, y);
+            return;
+        }
+        let from = self.canvas.child_position(&card.container);
+        let far = (from.0 - x).abs() > 1.0 || (from.1 - y).abs() > 1.0;
+        let animate = self.snapping.borrow().contains(id)
+            && far
+            && card.container.is_mapped()
+            && gtk4::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
+        if !animate {
+            self.canvas.move_(&card.container, x, y);
+            return;
+        }
+        self.glides.borrow_mut().insert(id.to_string(), (x, y));
+        let weak = Rc::downgrade(self);
+        let id = id.to_string();
+        let started: Cell<Option<i64>> = Cell::new(None);
+        card.container.add_tick_callback(move |widget, clock| {
+            let Some(view) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            let Some(to) = view.glides.borrow().get(&id).copied() else {
+                return glib::ControlFlow::Break;
+            };
+            // A new gesture owns the card from its first frame.
+            if view.gesturing.borrow().contains(&id) {
+                view.glides.borrow_mut().remove(&id);
+                return glib::ControlFlow::Break;
+            }
+            let now = clock.frame_time();
+            let start = started.get().unwrap_or(now);
+            started.set(Some(start));
+            let (x, y, done) = glide_step(from, to, now - start);
+            view.canvas.move_(widget, x, y);
+            if done {
+                view.glides.borrow_mut().remove(&id);
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
     }
 
     /// Snapshot plus drops the host has not echoed yet.
@@ -740,7 +837,7 @@ impl RemoteCanvas {
                 0
             };
             card.set_fit(width as f64, f64::from((height - header).max(1)), scale);
-            self.canvas.move_(&card.container, x, y);
+            self.place(id, card, x, y);
             self.placed
                 .borrow_mut()
                 .insert(id.clone(), (x, y, width as f64));
@@ -856,6 +953,21 @@ fn host_layout(host: &DesktopCard, data: &TerminalData, scale: f64) -> Option<Ca
     Some(layout)
 }
 
+/// How long a refused card takes to glide back to the host's position.
+const GLIDE_MICROS: i64 = 220_000;
+
+/// One frame of the snap-back glide: ease-out from `from` to `to`, `elapsed`
+/// microseconds in. Returns the position and whether the glide is over.
+fn glide_step(from: (f64, f64), to: (f64, f64), elapsed: i64) -> (f64, f64, bool) {
+    let t = (elapsed.max(0) as f64 / GLIDE_MICROS as f64).min(1.0);
+    let eased = 1.0 - (1.0 - t).powi(3);
+    (
+        from.0 + (to.0 - from.0) * eased,
+        from.1 + (to.1 - from.1) * eased,
+        t >= 1.0,
+    )
+}
+
 /// Where the card is drawn on the host: the icon spot when minimized, otherwise
 /// the saved card origin.
 fn shown_origin(card: &DesktopCard) -> (i32, i32) {
@@ -913,6 +1025,95 @@ mod tests {
         assert!(layout.iconified);
         assert_eq!((layout.icon_x, layout.icon_y), (Some(40), Some(80)));
         assert_eq!((layout.x, layout.y), (host.layout.x, host.layout.y));
+    }
+
+    #[test]
+    fn a_refused_card_glides_back_to_the_host_and_settles_there() {
+        let (x, y, done) = glide_step((0.0, 0.0), (100.0, 50.0), 0);
+        assert_eq!((x, y, done), (0.0, 0.0, false));
+        let (x, _, done) = glide_step((0.0, 0.0), (100.0, 50.0), GLIDE_MICROS / 2);
+        // Ease-out: past halfway at half time, never overshooting.
+        assert!(x > 50.0 && x < 100.0 && !done);
+        assert_eq!(glide_step((0.0, 0.0), (100.0, 50.0), GLIDE_MICROS * 3), (100.0, 50.0, true));
+    }
+
+    #[test]
+    fn command_results_reach_the_card_chrome() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::feedback_inner");
+    }
+
+    #[test]
+    fn feedback_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use crate::desktop_protocol::CommandResult;
+        gtk4::init().unwrap();
+        let canvas = RemoteCanvas::new();
+        let refreshes = Rc::new(Cell::new(0));
+        canvas.set_on_changed(Rc::new({
+            let refreshes = Rc::clone(&refreshes);
+            move || refreshes.set(refreshes.get() + 1)
+        }));
+        let mut snapshot = crate::remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        let peer = peer_client::test_peer('a');
+        canvas.apply(&peer, &snapshot, true);
+        let card = canvas.card_widget("card-one").unwrap();
+        assert_eq!(card.notice_text(), None);
+
+        // A drop the host refused: the card takes the host's own geometry and
+        // says why it moved.
+        let mut host_layout = snapshot.local.cards[0].layout.clone();
+        host_layout.x = 300;
+        host_layout.y = 400;
+        let reply = |result| CommandReply {
+            request_id: "m1".into(),
+            machine_id: peer.machine_id.clone(),
+            epoch: "host-one".into(),
+            revision: 5,
+            result,
+        };
+        let conflict: Result<_, ()> = Ok(Ok(reply(CommandResult::Conflict {
+            card_id: "card-one".into(),
+            card_revision: Some(4),
+            layout: Some(host_layout),
+            expanded: Some(false),
+        })));
+        canvas.finish("card-one", CardCommand::Layout, &conflict);
+        assert_eq!(canvas.card_position("card-one"), Some((300, 400)));
+        assert_eq!(canvas.card_revision("card-one"), Some(4));
+        assert_eq!(
+            card.notice_text().as_deref(),
+            Some("Changed on that PC · showing its layout")
+        );
+        assert!(card.notice_has_class("term-notice-info"));
+        assert_eq!(refreshes.get(), 1);
+
+        // No answer at all: nothing is claimed, the view refreshes to find
+        // out, and the command is not sent again.
+        let unknown: Result<Result<CommandReply, peer_client::PeerError>, ()> =
+            Ok(Err(peer_client::PeerError(command_feedback::OUTCOME_UNKNOWN)));
+        canvas.finish("card-one", CardCommand::Close, &unknown);
+        assert_eq!(
+            card.notice_text().as_deref(),
+            Some("Result unknown · check before retrying")
+        );
+        assert!(card.notice_has_class("term-notice-warning"));
+        assert!(!card.notice_has_class("term-notice-info"));
+        assert_eq!(refreshes.get(), 2);
+        assert_eq!(canvas.card_position("card-one"), Some((300, 400)));
+
+        // An unreachable host: said on the card, left to the regular poll.
+        let unreachable: Result<Result<CommandReply, peer_client::PeerError>, ()> =
+            Ok(Err(peer_client::PeerError("connection_failed_or_pin_mismatch")));
+        canvas.finish("card-one", CardCommand::Expand, &unreachable);
+        assert_eq!(
+            card.notice_text().as_deref(),
+            Some("Cannot reach that PC · change not applied")
+        );
+        assert_eq!(refreshes.get(), 2);
+        assert_eq!(canvas.card_count(), 1);
     }
 
     #[test]

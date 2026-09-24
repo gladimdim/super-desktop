@@ -2,10 +2,10 @@
 
 Status: pairing, a live remote workspace, its terminal transport, viewer typing
 and the host's own harness bar, folder picker and card chrome are delivered, and
-both workspaces now run the *same* UI code with only the source swapped; the
-100% + pan/zoom mode, conflict feedback and live outgoing subscriptions remain in
-progress.
-Updated 2026-09-22 against `master`.
+both workspaces now run the *same* UI code with only the source swapped, and
+every remote command reports its result in the chrome; the 100% + pan/zoom mode
+and live outgoing subscriptions remain in progress.
+Updated 2026-09-24 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
 The original architecture below remains the target. Capability negotiation,
@@ -64,6 +64,30 @@ PCs:
   view drew, so a concurrent host edit is refused with the host's own geometry
   instead of being overwritten. A card's click-raise is local until the host's
   own stacking order changes.
+- **Conflict feedback in the chrome.** Every card command's answer is turned
+  into a brief, non-blocking notice by one pure decision
+  (`src/command_feedback.rs`) and shown as a pill under the card's header
+  (`MiniTerminalCard::show_notice`: an overlay that takes no input, never sizes
+  the card, and crossfades away after 4 s, 6 s for failures, 8 s for an unknown
+  outcome). A `conflict` adopts the host's revision and geometry and glides the
+  card there (220 ms ease-out, skipped when GTK animations are off or the card
+  is unmapped; a new gesture cancels it) with “Changed on that PC · showing its
+  layout” (“· not closed” for a close). A typed refusal reverts the viewer's
+  optimistic drop, explains itself (restarted, already closed, expanded on that
+  PC, desktop not running, update needed, identity changed) and refreshes. A
+  request that never reached the host (connect, TLS or pin failure) says
+  “Cannot reach that PC · change not applied” and leaves recovery to the poll.
+  A request that may have been applied — a timeout after it left, a broken
+  reply, `desktop_timeout`, `unknown_outcome`, a gateway 504 — is reported as
+  **“Result unknown · check before retrying”**, reverts to the last snapshot
+  and refreshes; it is never replayed. `peer_client::command` tells these apart
+  (`command_outcome_unknown` for anything after the connect phase) and keeps the
+  bridge's stable code on 502/503/504 answers. `createTerminal` and
+  `setWorkspace` report the same way in the line under the remote top bar, which
+  also dismisses itself; a folder conflict says “Folder changed on that PC ·
+  showing its folder”. Answers that arrive after the user switched PCs are
+  dropped. The local workspace builds the same (hidden) notice and never shows
+  it.
 - Clicking a harness button sends a typed `createTerminal` command and the host
   builds the card exactly like a local launch — its own inventory, sandbox flags
   and folder — without being forced to show its overlay. The bar is offered only
@@ -94,8 +118,9 @@ widgets as a local workspace, with a host on the other end. It shows the host's
 terminal pixels, sends keystrokes, paste and Ctrl+C to the focused session, and
 its cards' own buttons, drags and edges move, resize, iconify, expand and close
 the host's cards, and the folder beside its top bar lists the folders *that PC*
-offers, so a new harness there can start in any of them. What is still missing is
-the 100% + pan/zoom mode and conflict feedback in the chrome. A host that says “Update and rebuild SUPER DESKTOP on the host” is
+offers, so a new harness there can start in any of them. Each of those actions
+reports its result on the card or under the bar. What is still missing is
+the 100% + pan/zoom mode. A host that says “Update and rebuild SUPER DESKTOP on the host” is
 serving an older bridge without `terminal-pty-v1`, and its workspace is drawn as
 chrome without live consoles. Hosts that hide their overlay release their
 viewers' streams, and reopening the overlay reconnects them.
@@ -153,9 +178,11 @@ automatically.
    gestures, the harness bar and the folder picker. `setWorkspace` (a folder from
    the host's own list, judged against the workspace revision) is applied too, so
    every command variant has a handler.
-4. Next: conflict feedback in the card chrome and the 100% + pan/scroll mode with
-   fit/100% coordinate transforms, then live WSS workspace events in place of the
-   two-second poll, and two-PC regression coverage for switching, concurrent
+4. **Delivered:** conflict feedback in the card chrome (and under the remote top
+   bar for launches and folder picks), with the host-geometry glide and the
+   unknown-outcome notice described above.
+5. Next: the 100% + pan/scroll mode with fit/100% coordinate transforms, then
+   live WSS workspace events in place of the two-second poll, and two-PC regression coverage for switching, concurrent
    edits, bridge/daemon restart and revocation. Viewer input (delivered) stays
    behind the current-selection handshake and the prompt-transaction guard, and
    keys are never replayed after a disconnect.
@@ -531,8 +558,8 @@ required for the first release; follow-ups in section 1 are separate work.
 6. **Layout and simultaneous use — partially delivered; next UI milestone.** Host-owned grids,
    stream budgeting, the inverse drag transform, revision conflicts with the
    host's own geometry, the shared bar and card widgets and every routed
-   move/resize/iconify/expand/close control are delivered. The 100% + pan/scroll
-   mode and conflict feedback in the chrome remain, together with a two-PC check
+   move/resize/iconify/expand/close control are delivered, and so is conflict
+   feedback in the chrome. The 100% + pan/scroll mode remains, together with a two-PC check
    that B can view C while A operates B, and that A/B can view each other
    without recursion or exported peer state.
 7. **Regression, documentation and release — ongoing.** Complete the matrix below, update
@@ -589,7 +616,8 @@ Manual acceptance matrix:
 | Different sizes/scales | Fit or 100% view is usable; all cards reachable; viewing never writes layout back. |
 | Shell + installed harness + full-screen app | Live console output, colour and full-screen redraws match the host; typing, paste and Ctrl+C reach the focused session. |
 | Launch a harness from the viewer's top bar | The buttons are the host's own list, in the host's order, and the click creates the card on the host in the host's published folder. A harness the host does not offer is not listed, and an older host offers no buttons at all. |
-| Drag/resize from either machine | Other view updates; a stale gesture is refused as a conflict and the card snaps to the host's real geometry; no resizing oscillation. |
+| Drag/resize from either machine | Other view updates; a stale gesture is refused as a conflict and the card glides to the host's real geometry with “Changed on that PC · showing its layout”; no resizing oscillation. |
+| Unplug B's network mid-command | A's card says “Cannot reach that PC” (not sent) or “Result unknown · check before retrying” (sent, no answer), reverts to the last snapshot, and nothing is resent. |
 | Close on B from A | B owns the lifecycle: its card, widget and session go, and A's local state is unchanged. |
 | Create on B from A | B owns the lifecycle: the card appears in B's workspace and the chosen folder, A's local state is unchanged, and B's overlay is not forced to show. |
 | Pick a folder from A, then launch | The list is B's own folders; the pick changes B's working folder (visible on B's own bar) and the next launch starts there. |

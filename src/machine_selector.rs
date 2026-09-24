@@ -252,20 +252,15 @@ impl MachineView {
             let Some(view) = weak.upgrade() else {
                 return;
             };
-            match reply {
-                Ok(Ok(_)) => view.refresh(),
-                Ok(Err(failure)) => {
-                    view.bar.fail(crate::harness_bar::launch_error(failure.0));
-                    // The folder this view shows is the host's, so a refused
-                    // change has to come back from the host, not from a guess
-                    // this view made on the way out.
-                    view.refresh();
-                }
-                Err(_) => {
-                    view.bar.fail("That PC did not answer · try again");
-                    view.refresh();
-                }
+            use crate::command_feedback::{for_workspace, Outcome, WorkspaceAction};
+            // Applied or not, the folder this view shows is the host's: a
+            // refused change has to come back from the host, not from a guess
+            // this view made on the way out. An unknown outcome is never
+            // retried; the refresh is how the user finds out.
+            if let Some(notice) = for_workspace(WorkspaceAction::Folder, Outcome::of(&reply)) {
+                view.bar.flash(notice);
             }
+            view.refresh();
         });
     }
 
@@ -297,32 +292,21 @@ impl MachineView {
             };
             view.launching.set(false);
             view.bar.set_busy(false);
-            match reply {
-                Ok(Ok(reply)) => {
-                    match reply.result {
-                        // The new card belongs to the host and is already in its
-                        // next snapshot. The card appearing is the success the
-                        // user sees, so this line goes back to describing it.
-                        crate::desktop_protocol::CommandResult::Applied { .. } => {
-                            view.bar.note("")
-                        }
-                        crate::desktop_protocol::CommandResult::Conflict { .. } => {
-                            view.bar.fail("That PC changed · try launching again")
-                        }
-                        crate::desktop_protocol::CommandResult::Rejected { error } => {
-                            view.bar.fail(crate::harness_bar::launch_error(&error))
-                        }
-                    }
-                    // A refusal usually means this view is behind that host
-                    // (its folder or epoch moved on), and "try again" only works
-                    // once the bar shows what it reports now. On success this is
-                    // how the new card shows up at once.
-                    view.refresh();
-                }
-                Ok(Err(failure)) => view
-                    .bar
-                    .fail(crate::harness_bar::launch_error(failure.0)),
-                Err(_) => view.bar.fail("That PC did not answer · try again"),
+            use crate::command_feedback::{for_workspace, Outcome, WorkspaceAction};
+            match for_workspace(WorkspaceAction::Create, Outcome::of(&reply)) {
+                // The new card belongs to the host and is already in its next
+                // snapshot. The card appearing is the success the user sees,
+                // so this line goes back to describing it.
+                None => view.bar.note(""),
+                Some(notice) => view.bar.flash(notice),
+            }
+            // A refusal usually means this view is behind that host (its folder
+            // or epoch moved on), and "try again" only works once the bar shows
+            // what it reports now; an unknown outcome is checked by looking,
+            // never by launching again. On success this is how the new card
+            // shows up at once.
+            if !matches!(&reply, Ok(Err(error)) if error.0 == "connection_failed_or_pin_mismatch") {
+                view.refresh();
             }
         });
     }

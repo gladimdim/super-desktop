@@ -139,6 +139,9 @@ pub struct HarnessBar {
     busy: Cell<bool>,
     /// A refusal is explained until the user tries again.
     failed: Cell<bool>,
+    /// Bumped by every new line, so a self-dismissing notice only clears the
+    /// line it put there.
+    note_generation: Cell<u64>,
 }
 
 impl HarnessBar {
@@ -194,6 +197,7 @@ impl HarnessBar {
             ready: Cell::new(false),
             busy: Cell::new(false),
             failed: Cell::new(false),
+            note_generation: Cell::new(0),
         });
         for (key, button) in bar.buttons.borrow().iter() {
             let weak = Rc::downgrade(&bar);
@@ -271,10 +275,29 @@ impl HarnessBar {
         self.set_note("Launching…");
     }
 
-    /// Explain a refusal, and keep explaining it until the next attempt.
-    pub fn fail(&self, message: &str) {
+    /// Report one command's result under the bar and let it go by itself.
+    ///
+    /// Like [`Self::fail`], it holds the line against routine snapshot notes
+    /// while shown; when it expires the line clears (unless something newer has
+    /// replaced it) and the next snapshot says what it normally says.
+    pub fn flash(self: &Rc<Self>, notice: crate::command_feedback::Notice) {
         self.failed.set(true);
-        self.set_note(message);
+        self.set_note(notice.text);
+        for class in crate::command_feedback::TONE_CLASSES {
+            self.note.remove_css_class(class);
+        }
+        self.note.add_css_class(notice.tone.css_class());
+        let generation = self.note_generation.get();
+        let weak = Rc::downgrade(self);
+        gtk4::glib::timeout_add_local_once(notice.duration, move || {
+            let Some(bar) = weak.upgrade() else {
+                return;
+            };
+            if bar.note_generation.get() == generation && !bar.busy.get() {
+                bar.failed.set(false);
+                bar.set_note("");
+            }
+        });
     }
 
     /// A launch is starting: its own message replaces an older refusal.
@@ -295,6 +318,10 @@ impl HarnessBar {
     }
 
     fn set_note(&self, text: &str) {
+        self.note_generation.set(self.note_generation.get().wrapping_add(1));
+        for class in crate::command_feedback::TONE_CLASSES {
+            self.note.remove_css_class(class);
+        }
         self.note.set_text(text);
         self.note.set_visible(!text.is_empty());
     }
@@ -372,9 +399,16 @@ pub fn launch_error(error: &str) -> &'static str {
         "desktop_unavailable" | "desktop_not_ready" | "remote_desktop_unavailable" => {
             "That PC's desktop is not running"
         }
-        "unknown_outcome" | "desktop_timeout" => {
-            "Launch status unknown · check that PC and refresh"
+        "unknown_outcome"
+        | "desktop_timeout"
+        | "command_outcome_unknown"
+        | "peer_response_incomplete"
+        | "invalid_desktop_response"
+        | "invalid_peer_response" => "Launch status unknown · check that PC and refresh",
+        "connection_failed_or_pin_mismatch" | "peer_endpoint_unavailable" => {
+            "Cannot reach that PC · nothing launched"
         }
+        "peer_revoked_or_expired" => "Pairing required · nothing launched",
         "terminal_unavailable" => "That PC could not start it · check its workspace",
         _ => "Could not launch on that PC",
     }
@@ -491,13 +525,21 @@ mod tests {
         bar.set_busy(false);
         assert!(bar.sensitive("shell"));
 
-        // A refusal stays visible until the user tries again, instead of being
-        // wiped by whatever the source says next.
-        bar.fail("That PC does not offer this harness");
+        // A refusal stays visible while it is shown, instead of being wiped by
+        // whatever the next snapshot says, and carries its tone's theme class.
+        let refusal = crate::command_feedback::for_workspace(
+            crate::command_feedback::WorkspaceAction::Create,
+            crate::command_feedback::Outcome::Rejected("unsupported_harness"),
+        )
+        .unwrap();
+        bar.flash(refusal);
         bar.note("Update SUPER DESKTOP on that PC");
         assert!(bar.note.text().contains("does not offer"));
+        assert!(bar.note.has_css_class("term-notice-error"));
+        // The next attempt replaces it, and the tone goes with it.
         bar.starting("Launching Claude…");
         assert!(bar.note.text().contains("Launching"));
+        assert!(!bar.note.has_css_class("term-notice-error"));
 
         // An empty state describes a workspace that offers nothing.
         bar.apply(&HarnessState::none());

@@ -878,6 +878,38 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     opacity: 0.8;
 }}
 
+/* Command feedback on a remote card (and under the remote top bar): a brief
+   line saying what the host did with the last command. The pill floats over
+   the card body and never takes input; the tone classes colour it and the
+   bar's note alike. */
+.term-notice {{
+    background-color: {compact_bg};
+    border: 1px solid {btn_border};
+    border-radius: 9999px;
+    padding: 3px 10px;
+    font-size: 10px;
+    font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}}
+.term-notice-info {{
+    color: {accent};
+}}
+.term-notice.term-notice-info {{
+    border-color: {ghost_label_border};
+}}
+.term-notice-warning {{
+    color: {bright_yellow};
+}}
+.term-notice.term-notice-warning {{
+    border-color: {status_busy_border};
+}}
+.term-notice-error {{
+    color: {usage_crit};
+}}
+.term-notice.term-notice-error {{
+    border-color: {usage_crit};
+}}
+
 /* ================= Settings and Android Connection Pages ================= */
 /* `harness_settings` owns the card chrome (`mini-terminal` + `harness-panel`
    + `term-header`) and swaps dedicated destination pages into its body. */
@@ -1629,5 +1661,18 @@ mod tests {
             css.contains("border: 2px dotted"),
             "the buried-card ghost must be a dotted outline, got:\n{css}"
         );
+    }
+
+    #[test]
+    fn test_command_notice_styles_exist() {
+        // The card's command feedback and the remote bar's note use these; an
+        // unstyled tone would read as ordinary preview text.
+        let css = generate_css(&current_theme());
+        for class in [".term-notice ", ".term-notice-info", ".term-notice-warning", ".term-notice-error"] {
+            assert!(css.contains(class), "missing CSS rule for {class}");
+        }
+        for class in crate::command_feedback::TONE_CLASSES {
+            assert!(css.contains(&format!(".{class}")), "missing CSS rule for {class}");
+        }
     }
 }

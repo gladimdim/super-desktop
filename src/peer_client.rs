@@ -351,6 +351,39 @@ fn check_response_status(status: u16, policy: ResponsePolicy) -> Result<()> {
     }
 }
 
+/// A request that never got a response. A connect-phase failure (refused,
+/// unreachable, connect timeout, TLS or pin mismatch) means the host never saw
+/// it. Anything later — a timeout while waiting for the answer, a connection
+/// dropped mid-response — may follow a command the host already applied, so a
+/// command reports it as an unknown outcome rather than as "not applied".
+fn send_failure(connect_phase: bool, policy: ResponsePolicy) -> PeerError {
+    match policy {
+        ResponsePolicy::Command if !connect_phase => {
+            PeerError(crate::command_feedback::OUTCOME_UNKNOWN)
+        }
+        _ => PeerError("connection_failed_or_pin_mismatch"),
+    }
+}
+
+/// A gateway status on the command route. The bridge answers these itself when
+/// its owner could not answer, with one of the stable codes; a 504 without one
+/// still means the request may have reached the owner.
+fn gateway_error(status: u16, bytes: &[u8]) -> Option<PeerError> {
+    if !(502..=504).contains(&status) {
+        return None;
+    }
+    let code = serde_json::from_slice::<Value>(bytes).ok().and_then(|document| {
+        document["error"]
+            .as_str()
+            .and_then(crate::desktop_protocol::known_command_error)
+    });
+    match (code, status) {
+        (Some(code), _) => Some(PeerError(code)),
+        (None, 504) => Some(PeerError(crate::command_feedback::OUTCOME_UNKNOWN)),
+        (None, _) => None,
+    }
+}
+
 fn peer_client(peer: &Peer) -> Result<PinnedClient> {
     validate_peer_access(peer)?;
     PinnedClient::new(peer.endpoint.clone(), &peer.fingerprint)
@@ -388,6 +421,7 @@ impl PinnedClient {
         path: &str,
         body: Option<Value>,
         token: Option<&str>,
+        policy: ResponsePolicy,
     ) -> Result<(u16, Vec<u8>)> {
         let url = self.endpoint.url(path)?;
         let mut request = match body {
@@ -402,7 +436,7 @@ impl PinnedClient {
         }
         let response = request
             .send()
-            .map_err(|_| PeerError("connection_failed_or_pin_mismatch"))?;
+            .map_err(|error| send_failure(error.is_connect(), policy))?;
         let status = response.status().as_u16();
         if (300..=399).contains(&status) {
             return Err(PeerError("redirect_rejected"));
@@ -428,7 +462,7 @@ impl PinnedClient {
         body: Option<Value>,
         token: Option<&str>,
     ) -> Result<T> {
-        let (status, bytes) = self.raw(path, body, token)?;
+        let (status, bytes) = self.raw(path, body, token, ResponsePolicy::Read)?;
         check_response_status(status, ResponsePolicy::Read)?;
         serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))
     }
@@ -437,7 +471,19 @@ impl PinnedClient {
     /// conflict carries the host's own geometry, which is the whole point of
     /// the refusal. Transport failures stay errors.
     fn command(&self, path: &str, body: Value, token: Option<&str>) -> Result<Value> {
-        let (status, bytes) = self.raw(path, Some(body), token)?;
+        let (status, bytes) = self
+            .raw(path, Some(body), token, ResponsePolicy::Command)
+            .map_err(|error| match error.0 {
+                // The host answered but the body broke off: it may have
+                // applied the command before the reply was cut.
+                "peer_response_incomplete" => {
+                    PeerError(crate::command_feedback::OUTCOME_UNKNOWN)
+                }
+                _ => error,
+            })?;
+        if let Some(error) = gateway_error(status, &bytes) {
+            return Err(error);
+        }
         check_response_status(status, ResponsePolicy::Command)?;
         let document: Value =
             serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))?;
@@ -885,5 +931,46 @@ mod tests {
         let mut misdirected = request;
         misdirected.machine_id = "b".repeat(32);
         assert_eq!(command(&peer, &misdirected).err(), Some(PeerError("invalid_command")));
+    }
+
+    #[test]
+    fn a_command_that_may_have_reached_the_host_is_an_unknown_outcome() {
+        let unknown = PeerError(crate::command_feedback::OUTCOME_UNKNOWN);
+        // A connect-phase failure never reached the host: it was not applied.
+        assert_eq!(
+            send_failure(true, ResponsePolicy::Command),
+            PeerError("connection_failed_or_pin_mismatch")
+        );
+        // Waiting for the answer failed: the host may have applied it.
+        assert_eq!(send_failure(false, ResponsePolicy::Command), unknown);
+        // Reads keep their existing code, which pairing depends on.
+        assert_eq!(
+            send_failure(false, ResponsePolicy::Read),
+            PeerError("connection_failed_or_pin_mismatch")
+        );
+    }
+
+    #[test]
+    fn gateway_answers_keep_the_bridge_s_stable_code() {
+        let body = |code: &str| serde_json::to_vec(&json!({ "error": code })).unwrap();
+        assert_eq!(
+            gateway_error(504, &body("desktop_timeout")),
+            Some(PeerError("desktop_timeout"))
+        );
+        assert_eq!(
+            gateway_error(503, &body("desktop_not_ready")),
+            Some(PeerError("desktop_not_ready"))
+        );
+        assert_eq!(
+            gateway_error(502, &body("invalid_desktop_response")),
+            Some(PeerError("invalid_desktop_response"))
+        );
+        // Free-form text is never passed on, and a bare 504 is still unknown.
+        assert_eq!(gateway_error(503, &body("<html>")), None);
+        assert_eq!(
+            gateway_error(504, b"gateway"),
+            Some(PeerError(crate::command_feedback::OUTCOME_UNKNOWN))
+        );
+        assert_eq!(gateway_error(409, &body("conflict")), None);
     }
 }

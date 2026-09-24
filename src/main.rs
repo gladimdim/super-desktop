@@ -24,6 +24,7 @@ mod peer_cli;
 mod peer_pairing;
 mod peer_pairing_ui;
 mod card_source;
+mod command_feedback;
 mod harness_bar;
 mod machine_selector;
 mod remote_terminal;

@@ -283,6 +283,13 @@ pub struct MiniTerminalCard {
     compact_restore_btn: Button,
     _compact_kill_btn: Button,
     compact_top_bar: gtk4::Box,
+    /// A brief line about the last command this card sent to another PC
+    /// (see `command_feedback`). Floats under the header, never takes input,
+    /// never changes the card's size, and dismisses itself.
+    notice: gtk4::Revealer,
+    notice_label: Label,
+    /// Bumped by every notice, so an older timer cannot hide a newer one.
+    notice_generation: Rc<Cell<u64>>,
     preview_box: gtk4::Box,
     vte: Rc<RefCell<Option<VteTerminal>>>,
     session_task: Arc<crate::session_task::SessionTask>,
@@ -644,6 +651,36 @@ impl MiniTerminalCard {
         compact_top_bar.append(&compact_actions);
         root.add_overlay(&compact_top_bar);
 
+        // Command feedback. An overlay child is not part of the card's own
+        // size request, so a long line wraps inside the card instead of
+        // enlarging it, and it lets every click through to the chrome below.
+        let notice_label = Label::new(None);
+        notice_label.add_css_class("term-notice");
+        // At most two lines, then an ellipsis: a small fitted or iconified card
+        // keeps a bounded notice rather than one tall column of characters.
+        notice_label.set_wrap(true);
+        notice_label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+        notice_label.set_lines(2);
+        notice_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        notice_label.set_justify(gtk4::Justification::Center);
+        let notice = gtk4::Revealer::new();
+        notice.set_transition_type(gtk4::RevealerTransitionType::Crossfade);
+        notice.set_transition_duration(180);
+        notice.set_child(Some(&notice_label));
+        notice.set_halign(Align::Center);
+        notice.set_valign(Align::Start);
+        notice.set_margin_start(8);
+        notice.set_margin_end(8);
+        notice.set_can_target(false);
+        notice.set_can_focus(false);
+        notice.set_visible(false);
+        notice.connect_child_revealed_notify(|revealer| {
+            if !revealer.reveals_child() && !revealer.is_child_revealed() {
+                revealer.set_visible(false);
+            }
+        });
+        root.add_overlay(&notice);
+
 
         // Seed from persisted state so rebooted cards resume the SAME agent
         // session without waiting for the DB mapping to re-resolve.
@@ -725,6 +762,9 @@ impl MiniTerminalCard {
             compact_restore_btn: compact_restore_btn.clone(),
             _compact_kill_btn: compact_kill_btn.clone(),
             compact_top_bar,
+            notice,
+            notice_label,
+            notice_generation: Rc::new(Cell::new(0)),
             preview_box,
             vte,
             visual_pos,
@@ -1286,6 +1326,58 @@ impl MiniTerminalCard {
     #[cfg(test)]
     pub fn footer_text(&self) -> String {
         self.hint_label.label().to_string()
+    }
+
+    /// Show a brief, non-blocking line about a command's result, just under
+    /// the chrome, and dismiss it after the notice's own duration.
+    pub fn show_notice(&self, notice: crate::command_feedback::Notice) {
+        for class in crate::command_feedback::TONE_CLASSES {
+            self.notice_label.remove_css_class(class);
+        }
+        self.notice_label.add_css_class(notice.tone.css_class());
+        self.notice_label.set_text(notice.text);
+        // Below whichever bar the card shows, so the title and buttons stay
+        // readable; a card that has not been allocated yet uses a small gap.
+        let top = if self.header.is_visible() {
+            self.header.height()
+        } else if self.compact_top_bar.is_visible() {
+            self.compact_top_bar.height()
+        } else {
+            0
+        };
+        self.notice.set_margin_top(top + 4);
+        self.notice.set_visible(true);
+        self.notice.set_reveal_child(true);
+        let generation = self.notice_generation.get().wrapping_add(1);
+        self.notice_generation.set(generation);
+        let current = Rc::clone(&self.notice_generation);
+        let revealer = self.notice.downgrade();
+        glib::timeout_add_local_once(notice.duration, move || {
+            if current.get() != generation {
+                return;
+            }
+            if let Some(revealer) = revealer.upgrade() {
+                revealer.set_reveal_child(false);
+                // Without a frame clock the crossfade never finishes.
+                if !revealer.is_mapped() {
+                    revealer.set_visible(false);
+                }
+            }
+        });
+    }
+
+    /// The notice on screen right now, if any.
+    #[cfg(test)]
+    pub fn notice_text(&self) -> Option<String> {
+        self.notice
+            .reveals_child()
+            .then(|| self.notice_label.text().to_string())
+    }
+
+    /// The tone class the notice carries, for checks of its colour.
+    #[cfg(test)]
+    pub fn notice_has_class(&self, class: &str) -> bool {
+        self.notice_label.has_css_class(class)
     }
 
     /// Whether the header is on screen. A compact or expanded card is not
