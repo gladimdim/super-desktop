@@ -91,7 +91,8 @@ def main():
             assert desktop == {"machineId": bridge_id, "desktopApiVersion": 1,
                                "capabilities": ["workspace-snapshot-v1",
                                                 "workspace-layout-v1",
-                                                "terminal-pty-v1"]}
+                                                "terminal-pty-v1",
+                                                "workspace-events-v1"]}
             assert request("/api/v1/ping")[1]["protocolVersion"] == 3
             assert request("/api/v1/desktop/capabilities", token=token,
                            headers={"Origin": "https://untrusted.example"})[0] == 403

@@ -386,6 +386,10 @@ pub fn save_state_async(state: AppState) {
     STATE_WRITER
         .get_or_init(|| StateWriter::new(get_state_path()))
         .submit(state);
+    // Every persisted edit (layout, create, close, stacking, folder, harness
+    // list) passes through here, which makes it the workspace's change signal:
+    // live desktop event subscribers fetch one snapshot instead of polling.
+    crate::workspace_model::notify_changed();
 }
 
 /// Only used at shutdown and by the synchronous initialization path.

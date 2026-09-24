@@ -18,7 +18,125 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 pub const MAX_DESKTOP_CARDS: usize = 256;
+
+/// Change notification for the published workspace.
+///
+/// Everything that can change a snapshot calls [`notify_changed`]: every state
+/// save (layout, create, close, stacking, folder, harness list), a local card's
+/// expand/collapse and title, and a runtime inventory that differs from the
+/// last one. A watcher ([`wait_for_change`]) then asks for one snapshot, which
+/// is what computes the revision; a notification that changed nothing
+/// published costs one snapshot and advances nothing. This is a counter, not a
+/// log: bursts coalesce, and a watcher only learns "something may differ".
+mod changes {
+    use std::sync::{Condvar, Mutex};
+    use std::time::Duration;
+
+    static COUNTER: Mutex<u64> = Mutex::new(0);
+    static CHANGED: Condvar = Condvar::new();
+
+    pub fn notify() {
+        let mut counter = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        *counter = counter.wrapping_add(1);
+        CHANGED.notify_all();
+    }
+
+    pub fn current() -> u64 {
+        *COUNTER.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Wait until the counter differs from `seen` or `timeout` passes, and
+    /// return the counter either way.
+    pub fn wait(seen: u64, timeout: Duration) -> u64 {
+        let counter = COUNTER.lock().unwrap_or_else(|e| e.into_inner());
+        let (counter, _) = CHANGED
+            .wait_timeout_while(counter, timeout, |counter| *counter == seen)
+            .unwrap_or_else(|e| e.into_inner());
+        *counter
+    }
+}
+
+/// Something that can appear in a workspace snapshot may have changed.
+pub fn notify_changed() {
+    changes::notify();
+}
+
+/// The current change counter, for a watcher's starting point.
+pub fn change_counter() -> u64 {
+    changes::current()
+}
+
+/// Block until [`notify_changed`] was called after `seen`, or `timeout`.
+pub fn wait_for_change(seen: u64, timeout: Duration) -> u64 {
+    changes::wait(seen, timeout)
+}
+
+/// Owner-side watchers of the change counter (one per bridge process in
+/// practice). Each holds one Unix socket and one thread, so they are bounded.
+const MAX_WATCHERS: usize = 4;
+static WATCHERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// How long a change may wait for the burst it belongs to (a drag's release
+/// saves, raises and saves again) before the watcher reports it.
+const WATCH_COALESCE: Duration = Duration::from_millis(30);
+/// Silence after which the watcher writes `idle`, so a dead reader is noticed
+/// and the bridge can reconcile runtime-only facts (a session that exited).
+const WATCH_IDLE: Duration = Duration::from_secs(crate::desktop_protocol::EVENT_HEARTBEAT_SECS);
+
+/// Serve `desktop-watch` on its own thread: the IPC listener is sequential and
+/// must never be held by a long-lived reader.
+///
+/// Protocol (owner-only Unix socket, one line each): `{"ok":true,"watch":N}`
+/// on accept, then `changed N` after each coalesced burst of notifications and
+/// `idle N` after five quiet seconds. The reader fetches a snapshot on either;
+/// the lines carry no workspace data.
+pub fn serve_watch(mut socket: std::os::unix::net::UnixStream) {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    if WATCHERS.fetch_add(1, Ordering::SeqCst) >= MAX_WATCHERS {
+        WATCHERS.fetch_sub(1, Ordering::SeqCst);
+        let _ = socket.write_all(b"{\"ok\":false,\"error\":\"too_many_watchers\"}\n");
+        return;
+    }
+    struct Slot;
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            WATCHERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let spawned = std::thread::Builder::new()
+        .name("desktop-watch".into())
+        .spawn(move || {
+            let _slot = Slot;
+            let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
+            let mut seen = change_counter();
+            if socket
+                .write_all(format!("{{\"ok\":true,\"watch\":{seen}}}\n").as_bytes())
+                .is_err()
+            {
+                return;
+            }
+            loop {
+                let now = wait_for_change(seen, WATCH_IDLE);
+                let line = if now == seen {
+                    format!("idle {now}\n")
+                } else {
+                    std::thread::sleep(WATCH_COALESCE);
+                    seen = change_counter();
+                    format!("changed {seen}\n")
+                };
+                if socket.write_all(line.as_bytes()).is_err() {
+                    return;
+                }
+            }
+        });
+    if spawned.is_err() {
+        WATCHERS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// After a workspace change the inventory may be refreshed sooner than
+/// `REFRESH_INTERVAL`, but never more than four times a second.
+const CHANGED_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
 const RUNTIME_MAX_AGE: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
@@ -222,13 +340,13 @@ pub fn offered_folders(state: &AppState, workspace: &str) -> Vec<String> {
     folders.iter().take(crate::desktop_protocol::MAX_FOLDERS).cloned().collect()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Pane {
     size: TerminalSize,
     alive: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct Runtime {
     // None means unknown/unavailable, never a fabricated exited session.
     sessions: Option<HashMap<String, Pane>>,
@@ -241,6 +359,10 @@ struct RuntimePoller {
     cached: Runtime,
     updated: Option<Instant>,
     requested: Option<Instant>,
+    /// The change counter when the last collection was requested. A newer
+    /// change asks again without waiting out the one-second throttle, so a
+    /// card created on the host is reported alive in its next snapshot.
+    requested_changes: u64,
     in_flight: bool,
 }
 
@@ -251,10 +373,30 @@ impl RuntimePoller {
         std::thread::Builder::new()
             .name("desktop-runtime".into())
             .spawn(move || {
+                let mut previous: Option<Runtime> = None;
                 while requests.recv().is_ok() {
-                    let runtime = collect_runtime();
+                    // A change during collection (a card created while tmux
+                    // was listing) may not be in this result: collect again,
+                    // a bounded number of times, rather than publish it stale.
+                    let mut runtime;
+                    let mut rounds = 0;
+                    loop {
+                        let started = change_counter();
+                        runtime = collect_runtime();
+                        rounds += 1;
+                        if change_counter() == started || rounds >= 3 {
+                            break;
+                        }
+                    }
+                    let differs = previous.as_ref() != Some(&runtime);
+                    previous = Some(runtime.clone());
                     if results.send((Instant::now(), runtime)).is_err() {
                         break;
+                    }
+                    // Sessions appearing or exiting are workspace changes too;
+                    // the next snapshot is what picks the new inventory up.
+                    if differs {
+                        notify_changed();
                     }
                 }
             })
@@ -265,6 +407,7 @@ impl RuntimePoller {
             cached: Runtime::default(),
             updated: None,
             requested: None,
+            requested_changes: change_counter(),
             in_flight: false,
         }
     }
@@ -275,14 +418,20 @@ impl RuntimePoller {
             self.updated = Some(updated);
             self.in_flight = false;
         }
+        let changes = change_counter();
         if !self.in_flight
-            && self
-                .requested
-                .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL)
+            && ((changes != self.requested_changes
+                && self
+                    .requested
+                    .is_none_or(|t| t.elapsed() >= CHANGED_REFRESH_INTERVAL))
+                || self
+                    .requested
+                    .is_none_or(|t| t.elapsed() >= REFRESH_INTERVAL))
         {
             if self.request.try_send(()).is_ok() {
                 self.in_flight = true;
                 self.requested = Some(Instant::now());
+                self.requested_changes = changes;
             }
         }
         if self.updated.is_some_and(|t| t.elapsed() <= RUNTIME_MAX_AGE) {
@@ -542,6 +691,52 @@ mod tests {
     }
 
     #[test]
+    fn the_owner_change_feed_reports_changes_and_stays_bounded() {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixStream;
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        ours.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        serve_watch(theirs);
+        let mut reader = BufReader::new(ours);
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let hello: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+        assert_eq!(hello["ok"], true);
+        assert!(hello["watch"].is_u64());
+        // A save (or any other notification) is reported as one `changed`
+        // line; the line carries no workspace data.
+        notify_changed();
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("changed "), "{line:?}");
+        assert!(line.trim().split(' ').nth(1).unwrap().parse::<u64>().is_ok());
+        // Watchers are bounded; one past the budget is refused, not queued.
+        let spare: Vec<_> = (0..MAX_WATCHERS)
+            .map(|_| {
+                let (ours, theirs) = UnixStream::pair().unwrap();
+                serve_watch(theirs);
+                ours
+            })
+            .collect();
+        let (refused, theirs) = UnixStream::pair().unwrap();
+        refused.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        serve_watch(theirs);
+        let mut line = String::new();
+        BufReader::new(refused).read_line(&mut line).unwrap();
+        assert!(line.contains("too_many_watchers"), "{line:?}");
+        drop(spare);
+        drop(reader);
+        // Closed readers release their slots once their next write fails.
+        notify_changed();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while WATCHERS.load(std::sync::atomic::Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+            notify_changed();
+        }
+        assert_eq!(WATCHERS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn runtime_requests_coalesce_and_queued_old_results_stay_unknown() {
         let (request, requests) = mpsc::sync_channel(1);
         let (results, result) = mpsc::sync_channel(1);
@@ -551,6 +746,7 @@ mod tests {
             cached: Runtime::default(),
             updated: None,
             requested: None,
+            requested_changes: change_counter(),
             in_flight: false,
         };
         assert!(poller.current().sessions.is_none());

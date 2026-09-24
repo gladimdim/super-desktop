@@ -20,6 +20,7 @@ mod desktop_protocol;
 mod peer_client;
 mod peer_store;
 mod peer_terminal;
+mod peer_events;
 mod peer_cli;
 mod peer_pairing;
 mod peer_pairing_ui;
@@ -248,7 +249,7 @@ fn main() {
         return;
     }
 
-    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-forget") {
+    if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-events" | "peer-forget") {
         if let Err(error) = peer_cli::run(action, &args[2..]) {
             eprintln!("{error}");
             std::process::exit(1);
@@ -708,6 +709,13 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
                     }
                     let line = String::from_utf8_lossy(&buf[..n]);
                     let cmd = line.trim().to_string();
+                    // A long-lived change feed for the bridge's desktop event
+                    // route. It never reaches GTK and never holds this
+                    // sequential listener: it gets a bounded thread of its own.
+                    if cmd == "desktop-watch" {
+                        crate::workspace_model::serve_watch(s);
+                        continue;
+                    }
 
                     let (resp_tx, resp_rx) = channel();
                     if ipc_tx

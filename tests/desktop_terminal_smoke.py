@@ -75,7 +75,7 @@ def scenario():
         bridge = subprocess.Popen([BINARY, "harness-bridge", str(port)], env=env,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         stub = DesktopStub(host)
-        live = None
+        live = events = None
         try:
             for _ in range(100):
                 if (host / "control.sock").exists():
@@ -166,6 +166,30 @@ def scenario():
             assert sender.returncode == 0, sender.stderr
             assert marker.encode() in sender.stdout, sender.stderr
 
+            # Live workspace events through the viewer's own subscription
+            # worker: the initial snapshot, then a host-side move pushed as the
+            # next event, without the viewer asking again.
+            watcher = subprocess.Popen([BINARY, "peer-events", machine, "--seconds", "20"],
+                                       env=client_env, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, text=True)
+            try:
+                first = json.loads(watcher.stdout.readline())
+                assert first["type"] == "snapshot" and first["sequence"] == 1, first
+                assert first["workspace"]["machineId"] == machine
+                moved = [card(CARD, SESSION), card(FOREIGN_CARD, "not_owned_session")]
+                moved[0]["revision"] = 2
+                moved[0]["layout"]["x"] = 777
+                reply = copy.deepcopy(stub.reply)
+                reply["workspace"]["cards"] = moved
+                reply["workspace"]["revision"] += 1
+                stub.replace(reply)
+                pushed = json.loads(watcher.stdout.readline())
+                assert pushed["type"] == "snapshot" and pushed["sequence"] == 2, pushed
+                assert pushed["workspace"]["cards"][0]["layout"]["x"] == 777, pushed
+            finally:
+                watcher.kill()
+                watcher.wait()
+
             # Only an owned card can be addressed, and only its own session.
             refused = cli("peer-attach", machine, "no-such-card", expected=1).stderr
             assert b"unknown_card" in refused, refused
@@ -174,19 +198,30 @@ def scenario():
             # Revoked access cannot keep streaming, let alone keep typing into it.
             live = subprocess.Popen([BINARY, "peer-attach", machine, CARD], env=client_env,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            # One CLI at a time reads the private peer store (it is locked).
+            time.sleep(1)
+            events = subprocess.Popen([BINARY, "peer-events", machine], env=client_env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             time.sleep(3)
             assert live.poll() is None, "a live attach must stay open"
+            assert events.poll() is None, "a live subscription must stay open"
             admin("revoke", {"deviceId": admin("devices")["devices"][0]["id"]})
             live.wait(timeout=15)
             reason = live.stderr.read()
             assert live.returncode != 0, reason
             assert b"connection_failed" in reason or b"revoked" in reason, reason
+            # The subscription is torn down too, and its reconnect learns the
+            # credential is gone and stops instead of retrying forever.
+            events.wait(timeout=15)
+            reason = events.stderr.read()
+            assert events.returncode != 0 and b"peer_revoked_or_expired" in reason, reason
             # The host session itself is untouched by detach and revocation.
             assert tmux("display-message", "-p", "-t", SESSION, "#{pane_pid}")
         finally:
-            if live is not None and live.poll() is None:
-                live.kill()
-                live.wait()
+            for process in (live, events):
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait()
             stub.close()
             bridge.terminate()
             bridge.wait(timeout=10)
@@ -195,4 +230,5 @@ def scenario():
 
 scenario()
 print("Desktop terminal smoke passed: pinned WSS attach, live colored output, "
-      "typed stdin, card ownership, revocation teardown, host session survival")
+      "typed stdin, live workspace events, card ownership, revocation teardown, "
+      "host session survival")

@@ -22,7 +22,8 @@ pub fn run(action: &str, args: &[String]) -> Result<()> {
             output(&serde_json::json!({"forgotten":args[0]}))
         }
         "peer-attach" if !args.is_empty() => attach(args),
-        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-attach ID CARD [--seconds N] | peer-forget ID")),
+        "peer-events" if !args.is_empty() => events(args),
+        _ => Err(PeerError("usage: peer-add [--host ADDRESS] [--port PORT] [--name LABEL] | peer-list | peer-workspace ID | peer-attach ID CARD [--seconds N] | peer-events ID [--seconds N] | peer-forget ID")),
     }
 }
 
@@ -35,26 +36,7 @@ pub fn run(action: &str, args: &[String]) -> Result<()> {
 /// terminal keeps stdin for itself; a pipe (the smoke test, a here-string)
 /// is written to the host session as raw terminal bytes.
 fn attach(args: &[String]) -> Result<()> {
-    let mut seconds = None;
-    let mut positionals = Vec::new();
-    let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--seconds" if seconds.is_none() => {
-                let value = args.get(index + 1).ok_or(PeerError("invalid_peer_attach_option"))?;
-                seconds = Some(
-                    value
-                        .parse::<u64>()
-                        .map_err(|_| PeerError("invalid_peer_attach_option"))?,
-                );
-                index += 2;
-            }
-            _ => {
-                positionals.push(args[index].as_str());
-                index += 1;
-            }
-        }
-    }
+    let (seconds, positionals) = stream_args(args)?;
     let [machine_id, card_id] = positionals[..] else {
         return Err(PeerError("peer_attach_requires_machine_and_card"));
     };
@@ -119,6 +101,70 @@ fn attach(args: &[String]) -> Result<()> {
             Err(futures_channel::mpsc::TryRecvError::Closed) => return Ok(()),
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Ok(());
+        }
+    }
+}
+
+/// `--seconds N` and the positional arguments of a streaming command.
+fn stream_args(args: &[String]) -> Result<(Option<u64>, Vec<&str>)> {
+    let mut seconds = None;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--seconds" if seconds.is_none() => {
+                let value = args.get(index + 1).ok_or(PeerError("invalid_peer_attach_option"))?;
+                seconds = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| PeerError("invalid_peer_attach_option"))?,
+                );
+                index += 2;
+            }
+            _ => {
+                positionals.push(args[index].as_str());
+                index += 1;
+            }
+        }
+    }
+    Ok((seconds, positionals))
+}
+
+/// Print a host's live workspace events, one JSON document per line.
+///
+/// The same subscription worker the machine selector uses (pinned WSS,
+/// validation, reconnect with backoff), so a two-PC problem can be narrowed to
+/// the event route. Connection changes go to stderr; a subscription that ends
+/// for good (revocation, identity change, an older host) exits with its code.
+fn events(args: &[String]) -> Result<()> {
+    let (seconds, positionals) = stream_args(args)?;
+    let [machine_id] = positionals[..] else {
+        return Err(PeerError("peer_events_requires_machine"));
+    };
+    let peer = PeerStore::default_store()?.get(machine_id)?;
+    let (subscription, mut updates) = crate::peer_events::WorkspaceEvents::open(peer);
+    let deadline = seconds.map(|seconds| Instant::now() + Duration::from_secs(seconds));
+    let mut stdout = std::io::stdout().lock();
+    loop {
+        match updates.try_recv() {
+            Ok(crate::peer_events::Update::Event(event)) => {
+                serde_json::to_writer(&mut stdout, &event)
+                    .map_err(|_| PeerError("output_failed"))?;
+                writeln!(stdout)
+                    .and_then(|()| stdout.flush())
+                    .map_err(|_| PeerError("output_failed"))?;
+            }
+            Ok(crate::peer_events::Update::Connected) => eprintln!("subscribed"),
+            Ok(crate::peer_events::Update::Down) => eprintln!("reconnecting"),
+            Ok(crate::peer_events::Update::Ended(reason)) => return Err(PeerError(reason)),
+            Err(futures_channel::mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(Duration::from_millis(10))
+            }
+            Err(futures_channel::mpsc::TryRecvError::Closed) => return Ok(()),
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            drop(subscription);
             return Ok(());
         }
     }

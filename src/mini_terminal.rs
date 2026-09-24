@@ -1166,6 +1166,15 @@ impl MiniTerminalCard {
         }
     }
 
+    /// Expanded state and the title are presentation, not saved state, so a
+    /// local card reports their changes to desktop event subscribers itself. A
+    /// remote card mirrors another PC and never describes this one.
+    fn notify_host_change(&self) {
+        if self.remote.is_none() {
+            crate::workspace_model::notify_changed();
+        }
+    }
+
     pub fn is_expanded(&self) -> bool {
         *self.expanded.borrow()
     }
@@ -1231,6 +1240,7 @@ impl MiniTerminalCard {
             return;
         }
         *self.expanded.borrow_mut() = true;
+        self.notify_host_change();
 
         let (x, y, w, h) = expanded_rect(screen_w, screen_h);
         *self.visual_pos.borrow_mut() = (x, y);
@@ -1259,6 +1269,7 @@ impl MiniTerminalCard {
             return;
         }
         *self.expanded.borrow_mut() = false;
+        self.notify_host_change();
         *self.visual_pos.borrow_mut() = displayed_pos(&self.data.borrow());
 
         let iconified = self.data.borrow().iconified;
@@ -1696,6 +1707,9 @@ impl MiniTerminalCard {
                 if title.label().as_str() != new_title {
                     title.set_label(&new_title);
                     title.set_tooltip_text(Some(&new_title));
+                    // This refresh runs for local cards only; their title is
+                    // part of the published workspace.
+                    crate::workspace_model::notify_changed();
                 }
             }
             if *opencode_cache.borrow() != oc_id {

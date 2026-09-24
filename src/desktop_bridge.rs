@@ -1,10 +1,11 @@
-//! Authenticated desktop snapshot routes, the typed command route and the live
+//! Authenticated desktop snapshot routes (the event stream is in
+//! `desktop_events.rs`), the typed command route and the live
 //! terminal attach stream. Called only after bridge admission, origin checks
 //! and paired-device authorization. Never reads state.json.
 use super::*;
 use crate::desktop_protocol::{
     valid_card_id, AttachCommand, AttachEvent, CommandOutcome, CommandRequest,
-    LocalWorkspaceSnapshot, TerminalSize, WorkspaceEvent, WorkspaceSnapshot, ATTACH_MAX_SECS,
+    LocalWorkspaceSnapshot, TerminalSize, WorkspaceSnapshot, ATTACH_MAX_SECS,
     MAX_REMOTE_VIEWERS,
 };
 use crate::terminal_transport::PtyAttachment;
@@ -57,7 +58,7 @@ pub(super) struct WorkspaceError {
     pub(super) error: &'static str,
 }
 
-fn workspace() -> Result<WorkspaceSnapshot, WorkspaceError> {
+pub(super) fn workspace() -> Result<WorkspaceSnapshot, WorkspaceError> {
     let reply = match crate::ipc_request("desktop-workspace") {
         crate::Ipc::Reply(reply) => reply,
         crate::Ipc::NoDaemon => return Err(unavailable("desktop_unavailable")),
@@ -697,38 +698,6 @@ fn apply_control(stream: &mut Connection, pty: &mut PtyAttachment, text: &str) -
         Err(_) => {}
     }
     Peer::Idle
-}
-
-pub(super) fn stream_workspace(stream: &mut Connection) {
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let deadline = std::time::Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
-    let mut previous = String::new();
-    let mut heartbeat = std::time::Instant::now();
-    while std::time::Instant::now() < deadline {
-        if !ws_client_alive(stream) {
-            return;
-        }
-        // Every message is a complete, independently usable snapshot. Polling
-        // the owning model avoids a snapshot/subscription gap without an event
-        // log; intermediate edits may coalesce, but the final state cannot be
-        // lost. Runtime collection is cached/off-thread in the daemon.
-        let event = match workspace() {
-            Ok(workspace) => WorkspaceEvent::Snapshot { workspace },
-            Err(error) => WorkspaceEvent::Unavailable {
-                error: error.error.into(),
-            },
-        };
-        let document = serde_json::to_string(&event).unwrap();
-        if document != previous || heartbeat.elapsed() >= Duration::from_secs(5) {
-            if crate::ws::write_text(stream, &document).is_err() {
-                return;
-            }
-            previous = document;
-            heartbeat = std::time::Instant::now();
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    let _ = crate::ws::write_close(stream, 1000, "reconnect");
 }
 
 #[cfg(test)]

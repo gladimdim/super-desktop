@@ -14,11 +14,12 @@ authenticated workspace snapshots/events, persisted terminal stacking order, the
 host-side PTY attach transport with a host-owned grid, viewer keystrokes on that
 stream, the viewer's live consoles, and the typed command route with `setLayout`,
 `closeTerminal`, `setExpanded` and `createTerminal` behind epoch/revision checks
-and per-device deduplication.
-Outgoing certificate-pinned pairing, remote snapshot retrieval and a
-`peer-attach` streaming CLI are available too (see below). The default-folder
-command, the viewer's own close/iconify controls and live outgoing workspace
-subscriptions remain pending; this is still an incremental development branch.
+and per-device deduplication, and live workspace events that replace the
+viewer's two-second poll (`workspace-events-v1`).
+Outgoing certificate-pinned pairing, remote snapshot retrieval and the
+`peer-attach` and `peer-events` streaming CLIs are available too (see below).
+The two-PC regression matrix remains pending; this is still an incremental
+development branch.
 
 ## Delivered user flow and current limit
 
@@ -91,14 +92,18 @@ credential over HTTPS. It returns:
 {
   "machineId": "<existing persistent bridgeId>",
   "desktopApiVersion": 1,
-  "capabilities": ["workspace-snapshot-v1", "workspace-layout-v1", "terminal-pty-v1"]
+  "capabilities": ["workspace-snapshot-v1", "workspace-layout-v1", "terminal-pty-v1",
+                   "workspace-events-v1"]
 }
 ```
 
-`workspace-snapshot-v1` advertises read-only workspace snapshots/events,
-`terminal-pty-v1` advertises the live terminal attach stream, and
-`workspace-layout-v1` advertises the command route. The host advertises it
-because `POST /api/v1/desktop/commands` really applies layout and close
+`workspace-snapshot-v1` advertises read-only workspace snapshots,
+`terminal-pty-v1` advertises the live terminal attach stream,
+`workspace-layout-v1` advertises the command route, and `workspace-events-v1`
+advertises the sequenced, change-driven event stream described below. A viewer
+subscribes only to a host advertising `workspace-events-v1`, and keeps the
+two-second snapshot poll for a host that does not. The host advertises
+`workspace-layout-v1` because `POST /api/v1/desktop/commands` really applies layout and close
 commands; it must never offer a capability whose endpoints are unimplemented,
 which is why a command variant with no handler is answered with
 `unsupported_command` instead of being half-applied. A desktop client enables
@@ -117,16 +122,60 @@ remains v3; Android endpoints and credentials are unchanged.
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /api/v1/desktop/workspace` | Complete current workspace snapshot, retrieved from the local daemon via Unix IPC. |
-| `GET /api/v1/desktop/events` (WSS) | Initial complete snapshot, then changed snapshots and five-second heartbeats. |
+| `GET /api/v1/desktop/events` (WSS) | Sequenced events: a complete snapshot on connect, another after each published change, `heartbeat` after five quiet seconds, `resync` when this subscriber fell behind, `unavailable` while the owner is down. |
 | `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live bytes of one owned card's session. Host→viewer binary frames are terminal output; viewer→host binary frames are terminal input. |
 | `POST /api/v1/desktop/commands` | One typed workspace command: `setLayout`, `setExpanded`, `closeTerminal`, `createTerminal` and `setWorkspace`. Requires the paired-device credential; a non-POST method on the path answers 405 after authorization. |
 
-Events use `{"type":"snapshot","workspace":{...}}` or
-`{"type":"unavailable","error":"desktop_unavailable"}`. Events poll the owning
-model every 500 ms and coalesce intermediate edits; every message is self-contained
-and no delta application is necessary. Discard prior assumptions on epoch changes.
-Streams expire after 30 minutes and ask the client to reconnect, like the existing
-phone stream. Credential revocation closes these streams immediately.
+### Workspace event stream (`workspace-events-v1`)
+
+Every message is one text frame with a `sequence` that starts at 1 on each
+connection and grows by exactly one per message:
+
+```json
+{"type":"snapshot","sequence":1,"workspace":{...complete snapshot...}}
+{"type":"snapshot","sequence":2,"workspace":{...after a change...}}
+{"type":"heartbeat","sequence":3,"epoch":"<epoch>","revision":7}
+{"type":"resync","sequence":4,"reason":"backpressure"}
+{"type":"unavailable","sequence":5,"error":"desktop_unavailable"}
+```
+
+- **Snapshot on connect.** The subscription is registered before the initial
+  snapshot is read, so a change between the two is queued, not lost; a queued
+  copy of what was already sent is skipped by revision.
+- **Change-driven, not polled.** The daemon counts changes: every state save
+  (layout, create, close, stacking, iconify, folder,
+  harness list), a local card's expand/collapse and title, and a runtime
+  inventory that differs from the last (a session appeared or exited). The
+  bridge holds one owner-only `desktop-watch` feed per process (Unix socket; the
+  daemon answers `{"ok":true,"watch":N}`, then `changed N` after each 30 ms
+  burst and `idle N` after five quiet seconds, and carries no workspace data).
+  One hub fetches a single snapshot per line and publishes it to every
+  subscriber only when it differs, so N viewers cost one owner read per change
+  (at most ten a second during a burst of saves, final state included), plus
+  one reconciliation read per five idle seconds for runtime facts. An
+  older daemon without the feed is polled once a second by that hub.
+- **Snapshots only.** Each snapshot is complete (bounded like the snapshot
+  route), so there is no delta to apply and no event log to replay. A snapshot
+  is sent only when the epoch changes or the workspace revision grows.
+- **Heartbeat** after five quiet seconds names the host's current epoch and
+  revision (omitted while the owner is unavailable).
+- **Backpressure.** Each subscriber has a four-event queue. When it is full
+  the host drops the queue and sends one `resync` instead of buffering; the
+  write itself has a five-second timeout, after which the stream is closed.
+- **Budgets.** At most 4 subscriptions per credential and 16 per bridge,
+  settled before the upgrade: a refusal is HTTP 429 `subscription_limit`.
+- **Lifetime and revocation.** A stream ends after 30 minutes with a
+  `reconnect` close frame. Revoking or expiring the credential shuts its sockets
+  down at once, and the stream loop re-checks authorization at least once a
+  second, so the subscription ends and releases its budget within a second.
+
+The viewer applies these rules (`peer_events::EventCursor`): a sequence that is
+not the previous one plus one, a snapshot or heartbeat from another epoch, a
+heartbeat naming a revision newer than the one drawn, and `resync` each cause
+one snapshot fetch (`GET /api/v1/desktop/workspace`), never a guess and never a
+replayed command. A snapshot older than the one drawn (same epoch, lower
+revision) is ignored, and the same check keeps a slow fetch from taking back a
+newer event. Three silent heartbeat intervals mean the subscription is lost.
 
 An unavailable daemon returns HTTP 503 rather than an empty workspace. A daemon
 whose window has not warmed up yet returns `desktop_not_ready` (503); a timeout
@@ -272,8 +321,9 @@ its panes or its processes.
   harness `available` are nullable: `null` means unknown while background discovery
   is pending or unavailable. `status` is `RUNNING`, `EXITED` or `UNKNOWN`; this API
   does not yet distinguish a busy agent from an idle running process.
-- `WorkspaceEvent` initially provides full snapshots and unavailability. Incremental
-  deltas are intentionally not specified until gap recovery is implemented.
+- `WorkspaceEvent` is the event stream's message: sequenced full snapshots,
+  unavailability, heartbeats naming epoch and revision, and `resync`.
+  Recovery is a snapshot fetch, so incremental deltas are still not specified.
 - Commands are typed envelopes with request/machine/epoch identity. Create takes
   a harness type and host workspace, not a shell command. Close and layout updates
   require a card revision; default-folder updates require a workspace revision.
@@ -386,7 +436,15 @@ route against a stub owner: authorization, refused envelopes that never reach th
 owner, deduplicated replay, the uncertain-outcome path, a conflict carrying the
 owner's own geometry, and an owner error downgraded instead of passed on.
 `machine_selector::tests::stale_poll_inner` covers the viewer's revision merge
-and epoch reset.
+and epoch reset. The event stream is covered by `bridge::desktop_events::tests`
+(an in-process host handler pushing a layout change to a subscribed viewer
+without polling, budgets, backpressure, heartbeats, lifetime and a revoked
+socket), `peer_events::tests` (sequence gaps, epoch changes, stale reads,
+validation, backoff), `workspace_model::tests` (the owner's change feed),
+`machine_selector::tests::live_events_inner` (events driving the GTK view),
+`tests/bridge_security_smoke.py` (the real bridge reading the owner's feed and
+not polling while idle) and `tests/desktop_terminal_smoke.py` (the viewer's
+subscription worker over pinned WSS, and its teardown on revocation).
 
 Viewer keystrokes, the prompt-transaction input guard and the attach handshake
 gate are in place: bytes VTE commits (keys, paste, IME, and mouse reports the
@@ -454,8 +512,8 @@ installed, but this PC falls back to its shell. The same failure was reproduced
 on the unmodified base commit `013492a`, and `bridge::tests::test_port_taken_follows_the_listener`
 is a pre-existing flake: it re-uses a released ephemeral port and loses it to a
 parallel test's connection roughly once in eight full-suite runs, on the base
-commit included. With terminal streaming, the command route and the remote launch
-bar the suite reports 261 passed, 5 ignored and those same failures. Coverage includes
+commit included. With live workspace events the suite reports 379 passed,
+6 ignored and that same Antigravity failure. Coverage includes
 `desktop_protocol` (envelope, bounds, epoch/revision checks, typed outcome and
 reply), `terminal_transport`, `peer_terminal`, `remote_terminal`, `window` and
 `machine_selector`, plus the isolated terminal smoke test and the bridge smoke
@@ -472,6 +530,7 @@ super-desktop peer-add --host 192.168.1.20 --name "Work laptop"
 super-desktop peer-list
 super-desktop peer-workspace MACHINE_ID
 super-desktop peer-attach MACHINE_ID CARD_ID --seconds 15
+super-desktop peer-events MACHINE_ID --seconds 30
 super-desktop peer-forget MACHINE_ID
 ```
 
@@ -488,7 +547,10 @@ displayed workspace.
 `peer-workspace` returns the host's typed layout snapshot, including card
 positions, sizes and stacking order, and the card ids `peer-attach` takes.
 `peer-attach` upgrades the same pinned, authenticated connection to the attach
-route and prints the console's raw bytes. Piped stdin is written to the host
+route and prints the console's raw bytes. `peer-events` runs the selector's own
+event subscription worker and prints one JSON event per line (connection
+changes on stderr); it exits with the code of a failure a reconnect cannot fix,
+such as `peer_revoked_or_expired`. Piped stdin is written to the host
 session as input frames; a terminal on stdin stays output-only. The host desktop
 daemon must be running.
 It checks the pinned certificate, persistent machine identity and desktop
@@ -555,8 +617,16 @@ while a remote PC is selected.
 Incoming bridge snapshots still describe this PC's local model even while it is
 viewing another PC.
 
-The viewer polls snapshots every two seconds while mapped, with one request in
-flight at a time, and holds at most eight attachments: the host's frontmost
+While the remote view is on screen and the host advertises
+`workspace-events-v1`, the viewer holds one event subscription to it and draws
+each pushed snapshot at once; the two-second snapshot poll stands down while
+that subscription is connected. The subscription is released when the overlay
+hides or another PC (or This PC) is selected, exactly like the attach streams,
+and reopens on the next show. A dropped subscription reconnects with jittered
+backoff (1 s doubling to 30 s) and the poll covers the gap; revocation, a changed
+identity or an older host end it, and the poll then reports why. Hosts without
+the capability keep the poll, with one request in flight at a time. The viewer
+holds at most eight attachments: the host's frontmost
 consoles get live output and the rest keep their chrome with an explanation.
 Network and registry operations run outside GTK; terminal bytes reach the
 emulator through a bounded queue, and a viewer that falls behind is disconnected
@@ -572,10 +642,11 @@ the overlay again reconnects without a failure backoff. The overlay's slide-out
 moves remote consoles to their nearest border exactly like local cards, so a
 remote workspace hides the way a local one does.
 
-This increment still uses bounded HTTPS polling for layout at two-second
-intervals. Live WSS workspace subscriptions, graphical peer removal and the remote
-folder list remain pending. Conflict feedback in the card chrome is delivered:
-see the viewer notes under the command route. Viewer
+Layout now arrives on the live event stream (bounded HTTPS polling only for
+hosts without it, and while a subscription reconnects). Graphical peer removal
+remains pending. Conflict feedback in the card chrome is unchanged by events: a
+command's answer still adopts the host's revision, and an older snapshot on the
+stream cannot take it back. See the viewer notes under the command route. Viewer
 typing is delivered on the attach stream, and layout, expand, close and create
 commands are delivered on the command route.
 

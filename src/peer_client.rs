@@ -748,6 +748,24 @@ pub fn desktop_socket(
     path: &str,
     required: &str,
 ) -> Result<tungstenite::WebSocket<PinnedStream>> {
+    desktop_socket_bounded(
+        peer,
+        path,
+        required,
+        crate::desktop_protocol::ATTACH_MAX_CHUNK,
+        crate::desktop_protocol::ATTACH_MAX_CHUNK * 2,
+    )
+}
+
+/// [`desktop_socket`] with explicit frame and message bounds: terminal bytes
+/// arrive in 16 KiB frames, a workspace event is one complete snapshot.
+pub fn desktop_socket_bounded(
+    peer: &Peer,
+    path: &str,
+    required: &str,
+    max_frame: usize,
+    max_message: usize,
+) -> Result<tungstenite::WebSocket<PinnedStream>> {
     if !path.starts_with("/api/v1/desktop/")
         || path.len() > 256
         || !path.bytes().all(|b| b.is_ascii_graphic() && b != b'\\')
@@ -784,8 +802,8 @@ pub fn desktop_socket(
         // Write every frame immediately: terminal output is latency-sensitive
         // and each chunk is already bounded.
         .write_buffer_size(0);
-    config.max_frame_size = Some(crate::desktop_protocol::ATTACH_MAX_CHUNK);
-    config.max_message_size = Some(crate::desktop_protocol::ATTACH_MAX_CHUNK * 2);
+    config.max_frame_size = Some(max_frame);
+    config.max_message_size = Some(max_message);
     match tungstenite::client::client_with_config(request, stream, Some(config)) {
         Ok((socket, _response)) => Ok(socket),
         Err(tungstenite::HandshakeError::Failure(error)) => Err(socket_failure(error)),

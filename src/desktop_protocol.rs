@@ -11,6 +11,10 @@ pub const DESKTOP_API_VERSION: u32 = 1;
 pub const WORKSPACE_SNAPSHOT: &str = "workspace-snapshot-v1";
 pub const WORKSPACE_LAYOUT: &str = "workspace-layout-v1";
 pub const TERMINAL_PTY: &str = "terminal-pty-v1";
+/// Live workspace events: `GET /api/v1/desktop/events` pushes a snapshot on
+/// connect and then one per published change, with sequenced heartbeats and an
+/// explicit `resync`. A viewer polls only hosts that do not advertise it.
+pub const WORKSPACE_EVENTS: &str = "workspace-events-v1";
 
 /// How many remote terminals one viewer may keep attached at once. The host
 /// enforces this per credential, and the viewer uses the same number to decide
@@ -23,6 +27,20 @@ pub const ATTACH_MAX_CHUNK: usize = 16 * 1024;
 pub const ATTACH_MAX_BACKLOG: usize = 1024 * 1024;
 /// Longest an attach stream lives before the viewer is asked to reconnect.
 pub const ATTACH_MAX_SECS: u64 = 1800;
+
+/// Workspace event subscriptions one credential may hold at once, and the
+/// bridge-wide total. A viewer holds one per selected host; the slack covers a
+/// reconnect racing the host noticing the previous socket is gone.
+pub const MAX_EVENT_SUBSCRIPTIONS: usize = 4;
+pub const MAX_EVENT_SUBSCRIPTIONS_TOTAL: usize = 16;
+/// Events a host queues for one subscriber before it stops queueing and asks
+/// that viewer to fetch a snapshot instead (`resync`).
+pub const EVENT_QUEUE: usize = 4;
+/// A heartbeat is sent after this much silence, and a viewer that hears nothing
+/// for three of them treats the subscription as lost.
+pub const EVENT_HEARTBEAT_SECS: u64 = 5;
+/// Longest event message: a 1 MiB owner snapshot plus the bridge's envelope.
+pub const EVENT_MAX_MESSAGE: usize = 2 * 1024 * 1024;
 
 /// Largest coordinate or size a viewer may name in a layout command. The owner
 /// clamps to its own screen afterwards; these bounds only stop absurd or
@@ -83,8 +101,16 @@ impl Capabilities {
                 WORKSPACE_SNAPSHOT.into(),
                 WORKSPACE_LAYOUT.into(),
                 TERMINAL_PTY.into(),
+                WORKSPACE_EVENTS.into(),
             ],
         }
+    }
+
+    /// Live workspace events. Without it a viewer keeps the two-second
+    /// snapshot poll, which every host with `workspace-snapshot-v1` serves.
+    pub fn supports_workspace_events(&self) -> bool {
+        self.desktop_api_version == DESKTOP_API_VERSION
+            && self.capabilities.iter().any(|c| c == WORKSPACE_EVENTS)
     }
 
     pub fn supports_remote_desktop(&self) -> bool {
@@ -231,7 +257,7 @@ impl AttachCommand {
 /// Stable failure codes shared by the attach route, its close frames and its
 /// HTTP errors. Both sides map a received code through this list, so a peer can
 /// never put free-form text (or a credential) in front of the user.
-pub const ATTACH_REASONS: [&str; 11] = [
+pub const ATTACH_REASONS: [&str; 12] = [
     "unknown_card",
     "terminal_exited",
     "terminal_grid_unknown",
@@ -243,6 +269,9 @@ pub const ATTACH_REASONS: [&str; 11] = [
     "desktop_not_ready",
     "update_remote_super_desktop",
     "reconnect",
+    // The event route's budget refusal; it shares this list so a viewer maps
+    // it without trusting free-form text.
+    "subscription_limit",
 ];
 
 /// Returns the code when it is one of ours, so callers can safely branch on it.
@@ -307,13 +336,50 @@ pub struct LocalWorkspaceSnapshot {
     pub cards: Vec<DesktopCard>,
 }
 
-/// Initial subscriptions and recovery use complete snapshots. No delta schema
-/// is promised until there is a retained event log and gap recovery.
+/// One message on the workspace event stream.
+///
+/// Every message carries `sequence`, which starts at 1 on each connection and
+/// grows by exactly one per message, so a viewer can tell a lost message from
+/// a quiet host. Snapshots are complete: there is no delta to apply, and
+/// recovery from a gap, an epoch change or `resync` is one snapshot fetch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum WorkspaceEvent {
-    Snapshot { workspace: WorkspaceSnapshot },
-    Unavailable { error: String },
+    /// The complete workspace, on connect and after every published change.
+    Snapshot {
+        #[serde(default)]
+        sequence: u64,
+        workspace: WorkspaceSnapshot,
+    },
+    /// The owner is not answering; snapshots resume when it does.
+    Unavailable {
+        #[serde(default)]
+        sequence: u64,
+        error: String,
+    },
+    /// Nothing changed. Names the host's current epoch and revision, so a
+    /// viewer that missed a change learns it without waiting for the next one.
+    Heartbeat {
+        sequence: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        epoch: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revision: Option<u64>,
+    },
+    /// The host dropped this subscriber's queued events (it was not reading
+    /// fast enough). Fetch a snapshot; later events follow on this stream.
+    Resync { sequence: u64, reason: String },
+}
+
+impl WorkspaceEvent {
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Self::Snapshot { sequence, .. }
+            | Self::Unavailable { sequence, .. }
+            | Self::Heartbeat { sequence, .. }
+            | Self::Resync { sequence, .. } => *sequence,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -785,6 +851,41 @@ mod tests {
         // capability is no longer a promise the host cannot keep.
         assert!(caps.supports_remote_desktop());
         assert!(caps.capabilities.contains(&WORKSPACE_SNAPSHOT.to_string()));
+        // Live workspace events replace the viewer's poll on this host.
+        assert!(caps.supports_workspace_events());
+        let mut older = caps.clone();
+        older.capabilities.retain(|c| c != WORKSPACE_EVENTS);
+        assert!(!older.supports_workspace_events());
+    }
+
+    #[test]
+    fn workspace_events_are_sequenced_on_the_wire() {
+        assert_eq!(
+            serde_json::to_value(WorkspaceEvent::Heartbeat {
+                sequence: 4,
+                epoch: Some("e".into()),
+                revision: Some(9)
+            })
+            .unwrap(),
+            json!({"type":"heartbeat","sequence":4,"epoch":"e","revision":9})
+        );
+        // An unavailable host's heartbeat names no revision.
+        assert_eq!(
+            serde_json::to_value(WorkspaceEvent::Heartbeat { sequence: 5, epoch: None, revision: None })
+                .unwrap(),
+            json!({"type":"heartbeat","sequence":5})
+        );
+        assert_eq!(
+            serde_json::to_value(WorkspaceEvent::Resync { sequence: 6, reason: "backpressure".into() })
+                .unwrap(),
+            json!({"type":"resync","sequence":6,"reason":"backpressure"})
+        );
+        let unavailable: WorkspaceEvent =
+            serde_json::from_value(json!({"type":"unavailable","sequence":2,"error":"desktop_unavailable"}))
+                .unwrap();
+        assert_eq!(unavailable.sequence(), 2);
+        // A subscription-limit refusal is one of the shared stream codes.
+        assert_eq!(known_reason("subscription_limit"), Some("subscription_limit"));
     }
 
     #[test]

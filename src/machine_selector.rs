@@ -1,8 +1,9 @@
 //! Paired-PC selector and the live remote workspace view.
 //! Workers own only network data; generation checks guard every GTK update.
 use crate::{
-    desktop_protocol::MachineSelection,
-    peer_client,
+    desktop_protocol::{Capabilities, MachineSelection, WorkspaceSnapshot},
+    peer_client::{self, Peer},
+    peer_events::{Action, EventCursor, Update, WorkspaceEvents},
     peer_store::PeerStore,
     remote_terminal::RemoteCanvas,
     remote_workspace::{self, Selection},
@@ -19,6 +20,17 @@ use std::{
 type OnLaunch = Rc<RefCell<Option<Rc<dyn Fn(&str)>>>>;
 /// The same, for picking one of the host's folders.
 type OnPickFolder = Rc<RefCell<Option<Rc<dyn Fn(String)>>>>;
+
+/// The selected host's live workspace subscription (`workspace-events-v1`).
+/// Held only while that host is selected and the overlay shows it.
+struct LiveEvents {
+    /// Which subscription this is; a late update from a released one is
+    /// recognised by it and dropped.
+    serial: u64,
+    generation: u64,
+    id: String,
+    _events: WorkspaceEvents,
+}
 
 pub struct MachineView {
     pub stack: gtk4::Stack,
@@ -42,6 +54,19 @@ pub struct MachineView {
     fit_button: gtk4::ToggleButton,
     actual_button: gtk4::ToggleButton,
     busy: Cell<bool>,
+    /// A refresh was asked for while one was in flight (an event resync, a
+    /// command's answer): run one more when it finishes, never in parallel.
+    again: Cell<bool>,
+    /// The host and capabilities of the last verified snapshot, which is
+    /// what an event's snapshot is drawn with.
+    host: RefCell<Option<(Peer, Capabilities)>>,
+    /// Sequence, epoch and revision of what this view shows, shared by the
+    /// event stream and the snapshot fetch.
+    cursor: RefCell<EventCursor>,
+    events: RefCell<Option<LiveEvents>>,
+    events_serial: Cell<u64>,
+    /// The subscription is connected: the two-second poll stands down.
+    live: Cell<bool>,
     on_switch: Rc<dyn Fn()>,
     on_add_pc: RefCell<Option<Rc<dyn Fn()>>>,
 }
@@ -163,6 +188,12 @@ impl MachineView {
             fit_button,
             actual_button,
             busy: Cell::new(false),
+            again: Cell::new(false),
+            host: RefCell::new(None),
+            cursor: RefCell::new(EventCursor::default()),
+            events: RefCell::new(None),
+            events_serial: Cell::new(0),
+            live: Cell::new(false),
             on_switch,
             on_add_pc: RefCell::new(None),
         });
@@ -239,11 +270,13 @@ impl MachineView {
             }
         });
         let weak = Rc::downgrade(&view);
+        // The fallback for hosts without `workspace-events-v1`, and for the
+        // time a subscription is down: a live subscription replaces it.
         glib::timeout_add_local(Duration::from_secs(2), move || {
             let Some(view) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if view.remote.is_mapped() {
+            if view.remote.is_mapped() && !view.live.get() {
                 view.refresh();
             }
             glib::ControlFlow::Continue
@@ -536,7 +569,11 @@ impl MachineView {
     fn select(self: &Rc<Self>, peer: Option<(String, String)>) {
         (self.on_switch)();
         // Leaving a PC — or picking another one — must release this viewer's
-        // terminal streams before anything else. The host keeps its sessions.
+        // terminal streams and its event subscription before anything else.
+        // The host keeps its sessions.
+        self.release_events();
+        *self.host.borrow_mut() = None;
+        *self.cursor.borrow_mut() = EventCursor::default();
         self.canvas.clear();
         *self.target.borrow_mut() = None;
         self.bar.apply(&crate::harness_bar::HarnessState::none());
@@ -567,7 +604,95 @@ impl MachineView {
     /// hide animation, and the next show reconnects. The selection, the saved
     /// layout and the local workspace are untouched.
     pub fn suspend_streams(&self) {
+        self.release_events();
         self.canvas.suspend();
+    }
+
+    /// Drop the event subscription; the host releases its slot when the socket
+    /// closes, and the poll takes over until the next subscription connects.
+    fn release_events(&self) {
+        self.events.borrow_mut().take();
+        self.live.set(false);
+    }
+
+    /// Subscribe to the selected host's workspace events, once per visit,
+    /// while the remote view is on screen and the host offers them.
+    fn ensure_events(
+        self: &Rc<Self>,
+        generation: u64,
+        id: &str,
+        peer: &Peer,
+        capabilities: &Capabilities,
+    ) {
+        if !capabilities.supports_workspace_events() || !self.remote.is_mapped() {
+            return;
+        }
+        if self
+            .events
+            .borrow()
+            .as_ref()
+            .is_some_and(|live| live.generation == generation && live.id == id)
+        {
+            return;
+        }
+        let serial = self.events_serial.get() + 1;
+        self.events_serial.set(serial);
+        let (events, mut updates) = WorkspaceEvents::open(peer.clone());
+        *self.events.borrow_mut() = Some(LiveEvents {
+            serial,
+            generation,
+            id: id.to_string(),
+            _events: events,
+        });
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            use futures_util::StreamExt;
+            while let Some(update) = updates.next().await {
+                let Some(view) = weak.upgrade() else {
+                    return;
+                };
+                let current = view.events.borrow().as_ref().is_some_and(|live| {
+                    live.serial == serial
+                        && view.selection.borrow().accepts(live.generation, &live.id)
+                });
+                if !current {
+                    return;
+                }
+                view.on_event(update);
+            }
+        });
+    }
+
+    fn on_event(self: &Rc<Self>, update: Update) {
+        match update {
+            Update::Connected => {
+                self.cursor.borrow_mut().connected();
+                self.live.set(true);
+            }
+            Update::Event(event) => {
+                let action = self.cursor.borrow_mut().accept(event);
+                match action {
+                    Action::Apply(snapshot) => {
+                        let host = self.host.borrow().clone();
+                        if let Some((peer, capabilities)) = host {
+                            self.show_snapshot(&peer, &capabilities, &snapshot);
+                        }
+                    }
+                    Action::Ignore => {}
+                    // Never a replay: one fetch of the host's current state.
+                    Action::Resync => self.refresh(),
+                    Action::Unavailable(_) => self.show_failure("remote_desktop_unavailable"),
+                }
+            }
+            // Reconnecting with backoff; the poll covers the gap.
+            Update::Down => self.live.set(false),
+            // Revoked, re-identified or downgraded: the poll reports why, and
+            // a later verified snapshot may subscribe again.
+            Update::Ended(reason) => {
+                self.release_events();
+                self.status.set_text(remote_status(reason));
+            }
+        }
     }
 
     /// Remote cards that should slide out with the overlay, as
@@ -581,6 +706,7 @@ impl MachineView {
             return;
         };
         if self.busy.replace(true) {
+            self.again.set(true);
             return;
         }
         let weak = Rc::downgrade(self);
@@ -597,6 +723,7 @@ impl MachineView {
                 return;
             };
             view.busy.set(false);
+            let again = view.again.replace(false);
             if !view.selection.borrow().accepts(generation, &id) {
                 if view.remote.is_mapped() {
                     view.refresh();
@@ -605,78 +732,99 @@ impl MachineView {
             }
             match result {
                 Ok(Ok((peer, capabilities, snapshot))) => {
-                    view.status.set_text(&format!(
-                        "Connected · {} consoles",
-                        snapshot.local.cards.len()
-                    ));
-                    let harnesses = snapshot
-                        .local
-                        .harness_types
-                        .iter()
-                        .filter(|h| snapshot.local.visible_harnesses.contains(&h.id))
-                        .map(|h| peer_client::label(&h.name))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    // The folder has its own control in the bar; this line is
-                    // what that PC can run.
-                    view.details.set_text(&harnesses);
-                    view.folder_bar.apply(
-                        &peer_client::label(&snapshot.local.workspace),
-                        // Only a host that accepts commands can be moved to
-                        // another of its folders, so only that host's list is
-                        // worth offering.
-                        if capabilities.supports_remote_desktop() {
-                            &snapshot.local.folders
-                        } else {
-                            &[]
-                        },
-                    );
-                    // The host's own harness list, offered by the same bar the
-                    // local workspace uses; only a host that accepts commands
-                    // becomes a launch target.
-                    let writable = capabilities.supports_remote_desktop();
-                    *view.target.borrow_mut() =
-                        writable.then(|| crate::harness_bar::RemoteTarget::of(&peer, &snapshot));
-                    view.bar.apply(&crate::harness_bar::HarnessState::of_snapshot(
-                        &snapshot, writable,
-                    ));
-                    view.bar.note(match (writable, snapshot.local.visible_harnesses.len()) {
-                        (false, _) => "Update SUPER DESKTOP on that PC to launch harnesses there",
-                        (true, 0) => "That PC offers no harnesses to launch",
-                        (true, _) => "",
-                    });
-                    // Live output is only carried for a host that advertises
-                    // the terminal transport; anything else is a layout-only
-                    // preview, never a snapshot emulation. Layout commands and
-                    // live output are separate capabilities: a host may accept
-                    // neither, either, or both.
-                    if capabilities.supports_terminal_stream() {
-                        view.canvas
-                            .apply(&peer, &snapshot, capabilities.supports_remote_desktop());
-                    } else {
-                        view.canvas.show_message(
-                            "Update SUPER DESKTOP on the host for live consoles · layout only for now",
-                        );
+                    *view.host.borrow_mut() = Some((peer.clone(), capabilities.clone()));
+                    // A fetch that left before a newer event arrived must not
+                    // take the view back to the older state.
+                    if view.cursor.borrow_mut().admit(&snapshot) {
+                        view.show_snapshot(&peer, &capabilities, &snapshot);
                     }
+                    view.ensure_events(generation, &id, &peer, &capabilities);
                 }
                 failure => {
                     let error = match failure {
                         Ok(Err(e)) => e.0,
                         _ => "connection_failed",
                     };
-                    view.status.set_text(remote_status(error));
-                    // A late failure must not leave another PC's consoles on
-                    // screen: disconnected content is not current content.
-                    view.canvas.clear();
-                    *view.target.borrow_mut() = None;
-                    view.bar.apply(&crate::harness_bar::HarnessState::none());
-                    view.bar.note("");
-                    view.folder_bar.clear();
-                    view.canvas.show_message(remote_status(error));
-                    view.details.set_text("");
+                    view.show_failure(error);
                 }
             }
+            if again && view.remote.is_mapped() {
+                view.refresh();
+            }
         });
+    }
+
+    /// Draw one verified snapshot of the selected host, from a fetch or from
+    /// its event stream.
+    fn show_snapshot(&self, peer: &Peer, capabilities: &Capabilities, snapshot: &WorkspaceSnapshot) {
+        let view = self;
+        view.status.set_text(&format!(
+            "Connected · {} consoles",
+            snapshot.local.cards.len()
+        ));
+        let harnesses = snapshot
+            .local
+            .harness_types
+            .iter()
+            .filter(|h| snapshot.local.visible_harnesses.contains(&h.id))
+            .map(|h| peer_client::label(&h.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // The folder has its own control in the bar; this line is
+        // what that PC can run.
+        view.details.set_text(&harnesses);
+        view.folder_bar.apply(
+            &peer_client::label(&snapshot.local.workspace),
+            // Only a host that accepts commands can be moved to
+            // another of its folders, so only that host's list is
+            // worth offering.
+            if capabilities.supports_remote_desktop() {
+                &snapshot.local.folders
+            } else {
+                &[]
+            },
+        );
+        // The host's own harness list, offered by the same bar the
+        // local workspace uses; only a host that accepts commands
+        // becomes a launch target.
+        let writable = capabilities.supports_remote_desktop();
+        *view.target.borrow_mut() =
+            writable.then(|| crate::harness_bar::RemoteTarget::of(peer, snapshot));
+        view.bar.apply(&crate::harness_bar::HarnessState::of_snapshot(
+            snapshot, writable,
+        ));
+        view.bar.note(match (writable, snapshot.local.visible_harnesses.len()) {
+            (false, _) => "Update SUPER DESKTOP on that PC to launch harnesses there",
+            (true, 0) => "That PC offers no harnesses to launch",
+            (true, _) => "",
+        });
+        // Live output is only carried for a host that advertises
+        // the terminal transport; anything else is a layout-only
+        // preview, never a snapshot emulation. Layout commands and
+        // live output are separate capabilities: a host may accept
+        // neither, either, or both.
+        if capabilities.supports_terminal_stream() {
+            view.canvas
+                .apply(peer, snapshot, capabilities.supports_remote_desktop());
+        } else {
+            view.canvas.show_message(
+                "Update SUPER DESKTOP on the host for live consoles · layout only for now",
+            );
+        }
+    }
+
+    fn show_failure(&self, error: &str) {
+        let view = self;
+        view.status.set_text(remote_status(error));
+        // A late failure must not leave another PC's consoles on
+        // screen: disconnected content is not current content.
+        view.canvas.clear();
+        *view.target.borrow_mut() = None;
+        view.bar.apply(&crate::harness_bar::HarnessState::none());
+        view.bar.note("");
+        view.folder_bar.clear();
+        view.canvas.show_message(remote_status(error));
+        view.details.set_text("");
     }
 }
 
@@ -1195,6 +1343,70 @@ mod tests {
     #[test]
     fn a_slow_poll_cannot_take_back_a_revision_we_already_adopted() {
         crate::gtk_test::run_in_child_process("machine_selector::tests::stale_poll_inner");
+    }
+
+    #[test]
+    fn live_events_drive_the_view() {
+        crate::gtk_test::run_in_child_process("machine_selector::tests::live_events_inner");
+    }
+
+    #[test]
+    fn live_events_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use crate::desktop_protocol::{Capabilities, WorkspaceEvent};
+        gtk4::init().unwrap();
+        let view = MachineView::new(&gtk4::Fixed::new(), Rc::new(|| {}), Rc::new(|| {}));
+        // No socket in this test: a resync must ask for a fetch, and the fetch
+        // is held back by `busy` exactly as a fetch already in flight would be.
+        view.busy.set(true);
+        let peer = peer_client::test_peer('a');
+        let generation = view
+            .selection
+            .borrow_mut()
+            .select(MachineSelection::Remote(peer.machine_id.clone()));
+        assert!(view.selection.borrow().accepts(generation, &peer.machine_id));
+        *view.host.borrow_mut() =
+            Some((peer.clone(), Capabilities::current(peer.machine_id.clone())));
+        let mut first = remote_workspace::fixture();
+        // A card whose session is gone is drawn but never streamed.
+        first.local.cards[0].session_alive = Some(false);
+        let snapshot = |sequence, revision, x| {
+            let mut workspace = first.clone();
+            workspace.local.revision = revision;
+            workspace.local.cards[0].revision = revision;
+            workspace.local.cards[0].layout.x = x;
+            Update::Event(WorkspaceEvent::Snapshot { sequence, workspace })
+        };
+
+        view.on_event(Update::Connected);
+        assert!(view.live.get(), "a connected subscription stands the poll down");
+        view.on_event(snapshot(1, 1, 100));
+        assert_eq!(view.canvas.card_count(), 1);
+        assert_eq!(view.status.text(), "Connected · 1 consoles");
+        // A host-side move arrives as the next event and is drawn at once.
+        view.on_event(snapshot(2, 2, 700));
+        assert_eq!(view.canvas.card_position("card-one"), Some((700, 200)));
+        assert_eq!(view.canvas.card_revision("card-one"), Some(2));
+        // A fetch that left before that event cannot take the view back.
+        let mut older = first.clone();
+        older.local.revision = 1;
+        assert!(!view.cursor.borrow_mut().admit(&older));
+        // A lost event is never guessed across: it asks for a snapshot.
+        assert!(!view.again.get());
+        view.on_event(snapshot(4, 3, 900));
+        assert!(view.again.get(), "a sequence gap asks for a fresh snapshot");
+        assert_eq!(view.canvas.card_position("card-one"), Some((700, 200)));
+        // A dropped subscription hands back to the poll; hiding releases it.
+        view.on_event(Update::Down);
+        assert!(!view.live.get());
+        view.on_event(Update::Connected);
+        view.suspend_streams();
+        assert!(!view.live.get() && view.events.borrow().is_none());
+        // An ended subscription says why and is not kept.
+        view.on_event(Update::Ended("peer_revoked_or_expired"));
+        assert_eq!(view.status.text(), "Pairing required · Add this PC again");
     }
 
     #[test]

@@ -3,8 +3,9 @@
 Status: pairing, a live remote workspace, its terminal transport, viewer typing
 and the host's own harness bar, folder picker and card chrome are delivered, and
 both workspaces now run the *same* UI code with only the source swapped, and
-every remote command reports its result in the chrome, and the view can switch
-between Fit and 100% + pan/zoom; live outgoing subscriptions remain in progress.
+every remote command reports its result in the chrome, the view can switch
+between Fit and 100% + pan/zoom, and the host pushes live workspace events in
+place of the viewer's two-second poll; the two-PC regression matrix remains.
 Updated 2026-09-24 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
@@ -20,8 +21,9 @@ that host session after the attach handshake, and
 with epoch/revision checks and per-device deduplication. While a remote PC is
 selected its top bar offers that PC's own harness buttons, and a click launches
 that harness there. Default folder selection, the viewer's own close/resize and
-iconify controls and the 100% + pan/zoom mode are delivered; live outgoing
-workspace subscriptions and the two-PC regression matrix remain pending.
+iconify controls, the 100% + pan/zoom mode and live workspace events
+(`workspace-events-v1`) are delivered; the two-PC regression matrix remains
+pending.
 
 ## Current delivery status
 
@@ -39,8 +41,8 @@ PCs:
   link, then displays pending requests with their codes and Approve/Deny controls.
   Approval requires checking a “codes match” box on the host.
 - Approved, certificate-pinned peers are stored privately and appear in the
-  selector. The viewer polls the host's authenticated workspace snapshot and
-  draws terminal cards in their host positions, sizes, iconified positions and
+  selector. The viewer subscribes to the host's authenticated workspace events
+  (or polls its snapshot, for a host without them) and draws terminal cards in their host positions, sizes, iconified positions and
   stacking order, scaled to fit the viewer canvas and never enlarged.
 - Dragging a remote card's header moves and raises it on the host: the gesture
   ends with one typed `POST /api/v1/desktop/commands` (`setLayout`) that carries
@@ -109,6 +111,24 @@ PCs:
   window, and focus never auto-scrolls it. The mode is kept per PC for the
   session only (in memory): nothing about the view is persisted, as this
   section's “never persist fitted coordinates” rule asks.
+- **Live workspace events.** A host advertising `workspace-events-v1` pushes
+  its workspace over pinned WSS (`GET /api/v1/desktop/events`): a complete
+  snapshot on connect, another after each published change, sequenced
+  heartbeats, `resync` for a subscriber that fell behind (its four-event queue
+  is dropped rather than grown), a 30-minute lifetime, 4 subscriptions per
+  credential and 16 per bridge (`subscription_limit`, 429), and teardown within
+  a second of revocation. The host is change-driven: every state save, a local
+  card's expand/collapse and title, and a changed runtime inventory bump a
+  counter in the daemon; one owner-only `desktop-watch` feed wakes one hub per
+  bridge, which reads one snapshot per change for all subscribers (plus one
+  reconciliation read per five idle seconds). The viewer
+  (`src/peer_events.rs`) subscribes while that PC is selected and on screen,
+  releases on hide and on a machine switch, stands the two-second poll down
+  while connected, reconnects with jittered backoff, and turns a sequence gap,
+  an epoch change, a heartbeat naming a newer revision or `resync` into one
+  snapshot fetch — never a replayed command. Hosts without the capability keep
+  the poll. Conflict feedback is unchanged: an older snapshot cannot take back
+  a revision a command's answer already adopted.
 - Clicking a harness button sends a typed `createTerminal` command and the host
   builds the card exactly like a local launch — its own inventory, sandbox flags
   and folder — without being forced to show its overlay. The bar is offered only
@@ -141,8 +161,8 @@ its cards' own buttons, drags and edges move, resize, iconify, expand and close
 the host's cards, and the folder beside its top bar lists the folders *that PC*
 offers, so a new harness there can start in any of them. Each of those actions
 reports its result on the card or under the bar, and the **Fit / 100%** toggle
-shows the whole workspace or that PC's own pixels with pan and zoom. What is
-still missing is live workspace events in place of the poll. A host that says “Update and rebuild SUPER DESKTOP on the host” is
+shows the whole workspace or that PC's own pixels with pan and zoom, and changes
+made on that PC appear as soon as it publishes them. A host that says “Update and rebuild SUPER DESKTOP on the host” is
 serving an older bridge without `terminal-pty-v1`, and its workspace is drawn as
 chrome without live consoles. Hosts that hide their overlay release their
 viewers' streams, and reopening the overlay reconnects them.
@@ -159,7 +179,8 @@ git pull origin master
 The second command must be run after pulling `655edbb` or newer: it replaces a
 stale bridge as well as the daemon. Existing approved peers remain saved. Open
 the selector on the viewing PC and select the peer again; the view refreshes
-within two seconds and live consoles attach immediately. A host with the current
+at once (or within two seconds for a host without `workspace-events-v1`) and
+live consoles attach immediately. A host with the current
 bridge returns **401** (before a credential is supplied) for
 `GET /api/v1/desktop/capabilities`, and lists `workspace-snapshot-v1` together
 with `terminal-pty-v1` once a credential is supplied; an old bridge returns
@@ -170,6 +191,7 @@ To check the transport from a shell without the GUI:
 ```sh
 super-desktop peer-workspace MACHINE_ID | python -m json.tool   # card ids
 super-desktop peer-attach MACHINE_ID CARD_ID --seconds 10 > out.raw
+super-desktop peer-events MACHINE_ID --seconds 30        # one JSON event per line
 ```
 
 `peer-attach` writes raw host bytes, so running it in a terminal shows the host's
@@ -206,8 +228,12 @@ automatically.
 5. **Delivered:** the 100% + pan/scroll mode with zoom and the fit/100%
    coordinate transforms (`remote_workspace::ViewTransform`), with the toggle
    in the remote top bar.
-6. Next: live WSS workspace events in place of the two-second poll, and two-PC
-   regression coverage for switching, concurrent
+6. **Delivered:** live WSS workspace events in place of the two-second poll
+   (`workspace-events-v1`): change-driven host hub, sequenced snapshots and
+   heartbeats, `resync` backpressure, per-credential/per-bridge budgets,
+   revocation teardown, and a viewer that subscribes while the PC is shown,
+   resyncs by fetching, and reconnects with backoff.
+7. Next: two-PC regression coverage for switching, concurrent
    edits, bridge/daemon restart and revocation. Viewer input (delivered) stays
    behind the current-selection handshake and the prompt-transaction guard, and
    keys are never replayed after a disconnect.
@@ -367,7 +393,7 @@ Delivered endpoints (`✓`) and the ones still to build:
 | Endpoint | Purpose |
 | --- | --- |
 | ✓ `GET /api/v1/desktop/workspace` | Authoritative local-workspace snapshot from the host daemon. |
-| ✓ `GET /api/v1/desktop/events` (WSS) | Initial snapshot, then changed snapshots and host availability. |
+| ✓ `GET /api/v1/desktop/events` (WSS) | `workspace-events-v1`: sequenced snapshot on connect, then one per published change (driven by the daemon's change feed, not polling), heartbeats naming epoch/revision, `resync` on backpressure, host availability. |
 | ✓ `GET /api/v1/desktop/terminals/<card-id>/attach` (WSS) | Live PTY transport for one owned session: host output as binary frames, viewer keystrokes back. |
 | ✓ `POST /api/v1/desktop/commands` | Typed commands with request IDs, epoch and card revisions: all five command variants are applied: `setLayout`, `setExpanded`, `closeTerminal`, `createTerminal` and `setWorkspace`. |
 
@@ -396,6 +422,10 @@ collecting or retain updates so no mutation is lost between snapshot and stream.
 On a revision gap, reconnect or changed epoch, discard incremental assumptions
 and obtain a fresh snapshot. Full snapshots are acceptable initially if bounded
 and sent only on changes; don't poll and parse `state.json` for interactive layout.
+**Delivered:** the bridge registers a subscriber before reading its initial
+snapshot, sends only snapshots whose epoch changed or revision grew, and numbers
+every message; the viewer fetches a snapshot on a gap, an epoch change or
+`resync` (see the protocol notes).
 
 Commands carry `requestId`, `machineId`, `expectedEpoch`, target card identity and
 expected card revision where applicable. Validate allowed fields and bounds.
@@ -614,6 +644,11 @@ Automated coverage must test behavior across boundaries, especially:
   before owner IPC, deduplicated replay, uncertain outcome, conflicts with the
   owner's geometry, free-form owner errors downgraded) and
   `machine_selector::tests::stale_poll_inner` (revision merge and epoch reset).
+  Event coverage: `bridge::desktop_events::tests` (in-process handler: a
+  layout change reaches a subscribed viewer without polling; budgets,
+  backpressure, heartbeats, lifetime, revoked socket), `peer_events::tests`
+  (sequence gaps, epoch changes, stale reads, validation, backoff),
+  `machine_selector::tests::live_events_inner`, and the two smoke tests.
 - Terminal UTF-8 across frame boundaries, alternate screen, color, reconnect
   redraw, size changes, slow reader and abrupt disconnect. Session PID survives
   detach/switch/hide. Delivered coverage: `terminal_transport` (grid rule, two

@@ -56,7 +56,12 @@ owned terminal geometry, ordering, folders and cached titles; it excludes notes,
 launch commands, local OS settings and credentials. Snapshots come from the
 daemon's local in-memory model over Unix IPC, not from a peer it may later be
 viewing. Export is capped at 256 cards and 1 MiB of IPC data. Events reuse bridge
-connection bounds, write deadlines, stream lifetime and live revocation.
+connection bounds, write deadlines, stream lifetime and live revocation, are
+limited to 4 subscriptions per credential and 16 per bridge (refused with
+`subscription_limit` before the upgrade), and never buffer more than four events
+per subscriber: a subscriber that falls behind is told to `resync` instead. The
+daemon's change feed (`desktop-watch`) is served only on the owner-only Unix
+socket, carries no workspace data, and is limited to four readers.
 
 The attach stream carries the bytes of one owned `sd_term_*` session in both
 directions. Binary frames from an authenticated viewer are raw terminal input:

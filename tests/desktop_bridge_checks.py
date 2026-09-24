@@ -5,6 +5,7 @@ import pathlib
 import socket
 import struct
 import threading
+import time
 
 
 class DesktopStub:
@@ -44,6 +45,11 @@ class DesktopStub:
         # is the only way to reach the bridge's uncertain-outcome path quickly.
         self.command_reply = None
         self.silent = False
+        # Open `desktop-watch` feeds, like the daemon's change notification.
+        # `watch=False` models an older owner without the feed.
+        self.watchers = []
+        self.watch = True
+        self.change = 0
         self.listener = socket.socket(socket.AF_UNIX)
         self.listener.bind(str(self.path))
         self.listener.listen()
@@ -65,6 +71,17 @@ class DesktopStub:
                     if not part:
                         break
                     command += part
+                if command.strip() == b"desktop-watch" and self.watch:
+                    # The feed holds its socket; the stub keeps serving others.
+                    with self.lock:
+                        self.watchers.append(client.dup())
+                        watcher = self.watchers[-1]
+                        change = self.change
+                    try:
+                        watcher.sendall(f'{{"ok":true,"watch":{change}}}\n'.encode())
+                    except OSError:
+                        pass
+                    continue
                 with self.lock:
                     self.commands.append(command.decode().strip())
                     if self.silent and command.startswith(b"desktop-command "):
@@ -81,6 +98,12 @@ class DesktopStub:
     def replace(self, reply):
         with self.lock:
             self.reply = copy.deepcopy(reply)
+            self.change += 1
+            for watcher in list(self.watchers):
+                try:
+                    watcher.sendall(f"changed {self.change}\n".encode())
+                except OSError:
+                    self.watchers.remove(watcher)
 
     def answer_commands_with(self, reply=None, silent=False):
         with self.lock:
@@ -88,6 +111,10 @@ class DesktopStub:
             self.silent = silent
 
     def close(self):
+        with self.lock:
+            for watcher in self.watchers:
+                watcher.close()
+            self.watchers.clear()
         self.stop.set()
         self.thread.join(timeout=3)
         assert not self.thread.is_alive(), "owner IPC test worker did not stop"
@@ -336,26 +363,44 @@ def check_desktop_routes(request, context, port, token, directory):
             header += receive_exact(live, 1)
             assert len(header) < 16384
         assert header.startswith(b"HTTP/1.1 101")
-        assert receive_event(live) == {"type": "snapshot", "workspace": snapshot}
+        assert receive_event(live) == {"type": "snapshot", "sequence": 1, "workspace": snapshot}
 
+        # The bridge learns about the change from the owner's feed, not by
+        # polling: one notification, one snapshot read, one event.
+        deadline = time.time() + 5
+        while not stub.watchers:
+            assert time.time() < deadline, "the bridge never opened the owner's change feed"
+            time.sleep(.02)
+        time.sleep(.3)
+        reads = stub.commands.count("desktop-workspace")
+        time.sleep(1.2)
+        assert stub.commands.count("desktop-workspace") == reads, "the idle stream polled the owner"
         moved = copy.deepcopy(stub.reply)
         moved["workspace"]["revision"] = 2
         moved["workspace"]["cards"][0]["revision"] = 2
         moved["workspace"]["cards"][0]["layout"]["x"] = 700
         stub.replace(moved)
         event = receive_event(live)
+        assert event["type"] == "snapshot" and event["sequence"] == 2, event
         assert event["workspace"]["revision"] == 2
         assert event["workspace"]["cards"][0]["layout"]["x"] == 700
+        assert stub.commands.count("desktop-workspace") == reads + 1, stub.commands
 
         restarted = copy.deepcopy(moved)
         restarted["workspace"].update(epoch="daemon-two", revision=1, cards=[])
         stub.replace(restarted)
         event = receive_event(live)
+        assert event["sequence"] == 3
         assert event["workspace"]["epoch"] == "daemon-two"
         assert event["workspace"]["revision"] == 1 and event["workspace"]["cards"] == []
 
         stub.replace({"ok": False, "error": "desktop_not_ready"})
-        assert receive_event(live) == {"type": "unavailable", "error": "desktop_not_ready"}
+        assert receive_event(live) == {"type": "unavailable", "sequence": 4, "error": "desktop_not_ready"}
+        # Quiet streams carry sequenced heartbeats (no revision while down).
+        live.settimeout(8)
+        heartbeat = receive_event(live)
+        live.settimeout(5)
+        assert heartbeat == {"type": "heartbeat", "sequence": 5}, heartbeat
         assert request("/api/v1/desktop/workspace", token=token)[0] == 503
         stub.replace({"ok": True, "workspace": {}})
         assert request("/api/v1/desktop/workspace", token=token)[0] == 502

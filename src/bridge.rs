@@ -47,6 +47,8 @@ const SERVICE_NAME: &str = "Omarchy Harness Bridge";
 const PROTOCOL_VERSION: u32 = 3;
 #[path = "desktop_bridge.rs"]
 mod desktop;
+#[path = "desktop_events.rs"]
+mod desktop_events;
 #[path = "bridge_harness_list.rs"]
 mod harness_list;
 #[path = "bridge_terminal_stream.rs"]
@@ -1159,10 +1161,16 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
                 return;
             }
             if path.ends_with("/events") {
+                // The budget is settled before the upgrade, so a refusal is a
+                // status a viewer can show, and it is released with the stream.
+                let device = stream.credential_id().map(str::to_string).unwrap_or_default();
+                let Some(subscription) = desktop_events::subscribe(&device) else {
+                    return respond(stream, 429, "Too Many Requests", &serde_json::json!({"error":"subscription_limit"}));
+                };
                 if !ws_upgrade(stream, req) {
                     return respond(stream, 400, "Bad Request", &serde_json::json!({"error":"expected_websocket"}));
                 }
-                desktop::stream_workspace(stream);
+                desktop_events::serve(stream, subscription);
             } else {
                 desktop::get_workspace(stream);
             }
