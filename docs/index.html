@@ -91,7 +91,10 @@
   footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
   footer a { color: var(--accent); }
   a { color: var(--accent); }
-  a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
+  button { font: inherit; cursor: pointer; }
+  .demo-controls [hidden] { display: none; }
+  .demo-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-top: 12px; }
+  a:focus-visible, button:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
   section { scroll-margin-top: 24px; }
   .news-link { display: inline-block; margin-bottom: 12px; text-decoration: none; }
   .screenshots { margin-top: 24px; }
@@ -132,22 +135,33 @@
       <a class="btn ghost" href="#features">Main features</a>
       <a class="btn ghost" href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </div>
-    <p><a class="pill news-link" href="#ios">iPhone app in development →</a></p>
+    <p><a class="pill news-link" href="#ios">iPhone + Android apps in development →</a></p>
     <p style="margin-top:22px"><span class="kbd">SUPER + SHIFT + Q</span></p>
   </header>
 
   <main>
   <section class="screenshots" aria-labelledby="screenshots-heading">
     <h2 id="screenshots-heading">A real working desktop</h2>
-    <p class="sub">Captured from the running workspace on September 24, 2026. Open a screenshot for the full-size view.</p>
+    <p class="sub">Chrome stays underneath. One shortcut brings your live AI workspace into view.</p>
     <figure>
-      <a class="screenshot-link" href="screenshots/live-desktop.webp" aria-label="Open full-size desktop screenshot">
-        <img src="screenshots/live-desktop.webp" width="3440" height="1440" fetchpriority="high" alt="SUPER DESKTOP overlay above a browser, with several live Codex and Claude Code terminal cards and the agent launcher toolbar.">
-      </a>
-      <figcaption>Several projects, one overlay. The terminals stay alive when the workspace is hidden.</figcaption>
+      <div class="screenshot-link">
+        <img id="workspace-demo" src="screenshots/desktop-toggle-poster.webp" width="1440" height="602" fetchpriority="high" alt="Chrome showing the SUPER DESKTOP website. Play the demo to see live terminal cards slide into view, then hide again.">
+      </div>
+      <div class="demo-controls">
+        <button id="demo-toggle" class="btn primary" type="button" aria-controls="workspace-demo" aria-pressed="false" hidden>Play demo</button>
+        <a href="screenshots/desktop-toggle.gif">Open GIF</a>
+      </div>
+      <figcaption><span class="kbd">F1</span> shows and hides the workspace in this demo. F1 is a custom binding; the default is <span class="kbd">SUPER + SHIFT + Q</span>. Set your own shortcut in Settings.</figcaption>
     </figure>
     <details>
-      <summary>A closer look at the live terminals</summary>
+      <summary>View the desktop screenshots</summary>
+      <figure>
+        <a class="screenshot-link" href="screenshots/live-desktop.webp" aria-label="Open full-size desktop screenshot">
+          <img src="screenshots/live-desktop.webp" width="3440" height="1440" loading="lazy" alt="SUPER DESKTOP overlay above a browser, with several live Codex and Claude Code terminal cards and the agent launcher toolbar.">
+        </a>
+        <figcaption>Several projects, one overlay. The terminals stay alive when the workspace is hidden.</figcaption>
+      </figure>
+
       <figure>
         <a class="screenshot-link" href="screenshots/live-terminals.webp" aria-label="Open full-size terminal detail screenshot">
           <img src="screenshots/live-terminals.webp" width="1715" height="815" loading="lazy" alt="Side-by-side Codex and Claude Code cards showing real development output, agent icons, status badges, and terminal controls.">
@@ -183,16 +197,16 @@ cd ~/GitHub/super-desktop
       <div class="card"><h3>🎯 Hot corner</h3><p>Park the pointer in the top-left corner for two seconds and the overlay toggles — no keyboard needed.</p></div>
       <div class="card"><h3>⌨ Your own shortcut</h3><p>SUPER + SHIFT + Q out of the box — click <strong>Record</strong> in ⚙ Settings, press any combination, and it becomes the key that toggles the overlay.</p></div>
       <div class="card"><h3>🖥️ Remote sessions</h3><p>Pair another PC and its windows appear live in your overlay — same layout, same sessions, and you can type into them.</p></div>
-      <div class="card"><h3>📱 Phone linking</h3><p>Watch and control sessions from Android, use two panes on wide screens, and receive completion alerts for supported agents. An iPhone app is in development.</p></div>
+      <div class="card"><h3>📱 Phone linking</h3><p>Watch and control sessions from Android, use two panes on wide screens, and receive completion alerts for supported agents. iPhone and Android companion apps are in active development, with full foldable support planned across both platforms.</p></div>
     </div>
   </section>
 
   <section id="ios" class="news" aria-labelledby="ios-heading">
-    <span class="pill">Development news · September 2026</span>
-    <h2 id="ios-heading">SUPER DESKTOP is coming to iPhone</h2>
-    <p>iOS development is underway. The goal is to bring your desktop AI sessions to iPhone, using the Android companion's behavior and design as the reference.</p>
-    <p class="sub">The implementation guide covers terminal streaming, remote keys, saved drafts, Files &amp; Links, and navigation. These are the reference for the port; the iPhone app is not available yet, and there is no announced release date.</p>
-    <p>Android is available today. Follow development in the <a href="https://github.com/gladimdim/super-desktop">project repository</a>.</p>
+    <span class="pill">Companion apps · In development</span>
+    <h2 id="ios-heading">iPhone + Android. Built for foldables.</h2>
+    <p>Both companion apps are in active development: bring your desktop AI sessions to iPhone and Android, with <strong>full foldable support for both platforms</strong> as part of that work.</p>
+    <p class="sub">Android already supports adaptive layouts and two terminal panes on wide screens. The iOS app is being developed toward the same experience: layouts that adapt as you fold, unfold, and resize, with independent terminals and drafts. iOS and its foldable support are in development, not yet released.</p>
+    <p>The Android companion is available today and continues to evolve. Follow development in the <a href="https://github.com/gladimdim/super-desktop">project repository</a>.</p>
   </section>
 
   <section id="remote">
@@ -281,5 +295,22 @@ super-desktop reload-theme
   </footer>
 
 </div>
+<script>
+  const demo = document.getElementById('workspace-demo');
+  const toggle = document.getElementById('demo-toggle');
+  const poster = 'screenshots/desktop-toggle-poster.webp';
+  const animation = 'screenshots/desktop-toggle.gif';
+  function setDemoPlaying(playing) {
+    demo.src = playing ? animation : poster;
+    toggle.textContent = playing ? 'Stop demo' : 'Play demo';
+    toggle.setAttribute('aria-pressed', String(playing));
+  }
+  // Start still, including for reduced motion. Playback requires an explicit click.
+  toggle.hidden = false;
+  toggle.addEventListener('click', () => setDemoPlaying(toggle.getAttribute('aria-pressed') !== 'true'));
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) setDemoPlaying(false);
+  });
+</script>
 </body>
 </html>
