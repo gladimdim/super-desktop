@@ -27,7 +27,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::launcher_settings::{chip, section_card};
+use crate::launcher_settings::{chip, section_card, ConnectionHooks, ConnectionPage};
 use crate::shortcut::{Capture, CaptureGuard};
 use crate::state::{AppState, TopBarSize};
 use crate::tmux::{detect_harnesses, HarnessInfo};
@@ -52,10 +52,23 @@ enum SettingsPage {
     CustomHarness,
     TopBar,
     SleepLock,
-    Android,
+    Connections(ConnectionPage),
 }
 
 fn settings_entry(icon: &str, title: &str, summary: &str, class: &str) -> (Button, Box) {
+    let (button, _, trailing) = settings_entry_with_summary(icon, title, summary, class);
+    (button, trailing)
+}
+
+/// A settings-hub entry: icon, title, summary and › in one button. Also
+/// returns the summary, for entries that describe live state, and the
+/// trailing box, for a count chip.
+pub(crate) fn settings_entry_with_summary(
+    icon: &str,
+    title: &str,
+    summary: &str,
+    class: &str,
+) -> (Button, Label, Box) {
     let button = Button::new();
     button.add_css_class("settings-entry");
     button.add_css_class(class);
@@ -89,7 +102,7 @@ fn settings_entry(icon: &str, title: &str, summary: &str, class: &str) -> (Butto
     row.append(&trailing);
     button.set_child(Some(&row));
 
-    (button, trailing)
+    (button, description, trailing)
 }
 
 fn settings_scroll(content: &Box) -> ScrolledWindow {
@@ -285,6 +298,7 @@ pub fn build_lazy_harness_settings_panel(
     on_detected: Rc<dyn Fn(Vec<String>)>,
     on_shortcut_change: Rc<dyn Fn(String)>,
     on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
+    connections: ConnectionHooks,
 ) -> HarnessSettingsPanel {
     let host = Box::new(Orientation::Vertical, 0);
     host.set_visible(false);
@@ -302,6 +316,7 @@ pub fn build_lazy_harness_settings_panel(
             Rc::clone(&state), Rc::clone(&on_change),
             Rc::clone(&on_detected),
             Rc::clone(&on_shortcut_change), Rc::clone(&on_top_bar_size_change),
+            connections.clone(),
         );
         // The panel's close button hides its root; mirror that on the host so
         // the next gear click opens it instead of requiring two clicks.
@@ -327,6 +342,7 @@ pub fn build_harness_settings_panel(
     on_detected: Rc<dyn Fn(Vec<String>)>,
     on_shortcut_change: Rc<dyn Fn(String)>,
     on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
+    connections: ConnectionHooks,
 ) -> HarnessSettingsPanel {
     let outer = Box::new(Orientation::Vertical, 0);
     outer.add_css_class("mini-terminal");
@@ -442,7 +458,7 @@ pub fn build_harness_settings_panel(
     let (btn_launcher, launcher_trailing) = settings_entry(
         "▣",
         "Connections",
-        "Pair devices and manage secure connections.",
+        "Add devices, review requests and manage PCs, phones and rejected devices.",
         "android-settings-entry",
     );
     btn_launcher.set_tooltip_text(Some("Manage PCs, mobile devices and secure pairing"));
@@ -806,10 +822,25 @@ pub fn build_harness_settings_panel(
     let top_bar_view = settings_scroll(&top_bar_root);
     let sleep_view = settings_scroll(&sleep_root);
 
-    // The Android page owns its live bridge controls. It is one destination in
-    // the settings hub and refreshes only when entered.
-    let launcher_page = crate::launcher_settings::build_launcher_page();
-    let launcher_view = launcher_page.widget.clone();
+    // Connections is a family of destinations with its own overview. They
+    // own their live bridge controls and refresh only while shown. `nav` is
+    // built below, after every page exists.
+    // Weak: the pages must not keep `nav`, which keeps them, alive.
+    let nav_slot: Rc<RefCell<std::rc::Weak<dyn Fn(SettingsPage)>>> =
+        Rc::new(RefCell::new(std::rc::Weak::<fn(SettingsPage)>::new()));
+    let connection_pages = crate::launcher_settings::build_connection_pages(
+        connections,
+        Rc::new({
+            let nav_slot = Rc::clone(&nav_slot);
+            move |page| {
+                let nav = nav_slot.borrow().upgrade();
+                if let Some(nav) = nav {
+                    nav(SettingsPage::Connections(page));
+                }
+            }
+        }),
+    );
+    let connection_pages = Rc::new(connection_pages);
 
     let pages = Box::new(Orientation::Vertical, 0);
     pages.add_css_class("harness-pages");
@@ -819,13 +850,15 @@ pub fn build_harness_settings_panel(
     pages.append(&harnesses_view);
     pages.append(&custom_view);
     pages.append(&top_bar_view);
-    pages.append(&launcher_view);
+    for (_, view) in connection_pages.widgets() {
+        pages.append(view);
+        view.set_visible(false);
+    }
     pages.append(&sleep_view);
     shortcut_view.set_visible(false);
     harnesses_view.set_visible(false);
     custom_view.set_visible(false);
     top_bar_view.set_visible(false);
-    launcher_view.set_visible(false);
     sleep_view.set_visible(false);
     outer.append(&pages);
 
@@ -836,13 +869,12 @@ pub fn build_harness_settings_panel(
         let harnesses_view = harnesses_view.clone();
         let custom_view = custom_view.clone();
         let top_bar_view = top_bar_view.clone();
-        let launcher_view = launcher_view.clone();
+        let connection_pages = Rc::clone(&connection_pages);
         let sleep_view = sleep_view.clone();
         let btn_back = btn_back.clone();
         let badge = badge.clone();
         let title = title.clone();
         let subtitle = subtitle.clone();
-        let launcher_refresh = Rc::clone(&launcher_page.refresh);
         let editing_custom = Rc::clone(&editing_custom);
         let current_page = Rc::clone(&current_page);
         Rc::new(move |page| {
@@ -853,13 +885,21 @@ pub fn build_harness_settings_panel(
             harnesses_view.set_visible(page == SettingsPage::Harnesses);
             custom_view.set_visible(page == SettingsPage::CustomHarness);
             top_bar_view.set_visible(page == SettingsPage::TopBar);
-            launcher_view.set_visible(page == SettingsPage::Android);
+            for (connection, view) in connection_pages.widgets() {
+                view.set_visible(page == SettingsPage::Connections(connection));
+            }
             sleep_view.set_visible(page == SettingsPage::SleepLock);
+            // An invitation lives only while its page is shown.
+            if page != SettingsPage::Connections(ConnectionPage::Invite) {
+                connection_pages.invite.stop();
+            }
             btn_back.set_visible(page != SettingsPage::Home);
-            btn_back.set_tooltip_text(Some(if page == SettingsPage::CustomHarness {
-                "Back to harness launchers"
-            } else {
-                "Back to settings"
+            btn_back.set_tooltip_text(Some(match page {
+                SettingsPage::CustomHarness => "Back to harness launchers",
+                SettingsPage::Connections(ConnectionPage::Invite) => "Back to Add a device",
+                SettingsPage::Connections(ConnectionPage::Overview) => "Back to settings",
+                SettingsPage::Connections(_) => "Back to Connections",
+                _ => "Back to settings",
             }));
 
             match page {
@@ -893,11 +933,12 @@ pub fn build_harness_settings_panel(
                     title.set_label("Sleep lock");
                     subtitle.set_label("Keep harnesses available on charger power");
                 }
-                SettingsPage::Android => {
-                    badge.set_label("⇄");
-                    title.set_label("Connections");
-                    subtitle.set_label("Devices · encrypted connections");
-                    launcher_refresh();
+                SettingsPage::Connections(connection) => {
+                    let (icon, heading, summary) = connection_pages.header(connection);
+                    badge.set_label(icon);
+                    title.set_label(heading);
+                    subtitle.set_label(summary);
+                    (connection_pages.refresh)();
                 }
             }
         })
@@ -907,19 +948,16 @@ pub fn build_harness_settings_panel(
         (&btn_shortcut_page, SettingsPage::Shortcut),
         (&btn_harnesses_page, SettingsPage::Harnesses),
         (&btn_top_bar_page, SettingsPage::TopBar),
-        (&btn_launcher, SettingsPage::Android),
+        (&btn_launcher, SettingsPage::Connections(ConnectionPage::Overview)),
         (&btn_sleep_lock, SettingsPage::SleepLock),
     ] {
         let nav = Rc::clone(&nav);
         button.connect_clicked(move |_| nav(page));
     }
+    *nav_slot.borrow_mut() = Rc::downgrade(&nav);
     btn_review_firewall.connect_clicked({
         let nav = Rc::clone(&nav);
-        let show_network = Rc::clone(&launcher_page.show_network);
-        move |_| {
-            nav(SettingsPage::Android);
-            show_network();
-        }
+        move |_| nav(SettingsPage::Connections(ConnectionPage::Network))
     });
     // Reopening always lands on the hub. A theme refresh while the card stays
     // open deliberately leaves the current page alone.
@@ -948,10 +986,12 @@ pub fn build_harness_settings_panel(
         let nav = Rc::clone(&nav);
         let refresh = Rc::clone(&firewall_notice_refresh);
         let current_page = Rc::clone(&current_page);
-        move |_| {
-            if current_page.get() == SettingsPage::CustomHarness {
-                nav(SettingsPage::Harnesses);
-            } else {
+        move |_| match current_page.get() {
+            SettingsPage::CustomHarness => nav(SettingsPage::Harnesses),
+            SettingsPage::Connections(page) if page.parent().is_some() => {
+                nav(SettingsPage::Connections(page.parent().unwrap_or(ConnectionPage::Overview)))
+            }
+            _ => {
                 nav(SettingsPage::Home);
                 refresh();
             }
@@ -1481,6 +1521,7 @@ mod tests {
         let panel = build_lazy_harness_settings_panel(
             Rc::new(RefCell::new(AppState::default())),
             Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
         );
         assert!(panel.widget.first_child().is_none());
         (panel.refresh)(); // Theme changes while unopened must remain cheap.
@@ -1555,6 +1596,7 @@ mod tests {
             Rc::new(|_| panic!("rescan must not persist the visibility preference")),
             Rc::new(move |keys| *captured.borrow_mut() = keys),
             Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
         );
         assert!(!detected.borrow().contains(&"t3code".to_string()));
         let t3 = bin.join("t3");
@@ -1589,6 +1631,7 @@ mod tests {
                 crate::state::save_state_async(saved.borrow().clone());
             }),
             Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
         );
         find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
         let pages = find_widgets(&panel.widget, "harness-page");
@@ -1737,21 +1780,28 @@ mod tests {
             Rc::new(|_| {}),
             Rc::new(move |combo: String| shortcut_cb.borrow_mut().push(combo)),
             Rc::new(move |size| size_cb.borrow_mut().push(size)),
+            ConnectionHooks::inert(),
         );
         (panel.refresh)();
 
         // The hub is deliberately short. Each substantial setting has its own
-        // page, with Android keeping its existing connection, pairing and
-        // device sections together.
+        // page; Connections is an overview with a sub-page per kind of
+        // connection, so none of them is a long scroll.
         let pages = find_widgets(&panel.widget, "harness-page");
-        assert_eq!(pages.len(), 7, "hub + five destinations + custom harness page");
+        assert_eq!(
+            pages.len(),
+            13,
+            "hub + four destinations + custom harness page + seven Connections pages"
+        );
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 1]);
+        // hub, shortcut, harnesses, custom, top bar,
+        // overview, add, invitation, PCs, phones, rejected, network, sleep
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 8);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 16);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -1769,7 +1819,7 @@ mod tests {
             ("settings-harnesses-entry", 2, "Harness launchers"),
             ("settings-top-bar-entry", 4, "Top bar"),
             ("android-settings-entry", 5, "Connections"),
-            ("settings-sleep-lock-entry", 6, "Sleep lock"),
+            ("settings-sleep-lock-entry", 12, "Sleep lock"),
         ] {
             let button = find_buttons(&panel.widget, class)
                 .into_iter()
@@ -1800,7 +1850,39 @@ mod tests {
         btn_back.emit_clicked();
         assert!(shown(&pages[0]));
 
-        // Reopening returns to the hub even when Android was the last page.
+        // Each Connections entry opens its own page; ← climbs back to the
+        // overview, then to the hub.
+        find_buttons(&panel.widget, "android-settings-entry")[0].emit_clicked();
+        for (class, page_index, page_title) in [
+            ("connections-add-entry", 6, "Add a device"),
+            ("connections-pcs-entry", 8, "PCs"),
+            ("connections-phones-entry", 9, "Phones & other devices"),
+            ("connections-rejected-entry", 10, "Rejected devices"),
+            ("connections-network-entry", 11, "Network & firewall"),
+        ] {
+            find_buttons(&panel.widget, class)[0].emit_clicked();
+            assert!(shown(&pages[page_index]), "{class}");
+            assert_eq!(pages.iter().filter(|page| shown(*page)).count(), 1);
+            assert_eq!(title_text(&panel.widget), page_title);
+            btn_back.emit_clicked();
+            assert!(shown(&pages[5]), "back from {page_title} returns to Connections");
+            assert_eq!(title_text(&panel.widget), "Connections");
+        }
+        btn_back.emit_clicked();
+        assert!(shown(&pages[0]));
+
+        // The firewall warning's Review goes straight to Network & firewall.
+        find_buttons(&panel.widget, "launcher-btn")
+            .into_iter()
+            .find(|b| b.label().as_deref() == Some("Review") && b.ancestor(gtk4::Box::static_type()).is_some_and(|a| a.has_css_class("settings-firewall-warning")))
+            .expect("the hub's firewall warning offers Review")
+            .emit_clicked();
+        assert!(shown(&pages[11]));
+        btn_back.emit_clicked();
+        btn_back.emit_clicked();
+        assert!(shown(&pages[0]));
+
+        // Reopening returns to the hub even when Connections was the last page.
         let btn_launcher = find_buttons(&panel.widget, "android-settings-entry")
             .into_iter()
             .next()

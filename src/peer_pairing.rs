@@ -111,7 +111,8 @@ fn claim_save(active: &AtomicBool) -> bool {
 }
 pub fn message(error: PeerError) -> &'static str {
     match error.0 {
-        "pairing_denied" => "The host denied pairing. Ask it for a new invitation to try again.",
+        "pairing_denied" => "The other PC rejected this PC. It stays blocked there until its owner removes it from Settings → Connections → Rejected devices.",
+        "pairing_blocked" => "The other PC rejected this PC earlier and blocks its requests. Ask its owner to remove it from Settings → Connections → Rejected devices, then use a new link.",
         "pairing_request_expired" | "peer_endpoint_unavailable" => "The pairing request expired or the host needs an update. Generate a new invitation.",
         "invalid_pairing_invitation" | "invalid_certificate_pin" => "Paste the complete pairing link from the host's settings.",
         "invalid_peer_address" | "invalid_peer_port" => "Check the host address and port.",
@@ -119,7 +120,7 @@ pub fn message(error: PeerError) -> &'static str {
         "invitation_rejected" => "The invitation expired or was already used. Generate a new one on the host.",
         "connection_failed_or_pin_mismatch" | "peer_identity_changed" => "Cannot verify or reach the host. Check its address, bridge and invitation.",
         "pairing_worker_busy" => "The previous connection is still finishing. Try again in a few seconds.",
-        "pairing_rate_limited" => "The host is limiting requests. Deny any old request and wait two minutes before retrying.",
+        "pairing_rate_limited" => "The other PC already has a request from this address. Wait two minutes for it to expire, then try again with a new link.",
         "unsafe_peer_store_permissions" => "The saved-PC directory has unsafe permissions. Check it before pairing.",
         "pairing_outcome_uncertain_check_host" => "The connection ended during pairing. Check the host for a pending request before trying a new invitation.",
         _ => "Could not complete or save pairing. Check the host's paired devices before trying again.",

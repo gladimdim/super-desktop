@@ -24,6 +24,8 @@ mod peer_events;
 mod peer_cli;
 mod peer_pairing;
 mod peer_pairing_ui;
+mod pairing_invite;
+mod pairing_request_ui;
 mod card_source;
 mod command_feedback;
 mod harness_bar;
@@ -345,7 +347,9 @@ fn main() {
     }
 
     // Daemon not running -> spawn it
-    if action == "toggle" || action == "show" {
+    if action == "toggle" || action == "show" || action == "pairing-review" {
+        // A clicked pairing notification must still end at the approval panel.
+        let first = if action == "pairing-review" { "pairing-review" } else { "show" };
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
         let mut command = std::process::Command::new(exe);
         // This child is the overlay itself: it needs the preload that `main`
@@ -366,7 +370,7 @@ fn main() {
             // spawned exits when it finds a live one instead of stealing the
             // socket (see start_ipc_thread), so never spawn a second process
             // from this loop.
-            match ipc_request("show") {
+            match ipc_request(first) {
                 Ipc::Reply(_) => {
                     println!("SUPER DESKTOP (Rust): Started and Shown");
                     return;
@@ -782,6 +786,20 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
         "hide" => {
             hide_window(ctx);
             json!({ "ok": true, "visible": false }).to_string()
+        }
+        // From the bridge when a device asks to pair: a visible overlay puts
+        // the request in front of the user; a hidden one is left alone and
+        // the bridge notifies instead.
+        "pairing-request" => {
+            let shown = ctx.borrow().shown;
+            let presented = shown && live_window(ctx).is_some_and(|win| win.review_pairing_requests());
+            json!({ "ok": true, "presented": presented }).to_string()
+        }
+        // The pairing notification was clicked.
+        "pairing-review" => {
+            let presented =
+                show_window(ctx, app) && live_window(ctx).is_some_and(|win| win.review_pairing_requests());
+            json!({ "ok": presented, "presented": presented }).to_string()
         }
         "status" => {
             let context = ctx.borrow();

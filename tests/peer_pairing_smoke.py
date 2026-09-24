@@ -99,6 +99,15 @@ def scenario(approve, gui_test_binary=None, cancel=False, unmap=False):
             if not approve:
                 assert pairing.returncode == (0 if gui_test_binary else 1) and "pairing_denied" in stderr
                 assert json.loads(cli("peer-list").stdout) == []
+                # A rejected PC is blocked: even with a fresh invitation it
+                # never reaches the desktop again, until it is removed.
+                rejected = admin("rejected")["rejected"]
+                assert [entry["name"] for entry in rejected] == [pending[0]["deviceName"]], rejected
+                blocked = cli(*options, input=json.dumps(admin("invitation", {})), expected=1)
+                assert "pairing_blocked" in blocked.stderr, blocked.stderr
+                assert not admin("state")["requests"]
+                admin("rejected/remove", {"id": rejected[0]["id"]})
+                assert admin("rejected")["rejected"] == []
                 return
             assert pairing.returncode == 0, stderr
             summary = json.loads(form_result.read_text() if gui_test_binary else stdout)
@@ -139,7 +148,7 @@ def scenario(approve, gui_test_binary=None, cancel=False, unmap=False):
 
 
 def host_wizard_scenario(gui_test_binary):
-    """The host wizard shows the code and approves through owner-only control."""
+    """The approval panel shows the code and approves through owner-only control."""
     with tempfile.TemporaryDirectory(prefix="sd-share-wizard-") as root:
         root = pathlib.Path(root)
         host = root / "host"
@@ -183,7 +192,7 @@ def host_wizard_scenario(gui_test_binary):
             result = root / "approved-code"
             gui_env = {**bridge_env, "XDG_RUNTIME_DIR": os.environ["XDG_RUNTIME_DIR"],
                        "SUPER_DESKTOP_SHARE_TEST_RESULT": str(result)}
-            host_gui = subprocess.Popen([gui_test_binary, "--exact", "peer_pairing_ui::tests::share_approval_inner", "--nocapture"],
+            host_gui = subprocess.Popen([gui_test_binary, "--exact", "pairing_request_ui::tests::approval_inner", "--nocapture"],
                                         env=gui_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             viewer = subprocess.Popen([BINARY, "peer-add", "--host", "127.0.0.1", "--port", str(port)],
                                       env=viewer_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -204,14 +213,14 @@ def host_wizard_scenario(gui_test_binary):
             except subprocess.TimeoutExpired:
                 host_gui.kill()
                 gui_stdout, gui_stderr = host_gui.communicate()
-                raise AssertionError(("host wizard timed out", gui_stdout, gui_stderr,
+                raise AssertionError(("approval panel timed out", gui_stdout, gui_stderr,
                                       admin("state")))
             try:
                 viewer_stdout, viewer_stderr = viewer.communicate(timeout=20)
             except subprocess.TimeoutExpired:
                 viewer.kill()
                 viewer_stdout, viewer_stderr = viewer.communicate()
-                raise AssertionError(("viewer timed out after wizard approval", viewer_stdout,
+                raise AssertionError(("viewer timed out after panel approval", viewer_stdout,
                                       viewer_stderr, gui_stdout, gui_stderr, admin("state"),
                                       admin("devices")))
             assert host_gui.returncode == 0, (gui_stdout, gui_stderr)
@@ -239,4 +248,4 @@ else:
         scenario(True, gui_test_binary, cancel=True)
         scenario(True, gui_test_binary, unmap=True)
         host_wizard_scenario(gui_test_binary)
-print("Desktop peer pairing smoke passed: pin, self-pair, wizard approval/denial, private storage, layout, identity, expiry, forget, revocation")
+print("Desktop peer pairing smoke passed: pin, self-pair, wizard approval/rejection, blocking, panel approval, private storage, layout, identity, expiry, forget, revocation")

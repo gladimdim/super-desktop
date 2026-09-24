@@ -28,11 +28,23 @@ this is still an incremental development branch.
 The top-left **This PC** control is the machine selector. **Add a PC** opens a
 centered setup wizard in the overlay. Choose whether to connect to another PC
 and view its harnesses, or make this PC's harnesses available on another PC.
-The host creates a single-use connection link in the wizard; the viewer pastes
-it into its wizard. Both PCs show the six-digit code, and the host wizard can
-approve or deny the request after its user confirms the codes match. Once
-approved, the peer is selected and its workspace is drawn live: every visible
-console is a real terminal that shows the host session's output in colour.
+The host creates a single-use connection link (in the wizard, or in Settings →
+Connections → Add a device → Share this PC); the viewer pastes it into its
+wizard. Both PCs show the six-digit code. On the host the request opens the
+**connection request panel**: at once when the overlay is visible, otherwise
+from the desktop notification when it is clicked. The panel shows the device's
+name, type, network address and the code, with **Reject** and **Approve**.
+Once approved, the peer is selected and its workspace is drawn live: every
+visible console is a real terminal that shows the host session's output in
+colour.
+
+Rejecting also blocks. The host remembers the device (by the installation ID a
+SUPER DESKTOP PC sends as `deviceId`, otherwise by name and source address) and
+answers its later `POST /api/v1/pair` with `403 {"error":"pairing_blocked"}`
+without prompting and without using up the invitation. The owner lists and
+removes blocked devices in Settings → Connections → Rejected devices
+(owner-only `GET /api/v1/pair/rejected` and `POST /api/v1/pair/rejected/remove`
+on the control socket).
 
 Click a console and type. VTE translates the keystroke (application cursor
 keys, bracketed paste, IME) and the viewer sends those bytes after the host's
@@ -667,22 +679,26 @@ Open the top-left selector and choose **Add a PC**. A centered wizard offers two
 paths:
 
 1. On the PC whose harnesses will be shared, choose **I want this PC's harnesses
-   to be available on another PC**. Click **Create connection link** (the wizard
-   starts the bridge if necessary) and **Copy link**. Leave the wizard open.
+   to be available on another PC** (or Settings → Connections → Add a device →
+   **Share this PC**). The page starts the bridge if necessary, checks the
+   firewall and network, and shows a single-use link: click **Copy link**. A
+   step that fails says why and offers its fix.
 2. On the viewing PC, choose **I want to connect to another PC and view its
    harnesses**. Paste the link, optionally enter a friendly name or network
    address/port override, and click **Connect to PC**.
-3. Compare the six-digit code shown on both PCs. On the host, check **The code
-   matches the other PC**, then click **Approve this PC**. The viewing PC saves
-   the peer and opens its live workspace. The host can click **Deny** instead.
+3. Compare the six-digit code shown on both PCs. On the host, the connection
+   request panel opens (or click the notification): click **Approve** only if
+   the codes match. The viewing PC saves the peer and opens its live workspace.
+   **Reject** instead refuses the request and blocks that PC until it is
+   removed from Rejected devices.
 
 The invitation field is hidden and cleared after submission or closing the
 wizard. Network requests and private-store writes run on workers. Only one
 viewer pairing worker can run at a time. Use Cancel/Back to stop an unfinished
 viewer attempt. The selector may transiently close while the Wayland layer
 surface changes focus; the wizard and its pending request continue. A request
-already submitted to the host can remain pending there: deny it on the host,
-and use a fresh invitation for another attempt.
+already submitted to the host can remain pending there until it expires after
+two minutes; use a fresh invitation for another attempt.
 Cancellation before saving claims completion prevents a late approval from
 writing a peer; a save already begun is allowed to finish. Host revocation
 remains authoritative if access must be withdrawn.
@@ -695,6 +711,6 @@ then supply the main test executable as a second argument:
 python3 tests/peer_pairing_smoke.py target/release/super-desktop target/debug/deps/super_desktop-TEST_HASH
 ```
 
-This exercises viewer approval, denial and cancellation before a late host
-approval, plus host-wizard code display and approval through the owner-only
-control socket. It then checks persisted peers, layout retrieval and revocation.
+This exercises viewer approval, rejection (and the block that follows it) and
+cancellation before a late host approval, plus the host's request panel showing
+the code and approving through the owner-only control socket. It then checks persisted peers, layout retrieval and revocation.

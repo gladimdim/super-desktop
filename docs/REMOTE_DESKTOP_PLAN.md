@@ -39,9 +39,12 @@ PCs:
   wizard in the SUPER DESKTOP overlay. Its first page asks whether to view
   another PC's harnesses or make this PC's harnesses available elsewhere. The
   viewer path explains where to get a link, accepts it and shows the verification
-  code. The host path starts the bridge if needed, creates and copies a one-time
-  link, then displays pending requests with their codes and Approve/Deny controls.
-  Approval requires checking a “codes match” box on the host.
+  code. The host path (also Settings → Connections → Add a device) checks the
+  bridge, firewall and network, then creates and copies a one-time link. The
+  request it produces is decided in the host's connection request panel, which
+  shows the device, its address and the code with Reject and Approve. Rejecting
+  blocks that device until it is removed from Settings → Connections → Rejected
+  devices.
 - Approved, certificate-pinned peers are stored privately and appear in the
   selector. The viewer subscribes to the host's authenticated workspace events
   (or polls its snapshot, for a host without them) and draws terminal cards in their host positions, sizes, iconified positions and

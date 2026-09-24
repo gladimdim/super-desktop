@@ -1003,6 +1003,94 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     margin-top: 14px;
 }}
 
+/* Pairing request panel: the one place a device is approved or rejected. */
+.pairing-panel {{
+    border: 1px solid {accent};
+}}
+.pairing-device-icon {{ color: {accent}; }}
+.pairing-device-name {{
+    color: {bright_foreground};
+    font-size: 17px;
+    font-weight: 800;
+}}
+.pairing-details {{
+    border-radius: 8px;
+    padding: 8px 12px;
+}}
+.pairing-decisions {{ margin-top: 6px; }}
+.pairing-decisions button {{ padding: 8px 18px; }}
+.pairing-queue {{
+    color: {bright_yellow};
+    font-size: 11px;
+    font-weight: 700;
+}}
+.pairing-result-mark {{
+    color: {bright_green};
+    font-size: 34px;
+    font-weight: 800;
+}}
+.pairing-result-mark.pairing-result-rejected {{ color: {bright_red}; }}
+
+/* Invitation flow: a checklist of prerequisites, the invitation, then what
+   happened to the request it produced. */
+.invite-checklist {{
+    border-radius: 8px;
+    padding: 10px 12px;
+}}
+.invite-step {{ padding: 3px 0; }}
+.invite-step-mark {{
+    border-radius: 9999px;
+    min-width: 20px;
+    min-height: 20px;
+    font-size: 11px;
+    font-weight: 800;
+}}
+.invite-step-mark.invite-working {{ color: {dark_foreground}; background-color: {btn_bg}; }}
+.invite-step-mark.invite-ok {{
+    color: {bright_green};
+    background-color: {status_active_bg};
+    border: 1px solid {status_active_border};
+}}
+.invite-step-mark.invite-warn {{
+    color: {bright_yellow};
+    background-color: {status_busy_bg};
+    border: 1px solid {status_busy_border};
+}}
+.invite-step-mark.invite-fail {{
+    color: {bright_red};
+    background-color: {danger_bg};
+    border: 1px solid {danger_border};
+}}
+.invite-step-title {{ color: {foreground}; font-size: 12px; font-weight: 700; }}
+.invite-step-detail {{ color: {light_foreground}; font-size: 11px; }}
+.invite-card {{
+    border-radius: 8px;
+    padding: 12px;
+}}
+.invite-expiry {{ color: {accent}; }}
+.invite-qr {{ margin: 4px 0; }}
+.invite-outcome {{ margin-top: 2px; }}
+
+/* Connections overview and its sub-pages. */
+.connections-pending {{
+    background-color: {badge_bg};
+    border: 1px solid {accent};
+    border-radius: 8px;
+    padding: 10px 12px;
+}}
+.connections-pending-text {{
+    color: {bright_foreground};
+    font-size: 11.5px;
+    font-weight: 700;
+}}
+.connections-warning-chip {{
+    background-color: {danger_bg};
+    color: {bright_yellow};
+    border: 1px solid {danger_border};
+}}
+.connections-empty {{ padding-bottom: 6px; }}
+.connections-action-note {{ margin-top: 2px; }}
+
 /* This is deliberately the first child of the Settings hub: without an open
    8759/tcp rule the Android page can look configured while every phone fails
    to reach the bridge. */
@@ -1556,6 +1644,18 @@ mod tests {
             "harness-toggle",
             "harness-toggle-on",
             "harness-toggle-off",
+            // Connections pages, the invitation flow and the approval panel.
+            "pairing-panel",
+            "pairing-device-name",
+            "pairing-result-mark",
+            "invite-checklist",
+            "invite-step-mark",
+            "invite-ok",
+            "invite-warn",
+            "invite-fail",
+            "invite-card",
+            "connections-pending",
+            "connections-warning-chip",
         ] {
             assert!(
                 css.contains(&format!(".{class}")),

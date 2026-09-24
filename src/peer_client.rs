@@ -478,6 +478,14 @@ impl PinnedClient {
         token: Option<&str>,
     ) -> Result<T> {
         let (status, bytes) = self.raw(path, body, token, ResponsePolicy::Read)?;
+        // The one 403 that is not about the invitation: the host rejected
+        // this device before and blocks it.
+        if status == 403
+            && serde_json::from_slice::<Value>(&bytes)
+                .is_ok_and(|document| document["error"] == "pairing_blocked")
+        {
+            return Err(PeerError("pairing_blocked"));
+        }
         check_response_status(status, ResponsePolicy::Read)?;
         serde_json::from_slice(&bytes).map_err(|_| PeerError("invalid_peer_response"))
     }
@@ -571,7 +579,9 @@ impl Pairing {
         let pending: Pending = client
             .request(
                 "/api/v1/pair",
-                Some(json!({"secret":invitation.secret,
+                // `deviceId` lets the host recognise this installation if it
+                // rejects the request, whatever this PC is called later.
+                Some(json!({"secret":invitation.secret, "deviceId": local_id,
             "deviceType": "pc", "deviceName": label(local_name)})),
                 None,
             )

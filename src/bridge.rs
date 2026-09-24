@@ -12,12 +12,16 @@
 //!   POST /api/v1/pair                 (open; requests desktop approval)
 //!   POST /api/v1/pair/poll            (unguessable request capability)
 //!   GET  /api/v1/pair/state           (owner-only Unix control socket)
-//!   POST /api/v1/pair/approve, /deny   (owner-only Unix control socket)
+//!   POST /api/v1/pair/approve, /deny   (owner-only; deny also blocks the device)
+//!   GET  /api/v1/pair/rejected, POST /api/v1/pair/rejected/remove   (owner-only)
 
 use serde::{Deserialize, Serialize};
 #[path = "bridge_pairing.rs"]
 mod pairing;
-pub use pairing::{pending_requests, decide_request, paired_devices, revoke_device, pairing_invitation};
+pub use pairing::{
+    pending_requests, decide_request, paired_devices, revoke_device, pairing_invitation,
+    rejected_devices, forget_rejected, pairing_requests,
+};
 #[path = "bridge_security.rs"]
 mod security;
 #[path = "bridge_lifecycle.rs"]
@@ -297,12 +301,35 @@ struct BridgeConfig {
     paired_tokens: Vec<String>,
     #[serde(default)]
     devices: Vec<PairedDevice>,
+    /// Devices whose pairing request the owner rejected. Their later requests
+    /// are refused without a desktop prompt until the owner removes them.
+    #[serde(default)]
+    rejected: Vec<RejectedDevice>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PairedDevice { id: String, name: String, token_hash: String, expires: f64,
     #[serde(default)]
     device_type: String,
+}
+
+/// Everything here was reported by the rejected device itself, so it is only
+/// used to recognise that device again, never to grant anything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct RejectedDevice {
+    /// Local handle for removing the entry; not the device's own identity.
+    id: String,
+    name: String,
+    #[serde(default)]
+    device_type: String,
+    /// The installation ID a SUPER DESKTOP PC sends (its bridge ID). Empty for
+    /// clients that do not send one.
+    #[serde(default)]
+    device_id: String,
+    /// Source address of the rejected request.
+    #[serde(default)]
+    address: String,
+    rejected_at: f64,
 }
 
 fn new_bridge_id() -> String { random_hex(16) }
@@ -317,8 +344,15 @@ pub fn own_bridge_id() -> Option<String> {
 
 fn state_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    // Unit tests exercise the pairing routes in-process; they must never
+    // write the developer's real credential store.
+    let default = if cfg!(test) {
+        std::env::temp_dir().join(format!("sd-bridge-test-{}", std::process::id()))
+    } else {
+        PathBuf::from(home).join(".local/state/omarchy/harness-bridge")
+    };
     let dir = std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(home).join(".local/state/omarchy/harness-bridge"));
+        .unwrap_or(default);
     fs::create_dir_all(&dir).expect("Cannot create private bridge state directory");
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("Cannot secure bridge state directory");
@@ -371,6 +405,7 @@ impl PairState {
                 bridge_id: new_bridge_id(),
                 paired_tokens: vec![],
                 devices: vec![],
+                rejected: vec![],
             });
         let mut state = Self {
             cfg,
@@ -415,6 +450,7 @@ impl PairState {
                 bridge_id: self.cfg.bridge_id.clone(),
                 paired_tokens: vec![],
                 devices: disk.devices,
+                rejected: disk.rejected,
             };
         }
         self.mtime = config_mtime();

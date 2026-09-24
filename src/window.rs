@@ -266,6 +266,9 @@ pub struct SuperDesktopWindow {
     canvas: Fixed,
     machine_view: Rc<crate::machine_selector::MachineView>,
     pairing_wizard: Rc<crate::peer_pairing_ui::PairingWizard>,
+    /// Where pairing requests are approved or rejected. Floats above every
+    /// other panel; opened by the bridge, the notification and Review buttons.
+    pairing_requests: Rc<crate::pairing_request_ui::PairingRequestPanel>,
     ghost_box: gtk4::Box,
     ghost_label: Label,
     state: Rc<RefCell<AppState>>,
@@ -405,6 +408,38 @@ impl SuperDesktopWindow {
             RefCell<Option<Rc<crate::machine_selector::MachineView>>>,
         > = Rc::new(RefCell::new(None));
 
+        let pairing_requests = crate::pairing_request_ui::PairingRequestPanel::new();
+        let pairing_target: Rc<RefCell<Option<std::rc::Weak<crate::machine_selector::MachineView>>>> =
+            Rc::new(RefCell::new(None));
+        let pairing_wizard = crate::peer_pairing_ui::PairingWizard::new(
+            &window,
+            Rc::new({
+                let pairing_target = Rc::clone(&pairing_target);
+                move |peer| {
+                    if let Some(view) = pairing_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
+                        view.select_saved_peer(peer);
+                    }
+                }
+            }),
+            pairing_requests.hooks(),
+        );
+        // Settings → Add a device → View another PC hands over to the wizard;
+        // the settings card is built lazily, so it is hidden through this slot.
+        let settings_for_wizard: Rc<RefCell<Option<gtk4::Widget>>> = Rc::new(RefCell::new(None));
+        let connection_hooks = crate::launcher_settings::ConnectionHooks {
+            requests: pairing_requests.hooks(),
+            connect_to_pc: Rc::new({
+                let wizard = Rc::clone(&pairing_wizard);
+                let settings = Rc::clone(&settings_for_wizard);
+                move || {
+                    if let Some(settings) = settings.borrow().as_ref() {
+                        settings.set_visible(false);
+                    }
+                    wizard.open_connect();
+                }
+            }),
+        };
+
         let settings_panel = crate::harness_settings::build_lazy_harness_settings_panel(
             Rc::clone(&state),
             Rc::new({
@@ -478,7 +513,9 @@ impl SuperDesktopWindow {
                     crate::state::save_state_async(snapshot);
                 }
             }),
+            connection_hooks,
         );
+        *settings_for_wizard.borrow_mut() = Some(settings_panel.widget.clone());
         settings_panel.widget.set_visible(false);
         settings_panel.widget.set_halign(Align::Center);
         settings_panel.widget.set_valign(Align::Center);
@@ -492,20 +529,6 @@ impl SuperDesktopWindow {
         let hud_left = gtk4::Box::new(Orientation::Horizontal, 10);
         hud_left.set_valign(Align::Center);
         hud_left.set_halign(Align::Start);
-
-        let pairing_target: Rc<RefCell<Option<std::rc::Weak<crate::machine_selector::MachineView>>>> =
-            Rc::new(RefCell::new(None));
-        let pairing_wizard = crate::peer_pairing_ui::PairingWizard::new(
-            &window,
-            Rc::new({
-                let pairing_target = Rc::clone(&pairing_target);
-                move |peer| {
-                    if let Some(view) = pairing_target.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
-                        view.select_saved_peer(peer);
-                    }
-                }
-            }),
-        );
 
         let machine_view = crate::machine_selector::MachineView::new(
             &canvas,
@@ -587,6 +610,7 @@ impl SuperDesktopWindow {
             canvas,
             machine_view,
             pairing_wizard: Rc::clone(&pairing_wizard),
+            pairing_requests: Rc::clone(&pairing_requests),
             ghost_box,
             ghost_label,
             state,
@@ -855,6 +879,8 @@ impl SuperDesktopWindow {
         // Added after the HUD so the settings card floats above it.
         root_overlay.add_overlay(&settings_panel.widget);
         root_overlay.add_overlay(&pairing_wizard.widget);
+        // Last: a request is decided above whatever else is open.
+        root_overlay.add_overlay(&pairing_requests.widget);
 
         // Esc key
         let key_ctrl = EventControllerKey::new();
@@ -864,6 +890,10 @@ impl SuperDesktopWindow {
         key_ctrl.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::Escape {
                 if let Some(w) = win_w.upgrade() {
+                    if w.pairing_requests.is_open() {
+                        w.pairing_requests.close();
+                        return glib::Propagation::Stop;
+                    }
                     if w.pairing_wizard.is_open() {
                         w.pairing_wizard.close();
                         return glib::Propagation::Stop;
@@ -2201,6 +2231,12 @@ impl SuperDesktopWindow {
         self.periodic_refresh();
     }
 
+    /// Put waiting pairing requests in front of the user: the approval panel.
+    pub fn review_pairing_requests(&self) -> bool {
+        self.pairing_requests.open();
+        true
+    }
+
     /// Token to hand back to `hide_if_unchanged` when a slide-out starts.
     pub fn current_show_token(&self) -> u64 {
         self.show_token.get()
@@ -2238,6 +2274,7 @@ impl SuperDesktopWindow {
             panel.set_visible(false);
         }
         self.pairing_wizard.close();
+        self.pairing_requests.close();
         // …and neither may the workspace list, which is not part of the
         // overlay's widget tree (it is its own popup surface).
         self.ws_popover.popdown();
