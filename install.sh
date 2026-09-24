@@ -22,6 +22,18 @@ if ! command -v cargo &> /dev/null; then
     fi
 fi
 
+# A fresh rustup has no default toolchain, so its cargo proxy refuses to run
+# ("rustup could not choose a version of cargo to run").
+if command -v rustup &> /dev/null && ! cargo --version &> /dev/null; then
+    echo "No default Rust toolchain is set. Installing and selecting stable..."
+    rustup default stable
+fi
+
+if ! cargo --version &> /dev/null; then
+    echo "Error: cargo is not usable. Install rustup (omarchy pkg add rustup), run 'rustup default stable', then re-run ./install.sh." >&2
+    exit 1
+fi
+
 # Check for vte4
 if ! pkg-config --exists vte-2.91-gtk4 2>/dev/null; then
     echo "Installing vte4 (GTK4 terminal widget for in-overlay agent sessions)..."

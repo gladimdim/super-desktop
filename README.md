@@ -204,7 +204,7 @@ See [Linux performance](PERFORMANCE.md) for startup changes, measured command la
 - You run commands as the **user** (never root for build/install steps).
 - `git`, `tmux`, `pkg-config`, `sqlite3` should exist. If anything is missing: `omarchy pkg add <name>` (e.g. `omarchy pkg add tmux sqlite3`). `sqlite3` is optional but recommended — without it, opencode card titles fall back to plain labels.
 - GTK4 system libs are preinstalled on Omarchy (`gtk4`, `gtk-layer-shell`, `vte4`). If the build fails on missing `vte-2.91-gtk4` (pkg-config) or GTK headers, install them first: `omarchy pkg add vte4 gtk4 gtk-layer-shell pkg-config`.
-- Rust toolchain: the installer offers to add `rustup` via `omarchy pkg add rustup` when run in a terminal. Prefer running the installer **from a real terminal** (it needs a TTY for package prompts).
+- Rust toolchain: the installer offers to add `rustup` via `omarchy pkg add rustup` when run in a terminal, and runs `rustup default stable` when rustup has no default toolchain yet (a fresh rustup cannot run `cargo` until one is selected). Prefer running the installer **from a real terminal** (it needs a TTY for package prompts).
 
 ### 1. Clone and install (the only supported way)
 
@@ -257,6 +257,7 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 | Global shortcuts stopped working after using ⚙ Settings → *Record* | The recorder releases the submap on Esc, on Cancel and after 10s. If it was killed mid-recording: `hyprctl dispatch 'hl.dsp.submap("reset")'` |
 | Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk-layer-shell pkg-config`, then `./rebuild.sh` |
 | Build fails: no `cargo` | `omarchy pkg add rustup`, open a new shell, then `./install.sh` |
+| `rustup could not choose a version of cargo to run` | No default toolchain yet: `rustup default stable`, then `./install.sh` (the installer now does this itself) |
 | Theme changes don't restyle the overlay | Check `~/.config/omarchy/hooks/theme-set.d/super-desktop` is executable; run `super-desktop reload-theme` manually |
 | Card shows another card's prompt in its title | Fixed in current code (owned-session resolution + self-heal). Update to latest (`git pull` + `./rebuild.sh`); titles correct themselves within ~30s of the overlay being visible |
 | Need daemon logs | `/tmp/super-desktop-daemon.log` |
