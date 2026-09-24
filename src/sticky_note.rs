@@ -14,6 +14,30 @@ pub const MIN_NOTE_HEIGHT: i32 = 120;
 pub struct StickyNote {
     pub container: Overlay,
     pub data: Rc<RefCell<NoteData>>,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub text_view: TextView,
+}
+
+/// CSS class on every note's root widget.
+pub const NOTE_CLASS: &str = "sticky-note";
+
+/// True while keyboard focus in `widget`'s window is inside a sticky note.
+///
+/// Terminal cards follow the mouse (hover raises them and takes focus). While
+/// a note is being edited they must not: otherwise the pointer drifting over a
+/// nearby card steals the keyboard mid-edit, so Ctrl+A, Delete, Backspace and
+/// Ctrl+C land in that terminal and a finished mouse selection vanishes under
+/// the raised card. Clicking a terminal still switches to it.
+pub fn note_has_focus(widget: &impl IsA<gtk4::Widget>) -> bool {
+    let Some(root) = widget.as_ref().root() else { return false };
+    let mut current = gtk4::prelude::RootExt::focus(&root);
+    while let Some(w) = current {
+        if w.has_css_class(NOTE_CLASS) {
+            return true;
+        }
+        current = w.parent();
+    }
+    false
 }
 
 impl StickyNote {
@@ -56,7 +80,7 @@ impl StickyNote {
         let body = gtk4::Box::new(Orientation::Vertical, 0);
 
         container.set_size_request(data.borrow().width, data.borrow().height);
-        container.add_css_class("sticky-note");
+        container.add_css_class(NOTE_CLASS);
         container.set_child(Some(&body));
 
         // Click to raise note above all other widgets
@@ -159,6 +183,19 @@ impl StickyNote {
 
         scrolled.set_child(Some(&text_view));
         content_box.append(&scrolled);
+        // A press on the padding around the text (or below a short note's last
+        // line) still means "edit this note": focus the text so keyboard
+        // shortcuts go here instead of wherever focus was.
+        let focus_click = GestureClick::new();
+        let text_focus = text_view.downgrade();
+        focus_click.connect_pressed(move |_, _, _, _| {
+            if let Some(text) = text_focus.upgrade() {
+                if !text.has_focus() {
+                    text.grab_focus();
+                }
+            }
+        });
+        content_box.add_controller(focus_click);
         body.append(&content_box);
 
         // Drag gesture
@@ -296,7 +333,7 @@ impl StickyNote {
             on_commit,
         );
 
-        Self { container, data }
+        Self { container, data, text_view }
     }
 }
 
@@ -338,6 +375,44 @@ mod tests {
             1080,
         );
         assert_eq!(count_class(&note.container, "card-resize-zone"), 8);
+    }
+
+    #[test]
+    fn test_note_focus_is_detected_for_hover_guard() {
+        crate::gtk_test::run_in_child_process("sticky_note::tests::note_focus_child");
+    }
+
+    #[test]
+    fn note_focus_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let note = StickyNote::new(
+            NoteData { id: "focus".into(), text: "select me".into(), x: 0, y: 0, width: 260, height: 200,
+                color: "omarchy".into(), updated_at: 0.0, tag: 0 },
+            |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {}, |_, _, _, _| {}, || {}, 1920, 1080,
+        );
+        let terminal_stand_in = gtk4::Entry::new();
+        let layout = gtk4::Box::new(Orientation::Horizontal, 0);
+        layout.append(&note.container);
+        layout.append(&terminal_stand_in);
+        let window = gtk4::Window::new();
+        window.set_child(Some(&layout));
+        window.present();
+        let pump = || while glib::MainContext::default().iteration(false) {};
+        pump();
+        // GTK focuses the first focusable widget on present; start from none.
+        gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
+        pump();
+        assert!(!note_has_focus(&terminal_stand_in), "nothing focused yet");
+        note.text_view.grab_focus();
+        pump();
+        assert!(note_has_focus(&terminal_stand_in), "editing a note must suspend terminal hover focus");
+        terminal_stand_in.grab_focus();
+        pump();
+        assert!(!note_has_focus(&note.container), "hover focus resumes once the note is left");
+        window.close();
     }
 
     fn count_class<W: IsA<gtk4::Widget>>(root: &W, class: &str) -> usize {

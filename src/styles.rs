@@ -607,7 +607,9 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 
 .note-content-area {{
     background-color: {note_content_bg};
-    padding: 8px 12px 12px 12px;
+    /* At least the 14px resize corners (card_resize::place_zone): a selection
+       started in the text's corner must not become a resize. */
+    padding: 8px 14px 14px 14px;
     border-bottom-left-radius: 13px;
     border-bottom-right-radius: 13px;
 }}

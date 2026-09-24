@@ -861,6 +861,9 @@ impl MiniTerminalCard {
             if accepted_hover.get() { return; }
             let Some(c) = container_weak_hover.upgrade() else { return; };
             if !hover_lock_enter.allows_hover_at(&hover_session, &c, x, y) { return; }
+            // Editing a sticky note: neither raise over it nor take its keyboard.
+            // Not marked accepted, so hover works again once the note is left.
+            if crate::sticky_note::note_has_focus(&c) { return; }
             accepted_hover.set(true);
             hover_lock_enter.note_hover(&hover_session, &c);
             on_raise_hover(c.upcast());
@@ -1990,6 +1993,7 @@ fn spawn_vte(
     term_hover.connect_enter(move |_, x, y| {
         if let Some(t) = term_weak.upgrade() {
             if !hover_lock_vte.allows_hover_at(&hover_session, &t, x, y) { return; }
+            if crate::sticky_note::note_has_focus(&t) { return; }
             if !t.has_focus() {
                 t.grab_focus();
             }
