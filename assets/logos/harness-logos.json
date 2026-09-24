@@ -1,0 +1,221 @@
+{
+  "claude": {
+    "source": "https://claude.ai/favicon.svg",
+    "download_sha256": "b150888bc7257af83e3b85d3c2be4294f88986026f8168f6c12fc1fde6697350",
+    "files": {
+      "claude.svg": "6adbae2dc7133d502b3a2484b8899d6e2d2057f3c3b88ea86098cc6c97c46c2c",
+      "claude-themed.svg": "bf2a6ed641d1b0383934d24a6844ae35fc9b47961e42d350c8a226ebc4e4ebf7"
+    },
+    "light": "claude.svg",
+    "dark": "claude.svg",
+    "themed": "claude-themed.svg"
+  },
+  "pi": {
+    "source": "https://pi.dev/logo.svg",
+    "download_sha256": "abd66e7868b2d24f0f0895f9237ee8a6dcb22337583b0dc54aeb595acecb4d6b",
+    "files": {
+      "pi.svg": "32b0cd98f2b18ee5e7e13cf151c3c3ddf8a2e1e37a00977eb5d4d8342f54522a",
+      "pi-themed.svg": "257af583bf235339c02d3a285e14c2f5d5bb2a02af7aa4317879e1f9b31aac10"
+    },
+    "light": "pi.svg",
+    "dark": "pi.svg",
+    "themed": "pi-themed.svg"
+  },
+  "openclaw": {
+    "source": "https://raw.githubusercontent.com/openclaw/openclaw/main/ui/public/favicon.svg",
+    "download_sha256": "74e1fb7542675f68aafe502576f7c857c3f3620d07095e910515e3c05d62ab2e",
+    "files": {
+      "openclaw.svg": "11a981fb6fae2de53e9c33387d6097aaca4ee69b3f97d92022cc0aa5f8a17e56",
+      "openclaw-themed.svg": "c922e500967be9890701f04511304512a6e73a17d5aaed528b5af1da5ae79fd4"
+    },
+    "light": "openclaw.svg",
+    "dark": "openclaw.svg",
+    "themed": "openclaw-themed.svg"
+  },
+  "hermes": {
+    "source": "https://web-assets.nousresearch.com/nousnet-web/assets/hermes-landing/teams/hermes-wing.6ee276e9bff5a166.svg",
+    "download_sha256": "6ee276e9bff5a166c41bc8e80c6717c525cb9b9e81a1111348559452a711e8cd",
+    "files": {
+      "hermes.svg": "6cf4f5381fb5b964abab3a0326ef5662d57a716062bbe379a81970c9180dd26e",
+      "hermes-themed.svg": "95e226ebd01865a03ccc0d66b3d7858ee254d1ae94f5d875a77a957cffeabd79"
+    },
+    "light": "hermes.svg",
+    "dark": "hermes.svg",
+    "notes": "Official Hermes wing mark from the current Nous Research landing page.",
+    "themed": "hermes-themed.svg"
+  },
+  "goose": {
+    "source": "https://raw.githubusercontent.com/block/goose/main/documentation/static/img/goose.svg",
+    "download_sha256": "27cb1fef4a85a1779394dbfd0c7d5285d8cb6b120b36446b1cdbd9aad798da0b",
+    "files": {
+      "goose-light.svg": "3983acbf6001db8a283745ce8de7a7c602c128991ae6b41196fad20897f632bd",
+      "goose-dark.svg": "dd0be253fcae8ba7194f750c83fdac0c7f77146341c341e327de9ba5585b5e78",
+      "goose-themed.svg": "755fcebb7dbd1ee336ed8d53ac432684884522c2b41050c00c8d77a4768d3179"
+    },
+    "light": "goose-light.svg",
+    "dark": "goose-dark.svg",
+    "themed": "goose-themed.svg"
+  },
+  "qwen": {
+    "source": "https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/desktop-shell/bootstrap/qwen-code-logo.svg",
+    "download_sha256": "f7e324607c3f657953977d2742fbb8a3a0a354a13736671d27bfb906e9d1f3f2",
+    "files": {
+      "qwen.svg": "189ef7216721628de519c11bc24549975f289bcf261f6c61b8f645ad3170f553",
+      "qwen-themed.svg": "544a47f7218823f4378029a4dcc052e33f9fc9943d01a140b69006640b872fad"
+    },
+    "light": "qwen.svg",
+    "dark": "qwen.svg",
+    "themed": "qwen-themed.svg"
+  },
+  "crush": {
+    "source": "https://raw.githubusercontent.com/charmbracelet/crush/main/internal/oauth/callback/heartbit.svg",
+    "download_sha256": "5f2cfea3d8ab14b8e86fdfa7d84e5db993712e8daf40860547e1a06de98f3fbe",
+    "files": {
+      "crush.svg": "fd89301a54ecd7fdd58a98f249fa186f933ffb59857d71d74308c6126f3d2a01",
+      "crush-themed.svg": "467f67847aab6680c927ebcbb0d1b468d4e2e6c9da7464ec7f46e9307dabd49c"
+    },
+    "light": "crush.svg",
+    "dark": "crush.svg",
+    "themed": "crush-themed.svg"
+  },
+  "aider": {
+    "source": "https://raw.githubusercontent.com/Aider-AI/aider/main/aider/website/assets/icons/safari-pinned-tab.svg",
+    "download_sha256": "145269573c298162e3e032de7563d39e6db234d29fbb7a7312f251e28cc374a6",
+    "files": {
+      "aider-light.svg": "4567a1cff23397f1a6ddf2f5019b7c6bde1eefc8207223cd79926edba08325e6",
+      "aider-dark.svg": "692791f5024f6df194b63ac19203477f662918cb119dda4afbcbe83f4ea51db1",
+      "aider-themed.svg": "09169e8d588b6eb4ef714c6d4c24dcb0b380a55ba4f2340cc3d5e000c5c4b600"
+    },
+    "light": "aider-light.svg",
+    "dark": "aider-dark.svg",
+    "themed": "aider-themed.svg"
+  },
+  "kiro": {
+    "source": "https://kiro.dev/icon.svg",
+    "download_sha256": "774cbc1c7ecec8c935a6091595583d7a92fc8289d6f1db3f071c0f50c61c369f",
+    "files": {
+      "kiro.svg": "ee0fc7dacfd80121b0977553bd9a43541a4e5caec1cc5c2945c6feaee0c671b8",
+      "kiro-themed.svg": "475c7535b8e03f00a288a3010173b28502ef5ca82e4619d30acdba4de630ddc3"
+    },
+    "light": "kiro.svg",
+    "dark": "kiro.svg",
+    "themed": "kiro-themed.svg"
+  },
+  "cursor": {
+    "source": "https://cursor.com/marketing-static/favicon.svg",
+    "download_sha256": "878309a7f82021e76cdf211188dd052fe6aaf2f435c24887a731d8a19582d260",
+    "files": {
+      "cursor.svg": "4faf3eaa3fa748a337ed22883957fddd1539aecc762e6a952e70430244fa368f",
+      "cursor-themed.svg": "040c1436eb3f91c4c99abea9a16ea2bf6af8db13c048aea2ea0a8b0caa2fdff3"
+    },
+    "light": "cursor.svg",
+    "dark": "cursor.svg",
+    "themed": "cursor-themed.svg"
+  },
+  "reasonix": {
+    "source": "https://raw.githubusercontent.com/esengine/reasonix/HEAD/desktop/frontend/src/assets/logo-symbol.svg",
+    "download_sha256": "9f536615dd8ffc4afa69cb9b80821b4dd536f77d59708da153720b1a246e93be",
+    "files": {
+      "reasonix.svg": "986c84ad98a27bc898599887099a27afbc84655089238ceeb67ef2d3f88d46a5",
+      "reasonix-themed.svg": "42931b022be7abe17f409ed8b794eba5c5d6db7b347adf300f3433b48622e0e3"
+    },
+    "light": "reasonix.svg",
+    "dark": "reasonix.svg",
+    "themed": "reasonix-themed.svg"
+  },
+  "gemini": {
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/gemini-color.svg",
+    "download_sha256": "8ab0a9bafec11f7e69bcb9fc4ffd8f1bc927d1ddcbbb6ff36dee5ae8b5a9d602",
+    "files": {
+      "gemini.svg": "f001b6a77d577ec13436213492d5b945bb58fb747446c8314f55416b0e1d042b",
+      "gemini-themed.svg": "a5667c4fffc77d58aac03d3b7195b0bc4dde563451080c1b6cb0c96ebb92ee6f"
+    },
+    "light": "gemini.svg",
+    "dark": "gemini.svg",
+    "notes": "Google Gemini mark from Lobe Icons (MIT).",
+    "themed": "gemini-themed.svg"
+  },
+  "antigravity": {
+    "source": "https://raw.githubusercontent.com/sst/opencode/dev/packages/ui/src/assets/icons/app/antigravity.svg",
+    "download_sha256": "7e7a2768f04e789e09c3c63b83d406d0c31370387a4a88b99ee2901d30a9ac8f",
+    "files": {
+      "antigravity.svg": "b23016af4be7604738e7bac26dd73bb75f372beaa4d307fe9dc1d56eee255623",
+      "antigravity-android.png": "184fd3c1500576b6be08fe6699bcdb6862cab9773691744262388ca1126cf5bf",
+      "antigravity-themed.svg": "b082e8894f545206ed16553d583623a6557fc892f8a45dc5d584c2363699f79a"
+    },
+    "light": "antigravity.svg",
+    "dark": "antigravity.svg",
+    "notes": "Product mark from OpenCode integration assets; Google site SVG embeds a raster. Opaque alpha mask expressed as equivalent white luminance mask for AndroidSVG. Android uses a 256px librsvg render of this SVG because AndroidSVG cannot render its blur filters.",
+    "androidRaster": "antigravity-android.png",
+    "themed": "antigravity-themed.svg"
+  },
+  "kimi": {
+    "source": "https://moonshotai.github.io/Branding-Guide/",
+    "download_sha256": "e3bfdae8de20c075c7c1e11c225d481466bf168aba578e7b666720161d38b404",
+    "files": {
+      "kimi-light.svg": "937616746780d0c7c4bda92820db39f503f6a3e9b7cfebe438a5fb61b62d3991",
+      "kimi-dark.svg": "3821ae593eebce6940992f56e2fee3f55a08bbbba78713303c23ea714d44c5f9",
+      "kimi-themed.svg": "c464ad8c6b526ccce3c0f2a2303c6f414bc8f64a145ba98985afd3d86ab0b592"
+    },
+    "light": "kimi-light.svg",
+    "dark": "kimi-dark.svg",
+    "notes": "Official K-only light/dark SVG variants.",
+    "themed": "kimi-themed.svg"
+  },
+  "t3code": {
+    "source": "https://raw.githubusercontent.com/pingdotgg/t3code/main/assets/prod/logo.svg",
+    "download_sha256": "fbceddbceeb75136fb8e2c702cf0fe459d153b629abbda6262a63d7c4c65e673",
+    "files": {
+      "t3code.svg": "2ccc70f4dcd9c412219f13a7c6ac5d85efc3c122b731387d3bc710e57dfd417f",
+      "t3code-themed.svg": "7cc684e1e6a7d74021ce888428884277fda30a0b3ab5268eef2c5345180111a5"
+    },
+    "light": "t3code.svg",
+    "dark": "t3code.svg",
+    "themed": "t3code-themed.svg"
+  },
+  "codex": {
+    "light": "openai-black.svg",
+    "dark": "openai-white.svg",
+    "source": "https://commons.wikimedia.org/wiki/File:OpenAI_logo_2025_(symbol).svg",
+    "files": {
+      "openai-black.svg": "557bdecff26534eed269a4de09ce0d80dc3c7ddf54044dc57413da5f6ab32a51",
+      "openai-white.svg": "fa8da8ec0b417526973ca56632de59d5b87faa281d04d29c9c0a8de2afe07160",
+      "codex-themed.svg": "1277981d104371aa39d91300908e24b8fe386e0d4ef90effc958929decf09a34"
+    },
+    "themed": "codex-themed.svg"
+  },
+  "opencode": {
+    "light": "opencode-light.svg",
+    "dark": "opencode-dark.svg",
+    "source": "https://github.com/sst/opencode/tree/dev/packages/console/app/src/asset/brand",
+    "files": {
+      "opencode-light.svg": "b47a4fecc77599382e238868e74064bbe92307b0e253a32f0b1a026517a2d2a6",
+      "opencode-dark.svg": "5dd4abb4de60204510edf140bbe74b3580d07ebdda79fdb0081cd45acb53d44b",
+      "opencode-themed.svg": "71e1047f3377368faf758e8633fb58b8c8f78162290d7bb35b22546f190fc4cb"
+    },
+    "themed": "opencode-themed.svg"
+  },
+  "grok": {
+    "light": "grok-mark-light.svg",
+    "dark": "grok-mark-dark.svg",
+    "source": "https://commons.wikimedia.org/wiki/File:Grok-feb-2025-logo.svg",
+    "files": {
+      "grok-mark-light.svg": "b47076ff325fe4e3daafe8891817114bdc5023ffa25e820d7b61129c91934246",
+      "grok-mark-dark.svg": "6e751d3802e621d0bb4f321c3a31dc94573846745fbd985d659e4a98b8e0981e",
+      "grok-themed.svg": "eb5a2f6e96f54e28fc247b69c4232350b87758274d02c86b25e995fdba25119e"
+    },
+    "notes": "Standalone mark extracted from the existing sourced wordmark; lettering omitted for small icons.",
+    "themed": "grok-themed.svg"
+  },
+  "shell": {
+    "light": "shell-black.svg",
+    "dark": "shell-white.svg",
+    "source": "SUPER DESKTOP generic terminal glyph (not a product logo)",
+    "files": {
+      "shell-black.svg": "3993afffa4ce6725319d96873779fe4fc8b1b797faa81ff91aaaaf358d96b811",
+      "shell-white.svg": "4af60fb8939f94e258f375b5df1cd304284602aeef2cb68ab07b0ee37cdeced0",
+      "shell-themed.svg": "fa54b44b5349bc6ed288cad912310065ff482dec0a6dade8d8a3ebd10f73ea88"
+    },
+    "themed": "shell-themed.svg"
+  }
+}

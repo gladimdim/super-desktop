@@ -929,6 +929,12 @@ fn stream_keys(mut stream: Connection, id: &str) {
                     }
                     if !stream.still_authorized() { return Err("device_revoked".into()); }
                     if enter { control.send("", true)?; }
+                    // The persistent phone input path bypasses tmux::send_keys,
+                    // which normally records submitted composer text. Record
+                    // only after Enter succeeds, never an unsent draft or error.
+                    if enter {
+                        crate::prompt_history::record(id, value);
+                    }
                     wake_terminal_streams();
                     Ok(())
                 })();
@@ -1983,6 +1989,16 @@ mod tests {
             assert_eq!(ack["sequence"], sequence);
             assert_eq!(ack["ok"], sequence < 3);
         }
+        assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("beta"));
+        // Draft input and rejected submissions must not replace the last prompt.
+        send(&mut client, serde_json::json!({"sequence":4,"text":"draft","enter":false}));
+        assert_eq!(receive(&mut client)["ok"], true);
+        send(&mut client, serde_json::json!({"sequence":5,"text":"x".repeat(4097),"enter":true}));
+        assert_eq!(receive(&mut client)["ok"], false);
+        assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("beta"));
+        send(&mut client, serde_json::json!({"sequence":6,"text":"\nUnicode привіт ✓","enter":true}));
+        assert_eq!(receive(&mut client)["ok"], true);
+        assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("Unicode привіт ✓"));
         let screen = capture_pane_text(&_session.0).unwrap();
         assert!(screen.find("alpha").unwrap() < screen.find("beta").unwrap());
         let mut control = crate::tmux_control::Control::open(&_session.0).unwrap();

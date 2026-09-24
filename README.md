@@ -39,6 +39,26 @@ page reports active, battery, unknown-power, or permission/service errors rather
 than claiming protection when the lock could not be acquired. Forced sleep and
 other components that bypass logind inhibitors are outside its control.
 
+### Terminal copy and paste
+
+In local and remote PC terminal cards, select text and press **Ctrl+Shift+C**
+to copy, or **Ctrl+Shift+V** to paste the desktop clipboard. **Ctrl+C** keeps
+its normal terminal interrupt behavior. If a terminal app captures mouse input,
+hold **Shift** while dragging to select text. Paste uses VTE's native handling,
+including bracketed paste when enabled by the running app.
+
+The clipboard regression test owns its clipboard: run it on an isolated display,
+for example with `gtk4-broadwayd :37` running, then
+`GDK_BACKEND=broadway BROADWAY_DISPLAY=:37 GSK_RENDERER=cairo cargo test clipboard_round_trip -- --ignored`.
+
+### Harness logos
+
+Linux launchers, settings and terminal cards use bundled SVG product marks,
+shared with Android's harness views and widgets. They scale with the UI and
+use the active theme’s accent and background colors, including live theme changes. Custom icons remain user-selected;
+Herder retains its fallback until a verified SVG is available. See
+[logo sources and hashes](assets/logos/ATTRIBUTION.md).
+
 ### Supported AI harnesses
 
 Claude Code, OpenCode and Pi now have scoped native metadata adapters for new

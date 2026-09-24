@@ -1,8 +1,8 @@
 //! Company/product logos for the toolbar agent buttons.
 //!
 //! SVG files live in `assets/logos/` (vendored, see ATTRIBUTION.md there).
-//! Monochrome marks ship black/white variants selected by theme mode so they
-//! stay visible on both dark and light Omarchy themes. When a logo file is
+//! Derived SVG templates use the active accent/background palette. Original
+//! brand variants remain available as a fallback if the cache is not writable. When a logo file is
 //! missing, callers fall back to the old emoji label.
 
 use std::path::PathBuf;
@@ -12,40 +12,77 @@ pub const BRAND_ICON_SIZE: i32 = 18;
 
 /// Map an agent key to its vendored logo file for the given theme mode.
 pub fn logo_filename(agent: &str, light_theme: bool) -> Option<&'static str> {
-    match agent {
-        // Antigravity ships only a wide wordmark lockup (unreadable at 18px),
-        // so the Google company mark is used instead.
-        "antigravity" | "agy" => Some("google.svg"),
-        "claude" => Some(if light_theme {
-            "anthropic-black.svg"
-        } else {
-            "anthropic-white.svg"
-        }),
-        "codex" => Some(if light_theme {
-            "openai-black.svg"
-        } else {
-            "openai-white.svg"
-        }),
-        "opencode" => Some(if light_theme {
-            "opencode-light.svg"
-        } else {
-            "opencode-dark.svg"
-        }),
-        "grok" => Some(if light_theme {
-            "grok-black.svg"
-        } else {
-            "grok-white.svg"
-        }),
-        // No vendored mark for Reasonix yet, so the HUD falls back to the
-        // emoji label (see the agent table in window.rs).
-        "reasonix" => None,
-        "shell" | "bash" | "terminal" => Some(if light_theme {
-            "shell-black.svg"
-        } else {
-            "shell-white.svg"
-        }),
-        _ => None,
+    let logos = logo_manifest();
+    let agent = match agent {
+        "agy" => "antigravity",
+        "bash" | "terminal" => "shell",
+        _ => agent,
+    };
+    logos[agent][if light_theme { "light" } else { "dark" }].as_str()
+}
+
+fn logo_manifest() -> &'static serde_json::Value {
+    static LOGOS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    LOGOS.get_or_init(|| {
+        serde_json::from_str(include_str!("../assets/logos/harness-logos.json"))
+            .expect("vendored logo manifest")
+    })
+}
+
+fn paint_template(svg: &str, ink: &str, surface: &str) -> String {
+    svg.replace("#123456", ink).replace("#fedcba", surface)
+}
+
+fn themed_logo_path(agent: &str) -> Option<PathBuf> {
+    use sha2::{Digest, Sha256};
+    let agent = match agent {
+        "agy" => "antigravity",
+        "bash" | "terminal" => "shell",
+        _ => agent,
+    };
+    let name = logo_manifest()[agent]["themed"].as_str()?;
+    let source = asset_path(name)?;
+    let theme = crate::theme::current_theme();
+    let color = |value: &str| -> Option<String> {
+        let rgba = gtk4::gdk::RGBA::parse(value).ok()?;
+        Some(format!(
+            "#{:02x}{:02x}{:02x}",
+            (rgba.red() * 255.0).round() as u8,
+            (rgba.green() * 255.0).round() as u8,
+            (rgba.blue() * 255.0).round() as u8
+        ))
+    };
+    let svg = paint_template(
+        &std::fs::read_to_string(source).ok()?,
+        &color(&theme.accent)?,
+        &color(&theme.background)?,
+    );
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".cache")))?
+        .join("super-desktop/harness-logos");
+    let digest = format!("{:x}", Sha256::digest(svg.as_bytes()));
+    let path = cache.join(format!("{digest}.svg"));
+    if !path.is_file() {
+        std::fs::create_dir_all(&cache).ok()?;
+        let temporary = cache.join(format!("{digest}-{}.tmp", std::process::id()));
+        std::fs::write(&temporary, svg).ok()?;
+        std::fs::rename(temporary, &path).ok()?;
     }
+    Some(path)
+}
+
+fn asset_path(name: &str) -> Option<PathBuf> {
+    if let Some(dir) = find_logos_dir() {
+        let path = dir.join(name);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/logos")
+        .join(name);
+    path.is_file().then_some(path)
 }
 
 /// Locate the vendored logos directory: installed copy under
@@ -76,13 +113,7 @@ pub fn find_logos_dir() -> Option<PathBuf> {
 
 /// Full path to an agent's logo for the given theme mode, if vendored.
 pub fn logo_path(agent: &str, light_theme: bool) -> Option<PathBuf> {
-    let dir = find_logos_dir()?;
-    let p = dir.join(logo_filename(agent, light_theme)?);
-    if p.is_file() {
-        Some(p)
-    } else {
-        None
-    }
+    themed_logo_path(agent).or_else(|| asset_path(logo_filename(agent, light_theme)?))
 }
 
 /// Locate the vendored icon-theme root (`assets/icons`, containing `hicolor/`).
@@ -115,6 +146,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn themed_templates_use_palette_without_recoloring_masks() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/logos");
+        for (_, entry) in logo_manifest().as_object().unwrap() {
+            let svg = std::fs::read_to_string(dir.join(entry["themed"].as_str().unwrap())).unwrap();
+            assert!(svg.contains("#123456"));
+            let colored = paint_template(&svg, "#aabbcc", "#112233");
+            assert!(!colored.contains("#123456") && !colored.contains("#fedcba"));
+            assert!(colored.contains("#aabbcc"));
+        }
+        let svg = std::fs::read_to_string(dir.join("kiro-themed.svg")).unwrap();
+        assert!(paint_template(&svg, "#aabbcc", "#112233").contains("fill=\"white\""));
+    }
+
+    #[test]
     fn test_vendored_icons_exist_and_parse() {
         // Same rule as logos: only checked when running from a checkout that
         // ships the files; an installed location without them is skipped.
@@ -135,26 +180,27 @@ mod tests {
 
     #[test]
     fn test_logo_filename_mapping() {
-        assert_eq!(logo_filename("claude", false), Some("anthropic-white.svg"));
-        assert_eq!(logo_filename("claude", true), Some("anthropic-black.svg"));
+        assert_eq!(logo_filename("claude", false), Some("claude.svg"));
+        assert_eq!(logo_filename("claude", true), Some("claude.svg"));
         assert_eq!(logo_filename("codex", false), Some("openai-white.svg"));
         assert_eq!(logo_filename("opencode", false), Some("opencode-dark.svg"));
         assert_eq!(logo_filename("opencode", true), Some("opencode-light.svg"));
-        assert_eq!(logo_filename("grok", true), Some("grok-black.svg"));
+        assert_eq!(logo_filename("grok", true), Some("grok-mark-light.svg"));
         assert_eq!(logo_filename("shell", false), Some("shell-white.svg"));
-        // Antigravity uses the Google company mark.
-        assert_eq!(logo_filename("antigravity", false), Some("google.svg"));
+        // Use the product mark, not the Google company mark.
+        assert_eq!(logo_filename("antigravity", false), Some("antigravity.svg"));
         assert_eq!(logo_filename("unknown-agent", false), None);
     }
 
     #[test]
     fn test_vendored_logos_exist_and_parse() {
-        // Only checks files that are actually vendored next to this checkout;
-        // skipped silently when running from an installed location without them.
-        let Some(dir) = find_logos_dir() else {
-            return;
-        };
-        for agent in ["antigravity", "claude", "codex", "opencode", "grok", "shell"] {
+        // Always validate checkout assets, never an older installed bundle.
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/logos");
+        for agent in crate::tmux::HARNESS_KEYS
+            .iter()
+            .copied()
+            .filter(|key| *key != "herder")
+        {
             for light in [false, true] {
                 let name = logo_filename(agent, light).unwrap();
                 assert!(

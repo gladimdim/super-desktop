@@ -263,6 +263,7 @@ pub struct MiniTerminalCard {
     footer: gtk4::Box,
     title_label: Label,
     title_prefix: String,
+    brand_images: Vec<gtk4::Image>,
     /// Cached opencode session id for the USER-text DB lookup (None = unresolved yet).
     opencode_session: Rc<RefCell<Option<String>>>,
     /// Next time the cached id may be re-resolved against live tmux/DB state.
@@ -455,7 +456,17 @@ impl MiniTerminalCard {
         tag_sync.borrow_mut().push(header_tag.downgrade());
         header.append(&header_tag);
 
-        let title = Label::new(Some(&format!("{} {}", display_icon, display_name)));
+        let logo = crate::brand::logo_path(&agent_type, crate::theme::current_theme().mode == "light");
+        let mut brand_images = Vec::new();
+        if let Some(path) = &logo {
+            let image = gtk4::Image::from_file(path);
+            image.set_pixel_size(18);
+            header.append(&image);
+            brand_images.push(image);
+        }
+        let title_prefix = if logo.is_some() { display_name.to_string() }
+            else { format!("{} {}", display_icon, display_name) };
+        let title = Label::new(Some(&title_prefix));
         title.add_css_class("term-title");
         title.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         title.set_single_line_mode(true);
@@ -534,7 +545,14 @@ impl MiniTerminalCard {
         let attrs = gtk4::pango::AttrList::new();
         attrs.insert(gtk4::pango::AttrSize::new(38 * gtk4::pango::SCALE));
         icon_label.set_attributes(Some(&attrs));
-        icon_box.append(&icon_label);
+        if let Some(path) = &logo {
+            let image = gtk4::Image::from_file(path);
+            image.set_pixel_size(48);
+            icon_box.append(&image);
+            brand_images.push(image);
+        } else {
+            icon_box.append(&icon_label);
+        }
 
         let icon_name_label = Label::new(Some(display_name));
         icon_name_label.add_css_class("term-agent-name");
@@ -621,7 +639,7 @@ impl MiniTerminalCard {
         compact_top_bar.append(&compact_actions);
         root.add_overlay(&compact_top_bar);
 
-        let title_prefix = format!("{} {}", display_icon, display_name);
+
         // Seed from persisted state so rebooted cards resume the SAME agent
         // session without waiting for the DB mapping to re-resolve.
         let opencode_session = Rc::new(RefCell::new(data.borrow().agent_session_id.clone()));
@@ -683,6 +701,7 @@ impl MiniTerminalCard {
             footer,
             title_label: title.clone(),
             title_prefix,
+            brand_images,
             opencode_session,
             // Recheck immediately on the first refresh so a stale persisted
             // guess heals fast, then at most every 30s.
@@ -1420,6 +1439,9 @@ impl MiniTerminalCard {
     }
 
     pub fn apply_theme(&self, theme: &crate::theme::OmarchyTheme) {
+        if let Some(path) = crate::brand::logo_path(&self.data.borrow().agent_type, theme.mode == "light") {
+            for image in &self.brand_images { image.set_from_file(Some(&path)); }
+        }
         if let Some(term) = self.vte.borrow().as_ref() {
             let font_size = if self.is_expanded() { 11 } else { 10 };
             let font = gtk4::pango::FontDescription::from_string(&format!("{} {}", theme.font_family, font_size));
@@ -1681,6 +1703,7 @@ fn spawn_vte(
     term.add_css_class("term-vte");
     term.set_can_focus(true);
     term.set_focusable(true);
+    crate::terminal_clipboard::install(&term);
 
     let font_size = if is_expanded { 11.0 } else { 10.0 };
     apply_vte_theme(&term, font_size);
