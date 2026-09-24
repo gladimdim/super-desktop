@@ -323,13 +323,9 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
         .unwrap_or_default();
     ids.iter()
         .map(|id| {
-            if !state
-                .terminals
-                .iter()
-                .any(|t| &t.session_name == id && t.agent_type == "codex")
-            {
+            let Some(terminal) = state.terminals.iter().find(|t| &t.session_name == id) else {
                 return unknown(id);
-            }
+            };
             let pids: Vec<u32> = panes
                 .lines()
                 .filter_map(|line| {
@@ -338,7 +334,19 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
                 })
                 .collect();
             if pids.len() == 1 {
-                inspect(id, pids[0])
+                if terminal.agent_type == "codex" {
+                    inspect(id, pids[0])
+                } else if let Some(metadata) =
+                    crate::harness_metadata::inspect(id, &terminal.agent_type)
+                {
+                    if crate::harness_metadata::owns_pane(&metadata, pids[0]) {
+                        native_completion(id, &metadata)
+                    } else {
+                        unknown(id)
+                    }
+                } else {
+                    unknown(id)
+                }
             } else {
                 unknown(id)
             }
@@ -346,9 +354,50 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
         .collect()
 }
 
+fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
+    if metadata.agent != "pi" || !metadata.completion_supported {
+        return unknown(id);
+    }
+    let state = match metadata.status.as_str() {
+        "working" => "working",
+        "completed" if metadata.completion_id.is_some() => "completed",
+        _ => "unknown",
+    };
+    Completion {
+        id: id.into(),
+        supported: true,
+        state: state.into(),
+        completion_id: if state == "completed" {
+            metadata.completion_id.clone()
+        } else {
+            None
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_completion_never_promotes_idle_waits_or_errors_to_completed() {
+        let mut metadata = crate::harness_metadata::Metadata {
+            agent: "pi".into(),
+            completion_supported: true,
+            completion_id: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        for status in ["idle", "waiting", "error", "unknown"] {
+            metadata.status = status.into();
+            let event = native_completion("session", &metadata);
+            assert!(event.supported);
+            assert_eq!(event.state, "unknown");
+            assert!(event.completion_id.is_none());
+        }
+        metadata.status = "completed".into();
+        assert_eq!(native_completion("session", &metadata).state, "completed");
+        metadata.agent = "claude".into();
+        assert!(!native_completion("session", &metadata).supported);
+    }
     fn event(kind: &str) -> String {
         format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"{kind}\"}}}}\n")
     }

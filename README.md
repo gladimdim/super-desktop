@@ -51,6 +51,25 @@ The clipboard regression test owns its clipboard: run it on an isolated display,
 for example with `gtk4-broadwayd :37` running, then
 `GDK_BACKEND=broadway BROADWAY_DISPLAY=:37 GSK_RENDERER=cairo cargo test clipboard_round_trip -- --ignored`.
 
+### Terminal history on mobile
+
+New default launches use native scrollback: OpenCode `--mini`, Codex
+`--no-alt-screen`, Pi `--tui-mode regular`, and Hermes `--cli`. Explicit custom
+mode flags are retained. Existing sessions are not restarted. Crush stays in
+its fullscreen UI; Android’s keyboard panel provides Tab to focus its history
+and Page Up/Page Down to navigate older output. These keys move the remote
+viewport rather than creating a local transcript.
+
+### Grok on mobile
+
+Default Grok launches use `--minimal` so finalized output enters native terminal
+scrollback and is visible to the Android snapshot viewer. Fullscreen Grok keeps
+its history inside the alternate-screen UI, exposing only its current viewport.
+For an existing conversation, use `/minimal` to switch in place without restarting.
+With an older launcher, set `[ui] screen_mode = "minimal"` in Grok's config.
+Requires a Grok version with minimal mode. The bridge still sends a bounded
+history tail; this does not turn it into an unlimited transcript viewer.
+
 ### Harness logos
 
 Linux launchers, settings and terminal cards use bundled SVG product marks,
@@ -85,9 +104,11 @@ input; exact original quoting, aliases, and pipelines require the Bash hook.
 Titles remain shortened to fit the card. This also applies to remote PC and
 Android labels; AI harness prompt titles are unchanged.
 
-Android's per-terminal bell can report explicit Codex response completion, including
-while the phone UI is hidden using an opt-in foreground monitor. Other harnesses
-do not yet have verified completion adapters. See [completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).
+Android's per-terminal bell can report explicit Codex and Pi response completion,
+including while the phone UI is hidden using an opt-in foreground monitor. Pi
+requires a new launch with the updated desktop extension and updated Android app.
+Other harnesses do not yet have verified completion adapters. See
+[completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).
 
 Android can also attach an image using **＋** and send it together with a prompt
 to an idle Codex terminal. See [image prompts, compatibility and upload limits](docs/IMAGE_PROMPTS.md).

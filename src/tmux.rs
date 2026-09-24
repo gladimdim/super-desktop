@@ -33,21 +33,23 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
             name: "OpenAI Codex",
             icon: "🤖",
             commands: &["codex"],
-            default_args: &["--dangerously-bypass-approvals-and-sandbox"],
+            default_args: &["--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"],
             npx_package: None,
         },
         "opencode" => AgentConfig {
             name: "OpenCode",
             icon: "🔮",
             commands: &["opencode"],
-            default_args: &["--auto"],
+            default_args: &["--mini", "--auto"],
             npx_package: None,
         },
         "grok" => AgentConfig {
             name: "Grok CLI",
             icon: "🚀",
             commands: &["grok"],
-            default_args: &["--dangerously-skip-permissions"],
+            // Native scrollback is required by the mobile snapshot viewer.
+            // Fullscreen Grok keeps history inside its alternate-screen UI.
+            default_args: &["--minimal", "--dangerously-skip-permissions"],
             npx_package: None,
         },
         "aider" => AgentConfig {
@@ -63,11 +65,11 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
         },
         "hermes" => AgentConfig {
             name: "Hermes Agent", icon: "🪽", commands: &["hermes"],
-            default_args: &[], npx_package: None,
+            default_args: &["--cli"], npx_package: None,
         },
         "pi" => AgentConfig {
             name: "Pi", icon: "🥧", commands: &["pi"],
-            default_args: &[], npx_package: None,
+            default_args: &["--tui-mode", "regular"], npx_package: None,
         },
         "openclaw" => AgentConfig {
             name: "OpenClaw", icon: "🦞", commands: &["openclaw"],
@@ -343,19 +345,8 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
     let cfg = get_agent_config(agent_type);
     if let Some(cmd) = custom {
         let trimmed = cmd.trim();
-        if !cfg.default_args.is_empty() && !trimmed.is_empty() {
-            let is_shell = trimmed.ends_with("/bash")
-                || trimmed == "bash"
-                || trimmed.ends_with("/zsh")
-                || trimmed == "zsh"
-                || trimmed.ends_with("/sh")
-                || trimmed == "sh"
-                || trimmed.ends_with("/fish")
-                || trimmed == "fish";
-            let already_has_arg = cfg.default_args.iter().any(|arg| trimmed.contains(arg));
-            if !is_shell && !already_has_arg {
-                return format!("{} {}", trimmed, cfg.default_args.join(" "));
-            }
+        if !trimmed.is_empty() && !is_shell_command(trimmed) {
+            return with_missing_default_args(agent_type, trimmed, cfg.default_args);
         }
         return trimmed.to_string();
     }
@@ -373,6 +364,31 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
         }
     }
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+}
+
+// Permission flags already present must not suppress a missing display-mode
+// default. Preserve explicit user mode overrides and never append to shell syntax.
+fn with_missing_default_args(agent: &str, command: &str, defaults: &[&str]) -> String {
+    let Some(words) = shlex::split(command) else { return command.to_string() };
+    if words.iter().any(|word| matches!(word.as_str(), "|" | "||" | "&&" | ";")) {
+        return command.to_string();
+    }
+    let has = |flag: &str| words.iter().any(|word| word == flag || word.starts_with(&format!("{flag}=")));
+    let mut result = command.to_string();
+    let mut i = 0;
+    while i < defaults.len() {
+        let flag = defaults[i];
+        let value = defaults.get(i + 1).filter(|value| !value.starts_with('-'));
+        let overridden = (agent == "grok" && flag == "--minimal" && has("--fullscreen"))
+            || (agent == "hermes" && flag == "--cli" && has("--tui"));
+        if !has(flag) && !overridden {
+            result.push(' ');
+            result.push_str(flag);
+            if let Some(value) = value { result.push(' '); result.push_str(value); }
+        }
+        i += if value.is_some() { 2 } else { 1 };
+    }
+    result
 }
 
 fn is_shell_command(cmd: &str) -> bool {
@@ -935,7 +951,7 @@ fn inspect_status_impl(
                     }
                 }
 
-                if matches!(agent_type, "claude" | "opencode" | "pi" | "openclaw") {
+                if crate::harness_metadata::native_agent(agent_type) || agent_type.starts_with("custom-") {
                     if let Some(metadata) = crate::harness_metadata::inspect(session_name, agent_type) {
                         if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
                             return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
@@ -1909,6 +1925,33 @@ mod tests {
     }
 
     #[test]
+    fn grok_default_launch_uses_native_scrollback() {
+        let cfg = get_agent_config("grok");
+        let command = with_default_args("/test/bin/grok", cfg.default_args);
+        assert_eq!(command, "/test/bin/grok --minimal --dangerously-skip-permissions");
+        assert!(!get_agent_config("codex").default_args.contains(&"--minimal"));
+    }
+
+    #[test]
+    fn mobile_scrollback_defaults_preserve_explicit_modes_and_permissions() {
+        for (agent, command, expected) in [
+            ("opencode", "/bin/opencode --auto", "/bin/opencode --auto --mini"),
+            ("codex", "/bin/codex --dangerously-bypass-approvals-and-sandbox", "/bin/codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen"),
+            ("pi", "/bin/pi", "/bin/pi --tui-mode regular"),
+            ("pi", "/bin/pi --tui-mode fullscreen", "/bin/pi --tui-mode fullscreen"),
+            ("pi", "/bin/pi --tui-mode=fullscreen", "/bin/pi --tui-mode=fullscreen"),
+            ("hermes", "/bin/hermes", "/bin/hermes --cli"),
+            ("hermes", "/bin/hermes --tui", "/bin/hermes --tui"),
+            ("grok", "/bin/grok --fullscreen --dangerously-skip-permissions", "/bin/grok --fullscreen --dangerously-skip-permissions"),
+            ("opencode", "/bin/bash -l", "/bin/bash -l"),
+        ] {
+            let actual = resolve_command(agent, Some(command));
+            assert_eq!(actual, expected, "{agent}");
+            assert_eq!(resolve_command(agent, Some(&actual)), actual, "defaults must be idempotent");
+        }
+    }
+
+    #[test]
     fn test_resolve_command_ai_agent_arguments() {
         // Antigravity
         let agy_cmd = resolve_command("antigravity", None);
@@ -2044,8 +2087,8 @@ mod tests {
     #[test]
     fn test_new_catalog_uses_installed_cli_commands() {
         for (key, command, args) in [
-            ("gemini", "gemini", &[][..]), ("hermes", "hermes", &[][..]),
-            ("pi", "pi", &[][..]), ("goose", "goose", &["session"][..]),
+            ("gemini", "gemini", &[][..]), ("hermes", "hermes", &["--cli"][..]),
+            ("pi", "pi", &["--tui-mode", "regular"][..]), ("goose", "goose", &["session"][..]),
             ("qwen", "qwen", &[][..]), ("crush", "crush", &[][..]),
             ("kimi", "kimi", &[][..]), ("herder", "herder", &["worker"][..]),
             ("kiro", "kiro-cli", &[][..]), ("cursor", "cursor-agent", &[][..]),

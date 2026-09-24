@@ -20,6 +20,7 @@ const LIMIT: u64 = 65536;
 pub struct Metadata {
     pub version: u32,
     pub agent: String,
+    pub launcher: String,
     pub native_session: String,
     pub title: String,
     pub prompt: String,
@@ -28,6 +29,9 @@ pub struct Metadata {
     pub pid: u32,
     pub process_start: String,
     pub emitter: u32,
+    pub observed_at_ms: u64,
+    pub completion_supported: bool,
+    pub completion_id: Option<String>,
 }
 
 fn root() -> Option<PathBuf> {
@@ -54,6 +58,21 @@ fn start_time(pid: u32) -> Option<String> {
             .nth(19)?
             .to_owned(),
     )
+}
+
+/// A surviving old launch must not describe a respawned/replaced tmux pane.
+pub fn owns_pane(metadata: &Metadata, pane_pid: u32) -> bool {
+    let mut pid = metadata.pid;
+    for _ in 0..32 {
+        if pid == 0 { return false; }
+        if pid == pane_pid { return true; }
+        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else { return false; };
+        let Some(parent) = stat.rsplit_once(')').and_then(|(_, fields)| fields.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u32>().ok()) else { return false; };
+        if parent == pid { return false; }
+        pid = parent;
+    }
+    false
 }
 fn read(path: &Path) -> Option<Metadata> {
     let file = fs::File::open(path).ok()?;
@@ -96,11 +115,15 @@ impl Launch {
 /// Only decorate an attributable direct CLI invocation. Shell scripts and custom
 /// wrappers keep working unchanged; they must opt in to a native adapter.
 pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
+    prepare_with_root(session, agent, command, root())
+}
+
+fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<PathBuf>) -> Launch {
     let unchanged = || Launch {
         command: command.into(),
         path: None,
     };
-    if !matches!(agent, "claude" | "opencode" | "pi" | "openclaw") {
+    if !native_agent(agent) && !agent.starts_with("custom-") {
         return unchanged();
     }
     let Some(mut args) = shlex::split(command) else {
@@ -113,7 +136,15 @@ pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
     else {
         return unchanged();
     };
-    if exe_name != agent
+    let exe_name = exe_name.to_owned();
+    let launcher = agent;
+    let agent = if launcher.starts_with("custom-") && native_agent(&exe_name) {
+        exe_name.as_str()
+    } else {
+        agent
+    };
+    if !native_agent(agent)
+        || exe_name != agent
         || command.contains(['$', '`', '\n'])
         || args.iter().any(|s| {
             s.starts_with("--settings=")
@@ -140,7 +171,7 @@ pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
     {
         return unchanged();
     }
-    let Some(root) = root() else {
+    let Some(root) = root else {
         return unchanged();
     };
     if install(&root).is_err() {
@@ -154,6 +185,7 @@ pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
     let initial = Metadata {
         version: 1,
         agent: agent.into(),
+        launcher: launcher.into(),
         status: "unknown".into(),
         ..Default::default()
     };
@@ -185,6 +217,7 @@ pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
                 "SessionEnd",
                 "PreCompact",
                 "PostCompact",
+                "PostModelSwitch",
             ] {
                 hooks.insert(
                     event.into(),
@@ -304,19 +337,53 @@ pub fn install_openclaw() -> Result<(), String> {
     let root = root().ok_or("HOME unavailable")?;
     install(&root).map_err(|e| e.to_string())?;
     let status = Command::new("openclaw")
-        .args(["plugins", "install", "--link"])
+        .args([
+            "plugins",
+            "install",
+            "--link",
+            "--force",
+            "--accept-capabilities",
+        ])
         .arg(root.join("openclaw"))
         .status()
         .map_err(|e| format!("Install OpenClaw first: {e}"))?;
     if !status.success() {
         return Err("OpenClaw plugin registration failed".into());
     }
+    // Recent gateways require explicit conversation-hook access for local
+    // plugins. Only grant this bundled observer its required hook access.
+    for args in [
+        vec!["plugins", "enable", "super-desktop-metadata"],
+        vec![
+            "config",
+            "set",
+            "plugins.entries.super-desktop-metadata.hooks.allowConversationAccess",
+            "true",
+            "--strict-json",
+        ],
+    ] {
+        if !Command::new("openclaw")
+            .args(args)
+            .status()
+            .map_err(|e| e.to_string())?
+            .success()
+        {
+            return Err(
+                "OpenClaw plugin installed but activation failed; inspect its plugin configuration"
+                    .into(),
+            );
+        }
+    }
     println!("Gateway plugin registered. Restart your OpenClaw gateway, then launch a new OpenClaw card.");
     Ok(())
 }
 
+pub fn native_agent(agent: &str) -> bool {
+    matches!(agent, "claude" | "opencode" | "pi" | "openclaw")
+}
+
 pub fn inspect(session: &str, agent: &str) -> Option<Metadata> {
-    if !matches!(agent, "claude" | "opencode" | "pi" | "openclaw") {
+    if !native_agent(agent) && !agent.starts_with("custom-") {
         return None;
     }
     type Cache =
@@ -339,7 +406,7 @@ pub fn inspect(session: &str, agent: &str) -> Option<Metadata> {
 }
 
 fn inspect_uncached(session: &str, agent: &str) -> Option<Metadata> {
-    if !matches!(agent, "claude" | "opencode" | "pi" | "openclaw") {
+    if !native_agent(agent) && !agent.starts_with("custom-") {
         return None;
     }
     let out = Command::new(crate::tmux::tmux_bin())
@@ -354,14 +421,33 @@ fn inspect_uncached(session: &str, agent: &str) -> Option<Metadata> {
     if path.parent()? != root()? {
         return None;
     }
-    let value = read(path)?;
+    let mut value = read(path)?;
     if value.version != 1
-        || value.agent != agent
+        || !native_agent(&value.agent)
+        || (value.agent != agent && value.launcher != agent)
         || start_time(value.pid).as_deref() != Some(&value.process_start)
     {
         return None;
     }
+    refresh_liveness(&mut value, now_ms());
     Some(value)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn refresh_liveness(value: &mut Metadata, now: u64) {
+    if value.agent == "openclaw"
+        && (value.observed_at_ms == 0
+            || now < value.observed_at_ms
+            || now - value.observed_at_ms > 15_000)
+    {
+        value.status = "unknown".into();
+    }
 }
 
 pub fn title(session: &str, agent: &str) -> Option<String> {
@@ -382,6 +468,7 @@ pub fn title(session: &str, agent: &str) -> Option<String> {
 pub fn status(value: &str) -> Option<(&'static str, &'static str)> {
     Some(match value {
         "working" => ("WORKING", "● WORKING"),
+        "completed" => ("FINISHED", "✓ FINISHED"),
         "idle" => ("IDLE", "● IDLE"),
         "waiting" => ("WAITING", "◌ WAITING"),
         "error" => ("ERROR", "⚠ ERROR"),
@@ -421,6 +508,7 @@ fn record_inner(kind: &str) -> Result<(), Box<dyn std::error::Error>> {
     }
     data.pid = pid;
     data.process_start = start;
+    data.observed_at_ms = now_ms();
     if kind == "init" {
         return Ok(atomic_write(&path, &data)?);
     }
@@ -452,6 +540,8 @@ fn apply(data: &mut Metadata, event: &Value) {
             data.prompt.clear();
             data.model.clear();
             data.status = "unknown".into();
+            data.completion_id = None;
+            data.completion_supported = false;
         }
     }
     if let Some(title) = event["title"].as_str() {
@@ -464,22 +554,65 @@ fn apply(data: &mut Metadata, event: &Value) {
         data.model = clean(model);
     }
     if let Some(state) = event["status"].as_str().filter(|s| status(s).is_some()) {
-        data.status = state.into();
+        data.completion_id = None;
+        if state == "completed" {
+            use sha2::{Digest, Sha256};
+            if data.agent == "pi" && data.completion_supported && !data.native_session.is_empty() {
+                if let Some(turn) = event["completionTurn"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                {
+                    data.completion_id = Some(format!(
+                        "{:x}",
+                        Sha256::digest(format!(
+                            "pi\0{}\0{}\0{}\0{turn}",
+                            data.pid, data.process_start, data.native_session
+                        ))
+                    ));
+                }
+            }
+            data.status = if data.completion_id.is_some() {
+                "completed"
+            } else {
+                "unknown"
+            }
+            .into();
+        } else {
+            data.status = state.into();
+        }
+    }
+    if data.agent == "pi" && event["completionSupported"] == true {
+        data.completion_supported = true;
     }
 }
 
 fn apply_claude(data: &mut Metadata, input: &Value) {
     let event = input["hook_event_name"].as_str().unwrap_or("");
     let session = input["session_id"].as_str().unwrap_or("");
+    if session.is_empty() || input["agent_id"].as_str().is_some_and(|id| !id.is_empty()) {
+        return;
+    }
     if !data.native_session.is_empty() && data.native_session != session && event != "SessionStart"
     {
         return;
     }
-    let state = match event {
-        "SessionStart" | "Stop" | "PostCompact" => "idle",
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PreCompact" => {
-            "working"
+    if event == "PostModelSwitch" {
+        if let Some(model) = input["to_model"].as_str() {
+            apply(data, &json!({"session":session,"model":model}));
         }
+        return;
+    }
+    let state = match event {
+        "SessionStart" => "idle",
+        "Stop" => {
+            if data.status == "error" {
+                "error"
+            } else {
+                "idle"
+            }
+        }
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure" | "PreCompact"
+        | "PostCompact" => "working",
         "PermissionRequest" => "waiting",
         "StopFailure" => "error",
         "SessionEnd" => "unknown",
@@ -639,6 +772,48 @@ mod tests {
     }
 
     #[test]
+    fn claude_child_hooks_compaction_and_model_switch_preserve_parent_state() {
+        let mut data = Metadata::default();
+        apply_claude(
+            &mut data,
+            &json!({"hook_event_name":"SessionStart","session_id":"own","model":"old"}),
+        );
+        apply_claude(
+            &mut data,
+            &json!({"hook_event_name":"PermissionRequest","session_id":"own"}),
+        );
+        for event in ["SessionStart", "Stop", "PreToolUse"] {
+            apply_claude(
+                &mut data,
+                &json!({"hook_event_name":event,"session_id":"own","agent_id":"child"}),
+            );
+            assert_eq!(data.status, "waiting");
+        }
+        apply_claude(
+            &mut data,
+            &json!({"hook_event_name":"PostModelSwitch","session_id":"own","to_model":"new"}),
+        );
+        assert_eq!(data.model, "new");
+        assert_eq!(data.status, "waiting");
+        apply_claude(
+            &mut data,
+            &json!({"hook_event_name":"PostCompact","session_id":"own"}),
+        );
+        assert_eq!(data.status, "working");
+        apply_claude(
+            &mut data,
+            &json!({"hook_event_name":"StopFailure","session_id":"own"}),
+        );
+        apply_claude(
+            &mut data,
+            &json!({"hook_event_name":"Stop","session_id":"own"}),
+        );
+        assert_eq!(data.status, "error");
+        apply_claude(&mut data, &json!({"hook_event_name":"SessionStart"}));
+        assert_eq!(data.native_session, "own");
+    }
+
+    #[test]
     fn claude_transcript_uses_only_complete_own_user_and_title_records() {
         let records = [
             json!({"type":"custom-title","sessionId":"own","customTitle":"Named task"}),
@@ -659,6 +834,65 @@ mod tests {
     fn process_identity_is_not_just_a_reused_pid() {
         assert!(start_time(std::process::id()).is_some());
         assert_eq!(start_time(u32::MAX), None);
+        let own = Metadata { pid: std::process::id(), ..Default::default() };
+        let parent = unsafe { libc::getppid() } as u32;
+        assert!(owns_pane(&own, own.pid));
+        assert!(owns_pane(&own, parent));
+        assert!(!owns_pane(&own, u32::MAX));
+        assert!(!owns_pane(&Metadata { pid: parent, ..Default::default() }, own.pid));
+    }
+
+    #[test]
+    fn openclaw_gateway_liveness_expires_without_changing_other_native_adapters() {
+        let mut data = Metadata {
+            agent: "openclaw".into(),
+            status: "working".into(),
+            observed_at_ms: 1000,
+            ..Default::default()
+        };
+        refresh_liveness(&mut data, 16000);
+        assert_eq!(data.status, "working");
+        refresh_liveness(&mut data, 16001);
+        assert_eq!(data.status, "unknown");
+        data.agent = "pi".into();
+        data.status = "idle".into();
+        refresh_liveness(&mut data, 60000);
+        assert_eq!(data.status, "idle");
+    }
+
+    #[test]
+    fn pi_completion_is_scoped_durable_and_cleared_by_activity_or_session_switch() {
+        let mut data = Metadata {
+            agent: "pi".into(),
+            pid: 42,
+            process_start: "123".into(),
+            ..Default::default()
+        };
+        apply(
+            &mut data,
+            &json!({"session":"one","status":"idle","completionSupported":true}),
+        );
+        let completed = json!({"session":"one","status":"completed","completionTurn":"turn-one"});
+        apply(&mut data, &completed);
+        let id = data.completion_id.clone().unwrap();
+        assert_eq!(id.len(), 64);
+        let mut restored: Metadata =
+            serde_json::from_slice(&serde_json::to_vec(&data).unwrap()).unwrap();
+        apply(&mut restored, &completed);
+        assert_eq!(restored.completion_id.as_deref(), Some(id.as_str()));
+        apply(&mut data, &json!({"status":"waiting"}));
+        assert!(data.completion_id.is_none());
+        apply(
+            &mut data,
+            &json!({"session":"two","status":"completed","completionTurn":"turn-one"}),
+        );
+        assert_eq!(data.status, "unknown");
+        assert!(!data.completion_supported);
+        data.agent = "claude".into();
+        data.completion_supported = true;
+        apply(&mut data, &completed);
+        assert!(data.completion_id.is_none());
+        assert_eq!(data.status, "unknown");
     }
 
     #[test]
@@ -680,5 +914,41 @@ mod tests {
             assert_eq!(launch.command, command);
             assert!(launch.path.is_none());
         }
+    }
+
+    #[test]
+    fn direct_custom_launchers_receive_scoped_adapters_without_rewriting_wrappers() {
+        let root = std::env::temp_dir().join(format!("sd-adapter-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        for agent in ["claude", "pi", "opencode", "openclaw"] {
+            let command = format!(
+                "'/opt/tools/{agent}' {}",
+                if agent == "openclaw" { "tui" } else { "" }
+            );
+            let launch =
+                prepare_with_root("sd_term_test", "custom-test", &command, Some(root.clone()));
+            let metadata = read(
+                launch
+                    .path
+                    .as_ref()
+                    .expect("custom direct launch has adapter"),
+            )
+            .unwrap();
+            assert_eq!(metadata.agent, agent);
+            assert_eq!(metadata.launcher, "custom-test");
+            assert!(launch.command.contains("SD_HARNESS_PID"));
+        }
+        for command in [
+            "'/opt/tools/wrapper' claude",
+            "claude --settings custom.json",
+            "custom-test",
+            "bash -c claude",
+        ] {
+            let launch =
+                prepare_with_root("sd_term_test", "custom-test", command, Some(root.clone()));
+            assert_eq!(launch.command, command);
+            assert!(launch.path.is_none());
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

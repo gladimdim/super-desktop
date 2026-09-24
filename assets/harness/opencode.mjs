@@ -3,6 +3,7 @@ import { report } from "./report.mjs";
 export const SuperDesktop = async ({ client }) => {
   let selected;
   let failed = false;
+  let selection = 0;
   const sessions = new Map();
   const emit = (patch) => report("opencode", patch);
   // Session lookup filters tool-created child agents; cwd and creation order
@@ -17,7 +18,9 @@ export const SuperDesktop = async ({ client }) => {
     return sessions.get(id);
   };
   const choose = async (id) => {
+    const generation = ++selection;
     const session = await info(id);
+    if (generation !== selection) return false;
     if (!session || session.parentID) return false;
     if (selected !== id) failed = false;
     selected = id;
@@ -38,14 +41,22 @@ export const SuperDesktop = async ({ client }) => {
         const value = p.info;
         if (!value) return;
         sessions.set(value.id, value);
-        if (!selected && !value.parentID) {
-          await choose(value.id);
-          if (event.type === "session.created") emit({ session: selected, status: "idle" });
-        }
+        // Server-wide creation/update events do not identify the TUI's selection.
+        // Only a TUI selection or submitted root-session prompt can claim it.
         if (value.id === selected) emit({ session: selected, title: value.title ?? "" });
         return;
       }
       if (event.type === "tui.session.select") { await choose(p.sessionID); return; }
+      if (event.type === "session.deleted") {
+        sessions.delete(p.info?.id);
+        if (p.info?.id === selected) {
+          ++selection;
+          emit({ session: selected, status: "unknown", title: "", prompt: "", model: "" });
+          selected = undefined;
+          failed = false;
+        }
+        return;
+      }
       if (p.sessionID !== selected || !selected) return;
       if (event.type === "session.status") {
         const status = p.status?.type;

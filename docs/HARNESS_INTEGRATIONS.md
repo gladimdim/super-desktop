@@ -14,17 +14,18 @@ installed CLI version and its permission/retry configuration.
 | Harness | Title and identity | Activity | Activation / validation |
 | --- | --- | --- | --- |
 | Codex | Own process's open CLI rollout and exact thread ID in its session index; generated/renamed name; own user messages | Explicit working and completed events; ambiguous/partial metadata is UNKNOWN, not guessed idle | Existing rollout adapter plus exact-name tests, including another conversation and a child agent |
-| Claude Code | Scoped hooks identify the native session; submitted prompts; session name when supplied and bounded `custom-title` transcript records | Session start/stop, prompt/tool activity, permission wait, API error, compaction | Added automatically to direct CLI launches; 2.1.278 accepted the configuration and emitted SessionStart in an isolated no-prompt run; lifecycle reducer tests |
-| OpenCode | Per-launch plugin tracks the selected root session and its native title; child sessions cannot claim the card; owned DB title fallback for older sessions | Native session status (busy/retry/idle), permissions/questions, error | Added automatically to direct CLI launches; 1.18.31 loaded the plugin and reported a real locally created session/title; plugin lifecycle contract tests |
-| Pi | Per-launch extension reads session ID/name/model and submitted prompt; session switches clear old data | Agent start and final settlement, error/abort outcome, blocking extension UI prompts | Added automatically using `--extension`; 0.87.1 loaded it in isolated offline RPC mode and reported a named idle session; retry/settlement contract tests |
-| OpenClaw TUI | Separate `sd_term_*` gateway session per card; prompt-based title; no guessed generated conversation name | Gateway session start, prompt/model start, run success/error and end | Discoverable after installing `openclaw`; requires the bundled gateway plugin below. Gateway mapping/hook contract tests pass; live gateway validation is pending because OpenClaw is not installed on this development PC |
+| Claude Code | Scoped hooks identify the native session; submitted prompts; native names and model switches | Session start/stop, prompt/tool activity, permission wait, API error, compaction; child hooks cannot overwrite parent state | Installed CLI accepts hooks and emits SessionStart in an isolated no-prompt run; lifecycle reducer tests |
+| OpenCode | Explicit TUI selection or submitted root prompt owns the card; background creation/update events and stale selection lookups cannot claim it | Native session status (busy/retry/idle), permissions/questions, error; deletion clears metadata | Installed-server smoke verifies selection, rename and switching; child-session/race contract tests |
+| Pi | Per-launch extension reads session ID/name/model and submitted prompt; session switches clear old data | Agent start, permission UI, error/abort and final settlement; successful final text response produces FINISHED and completion alerts | Installed offline RPC smoke uses a local fixture provider to verify success, provider failure, recovery, rename and session switching |
+| OpenClaw TUI | Dedicated `sd_term_*` key plus native session ID; exact session-store label/display name, refreshed while idle; model retained across hooks | Working/idle/error and native exec-approval waits; stale pre-reset/run events ignored; stopped-gateway observations expire to UNKNOWN | 2026.9.5 production plugin installation and real isolated gateway reset/SessionStart verified; approval transitions contract-tested |
 | Regular Bash terminals | Submitted command through the shell hook; foreground argv for older terminals | Foreground process group | See README's terminal command-title behavior |
 | Other launchers | Tracked input and existing agent-specific fallbacks | Existing screen heuristic | Launchability does not imply native lifecycle support |
 
 New WAITING, ERROR and UNKNOWN badges are distinct from IDLE. An exited tmux
-pane always wins over cached metadata. FINISHED/completion notifications remain
-Codex-only: a Stop/idle hook is not proof that a response is eligible for a
-completion notification, especially when other hooks can continue a turn.
+pane always wins over cached metadata. FINISHED/completion notifications support
+Codex and Pi. Pi requires final `agent_settled`, a completed outcome and a
+nonempty successful assistant text response, with a durable per-turn ID. A
+Claude Stop or OpenCode/OpenClaw idle hook is not a completion guarantee.
 
 ## Activating integrations
 
@@ -39,6 +40,11 @@ shell wrappers, explicit Claude `--settings`, disabled-plugin/bare modes, and
 noninteractive invocations are left unchanged rather than silently rewriting them.
 An adapter that has not emitted attributable metadata reports UNKNOWN.
 
+Custom launchers that directly invoke `claude`, `opencode`, `pi`, or `openclaw`
+receive the same scoped adapters and retain their custom launcher identity.
+Shell wrappers and explicit incompatible CLI modes remain unchanged. Existing
+running processes require a new launch; no live session is silently restarted.
+
 OpenClaw needs its gateway installed/configured separately. After installing it:
 
 1. Run `super-desktop integrate-openclaw` to register the bundled local plugin.
@@ -49,8 +55,12 @@ The launcher runs `openclaw tui --session <card-session-name>`. The plugin only
 observes sessions with an explicit matching desktop mapping. It does not change
 permissions, supply prompts, submit messages, approve tools, or observe unrelated
 gateway sessions. The gateway must run as the same local user for this integration;
-remote gateways need a future authenticated event transport. OpenClaw permission
-waits and generated/renamed gateway titles are not yet verified native capabilities.
+remote gateways need a future authenticated event transport. The setup command
+installs/enables this bundled plugin and grants its conversation-hook access;
+it does not restart the gateway. Gateway labels/display names refresh every three
+seconds for observed mapped sessions (maximum 256); missing heartbeats for fifteen
+seconds yield UNKNOWN. Exec-approval events report WAITING; unsupported approval
+types do not invent a wait signal. Native names are read, never generated here.
 
 ## Implementation contract
 
@@ -74,7 +84,10 @@ waits and generated/renamed gateway titles are not yet verified native capabilit
 Run `cargo test harness_metadata`, `cargo test completion::tests`,
 `node --test tests/harness-metadata.test.mjs`, and `cargo test toolbar_`.
 After `cargo build`, `python3 tests/native-harness-smoke.py` exercises installed
-Pi/OpenCode adapter loading in isolated homes without making model requests.
+Claude/Pi/OpenCode adapters in isolated homes without external model requests.
+Pi uses `tests/fixtures/pi-probe-provider.mjs` for real runtime success/error turns.
+`python3 tests/openclaw-harness-smoke.py` tests the production setup command and
+a real isolated gateway without changing the user's gateway or credentials.
 Run the full Rust suite before rebuilding the installed desktop.
 
 Validation on 2026-09-23: 302 Rust tests passed, five were marked ignored, and
@@ -85,14 +98,44 @@ passed. Installed Pi/OpenCode smoke tests both reported their own named idle
 session without model requests. OpenClaw is not installed; its tests use mocked
 gateway callbacks.
 
+Validation on 2026-09-24: Claude 2.1.278, Pi 0.87.1, OpenCode 1.18.31 and
+OpenClaw 2026.9.5 passed the isolated runtime checks. Pi's local fixture provider
+exercised successful settlement, failure/recovery and distinct completion IDs;
+Pi/OpenCode rename and session switching passed. OpenClaw's production install,
+native reset/SessionStart and idle-rename heartbeat passed against a real gateway.
+Seven JS contract tests and 77 Android unit tests passed; Android lint and debug
+APK build passed. Both control-client tests passed separately.
+
+The full Rust run reported 307 passed, four failed and six ignored. All four
+failures also reproduce on a clean checkout of `8a7ff7e`: the resolver test
+expects an installed Antigravity CLI; the GTK outline-resize, slide-position and
+mapped-toolbar-resize tests fail allocation assertions on this environment.
+`cargo test toolbar_` reported three passed and the same mapped-toolbar failure,
+also reproduced with an isolated Broadway display. No installed desktop rebuild
+or app deployment was performed.
+
+A later parallel full run also hit the existing ephemeral-port release test
+(`test_port_taken_follows_the_listener`): 306 passed, five failed, six ignored.
+That test passed on an immediate isolated rerun; no bridge-port implementation
+was changed. The final serial full run reported 308 passed, the four repeatable
+baseline failures and six ignored tests. Those four failures remain unresolved.
+
+The six existing ignored tests were not enabled: `sandbox_renders_a_single_page_fixture`,
+`android_page_visual_preview`, `layer_popup_stays_open`, `native_codex_attachment_probe`,
+`live_logind_lock_acquires_and_releases`, and `clipboard_round_trip`. They need
+explicit sandbox, interactive display, disposable Codex, logind or clipboard setup.
+No additional tests were excluded. Physical-phone notification delivery was not
+tested in this pass.
+
 Before marking any adapter fully validated, exercise real model turns, tool calls,
 permission accept/deny, cancellation, API failures, retry/continuation, rename,
 new/resumed/forked sessions, process crashes and simultaneous same-directory cards.
 The automated tests cover state transitions and isolation; they do not substitute
-for that live matrix. Remaining priorities are OpenClaw live gateway validation,
-its permission/title events, legacy/custom-launch migration, and native adapters
-for additional installed harnesses. Record exact versions and observed failures
-here as those checks are completed.
+for that live matrix. Remaining work includes real-provider permission/cancellation
+matrices, additional launcher adapters, remote OpenClaw gateway transport and
+completion adapters beyond Codex/Pi. The September 23 OpenClaw installation
+blocker above is superseded by the September 24 isolated gateway smoke. Existing
+live/custom wrapper processes are deliberately not injected or restarted.
 
 ## Upstream contracts
 

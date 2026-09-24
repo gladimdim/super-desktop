@@ -15,7 +15,17 @@ used as completion evidence. The bridge follows the exact tmux pane process to
 the nearest Codex process, then its open rollout descriptor. It does not search
 for the newest conversation in the workspace or modify user Codex configuration.
 Ambiguous/multi-pane sessions, subagent rollouts, and unsupported formats fail
-closed. Other harnesses explain that reliable alerts are not yet supported.
+closed. Pi is also supported through the scoped extension described below.
+Other harnesses explain that reliable alerts are not yet supported.
+
+New Pi launches with the updated desktop extension support completion through
+the notification-only `agent_settled` event. A completed outcome and a nonempty
+assistant text message with successful stop reason are both required. Errors,
+aborts, tool-only turns, permission waits and intermediate `agent_end` events do
+not alert. IDs combine launch/native-session identity with a unique turn ID and
+are persisted in the private metadata file. New activity clears the completion.
+Direct custom Pi launchers use the same adapter; older already-running Pi
+sessions must be relaunched. Both updated Android and Linux builds are required.
 
 An explicit `event_msg/task_complete` with a turn ID and nonempty final assistant
 message marks a completed response. Later starts, user messages, aborts and
@@ -70,7 +80,7 @@ the bridge (including localhost). Request: `{"sessions":["sd_term_..."]}`.
 Maximum 32 identifiers, each 1–128 ASCII letters/digits/underscores/hyphens.
 
 Response: `{"terminals":[{"id":"sd_term_...","supported":true,"state":"completed","completionId":"64-character lowercase SHA-256"}]}`.
-States are `working`, `completed`, or `unknown`. Missing/non-Codex/unattributable
+States are `working`, `completed`, or `unknown`. Missing/unsupported/unattributable
 sessions return `supported:false`, `state:unknown`, `completionId:null`.
 The endpoint exposes no process IDs, filesystem paths, prompts, or responses.
 It uses the existing four-job admission cap and bridge revocation enforcement.
@@ -82,6 +92,11 @@ records, stable IDs, and process-owned descriptor attribution/cache refresh usin
 an isolated fixture process. Wire tests cover missing authorization, revoked
 tokens, malformed IDs and oversized lists. Android tests cover completion
 deduplication and notification wording.
+Pi's installed-runtime smoke uses a deterministic local provider to verify final
+settlement, failure, recovery, distinct IDs and session switching without cloud
+credentials. Native reducer tests cover persistence and clearing on new activity.
+Notification taps preserve the saved agent identity; existing watches default to
+Codex for backward compatibility.
 
 Before declaring phone delivery verified, install both updated builds and test:
 bell OFF/ON; old completion suppression; completed prompt; tool wait/approval;
