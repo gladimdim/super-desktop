@@ -712,7 +712,7 @@ impl SuperDesktopWindow {
         }
 
         // + Note Button
-        let btn_note = Button::with_label("📝 + Note");
+        let btn_note = Button::with_label("📝 +");
         btn_note.set_tooltip_text(Some("Create Sticky Note"));
         btn_note.add_css_class("hud-button");
         btn_note.add_css_class("hud-action-primary");

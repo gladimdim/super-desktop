@@ -154,7 +154,7 @@ impl Default for AppState {
         Self {
             notes: vec![NoteData {
                 id: "welcome_note".to_string(),
-                text: "✨ Welcome to SUPER DESKTOP (Rust Edition)!\n\n• Shortcut: SUPER + SHIFT + Q to show / hide (change it in ⚙ Settings).\n• Drag: Grab any header to reposition smoothly!\n• Click 📝 + Note in the top bar to create a new sticky note.\n• Double-click a terminal card to expand it to 80% inside the overlay.\n• Double-click the header (or 🗕) to collapse it back.\n• ⚙ Settings picks the toggle shortcut and which harnesses show up in the top bar.\n• Built in Rust for maximum 240Hz responsiveness.".to_string(),
+                text: "✨ Welcome to SUPER DESKTOP (Rust Edition)!\n\n• Shortcut: SUPER + SHIFT + Q to show / hide (change it in ⚙ Settings).\n• Drag: Grab any header to reposition smoothly!\n• Click 📝 + in the top bar to create a new sticky note.\n• Double-click a terminal card to expand it to 80% inside the overlay.\n• Double-click the header (or 🗕) to collapse it back.\n• ⚙ Settings picks the toggle shortcut and which harnesses show up in the top bar.\n• Built in Rust for maximum 240Hz responsiveness.".to_string(),
                 x: 80,
                 y: 140,
                 width: 300,
