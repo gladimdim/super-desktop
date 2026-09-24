@@ -6,6 +6,27 @@ targets. **Add / Add path** supplies a workspace-relative path if a filename was
 wrapped, ambiguous, or already scrolled away. Referenced does not mean generated
 by this agent. Refresh returns from a preview to the list.
 
+## Linux reference browser
+
+The folder button in each local terminal card opens **Files & links**. Nonempty
+Links, Markdown, Images (including GIF), PDFs, and Text / code sections have
+large bold headers, item counts, and independent expand/collapse controls.
+They start expanded and retain their state across Refresh and preview navigation
+for the lifetime of that card's popup. The popup follows the desktop theme.
+
+Links are deduplicated visible HTTP(S) references from that terminal's capture
+(visible screen plus up to 300 history lines, with at most 512 KiB inspected and
+100 links shown). Markdown/prose wrappers are removed; URLs are not fetched
+until **Open link** invokes the default browser. **Copy URL** copies the target.
+Links remain available when workspace file discovery fails. Wrapped URLs and
+hidden OSC hyperlink targets are not reconstructed, and this is not a complete
+conversation archive. URLs are not registered as file assets or persisted in
+file-reference history. File previews retain the workspace and format limits below.
+
+This button remains local-only: PC-to-PC remote cards do not read the viewer's
+filesystem or local tmux session under a remote card's ID. Android's existing
+categorized browser and bridge file protocol are unchanged.
+
 ## Supported previews
 
 - PNG, JPEG, WebP: image preview with zoom; Android supports pinch/pan.

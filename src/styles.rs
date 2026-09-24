@@ -17,6 +17,15 @@ r#"
     border: 1px solid {btn_border};
     border-radius: 8px;
 }}
+.asset-drawer .asset-group {{
+    padding: 8px;
+    border: 1px solid {btn_border};
+    border-radius: 6px;
+}}
+.asset-drawer .asset-group-title {{
+    font-size: 18px;
+    font-weight: bold;
+}}
 .asset-drawer textview, .asset-drawer textview text {{
     background-color: {note_content_bg};
     color: {foreground};

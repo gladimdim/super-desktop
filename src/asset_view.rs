@@ -2,6 +2,7 @@
 use gtk4::gdk_pixbuf;
 use gtk4::{gdk, gio, glib, prelude::*};
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
@@ -113,12 +114,103 @@ fn text_view(text: &str, markdown: bool) -> gtk4::TextView {
     view
 }
 
+/// Visible HTTP(S) references only, bounded and never fetched during discovery.
+fn links(text: &str) -> Vec<String> {
+    let mut offset = text.len().saturating_sub(512 * 1024);
+    while !text.is_char_boundary(offset) { offset += 1; }
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+    for token in text[offset..].split(|c: char| c.is_whitespace() || c.is_control() || "<>\"'`".contains(c)) {
+        let lower = token.to_ascii_lowercase();
+        let Some(start) = [lower.find("https://"), lower.find("http://")].into_iter().flatten().min() else { continue };
+        let mut candidate = &token[start..];
+        if candidate.len() > 8192 { continue; }
+        loop {
+            let old = candidate;
+            candidate = candidate.trim_end_matches(['.', ',', ';', ':', '!', '?']);
+            for (close, open) in [(')', '('), (']', '['), ('}', '{')] {
+                if candidate.ends_with(close) && candidate.matches(close).count() > candidate.matches(open).count() {
+                    candidate = &candidate[..candidate.len() - 1];
+                }
+            }
+            if old == candidate { break; }
+        }
+        let Ok(url) = reqwest::Url::parse(candidate) else { continue };
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+            || !url.username().is_empty() || url.password().is_some() { continue; }
+        if seen.insert(candidate.to_string()) { result.push(candidate.to_string()); }
+        if result.len() == 100 { break; }
+    }
+    result
+}
+
+type Collapsed = Rc<RefCell<HashSet<String>>>;
+
+fn group(content: &gtk4::Box, title: &str, count: usize, collapsed: &Collapsed) -> gtk4::Box {
+    let panel = gtk4::Expander::new(None);
+    let heading = gtk4::Label::new(Some(&format!("{title} · {count}")));
+    heading.add_css_class("asset-group-title");
+    heading.set_xalign(0.0);
+    panel.set_label_widget(Some(&heading));
+    panel.set_expanded(!collapsed.borrow().contains(title));
+    panel.add_css_class("asset-group");
+    let rows = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    rows.set_margin_top(8);
+    panel.set_child(Some(&rows));
+    let collapsed = Rc::clone(collapsed);
+    let title = title.to_string();
+    panel.connect_expanded_notify(move |panel| {
+        if panel.is_expanded() { collapsed.borrow_mut().remove(&title); }
+        else { collapsed.borrow_mut().insert(title.clone()); }
+    });
+    content.append(&panel);
+    rows
+}
+
+fn show_links(content: &gtk4::Box, urls: &[String], collapsed: &Collapsed, status: &gtk4::Label) {
+    if urls.is_empty() { return; }
+    let rows = group(content, "Links", urls.len(), collapsed);
+    for url in urls {
+        let row = gtk4::Box::new(gtk4::Orientation::Vertical, 4);
+        let label = gtk4::Label::new(Some(url));
+        label.set_selectable(true);
+        label.set_wrap(true);
+        label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+        label.set_xalign(0.0);
+        row.append(&label);
+        let actions = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+        let open = gtk4::Button::with_label("Open link");
+        let target = url.clone();
+        let feedback = status.downgrade();
+        open.connect_clicked(move |_| {
+            let target = target.clone();
+            let feedback = feedback.clone();
+            glib::MainContext::default().spawn_local(async move {
+                if let Err(error) = gio::AppInfo::launch_default_for_uri_future(&target, None::<&gio::AppLaunchContext>).await {
+                    if let Some(status) = feedback.upgrade() { status.set_text(&format!("Could not open link: {error}")); }
+                }
+            });
+        });
+        let copy = gtk4::Button::with_label("Copy URL");
+        let target = url.clone();
+        let feedback = status.downgrade();
+        copy.connect_clicked(move |button| {
+            button.display().clipboard().set_text(&target);
+            if let Some(status) = feedback.upgrade() { status.set_text("URL copied"); }
+        });
+        actions.append(&open);
+        actions.append(&copy);
+        row.append(&actions);
+        rows.append(&row);
+    }
+}
+
 pub fn button(session: String) -> gtk4::Button {
     let button = gtk4::Button::from_icon_name("folder-symbolic");
     button.update_property(&[gtk4::accessible::Property::Label("Files")]);
     button.add_css_class("term-btn");
     button.set_tooltip_text(Some(
-        "Referenced files: images, GIF, PDF, Markdown and text",
+        "Files and links referenced by this terminal",
     ));
     let slot: Rc<RefCell<Option<gtk4::Popover>>> = Rc::new(RefCell::new(None));
     button.connect_unmap({
@@ -163,7 +255,7 @@ fn build_drawer(session: &str) -> gtk4::Popover {
     body.set_margin_start(12);
     body.set_margin_end(12);
     let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
-    let title = gtk4::Label::new(Some("Referenced files"));
+    let title = gtk4::Label::new(Some("Files & links"));
     title.set_hexpand(true);
     title.set_xalign(0.0);
     let close = gtk4::Button::with_label("Close");
@@ -350,6 +442,7 @@ fn build_drawer(session: &str) -> gtk4::Popover {
     }
     pages.set_visible(false);
     body.append(&pages);
+    let collapsed: Collapsed = Rc::new(RefCell::new(HashSet::new()));
     let reload: Rc<dyn Fn(Option<String>)> = {
         let session = session.to_string();
         let generation = Rc::clone(&generation);
@@ -360,7 +453,7 @@ fn build_drawer(session: &str) -> gtk4::Popover {
             let ticket = generation.get();
             pages.set_visible(false);
             selected.borrow_mut().take();
-            status.set_text("Finding referenced files…");
+            status.set_text("Finding referenced files and links…");
             let session = session.clone();
             let generation = Rc::clone(&generation);
             let content = content.clone();
@@ -369,22 +462,47 @@ fn build_drawer(session: &str) -> gtk4::Popover {
             let selected = Rc::clone(&selected);
             let page = Rc::clone(&page);
             let pages = pages.clone();
+            let collapsed = Rc::clone(&collapsed);
             glib::MainContext::default().spawn_local(async move {
-                let result = gio::spawn_blocking(move || crate::assets::list(&session, explicit.as_deref())).await;
+                let result = gio::spawn_blocking(move || {
+                    let urls = links(&crate::tmux::capture_pane_history(&session).unwrap_or_default());
+                    (urls, crate::assets::list(&session, explicit.as_deref()))
+                }).await;
                 if generation.get() != ticket { return; }
                 while let Some(child) = content.first_child() { content.remove(&child); }
                 match result {
-                    Ok(Ok(items)) => {
-                        status.set_text(if items.is_empty() { "No files found in the current terminal output. Add a relative path above." } else { "Choose a file. Refresh returns to this list." });
-                        for item in items {
-                            let button = gtk4::Button::with_label(&format!("{}  ·  {}  ·  {} KB", item.relative_path, item.kind, item.size.div_ceil(1024)));
-                            let render = Rc::clone(&render); let selected = Rc::clone(&selected); let page = Rc::clone(&page); let pages = pages.clone();
-                            button.connect_clicked(move |_| { page.set(1); pages.set_visible(item.kind == "pdf"); *selected.borrow_mut() = Some(item.clone()); render(item.clone(), 1); });
-                            content.append(&button);
+                    Ok((urls, files)) => {
+                        show_links(&content, &urls, &collapsed, &status);
+                        match files {
+                            Ok(items) => {
+                                status.set_text(&format!("{} files · {} links. Choose a file to preview; Refresh returns to this list.", items.len(), urls.len()));
+                                for (kind, title) in [("markdown", "Markdown"), ("image", "Images"), ("pdf", "PDFs"), ("text", "Text / code")] {
+                                    let files: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
+                                    if files.is_empty() { continue; }
+                                    let rows = group(&content, title, files.len(), &collapsed);
+                                    for item in files {
+                                        let item = item.clone();
+                                        let button = gtk4::Button::new();
+                                        let label = gtk4::Label::new(Some(&format!("{}  ·  {} KB", item.relative_path, item.size.div_ceil(1024))));
+                                        label.set_wrap(true);
+                                        label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+                                        label.set_xalign(0.0);
+                                        button.set_child(Some(&label));
+                                        let render = Rc::clone(&render); let selected = Rc::clone(&selected); let page = Rc::clone(&page); let pages = pages.clone();
+                                        button.connect_clicked(move |_| { page.set(1); pages.set_visible(item.kind == "pdf"); *selected.borrow_mut() = Some(item.clone()); render(item.clone(), 1); });
+                                        rows.append(&button);
+                                    }
+                                }
+                                if items.is_empty() {
+                                    let empty = gtk4::Label::new(Some("No supported files found. Add a workspace-relative path above."));
+                                    empty.set_wrap(true);
+                                    content.append(&empty);
+                                }
+                            }
+                            Err(error) => status.set_text(&format!("{} links · Files: {}", urls.len(), error.replace('_', " "))),
                         }
                     }
-                    Ok(Err(error)) => status.set_text(&error.replace('_', " ")),
-                    Err(_) => status.set_text("File lookup failed"),
+                    Err(_) => status.set_text("Reference lookup failed"),
                 }
             });
         })
@@ -404,6 +522,18 @@ fn build_drawer(session: &str) -> gtk4::Popover {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn links_preserve_targets_and_strip_markdown_wrappers() {
+        assert_eq!(links("[Docs](https://example.org/a?q=1&b=2#part). <http://localhost:3000/> https://example.org/a?q=1&b=2#part"),
+            vec!["https://example.org/a?q=1&b=2#part", "http://localhost:3000/"]);
+        assert_eq!(links("(https://example.org/Thing_(test)) https://example.org/資料"),
+            vec!["https://example.org/Thing_(test)", "https://example.org/資料"]);
+        assert!(links("file:///tmp/a javascript:alert(1) https://user:password@example.org").is_empty());
+        assert!(links(&format!("https://example.org/{}", "a".repeat(9000))).is_empty());
+        assert_eq!(links(&(0..200).map(|n| format!("https://example.org/{n} ")).collect::<String>()).len(), 100);
+        assert!(links(&format!("https://example.org/ {}", "界".repeat(200_000))).is_empty());
+    }
+
     #[test]
     fn malformed_gifs_are_bounded() {
         assert!(crate::assets::gif_frames(b"GIF89a").is_err());
@@ -443,6 +573,27 @@ mod tests {
         let pop = build_drawer("test_missing_asset_terminal");
         assert!(pop.child().is_some());
         assert!(!pop.is_mapped());
+        let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        let collapsed: Collapsed = Rc::new(RefCell::new(HashSet::new()));
+        for title in ["Links", "Markdown", "Images", "PDFs", "Text / code"] {
+            let rows = group(&content, title, 2, &collapsed);
+            rows.append(&gtk4::Label::new(Some("Reference")));
+            let panel = content.last_child().unwrap().downcast::<gtk4::Expander>().unwrap();
+            assert!(panel.is_expanded());
+            panel.set_expanded(false);
+            assert!(collapsed.borrow().contains(title));
+            content.remove(&panel);
+            group(&content, title, 3, &collapsed);
+            let panel = content.last_child().unwrap().downcast::<gtk4::Expander>().unwrap();
+            assert!(!panel.is_expanded());
+            panel.set_expanded(true);
+            assert!(!collapsed.borrow().contains(title));
+        }
+        let status = gtk4::Label::new(None);
+        let links_content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+        show_links(&links_content, &["https://example.org/".into()], &collapsed, &status);
+        assert!(links_content.first_child().unwrap().is::<gtk4::Expander>());
+
         let text = text_view(
             "# Title\n<script>ignored</script>\n![image](https://example/image.png)",
             true,
