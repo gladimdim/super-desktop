@@ -55,6 +55,24 @@ fn card_hint_or(message: &Rc<RefCell<Option<String>>>, fallback: &str) -> String
         .unwrap_or_else(|| fallback.to_string())
 }
 
+/// Resize bounds for a card in a `width × height` workspace drawn at `scale`
+/// times this machine's pixels: the local rules (10 px margins, 70 px under
+/// the dock, at most 70% × 75% of the workspace), scaled with the workspace.
+pub fn workspace_limits((width, height): (i32, i32), scale: f64) -> crate::card_resize::Limits {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let (min_width, min_height) = min_card_size(scale);
+    crate::card_resize::Limits {
+        min_width,
+        min_height,
+        max_width: ((width as f64) * 0.70).round() as i32,
+        max_height: ((height as f64) * 0.75).round() as i32,
+        left: 10.0 * scale,
+        top: 70.0 * scale,
+        right: width as f64 - 10.0 * scale,
+        bottom: height as f64 - 10.0 * scale,
+    }
+}
+
 /// Clamp a card size in a workspace whose smallest card is `scale` times this
 /// machine's: one rule for the local workspace (scale 1) and a fitted one.
 pub fn clamp_card_size_at(w: i32, h: i32, screen_w: i32, screen_h: i32, scale: f64) -> (i32, i32) {
@@ -307,6 +325,11 @@ pub struct MiniTerminalCard {
     /// The body size and fit scale a remote view sized this card to, so its
     /// font follows the host's grid.
     fit: Rc<Cell<(f64, f64, f64)>>,
+    /// The workspace this card is bounded by, in its own pixels. A local card
+    /// is bounded by this machine's screen; a remote one by the host's
+    /// workspace as the view currently draws it, which changes with the
+    /// Fit/100% mode and the zoom.
+    workspace: Rc<Cell<(i32, i32)>>,
     /// The last thing the source said about this card's session. A chrome
     /// change of our own must not lose it.
     source_message: Rc<RefCell<Option<String>>>,
@@ -775,6 +798,7 @@ impl MiniTerminalCard {
             source,
             remote,
             fit,
+            workspace: Rc::new(Cell::new((screen_w, screen_h))),
             source_message: Rc::clone(&source_message),
             iconify_action: Rc::new(RefCell::new(None)),
             restore_action: Rc::new(RefCell::new(None)),
@@ -898,6 +922,7 @@ impl MiniTerminalCard {
             let hint_label = card.hint_label.clone();
             let source_message = Rc::clone(&source_message);
             let fit = Rc::clone(&card.fit);
+            let workspace = Rc::clone(&card.workspace);
             let on_save = Rc::clone(&on_drag_end);
             let on_toggle_restore = Rc::clone(&on_toggle);
             let hover_lock_restore = card.hover_lock.clone();
@@ -924,6 +949,7 @@ impl MiniTerminalCard {
                     } else {
                         CARD_HEIGHT
                     };
+                    let (screen_w, screen_h) = workspace.get();
                     clamp_card_size_at(rw, rh, screen_w, screen_h, fit.get().2)
                 };
                 {
@@ -1059,15 +1085,13 @@ impl MiniTerminalCard {
         // Eight border/corner resize targets make every edge behave like a
         // conventional desktop window. Compact and expanded cards do not
         // resize: restore/collapse them first.
-        let resize_limits = crate::card_resize::Limits {
-            min_width: MIN_CARD_WIDTH,
-            min_height: MIN_CARD_HEIGHT,
-            max_width: ((screen_w as f64) * 0.70).round() as i32,
-            max_height: ((screen_h as f64) * 0.75).round() as i32,
-            left: 10.0,
-            top: 70.0,
-            right: (screen_w - 10) as f64,
-            bottom: (screen_h - 10) as f64,
+        // Read when a resize begins, so a remote view that changed its scale
+        // (Fit/100%, zoom) bounds the edge in its current pixels. A local card
+        // is at scale 1 on this machine's screen, exactly as before.
+        let resize_limits: Rc<dyn Fn() -> crate::card_resize::Limits> = {
+            let workspace = Rc::clone(&card.workspace);
+            let fit = Rc::clone(&card.fit);
+            Rc::new(move || workspace_limits(workspace.get(), fit.get().2))
         };
         let data_start = Rc::clone(&card.data);
         let expanded_start = Rc::clone(&card.expanded);
@@ -1119,7 +1143,7 @@ impl MiniTerminalCard {
             on_drag_end_resize(root_commit.clone().upcast(), &data_commit.borrow());
         });
         *card.geometry_commit.borrow_mut() = Some(Rc::clone(&on_commit));
-        crate::card_resize::attach_resize_borders(
+        crate::card_resize::attach_resize_borders_with(
             &card.container,
             resize_limits,
             get_start,
@@ -1388,6 +1412,24 @@ impl MiniTerminalCard {
 
     pub fn remote_session(&self) -> Option<&Rc<RemoteSession>> {
         self.remote.as_ref()
+    }
+
+    /// The workspace this card is bounded by changed size: a remote view
+    /// switched between Fit and 100%, zoomed, or was resized.
+    pub fn set_workspace_size(&self, width: i32, height: i32) {
+        self.workspace.set((width.max(1), height.max(1)));
+    }
+
+    /// The scale this card's emulator font was last fitted at.
+    #[cfg(test)]
+    pub fn fit_scale(&self) -> f64 {
+        self.fit.get().2
+    }
+
+    /// The bounds a resize of this card starts with right now.
+    #[cfg(test)]
+    pub fn resize_limits(&self) -> crate::card_resize::Limits {
+        workspace_limits(self.workspace.get(), self.fit.get().2)
     }
 
     /// Remember the size and fit scale the owning view drew this card at, and

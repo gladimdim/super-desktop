@@ -301,6 +301,17 @@ harness button launches it on that PC, without forcing its overlay to show. The
 folder field beside it is that PC's too: open its list to pick one of the folders
 that PC offers as the working directory for the next harness there (it becomes
 that PC's folder, exactly as if you had typed it on that machine).
+
+The **Fit / 100%** toggle left of Hide chooses how that PC's workspace is drawn.
+**Fit** (the default) shows the whole workspace, scaled down to fit and never
+enlarged. **100%** shows one host pixel per logical pixel, so consoles are as
+large and readable as on that PC: drag empty canvas, use the scrollbars or
+scroll with the touchpad or wheel to pan, and Ctrl+scroll or pinch to zoom
+(25–300%, shown on the button; click 100% again to return to exactly 100%).
+Terminals are redrawn at the new font size rather than scaled, so they stay
+sharp, and zooming never changes the host's own terminal grid. Every drag,
+resize and button still acts on that PC at its own coordinates in either mode.
+The choice is remembered per PC until SUPER DESKTOP restarts.
 `workspace-layout-v1` and `terminal-pty-v1` in
 [the protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md) record what each PC
 advertises.

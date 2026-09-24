@@ -123,7 +123,22 @@ pub fn attach_resize_borders(
     on_preview: Rc<dyn Fn(Rect)>,
     on_commit: Rc<dyn Fn(Rect)>,
 ) {
+    attach_resize_borders_with(root, Rc::new(move || limits), get_start, on_begin, on_preview, on_commit);
+}
+
+/// The same targets, with bounds read when each resize begins: a workspace
+/// whose size or scale changes while the card lives (a remote view switching
+/// between Fit and 100%, or zooming) keeps resizing inside its current bounds.
+pub fn attach_resize_borders_with(
+    root: &Overlay,
+    limits_now: Rc<dyn Fn() -> Limits>,
+    get_start: Rc<dyn Fn() -> Option<Rect>>,
+    on_begin: Rc<dyn Fn()>,
+    on_preview: Rc<dyn Fn(Rect)>,
+    on_commit: Rc<dyn Fn(Rect)>,
+) {
     for edge in Edge::ALL {
+        let limits_cell = Rc::new(Cell::new(limits_now()));
         let zone = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         zone.add_css_class("card-resize-zone");
         zone.set_cursor_from_name(Some(edge.cursor()));
@@ -140,7 +155,10 @@ pub fn attach_resize_borders(
         let start_begin = Rc::clone(&start);
         let get_start_begin = Rc::clone(&get_start);
         let on_begin_begin = Rc::clone(&on_begin);
+        let limits_begin = Rc::clone(&limits_cell);
+        let limits_source = Rc::clone(&limits_now);
         drag.connect_drag_begin(move |gesture, _, _| {
+            limits_begin.set(limits_source());
             let rect = get_start_begin();
             start_begin.set(rect);
             if rect.is_some() {
@@ -156,11 +174,12 @@ pub fn attach_resize_borders(
         let tick_update = Rc::clone(&tick_active);
         let preview_update = Rc::clone(&on_preview);
         let root_weak = root.downgrade();
+        let limits_update = Rc::clone(&limits_cell);
         drag.connect_drag_update(move |_, dx, dy| {
             let Some(initial) = start_update.get() else {
                 return;
             };
-            pending_update.set(Some(resized_rect(edge, initial, dx, dy, limits)));
+            pending_update.set(Some(resized_rect(edge, initial, dx, dy, limits_update.get())));
             if tick_update.replace(true) {
                 return;
             }
@@ -185,12 +204,13 @@ pub fn attach_resize_borders(
         let start_end = Rc::clone(&start);
         let pending_end = Rc::clone(&pending);
         let commit_end = Rc::clone(&on_commit);
+        let limits_end = Rc::clone(&limits_cell);
         drag.connect_drag_end(move |_, dx, dy| {
             let Some(initial) = start_end.take() else {
                 return;
             };
             pending_end.set(None);
-            commit_end(resized_rect(edge, initial, dx, dy, limits));
+            commit_end(resized_rect(edge, initial, dx, dy, limits_end.get()));
         });
         zone.add_controller(drag);
     }

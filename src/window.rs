@@ -110,7 +110,7 @@ pub fn top_bar_content(
 /// Cards may extend past the output while being dragged, restored from a
 /// larger display, or animated off screen. Their extents must never become
 /// the layer-shell window's minimum size.
-fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
+pub(crate) fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
     let root = Overlay::new();
     root.set_child(Some(&gtk4::Box::new(Orientation::Vertical, 0)));
     workspace.set_halign(Align::Fill);

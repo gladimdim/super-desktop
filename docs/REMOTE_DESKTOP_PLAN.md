@@ -3,8 +3,8 @@
 Status: pairing, a live remote workspace, its terminal transport, viewer typing
 and the host's own harness bar, folder picker and card chrome are delivered, and
 both workspaces now run the *same* UI code with only the source swapped, and
-every remote command reports its result in the chrome; the 100% + pan/zoom mode
-and live outgoing subscriptions remain in progress.
+every remote command reports its result in the chrome, and the view can switch
+between Fit and 100% + pan/zoom; live outgoing subscriptions remain in progress.
 Updated 2026-09-24 against `master`.
 
 Implementation has started: see [increment status and protocol notes](REMOTE_DESKTOP_PROTOCOL.md).
@@ -20,8 +20,8 @@ that host session after the attach handshake, and
 with epoch/revision checks and per-device deduplication. While a remote PC is
 selected its top bar offers that PC's own harness buttons, and a click launches
 that harness there. Default folder selection, the viewer's own close/resize and
-iconify controls, the 100% + pan/zoom mode, live outgoing workspace
-subscriptions and the two-PC regression matrix remain pending.
+iconify controls and the 100% + pan/zoom mode are delivered; live outgoing
+workspace subscriptions and the two-PC regression matrix remain pending.
 
 ## Current delivery status
 
@@ -88,6 +88,27 @@ PCs:
   showing its folder”. Answers that arrive after the user switched PCs are
   dropped. The local workspace builds the same (hidden) notice and never shows
   it.
+- **Fit / 100% + pan/zoom.** A two-part toggle left of Hide in the remote top
+  bar switches the view. **Fit** is the default and the rule of section 7
+  (`s = min(1, Vw/Hw, Vh/Hh)`, centered, never enlarged). **100%** maps one host
+  logical pixel to one viewer logical pixel times a zoom (25–300%, shown on the
+  button; clicking it again resets to exactly 100%). The workspace pans with
+  the scrollbars, touchpad/wheel scroll, or a drag that starts on empty canvas
+  (a drag on a card stays that card's gesture); Ctrl+scroll and pinch zoom
+  around the pointer/fingers, and Ctrl+scroll in Fit enters 100% mode at the
+  current scale. One pure transform (`remote_workspace::ViewTransform`) maps
+  host ↔ canvas ↔ viewport pixels with GTK's own rounding; cards live in canvas
+  pixels (`host × scale`), so pan never reaches a card gesture and every
+  command (drag, edge resize, iconify, expand, close) is converted back with
+  the current scale and rounded only at commit, carrying the same card
+  revision and conflict feedback as before. Each card's resize bounds and
+  minimum follow the current scale. Terminal fonts are refitted to the host's
+  grid at each scale (VTE redraws text, nothing is bitmap-scaled), and no mode
+  or zoom change sends anything to the host. The viewport requests no size, so
+  neither a large host at 100% nor an off-screen card enlarges the overlay
+  window, and focus never auto-scrolls it. The mode is kept per PC for the
+  session only (in memory): nothing about the view is persisted, as this
+  section's “never persist fitted coordinates” rule asks.
 - Clicking a harness button sends a typed `createTerminal` command and the host
   builds the card exactly like a local launch — its own inventory, sandbox flags
   and folder — without being forced to show its overlay. The bar is offered only
@@ -119,8 +140,9 @@ terminal pixels, sends keystrokes, paste and Ctrl+C to the focused session, and
 its cards' own buttons, drags and edges move, resize, iconify, expand and close
 the host's cards, and the folder beside its top bar lists the folders *that PC*
 offers, so a new harness there can start in any of them. Each of those actions
-reports its result on the card or under the bar. What is still missing is
-the 100% + pan/zoom mode. A host that says “Update and rebuild SUPER DESKTOP on the host” is
+reports its result on the card or under the bar, and the **Fit / 100%** toggle
+shows the whole workspace or that PC's own pixels with pan and zoom. What is
+still missing is live workspace events in place of the poll. A host that says “Update and rebuild SUPER DESKTOP on the host” is
 serving an older bridge without `terminal-pty-v1`, and its workspace is drawn as
 chrome without live consoles. Hosts that hide their overlay release their
 viewers' streams, and reopening the overlay reconnects them.
@@ -181,8 +203,11 @@ automatically.
 4. **Delivered:** conflict feedback in the card chrome (and under the remote top
    bar for launches and folder picks), with the host-geometry glide and the
    unknown-outcome notice described above.
-5. Next: the 100% + pan/scroll mode with fit/100% coordinate transforms, then
-   live WSS workspace events in place of the two-second poll, and two-PC regression coverage for switching, concurrent
+5. **Delivered:** the 100% + pan/scroll mode with zoom and the fit/100%
+   coordinate transforms (`remote_workspace::ViewTransform`), with the toggle
+   in the remote top bar.
+6. Next: live WSS workspace events in place of the two-second poll, and two-PC
+   regression coverage for switching, concurrent
    edits, bridge/daemon restart and revocation. Viewer input (delivered) stays
    behind the current-selection handshake and the prompt-transaction guard, and
    keys are never replayed after a disconnect.
@@ -481,8 +506,9 @@ host. Account for dock space once, not separately in each widget.
 
 GTK/VTE font/layout scaling may prevent exact pixel equivalence. Provide a
 **100% + pan/scroll** mode when fitted terminals become unreadable or cannot
-preserve the host grid. Test the transform against actual GTK allocation and
-input coordinates. Never persist fitted coordinates, silently auto-arrange, or
+preserve the host grid (delivered, with zoom: see “Current delivery status”).
+Test the transform against actual GTK allocation and input coordinates (the
+`remote_terminal` pan/zoom regression does, through a mapped window). Never persist fitted coordinates, silently auto-arrange, or
 resize the host because the viewer monitor changes. Use the viewer's theme for
 the first release; matching font metrics and colors exactly is not guaranteed.
 Multi-monitor topology mirroring is deferred; do not add meaningless monitor IDs

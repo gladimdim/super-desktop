@@ -535,7 +535,12 @@ uniformly scaled to fit the viewer and **never enlarged**
 (`s = min(1, Vw/Hw, Vh/Hh)`, as the plan specifies). The scale is applied to
 positions, sizes and the terminal font, so the host's cell grid fits the card
 just as it does on the host. Physical monitor scale is not applied again to the
-host's logical coordinates.
+host's logical coordinates. The **Fit / 100%** toggle in the remote top bar
+switches to one host logical pixel per viewer logical pixel (times a 25–300%
+zoom from Ctrl+scroll or pinch), with the workspace panned by scrollbars,
+scrolling or a drag on empty canvas. Commands are converted back with the
+current scale, so the wire format is unchanged, and no view change is sent to
+the host. The mode is remembered per PC for the session only.
 
 Remote cards never enter local session creation: their source is a host stream,
 not a session on this machine, which is the only thing about them that differs

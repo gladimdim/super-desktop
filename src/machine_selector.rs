@@ -38,6 +38,9 @@ pub struct MachineView {
     launching: Cell<bool>,
     status: gtk4::Label,
     details: gtk4::Label,
+    /// Fit / 100% for the remote workspace, left of Hide.
+    fit_button: gtk4::ToggleButton,
+    actual_button: gtk4::ToggleButton,
     busy: Cell<bool>,
     on_switch: Rc<dyn Fn()>,
     on_add_pc: RefCell<Option<Rc<dyn Fn()>>>,
@@ -55,6 +58,9 @@ impl MachineView {
         // connection state and Hide on the right.
         let toolbar = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
         toolbar.add_css_class("hud-bar");
+        // The bar's inner viewport expands; the bar itself must not take a
+        // share of the height the workspace canvas needs for pan and zoom.
+        toolbar.set_vexpand(false);
         let chrome = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
         chrome.set_hexpand(true);
         chrome.set_valign(gtk4::Align::Fill);
@@ -87,7 +93,30 @@ impl MachineView {
         right.append(&details);
         let status = gtk4::Label::new(Some("Connecting…"));
         status.set_xalign(0.0);
+        // Optional text: it shrinks before the view toggle and Hide do.
+        status.set_ellipsize(gtk4::pango::EllipsizeMode::End);
         right.append(&status);
+        // Fit the host's whole workspace, or show it at 100% (one host pixel
+        // per logical pixel) and pan/zoom over it. Outside every scroller, with
+        // Hide, so it stays visible and clickable at any width.
+        let view_toggle = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+        view_toggle.add_css_class("linked");
+        view_toggle.add_css_class("remote-view-toggle");
+        view_toggle.set_valign(gtk4::Align::Center);
+        let fit_button = gtk4::ToggleButton::with_label("Fit");
+        fit_button.add_css_class("hud-button");
+        fit_button.set_tooltip_text(Some("Fit that PC's whole workspace in this screen"));
+        fit_button.set_active(true);
+        let actual_button = gtk4::ToggleButton::with_label("100%");
+        actual_button.add_css_class("hud-button");
+        actual_button.set_group(Some(&fit_button));
+        actual_button.set_tooltip_text(Some(
+            "Show that PC at 100% · drag empty space or scroll to pan · \
+             Ctrl+scroll or pinch to zoom · click again for 100%",
+        ));
+        view_toggle.append(&fit_button);
+        view_toggle.append(&actual_button);
+        right.append(&view_toggle);
         let hide = gtk4::Button::with_label("✕ Hide");
         hide.add_css_class("hud-button");
         hide.add_css_class("hud-button-danger");
@@ -131,6 +160,8 @@ impl MachineView {
             launching: Cell::new(false),
             status,
             details,
+            fit_button,
+            actual_button,
             busy: Cell::new(false),
             on_switch,
             on_add_pc: RefCell::new(None),
@@ -151,6 +182,30 @@ impl MachineView {
                 }
             }
         }));
+        // The toggle follows the canvas: a PC's remembered mode, Ctrl+scroll
+        // and pinch all change it without a click.
+        view.canvas.set_on_mode_changed(Rc::new({
+            let fit = view.fit_button.clone();
+            let actual = view.actual_button.clone();
+            move |mode| paint_view_mode(&fit, &actual, mode)
+        }));
+        view.fit_button.connect_clicked({
+            let weak = Rc::downgrade(&view);
+            move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.canvas.set_mode(remote_workspace::ViewMode::Fit, None);
+                }
+            }
+        });
+        view.actual_button.connect_clicked({
+            let weak = Rc::downgrade(&view);
+            move |_| {
+                if let Some(view) = weak.upgrade() {
+                    view.canvas
+                        .set_mode(remote_workspace::ViewMode::Actual { zoom: 1.0 }, None);
+                }
+            }
+        });
         // A command whose effect the answer cannot describe — a close, an
         // expand — asks for a fresh snapshot instead of waiting out the poll.
         view.canvas.set_on_changed(Rc::new({
@@ -625,6 +680,33 @@ impl MachineView {
     }
 }
 
+/// Show the view mode on the toggle: which half is on, and the zoom.
+fn paint_view_mode(
+    fit: &gtk4::ToggleButton,
+    actual: &gtk4::ToggleButton,
+    mode: remote_workspace::ViewMode,
+) {
+    let label = view_mode_label(mode);
+    let is_fit = matches!(mode, remote_workspace::ViewMode::Fit);
+    if fit.is_active() != is_fit {
+        fit.set_active(is_fit);
+    }
+    if actual.is_active() == is_fit {
+        actual.set_active(!is_fit);
+    }
+    if actual.label().as_deref() != Some(label.as_str()) {
+        actual.set_label(&label);
+    }
+}
+
+/// The 100% half of the toggle names the current zoom.
+fn view_mode_label(mode: remote_workspace::ViewMode) -> String {
+    match mode {
+        remote_workspace::ViewMode::Fit => "100%".to_string(),
+        remote_workspace::ViewMode::Actual { zoom } => format!("{:.0}%", zoom * 100.0),
+    }
+}
+
 /// One place for the viewer-visible wording of a peer failure.
 fn remote_status(error: &str) -> &'static str {
     match error {
@@ -673,6 +755,10 @@ mod tests {
         let card = gtk4::Label::new(Some("saved on a larger output"));
         local.put(&card, 6000.0, 0.0);
         let view = MachineView::new(&local, Rc::new(|| {}), Rc::new(|| {}));
+        // Select a PC first (no network in this layout test), then fill the
+        // bar with the longest contents it can carry.
+        view.busy.set(true);
+        view.select(Some(("a".repeat(32), "Host laptop".into())));
         view.remote_button
             .set_label(&"A very long paired computer name ".repeat(12));
         view.folder_bar
@@ -680,91 +766,186 @@ mod tests {
         view.status.set_text("Connected · 123 consoles");
         view.details
             .set_text(&"Claude, Codex, OpenCode, Custom launcher, ".repeat(10));
-        view.bar.apply(&crate::harness_bar::HarnessState {
-            keys: crate::tmux::HARNESS_KEYS
-                .iter()
-                .map(|key| key.to_string())
-                .collect(),
-            custom: Vec::new(),
-            ready: true,
-        });
-        fn find_hide(widget: &gtk4::Widget) -> Option<gtk4::Button> {
-            if widget.has_css_class("hud-button-danger") {
-                return widget.clone().downcast().ok();
+        // A large host with one card parked far past its own edge, drawn
+        // live: neither the 100% workspace nor the off-screen card may
+        // enlarge the remote workspace (and so the overlay window).
+        let mut snapshot = remote_workspace::fixture();
+        snapshot.local.canvas.width = 3840;
+        snapshot.local.canvas.height = 2160;
+        snapshot.local.cards[0].session_alive = Some(false);
+        snapshot.local.cards[0].layout.x = 9000;
+        snapshot.local.cards[0].layout.y = 5000;
+        view.canvas
+            .apply(&peer_client::test_peer('a'), &snapshot, true);
+        fn find(widget: &gtk4::Widget, test: &dyn Fn(&gtk4::Widget) -> bool) -> Option<gtk4::Widget> {
+            if test(widget) {
+                return Some(widget.clone());
             }
             let mut child = widget.first_child();
             while let Some(widget) = child {
-                if let Some(button) = find_hide(&widget) {
-                    return Some(button);
+                if let Some(found) = find(&widget, test) {
+                    return Some(found);
                 }
                 child = widget.next_sibling();
             }
             None
         }
-        let hide = find_hide(view.remote_toolbar.upcast_ref()).unwrap();
-        for size in [
-            crate::state::TopBarSize::Small,
-            crate::state::TopBarSize::Medium,
-            crate::state::TopBarSize::Large,
-        ] {
-            view.paint_top_bar_size(size);
-            for width in [1280, 320, 3440, 640, 480, 1024] {
-                view.stack.set_visible_child_name("local");
-                assert!(view.stack.measure(gtk4::Orientation::Horizontal, -1).0 > 6000);
-                view.stack.set_visible_child_name("remote");
-                assert!(
-                    view.stack.measure(gtk4::Orientation::Horizontal, -1).0 <= width,
-                    "remote workspace minimum must fit {width} logical pixels"
-                );
-                view.stack.allocate(width, 600, -1, None);
-                let bounds = hide.compute_bounds(&view.stack).unwrap();
-                assert!(hide.is_visible() && hide.is_sensitive());
-                assert!(bounds.width() > 0.0 && bounds.x() >= 0.0);
-                assert!(
-                    bounds.x() + bounds.width() <= width as f32,
-                    "remote Hide must fit {width}: {bounds:?}"
-                );
-                let inset = match size {
-                    crate::state::TopBarSize::Small => 10,
-                    crate::state::TopBarSize::Medium => 12,
-                    crate::state::TopBarSize::Large => 16,
-                };
-                assert!((bounds.x() + bounds.width() - (width - inset) as f32).abs() < 1.0);
+        let hide: gtk4::Button = find(view.remote_toolbar.upcast_ref(), &|w| {
+            w.has_css_class("hud-button-danger")
+        })
+        .unwrap()
+        .downcast()
+        .unwrap();
+        // Every right-side action: the view toggle and Hide.
+        let actions: Vec<gtk4::Widget> = vec![
+            view.fit_button.clone().upcast(),
+            view.actual_button.clone().upcast(),
+            hide.clone().upcast(),
+        ];
+        // The toggle is outside every scroller, like Hide.
+        for action in &actions {
+            assert!(action.ancestor(gtk4::ScrolledWindow::static_type()).is_none());
+        }
+        let all_keys: Vec<String> = crate::tmux::HARNESS_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .collect();
+        let modes = [
+            remote_workspace::ViewMode::Fit,
+            remote_workspace::ViewMode::Actual { zoom: 1.0 },
+            remote_workspace::ViewMode::Actual { zoom: 3.0 },
+        ];
+        for keys in [Vec::new(), all_keys.clone()] {
+            view.bar.apply(&crate::harness_bar::HarnessState {
+                keys,
+                custom: Vec::new(),
+                ready: true,
+            });
+            for mode in modes {
+                view.canvas.set_mode(mode, None);
+                for size in [
+                    crate::state::TopBarSize::Small,
+                    crate::state::TopBarSize::Medium,
+                    crate::state::TopBarSize::Large,
+                ] {
+                    view.paint_top_bar_size(size);
+                    // Shrink, grow and shrink again, narrow and wide.
+                    for width in [1280, 320, 3440, 640, 480, 1024, 360, 2560] {
+                        view.stack.set_visible_child_name("local");
+                        assert!(view.stack.measure(gtk4::Orientation::Horizontal, -1).0 > 6000);
+                        view.stack.set_visible_child_name("remote");
+                        assert!(
+                            view.stack.measure(gtk4::Orientation::Horizontal, -1).0 <= width,
+                            "remote workspace minimum must fit {width} logical pixels in {mode:?}"
+                        );
+                        assert!(
+                            view.stack.measure(gtk4::Orientation::Vertical, width).0 <= 600,
+                            "the remote canvas must not demand height in {mode:?}"
+                        );
+                        view.stack.allocate(width, 600, -1, None);
+                        assert!(
+                            view.remote_toolbar.height() <= 80,
+                            "the bar must stay a bar: {}",
+                            view.remote_toolbar.height()
+                        );
+                        let inset = match size {
+                            crate::state::TopBarSize::Small => 10,
+                            crate::state::TopBarSize::Medium => 12,
+                            crate::state::TopBarSize::Large => 16,
+                        };
+                        for action in &actions {
+                            let bounds = action.compute_bounds(&view.stack).unwrap();
+                            assert!(action.is_visible() && action.is_sensitive());
+                            assert!(bounds.width() > 0.0 && bounds.x() >= 0.0);
+                            assert!(
+                                bounds.x() + bounds.width() <= (width - inset) as f32 + 0.5,
+                                "remote action must fit {width} at {size:?} in {mode:?}: {bounds:?}"
+                            );
+                        }
+                        let bounds = hide.compute_bounds(&view.stack).unwrap();
+                        assert!((bounds.x() + bounds.width() - (width - inset) as f32).abs() < 1.0);
+                        // The toggle sits left of Hide, never over it.
+                        let toggle = view.actual_button.compute_bounds(&view.stack).unwrap();
+                        assert!(toggle.x() + toggle.width() <= bounds.x());
+                    }
+                }
             }
         }
+        view.canvas.set_mode(remote_workspace::ViewMode::Fit, None);
+        view.paint_top_bar_size(crate::state::TopBarSize::Medium);
+        // Mapped, through the production overlay that sizes the workspace.
         let window = gtk4::Window::new();
         window.set_default_size(640, 600);
         window.set_resizable(false);
-        window.set_child(Some(&view.stack));
+        window.set_child(Some(&crate::window::desktop_overlay(&view.stack)));
         window.present();
-        let until = std::time::Instant::now() + Duration::from_secs(3);
-        let mut hittable = false;
-        while std::time::Instant::now() < until {
-            while glib::MainContext::default().iteration(false) {}
-            if let Some(bounds) = hide.compute_bounds(&window) {
-                if bounds.width() > 0.0
-                    && bounds.x() >= 0.0
-                    && bounds.x() + bounds.width() <= window.width() as f32
-                {
-                    hittable = window
-                        .pick(
-                            (bounds.x() + bounds.width() / 2.0) as f64,
-                            (bounds.y() + bounds.height() / 2.0) as f64,
-                            gtk4::PickFlags::DEFAULT,
-                        )
-                        .is_some_and(|picked| picked == hide || picked.is_ancestor(&hide));
+        let hittable = |window: &gtk4::Window, action: &gtk4::Widget| {
+            let Some(bounds) = action.compute_bounds(window) else {
+                return false;
+            };
+            bounds.width() > 0.0
+                && bounds.x() >= 0.0
+                && bounds.x() + bounds.width() <= window.width() as f32
+                && window
+                    .pick(
+                        (bounds.x() + bounds.width() / 2.0) as f64,
+                        (bounds.y() + bounds.height() / 2.0) as f64,
+                        gtk4::PickFlags::DEFAULT,
+                    )
+                    .is_some_and(|picked| picked == *action || picked.is_ancestor(action))
+        };
+        for (step, (width, mode)) in [
+            (640, remote_workspace::ViewMode::Fit),
+            (480, remote_workspace::ViewMode::Actual { zoom: 1.0 }),
+            (1280, remote_workspace::ViewMode::Actual { zoom: 3.0 }),
+            (800, remote_workspace::ViewMode::Fit),
+            (480, remote_workspace::ViewMode::Actual { zoom: 1.0 }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if step == 3 {
+                // The short "Connecting…" state, with no harness list.
+                view.details.set_text("");
+                view.status.set_text("Connecting…");
+            }
+            window.set_default_size(width, 600);
+            view.canvas.set_mode(mode, None);
+            let until = std::time::Instant::now() + Duration::from_secs(3);
+            let mut ok = false;
+            while std::time::Instant::now() < until {
+                while glib::MainContext::default().iteration(false) {}
+                // Right-aligned inside the medium bar's 12 px padding.
+                let aligned = hide.compute_bounds(&window).is_some_and(|bounds| {
+                    (bounds.x() + bounds.width() - (width - 12) as f32).abs() < 1.0
+                });
+                ok = window.width() == width
+                    && aligned
+                    && actions.iter().all(|a| hittable(&window, a));
+                if ok {
+                    break;
                 }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            if hittable {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+            assert_eq!(window.width(), width, "the canvas must not enlarge the window");
+            assert!(ok, "every remote action must stay hittable at {width} in {mode:?}");
         }
-        assert_eq!(window.width(), 640);
-        assert!(
-            hittable,
-            "remote Hide must remain hittable in the mapped window"
+        // The toggle really switches the view, and follows it back.
+        view.fit_button.emit_clicked();
+        assert_eq!(view.canvas.mode(), remote_workspace::ViewMode::Fit);
+        assert!(view.fit_button.is_active() && !view.actual_button.is_active());
+        view.actual_button.emit_clicked();
+        assert_eq!(
+            view.canvas.mode(),
+            remote_workspace::ViewMode::Actual { zoom: 1.0 }
         );
+        assert!(view.actual_button.is_active() && !view.fit_button.is_active());
+        view.canvas
+            .set_mode(remote_workspace::ViewMode::Actual { zoom: 1.5 }, None);
+        assert_eq!(view.actual_button.label().as_deref(), Some("150%"));
+        // Clicking 100% again returns to exactly 100%.
+        view.actual_button.emit_clicked();
+        assert_eq!(view.actual_button.label().as_deref(), Some("100%"));
         window.close();
     }
 

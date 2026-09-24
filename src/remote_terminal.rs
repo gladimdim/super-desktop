@@ -17,7 +17,7 @@ use crate::desktop_protocol::{
 use crate::command_feedback::{self, CardCommand, Geometry, Outcome};
 use crate::mini_terminal::MiniTerminalCard;
 use crate::peer_client::{self, Peer};
-use crate::remote_workspace;
+use crate::remote_workspace::{self, ViewMode, ViewTransform};
 use crate::state::TerminalData;
 use gtk4::{glib, prelude::*};
 use std::cell::{Cell, RefCell};
@@ -25,14 +25,42 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// Header height at 100% scale. Every other card dimension comes from the
-/// host's logical rectangle, multiplied by this view's fit scale.
+/// host's logical rectangle, multiplied by this view's scale.
 const HEADER_HEIGHT: f64 = 30.0;
+
+/// Told whenever the view's mode or zoom changes, so the toggle can follow.
+pub type ModeCallback = Rc<dyn Fn(ViewMode)>;
 
 /// The host's workspace, rendered live inside the viewer's canvas.
 pub struct RemoteCanvas {
     /// `message` (status/errors) or `canvas` (live cards).
     pub area: gtk4::Stack,
+    /// The viewport. In Fit mode it never scrolls; in 100% mode it pans over
+    /// the host's workspace. It asks for no size of its own, so neither a
+    /// large host nor an off-screen card can enlarge the overlay window.
+    scroller: gtk4::ScrolledWindow,
+    /// Sized to exactly the host workspace at the current scale (the
+    /// scroll range), and centered in the viewport when it is smaller.
+    page: gtk4::Overlay,
+    frame: gtk4::Box,
+    /// The cards, in canvas pixels (`host × scale`). An overlay child of
+    /// `page` that is never measured, so card extents never become the
+    /// scroll range or the window's size.
     canvas: gtk4::Fixed,
+    /// Fit or 100% (with its zoom) for the PC on screen now.
+    mode: Cell<ViewMode>,
+    /// The mode chosen for each PC this session, by machine id. Not written
+    /// to disk: the plan asks for Fit by default and never persists view
+    /// geometry, and a restart returns to This PC anyway.
+    modes: RefCell<HashMap<String, ViewMode>>,
+    on_mode: RefCell<Option<ModeCallback>>,
+    /// Where the pointer is over the viewport, for zooming around it.
+    pointer: Cell<Option<(f64, f64)>>,
+    /// The viewport size the cards were last laid out for.
+    laid_out_for: Cell<(i32, i32)>,
+    /// Commands a regression test captured instead of sending.
+    #[cfg(test)]
+    outbox: RefCell<Option<Vec<WorkspaceCommand>>>,
     cards: RefCell<HashMap<String, Rc<MiniTerminalCard>>>,
     /// Where each card was last placed inside the fitted canvas, as
     /// `(x, y, width)`; the overlay's slide-out animates between these.
@@ -77,17 +105,49 @@ impl RemoteCanvas {
         message.set_justify(gtk4::Justification::Center);
         message.add_css_class("term-preview-text");
         area.add_named(&message, Some("message"));
-        let holder = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        holder.set_halign(gtk4::Align::Center);
-        holder.set_valign(gtk4::Align::Center);
+        // viewport → page (host-sized, centered) → frame (background) with
+        // the card canvas laid over it.
+        let frame = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        frame.add_css_class("remote-canvas");
         let canvas = gtk4::Fixed::new();
-        canvas.add_css_class("remote-canvas");
-        holder.append(&canvas);
-        area.add_named(&holder, Some("canvas"));
+        canvas.set_halign(gtk4::Align::Start);
+        canvas.set_valign(gtk4::Align::Start);
+        let page = gtk4::Overlay::new();
+        page.set_halign(gtk4::Align::Center);
+        page.set_valign(gtk4::Align::Center);
+        page.set_child(Some(&frame));
+        page.add_overlay(&canvas);
+        page.set_measure_overlay(&canvas, false);
+        page.set_clip_overlay(&canvas, false);
+        let scroller = gtk4::ScrolledWindow::new();
+        scroller.set_policy(gtk4::PolicyType::External, gtk4::PolicyType::External);
+        scroller.set_propagate_natural_width(false);
+        scroller.set_propagate_natural_height(false);
+        scroller.set_min_content_width(0);
+        scroller.set_min_content_height(0);
+        scroller.set_hexpand(true);
+        scroller.set_vexpand(true);
+        // Hover focuses a card's terminal; that must never scroll the view
+        // under the pointer. Panning is the user's, not focus's.
+        let viewport = gtk4::Viewport::new(None::<&gtk4::Adjustment>, None::<&gtk4::Adjustment>);
+        viewport.set_scroll_to_focus(false);
+        viewport.set_child(Some(&page));
+        scroller.set_child(Some(&viewport));
+        area.add_named(&scroller, Some("canvas"));
         area.set_visible_child_name("message");
         let view = Rc::new(Self {
             area,
+            scroller,
+            page,
+            frame,
             canvas,
+            mode: Cell::new(ViewMode::Fit),
+            modes: RefCell::new(HashMap::new()),
+            on_mode: RefCell::new(None),
+            pointer: Cell::new(None),
+            laid_out_for: Cell::new((0, 0)),
+            #[cfg(test)]
+            outbox: RefCell::new(None),
             cards: RefCell::new(HashMap::new()),
             placed: RefCell::new(HashMap::new()),
             gesturing: RefCell::new(HashSet::new()),
@@ -103,16 +163,237 @@ impl RemoteCanvas {
             message,
         });
         // The viewer's own monitor can change while the overlay stays mapped
-        // (display switch, dock), so the fit follows the actual allocation.
-        for property in ["width", "height"] {
+        // (display switch, dock), so the layout follows the viewport's actual
+        // allocation: its adjustments change page size on every resize.
+        for adjustment in [view.scroller.hadjustment(), view.scroller.vadjustment()] {
             let weak = Rc::downgrade(&view);
-            view.area.connect_notify_local(Some(property), move |_, _| {
-                if let Some(view) = weak.upgrade() {
-                    view.relayout();
+            adjustment.connect_changed(move |_| {
+                let Some(view) = weak.upgrade() else {
+                    return;
+                };
+                if view.laid_out_for.get() == view.viewport_size() {
+                    return;
                 }
+                // Never relayout inside the allocation that reported it.
+                let weak = Rc::downgrade(&view);
+                glib::idle_add_local_once(move || {
+                    if let Some(view) = weak.upgrade() {
+                        if view.laid_out_for.get() != view.viewport_size() {
+                            view.relayout();
+                        }
+                    }
+                });
             });
         }
+        view.bind_pan_and_zoom();
         view
+    }
+
+    /// Pan (drag on empty canvas, scrollbars, touchpad or wheel scroll) and
+    /// zoom (Ctrl+scroll, pinch) for the 100% mode.
+    fn bind_pan_and_zoom(self: &Rc<Self>) {
+        let motion = gtk4::EventControllerMotion::new();
+        let weak = Rc::downgrade(self);
+        motion.connect_motion(move |_, x, y| {
+            if let Some(view) = weak.upgrade() {
+                view.pointer.set(Some((x, y)));
+            }
+        });
+        let weak = Rc::downgrade(self);
+        motion.connect_leave(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.pointer.set(None);
+            }
+        });
+        self.scroller.add_controller(motion);
+
+        // Ctrl+scroll zooms around the pointer. Captured before the viewport
+        // and the emulators see it; a plain scroll pans (or scrolls a
+        // terminal's history when over one) as usual.
+        let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+        scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        scroll.connect_scroll(move |controller, _, dy| {
+            let Some(view) = weak.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if !controller
+                .current_event_state()
+                .contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                || !view.has_workspace()
+            {
+                return glib::Propagation::Proceed;
+            }
+            let steps = match controller.unit() {
+                gtk4::gdk::ScrollUnit::Surface => dy / 40.0,
+                _ => dy,
+            };
+            let zoom = view.transform().scale * 1.1f64.powf(-steps);
+            view.set_mode(ViewMode::Actual { zoom }, view.pointer.get());
+            glib::Propagation::Stop
+        });
+        self.scroller.add_controller(scroll);
+
+        // Touchpad pinch or touchscreen zoom, around the fingers.
+        let pinch = gtk4::GestureZoom::new();
+        pinch.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let start = Rc::new(Cell::new(1.0));
+        let weak = Rc::downgrade(self);
+        let start_begin = Rc::clone(&start);
+        pinch.connect_begin(move |gesture, _| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            if !view.has_workspace() {
+                gesture.set_state(gtk4::EventSequenceState::Denied);
+                return;
+            }
+            start_begin.set(view.transform().scale);
+        });
+        let weak = Rc::downgrade(self);
+        pinch.connect_scale_changed(move |gesture, scale| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            if !view.has_workspace() {
+                return;
+            }
+            gesture.set_state(gtk4::EventSequenceState::Claimed);
+            let anchor = gesture.bounding_box_center();
+            view.set_mode(ViewMode::Actual { zoom: start.get() * scale }, anchor);
+        });
+        self.scroller.add_controller(pinch);
+
+        // Dragging empty canvas pans in 100% mode. A drag that starts on a
+        // card (its header, edges or terminal) or on a scrollbar is that
+        // widget's own gesture and is left alone.
+        let drag = gtk4::GestureDrag::new();
+        drag.set_button(0);
+        let origin = Rc::new(Cell::new((0.0, 0.0)));
+        let weak = Rc::downgrade(self);
+        let origin_begin = Rc::clone(&origin);
+        drag.connect_drag_begin(move |gesture, x, y| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            let button = gesture.current_button();
+            let pannable = matches!(view.mode.get(), ViewMode::Actual { .. })
+                && (button == 1 || button == 2)
+                && view.is_empty_canvas(x, y);
+            if !pannable {
+                gesture.set_state(gtk4::EventSequenceState::Denied);
+                return;
+            }
+            origin_begin.set((
+                view.scroller.hadjustment().value(),
+                view.scroller.vadjustment().value(),
+            ));
+        });
+        let weak = Rc::downgrade(self);
+        drag.connect_drag_update(move |gesture, dx, dy| {
+            let Some(view) = weak.upgrade() else {
+                return;
+            };
+            if dx.abs() > 2.0 || dy.abs() > 2.0 {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+            }
+            let (x, y) = origin.get();
+            view.scroller.hadjustment().set_value(x - dx);
+            view.scroller.vadjustment().set_value(y - dy);
+        });
+        self.scroller.add_controller(drag);
+    }
+
+    /// Whether a viewport point is on the workspace but not on any card.
+    fn is_empty_canvas(&self, x: f64, y: f64) -> bool {
+        let Some(picked) = self.scroller.pick(x, y, gtk4::PickFlags::DEFAULT) else {
+            return false;
+        };
+        let viewport = self.scroller.child();
+        picked == *self.canvas.upcast_ref::<gtk4::Widget>()
+            || picked == *self.page.upcast_ref::<gtk4::Widget>()
+            || picked == *self.frame.upcast_ref::<gtk4::Widget>()
+            || viewport.is_some_and(|viewport| picked == viewport)
+    }
+
+    fn has_workspace(&self) -> bool {
+        self.snapshot.borrow().is_some()
+    }
+
+    /// The current mode (Fit, or 100% with its zoom).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn mode(&self) -> ViewMode {
+        self.mode.get()
+    }
+
+    /// Told whenever the mode or the zoom changes.
+    pub fn set_on_mode_changed(&self, callback: ModeCallback) {
+        *self.on_mode.borrow_mut() = Some(callback);
+    }
+
+    /// Switch between Fit and 100% (or change the zoom), keeping the host
+    /// point under `anchor` — the pointer, or the viewport's center — where
+    /// it is. Remembered for this PC for the rest of the session.
+    pub fn set_mode(self: &Rc<Self>, mode: ViewMode, anchor: Option<(f64, f64)>) {
+        let mode = match mode {
+            ViewMode::Fit => ViewMode::Fit,
+            ViewMode::Actual { zoom } => ViewMode::Actual {
+                zoom: remote_workspace::clamp_zoom(zoom),
+            },
+        };
+        if let Some(peer) = self.peer.borrow().as_ref() {
+            self.modes
+                .borrow_mut()
+                .insert(peer.machine_id.clone(), mode);
+        }
+        let host = self.host_size();
+        let before = self.transform();
+        self.mode.set(mode);
+        if let Some((host_width, host_height)) = host {
+            let (width, height) = self.viewport_size();
+            let anchor = anchor.unwrap_or((f64::from(width) / 2.0, f64::from(height) / 2.0));
+            let after = before.rezoomed(mode, host_width, host_height, anchor);
+            self.relayout();
+            self.show_pan(&after);
+        }
+        self.announce_mode();
+    }
+
+    fn announce_mode(&self) {
+        let callback = self.on_mode.borrow().clone();
+        if let Some(callback) = callback {
+            callback(self.mode.get());
+        }
+    }
+
+    /// Scroll the viewport to a transform's pan. The scroll range is set
+    /// here as well, so the value is not clamped against the previous zoom's
+    /// range before the viewport's next allocation catches up.
+    fn show_pan(&self, transform: &ViewTransform) {
+        for (adjustment, value, content, page) in [
+            (
+                self.scroller.hadjustment(),
+                transform.pan_x,
+                transform.content_width,
+                transform.view_width,
+            ),
+            (
+                self.scroller.vadjustment(),
+                transform.pan_y,
+                transform.content_height,
+                transform.view_height,
+            ),
+        ] {
+            let page = f64::from(page);
+            adjustment.configure(
+                value,
+                0.0,
+                f64::from(content).max(page),
+                page * 0.1,
+                page * 0.9,
+                page,
+            );
+        }
     }
 
     /// The workspace revision this view last held. A folder change is judged
@@ -164,6 +445,52 @@ impl RemoteCanvas {
         self.cards.borrow().get(card_id).cloned()
     }
 
+    /// Capture commands instead of sending them, so a check can see exactly
+    /// what a gesture would have told the host.
+    #[cfg(test)]
+    pub fn capture_commands(&self) {
+        *self.outbox.borrow_mut() = Some(Vec::new());
+    }
+
+    #[cfg(test)]
+    pub fn captured(&self) -> Vec<WorkspaceCommand> {
+        self.outbox.borrow().clone().unwrap_or_default()
+    }
+
+    /// The viewport widget, for checks against real GTK geometry.
+    #[cfg(test)]
+    pub fn viewport(&self) -> &gtk4::ScrolledWindow {
+        &self.scroller
+    }
+
+    /// A header drag the user made in viewport pixels: grabbed at `grab`,
+    /// released at `release`. The points go through GTK's own translation
+    /// from the viewport into the card canvas — the one a real pointer's
+    /// events take, pan and all — and the drop then runs the card's real
+    /// commit path.
+    #[cfg(test)]
+    pub fn drag_card_in_view(self: &Rc<Self>, card_id: &str, grab: (f64, f64), release: (f64, f64)) {
+        let card = self.card_widget(card_id).expect("card on screen");
+        let point = |(x, y): (f64, f64)| {
+            self.scroller
+                .compute_point(&self.canvas, &gtk4::graphene::Point::new(x as f32, y as f32))
+                .map(|p| (f64::from(p.x()), f64::from(p.y())))
+                .expect("viewport and canvas share a root")
+        };
+        let (from, to) = (point(grab), point(release));
+        let data = {
+            let mut data = card.data.borrow_mut();
+            let (x, y) = crate::mini_terminal::displayed_pos(&data);
+            crate::mini_terminal::set_displayed_pos(
+                &mut data,
+                (x + to.0 - from.0).round() as i32,
+                (y + to.1 - from.1).round() as i32,
+            );
+            data.clone()
+        };
+        self.commit_card_layout(card_id, &data);
+    }
+
     /// The host's own card as the last snapshot reported it. Every command
     /// needs it: its revision is what the owner checks.
     fn card(&self, card_id: &str) -> Option<DesktopCard> {
@@ -195,9 +522,9 @@ impl RemoteCanvas {
     /// inside the fitted canvas, plus that canvas's position on the viewer's
     /// screen, so a card can find its nearest real screen edge.
     pub fn slide_cards(&self) -> Vec<(gtk4::Widget, f64, f64, f64, f64)> {
-        // The fitted canvas is centered in the viewer's area, so its left edge
-        // is what turns canvas coordinates into screen coordinates.
-        let offset = ((self.area.width() - self.canvas.width()) as f64 / 2.0).max(0.0);
+        // The canvas is centered in (or panned across) the viewer's area, so
+        // its left edge is what turns canvas coordinates into screen ones.
+        let offset = self.transform().origin().0;
         let placed = self.placed.borrow().clone();
         self.cards
             .borrow()
@@ -239,6 +566,11 @@ impl RemoteCanvas {
         *self.peer.borrow_mut() = None;
         // Another PC decides for itself whether it accepts layout commands.
         self.layout_writable.set(false);
+        // The next PC starts at its own mode, unscrolled; its remembered mode
+        // is restored by its first snapshot.
+        self.scroller.hadjustment().set_value(0.0);
+        self.scroller.vadjustment().set_value(0.0);
+        self.laid_out_for.set((0, 0));
     }
 
     /// Render a fresh host snapshot. Cards that did not change keep their
@@ -264,7 +596,20 @@ impl RemoteCanvas {
             });
         }
         self.layout_writable.set(layout_writable);
+        let arriving = self.peer.borrow().as_ref().map(|known| &known.machine_id)
+            != Some(&peer.machine_id);
         *self.peer.borrow_mut() = Some(peer.clone());
+        if arriving {
+            // Each PC keeps the mode last chosen for it this session.
+            let mode = self
+                .modes
+                .borrow()
+                .get(&peer.machine_id)
+                .copied()
+                .unwrap_or_default();
+            self.mode.set(mode);
+            self.announce_mode();
+        }
         // A poll that was already running when we applied a command still
         // carries the older revision. Revisions only grow inside one epoch, so
         // the newer of the two is the truth, and the next gesture is not
@@ -584,6 +929,11 @@ impl RemoteCanvas {
             self.relayout();
             return;
         };
+        #[cfg(test)]
+        if let Some(outbox) = self.outbox.borrow_mut().as_mut() {
+            outbox.push(command);
+            return;
+        }
         let machine = peer.machine_id.clone();
         let request = peer_client::request(&peer, &epoch, command);
         let id = card_id.to_string();
@@ -795,11 +1145,22 @@ impl RemoteCanvas {
             return;
         };
         let local = &snapshot.local;
-        let (scale, ..) = self.fit();
-        self.canvas.set_size_request(
-            (f64::from(local.canvas.width) * scale).round() as i32,
-            (f64::from(local.canvas.height) * scale).round() as i32,
-        );
+        let transform = self.transform();
+        let scale = transform.scale;
+        self.laid_out_for.set(self.viewport_size());
+        // The page is exactly the host workspace at this scale: that is the
+        // scroll range in 100% mode, and it is centered when smaller.
+        self.frame
+            .set_size_request(transform.content_width, transform.content_height);
+        let policy = match self.mode.get() {
+            // Fit shows everything: nothing to scroll, and no scrollbar.
+            ViewMode::Fit => gtk4::PolicyType::External,
+            ViewMode::Actual { .. } => gtk4::PolicyType::Automatic,
+        };
+        self.scroller.set_policy(policy, policy);
+        if matches!(self.mode.get(), ViewMode::Fit) {
+            self.show_pan(&transform);
+        }
         let cards = self.cards.borrow().clone();
         for (id, card) in &cards {
             let Some(host) = local.cards.iter().find(|host| &host.card_id == id) else {
@@ -828,6 +1189,7 @@ impl RemoteCanvas {
                 data.tag = host.layout.tag;
                 data.workspace_dir = Some(host.workspace.clone());
             }
+            card.set_workspace_size(transform.content_width, transform.content_height);
             card.adopt_host_geometry(width, height);
             // The font follows the host's grid, not this machine's theme: the
             // emulator has to line up with the host's own columns and rows.
@@ -860,35 +1222,50 @@ impl RemoteCanvas {
         self.area.set_visible_child_name("canvas");
     }
 
-    /// The fit scale for the current snapshot: the rule the plan states, which
-    /// never enlarges a host card.
-    fn fit(&self) -> (f64, f64, f64) {
-        let Some(snapshot) = self.snapshot.borrow().clone() else {
-            return (1.0, 0.0, 0.0);
-        };
-        remote_workspace::fit(
-            snapshot.local.canvas.width,
-            snapshot.local.canvas.height,
-            self.area.width() as f64,
-            self.area.height() as f64,
+    /// The host workspace's logical size, once a snapshot has said it.
+    fn host_size(&self) -> Option<(u32, u32)> {
+        self.snapshot
+            .borrow()
+            .as_ref()
+            .map(|snapshot| (snapshot.local.canvas.width, snapshot.local.canvas.height))
+    }
+
+    /// The viewport's allocated logical size.
+    fn viewport_size(&self) -> (i32, i32) {
+        (self.scroller.width(), self.scroller.height())
+    }
+
+    /// The one host ↔ viewer mapping for the current mode, viewport and pan.
+    /// Fit follows the plan's rule (`min(1, Vw/Hw, Vh/Hh)`, centered, never
+    /// enlarged); 100% is one host pixel per viewer pixel times the zoom.
+    pub fn transform(&self) -> ViewTransform {
+        let (host_width, host_height) = self.host_size().unwrap_or((1, 1));
+        let (width, height) = self.viewport_size();
+        ViewTransform::new(
+            self.mode.get(),
+            host_width,
+            host_height,
+            width,
+            height,
+            (
+                self.scroller.hadjustment().value(),
+                self.scroller.vadjustment().value(),
+            ),
         )
     }
 
     fn scale(&self) -> f64 {
-        self.fit().0
+        self.transform().scale
     }
 
     /// The whole host canvas in this view's pixels. A card's own gestures are
     /// bounded by it, exactly as a local card is bounded by the screen.
     fn fitted_size(&self) -> (i32, i32) {
-        let Some(snapshot) = self.snapshot.borrow().clone() else {
+        if self.host_size().is_none() {
             return (0, 0);
-        };
-        let (scale, ..) = self.fit();
-        (
-            (f64::from(snapshot.local.canvas.width) * scale).round() as i32,
-            (f64::from(snapshot.local.canvas.height) * scale).round() as i32,
-        )
+        }
+        let transform = self.transform();
+        (transform.content_width, transform.content_height)
     }
 }
 
@@ -1114,6 +1491,201 @@ mod tests {
         );
         assert_eq!(refreshes.get(), 2);
         assert_eq!(canvas.card_count(), 1);
+    }
+
+    #[test]
+    fn a_drag_at_100_percent_with_pan_sends_host_geometry() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::pan_zoom_inner");
+    }
+
+    #[test]
+    fn pan_zoom_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use crate::desktop_protocol::CommandResult;
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let canvas = RemoteCanvas::new();
+        canvas.capture_commands();
+        let window = gtk4::Window::new();
+        window.set_default_size(960, 600);
+        window.set_resizable(false);
+        window.set_child(Some(&canvas.area));
+        window.present();
+        let pump = || {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(150);
+            while std::time::Instant::now() < until {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        // Host 1920×1080 with one card at (100, 200), 640×480. Its session is
+        // gone, so this check opens no socket.
+        let mut snapshot = crate::remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        let peer = peer_client::test_peer('a');
+        canvas.apply(&peer, &snapshot, true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while canvas.viewport().width() != 960 || canvas.viewport().height() != 600 {
+            pump();
+            assert!(std::time::Instant::now() < deadline, "viewport never allocated");
+        }
+        // The first layout ran before the viewport had its size; the
+        // allocation itself triggers the refit.
+        pump();
+        let card = canvas.card_widget("card-one").unwrap();
+        // Where GTK really drew the card, in viewport pixels (through the
+        // window, the root both share). The card's own 1 px border is inside
+        // the tolerance.
+        let drawn_card = |card: &Rc<MiniTerminalCard>| {
+            let origin = gtk4::graphene::Point::new(0.0, 0.0);
+            // A move queues a new allocation, and GTK reports no transform
+            // until it has run: let the frame finish first.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let card_at = loop {
+                if let Some(point) = card.container.compute_point(&window, &origin) {
+                    break point;
+                }
+                assert!(std::time::Instant::now() < deadline, "card never allocated");
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            let view_at = canvas.viewport().compute_point(&window, &origin).unwrap();
+            (
+                f64::from(card_at.x() - view_at.x()),
+                f64::from(card_at.y() - view_at.y()),
+            )
+        };
+        let drawn = || drawn_card(&card);
+        let near = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() <= 1.5 && (a.1 - b.1).abs() <= 1.5;
+
+        // Fit (the default): half scale, the transform matches GTK's layout,
+        // and a drop doubles on its way back to host pixels.
+        assert_eq!(canvas.mode(), ViewMode::Fit);
+        let t = canvas.transform();
+        assert_eq!(t.scale, 0.5);
+        assert!(near(drawn(), t.host_to_view(100.0, 200.0)), "{:?}", drawn());
+        let at = t.host_to_view(100.0, 200.0);
+        canvas.drag_card_in_view("card-one", (at.0 + 20.0, at.1 + 8.0), (at.0 + 120.0, at.1 + 58.0));
+        match canvas.captured().last() {
+            Some(WorkspaceCommand::SetLayout { card_id, expected_revision, layout }) => {
+                assert_eq!(card_id, "card-one");
+                assert_eq!(*expected_revision, 1);
+                assert_eq!((layout.x, layout.y), (300, 300));
+                assert_eq!((layout.width, layout.height), (640, 480));
+            }
+            other => panic!("expected a layout command, got {other:?}"),
+        }
+
+        // The host refuses: the card goes back to the host's own geometry.
+        let reply = |result| CommandReply {
+            request_id: "m1".into(),
+            machine_id: peer.machine_id.clone(),
+            epoch: "host-one".into(),
+            revision: 2,
+            result,
+        };
+        let refuse = |canvas: &Rc<RemoteCanvas>, revision: u64| {
+            let host = snapshot.local.cards[0].layout.clone();
+            let conflict: Result<_, ()> = Ok(Ok(reply(CommandResult::Conflict {
+                card_id: "card-one".into(),
+                card_revision: Some(revision),
+                layout: Some(host),
+                expanded: Some(false),
+            })));
+            canvas.finish("card-one", CardCommand::Layout, &conflict);
+        };
+        refuse(&canvas, 2);
+        assert_eq!(canvas.card_position("card-one"), Some((100, 200)));
+
+        // 100%: one host pixel per viewer pixel, and switching sends nothing.
+        let sent = canvas.captured().len();
+        canvas.set_mode(ViewMode::Actual { zoom: 1.0 }, Some((0.0, 0.0)));
+        pump();
+        assert_eq!(canvas.captured().len(), sent, "a view change is not a host change");
+        let t = canvas.transform();
+        assert_eq!(t.scale, 1.0);
+        assert_eq!((t.content_width, t.content_height), (1920, 1080));
+        // The emulator is fitted at 100%: a crisp font for the host's grid,
+        // never a scaled bitmap and never a new grid for the host.
+        assert_eq!(card.fit_scale(), 1.0);
+        // The card's own resize bounds follow the workspace it now sits in.
+        let limits = card.resize_limits();
+        assert_eq!(limits.right, 1910.0);
+        assert_eq!(limits.bottom, 1070.0);
+
+        // Pan like a scrollbar or a drag on empty canvas would.
+        canvas.viewport().hadjustment().set_value(60.0);
+        canvas.viewport().vadjustment().set_value(150.0);
+        pump();
+        let t = canvas.transform();
+        assert_eq!((t.pan_x, t.pan_y), (60.0, 150.0));
+        assert!(near(drawn(), (40.0, 50.0)), "{:?}", drawn());
+        assert!(near(drawn(), t.host_to_view(100.0, 200.0)));
+        // Grab the header where it is drawn, drop it 300 → and 100 ↓.
+        canvas.drag_card_in_view("card-one", (60.0, 58.0), (360.0, 158.0));
+        match canvas.captured().last() {
+            Some(WorkspaceCommand::SetLayout { expected_revision, layout, .. }) => {
+                // The revision the conflict published travels with the drop.
+                assert_eq!(*expected_revision, 2);
+                assert_eq!((layout.x, layout.y), (400, 300));
+                assert_eq!((layout.width, layout.height), (640, 480));
+            }
+            other => panic!("expected a layout command, got {other:?}"),
+        }
+        // Conflict feedback still works at 100% with a pan: the host's own
+        // geometry is adopted and said on the card.
+        refuse(&canvas, 3);
+        pump();
+        assert_eq!(canvas.card_position("card-one"), Some((100, 200)));
+        assert_eq!(
+            card.notice_text().as_deref(),
+            Some("Changed on that PC · showing its layout")
+        );
+
+        // Zoom around a point keeps the host point under it, and a drop at
+        // 200% halves on its way back to host pixels.
+        let anchor = (400.0, 300.0);
+        let under = canvas.transform().view_to_host(anchor.0, anchor.1);
+        canvas.set_mode(ViewMode::Actual { zoom: 2.0 }, Some(anchor));
+        pump();
+        let t = canvas.transform();
+        assert_eq!(t.scale, 2.0);
+        let after = t.view_to_host(anchor.0, anchor.1);
+        assert!((after.0 - under.0).abs() <= 1.0 && (after.1 - under.1).abs() <= 1.0);
+        let at = t.host_to_view(100.0, 200.0);
+        assert!(near(drawn(), at), "{:?} vs {at:?}", drawn());
+        assert_eq!(card.fit_scale(), 2.0);
+        canvas.drag_card_in_view("card-one", (at.0 + 30.0, at.1 + 10.0), (at.0 + 230.0, at.1 - 90.0));
+        match canvas.captured().last() {
+            Some(WorkspaceCommand::SetLayout { expected_revision, layout, .. }) => {
+                assert_eq!(*expected_revision, 3);
+                assert_eq!((layout.x, layout.y), (200, 150));
+                assert_eq!((layout.width, layout.height), (640, 480));
+            }
+            other => panic!("expected a layout command, got {other:?}"),
+        }
+
+        // The mode belongs to this PC for the session: another PC starts in
+        // Fit, and coming back restores 200%.
+        canvas.clear();
+        let other = peer_client::test_peer('b');
+        let elsewhere = snapshot.clone();
+        canvas.apply(&other, &elsewhere, true);
+        assert_eq!(canvas.mode(), ViewMode::Fit);
+        canvas.clear();
+        canvas.apply(&peer, &snapshot, true);
+        assert_eq!(canvas.mode(), ViewMode::Actual { zoom: 2.0 });
+        // Back to Fit: nothing to pan, everything visible again.
+        canvas.set_mode(ViewMode::Fit, None);
+        pump();
+        let t = canvas.transform();
+        assert_eq!((t.scale, t.pan_x, t.pan_y), (0.5, 0.0, 0.0));
+        // The card was rebuilt for the new visit.
+        let card = canvas.card_widget("card-one").unwrap();
+        assert!(near(drawn_card(&card), t.host_to_view(100.0, 200.0)));
+        window.close();
     }
 
     #[test]
