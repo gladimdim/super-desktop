@@ -86,9 +86,19 @@ pub fn clamp_card_size_at(w: i32, h: i32, screen_w: i32, screen_h: i32, scale: f
 }
 
 pub const EXPAND_RATIO: f64 = 0.80;
+/// Logical pixels outside the last active card that do not activate a neighbour.
+const HOVER_DEAD_ZONE: f32 = 20.0;
+
+fn inside_hover_margin(x: f32, y: f32, width: i32, height: i32) -> bool {
+    x >= -HOVER_DEAD_ZONE && y >= -HOVER_DEAD_ZONE
+        && x <= width as f32 + HOVER_DEAD_ZONE
+        && y <= height as f32 + HOVER_DEAD_ZONE
+}
 /// Newly opened harnesses ignore hover-raise on other cards for this long
 /// so the pointer can travel to the new card without burying it.
 pub const NEW_HARNESS_HOVER_LOCK: Duration = Duration::from_secs(4);
+/// Keep a resize release over another card from immediately switching terminals.
+const RESIZE_HOVER_LOCK: Duration = Duration::from_secs(1);
 
 /// Shared across every terminal card. After `lock()`, pointer-enter on any
 /// other card skips raise/focus until the hold expires or a click on another
@@ -97,6 +107,7 @@ pub const NEW_HARNESS_HOVER_LOCK: Duration = Duration::from_secs(4);
 pub struct HoverRaiseLock {
     until: Rc<Cell<Option<Instant>>>,
     owner: Rc<RefCell<Option<String>>>,
+    hover_owner: Rc<RefCell<Option<(String, glib::WeakRef<gtk4::Widget>)>>>,
 }
 
 impl HoverRaiseLock {
@@ -104,6 +115,7 @@ impl HoverRaiseLock {
         Self {
             until: Rc::new(Cell::new(None)),
             owner: Rc::new(RefCell::new(None)),
+            hover_owner: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -138,8 +150,29 @@ impl HoverRaiseLock {
         }
     }
 
+    fn note_hover(&self, session: &str, widget: &impl IsA<gtk4::Widget>) {
+        *self.hover_owner.borrow_mut() = Some((session.to_owned(), widget.as_ref().downgrade()));
+    }
+
+    fn allows_hover_at(&self, session: &str, source: &impl IsA<gtk4::Widget>, x: f64, y: f64) -> bool {
+        if !self.allows_hover(session) {
+            return false;
+        }
+        let owner = self.hover_owner.borrow();
+        let Some((name, weak)) = owner.as_ref() else { return true; };
+        if name == session { return true; }
+        let Some(widget) = weak.upgrade().filter(|widget| widget.is_mapped()) else { return true; };
+        // Translate against the live allocation, so dragging, resizing and output
+        // scaling never leave a stale exclusion rectangle behind.
+        let Some(point) = source.as_ref().compute_point(&widget, &gtk4::graphene::Point::new(x as f32, y as f32)) else { return true; };
+        !inside_hover_margin(point.x(), point.y(), widget.width(), widget.height())
+    }
+
     /// A click on a different card is an intentional switch: drop the hold.
     pub fn on_click(&self, session_name: &str) {
+        if self.hover_owner.borrow().as_ref().is_some_and(|(owner, _)| owner != session_name) {
+            self.hover_owner.borrow_mut().take();
+        }
         if let Some(owner) = self.active_owner() {
             if owner != session_name {
                 self.release();
@@ -429,6 +462,7 @@ impl MiniTerminalCard {
         click_raise.connect_pressed(move |_, _, _, _| {
             click_lock.on_click(&click_session);
             if let Some(c) = container_weak_click.upgrade() {
+                click_lock.note_hover(&click_session, &c);
                 on_raise_click(c.upcast());
             }
         });
@@ -816,27 +850,30 @@ impl MiniTerminalCard {
         let hover_lock_enter = hover_lock.clone();
         let hover_session = card.data.borrow().session_name.clone();
         let pointer_enter = Rc::clone(&card.activity);
-        hover.connect_enter(move |_, _, _| {
-            // Attention bookkeeping comes first: it must happen even while the
-            // hover lock below skips the raise.
+        let accepted = Rc::new(Cell::new(false));
+        let accepted_hover = Rc::clone(&accepted);
+        let activate: Rc<dyn Fn(f64, f64)> = Rc::new(move |x, y| {
             pointer_enter.set_pointer_inside(true);
-            if !hover_lock_enter.allows_hover(&hover_session) {
-                return;
-            }
-            if let Some(c) = container_weak_hover.upgrade() {
-                on_raise_hover(c.upcast());
-            }
-            // Perf: grabbing focus re-triggers :focus-within CSS + cursor
-            // redraw, so skip it when the VTE is already focused. During a
-            // 120Hz drag across cards this fires constantly.
+            if accepted_hover.get() { return; }
+            let Some(c) = container_weak_hover.upgrade() else { return; };
+            if !hover_lock_enter.allows_hover_at(&hover_session, &c, x, y) { return; }
+            accepted_hover.set(true);
+            hover_lock_enter.note_hover(&hover_session, &c);
+            on_raise_hover(c.upcast());
             if let Some(t) = vte_hover.borrow().as_ref() {
-                if !t.has_focus() {
-                    t.grab_focus();
-                }
+                if !t.has_focus() { t.grab_focus(); }
             }
         });
+        let activate_enter = Rc::clone(&activate);
+        hover.connect_enter(move |_, x, y| activate_enter(x, y));
+        // Enter may land in the margin. Retry as the pointer moves past it,
+        // without repeatedly raising an already accepted card.
+        hover.connect_motion(move |_, x, y| activate(x, y));
         let pointer_leave = Rc::clone(&card.activity);
-        hover.connect_leave(move |_| pointer_leave.set_pointer_inside(false));
+        hover.connect_leave(move |_| {
+            accepted.set(false);
+            pointer_leave.set_pointer_inside(false);
+        });
         card.container.add_controller(hover);
 
         // Actions
@@ -1143,13 +1180,34 @@ impl MiniTerminalCard {
             on_drag_end_resize(root_commit.clone().upcast(), &data_commit.borrow());
         });
         *card.geometry_commit.borrow_mut() = Some(Rc::clone(&on_commit));
+        // Install the hold before committing geometry: the allocation change
+        // can itself deliver pointer-enter to the terminal under the release.
+        // Keep this on the gesture path, not incoming remote geometry updates.
+        let resize_lock = card.hover_lock.clone();
+        let resize_session = card.data.borrow().session_name.clone();
+        let resize_root = card.container.downgrade();
+        let resize_vte = Rc::clone(&card.vte);
+        let resize_activity = Rc::clone(&card.activity);
+        let raise_after_resize = Rc::clone(&on_raise_rc);
+        let on_resize_commit: Rc<dyn Fn(crate::card_resize::Rect)> = Rc::new(move |rect| {
+            resize_lock.lock_for(&resize_session, RESIZE_HOVER_LOCK);
+            if let Some(root) = resize_root.upgrade() {
+                resize_lock.note_hover(&resize_session, &root);
+                raise_after_resize(root.upcast());
+            }
+            if let Some(term) = resize_vte.borrow().as_ref() {
+                if !term.has_focus() { term.grab_focus(); }
+            }
+            resize_activity.note_activity(Instant::now());
+            on_commit(rect);
+        });
         crate::card_resize::attach_resize_borders_with(
             &card.container,
             resize_limits,
             get_start,
             on_begin,
             on_preview,
-            on_commit,
+            on_resize_commit,
         );
 
         if !card.data.borrow().iconified && card.data.borrow().width >= MIN_CARD_WIDTH {
@@ -1914,11 +1972,9 @@ fn spawn_vte(
     let term_weak = term.downgrade();
     let hover_lock_vte = hover_lock.clone();
     let hover_session = session.clone();
-    term_hover.connect_enter(move |_, _, _| {
-        if !hover_lock_vte.allows_hover(&hover_session) {
-            return;
-        }
+    term_hover.connect_enter(move |_, x, y| {
         if let Some(t) = term_weak.upgrade() {
+            if !hover_lock_vte.allows_hover_at(&hover_session, &t, x, y) { return; }
             if !t.has_focus() {
                 t.grab_focus();
             }
@@ -2336,6 +2392,75 @@ mod tests {
         lock.on_click("old");
         assert!(lock.allows_hover("old"), "clicking another card is an intentional switch");
         assert!(lock.allows_hover("new"));
+    }
+
+    #[test]
+    fn hover_dead_zone_uses_live_widget_bounds_and_click_override() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("mini_terminal::tests::hover_dead_zone_uses_live_widget_bounds_and_click_override");
+            return;
+        }
+        if gtk4::init().is_err() { return; }
+        let window = gtk4::Window::new();
+        let fixed = gtk4::Fixed::new();
+        window.set_child(Some(&fixed));
+        let card = gtk4::Box::new(Orientation::Vertical, 0);
+        card.set_size_request(100, 80);
+        fixed.put(&card, 20.0, 20.0);
+        window.set_default_size(300, 200);
+        window.present();
+        for _ in 0..30 {
+            while glib::MainContext::default().iteration(false) {}
+            if card.is_mapped() && card.width() > 0 { break; }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(card.is_mapped());
+        let lock = HoverRaiseLock::new();
+        lock.note_hover("front", &card);
+        let point = card.compute_point(&fixed, &gtk4::graphene::Point::new(card.width() as f32, 40.0)).unwrap();
+        let x = f64::from(point.x());
+        let y = f64::from(point.y());
+        assert!(!lock.allows_hover_at("back", &fixed, x + 20.0, y));
+        assert!(lock.allows_hover_at("back", &fixed, x + 21.0, y));
+        assert!(lock.allows_hover_at("front", &fixed, x + 2.0, y));
+        lock.on_click("front");
+        assert!(!lock.allows_hover_at("back", &fixed, x + 2.0, y));
+        lock.on_click("back");
+        assert!(lock.allows_hover_at("back", &fixed, x + 2.0, y));
+        lock.note_hover("front", &card);
+        card.set_visible(false);
+        assert!(lock.allows_hover_at("back", &fixed, x + 2.0, y));
+        fixed.remove(&card);
+        drop(card);
+        assert!(lock.allows_hover_at("back", &fixed, x + 2.0, y));
+        window.close();
+    }
+
+    #[test]
+    fn test_hover_dead_zone_edges_and_corners() {
+        for (x, y) in [(-20.0, 40.0), (120.0, 40.0), (50.0, -20.0),
+            (50.0, 100.0), (-20.0, -20.0), (120.0, 100.0)] {
+            assert!(inside_hover_margin(x, y, 100, 80));
+        }
+        for (x, y) in [(-20.01, 40.0), (120.01, 40.0), (50.0, -20.01), (50.0, 100.01)] {
+            assert!(!inside_hover_margin(x, y, 100, 80));
+        }
+        assert!(inside_hover_margin(117.0, 40.0, 100, 80));
+        assert!(!inside_hover_margin(117.0, 40.0, 90, 80));
+    }
+
+    #[test]
+    fn resize_release_holds_hover_for_one_second_then_allows_other_cards() {
+        assert_eq!(RESIZE_HOVER_LOCK, Duration::from_secs(1));
+        let lock = HoverRaiseLock::new();
+        let before_release = Instant::now();
+        lock.lock_for("resized", RESIZE_HOVER_LOCK);
+        assert!(lock.until.get().unwrap() >= before_release + Duration::from_secs(1));
+        assert!(lock.allows_hover("resized"));
+        assert!(!lock.allows_hover("under_pointer"));
+        // Advance the deadline without a slow, timing-sensitive sleep.
+        lock.until.set(Some(Instant::now()));
+        assert!(lock.allows_hover("under_pointer"));
     }
 
     #[test]
