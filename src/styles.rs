@@ -705,6 +705,13 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
    working in neither, keeps a dotted outline so the desk still
    shows that it is there. It is drawn over the card that hides
    it and never takes a click. */
+/* Keyboard selection dims output without changing any card geometry. */
+.terminal-picker-ghost .term-preview-box {{
+    opacity: 0.60;
+}}
+.terminal-picker-overlay {{
+    color: {bright_foreground};
+}}
 .term-overlap-ghost {{
     border: 2px dotted {overlap_ghost_border};
     border-radius: 14px;

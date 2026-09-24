@@ -315,6 +315,7 @@ pub struct SuperDesktopWindow {
     /// After a new harness is spawned, hover-raise on other cards is ignored
     /// until this hold expires so the pointer path cannot bury the new card.
     hover_raise_lock: HoverRaiseLock,
+    terminal_picker: RefCell<Option<Rc<crate::terminal_picker::Picker>>>,
 }
 
 impl SuperDesktopWindow {
@@ -632,6 +633,7 @@ impl SuperDesktopWindow {
             ws_bar: workspace_bar.clone(),
             show_token: std::cell::Cell::new(0),
             hover_raise_lock: HoverRaiseLock::new(),
+            terminal_picker: RefCell::new(None),
         });
 
         // The overlay is OnDemand so an unfocused HUD does not eat desktop
@@ -881,6 +883,26 @@ impl SuperDesktopWindow {
         root_overlay.add_overlay(&pairing_wizard.widget);
         // Last: a request is decided above whatever else is open.
         root_overlay.add_overlay(&pairing_requests.widget);
+
+        let picker_window = Rc::downgrade(&win_rc);
+        let picker = crate::terminal_picker::Picker::install(&win_rc.window, &root_overlay, Rc::new(move || {
+            let Some(window) = picker_window.upgrade() else { return Vec::new(); };
+            if window.overlay_panels.iter().any(|panel| panel.is_visible())
+                || window.pairing_requests.is_open() || window.pairing_wizard.is_open() {
+                return Vec::new();
+            }
+            let cards = if window.machine_view.is_remote() {
+                window.machine_view.keyboard_cards()
+            } else {
+                window.terminal_cards.borrow().clone()
+            };
+            cards.into_iter().map(|card| crate::terminal_picker::Target {
+                widget: card.container.clone().upcast(),
+                digit: card.keyboard_digit.get(),
+                activate: Rc::new(move || card.select_with_keyboard()),
+            }).collect()
+        }));
+        *win_rc.terminal_picker.borrow_mut() = Some(picker);
 
         // Esc key
         let key_ctrl = EventControllerKey::new();
@@ -1601,6 +1623,9 @@ impl SuperDesktopWindow {
             crate::card_source::CardSource::Local,
         );
         let card = Rc::new(card);
+        card.keyboard_digit.set(crate::terminal_picker::next_digit(
+            term_cards.borrow().iter().filter_map(|card| card.keyboard_digit.get())
+        ));
         canvas.put(&card.container, x, y);
         if save {
             card.focus_terminal();
@@ -1705,6 +1730,7 @@ impl SuperDesktopWindow {
     }
 
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
+        if let Some(picker) = self.terminal_picker.borrow().as_ref() { picker.cancel(); }
         self.machine_view.dismiss();
         // Outlines describe rest positions, so they go away with the cards.
         self.ghosts.suspend();

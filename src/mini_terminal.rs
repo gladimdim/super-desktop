@@ -346,8 +346,10 @@ pub struct MiniTerminalCard {
     session_task: Arc<crate::session_task::SessionTask>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
+    on_raise: Rc<dyn Fn(gtk4::Widget)>,
     on_session_persist: Rc<dyn Fn(&TerminalData)>,
     hover_lock: HoverRaiseLock,
+    pub keyboard_digit: Cell<Option<u8>>,
     /// Pointer and typing signals for the overlap ghosts (`user_is_active`).
     activity: Rc<CardActivity>,
     /// Who runs this card's session: this machine's tmux, or a host that
@@ -443,7 +445,7 @@ impl MiniTerminalCard {
         let on_drag_end = Rc::new(on_drag_end);
         let on_resize_ghost = Rc::new(on_resize_ghost);
         let on_resize_end = Rc::new(on_resize_end);
-        let on_raise_rc = Rc::new(on_raise);
+        let on_raise_rc: Rc<dyn Fn(gtk4::Widget)> = Rc::new(on_raise);
         // Pointer and typing attention on this card, for the overlap ghosts
         // (`user_is_active`). The callback tells the overlay to redraw them.
         let activity = Rc::new(CardActivity::new(Rc::new(on_interaction)));
@@ -826,8 +828,10 @@ impl MiniTerminalCard {
             vte,
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
+            on_raise: Rc::clone(&on_raise_rc),
             on_session_persist: Rc::clone(&on_session_persist),
             hover_lock: hover_lock.clone(),
+            keyboard_digit: Cell::new(None),
             activity,
             source,
             remote,
@@ -1384,6 +1388,17 @@ impl MiniTerminalCard {
         };
         commit(rect);
         true
+    }
+
+    /// An explicit keyboard selection restores compact cards and protects the
+    /// selected terminal from the pointer left over a different card.
+    pub fn select_with_keyboard(&self) {
+        self.set_iconified(false);
+        let session = self.data.borrow().session_name.clone();
+        self.hover_lock.lock_for(&session, Duration::from_secs(1));
+        self.hover_lock.note_hover(&session, &self.container);
+        (self.on_raise)(self.container.clone().upcast());
+        self.focus_terminal();
     }
 
     pub fn focus_terminal(&self) {
@@ -2149,7 +2164,7 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
 ) where
     FUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
     FEnd: Fn(gtk4::Widget, &TerminalData) + 'static,
-    FRaise: Fn(gtk4::Widget) + 'static,
+    FRaise: Fn(gtk4::Widget) + 'static + ?Sized,
 {
     let drag = GestureDrag::new();
     let start_pos = Rc::new(RefCell::new((0.0, 0.0)));

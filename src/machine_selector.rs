@@ -289,6 +289,10 @@ impl MachineView {
         });
         view
     }
+    pub fn keyboard_cards(&self) -> Vec<Rc<crate::mini_terminal::MiniTerminalCard>> {
+        self.canvas.keyboard_cards()
+    }
+
     pub fn is_remote(&self) -> bool {
         self.selection.borrow().request().is_some()
     }

@@ -397,6 +397,14 @@ impl RemoteCanvas {
         }
     }
 
+    /// Stable id order; raising a card must not renumber keyboard shortcuts.
+    pub fn keyboard_cards(&self) -> Vec<Rc<MiniTerminalCard>> {
+        let cards = self.cards.borrow();
+        let mut ids: Vec<_> = cards.keys().collect();
+        ids.sort();
+        ids.into_iter().filter_map(|id| cards.get(id).cloned()).collect()
+    }
+
     /// The workspace revision this view last held. A folder change is judged
     /// against it, because the folder is one field of the workspace.
     pub fn snapshot_revision(&self) -> Option<u64> {
@@ -864,6 +872,9 @@ impl RemoteCanvas {
                 card_id: id,
                 scale,
             },
+        ));
+        card.keyboard_digit.set(crate::terminal_picker::next_digit(
+            self.cards.borrow().values().filter_map(|card| card.keyboard_digit.get())
         ));
         *slot.borrow_mut() = Some(Rc::clone(&card));
         card
