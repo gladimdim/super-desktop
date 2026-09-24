@@ -6,3 +6,5 @@ __pycache__/
 *.sock
 target/
 .reasonix
+# Local terminal captures from tests/harness_phone_matrix.py (tests skip without them)
+tests/fixtures/status-frames/

@@ -98,7 +98,7 @@ test("OpenCode background sessions cannot claim a card; latest explicit selectio
     const event = (type, properties) => hooks.event({event:{type,properties}});
     await event("session.created", {info:{id:"background",title:"Unrelated"}});
     await event("session.updated", {info:{id:"background",title:"Renamed"}});
-    assert.equal(f.events().length, 1, "only the initial unknown observation");
+    assert.equal(f.events().length, 1, "only the initial idle observation");
     const slow = event("tui.session.select", {sessionID:"slow"});
     await event("tui.session.select", {sessionID:"chosen"});
     finishSlow({data:{id:"slow",title:"Stale"}});
@@ -109,6 +109,42 @@ test("OpenCode background sessions cannot claim a card; latest explicit selectio
     const count = f.events().length;
     await event("session.status", {sessionID:"chosen",status:{type:"busy"}});
     assert.equal(f.events().length, count);
+  } finally { f.close(); }
+});
+
+test("OpenCode starts idle and reports a selected session's own server status", async () => {
+  const f = fixture();
+  try {
+    let busy = {};
+    const client = {session:{get:async ({path:{id}}) => ({data:{id,title:"New session - 2026-09-24T17:17:47.798Z"}}),
+      status:async () => ({data:busy})}};
+    const hooks = await SuperDesktop({client});
+    const event = (type, properties) => hooks.event({event:{type,properties}});
+    // A fresh process has no turn in flight: IDLE before any prompt.
+    assert.deepEqual(f.events(), [{status:"idle", emitter:f.events()[0].emitter}]);
+    await event("tui.session.select", {sessionID:"resumed"});
+    assert.equal(f.events().at(-1).status, "idle");
+    assert.equal(f.events().at(-1).session, "resumed");
+    busy = {other:{type:"idle"}, running:{type:"busy"}};
+    await event("tui.session.select", {sessionID:"running"});
+    assert.equal(f.events().at(-1).status, "working");
+    // Malformed or failing lookups never guess.
+    for (const bad of [async () => ({}), async () => ({data:[]}), async () => { throw new Error("offline"); }]) {
+      client.session.status = bad;
+      const count = f.events().length;
+      await event("tui.session.select", {sessionID:`bad${count}`});
+      assert.notEqual(f.events().at(-1).status, "idle");
+      assert.notEqual(f.events().at(-1).status, "working");
+    }
+    // A status event that lands while the lookup runs wins.
+    let finish;
+    client.session.status = () => new Promise(resolve => { finish = resolve; });
+    const pending = event("tui.session.select", {sessionID:"race"});
+    await new Promise(resolve => setImmediate(resolve));
+    await event("session.status", {sessionID:"race",status:{type:"busy"}});
+    finish({data:{}});
+    await pending;
+    assert.equal(f.events().at(-1).status, "working");
   } finally { f.close(); }
 });
 

@@ -64,14 +64,7 @@ impl CustomHarness {
         if !Path::new(&self.executable).is_absolute() || self.executable.len() > 4096 {
             return Err("Enter an absolute executable path".into());
         }
-        if self.arguments.len() > 32
-            || self
-                .arguments
-                .iter()
-                .any(|arg| arg.len() > 1024 || arg.chars().any(char::is_control))
-        {
-            return Err("Use at most 32 arguments of up to 1024 characters each".into());
-        }
+        crate::launch_args::validate(&self.arguments)?;
         if !self.available() {
             return Err("The path is not an executable file".into());
         }

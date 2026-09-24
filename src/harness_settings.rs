@@ -50,6 +50,7 @@ enum SettingsPage {
     Shortcut,
     Harnesses,
     CustomHarness,
+    HarnessArgs,
     TopBar,
     SleepLock,
     Connections(ConnectionPage),
@@ -210,8 +211,8 @@ fn paint_size_button(btn: &Button, selected: bool) {
     }
 }
 
-/// One `[logo] name …… resolved command [ON/OFF]` row.
-fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
+/// One `[logo] name …… resolved command [Parameters] [ON/OFF]` row.
+fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button, Button) {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("harness-row");
 
@@ -244,13 +245,20 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button) {
     cmd.set_valign(Align::Center);
     row.append(&cmd);
 
+    let params = Button::with_label("Parameters");
+    params.add_css_class("launcher-btn");
+    params.add_css_class("harness-params");
+    params.set_valign(Align::Center);
+    params.set_tooltip_text(Some("Edit the parameters new cards start with"));
+    row.append(&params);
+
     let btn = Button::new();
     btn.add_css_class("harness-toggle");
     btn.set_valign(Align::Center);
     btn.set_tooltip_text(Some("Show / hide this harness in the top bar"));
     row.append(&btn);
 
-    (row, btn)
+    (row, params, btn)
 }
 
 fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Button, Button) {
@@ -691,6 +699,91 @@ pub fn build_harness_settings_panel(
         });
     }
 
+    // ---- starting parameters of one built-in harness ----
+    let args_root = Box::new(Orientation::Vertical, 10);
+    args_root.add_css_class("launcher-body");
+    let (_, args_body) = section_card(&args_root, "", "Starting parameters");
+    let args_help = Label::new(None);
+    args_help.add_css_class("launcher-hint");
+    args_help.set_xalign(0.0);
+    args_help.set_wrap(true);
+    args_body.append(&args_help);
+    let args_default = Label::new(None);
+    args_default.add_css_class("launcher-hint");
+    args_default.add_css_class("harness-args-default");
+    args_default.set_xalign(0.0);
+    args_default.set_wrap(true);
+    args_default.set_selectable(true);
+    args_body.append(&args_default);
+    let args_status = Label::new(None);
+    args_status.add_css_class("launcher-note");
+    args_status.add_css_class("launcher-note-error");
+    args_status.add_css_class("harness-args-error");
+    args_status.set_xalign(0.0);
+    args_status.set_wrap(true);
+    args_status.set_visible(false);
+    args_body.append(&args_status);
+    let args_entry = gtk4::Entry::new();
+    args_entry.set_placeholder_text(Some("No parameters"));
+    args_entry.add_css_class("ws-entry");
+    args_entry.add_css_class("harness-args-entry");
+    args_body.append(&args_entry);
+    let args_preview = Label::new(None);
+    args_preview.add_css_class("launcher-status-text");
+    args_preview.add_css_class("harness-args-preview");
+    args_preview.set_xalign(0.0);
+    args_preview.set_wrap(true);
+    args_preview.set_wrap_mode(pango::WrapMode::WordChar);
+    args_preview.set_selectable(true);
+    args_body.append(&args_preview);
+    let args_actions = Box::new(Orientation::Horizontal, 8);
+    let btn_save_args = Button::with_label("Save parameters");
+    btn_save_args.add_css_class("launcher-btn");
+    btn_save_args.add_css_class("launcher-btn-primary");
+    let btn_default_args = Button::with_label("Use built-in default");
+    btn_default_args.add_css_class("launcher-btn");
+    let btn_cancel_args = Button::with_label("Cancel");
+    btn_cancel_args.add_css_class("launcher-btn");
+    args_actions.append(&btn_save_args);
+    args_actions.append(&btn_default_args);
+    args_actions.append(&btn_cancel_args);
+    args_body.append(&args_actions);
+    let args_note = Label::new(Some(
+        "New cards started from the top bar, the phone or another PC use these parameters. Open cards keep their command; restored cards keep theirs and gain parameters added here. Built-in defaults include the display modes the phone needs for scrollback, such as Codex's --no-alt-screen: removing one can hide history on Android.",
+    ));
+    args_note.add_css_class("launcher-hint");
+    args_note.set_xalign(0.0);
+    args_note.set_wrap(true);
+    args_body.append(&args_note);
+    // The built-in harness whose parameters the page is showing.
+    let editing_args: Rc<Cell<Option<&'static str>>> = Rc::new(Cell::new(None));
+    let paint_args_preview: Rc<dyn Fn()> = {
+        let entry = args_entry.clone();
+        let preview = args_preview.clone();
+        let editing = Rc::clone(&editing_args);
+        Rc::new(move || {
+            let Some(key) = editing.get() else { return };
+            match crate::launch_args::parse(&entry.text()) {
+                Ok(args) => preview.set_text(&format!(
+                    "Starts: {}",
+                    crate::tmux::harness_command_with(key, &args).unwrap_or_default()
+                )),
+                Err(error) => preview.set_text(&error),
+            }
+        })
+    };
+    args_entry.connect_changed({
+        let status = args_status.clone();
+        let subtitle = subtitle.clone();
+        let paint = Rc::clone(&paint_args_preview);
+        move |entry| {
+            entry.remove_css_class("ws-entry-invalid");
+            status.set_visible(false);
+            subtitle.remove_css_class("launcher-note-error");
+            paint();
+        }
+    });
+
     let note = Label::new(Some(
         "Hiding a launcher only removes its top-bar button; it does not remove the executable or saved configuration.",
     ));
@@ -819,6 +912,7 @@ pub fn build_harness_settings_panel(
     let shortcut_view = settings_scroll(&shortcut_root);
     let harnesses_view = settings_scroll(&harnesses_root);
     let custom_view = settings_scroll(&custom_root);
+    let args_view = settings_scroll(&args_root);
     let top_bar_view = settings_scroll(&top_bar_root);
     let sleep_view = settings_scroll(&sleep_root);
 
@@ -855,6 +949,8 @@ pub fn build_harness_settings_panel(
         view.set_visible(false);
     }
     pages.append(&sleep_view);
+    pages.append(&args_view);
+    args_view.set_visible(false);
     shortcut_view.set_visible(false);
     harnesses_view.set_visible(false);
     custom_view.set_visible(false);
@@ -868,6 +964,7 @@ pub fn build_harness_settings_panel(
         let shortcut_view = shortcut_view.clone();
         let harnesses_view = harnesses_view.clone();
         let custom_view = custom_view.clone();
+        let args_view = args_view.clone();
         let top_bar_view = top_bar_view.clone();
         let connection_pages = Rc::clone(&connection_pages);
         let sleep_view = sleep_view.clone();
@@ -876,6 +973,7 @@ pub fn build_harness_settings_panel(
         let title = title.clone();
         let subtitle = subtitle.clone();
         let editing_custom = Rc::clone(&editing_custom);
+        let editing_args = Rc::clone(&editing_args);
         let current_page = Rc::clone(&current_page);
         Rc::new(move |page| {
             current_page.set(page);
@@ -884,6 +982,7 @@ pub fn build_harness_settings_panel(
             shortcut_view.set_visible(page == SettingsPage::Shortcut);
             harnesses_view.set_visible(page == SettingsPage::Harnesses);
             custom_view.set_visible(page == SettingsPage::CustomHarness);
+            args_view.set_visible(page == SettingsPage::HarnessArgs);
             top_bar_view.set_visible(page == SettingsPage::TopBar);
             for (connection, view) in connection_pages.widgets() {
                 view.set_visible(page == SettingsPage::Connections(connection));
@@ -895,7 +994,7 @@ pub fn build_harness_settings_panel(
             }
             btn_back.set_visible(page != SettingsPage::Home);
             btn_back.set_tooltip_text(Some(match page {
-                SettingsPage::CustomHarness => "Back to harness launchers",
+                SettingsPage::CustomHarness | SettingsPage::HarnessArgs => "Back to harness launchers",
                 SettingsPage::Connections(ConnectionPage::Invite) => "Back to Add a device",
                 SettingsPage::Connections(ConnectionPage::Overview) => "Back to settings",
                 SettingsPage::Connections(_) => "Back to Connections",
@@ -922,6 +1021,12 @@ pub fn build_harness_settings_panel(
                     badge.set_label("＋");
                     title.set_label(if editing_custom.borrow().is_some() { "Edit harness" } else { "Add a harness" });
                     subtitle.set_label("Icon · name · executable · arguments");
+                }
+                SettingsPage::HarnessArgs => {
+                    let name = editing_args.get().map_or("Harness", |key| crate::tmux::get_agent_config(key).name);
+                    badge.set_label("⌘");
+                    title.set_label(&format!("{name} parameters"));
+                    subtitle.set_label("What new cards start with");
                 }
                 SettingsPage::TopBar => {
                     badge.set_label("▤");
@@ -987,7 +1092,7 @@ pub fn build_harness_settings_panel(
         let refresh = Rc::clone(&firewall_notice_refresh);
         let current_page = Rc::clone(&current_page);
         move |_| match current_page.get() {
-            SettingsPage::CustomHarness => nav(SettingsPage::Harnesses),
+            SettingsPage::CustomHarness | SettingsPage::HarnessArgs => nav(SettingsPage::Harnesses),
             SettingsPage::Connections(page) if page.parent().is_some() => {
                 nav(SettingsPage::Connections(page.parent().unwrap_or(ConnectionPage::Overview)))
             }
@@ -1011,6 +1116,85 @@ pub fn build_harness_settings_panel(
         }
     });
     btn_cancel_custom.connect_clicked({
+        let nav = Rc::clone(&nav);
+        move |_| nav(SettingsPage::Harnesses)
+    });
+
+    let open_args: Rc<dyn Fn(&'static str)> = {
+        let editing = Rc::clone(&editing_args);
+        let help = args_help.clone();
+        let default = args_default.clone();
+        let entry = args_entry.clone();
+        let status = args_status.clone();
+        let paint = Rc::clone(&paint_args_preview);
+        let nav = Rc::clone(&nav);
+        Rc::new(move |key| {
+            editing.set(Some(key));
+            help.set_text(&format!(
+                "Added after the {} command when a new card starts. Quotes keep words together, and every word is passed as typed (no ~ or $VARIABLE expansion). An empty field starts it with no parameters.",
+                crate::tmux::get_agent_config(key).name,
+            ));
+            let builtin = crate::launch_args::builtin(key);
+            default.set_text(&if builtin.is_empty() {
+                "Built-in default: none".to_string()
+            } else {
+                format!("Built-in default: {}", crate::launch_args::display(&builtin))
+            });
+            entry.set_text(&crate::launch_args::display(&crate::launch_args::effective(key)));
+            entry.remove_css_class("ws-entry-invalid");
+            status.set_visible(false);
+            paint();
+            nav(SettingsPage::HarnessArgs);
+            entry.grab_focus();
+        })
+    };
+    btn_save_args.connect_clicked({
+        let state = Rc::clone(&state);
+        let editing = Rc::clone(&editing_args);
+        let entry = args_entry.clone();
+        let status = args_status.clone();
+        let subtitle = subtitle.clone();
+        let nav = Rc::clone(&nav);
+        let refresh = Rc::downgrade(&refresh_custom);
+        move |_| {
+            let Some(key) = editing.get() else { return };
+            match crate::launch_args::parse(&entry.text()) {
+                Ok(args) => {
+                    let snapshot = {
+                        let mut s = state.borrow_mut();
+                        crate::launch_args::store(&mut s.harness_args, key, args);
+                        crate::launch_args::install(&s.harness_args);
+                        s.clone()
+                    };
+                    crate::state::save_state_async(snapshot);
+                    if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
+                    nav(SettingsPage::Harnesses);
+                }
+                Err(error) => {
+                    status.set_text(&error);
+                    status.set_visible(true);
+                    subtitle.set_label(&error);
+                    subtitle.add_css_class("launcher-note-error");
+                    entry.add_css_class("ws-entry-invalid");
+                    entry.grab_focus();
+                }
+            }
+        }
+    });
+    args_entry.connect_activate({
+        let save = btn_save_args.clone();
+        move |_| save.emit_clicked()
+    });
+    btn_default_args.connect_clicked({
+        let editing = Rc::clone(&editing_args);
+        let entry = args_entry.clone();
+        move |_| {
+            if let Some(key) = editing.get() {
+                entry.set_text(&crate::launch_args::display(&crate::launch_args::builtin(key)));
+            }
+        }
+    });
+    btn_cancel_args.connect_clicked({
         let nav = Rc::clone(&nav);
         move |_| nav(SettingsPage::Harnesses)
     });
@@ -1279,6 +1463,7 @@ pub fn build_harness_settings_panel(
 
     // Re-detect and rebuild the rows; the overlay calls this on every open.
     let refresh: Rc<dyn Fn()> = {
+        let open_args = Rc::clone(&open_args);
         let rows = rows.clone();
         let rescan_status = rescan_status.clone();
         let missing_rows = missing_rows.clone();
@@ -1332,7 +1517,8 @@ pub fn build_harness_settings_panel(
                     key, name: cfg.name, icon: cfg.icon,
                     command: format!("Not installed · {}", cfg.commands[0]),
                 };
-                let (row, toggle) = harness_row(&info, light_theme);
+                let (row, params, toggle) = harness_row(&info, light_theme);
+                row.remove(&params);
                 row.remove(&toggle);
                 missing_rows.append(&row);
                 missing += 1;
@@ -1340,7 +1526,12 @@ pub fn build_harness_settings_panel(
             missing_count.set_text(&missing.to_string());
 
             for info in &detected {
-                let (row, btn) = harness_row(info, light_theme);
+                let (row, params, btn) = harness_row(info, light_theme);
+                params.connect_clicked({
+                    let open = Rc::clone(&open_args);
+                    let key = info.key;
+                    move |_| open(key)
+                });
                 let key = info.key.to_string();
                 let order = Rc::clone(&order);
                 let selection = Rc::clone(&selection);
@@ -1712,6 +1903,124 @@ mod tests {
         std::fs::remove_dir_all(home).unwrap();
     }
 
+    /// The Parameters button of the installed built-in harness called `name`.
+    fn params_button(panel: &gtk4::Widget, name: &str) -> Button {
+        let row = harness_row_named(panel, name);
+        find_buttons(&row, "harness-params").remove(0)
+    }
+
+    fn harness_row_named(panel: &gtk4::Widget, name: &str) -> gtk4::Widget {
+        find_widgets(panel, "harness-row")
+            .into_iter()
+            .find(|row| {
+                find_widgets(row, "harness-name")
+                    .iter()
+                    .any(|label| label.downcast_ref::<Label>().is_some_and(|l| l.text() == name))
+            })
+            .unwrap_or_else(|| panic!("no launcher row for {name}"))
+    }
+
+    #[test]
+    fn built_in_parameters_replace_defaults_and_reach_new_launches() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process(
+                "harness_settings::tests::built_in_parameters_replace_defaults_and_reach_new_launches",
+            );
+            return;
+        }
+        gtk4::init().unwrap();
+        let home = std::env::temp_dir().join(format!("sd-params-ui-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::env::set_var("HOME", &home);
+        // Aider stands in for any harness with built-in defaults; the stub gets
+        // it detected whether or not the real CLI is installed.
+        let stub = bin.join("aider");
+        std::fs::write(&stub, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let aider = crate::tmux::detect_harness_command("aider").unwrap()
+            .strip_suffix(" --yes-always").unwrap().to_string();
+        let state = Rc::new(RefCell::new(AppState::default()));
+        let panel = build_harness_settings_panel(
+            Rc::clone(&state),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        let pages = find_widgets(&panel.widget, "harness-page");
+        let (harnesses, args_page) = (pages[2].clone(), pages.last().unwrap().clone());
+        let entry = find_widgets(&panel.widget, "harness-args-entry")[0].clone()
+            .downcast::<gtk4::Entry>().unwrap();
+        let label = |class: &str| find_widgets(&panel.widget, class)[0].clone().downcast::<Label>().unwrap();
+        let (preview, default, error) =
+            (label("harness-args-preview"), label("harness-args-default"), label("harness-args-error"));
+        let button = |text: &str| find_buttons(&args_page, "launcher-btn").into_iter()
+            .find(|button| button.label().as_deref() == Some(text)).unwrap();
+        let row_command = || find_widgets(&harness_row_named(&panel.widget, "Aider"), "harness-cmd")[0]
+            .clone().downcast::<Label>().unwrap().text().to_string();
+
+        params_button(&panel.widget, "Aider").emit_clicked();
+        assert!(shown(&args_page));
+        assert_eq!(title_text(&panel.widget), "Aider parameters");
+        assert_eq!(default.text(), "Built-in default: --yes-always");
+        assert_eq!(entry.text(), "--yes-always");
+        entry.set_text("--model \"gpt 5\" --no-auto-commits");
+        assert_eq!(preview.text(), format!("Starts: {aider} --model 'gpt 5' --no-auto-commits"));
+        entry.set_text("--model 'gpt");
+        button("Save parameters").emit_clicked();
+        assert!(shown(&args_page), "invalid parameters keep the page open");
+        assert!(error.is_visible());
+        assert_eq!(error.text(), "Parameters have an unmatched quote");
+        assert!(entry.has_css_class("ws-entry-invalid"));
+        assert!(state.borrow().harness_args.is_empty());
+
+        // An empty field replaces the defaults: no parameters at all, and a
+        // restored card does not get the dropped flag back.
+        entry.set_text("");
+        assert!(!error.is_visible());
+        assert!(!entry.has_css_class("ws-entry-invalid"));
+        button("Save parameters").emit_clicked();
+        assert!(shown(&harnesses));
+        assert_eq!(state.borrow().harness_args["aider"], Vec::<String>::new());
+        assert_eq!(crate::tmux::resolve_command("aider", None), aider);
+        assert_eq!(crate::tmux::resolve_command("aider", Some("/opt/aider")), "/opt/aider");
+        assert_eq!(row_command(), aider);
+        crate::state::flush_state_saves();
+        assert_eq!(crate::state::load_state().harness_args["aider"], Vec::<String>::new());
+
+        // Enter saves. New launches use the saved words; a restored card keeps
+        // its own value and gains only what it lacks.
+        params_button(&panel.widget, "Aider").emit_clicked();
+        assert_eq!(entry.text(), "");
+        entry.set_text("--model 'gpt 5'");
+        entry.emit_activate();
+        assert!(shown(&harnesses));
+        assert_eq!(crate::tmux::resolve_command("aider", None), format!("{aider} --model 'gpt 5'"));
+        assert_eq!(crate::tmux::resolve_command("aider", Some("/opt/aider --model x")), "/opt/aider --model x");
+        assert_eq!(crate::tmux::resolve_command("aider", Some("/opt/aider")), "/opt/aider --model 'gpt 5'");
+        assert_eq!(row_command(), format!("{aider} --model 'gpt 5'"));
+
+        // Back to the built-in default: nothing stays pinned in state.
+        params_button(&panel.widget, "Aider").emit_clicked();
+        button("Use built-in default").emit_clicked();
+        assert_eq!(entry.text(), "--yes-always");
+        button("Save parameters").emit_clicked();
+        assert!(!state.borrow().harness_args.contains_key("aider"));
+        assert_eq!(crate::tmux::resolve_command("aider", None), format!("{aider} --yes-always"));
+        crate::state::flush_state_saves();
+        assert!(crate::state::load_state().harness_args.is_empty());
+
+        params_button(&panel.widget, "Aider").emit_clicked();
+        entry.set_text("--changed");
+        button("Cancel").emit_clicked();
+        assert!(shown(&harnesses), "cancel returns to the launcher list");
+        assert!(state.borrow().harness_args.is_empty());
+        assert_eq!(params_button(&panel.widget, "Terminal").label().as_deref(), Some("Parameters"));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn test_resolve_visible_filters_to_detection_in_detection_order() {
         let detected = vec![info("claude"), info("codex"), info("shell")];
@@ -1790,18 +2099,19 @@ mod tests {
         let pages = find_widgets(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            13,
-            "hub + four destinations + custom harness page + seven Connections pages"
+            14,
+            "hub + four destinations + custom harness page + seven Connections pages + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
         // hub, shortcut, harnesses, custom, top bar,
-        // overview, add, invitation, PCs, phones, rejected, network, sleep
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1]);
+        // overview, add, invitation, PCs, phones, rejected, network, sleep,
+        // harness parameters
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 16);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 17);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.

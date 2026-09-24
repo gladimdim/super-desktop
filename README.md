@@ -279,6 +279,20 @@ add a button to this PC's top bar. You can edit, hide, or remove it from the
 same list. Its command runs in the selected workspace
 folder; a connected PC can launch it only while this PC offers it.
 
+Every installed built-in harness, Terminal included, has a **Parameters**
+button in the same list. Its page shows the built-in defaults (Claude Code's
+`--dangerously-skip-permissions`, Codex's `--no-alt-screen
+--dangerously-bypass-approvals-and-sandbox`, …) and previews the command a new
+card will run. Add flags such as `--model opus`, or remove ones you do not want:
+saved parameters replace the built-in defaults, an empty field starts the
+harness with none, and **Use built-in default** brings them back. Quote words
+that contain spaces; `~` and `$VARIABLES` are passed as typed, not expanded.
+New cards started from the top bar, the phone or another PC use these
+parameters. Open cards keep their command, and restored cards keep theirs while
+gaining parameters you add. Keep display-mode defaults such as Codex's
+`--no-alt-screen` if you follow that harness from the phone: they are what puts
+its history into scrollback.
+
 ### Keybindings
 
 | Combo | Action |

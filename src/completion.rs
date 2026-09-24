@@ -51,8 +51,19 @@ fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
                 state = "working";
                 completed = None;
             }
-            Some("turn_aborted" | "task_failed" | "error") => {
+            // An interrupted turn says nothing about the next state.
+            Some("turn_aborted") => {
                 state = "unknown";
+                completed = None;
+            }
+            // Explicit turn failures (Codex >= 0.1xx reports a usage limit as
+            // `task_complete` with an `error` object and no final message).
+            Some("task_failed" | "error") => {
+                state = "error";
+                completed = None;
+            }
+            Some("task_complete") if event["error"].is_object() => {
+                state = "error";
                 completed = None;
             }
             Some("task_complete") => {
@@ -414,8 +425,11 @@ pub(crate) fn inspect(id: &str, pid: u32) -> Completion {
 pub fn collect(ids: &[String]) -> Vec<Completion> {
     let state = crate::state::load_state();
     // One inventory call, no capture-pane, prompt inspection, or terminal stream changes.
+    // The metadata option comes from the same listing: a per-session
+    // `show-options -t =<session>` names a pane target, which tmux rejects
+    // ("no such session"), so native adapters were never reported.
     let output = std::process::Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
+        .args(["list-panes", "-a", "-F", PANE_LISTING])
         .output();
     let panes = output
         .ok()
@@ -427,20 +441,13 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
             let Some(terminal) = state.terminals.iter().find(|t| &t.session_name == id) else {
                 return unknown(id);
             };
-            let pids: Vec<u32> = panes
-                .lines()
-                .filter_map(|line| {
-                    let (session, pid) = line.split_once(' ')?;
-                    (session == id).then(|| pid.parse().ok()).flatten()
-                })
-                .collect();
-            if pids.len() == 1 {
+            if let [(pid, option)] = session_panes(&panes, id)[..] {
                 if terminal.agent_type == "codex" {
-                    inspect(id, pids[0])
+                    api_state(inspect(id, pid))
                 } else if let Some(metadata) =
-                    crate::harness_metadata::inspect(id, &terminal.agent_type)
+                    crate::harness_metadata::inspect_option(&terminal.agent_type, option)
                 {
-                    if crate::harness_metadata::owns_pane(&metadata, pids[0]) {
+                    if crate::harness_metadata::owns_pane(&metadata, pid) {
                         native_completion(id, &metadata)
                     } else {
                         unknown(id)
@@ -451,6 +458,34 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
             } else {
                 unknown(id)
             }
+        })
+        .collect()
+}
+
+/// The completions API only reports `working`, `completed` or `unknown`; a
+/// failed turn (shown as ERROR on cards) is not a completion.
+fn api_state(mut completion: Completion) -> Completion {
+    if completion.state == "error" {
+        completion.state = "unknown".into();
+    }
+    completion
+}
+
+/// `list-panes -a` format: session, pane PID and the launch's metadata option,
+/// separated by US (absent from session names, PIDs and our metadata paths).
+const PANE_LISTING: &str = "#{session_name}\u{1f}#{pane_pid}\u{1f}#{@super_desktop_metadata}";
+
+/// Every pane of `id` in a `PANE_LISTING` listing: (pane PID, metadata option).
+/// More than one pane means the session is ambiguous; callers require exactly one.
+fn session_panes<'a>(listing: &'a str, id: &str) -> Vec<(u32, &'a str)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\u{1f}');
+            if fields.next()? != id {
+                return None;
+            }
+            Some((fields.next()?.trim().parse().ok()?, fields.next().unwrap_or("").trim()))
         })
         .collect()
 }
@@ -480,6 +515,22 @@ fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> 
 mod tests {
     use super::*;
     #[test]
+    fn pane_listing_carries_each_sessions_metadata_option() {
+        let listing = "sd_term_a\u{1f}101\u{1f}/state/harness/sd_term_a-1.json\n\
+                       sd_term_ab\u{1f}102\u{1f}/state/harness/sd_term_ab-1.json\n\
+                       sd_term_split\u{1f}103\u{1f}\n\
+                       sd_term_split\u{1f}104\u{1f}\n\
+                       sd_term_plain\u{1f}105\u{1f}\n";
+        assert_eq!(session_panes(listing, "sd_term_a"), vec![(101, "/state/harness/sd_term_a-1.json")]);
+        // Exact names only, and a session without the option has an empty one.
+        assert_eq!(session_panes(listing, "sd_term_plain"), vec![(105, "")]);
+        // Split panes stay ambiguous for the caller, missing sessions are empty.
+        assert_eq!(session_panes(listing, "sd_term_split").len(), 2);
+        assert!(session_panes(listing, "sd_term_missing").is_empty());
+        assert!(PANE_LISTING.contains("#{@super_desktop_metadata}"));
+    }
+
+    #[test]
     fn native_completion_never_promotes_idle_waits_or_errors_to_completed() {
         let mut metadata = crate::harness_metadata::Metadata {
             agent: "pi".into(),
@@ -506,6 +557,30 @@ mod tests {
     fn event(kind: &str) -> String {
         format!("{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"{kind}\"}}}}\n")
     }
+    /// Codex 0.14x usage-limit turn, as written to the rollout (sanitized).
+    const USAGE_LIMIT: &str = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-2\",\"last_agent_message\":null,\"error\":{\"message\":\"You\\u2019ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 30th, 2026 11:36 AM.\",\"codex_error_info\":\"usage_limit_exceeded\"},\"started_at\":1790269332,\"completed_at\":1790269333,\"duration_ms\":358}}\n";
+
+    #[test]
+    fn codex_failed_turns_are_errors_and_never_completions() {
+        let started = event("task_started");
+        let (state, id) = parse_tail(format!("{DONE}{started}{USAGE_LIMIT}").as_bytes(), "a");
+        assert_eq!((state.as_str(), id), ("error", None));
+        for kind in ["error", "task_failed"] {
+            assert_eq!(parse_tail(format!("{started}{}", event(kind)).as_bytes(), "a").0, "error");
+        }
+        // A new prompt after the failure is ordinary work again.
+        assert_eq!(parse_tail(format!("{USAGE_LIMIT}{}", event("user_message")).as_bytes(), "a").0, "working");
+        // Response text that merely mentions a limit is not an error.
+        let talk = DONE.replace("\"Done\"", "\"You hit the usage limit of the rate limit API\"");
+        assert_eq!(parse_tail(talk.as_bytes(), "a").0, "completed");
+        let message = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"agent_message\",\"message\":\"usage limit error\"}}\n";
+        assert_eq!(parse_tail(format!("{started}{message}").as_bytes(), "a").0, "working");
+        // An interrupt still reports UNKNOWN, and the phone API keeps its three states.
+        assert_eq!(parse_tail(format!("{started}{}", event("turn_aborted")).as_bytes(), "a").0, "unknown");
+        let failed = Completion { id: "t".into(), supported: true, state: "error".into(), completion_id: None };
+        assert_eq!(api_state(failed).state, "unknown");
+    }
+
     const DONE: &str = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\",\"last_agent_message\":\"Done\"}}\n";
     #[test]
     fn only_complete_responses_notify() {

@@ -35,6 +35,7 @@ mod remote_workspace;
 mod harness_settings;
 mod hotcorner;
 mod jev;
+mod launch_args;
 mod launcher_settings;
 mod mini_terminal;
 mod terminal_picker;
@@ -395,6 +396,8 @@ fn main() {
 fn run_daemon(start_visible: bool) {
     let initial_state = state::load_state();
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
+    // Before any card is restored: restores resolve through these too.
+    launch_args::install(&initial_state.harness_args);
     let _ = gtk4::init();
     startup::mark("GTK initialized");
 

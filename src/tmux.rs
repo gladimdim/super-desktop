@@ -131,9 +131,9 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
 
 /// `npx -y <package> <args…>`. `-y` keeps npx from stopping on its
 /// "Ok to proceed?" install prompt the first time the package is fetched.
-fn npx_fallback_command(package: &str, args: &[&str]) -> String {
+fn npx_fallback_command<S: AsRef<str>>(package: &str, args: &[S]) -> String {
     let mut parts = vec!["npx".to_string(), "-y".to_string(), package.to_string()];
-    parts.extend(args.iter().map(|a| (*a).to_string()));
+    parts.extend(args.iter().map(|a| crate::launch_args::quote(a.as_ref())));
     parts.join(" ")
 }
 
@@ -235,12 +235,11 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-fn with_default_args(path: &str, args: &[&str]) -> String {
-    if args.is_empty() {
-        path.to_string()
-    } else {
-        format!("{} {}", path, args.join(" "))
-    }
+fn with_default_args<S: AsRef<str>>(path: &str, args: &[S]) -> String {
+    std::iter::once(path.to_string())
+        .chain(args.iter().map(|arg| crate::launch_args::quote(arg.as_ref())))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Command to launch `key` here, or `None` when nothing resolves — i.e. the
@@ -250,24 +249,30 @@ fn with_default_args(path: &str, args: &[&str]) -> String {
 /// the "nothing found" case instead of falling back to `$SHELL`, so the
 /// settings panel only ever offers harnesses that really exist.
 pub fn detect_harness_command(key: &str) -> Option<String> {
+    harness_command_with(key, &crate::launch_args::effective(key))
+}
+
+/// `detect_harness_command` with `args` as the starting parameters, for the
+/// settings preview of parameters that are not saved yet.
+pub fn harness_command_with(key: &str, args: &[String]) -> Option<String> {
     let cfg = get_agent_config(key);
 
     for cmd in harness_candidates(key) {
         if let Some(path) = which(cmd) {
-            return Some(with_default_args(&path, cfg.default_args));
+            return Some(with_default_args(&path, args));
         }
     }
     // Harnesses that commonly run through `npx` (Reasonix) are available as
     // soon as npx is, exactly like `resolve_command` assumes.
     if let Some(package) = cfg.npx_package {
         if which("npx").is_some() {
-            return Some(npx_fallback_command(package, cfg.default_args));
+            return Some(npx_fallback_command(package, args));
         }
     }
     if key == "shell" {
         if let Ok(shell) = std::env::var("SHELL") {
             if std::path::Path::new(&shell).is_file() {
-                return Some(shell);
+                return Some(with_default_args(&shell, args));
             }
         }
     }
@@ -347,18 +352,26 @@ pub fn parse_pane_grid(text: &str) -> Option<crate::desktop_protocol::TerminalSi
         .ok()
 }
 
+/// The command a card for `agent_type` runs: `custom` (a saved card command
+/// or a custom launcher) with any missing starting parameters added, or the
+/// installed binary with them. Starting parameters are the user's saved ones
+/// from Settings, else the built-in defaults (see `launch_args`).
 pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
+    resolve_command_with(agent_type, custom, &crate::launch_args::effective(agent_type))
+}
+
+fn resolve_command_with(agent_type: &str, custom: Option<&str>, args: &[String]) -> String {
     let cfg = get_agent_config(agent_type);
     if let Some(cmd) = custom {
         let trimmed = cmd.trim();
         if !trimmed.is_empty() && !is_shell_command(trimmed) {
-            return with_missing_default_args(agent_type, trimmed, cfg.default_args);
+            return with_missing_default_args(agent_type, trimmed, args);
         }
         return trimmed.to_string();
     }
     for cmd in cfg.commands {
         if let Some(path) = which(cmd) {
-            return with_default_args(&path, cfg.default_args);
+            return with_default_args(&path, args);
         }
     }
     // Harness that ships on npm but has no binary on PATH (e.g. Reasonix is
@@ -366,7 +379,7 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
     // silently degrading the card to a bare shell.
     if let Some(package) = cfg.npx_package {
         if which("npx").is_some() {
-            return npx_fallback_command(package, cfg.default_args);
+            return npx_fallback_command(package, args);
         }
     }
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
@@ -374,7 +387,7 @@ pub fn resolve_command(agent_type: &str, custom: Option<&str>) -> String {
 
 // Permission flags already present must not suppress a missing display-mode
 // default. Preserve explicit user mode overrides and never append to shell syntax.
-fn with_missing_default_args(agent: &str, command: &str, defaults: &[&str]) -> String {
+fn with_missing_default_args(agent: &str, command: &str, defaults: &[String]) -> String {
     let Some(words) = shlex::split(command) else { return command.to_string() };
     if words.iter().any(|word| matches!(word.as_str(), "|" | "||" | "&&" | ";")) {
         return command.to_string();
@@ -383,14 +396,17 @@ fn with_missing_default_args(agent: &str, command: &str, defaults: &[&str]) -> S
     let mut result = command.to_string();
     let mut i = 0;
     while i < defaults.len() {
-        let flag = defaults[i];
+        let flag = defaults[i].as_str();
         let value = defaults.get(i + 1).filter(|value| !value.starts_with('-'));
         let overridden = (agent == "grok" && flag == "--minimal" && has("--fullscreen"))
             || (agent == "hermes" && flag == "--cli" && has("--tui"));
         if !has(flag) && !overridden {
             result.push(' ');
-            result.push_str(flag);
-            if let Some(value) = value { result.push(' '); result.push_str(value); }
+            result.push_str(&crate::launch_args::quote(flag));
+            if let Some(value) = value {
+                result.push(' ');
+                result.push_str(&crate::launch_args::quote(value));
+            }
         }
         i += if value.is_some() { 2 } else { 1 };
     }
@@ -820,6 +836,8 @@ fn explicit_turn_status(state: &str) -> Option<(&'static str, &'static str)> {
     match state {
         "working" => Some(("WORKING", "● WORKING")),
         "completed" => Some(("FINISHED", "✓ FINISHED")),
+        // Same label as native adapters' `error` (harness_record::status).
+        "error" => Some(("ERROR", "⚠ ERROR")),
         _ => None,
     }
 }
@@ -836,11 +854,62 @@ fn screen_indicates_work(screen: &str, height: usize) -> bool {
         let interrupt = ["esc to cancel", "esc to interrupt", "ctrl+c to cancel", "ctrl+c to interrupt", "press esc to stop"];
         if interrupt.iter().any(|hint| text.starts_with(hint)) { return true; }
         if !decorated { return false; }
-        if interrupt.iter().any(|hint| text.contains(hint)) { return true; }
+        if interrupt.iter().chain(&["esc cancels"]).any(|hint| text.contains(hint)) { return true; }
+        if spinner && spinner_timer(&text) { return true; }
         ["thinking", "generating", "streaming", "working", "building", "compiling", "editing", "running", "analyzing"]
             .iter().any(|word| text.starts_with(&format!("{word}…")) || text.starts_with(&format!("{word}...")))
     });
     working
+}
+
+/// A braille spinner's activity label followed by its running elapsed timer:
+/// Grok `⠋ Waiting for response… 0.8s` / `⠋ Responding… 0.1s`, Reasonix
+/// `⣽  working · 0s · ↓2`. `text` is lowercased, without the spinner.
+fn spinner_timer(text: &str) -> bool {
+    let label_end = text.find(|c: char| !(c.is_alphabetic() || c == ' ')).unwrap_or(text.len());
+    let label = text[..label_end].trim();
+    if label.is_empty() || label.len() > 40 {
+        return false;
+    }
+    let rest = text[label_end..].trim_start_matches(['…', '.', ' ', '(', '·']);
+    // The timer is set off from the label (`…`, `·` or `(`), never plain prose.
+    let separator = &text[label_end..text.len() - rest.len()];
+    if !separator.contains(['…', '·', '(']) && !separator.contains("...") {
+        return false;
+    }
+    let digits = rest.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(rest.len());
+    if digits == 0 || !rest[..digits].starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let unit = &rest[digits..];
+    // `12s`, or minutes first as in `1m 5s`.
+    let unit = unit.strip_prefix('m').map(|after| after.trim_start()).map_or(unit, |after| {
+        after.trim_start_matches(|c: char| c.is_ascii_digit())
+    });
+    unit.strip_prefix('s')
+        .is_some_and(|after| after.is_empty() || after.starts_with([' ', ')', '·']))
+}
+
+/// Harness-specific in-progress indicators that are not spinner lines.
+fn agent_screen_indicates_work(agent_type: &str, screen: &str, height: usize) -> bool {
+    if screen_indicates_work(screen, height) {
+        return true;
+    }
+    match agent_type {
+        // Hermes (classic `--cli`) replaces its empty composer's placeholder
+        // while a turn runs, and marks a live turn's status-bar timer with ⏱.
+        "hermes" => {
+            let plain = strip_terminal_escapes(screen);
+            let lines: Vec<&str> = recent_status_lines(&plain, height).collect();
+            lines.iter().any(|line| {
+                let composer = line.trim_start_matches(['⚕', ' ']);
+                composer.strip_prefix('❯').is_some_and(|rest| {
+                    rest.trim_start().starts_with("msg=interrupt · /queue")
+                }) || (line.starts_with('⚕') && line.contains('│') && line.contains("│ ⏱ "))
+            })
+        }
+        _ => false,
+    }
 }
 
 fn resolve_effective_pid(pid_num: u32, is_shell_agent: bool) -> u32 {
@@ -1010,7 +1079,7 @@ pub fn status_for_pane(
 
     // Other agents use conservative visible status indicators. Child
     // process existence alone says nothing about a response in progress.
-    if screen().is_some_and(|text| screen_indicates_work(&text, row.height)) {
+    if screen().is_some_and(|text| agent_screen_indicates_work(agent_type, &text, row.height)) {
         return SessionStatus { status: "WORKING", label: "● WORKING", pid: display_pid, cmd: display_cmd, cwd };
     }
 
@@ -1956,13 +2025,40 @@ pub fn get_opencode_user_text_by_id(opencode_session_id: &str) -> Option<String>
 pub fn get_opencode_title_by_id(session_id: &str) -> Option<String> {
     let title = sqlite_query(&opencode_db_path()?, &format!(
         "SELECT title FROM session WHERE id = '{}' LIMIT 1;", sql_escape(session_id)))?;
-    let title = strip_terminal_escapes(&title).split_whitespace().collect::<Vec<_>>().join(" ");
+    opencode_db_title(&title)
+}
+
+/// A title read from OpenCode's database; its "New session - <timestamp>"
+/// placeholder is no title, so the card shows the submitted prompt instead.
+pub(crate) fn opencode_db_title(raw: &str) -> Option<String> {
+    let title = strip_terminal_escapes(raw).split_whitespace().collect::<Vec<_>>().join(" ");
+    if crate::harness_record::is_placeholder_title("opencode", &title) {
+        return None;
+    }
     (!title.is_empty()).then(|| title.chars().take(240).collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Driven by tests/harness_phone_matrix.py: launch one harness through the
+    /// desktop's own `create_session` (resolved command, default flags, shell
+    /// title and harness-metadata wrapper) inside the caller's private tmux
+    /// server. Does nothing unless the matrix provides its spec file.
+    #[test]
+    fn phone_matrix_launch() {
+        let Ok(spec) = std::env::var("SUPER_DESKTOP_PHONE_MATRIX_LAUNCH") else {
+            return;
+        };
+        let spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&spec).unwrap()).unwrap();
+        let agent = spec["agent"].as_str().unwrap();
+        let workspace = spec["workspace"].as_str();
+        let (session, command) = create_session(agent, None, workspace);
+        let reply = serde_json::json!({"session": session, "command": command});
+        std::fs::write(spec["out"].as_str().unwrap(), reply.to_string()).unwrap();
+    }
 
     #[test]
     fn unchanged_database_answers_without_a_sqlite_process() {
@@ -1996,6 +2092,7 @@ mod tests {
     fn status_uses_turn_events_and_not_response_text() {
         assert_eq!(explicit_turn_status("completed"), Some(("FINISHED", "✓ FINISHED")));
         assert_eq!(explicit_turn_status("working"), Some(("WORKING", "● WORKING")));
+        assert_eq!(explicit_turn_status("error"), crate::harness_record::status("error"));
         assert_eq!(explicit_turn_status("unknown"), None);
         assert!(!screen_indicates_work("Use Ctrl+C to cancel this command.\nThe output contains ⠋ and thinking...\n› Ask anything", 24));
         assert!(!screen_indicates_work("› explain working... and esc to interrupt", 24));
@@ -2003,6 +2100,62 @@ mod tests {
         assert!(screen_indicates_work("✻ Thinking… (esc to interrupt)", 24));
         assert!(screen_indicates_work("⠋ Generating…", 24));
         assert!(!screen_indicates_work(&format!("⠋ Generating…\n{}Ready", "\n".repeat(30)), 24));
+    }
+
+    /// Real phone-stream frames (tailAnsi, bottom rows, sanitized) captured by
+    /// tests/harness_phone_matrix.py --submit on 2026-09-24: Grok 1.0.41
+    /// `--minimal`, Reasonix 1.39.0 `code` and Hermes 0.19.0 `--cli`.
+    /// The frames are git-ignored local captures (dump raw reply frames with
+    /// `SD_MATRIX_FRAME_DUMP=DIR python3 tests/harness_phone_matrix.py --submit`,
+    /// then sanitize and keep the bottom rows). Without them the frame checks
+    /// are skipped and only the inline cases run.
+    fn status_frames_dir() -> Option<std::path::PathBuf> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/status-frames");
+        if dir.join("grok-thinking.ansi").is_file() {
+            Some(dir)
+        } else {
+            eprintln!("skipping captured status frames: {} is missing", dir.display());
+            None
+        }
+    }
+
+    fn status_frame(dir: &std::path::Path, name: &str) -> String {
+        let path = dir.join(format!("{name}.ansi"));
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    #[test]
+    fn screen_status_sees_grok_reasonix_and_hermes_replies_in_progress() {
+        if let Some(dir) = status_frames_dir() {
+            for (agent, working, idle) in [
+                ("grok", &["grok-waiting", "grok-thinking", "grok-responding"][..], &["grok-idle-start", "grok-idle-done"][..]),
+                ("reasonix", &["reasonix-thinking", "reasonix-working"][..], &["reasonix-idle-done"][..]),
+                ("hermes", &["hermes-running"][..], &["hermes-idle-error"][..]),
+            ] {
+                for name in working {
+                    assert!(agent_screen_indicates_work(agent, &status_frame(&dir, name), 35), "{name} should be WORKING");
+                }
+                for name in idle {
+                    assert!(!agent_screen_indicates_work(agent, &status_frame(&dir, name), 35), "{name} should be IDLE");
+                }
+            }
+            // Hermes' running placeholder is Hermes-only; other agents never see it.
+            assert!(!agent_screen_indicates_work("grok", &status_frame(&dir, "hermes-running"), 35));
+        }
+        // The reply text itself ("OK", or prose about waiting) is never a signal.
+        for text in [
+            "Waiting for response… 0.8s\n❯",
+            "OK\nWorked for 2.1s\n❯",
+            "❯ show msg=interrupt · /queue usage\n",
+            "⠋ and then 5s later",
+            "⠋ Deploy finished in 12 minutes",
+            "│ uses ⏱ 5s timers",
+        ] {
+            assert!(!agent_screen_indicates_work("hermes", text, 24), "{text:?}");
+            assert!(!agent_screen_indicates_work("grok", text, 24), "{text:?}");
+        }
+        assert!(screen_indicates_work("⠙ Running command… 1m 5s", 24));
+        assert!(!screen_indicates_work("⠙ Running command… 1m", 24));
     }
 
     #[test]
@@ -2149,6 +2302,27 @@ mod tests {
             assert_eq!(actual, expected, "{agent}");
             assert_eq!(resolve_command(agent, Some(&actual)), actual, "defaults must be idempotent");
         }
+    }
+
+    #[test]
+    fn saved_starting_parameters_replace_defaults_and_are_quoted() {
+        let saved = vec!["--model".to_string(), "gpt 5".to_string()];
+        // A restored card keeps its own value and gains only what it lacks.
+        assert_eq!(resolve_command_with("aider", Some("/opt/aider --model x"), &saved), "/opt/aider --model x");
+        assert_eq!(resolve_command_with("aider", Some("/opt/aider"), &saved), "/opt/aider --model 'gpt 5'");
+        // A built-in default the user removed is not added back.
+        assert_eq!(resolve_command_with("aider", Some("/opt/aider"), &[]), "/opt/aider");
+        assert_eq!(resolve_command_with("aider", Some("/bin/bash"), &saved), "/bin/bash");
+        assert_eq!(
+            npx_fallback_command("reasonix", &["code", "a b"]),
+            "npx -y reasonix code 'a b'"
+        );
+        // The built-in defaults read exactly as before quoting existed.
+        assert_eq!(
+            with_default_args("/usr/bin/pi", &crate::launch_args::builtin("pi")),
+            "/usr/bin/pi --tui-mode regular"
+        );
+        assert_eq!(with_default_args::<&str>("/usr/bin/gemini", &[]), "/usr/bin/gemini");
     }
 
     #[test]

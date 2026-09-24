@@ -48,6 +48,74 @@ pub fn clean(value: &str) -> String {
         .collect()
 }
 
+/// Messages a harness injects into the conversation as if the user typed them.
+/// Claude Code writes background-task results (`<task-notification>`), slash
+/// command echoes, `!` shell input/output and reminders as "user" turns, and
+/// also passes them to the `UserPromptSubmit` hook. None of them is a prompt.
+const SYNTHETIC_PROMPT_PREFIXES: &[&str] = &[
+    "<task-notification",
+    "<system-reminder",
+    "<local-command-",
+    "<command-name",
+    "<command-message",
+    "<command-args",
+    "<bash-input",
+    "<bash-stdout",
+    "<bash-stderr",
+    "<user-prompt-submit-hook",
+    "caveat: the messages below were generated",
+];
+
+/// True only for text a person submitted as a prompt.
+///
+/// CARD TITLE INVARIANT (regressed three times): every prompt stored in or
+/// read from harness metadata goes through this check, so the card and phone
+/// title only ever shows what the user typed. See the "Card titles" section of
+/// AGENTS.md before changing it or adding a new prompt source.
+pub fn is_user_prompt(text: &str) -> bool {
+    let text = text.trim_start();
+    if text.is_empty() {
+        return false;
+    }
+    let head: String = text.chars().take(64).collect::<String>().to_lowercase();
+    !SYNTHETIC_PROMPT_PREFIXES.iter().any(|prefix| head.starts_with(prefix))
+}
+
+/// OpenCode names a session "New session - <ISO timestamp>" ("Child session -
+/// …" for subagents) until it generates a real title, and keeps that
+/// placeholder when title generation is unavailable. It names nothing the user
+/// did, so it is treated as no title: the card falls back to the submitted
+/// prompt (see the "Card titles" rules in AGENTS.md).
+pub fn is_placeholder_title(agent: &str, title: &str) -> bool {
+    if agent != "opencode" {
+        return false;
+    }
+    let title = title.trim();
+    let Some(stamp) = ["New session - ", "Child session - "]
+        .iter()
+        .find_map(|prefix| title.strip_prefix(prefix))
+    else {
+        return false;
+    };
+    // Exactly `YYYY-MM-DDTHH:MM:SS.mmmZ`, as OpenCode's own `isDefaultTitle`.
+    let shape = "dddd-dd-ddTdd:dd:dd.dddZ";
+    stamp.len() == shape.len()
+        && stamp.bytes().zip(shape.bytes()).all(|(c, s)| match s {
+            b'd' => c.is_ascii_digit(),
+            _ => c == s,
+        })
+}
+
+/// A native title worth showing: never an auto-generated placeholder.
+pub fn native_title(agent: &str, title: &str) -> String {
+    let title = clean(title);
+    if is_placeholder_title(agent, &title) {
+        String::new()
+    } else {
+        title
+    }
+}
+
 pub fn start_time(pid: u32) -> Option<String> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     Some(
@@ -171,9 +239,9 @@ pub fn apply(data: &mut Metadata, event: &Value) {
         }
     }
     if let Some(title) = event["title"].as_str() {
-        data.title = clean(title);
+        data.title = native_title(&data.agent, title);
     }
-    if let Some(prompt) = event["prompt"].as_str() {
+    if let Some(prompt) = event["prompt"].as_str().filter(|p| is_user_prompt(p)) {
         data.prompt = clean(prompt);
     }
     if let Some(model) = event["model"].as_str() {
@@ -254,9 +322,11 @@ pub fn apply_claude(data: &mut Metadata, input: &Value) {
         _ => return,
     };
     let mut patch = json!({"session":session,"status":state});
-    if event == "UserPromptSubmit" {
-        patch["prompt"] = input["prompt"].clone();
-    }
+    // A task notification or other injected turn still starts a turn (status and
+    // completion tracking below), but it must never replace the user's prompt.
+    // The hook input has no origin field, so the transcript (below) also vetoes
+    // text it records as injected, e.g. the usage-limit auto-continuation.
+    let submitted = input["prompt"].as_str().filter(|p| event == "UserPromptSubmit" && is_user_prompt(p));
     if let Some(model) = input["model"].as_str() {
         patch["model"] = json!(model);
     }
@@ -264,16 +334,22 @@ pub fn apply_claude(data: &mut Metadata, input: &Value) {
         patch["title"] = json!(title);
     }
     if matches!(event, "SessionStart" | "Stop" | "UserPromptSubmit") {
-        if let Some(path) = input["transcript_path"].as_str() {
-            if let Some((title, prompt)) = claude_transcript(Path::new(path), session) {
-                if let Some(title) = title {
-                    patch["title"] = json!(title);
-                }
-                if event == "SessionStart" {
-                    if let Some(prompt) = prompt {
-                        patch["prompt"] = json!(prompt);
-                    }
-                }
+        let scan = input["transcript_path"]
+            .as_str()
+            .and_then(|path| claude_transcript(Path::new(path), session));
+        if let Some(scan) = &scan {
+            if let Some(title) = &scan.title {
+                patch["title"] = json!(title);
+            }
+        }
+        let injected = |text: &str| scan.as_ref().is_some_and(|scan| scan.injected.contains(&clean(text)));
+        if let Some(prompt) = submitted.filter(|p| !injected(p)) {
+            patch["prompt"] = json!(prompt);
+        } else if event == "SessionStart" || !is_user_prompt(&data.prompt) || injected(&data.prompt) {
+            // Resume, or repair a stored prompt that was injected (the transcript
+            // record can land after the hook ran, or predates the filter).
+            if let Some(prompt) = scan.as_ref().and_then(|scan| scan.prompt.clone()) {
+                patch["prompt"] = json!(prompt);
             }
         }
     }
@@ -297,7 +373,17 @@ pub fn apply_claude(data: &mut Metadata, input: &Value) {
     }
 }
 
-pub fn claude_transcript(path: &Path, session: &str) -> Option<(Option<String>, Option<String>)> {
+/// What the tail of a Claude transcript says about the card's own session.
+#[derive(Debug, Default)]
+pub struct TranscriptScan {
+    pub title: Option<String>,
+    /// Last prompt a person submitted.
+    pub prompt: Option<String>,
+    /// Cleaned text of user turns Claude Code injected itself.
+    pub injected: Vec<String>,
+}
+
+pub fn claude_transcript(path: &Path, session: &str) -> Option<TranscriptScan> {
     let mut file = fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
     if !metadata.is_file() {
@@ -314,11 +400,17 @@ pub fn claude_transcript(path: &Path, session: &str) -> Option<(Option<String>, 
     } else {
         &bytes
     };
-    Some(claude_transcript_records(bytes, session))
+    Some(claude_transcript_scan(bytes, session))
 }
 
+#[cfg(test)]
 pub fn claude_transcript_records(bytes: &[u8], session: &str) -> (Option<String>, Option<String>) {
-    let (mut title, mut prompt) = (None, None);
+    let scan = claude_transcript_scan(bytes, session);
+    (scan.title, scan.prompt)
+}
+
+pub fn claude_transcript_scan(bytes: &[u8], session: &str) -> TranscriptScan {
+    let mut scan = TranscriptScan::default();
     for line in bytes
         .split_inclusive(|b| *b == b'\n')
         .filter(|l| l.ends_with(b"\n"))
@@ -327,35 +419,51 @@ pub fn claude_transcript_records(bytes: &[u8], session: &str) -> (Option<String>
             continue;
         };
         if record["isSidechain"] == true
-            || record["isMeta"] == true
             || record["sessionId"].as_str().is_some_and(|id| id != session)
         {
+            continue;
+        }
+        let text = || {
+            let content = &record["message"]["content"];
+            content.as_str().map(str::to_owned).or_else(|| {
+                content.as_array().map(|parts| {
+                    parts
+                        .iter()
+                        .filter(|p| p["type"] == "text")
+                        .filter_map(|p| p["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            })
+        };
+        // Newer transcripts label turns Claude Code produced itself.
+        let injected = record["isMeta"] == true
+            || record["promptSource"] == "system"
+            || matches!(
+                record["origin"]["kind"].as_str(),
+                Some("task-notification" | "auto-continuation")
+            );
+        if injected {
+            if record["type"] == "user" {
+                if let Some(value) = text().filter(|v| !v.trim().is_empty()) {
+                    scan.injected.push(clean(&value));
+                }
+            }
             continue;
         }
         match record["type"].as_str() {
             Some("custom-title") => {
                 if let Some(value) = record["customTitle"].as_str() {
-                    title = Some(clean(value));
+                    scan.title = Some(clean(value));
                 }
             }
             Some("user") => {
-                let content = &record["message"]["content"];
-                let value = content.as_str().map(str::to_owned).or_else(|| {
-                    content.as_array().map(|parts| {
-                        parts
-                            .iter()
-                            .filter(|p| p["type"] == "text")
-                            .filter_map(|p| p["text"].as_str())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    })
-                });
-                if let Some(value) = value.filter(|v| !v.trim().is_empty()) {
-                    prompt = Some(clean(&value));
+                if let Some(value) = text().filter(|v| is_user_prompt(v)) {
+                    scan.prompt = Some(clean(&value));
                 }
             }
             _ => {}
         }
     }
-    (title, prompt)
+    scan
 }

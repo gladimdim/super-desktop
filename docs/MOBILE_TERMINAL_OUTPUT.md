@@ -36,6 +36,7 @@ Phone input wakes only the streams of the session it was sent to.
 | Gemini, Cursor | Existing defaults | Startup/main screen only; login/onboarding prevents claiming full-response verification. |
 | OpenClaw | Existing `tui` | Installed 2026.9.5 constructs `TuiMainScreen`, whose renderer uses main screen and scrollback. Live gateway response not exercised here. |
 | Crush | Existing fullscreen UI + remote paging | Installed 0.96.1 long saved-response fixture verifies Tab, Page Up, and Page Down. |
+| Reasonix | Existing `code` (alternate screen) + remote paging | 1.39.0 has no main-screen/inline mode: `reasonix --help`/`code --help` list no display flag, its `[ui]` settings are only `cursor_shape`, `shortcut_layout` and `show_turn_usage`, and no `REASONIX_*` variable selects one (its Bubble Tea view always requests the alternate screen). The phone matrix shows `alternate_on=1` and zero history before and after a reply. Reasonix documents PgUp/PgDn as transcript scrolling, so the phone's PgUp/PgDn keys are the way to read older output. No launch flag is added. |
 | Other/custom agents | Existing defaults + remote paging keys | No blanket compatibility claim; unavailable CLIs not exercised. |
 
 Requires CLI versions supporting these flags. Existing custom permission flags

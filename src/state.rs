@@ -99,6 +99,11 @@ pub struct AppState {
     pub terminals: Vec<TerminalData>,
     #[serde(default)]
     pub custom_harnesses: Vec<crate::custom_harness::CustomHarness>,
+    /// Starting parameters saved for built-in harnesses, by harness key. A
+    /// key without an entry starts with its built-in defaults; an empty list
+    /// starts it with none (see `launch_args`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub harness_args: std::collections::BTreeMap<String, Vec<String>>,
     /// Terminal card IDs, back to front. Missing legacy entries are appended
     /// in creation order; notes retain their existing independent stacking.
     #[serde(default)]
@@ -165,6 +170,7 @@ impl Default for AppState {
             }],
             terminals: Vec::new(),
             custom_harnesses: Vec::new(),
+            harness_args: std::collections::BTreeMap::new(),
             terminal_order: Vec::new(),
             visible_harnesses: None,
             toggle_shortcut: None,

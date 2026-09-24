@@ -155,7 +155,13 @@ pub(crate) fn card_title(
     oc_id: Option<&str>,
     pid: &str,
 ) -> Option<String> {
-    if let Some(title) = metadata.map(|m| m.title.clone()).filter(|t| !t.is_empty()) {
+    // An auto-generated placeholder (OpenCode's "New session - <timestamp>")
+    // is no title: the caller falls back to the submitted prompt.
+    if let Some(title) = metadata
+        .filter(|m| !crate::harness_record::is_placeholder_title(&m.agent, &m.title))
+        .map(|m| m.title.clone())
+        .filter(|t| !t.is_empty())
+    {
         return Some(title);
     }
     match agent {

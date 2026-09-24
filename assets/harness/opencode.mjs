@@ -49,7 +49,22 @@ export const SuperDesktop = async ({ client }) => {
       emit({ session, status: "completed", completionTurn: prompt });
     } catch { /* Missing, unsupported or ambiguous native records fail closed. */ }
   };
-  emit({ status: "unknown" });
+  // Status of an explicitly selected session from this process's own server
+  // (it lists only non-idle sessions). Unavailable or malformed: no guess.
+  const current = async (id) => {
+    if (typeof client.session.status !== "function") return undefined;
+    try {
+      const response = await client.session.status({ signal: AbortSignal.timeout(2000) });
+      const all = response?.data;
+      if (!all || typeof all !== "object" || Array.isArray(all)) return undefined;
+      const type = all[id]?.type;
+      if (type === undefined || type === "idle") return "idle";
+      return ["busy", "retry"].includes(type) ? "working" : undefined;
+    } catch { return undefined; }
+  };
+  // A freshly started OpenCode process (its server runs in-process) has no
+  // turn in flight: the TUI opens on an empty composer, so it is idle.
+  emit({ status: "idle" });
   return {
     "chat.message": async (input, output) => {
       if (!await choose(input.sessionID)) return;
@@ -70,7 +85,14 @@ export const SuperDesktop = async ({ client }) => {
         if (value.id === selected) emit({ session: selected, title: value.title ?? "" });
         return;
       }
-      if (event.type === "tui.session.select") { await choose(p.sessionID); return; }
+      if (event.type === "tui.session.select") {
+        if (!await choose(p.sessionID)) return;
+        const session = selected, version = revision;
+        const status = await current(session);
+        // A newer status event or selection wins over this lookup.
+        if (status && session === selected && version === revision) emit({ session, status });
+        return;
+      }
       if (event.type === "session.deleted") {
         sessions.delete(p.info?.id);
         if (p.info?.id === selected) {

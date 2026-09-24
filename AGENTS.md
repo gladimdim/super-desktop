@@ -31,3 +31,32 @@ cards, and a mapped window with hit tests for every right-side action. Exercise
 the production sizing callback; a manually allocated standalone widget alone
 is not sufficient. Run the full test suite before rebuilding the installed app,
 and report any unrelated failures or excluded tests explicitly.
+
+## Card titles (regressed three times)
+
+A card's title, and the phone's `lastPrompt`, must only ever show a prompt the
+user submitted to that card's own harness. Never derive it from terminal
+output, assistant text, tool results, or turns the harness injects itself.
+Claude Code, for example, writes background-task results (`<task-notification>`),
+slash-command echoes, `!` shell input/output, reminders and auto-continuations
+as "user" turns, and sends them to the `UserPromptSubmit` hook.
+
+- Every prompt stored in or read from harness metadata must pass
+  `harness_record::is_user_prompt`: in `apply`, `apply_claude`, the Claude
+  transcript reader, and `harness_metadata::inspect_option` (the single read
+  path for desktop cards, the phone list and the phone terminal header). A new
+  prompt source must use the same check; do not bypass it.
+- In Claude transcripts, skip user records with `promptSource: "system"` or an
+  `origin.kind` of `task-notification`/`auto-continuation`. When Claude Code
+  adds a new injected kind, extend the filter and the tests together.
+- The `UserPromptSubmit` hook input carries only the text, with no origin. Some
+  injected turns are plain prose (the usage-limit "Your claude.ai usage limit
+  has reset. Continue…" auto-continuation), so the hook's prompt is also
+  vetoed when the transcript records the same text as injected, and Stop
+  repairs a stored prompt the transcript marks as injected (its record can
+  land after the hook). Do not remove either step.
+- An injected turn still counts as a turn for status and completion tracking;
+  it only must not replace the prompt.
+- Any change to prompt/title capture, harness hooks or adapters must preserve
+  and run `cargo test card_title_`. Those tests must fail if the filter is
+  removed; add a case for every new injected-turn shape you see in the wild.
