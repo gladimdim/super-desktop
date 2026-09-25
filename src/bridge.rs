@@ -762,6 +762,13 @@ fn stream_keys(stream: &mut Connection, id: &str) {
                         }
                     }
                     if !stream.still_authorized() { return Err("device_revoked".into()); }
+                    // One failed tmux command poisons the client for good, and
+                    // this socket can live for hours. Reopen it for this input;
+                    // the input that failed was acknowledged as an error and is
+                    // never replayed.
+                    if !control.is_healthy() {
+                        control = crate::tmux_control::Control::open(id)?;
+                    }
                     control.send(value, false)?;
                     wake_terminal_streams(id);
                     // Codex paste detection needs settling, but it does not
@@ -1843,45 +1850,24 @@ mod tests {
             let (stream, _) = listener.accept().unwrap();
             stream_keys(&mut Connection::plain(stream), &id);
         });
-        fn send(client: &mut TcpStream, body: serde_json::Value) {
-            let bytes = body.to_string().into_bytes();
-            let mut frame = vec![0x81];
-            if bytes.len() < 126 { frame.push(0x80 | bytes.len() as u8); }
-            else { frame.push(0xfe); frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes()); }
-            frame.extend_from_slice(&[0, 0, 0, 0]);
-            frame.extend_from_slice(&bytes);
-            client.write_all(&frame).unwrap();
-        }
-        fn receive(client: &mut TcpStream) -> serde_json::Value {
-            let mut header = [0u8; 2];
-            client.read_exact(&mut header).unwrap();
-            assert_eq!(header[0], 0x81);
-            let mut size = usize::from(header[1]);
-            if size == 126 {
-                let mut extended = [0; 2]; client.read_exact(&mut extended).unwrap();
-                size = usize::from(u16::from_be_bytes(extended));
-            }
-            let mut body = vec![0; size]; client.read_exact(&mut body).unwrap();
-            serde_json::from_slice(&body).unwrap()
-        }
         // Pipeline messages without waiting for each acknowledgement.
-        send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
-        send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
-        send(&mut client, serde_json::json!({"sequence":3,"text":"x".repeat(4097)}));
+        ws_send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
+        ws_send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
+        ws_send(&mut client, serde_json::json!({"sequence":3,"text":"x".repeat(4097)}));
         for sequence in 1..=3 {
-            let ack = receive(&mut client);
+            let ack = ws_receive(&mut client);
             assert_eq!(ack["sequence"], sequence);
             assert_eq!(ack["ok"], sequence < 3);
         }
         assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("beta"));
         // Draft input and rejected submissions must not replace the last prompt.
-        send(&mut client, serde_json::json!({"sequence":4,"text":"draft","enter":false}));
-        assert_eq!(receive(&mut client)["ok"], true);
-        send(&mut client, serde_json::json!({"sequence":5,"text":"x".repeat(4097),"enter":true}));
-        assert_eq!(receive(&mut client)["ok"], false);
+        ws_send(&mut client, serde_json::json!({"sequence":4,"text":"draft","enter":false}));
+        assert_eq!(ws_receive(&mut client)["ok"], true);
+        ws_send(&mut client, serde_json::json!({"sequence":5,"text":"x".repeat(4097),"enter":true}));
+        assert_eq!(ws_receive(&mut client)["ok"], false);
         assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("beta"));
-        send(&mut client, serde_json::json!({"sequence":6,"text":"\nUnicode привіт ✓","enter":true}));
-        assert_eq!(receive(&mut client)["ok"], true);
+        ws_send(&mut client, serde_json::json!({"sequence":6,"text":"\nUnicode привіт ✓","enter":true}));
+        assert_eq!(ws_receive(&mut client)["ok"], true);
         assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("Unicode привіт ✓"));
         let screen = capture_pane_text(&_session.0).unwrap();
         assert!(screen.find("alpha").unwrap() < screen.find("beta").unwrap());
@@ -1897,6 +1883,56 @@ mod tests {
             false
         });
         assert!(appeared, "tmux never rendered the acknowledged input");
+        drop(client);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn persistent_input_reopens_a_failed_tmux_connection() {
+        // One failed tmux command used to poison the socket's control client,
+        // so every later phone input was refused with "tmux connection must
+        // be reopened" until the phone dropped the socket.
+        let id = format!("sd_reopen_test_{}", std::process::id());
+        struct Session(String);
+        impl Drop for Session {
+            fn drop(&mut self) { let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output(); }
+        }
+        let result = Command::new("tmux").args(["new-session", "-d", "-s", &id, "cat"]).output().unwrap();
+        assert!(result.status.success());
+        let session = Session(id.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream_keys(&mut Connection::plain(stream), &id);
+        });
+        ws_send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
+        assert_eq!(ws_receive(&mut client)["ok"], true);
+
+        // Drop the bridge's control client from under it, as a tmux hiccup would.
+        let detached = Command::new("tmux").args(["detach-client", "-s", &format!("={}", session.0)]).output().unwrap();
+        assert!(detached.status.success());
+        ws_send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
+        let failed = ws_receive(&mut client);
+        assert_eq!(failed["sequence"], 2);
+
+        ws_send(&mut client, serde_json::json!({"sequence":3,"text":"gamma","enter":true}));
+        let ack = ws_receive(&mut client);
+        assert_eq!(ack["sequence"], 3);
+        assert_eq!(ack["ok"], true, "input after a failed command must reopen tmux: {ack}");
+        let appeared = (0..40).any(|_| {
+            if capture_pane_text(&session.0).is_some_and(|screen| screen.contains("gamma")) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            false
+        });
+        assert!(appeared, "the reopened client never delivered the input");
+        if failed["ok"] == false {
+            // A failed input is reported, never replayed on the new client.
+            assert!(!capture_pane_text(&session.0).unwrap().contains("beta"));
+        }
         drop(client);
         worker.join().unwrap();
     }
@@ -1936,6 +1972,31 @@ mod tests {
         assert_eq!(super::harness_model_effort("shell", "gpt-6-astra high · text"), (None, None));
     }
     use super::*;
+
+    /// A masked client text frame, as the phone sends one.
+    fn ws_send(client: &mut TcpStream, body: serde_json::Value) {
+        let bytes = body.to_string().into_bytes();
+        let mut frame = vec![0x81];
+        if bytes.len() < 126 { frame.push(0x80 | bytes.len() as u8); }
+        else { frame.push(0xfe); frame.extend_from_slice(&(bytes.len() as u16).to_be_bytes()); }
+        frame.extend_from_slice(&[0, 0, 0, 0]);
+        frame.extend_from_slice(&bytes);
+        client.write_all(&frame).unwrap();
+    }
+
+    /// One unmasked server text frame, parsed as JSON.
+    fn ws_receive(client: &mut TcpStream) -> serde_json::Value {
+        let mut header = [0u8; 2];
+        client.read_exact(&mut header).unwrap();
+        assert_eq!(header[0], 0x81);
+        let mut size = usize::from(header[1]);
+        if size == 126 {
+            let mut extended = [0; 2]; client.read_exact(&mut extended).unwrap();
+            size = usize::from(u16::from_be_bytes(extended));
+        }
+        let mut body = vec![0; size]; client.read_exact(&mut body).unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
 
     /// Reads one HTTP response: (status, Connection header, body).
     fn read_response(client: &mut TcpStream) -> (u16, String, String) {

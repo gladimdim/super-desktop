@@ -220,6 +220,13 @@ impl Control {
         }
     }
 
+    /// False once a command failed. The reply stream may then be out of step
+    /// with tmux (a late answer would be read as the next command's), so the
+    /// caller must open a new client instead of reusing this one.
+    pub fn is_healthy(&self) -> bool {
+        self.healthy
+    }
+
     fn command(&mut self, command: &str) -> Result<String, String> {
         if !self.healthy {
             return Err("tmux connection must be reopened".into());
