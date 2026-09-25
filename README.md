@@ -158,6 +158,8 @@ other components that bypass logind inhibitors are outside its control.
 
 ### Terminal copy and paste
 
+Hold **Ctrl** and hover a web link (http/https) in a terminal card: it is underlined with a hand cursor, and **Ctrl+click** opens it in your default browser. A link that tmux wrapped onto several rows is only found on its first row.
+
 In local and remote PC terminal cards, select text and press **Ctrl+Shift+C**
 to copy, or **Ctrl+Shift+V** to paste the desktop clipboard. **Ctrl+C** keeps
 its normal terminal interrupt behavior. In local cards a plain mouse drag (or a

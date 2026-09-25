@@ -121,24 +121,8 @@ fn links(text: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
     for token in text[offset..].split(|c: char| c.is_whitespace() || c.is_control() || "<>\"'`".contains(c)) {
-        let lower = token.to_ascii_lowercase();
-        let Some(start) = [lower.find("https://"), lower.find("http://")].into_iter().flatten().min() else { continue };
-        let mut candidate = &token[start..];
-        if candidate.len() > 8192 { continue; }
-        loop {
-            let old = candidate;
-            candidate = candidate.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-            for (close, open) in [(')', '('), (']', '['), ('}', '{')] {
-                if candidate.ends_with(close) && candidate.matches(close).count() > candidate.matches(open).count() {
-                    candidate = &candidate[..candidate.len() - 1];
-                }
-            }
-            if old == candidate { break; }
-        }
-        let Ok(url) = reqwest::Url::parse(candidate) else { continue };
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-            || !url.username().is_empty() || url.password().is_some() { continue; }
-        if seen.insert(candidate.to_string()) { result.push(candidate.to_string()); }
+        let Some(candidate) = crate::terminal_links::clean_link(token) else { continue };
+        if seen.insert(candidate.clone()) { result.push(candidate); }
         if result.len() == 100 { break; }
     }
     result
