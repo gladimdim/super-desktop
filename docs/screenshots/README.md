@@ -33,3 +33,17 @@ encoded with a shared GIF palette. The recording used a custom binding; the
 badge shows the default product shortcut, Super + Shift + Q. The GIF autoplays
 and loops; a Pause/Play button stops it, and reduced-motion visitors start on
 the still.
+
+## iOS companion (iPhone Duo)
+
+- `ios-duo-split.png`: DUO mode, the harness list beside two live Codex terminals.
+- `ios-duo-harnesses.png`: the harness list with the foldable placeholder detail.
+- `ios-duo-terminal.png`: the harness list beside one open terminal.
+
+Captured on 2026-09-25 from the in-development iOS app (`super-desktop-ios`) on
+the unfolded inner display (2853 × 2007) of the Xcode "iPhone Duo" simulator,
+driven by its `ParityTour/testWideTour` UI test against the repository's mock
+bridge (`scripts/mock-bridge/`), so the harnesses and output are sample data.
+Each screenshot was clipped with the device type's framebuffer mask, placed in a
+drawn bezel modeled on the Simulator's `phone15` chrome with a soft shadow on a
+transparent background, then scaled to 1600 × 1175 PNG.

@@ -117,6 +117,14 @@
   .news { border: 1px solid var(--border); border-left: 4px solid var(--accent2); border-radius: var(--radius); padding: 24px; background: var(--panel); }
   .news h2 { margin-top: 8px; }
   .news p:last-child { margin-bottom: 0; }
+  .device-shots { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 24px; margin-top: 24px; }
+  .device-shots .wide { grid-column: 1 / -1; }
+  .device-shots .wide img { max-width: 900px; margin: 0 auto; }
+  .device-shots img { display: block; width: 100%; height: auto; }
+  .device-shots figcaption { padding: 4px 0 0; text-align: center; }
+  .device-shots figcaption strong { color: var(--text); }
+  .shots-note { color: var(--muted); font-size: 13px; text-align: center; }
+  @media (max-width: 760px) { .device-shots { grid-template-columns: minmax(0, 1fr); } }
   @media (max-width: 600px) {
     .wrap { padding: 0 16px 48px; }
     header.hero { padding: 32px 0 8px; }
@@ -239,6 +247,27 @@ cd ~/GitHub/super-desktop
     <p>Both companion apps are in active development: bring your desktop AI sessions to iPhone and Android, with <strong>full foldable support for both platforms</strong> as part of that work.</p>
     <p class="sub">Android already supports adaptive layouts and two terminal panes on wide screens. The iOS app is being developed toward the same experience: layouts that adapt as you fold, unfold, and resize, with independent terminals and drafts. iOS and its foldable support are in development, not yet released.</p>
     <p>The Android companion is available today and continues to evolve. Follow development in the <a href="https://github.com/gladimdim/super-desktop">project repository</a>.</p>
+    <div class="device-shots">
+      <figure class="wide">
+        <a href="screenshots/ios-duo-split.png" aria-label="Open full-size DUO split screenshot">
+          <img src="screenshots/ios-duo-split.png" width="1600" height="1175" loading="lazy" alt="The iOS app unfolded on an iPhone Duo in landscape: the harness list on the left and two live OpenAI Codex terminals side by side in DUO mode, one showing a diff and cargo test output, the other streaming build logs.">
+        </a>
+        <figcaption><strong>DUO split.</strong> Unfolded, two harnesses run side by side, each with its own live terminal and draft, next to the harness list.</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/ios-duo-harnesses.png" aria-label="Open full-size harness list screenshot">
+          <img src="screenshots/ios-duo-harnesses.png" width="1600" height="1175" loading="lazy" alt="The iOS app on an unfolded iPhone Duo: Codex usage tiles, a paired machine with seven harnesses, and harness cards with IDLE and RUNNING status beside the SUPER DESKTOP foldable illustration.">
+        </a>
+        <figcaption><strong>Every harness.</strong> Usage, machines and each session's status and last prompt at a glance.</figcaption>
+      </figure>
+      <figure>
+        <a href="screenshots/ios-duo-terminal.png" aria-label="Open full-size terminal screenshot">
+          <img src="screenshots/ios-duo-terminal.png" width="1600" height="1175" loading="lazy" alt="The iOS app on an unfolded iPhone Duo with the harness list beside an open Codex terminal showing colored diffs, test results and a composer with a Send button.">
+        </a>
+        <figcaption><strong>List and terminal.</strong> Open a card and its terminal fills the other half, ready for your next prompt.</figcaption>
+      </figure>
+    </div>
+    <p class="shots-note">iOS app in development, captured in the iPhone Duo simulator against a test bridge.</p>
   </section>
 
   <section id="remote">
