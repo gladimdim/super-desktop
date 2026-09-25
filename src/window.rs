@@ -342,6 +342,7 @@ impl SuperDesktopWindow {
 
         window.set_keyboard_mode(KeyboardMode::OnDemand);
         window.add_css_class("super-desktop-window");
+        crate::frame_profile::watch(&window, "overlay");
 
         let mut screen_width = 2560;
         let mut screen_height = 1600;
