@@ -1,6 +1,6 @@
 # Harness logo sources
 
-Downloaded/verified 2026-09-24. Bundled locally for Linux and Android. Product
+Downloaded/verified 2026-09-24 (DeepSeek: 2026-09-25). Bundled locally for Linux and Android. Product
 marks identify their respective harnesses; trademarks remain with their owners.
 No affiliation or endorsement is implied.
 
@@ -21,6 +21,7 @@ foreground variants on dark themes; Kimi uses its official variants.
 | kiro | https://kiro.dev/icon.svg  |
 | cursor | https://cursor.com/marketing-static/favicon.svg  |
 | reasonix | https://raw.githubusercontent.com/esengine/reasonix/HEAD/desktop/frontend/src/assets/logo-symbol.svg  |
+| dsh | https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/deepseek-color.svg DeepSeek mark from Lobe Icons (MIT); DeepSeek Harness and its dsh-tui ship no separate product mark. |
 | gemini | https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/gemini-color.svg Google Gemini mark from Lobe Icons (MIT). |
 | antigravity | https://raw.githubusercontent.com/sst/opencode/dev/packages/ui/src/assets/icons/app/antigravity.svg Product mark from OpenCode integration assets; Google site SVG embeds a raster. |
 | kimi | https://moonshotai.github.io/Branding-Guide/ Official K-only light/dark SVG variants. |

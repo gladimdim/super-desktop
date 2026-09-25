@@ -19,11 +19,13 @@ source URLs and file hashes, and never accepts a filename from a bridge.
 - Herder retains its old glyph: no verifiable SVG mark was found in its upstream
   repository. Shell uses the existing generic terminal SVG, not a product trademark.
 
-There are 17 branded harness mappings plus Shell. Existing OpenAI, OpenCode and
+There are 18 branded harness mappings plus Shell. Existing OpenAI, OpenCode and
 Grok artwork is retained; Grok's standalone symbol is extracted from its sourced
 wordmark for legibility. New SVGs replace the company substitutes for Claude and
 Antigravity. Pi, OpenClaw, Hermes, Goose, Qwen, Crush, Aider, Kiro, Cursor, Reasonix,
-Gemini and Kimi also have bundled marks. T3 Code's mark was removed with its
+Gemini and Kimi also have bundled marks. DeepSeek Harness (`dsh`, added 2026-09-25)
+uses DeepSeek's whale mark from Lobe Icons (MIT), because neither `dsh` nor its
+`dsh-tui` terminal UI ships a product mark of its own. T3 Code's mark was removed with its
 launcher (2026-09-25): it runs a web server, not a terminal harness.
 
 The default display now uses the active theme’s accent for visible strokes/fills

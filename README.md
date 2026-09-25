@@ -257,6 +257,7 @@ to an idle Codex terminal. See [image prompts, compatibility and upload limits](
 | 🔮 OpenCode | `opencode` |
 | 🚀 Grok CLI | `grok` |
 | 🧭 Reasonix | `reasonix code` (or `npx -y reasonix code`) |
+| 🐋 DeepSeek Harness | `dsh-tui` / `dst`, the community terminal UI (public beta) for DeepSeek's `dsh`. Install with `npm install -g @deepseek-ai/dsh @deepseek-harness-tui/dsh-tui`. The first run sets up its `dsh-tui` profile, which needs pnpm, and it needs `DEEPSEEK_API_KEY`. Permissions come from the dsh profile, so no flag is added. For phone scrollback turn off **Fullscreen mode** in dsh-tui's `/settings` (there is no per-launch flag). Cards restored after a restart start a new conversation, because `dsh-tui --resume` reopens one global last session, not the card's own. |
 | 🧠 Aider | `aider` |
 | ✦ Gemini CLI | `gemini` — no longer maintained upstream; still launches, but fresh installs do not add it to the top bar and an existing Gemini button switches to Antigravity once `agy` is installed (turn Gemini back on in ⚙ Settings to keep it). |
 | 🪽 Hermes Agent | `hermes` |

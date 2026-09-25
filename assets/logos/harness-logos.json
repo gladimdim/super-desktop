@@ -123,6 +123,18 @@
     "dark": "reasonix.svg",
     "themed": "reasonix-themed.svg"
   },
+  "dsh": {
+    "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/deepseek-color.svg",
+    "download_sha256": "deba5f98a5c1796e20fcac3149bcd7eb8a32f0bdd04d048819400b1f28bd1439",
+    "files": {
+      "deepseek.svg": "bc01bcce03431575f7ba0acb59f7fbbfa4f790176d647419da0af8f74f793127",
+      "dsh-themed.svg": "33811466aad0a9aee4405d6148d69b2717672e475ca55541e00aa1a8ee3f58c6"
+    },
+    "light": "deepseek.svg",
+    "dark": "deepseek.svg",
+    "notes": "DeepSeek mark from Lobe Icons (MIT); DeepSeek Harness and its dsh-tui ship no separate product mark.",
+    "themed": "dsh-themed.svg"
+  },
   "gemini": {
     "source": "https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/gemini-color.svg",
     "download_sha256": "8ab0a9bafec11f7e69bcb9fc4ffd8f1bc927d1ddcbbb6ff36dee5ae8b5a9d602",

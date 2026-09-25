@@ -189,6 +189,10 @@ mod tests {
         assert_eq!(logo_filename("shell", false), Some("shell-white.svg"));
         // Use the product mark, not the Google company mark.
         assert_eq!(logo_filename("antigravity", false), Some("antigravity.svg"));
+        // DeepSeek Harness has no product mark of its own: DeepSeek's.
+        assert_eq!(logo_filename("dsh", false), Some("deepseek.svg"));
+        assert_eq!(logo_filename("dsh", true), Some("deepseek.svg"));
+        assert_eq!(logo_manifest()["dsh"]["themed"].as_str(), Some("dsh-themed.svg"));
         assert_eq!(logo_filename("unknown-agent", false), None);
     }
 

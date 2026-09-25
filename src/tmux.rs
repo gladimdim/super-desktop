@@ -115,6 +115,15 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
             default_args: &["code"],
             npx_package: Some("reasonix"),
         },
+        // DeepSeek Harness (`dsh`) ships no terminal UI of its own; `dsh-tui`
+        // (alias `dst`, both `dsh --profile dsh-tui`) is its community TUI.
+        // No default arguments: permissions come from the dsh profile's
+        // presets and there is no bypass flag. No npx fallback either: it
+        // needs the global `@deepseek-ai/dsh` install and its dsh-tui profile.
+        "dsh" => AgentConfig {
+            name: "DeepSeek Harness", icon: "🐋", commands: &["dsh-tui", "dst"],
+            default_args: &[], npx_package: None,
+        },
         _ => AgentConfig {
             name: "Terminal",
             icon: "💻",
@@ -145,6 +154,7 @@ pub const HARNESS_KEYS: &[&str] = &[
     "opencode",
     "grok",
     "reasonix",
+    "dsh",
     "aider",
     "hermes",
     "pi",
@@ -266,10 +276,8 @@ pub fn detect_harness_command(key: &str) -> Option<String> {
 pub fn harness_command_with(key: &str, args: &[String]) -> Option<String> {
     let cfg = get_agent_config(key);
 
-    for cmd in harness_candidates(key) {
-        if let Some(path) = which(cmd) {
-            return Some(with_default_args(&path, args));
-        }
+    if let Some(path) = first_installed(harness_candidates(key), which) {
+        return Some(with_default_args(&path, args));
     }
     // Harnesses that commonly run through `npx` (Reasonix) are available as
     // soon as npx is, exactly like `resolve_command` assumes.
@@ -292,7 +300,13 @@ pub fn harness_command_with(key: &str, args: &[String]) -> Option<String> {
 /// bin folders), without its starting parameters. For helper subcommands such
 /// as `openclaw plugins install`, which must run the same CLI a card would.
 pub fn harness_binary(key: &str) -> Option<String> {
-    harness_candidates(key).iter().find_map(|cmd| which(cmd))
+    first_installed(harness_candidates(key), which)
+}
+
+/// The first of `candidates` that `lookup` resolves: preference order wins
+/// over whatever else is installed (DeepSeek Harness: `dsh-tui`, then `dst`).
+fn first_installed(candidates: &[&str], lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    candidates.iter().find_map(|cmd| lookup(cmd))
 }
 
 /// Binaries that can serve `key`, in preference order.
@@ -385,10 +399,8 @@ fn resolve_command_with(agent_type: &str, custom: Option<&str>, args: &[String])
         }
         return trimmed.to_string();
     }
-    for cmd in cfg.commands {
-        if let Some(path) = which(cmd) {
-            return with_default_args(&path, args);
-        }
+    if let Some(path) = first_installed(cfg.commands, which) {
+        return with_default_args(&path, args);
     }
     // Harness that ships on npm but has no binary on PATH (e.g. Reasonix is
     // usually run as `npx reasonix code`): launch it through npx rather than
@@ -465,6 +477,11 @@ fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
 /// Agents without a non-interactive resume mechanism (shell, antigravity,
 /// grok, unknown) relaunch fresh, exactly like before. An explicit shell
 /// command is never decorated with agent flags.
+///
+/// DeepSeek Harness (`dsh-tui`) relaunches fresh too. Its bare `--resume`
+/// reads one global `~/.dsh-tui/resume.txt` (the last session any dsh-tui
+/// process exited from, in any folder), not a session of the card's
+/// workspace, so it would attach every restored card to that one session.
 #[allow(dead_code)]
 pub fn resolve_resume_command(agent_type: &str, custom: Option<&str>) -> String {
     resolve_resume_command_with_session(agent_type, custom, None)
@@ -926,8 +943,51 @@ fn agent_screen_indicates_work(agent_type: &str, screen: &str, height: usize) ->
                 }) || (line.starts_with('⚕') && line.contains('│') && line.contains("│ ⏱ "))
             })
         }
+        "dsh" => {
+            let plain = strip_terminal_escapes(screen);
+            let working = recent_status_lines(&plain, height).any(dsh_line_indicates_work);
+            working
+        }
         _ => false,
     }
+}
+
+/// Spinner verbs dsh-TUI 0.11.0 picks one of per turn (`SPINNER_VERBS`), in
+/// its English and Chinese UI (`spinner-verb-*`).
+const DSH_SPINNER_VERBS: &[&str] = &[
+    "Analyzing", "Thinking", "Working", "Considering", "Reviewing", "Planning",
+    "Checking", "Reading", "Searching", "Building", "Testing", "Connecting",
+    "Preparing", "Exploring", "Reasoning", "Summarizing", "Resolving", "Responding",
+    "分析中", "思考中", "工作中", "斟酌中", "审阅中", "规划中", "检查中", "读取中", "检索中",
+    "构建中", "测试中", "连接中", "准备中", "探索中", "推理中", "总结中", "解析中", "回应中",
+];
+
+/// One trimmed screen line of dsh-TUI while a turn runs. Its status bar's hint
+/// row reads `esc to interrupt` (already a generic signal) or, in its Chinese
+/// UI, `esc 中断`. The working row above the composer is a breathing dot
+/// (`·`/`•`/`●`), a spinner verb and `…`, then nothing (narrow card) or the
+/// parenthesised elapsed time / token count / `thinking`:
+/// `● Thinking… (3s · ↓ 12 tokens)`. Both rows vanish when the turn ends.
+fn dsh_line_indicates_work(line: &str) -> bool {
+    if line.starts_with("esc 中断") {
+        return true;
+    }
+    let Some(rest) = line.strip_prefix(['·', '•', '●']) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    DSH_SPINNER_VERBS.iter().any(|verb| {
+        let Some(status) = rest.strip_prefix(verb).and_then(|after| after.strip_prefix('…')) else {
+            return false;
+        };
+        let status = status.trim_start();
+        status.is_empty()
+            || status.strip_prefix('(').is_some_and(|inner| {
+                inner.starts_with(|c: char| c.is_ascii_digit() || c == '↑' || c == '↓')
+                    || inner.starts_with("thinking")
+                    || inner.starts_with("thought for")
+            })
+    })
 }
 
 fn resolve_effective_pid(pid_num: u32, is_shell_agent: bool) -> u32 {
@@ -2179,6 +2239,52 @@ mod tests {
         assert!(!screen_indicates_work("⠙ Running command… 1m", 24));
     }
 
+    /// dsh-TUI 0.11.0 footers, laid out from its source (`WorkingSpinner`,
+    /// `SpinnerAnimationRow`, `StatusLine`): the working row, the composer and
+    /// the status bar whose last row carries the hint. No captured frames yet:
+    /// DeepSeek Harness is not installed on the development machine.
+    #[test]
+    fn screen_status_sees_dsh_tui_turns_in_progress() {
+        let footer = |row: &str, hint: &str| {
+            format!("⏺ Earlier reply text\n\n{row}\n\n╭──────────────╮\n│ >            │\n╰──────────────╯\n deepseek-v4-pro · ~/proj · #1a2b3c4d\n {hint}\n")
+        };
+        for screen in [
+            footer("● Thinking… (3s · ↓ 12 tokens)", "esc to interrupt"),
+            footer("• 思考中… (1m 5s · ↑ 3.1k · ↓ 1.2k tokens)", "esc 中断"),
+            // The hint yields to a hovered status field; the working row remains.
+            footer("· Reading… (12s)", "42.1% · 84k/200k · free 116k"),
+            footer("● Reasoning… (thinking)", ""),
+            footer("● Considering… (thought for 4s)", ""),
+            footer("● Working…", ""),
+            // The working-activity row (free-form phrases) keeps the hint.
+            footer("🌔 reading src/main.rs · 4s · ↓ 210 tokens", "esc to interrupt"),
+            footer("🌔 读取 src/main.rs", "esc 中断   ▁▂▃"),
+        ] {
+            assert!(agent_screen_indicates_work("dsh", &screen, 24), "{screen}");
+        }
+        for screen in [
+            footer("Finished 3 tools · thought 2s worked 5s", "? for shortcuts"),
+            footer("搞定 ✓ 3 tools · 想2s 干5s", "? 查看快捷键"),
+            footer("", "esc to return to input"),
+            // Reply text shaped like the working row is not the working row.
+            footer("• Reading… the config first", ""),
+            footer("● Thinking… (see the note above)", ""),
+            footer("- Working… (3s)", ""),
+            footer("Thinking… (3s)", ""),
+            footer("● Deploying… (3s)", ""),
+            footer("│ esc 中断 stops the run", ""),
+        ] {
+            assert!(!agent_screen_indicates_work("dsh", &screen, 24), "{screen}");
+        }
+        // Scrolled far above the visible rows, the working row is history.
+        let stale = format!("● Thinking… (3s)\n{}? for shortcuts", "\n".repeat(30));
+        assert!(!agent_screen_indicates_work("dsh", &stale, 24));
+        // dsh's own rows mean nothing for another harness.
+        for screen in [footer("● Thinking… (3s)", ""), footer("", "esc 中断")] {
+            assert!(!agent_screen_indicates_work("grok", &screen, 24), "{screen}");
+        }
+    }
+
     #[test]
     fn background_children_do_not_make_shell_busy() {
         assert!(!foreground_job_from_stat("10 (bash) S 1 10 10 123 10 0 0"));
@@ -2546,7 +2652,7 @@ mod tests {
 
     #[test]
     fn test_only_reasonix_declares_an_npx_fallback() {
-        for agent in ["claude", "codex", "opencode", "grok", "aider", "shell"] {
+        for agent in ["claude", "codex", "opencode", "grok", "aider", "dsh", "shell"] {
             assert!(
                 get_agent_config(agent).npx_package.is_none(),
                 "{agent} must not fall back to npx"
@@ -2570,6 +2676,63 @@ mod tests {
         } else {
             assert_eq!(resolved, std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into()));
         }
+    }
+
+    #[test]
+    fn test_dsh_launches_dsh_tui_then_dst_with_no_default_args() {
+        let cfg = get_agent_config("dsh");
+        assert_eq!((cfg.name, cfg.icon), ("DeepSeek Harness", "🐋"));
+        assert_eq!(harness_candidates("dsh"), ["dsh-tui", "dst"]);
+        // Permissions come from the dsh profile; there is no bypass flag.
+        assert!(cfg.default_args.is_empty());
+        // It needs the global dsh install and its profile, never `npx`.
+        assert_eq!(cfg.npx_package, None);
+        let at = |key: &str| HARNESS_KEYS.iter().position(|k| *k == key).unwrap();
+        assert_eq!(at("dsh"), at("reasonix") + 1);
+
+        // Preference order over whatever is installed, on a PATH of our own.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("sd-dsh-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["dst", "dsh-tui"] {
+            std::fs::write(dir.join(name), "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let lookup = |cmd: &str| which_in_path(cmd, dir.as_os_str());
+        let found = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
+        assert_eq!(first_installed(harness_candidates("dsh"), lookup), found("dsh-tui"));
+        std::fs::remove_file(dir.join("dsh-tui")).unwrap();
+        assert_eq!(first_installed(harness_candidates("dsh"), lookup), found("dst"));
+        std::fs::remove_file(dir.join("dst")).unwrap();
+        assert_eq!(first_installed(harness_candidates("dsh"), lookup), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let installed = with_default_args(&found("dst").unwrap(), &crate::launch_args::builtin("dsh"));
+        assert_eq!(installed, found("dst").unwrap(), "no arguments are appended");
+
+        // A saved card or custom launcher command is kept as it is.
+        assert_eq!(resolve_command("dsh", Some("/custom/bin/dsh-tui")), "/custom/bin/dsh-tui");
+        assert_eq!(resolve_command("dsh", Some(" dst --resume abc ")), "dst --resume abc");
+        assert_eq!(resolve_command("dsh", Some("/bin/bash")), "/bin/bash");
+        // Starting parameters saved in Settings still reach it.
+        let saved = vec!["--model".to_string(), "deepseek v4".to_string()];
+        assert_eq!(resolve_command_with("dsh", Some("/opt/dsh-tui"), &saved), "/opt/dsh-tui --model 'deepseek v4'");
+        // Whatever is installed here, a card never degrades to npx.
+        assert!(!resolve_command("dsh", None).starts_with("npx"));
+    }
+
+    #[test]
+    fn test_dsh_relaunches_fresh_because_its_resume_target_is_global() {
+        // A bare `dsh-tui --resume` reads one global ~/.dsh-tui/resume.txt,
+        // so it would attach every restored card to the same session.
+        assert_eq!(resolve_resume_command("dsh", Some("/usr/bin/dsh-tui")), "/usr/bin/dsh-tui");
+        assert_eq!(resolve_resume_command("dsh", Some("/usr/bin/dst")), "/usr/bin/dst");
+        // An explicit session a user put into the command is kept verbatim.
+        assert_eq!(
+            resolve_resume_command("dsh", Some("/usr/bin/dsh-tui --resume 1a2b3c4d")),
+            "/usr/bin/dsh-tui --resume 1a2b3c4d"
+        );
+        assert_eq!(resolve_resume_command_with_session("dsh", Some("/usr/bin/dst"), Some("ses_x")), "/usr/bin/dst");
     }
 
     #[test]
@@ -3241,6 +3404,7 @@ mod tests {
         // A harness is only detected through its own binary…
         assert_eq!(harness_candidates("claude"), ["claude"]);
         assert_eq!(harness_candidates("antigravity"), ["agy", "antigravity"]);
+        assert_eq!(harness_candidates("dsh"), ["dsh-tui", "dst"]);
         // …while a terminal card accepts any POSIX shell on the box.
         let shell = harness_candidates("shell");
         assert!(shell.contains(&"bash") && shell.contains(&"zsh") && shell.contains(&"fish"));

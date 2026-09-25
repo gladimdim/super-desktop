@@ -22,6 +22,7 @@ pub fn harness_label(key: &str) -> (&'static str, &'static str) {
         "opencode" => ("OpenCode", "🔮"),
         "grok" => ("Grok", "🚀"),
         "reasonix" => ("Reasonix", "🧭"),
+        "dsh" => ("DeepSeek", "🐋"),
         "aider" => ("Aider", "🧠"),
         "gemini" => ("Gemini", "✦"),
         "hermes" => ("Hermes", "🪽"),
@@ -48,6 +49,7 @@ pub fn harness_tooltip(key: &str) -> &'static str {
         "opencode" => "Launch OpenCode (--auto)",
         "grok" => "Launch Grok CLI (--dangerously-skip-permissions)",
         "reasonix" => "Launch Reasonix (reasonix code, else npx -y reasonix code)",
+        "dsh" => "Launch DeepSeek Harness (dsh-tui)",
         "aider" => "Launch Aider (--yes-always)",
         "gemini" => "Launch Gemini CLI (no longer maintained; Antigravity replaces it)",
         "hermes" => "Launch Hermes Agent",
@@ -426,6 +428,13 @@ mod tests {
         }
         // A key from nowhere is still labelled rather than left blank.
         assert_eq!(harness_label("shell"), ("Shell", "💻"));
+        // Only the shell may fall through to the shell's label.
+        for key in crate::tmux::HARNESS_KEYS.iter().filter(|key| **key != "shell") {
+            assert_ne!(harness_label(key), harness_label("shell"), "{key}");
+            assert_ne!(harness_tooltip(key), harness_tooltip("shell"), "{key}");
+        }
+        assert_eq!(harness_label("dsh"), ("DeepSeek", "🐋"));
+        assert_eq!(harness_tooltip("dsh"), "Launch DeepSeek Harness (dsh-tui)");
     }
 
     #[test]
