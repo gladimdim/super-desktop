@@ -24,7 +24,6 @@ foreground variants on dark themes; Kimi uses its official variants.
 | gemini | https://raw.githubusercontent.com/lobehub/lobe-icons/master/packages/static-svg/icons/gemini-color.svg Google Gemini mark from Lobe Icons (MIT). |
 | antigravity | https://raw.githubusercontent.com/sst/opencode/dev/packages/ui/src/assets/icons/app/antigravity.svg Product mark from OpenCode integration assets; Google site SVG embeds a raster. |
 | kimi | https://moonshotai.github.io/Branding-Guide/ Official K-only light/dark SVG variants. |
-| t3code | https://raw.githubusercontent.com/pingdotgg/t3code/main/assets/prod/logo.svg  |
 | codex | https://commons.wikimedia.org/wiki/File:OpenAI_logo_2025_(symbol).svg  |
 | opencode | https://github.com/sst/opencode/tree/dev/packages/console/app/src/asset/brand  |
 | grok | https://commons.wikimedia.org/wiki/File:Grok-feb-2025-logo.svg  |

@@ -162,17 +162,6 @@
     "notes": "Official K-only light/dark SVG variants.",
     "themed": "kimi-themed.svg"
   },
-  "t3code": {
-    "source": "https://raw.githubusercontent.com/pingdotgg/t3code/main/assets/prod/logo.svg",
-    "download_sha256": "fbceddbceeb75136fb8e2c702cf0fe459d153b629abbda6262a63d7c4c65e673",
-    "files": {
-      "t3code.svg": "2ccc70f4dcd9c412219f13a7c6ac5d85efc3c122b731387d3bc710e57dfd417f",
-      "t3code-themed.svg": "7cc684e1e6a7d74021ce888428884277fda30a0b3ab5268eef2c5345180111a5"
-    },
-    "light": "t3code.svg",
-    "dark": "t3code.svg",
-    "themed": "t3code-themed.svg"
-  },
   "codex": {
     "light": "openai-black.svg",
     "dark": "openai-white.svg",

@@ -27,6 +27,52 @@ pub struct CardUpdate {
     /// Session title, else the last submitted prompt.
     pub prompt: Option<String>,
     pub oc_id: Option<String>,
+    /// A setup hint for this card (see `setup_notice`); the card shows it once
+    /// per session (`claim_setup_notice`), not on every refresh.
+    pub notice: Option<crate::command_feedback::Notice>,
+}
+
+/// An OpenClaw card whose gateway does not load the SUPER DESKTOP plugin never
+/// reports status or a native title (the card falls back to the typed prompt
+/// and the screen). Point at the one place that fixes it.
+pub const OPENCLAW_SETUP_NOTICE: crate::command_feedback::Notice = crate::command_feedback::Notice {
+    text: "OpenClaw status needs setup · Settings → Harness launchers",
+    tone: crate::command_feedback::Tone::Warning,
+    duration: std::time::Duration::from_secs(8),
+};
+
+/// The setup hint `metadata` calls for: an OpenClaw launch (built-in or a
+/// custom launcher running `openclaw`) whose adapter has not reported, while
+/// OpenClaw's config does not load our gateway plugin. An unreadable config
+/// says nothing either way, so it gets no hint. `plugin` is only asked for an
+/// OpenClaw card; the check is a cached stat of the config file.
+pub(crate) fn setup_notice(
+    metadata: Option<&Metadata>,
+    plugin: impl FnOnce() -> crate::harness_metadata::OpenClawPlugin,
+) -> Option<crate::command_feedback::Notice> {
+    let metadata = metadata?;
+    (metadata.agent == "openclaw"
+        && !metadata.adapter_reported()
+        && matches!(plugin(), crate::harness_metadata::OpenClawPlugin::Missing(_)))
+    .then_some(OPENCLAW_SETUP_NOTICE)
+}
+
+thread_local! {
+    /// Sessions whose card already showed its setup hint in this process.
+    static SETUP_NOTICE_SHOWN: std::cell::RefCell<std::collections::HashSet<String>> =
+        Default::default();
+}
+
+/// True the first time `session` asks, so a card shows its setup hint once
+/// rather than on every one-second refresh. Main thread (the card applier).
+pub fn claim_setup_notice(session: &str) -> bool {
+    SETUP_NOTICE_SHOWN.with(|shown| {
+        let mut shown = shown.borrow_mut();
+        if shown.len() >= 1024 {
+            shown.clear();
+        }
+        shown.insert(session.to_owned())
+    })
 }
 
 /// Refresh every requested card from one tmux inventory.
@@ -86,7 +132,8 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
     let oc_id = resolve_oc_id(request);
     let prompt = card_prompt(agent, row, metadata.as_ref(), oc_id.as_deref());
     let prompt = card_title(agent, metadata.as_ref(), oc_id.as_deref(), &status.pid).or(prompt);
-    CardUpdate { status, preview, prompt, oc_id }
+    let notice = setup_notice(metadata.as_ref(), crate::harness_metadata::openclaw_plugin);
+    CardUpdate { status, preview, prompt, oc_id, notice }
 }
 
 fn preview_text(screen: Option<&str>, status: &SessionStatus, lines: usize) -> String {
@@ -111,6 +158,29 @@ fn resolve_oc_id(request: &CardRequest) -> Option<String> {
     oc_id
 }
 
+/// The prompt of a card whose native adapter reported, else the prompt typed
+/// into its tmux session (`prompt_history`). `Some(answer)` is final; `None`
+/// leaves the caller's agent-specific fallbacks (Codex rollout, OpenCode DB).
+///
+/// Native metadata is authoritative once its adapter has reported, even with
+/// no prompt yet. A silent adapter (an OpenClaw gateway without our plugin,
+/// hooks that never ran) falls back to the typed prompt like every other
+/// launcher. Either way it must be something a person submitted
+/// (`is_user_prompt`, see "Card titles" in AGENTS.md). Shared by the card
+/// refresh and `bridge::last_user_text` (the phone's `lastPrompt`).
+pub(crate) fn reported_or_typed_prompt(
+    metadata: Option<&Metadata>,
+    typed: impl FnOnce() -> Option<String>,
+) -> Option<Option<String>> {
+    if let Some(metadata) = metadata.filter(|m| m.adapter_reported()) {
+        return Some(
+            (!metadata.prompt.is_empty())
+                .then(|| crate::tmux::truncate_prompt_title(&metadata.prompt)),
+        );
+    }
+    typed().filter(|prompt| crate::harness_record::is_user_prompt(prompt)).map(Some)
+}
+
 /// Same sources and order as `bridge::last_user_text`, from the batched row.
 pub(crate) fn card_prompt(
     agent: &str,
@@ -132,12 +202,8 @@ pub(crate) fn card_prompt(
             recorded,
         );
     }
-    if let Some(metadata) = metadata {
-        return (!metadata.prompt.is_empty())
-            .then(|| crate::tmux::truncate_prompt_title(&metadata.prompt));
-    }
-    if let Some(prompt) = recorded() {
-        return Some(prompt);
+    if let Some(prompt) = reported_or_typed_prompt(metadata, recorded) {
+        return prompt;
     }
     if agent == "codex" {
         return crate::completion::last_user_prompt_for_pid(row?.pid.parse().ok()?);
@@ -187,7 +253,11 @@ fn legacy(request: &CardRequest) -> CardUpdate {
         screen.as_deref().unwrap_or(""),
     );
     let prompt = crate::bridge::session_title(session, agent, &status.pid).or(prompt);
-    CardUpdate { status, preview, prompt, oc_id }
+    let notice = setup_notice(
+        crate::harness_metadata::inspect(session, agent).as_ref(),
+        crate::harness_metadata::openclaw_plugin,
+    );
+    CardUpdate { status, preview, prompt, oc_id, notice }
 }
 
 #[cfg(test)]
@@ -242,13 +312,133 @@ mod tests {
         assert_eq!(card_prompt("shell", Some(&shell), None, None).as_deref(), Some("cargo test"));
         let recorded = PaneRow { last_prompt: " typed prompt ".into(), ..Default::default() };
         assert_eq!(card_prompt("grok", Some(&recorded), None, None).as_deref(), Some("typed prompt"));
-        // Native metadata is authoritative, even when it has no prompt yet.
-        let metadata = Metadata { prompt: String::new(), ..Default::default() };
+        // Native metadata is authoritative once its adapter reported, even
+        // when it has no prompt yet.
+        let metadata = Metadata { native_session: "own".into(), ..Default::default() };
         assert_eq!(card_prompt("claude", Some(&recorded), Some(&metadata), None), None);
         let metadata = Metadata { title: "Named".into(), ..Default::default() };
         assert_eq!(card_title("claude", Some(&metadata), None, "1").as_deref(), Some("Named"));
         assert_eq!(card_title("grok", None, None, "1"), None);
         assert_eq!(card_prompt("grok", None, None, None), None);
+    }
+
+    // Card title regression guards (see AGENTS.md "Card titles"). Run with
+    // `cargo test card_title_`.
+
+    /// What `harness-event init` leaves before the adapter's first event.
+    fn silent(agent: &str) -> Metadata {
+        Metadata {
+            version: 1,
+            agent: agent.into(),
+            status: "unknown".into(),
+            pid: 42,
+            process_start: "launch".into(),
+            observed_at_ms: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn card_title_silent_native_adapter_falls_back_to_the_typed_prompt() {
+        let typed = PaneRow { last_prompt: "Fix the login bug".into(), ..Default::default() };
+        for agent in ["openclaw", "claude", "opencode", "pi"] {
+            let metadata = silent(agent);
+            let prompt = card_prompt(agent, Some(&typed), Some(&metadata), None);
+            assert_eq!(prompt.as_deref(), Some("Fix the login bug"), "{agent}");
+            // The card title is the native title, else this prompt.
+            let title = card_title(agent, Some(&metadata), None, "0").or(prompt);
+            assert_eq!(title.as_deref(), Some("Fix the login bug"), "{agent}");
+        }
+        // The phone's lastPrompt (`bridge::last_user_text`) makes the same call.
+        assert_eq!(
+            reported_or_typed_prompt(Some(&silent("openclaw")), || Some("Deploy it".into())),
+            Some(Some("Deploy it".into()))
+        );
+        assert_eq!(reported_or_typed_prompt(Some(&silent("openclaw")), || None), None);
+    }
+
+    #[test]
+    fn card_title_typed_fallback_still_rejects_injected_turns() {
+        for injected in [
+            "<task-notification> <task-id>b1</task-id> <status>completed</status>",
+            "<system-reminder>Background task finished</system-reminder>",
+            "<bash-stdout>1 2 3</bash-stdout>",
+        ] {
+            let row = PaneRow { last_prompt: injected.into(), ..Default::default() };
+            assert_eq!(card_prompt("openclaw", Some(&row), Some(&silent("openclaw")), None), None, "{injected}");
+            assert_eq!(card_prompt("grok", Some(&row), None, None), None, "{injected}");
+            assert_eq!(
+                reported_or_typed_prompt(Some(&silent("claude")), || Some(injected.into())),
+                None,
+                "{injected}"
+            );
+        }
+    }
+
+    #[test]
+    fn card_title_reporting_adapter_wins_over_the_typed_prompt() {
+        let typed = PaneRow { last_prompt: "typed text".into(), ..Default::default() };
+        // Any adapter event: a native session, the JS reporter's emitter
+        // (OpenCode's load-time idle), a title or a prompt.
+        for (field, reported) in [
+            ("session", Metadata { native_session: "agent:main:sd_term_x/abc".into(), ..silent("openclaw") }),
+            ("emitter", Metadata { emitter: 4242, status: "idle".into(), ..silent("opencode") }),
+            ("title", Metadata { title: "Named".into(), ..silent("pi") }),
+        ] {
+            assert!(reported.adapter_reported(), "{field}");
+            assert_eq!(card_prompt(&reported.agent, Some(&typed), Some(&reported), None), None, "{field}");
+        }
+        let prompted = Metadata { native_session: "own".into(), prompt: "Native prompt".into(), ..silent("claude") };
+        assert_eq!(card_prompt("claude", Some(&typed), Some(&prompted), None).as_deref(), Some("Native prompt"));
+        assert_eq!(
+            reported_or_typed_prompt(Some(&prompted), || Some("typed text".into())),
+            Some(Some("Native prompt".into()))
+        );
+        assert!(!silent("openclaw").adapter_reported());
+    }
+
+    #[test]
+    fn silent_native_adapter_status_uses_the_screen() {
+        let row = PaneRow {
+            pid: std::process::id().to_string(),
+            cmd: "openclaw".into(),
+            height: 24,
+            ..Default::default()
+        };
+        let status = |metadata: Metadata, screen: &str| {
+            let screen = screen.to_string();
+            crate::tmux::status_for_pane("sd_term_status_test", "openclaw", &row,
+                &|| Some(metadata.clone()), &mut || Some(screen.clone())).status
+        };
+        let busy = "✻ Thinking… (esc to interrupt)\n";
+        assert_eq!(status(silent("openclaw"), busy), "WORKING");
+        assert_eq!(status(silent("openclaw"), "> \n"), "IDLE");
+        // Once the adapter reports, its status wins, including UNKNOWN.
+        let reported = Metadata { native_session: "agent:main:sd_term_x".into(), ..silent("openclaw") };
+        assert_eq!(status(reported.clone(), busy), "UNKNOWN");
+        assert_eq!(status(Metadata { status: "idle".into(), ..reported }, busy), "IDLE");
+    }
+
+    #[test]
+    fn openclaw_setup_notice_needs_a_silent_openclaw_launch_without_the_plugin() {
+        use crate::harness_metadata::OpenClawPlugin;
+        let missing = || OpenClawPlugin::Missing("the plugin is not registered");
+        assert_eq!(setup_notice(Some(&silent("openclaw")), missing), Some(OPENCLAW_SETUP_NOTICE));
+        // A custom launcher running `openclaw` records agent "openclaw" too.
+        let custom = Metadata { launcher: "custom-abc".into(), ..silent("openclaw") };
+        assert_eq!(setup_notice(Some(&custom), missing), Some(OPENCLAW_SETUP_NOTICE));
+        assert_eq!(setup_notice(Some(&silent("openclaw")), || OpenClawPlugin::Connected), None);
+        assert_eq!(setup_notice(Some(&silent("openclaw")), || OpenClawPlugin::Unreadable), None);
+        assert_eq!(setup_notice(None, missing), None);
+        let reported = Metadata { native_session: "agent:main:sd_term_x".into(), ..silent("openclaw") };
+        assert_eq!(setup_notice(Some(&reported), missing), None);
+        // Other agents never ask about OpenClaw's config.
+        assert_eq!(setup_notice(Some(&silent("claude")), || panic!("not asked")), None);
+        // Shown once per session, not on every refresh.
+        let session = format!("sd_term_notice_{}", std::process::id());
+        assert!(claim_setup_notice(&session));
+        assert!(!claim_setup_notice(&session));
+        assert!(claim_setup_notice(&format!("{session}_other")));
     }
 
     /// The batched path must describe live sessions exactly like the

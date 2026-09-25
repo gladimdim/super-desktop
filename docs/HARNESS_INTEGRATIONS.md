@@ -17,7 +17,7 @@ installed CLI version and its permission/retry configuration.
 | Claude Code | Scoped hooks identify the native session; submitted prompts; native names and model switches | Session start/stop, prompt/tool activity, permission wait, API error, compaction; prompt-scoped final Stop supports completion alerts; child hooks cannot overwrite parent state | Installed CLI accepts hooks and emits SessionStart in an isolated no-prompt run; lifecycle reducer tests |
 | OpenCode | Explicit TUI selection or submitted root prompt owns the card; background creation/update events and stale selection lookups cannot claim it; the auto-generated `New session - <timestamp>` / `Child session - …` placeholder is no title (card falls back to the submitted prompt) | IDLE at launch (the in-process server has no turn in flight); a selected session reports its own server's `session.status` (idle unless listed busy/retry, lookup failures stay UNKNOWN, newer events win); native session status (busy/retry/idle), permissions/questions, error; final successful own-prompt response produces FINISHED and completion alerts; deletion clears metadata | Installed-server smoke verifies selection, rename and switching; child-session/race contract tests; local-provider runtime completion/error/cancellation smoke |
 | Pi | Per-launch extension reads session ID/name/model and submitted prompt; session switches clear old data | Agent start, permission UI, error/abort and final settlement; successful final text response produces FINISHED and completion alerts | Installed offline RPC smoke uses a local fixture provider to verify success, provider failure, recovery, rename and session switching |
-| OpenClaw TUI | Dedicated `sd_term_*` key plus native session ID; exact session-store label/display name, refreshed while idle; model retained across hooks | Working/idle/error and native exec-approval waits; stale pre-reset/run events ignored; stopped-gateway observations expire to UNKNOWN | 2026.9.5 production plugin installation and real isolated gateway reset/SessionStart verified; approval transitions contract-tested |
+| OpenClaw TUI | Dedicated `sd_term_*` key plus native session ID; exact session-store label/display name, refreshed while idle; model retained across hooks. Without the gateway plugin: tracked typed prompt | Working/idle/error and native exec-approval waits; stale pre-reset/run events ignored; stopped-gateway observations expire to UNKNOWN. Without the gateway plugin: screen heuristic | 2026.9.5 production plugin installation and real isolated gateway reset/SessionStart verified; approval transitions contract-tested. Settings detects the plugin from OpenClaw's config and offers **Connect** |
 | Regular Bash terminals | Submitted command through the shell hook; foreground argv for older terminals | Foreground process group | See README's terminal command-title behavior |
 | Grok, Reasonix, Hermes | Tracked submitted input | Visible-screen indicators only, never response text: a braille-spinner line whose label is followed by a running timer (Grok `⠋ Waiting for response… 0.8s`, `Thinking… 0.0s`, `Responding… 0.1s`; Reasonix `⣽  working · 0s`, `thinking… (0s · Esc cancels)`), and Hermes' `msg=interrupt · /queue …` composer placeholder or live `⏱` status-bar timer. They disappear when the reply ends, so status returns to IDLE | Real reply frames from the phone matrix (Grok 1.0.41, Reasonix 1.39.0, Hermes 0.19.0) are unit-test fixtures in `tests/fixtures/status-frames/`. Grok and Hermes offer hooks, but only through global/user config (`~/.grok/hooks`, Hermes `config.yaml`), which the launcher does not rewrite, so there is no scoped adapter yet |
 | Other launchers | Tracked input and existing agent-specific fallbacks | Existing screen heuristic | Launchability does not imply native lifecycle support |
@@ -40,19 +40,59 @@ rewritten. Claude's normal settings continue to load, Pi's other extensions rema
 loaded, and existing inline OpenCode plugin configuration is preserved. Custom
 shell wrappers, explicit Claude `--settings`, disabled-plugin/bare modes, and
 noninteractive invocations are left unchanged rather than silently rewriting them.
-An adapter that has not emitted attributable metadata reports UNKNOWN; the OpenCode
-plugin reports IDLE as soon as it loads, because a fresh process has no turn in flight.
+The OpenCode plugin reports IDLE as soon as it loads, because a fresh process has
+no turn in flight.
+
+An adapter that has not reported anything since its launch (no native session and
+no reporter event: for example an OpenClaw gateway without the SUPER DESKTOP plugin,
+or hooks that never ran) is treated as silent rather than authoritative. The card
+title and the phone's `lastPrompt` then fall back to the prompt typed into that card
+(`@super_desktop_last_prompt`, the same tracked input other launchers use, still
+filtered by `harness_record::is_user_prompt`), and status comes from the screen
+heuristic instead of a permanent UNKNOWN. As soon as the adapter reports, its prompt,
+title and status win again, including an explicit UNKNOWN (for example an OpenClaw
+gateway that stopped sending heartbeats). The fallback never uses response text.
 
 Custom launchers that directly invoke `claude`, `opencode`, `pi`, or `openclaw`
 receive the same scoped adapters and retain their custom launcher identity.
 Shell wrappers and explicit incompatible CLI modes remain unchanged. Existing
 running processes require a new launch; no live session is silently restarted.
 
-OpenClaw needs its gateway installed/configured separately. After installing it:
+OpenClaw needs its gateway installed/configured separately. Its cards report status,
+prompts and native titles only through the SUPER DESKTOP gateway plugin. After
+installing OpenClaw:
 
-1. Run `super-desktop integrate-openclaw` to register the bundled local plugin.
-2. Restart the OpenClaw gateway using your usual gateway service workflow.
-3. Rescan harness launchers in SUPER DESKTOP settings and launch OpenClaw.
+1. Open **Settings → Harness launchers** (press **Rescan** if OpenClaw is new). Under
+   the OpenClaw row, a line says **Status & titles need the SUPER DESKTOP plugin**
+   while the plugin is not connected. **Connect** runs the same registration as
+   `super-desktop integrate-openclaw` on a worker thread (`openclaw plugins install
+   --link`, `plugins enable`, and the conversation-hook grant), showing the last line
+   of OpenClaw's output if a step fails. Each step is bounded to 90 seconds.
+2. Then press **Restart gateway**, which runs `openclaw gateway restart` (the CLI's
+   own service restart). If that fails, restart it yourself, e.g.
+   `systemctl --user restart openclaw-gateway`. Recent OpenClaw versions may also
+   hot-reload plugin changes; the restart makes it certain.
+3. The line then shows **Connected**. Open cards update from their next turn; new
+   cards report from launch.
+
+Detection reads OpenClaw's config file, never an `openclaw` subprocess: the file is
+`$OPENCLAW_CONFIG_PATH`, else `$OPENCLAW_STATE_DIR/openclaw.json`, else
+`~/.openclaw/openclaw.json` (with `OPENCLAW_HOME` replacing `$HOME`), as seen by the
+desktop process. The plugin counts as connected when `plugins.load.paths` lists
+`~/.local/state/super-desktop/harness/openclaw`,
+`plugins.entries["super-desktop-metadata"].enabled` is `true`, its
+`hooks.allowConversationAccess` is `true`, and `plugins.enabled`/`allow`/`deny` do
+not exclude it. The result is cached by the file's path, modification time and size,
+so a card refresh costs one `stat`. Comments and trailing commas (JSON5) are
+accepted; other JSON5 syntax reads as "could not be read", which still offers
+Connect but shows no card hint. Named `--profile` configs and a gateway running with
+a different environment than the desktop are not visible to this check.
+
+When an OpenClaw card (built-in or a custom launcher that runs `openclaw` directly)
+has a silent adapter while the plugin is not connected, the card shows its brief
+notice **OpenClaw status needs setup · Settings → Harness launchers** once per
+session per desktop run, the first time the card is on screen, never on every
+refresh. Meanwhile the card uses the typed-prompt and screen fallbacks above.
 
 The launcher runs `openclaw tui --session <card-session-name>`. The plugin only
 observes sessions with an explicit matching desktop mapping. It does not change
@@ -83,6 +123,19 @@ types do not invent a wait signal. Native names are read, never generated here.
   `~/.local/state/super-desktop/harness/`. Hook installation does not read API keys.
 
 ## Validation and remaining work
+
+OpenClaw setup and silent-adapter fallback (2026-09-25): the diagnosed cause of
+OpenClaw cards that never updated was an unregistered gateway plugin; after
+registration and a gateway restart a real card updated its prompt, title and status
+within a second. Unit tests cover plugin detection (registered, disabled, missing,
+not loaded, no conversation access, `plugins.enabled`/`allow`/`deny`, JSON5 comments
+and trailing commas, malformed configs) and OpenClaw's config-path overrides. GTK
+child tests drive the Settings line with fake OpenClaw steps (failure, Connect,
+Restart, retries) and the real panel against an isolated config. `card_title_` tests
+cover the typed-prompt fallback for silent Claude/OpenCode/Pi/OpenClaw adapters, the
+`is_user_prompt` filter on it, and the reporting adapter winning; each fails when its
+fallback or filter is removed. No test runs `openclaw` or touches the user's gateway
+or config.
 
 Run `cargo test harness_metadata`, `cargo test completion::tests`,
 `node --test tests/harness-metadata.test.mjs`, and `cargo test toolbar_`.

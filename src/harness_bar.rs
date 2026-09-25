@@ -34,7 +34,6 @@ pub fn harness_label(key: &str) -> (&'static str, &'static str) {
         "kiro" => ("Kiro", "🧰"),
         "cursor" => ("Cursor", "🎯"),
         "herder" => ("Herder", "🐑"),
-        "t3code" => ("T3 Code", "🌐"),
         _ => ("Shell", "💻"),
     }
 }
@@ -61,7 +60,6 @@ pub fn harness_tooltip(key: &str) -> &'static str {
         "kiro" => "Launch Kiro CLI",
         "cursor" => "Launch Cursor Agent CLI",
         "herder" => "Launch Herder job worker (not an interactive chat)",
-        "t3code" => "Launch T3 Code server; open its URL in a browser",
         _ => "Launch Terminal Shell",
     }
 }
@@ -450,6 +448,10 @@ mod tests {
         assert!(state.ready);
         // A key the host does not offer is not in the state at all.
         assert!(!state.keys.iter().any(|key| key == "aider"));
+        // Nor is one this build no longer knows (an older host still offering
+        // the removed T3 Code launcher).
+        snapshot.local.visible_harnesses = vec!["t3code".into(), "claude".into()];
+        assert_eq!(HarnessState::of_snapshot(&snapshot, true).keys, vec!["claude".to_string()]);
 
         let none = HarnessState::none();
         assert!(none.keys.is_empty() && !none.ready);
@@ -540,6 +542,14 @@ mod tests {
         bar.starting("Launching Claude…");
         assert!(bar.note.text().contains("Launching"));
         assert!(!bar.note.has_css_class("term-notice-error"));
+
+        // A key without a built-in launcher (the removed "t3code", left in an
+        // old selection) gets no button, empty or otherwise.
+        let before = bar.buttons().len();
+        bar.apply(&HarnessState { keys: vec!["t3code".into(), "shell".into()], custom: vec![], ready: true });
+        assert_eq!(bar.buttons().len(), before);
+        assert!(!bar.offered("t3code"));
+        assert_eq!(bar.buttons().iter().filter(|(_, button)| button.is_visible()).count(), 1);
 
         // An empty state describes a workspace that offers nothing.
         bar.apply(&HarnessState::none());

@@ -1442,39 +1442,11 @@ impl MiniTerminalCard {
     /// Show a brief, non-blocking line about a command's result, just under
     /// the chrome, and dismiss it after the notice's own duration.
     pub fn show_notice(&self, notice: crate::command_feedback::Notice) {
-        for class in crate::command_feedback::TONE_CLASSES {
-            self.notice_label.remove_css_class(class);
-        }
-        self.notice_label.add_css_class(notice.tone.css_class());
-        self.notice_label.set_text(notice.text);
-        // Below whichever bar the card shows, so the title and buttons stay
-        // readable; a card that has not been allocated yet uses a small gap.
-        let top = if self.header.is_visible() {
-            self.header.height()
-        } else if self.compact_top_bar.is_visible() {
-            self.compact_top_bar.height()
-        } else {
-            0
-        };
-        self.notice.set_margin_top(top + 4);
-        self.notice.set_visible(true);
-        self.notice.set_reveal_child(true);
-        let generation = self.notice_generation.get().wrapping_add(1);
-        self.notice_generation.set(generation);
-        let current = Rc::clone(&self.notice_generation);
-        let revealer = self.notice.downgrade();
-        glib::timeout_add_local_once(notice.duration, move || {
-            if current.get() != generation {
-                return;
-            }
-            if let Some(revealer) = revealer.upgrade() {
-                revealer.set_reveal_child(false);
-                // Without a frame clock the crossfade never finishes.
-                if !revealer.is_mapped() {
-                    revealer.set_visible(false);
-                }
-            }
-        });
+        reveal_notice(
+            (&self.notice, &self.notice_label, &self.notice_generation),
+            (&self.header, &self.compact_top_bar),
+            notice,
+        );
     }
 
     /// The notice on screen right now, if any.
@@ -1739,6 +1711,9 @@ impl MiniTerminalCard {
                 false
             }
         };
+        let notice_parts = (self.notice.downgrade(), self.notice_label.downgrade(),
+            Rc::clone(&self.notice_generation), self.header.downgrade(), self.compact_top_bar.downgrade());
+        let notice_session = sess_name.clone();
         let data_weak = Rc::downgrade(&self.data);
         let data_snapshot: Option<TerminalData> =
             data_weak.upgrade().map(|d| d.borrow().clone());
@@ -1754,7 +1729,7 @@ impl MiniTerminalCard {
             need_resolve,
         };
         let apply = Box::new(move |update: Option<crate::card_status::CardUpdate>| {
-            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id }) = update else {
+            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, notice }) = update else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -1788,6 +1763,17 @@ impl MiniTerminalCard {
                     crate::workspace_model::notify_changed();
                 }
             }
+            // A setup hint shows once per session, and only on a card on screen.
+            let (revealer, label, generation, header, compact) = &notice_parts;
+            if let (Some(notice), Some(revealer), Some(label), Some(header), Some(compact)) =
+                (notice, revealer.upgrade(), label.upgrade(), header.upgrade(), compact.upgrade())
+            {
+                if revealer.parent().is_some_and(|card| card.is_mapped())
+                    && crate::card_status::claim_setup_notice(&notice_session)
+                {
+                    reveal_notice((&revealer, &label, generation), (&header, &compact), notice);
+                }
+            }
             if *opencode_cache.borrow() != oc_id {
                 *opencode_cache.borrow_mut() = oc_id.clone();
             }
@@ -1814,6 +1800,48 @@ impl MiniTerminalCard {
         });
         Some(PendingRefresh { request, apply })
     }
+}
+
+/// `MiniTerminalCard::show_notice` for the card's notice widgets, so a status
+/// refresh holding only weak references can show one too.
+fn reveal_notice(
+    (revealer, label, generation): (&gtk4::Revealer, &Label, &Rc<Cell<u64>>),
+    (header, compact_top_bar): (&gtk4::Box, &gtk4::Box),
+    notice: crate::command_feedback::Notice,
+) {
+    for class in crate::command_feedback::TONE_CLASSES {
+        label.remove_css_class(class);
+    }
+    label.add_css_class(notice.tone.css_class());
+    label.set_text(notice.text);
+    // Below whichever bar the card shows, so the title and buttons stay
+    // readable; a card that has not been allocated yet uses a small gap.
+    let top = if header.is_visible() {
+        header.height()
+    } else if compact_top_bar.is_visible() {
+        compact_top_bar.height()
+    } else {
+        0
+    };
+    revealer.set_margin_top(top + 4);
+    revealer.set_visible(true);
+    revealer.set_reveal_child(true);
+    let next = generation.get().wrapping_add(1);
+    generation.set(next);
+    let current = Rc::clone(generation);
+    let revealer = revealer.downgrade();
+    glib::timeout_add_local_once(notice.duration, move || {
+        if current.get() != next {
+            return;
+        }
+        if let Some(revealer) = revealer.upgrade() {
+            revealer.set_reveal_child(false);
+            // Without a frame clock the crossfade never finishes.
+            if !revealer.is_mapped() {
+                revealer.set_visible(false);
+            }
+        }
+    });
 }
 
 /// One card's part of a batched status refresh.

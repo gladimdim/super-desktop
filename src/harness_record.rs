@@ -34,6 +34,25 @@ pub struct Metadata {
     pub claude_turn_active: bool,
 }
 
+impl Metadata {
+    /// Whether this launch's native adapter has reported anything yet.
+    ///
+    /// `prepare` writes the file and `harness-event init` only stamps the
+    /// process identity. Every adapter event after that names a native session
+    /// (Claude hooks, the OpenClaw gateway plugin, Pi) or carries the JS
+    /// reporter's emitter (OpenCode's load-time idle). A silent adapter — for
+    /// example an OpenClaw gateway without the SUPER DESKTOP plugin, or hooks
+    /// that never ran — describes nothing, so readers fall back to the typed
+    /// prompt and the screen status instead of a blank title and UNKNOWN. Once
+    /// the adapter reports, it is authoritative again.
+    pub fn adapter_reported(&self) -> bool {
+        !self.native_session.is_empty()
+            || self.emitter != 0
+            || !self.title.is_empty()
+            || !self.prompt.is_empty()
+    }
+}
+
 pub fn root() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/state/super-desktop/harness"))
 }

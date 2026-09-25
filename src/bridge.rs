@@ -174,11 +174,13 @@ pub(crate) fn last_user_text(
     if is_regular_terminal(agent_type) {
         return crate::shell_title::last(session);
     }
-    if let Some(metadata) = crate::harness_metadata::inspect(session, agent_type) {
-        return (!metadata.prompt.is_empty()).then(|| crate::tmux::truncate_prompt_title(&metadata.prompt));
-    }
-    if let Some(prompt) = crate::prompt_history::last(session) {
-        return Some(prompt);
+    // A silent native adapter falls back to the typed prompt (same rule as
+    // the card, see `reported_or_typed_prompt`).
+    if let Some(prompt) = crate::card_status::reported_or_typed_prompt(
+        crate::harness_metadata::inspect(session, agent_type).as_ref(),
+        || crate::prompt_history::last(session),
+    ) {
+        return prompt;
     }
     if agent_type == "codex" {
         return crate::completion::last_user_prompt(session);

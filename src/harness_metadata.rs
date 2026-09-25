@@ -2,6 +2,7 @@
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::Read,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
@@ -283,50 +284,292 @@ fn install(root: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Explicit setup for the independently running OpenClaw gateway.
+/// The id `install_openclaw` registers the bundled gateway plugin under.
+pub const OPENCLAW_PLUGIN_ID: &str = "super-desktop-metadata";
+/// OpenClaw CLI steps may start a Node runtime and rewrite its config; a hung
+/// one must not keep the Settings row busy forever.
+const OPENCLAW_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Explicit setup for the independently running OpenClaw gateway
+/// (`super-desktop integrate-openclaw`): OpenClaw's own output stays visible.
 pub fn install_openclaw() -> Result<(), String> {
-    let root = root().ok_or("HOME unavailable")?;
-    install(&root).map_err(|e| e.to_string())?;
-    let status = Command::new("openclaw")
-        .args([
-            "plugins",
-            "install",
-            "--link",
-            "--force",
-            "--accept-capabilities",
-        ])
-        .arg(root.join("openclaw"))
-        .status()
-        .map_err(|e| format!("Install OpenClaw first: {e}"))?;
-    if !status.success() {
-        return Err("OpenClaw plugin registration failed".into());
-    }
-    // Recent gateways require explicit conversation-hook access for local
-    // plugins. Only grant this bundled observer its required hook access.
-    for args in [
-        vec!["plugins", "enable", "super-desktop-metadata"],
-        vec![
-            "config",
-            "set",
-            "plugins.entries.super-desktop-metadata.hooks.allowConversationAccess",
-            "true",
-            "--strict-json",
-        ],
-    ] {
-        if !Command::new("openclaw")
-            .args(args)
-            .status()
-            .map_err(|e| e.to_string())?
-            .success()
-        {
-            return Err(
-                "OpenClaw plugin installed but activation failed; inspect its plugin configuration"
-                    .into(),
-            );
-        }
-    }
+    register_openclaw_plugin(false)?;
     println!("Gateway plugin registered. Restart your OpenClaw gateway, then launch a new OpenClaw card.");
     Ok(())
+}
+
+/// Settings → Harness launchers → OpenClaw → Connect: the same registration,
+/// with OpenClaw's output captured for the error line. Blocking; run it off
+/// the GTK main thread.
+pub fn connect_openclaw() -> Result<(), String> {
+    register_openclaw_plugin(true)
+}
+
+/// Install, enable and grant conversation-hook access to the bundled plugin.
+fn register_openclaw_plugin(quiet: bool) -> Result<(), String> {
+    let root = root().ok_or("HOME unavailable")?;
+    install(&root).map_err(|e| e.to_string())?;
+    let cli = crate::tmux::harness_binary("openclaw")
+        .ok_or("Install OpenClaw first: the openclaw command was not found")?;
+    let plugin = root.join("openclaw");
+    let plugin = plugin.to_string_lossy();
+    run_openclaw(&cli, &["plugins", "install", "--link", "--force", "--accept-capabilities",
+        plugin.as_ref()], quiet)
+        .map_err(|detail| format!("OpenClaw plugin registration failed{detail}"))?;
+    // Recent gateways require explicit conversation-hook access for local
+    // plugins. Only grant this bundled observer its required hook access.
+    let access = format!("plugins.entries.{OPENCLAW_PLUGIN_ID}.hooks.allowConversationAccess");
+    for args in [
+        vec!["plugins", "enable", OPENCLAW_PLUGIN_ID],
+        vec!["config", "set", access.as_str(), "true", "--strict-json"],
+    ] {
+        run_openclaw(&cli, &args, quiet).map_err(|detail| format!(
+            "OpenClaw plugin installed but activation failed{detail}; inspect its plugin configuration"
+        ))?;
+    }
+    Ok(())
+}
+
+/// Settings → Restart gateway: `openclaw gateway restart`, the CLI's own
+/// service restart (systemd user unit on Linux). Blocking.
+pub fn restart_openclaw_gateway() -> Result<(), String> {
+    let cli = crate::tmux::harness_binary("openclaw")
+        .ok_or("Install OpenClaw first: the openclaw command was not found")?;
+    run_openclaw(&cli, &["gateway", "restart"], true).map_err(|detail| format!(
+        "Gateway restart failed{detail}. Restart it yourself, e.g. systemctl --user restart openclaw-gateway"
+    ))
+}
+
+/// Run one `openclaw` step with no stdin. `Err` holds ": <last output line>"
+/// (or nothing) for the caller's message.
+fn run_openclaw(cli: &str, args: &[&str], quiet: bool) -> Result<(), String> {
+    use std::process::Stdio;
+    let mut command = Command::new(cli);
+    command.args(args).stdin(Stdio::null());
+    if quiet {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    }
+    let child = command.spawn().map_err(|e| format!(": {e}"))?;
+    let pid = child.id();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(child.wait_with_output());
+    });
+    let output = match finished.recv_timeout(OPENCLAW_STEP_TIMEOUT) {
+        Ok(output) => output.map_err(|e| format!(": {e}"))?,
+        Err(_) => {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            return Err(": timed out".into());
+        }
+    };
+    if output.status.success() {
+        return Ok(());
+    }
+    let text = String::from_utf8_lossy(if output.stderr.is_empty() { &output.stdout } else { &output.stderr })
+        .into_owned();
+    let last = crate::terminal_text::strip_terminal_escapes(&text)
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .map(|line| format!(": {}", line.chars().take(160).collect::<String>()))
+        .unwrap_or_default();
+    Err(last)
+}
+
+/// Whether OpenClaw's config loads the SUPER DESKTOP gateway plugin, which is
+/// what reports an OpenClaw card's status, prompt and native title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenClawPlugin {
+    /// Loaded from our plugin folder, enabled, allowed to read conversation
+    /// hooks, and not excluded by `plugins.enabled` / `allow` / `deny`.
+    Connected,
+    /// Not (fully) registered; why, for the Settings tooltip.
+    Missing(&'static str),
+    /// A config file exists but is not JSON (or the JSON5 subset read here).
+    Unreadable,
+}
+
+/// OpenClaw's config file and the home its `~` paths expand to, resolved the
+/// way OpenClaw does: `OPENCLAW_CONFIG_PATH`, else
+/// `$OPENCLAW_STATE_DIR/openclaw.json`, else `~/.openclaw/openclaw.json`,
+/// with `OPENCLAW_HOME` replacing `$HOME`. Named profiles (`--profile`) are
+/// per invocation and cannot be seen from here.
+fn openclaw_config_location(env: &dyn Fn(&str) -> Option<String>) -> Option<(PathBuf, PathBuf)> {
+    let set = |key: &str| {
+        env(key).map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty() && value != "undefined" && value != "null")
+    };
+    let home = PathBuf::from(set("OPENCLAW_HOME").or_else(|| set("HOME"))?);
+    let config = if let Some(path) = set("OPENCLAW_CONFIG_PATH") {
+        expand_home(&path, &home)
+    } else if let Some(dir) = set("OPENCLAW_STATE_DIR") {
+        expand_home(&dir, &home).join("openclaw.json")
+    } else {
+        home.join(".openclaw/openclaw.json")
+    };
+    Some((config, home))
+}
+
+fn expand_home(value: &str, home: &Path) -> PathBuf {
+    match value.strip_prefix('~') {
+        Some("") => home.to_path_buf(),
+        Some(rest) if rest.starts_with('/') => home.join(&rest[1..]),
+        _ => PathBuf::from(value),
+    }
+}
+
+/// `openclaw_plugin_in` for this user's OpenClaw config, cached by the
+/// file's path, modification time and size: a card refresh costs one `stat`,
+/// never an `openclaw` subprocess.
+pub fn openclaw_plugin() -> OpenClawPlugin {
+    type Stamp = (PathBuf, Option<(std::time::SystemTime, u64)>);
+    static CACHE: std::sync::Mutex<Option<(Stamp, OpenClawPlugin)>> = std::sync::Mutex::new(None);
+    let (Some((config, home)), Some(root)) =
+        (openclaw_config_location(&|key| std::env::var(key).ok()), root())
+    else {
+        return OpenClawPlugin::Missing("HOME is not set");
+    };
+    let stamp = fs::metadata(&config).ok()
+        .map(|m| (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len()));
+    let key = (config.clone(), stamp);
+    if let Some((cached, value)) = CACHE.lock().unwrap().as_ref() {
+        if *cached == key {
+            return *value;
+        }
+    }
+    let value = match stamp {
+        // No config: OpenClaw runs on defaults, which load no local plugin.
+        None => OpenClawPlugin::Missing("OpenClaw has no config file yet"),
+        Some(_) => {
+            let mut text = String::new();
+            match fs::File::open(&config).and_then(|file| file.take(1 << 20).read_to_string(&mut text)) {
+                Ok(_) => openclaw_plugin_in(&text, &root.join("openclaw"), &home),
+                Err(_) => OpenClawPlugin::Unreadable,
+            }
+        }
+    };
+    *CACHE.lock().unwrap() = Some((key, value));
+    value
+}
+
+/// What an OpenClaw config (`text`) says about our plugin at `plugin_dir`.
+pub fn openclaw_plugin_in(text: &str, plugin_dir: &Path, home: &Path) -> OpenClawPlugin {
+    use OpenClawPlugin::{Connected, Missing, Unreadable};
+    let Some(config) = parse_json5ish(text) else { return Unreadable };
+    if !config.is_object() {
+        return Unreadable;
+    }
+    let plugins = &config["plugins"];
+    let lists = |key: &str| plugins[key].as_array().is_some_and(|ids| ids.iter().any(|id| id == OPENCLAW_PLUGIN_ID));
+    if plugins["enabled"] == false {
+        return Missing("OpenClaw plugins are turned off (plugins.enabled)");
+    }
+    if lists("deny") {
+        return Missing("plugins.deny blocks the plugin");
+    }
+    if plugins["allow"].as_array().is_some_and(|ids| !ids.is_empty()) && !lists("allow") {
+        return Missing("plugins.allow does not list the plugin");
+    }
+    let loaded = plugins["load"]["paths"].as_array().is_some_and(|paths| {
+        paths.iter().filter_map(Value::as_str).any(|path| same_dir(path, plugin_dir, home))
+    });
+    let entry = &plugins["entries"][OPENCLAW_PLUGIN_ID];
+    if !loaded || !entry.is_object() {
+        return Missing("the plugin is not registered");
+    }
+    if entry["enabled"] != true {
+        return Missing("the plugin is registered but disabled");
+    }
+    if entry["hooks"]["allowConversationAccess"] != true {
+        return Missing("the plugin may not read prompts (hooks.allowConversationAccess)");
+    }
+    Connected
+}
+
+fn same_dir(entry: &str, dir: &Path, home: &Path) -> bool {
+    let entry = expand_home(entry.trim(), home);
+    // Components drop a trailing slash and `.` segments.
+    let lexical = |path: &Path| path.components().collect::<PathBuf>();
+    lexical(&entry) == lexical(dir)
+        || fs::canonicalize(&entry).is_ok_and(|real| fs::canonicalize(dir).is_ok_and(|own| own == real))
+}
+
+/// OpenClaw reads JSON5. Its own writes are plain JSON; a hand-edited file may
+/// add comments and trailing commas, which are removed here. Other JSON5
+/// syntax (unquoted keys, single quotes) reads as unparseable.
+fn parse_json5ish(text: &str) -> Option<Value> {
+    serde_json::from_str(text).ok()
+        .or_else(|| serde_json::from_str(&strip_trailing_commas(&strip_json_comments(text))).ok())
+}
+
+fn strip_json_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut quote = None;
+    while let Some(c) = chars.next() {
+        if let Some(open) = quote {
+            out.push(c);
+            if c == '\\' {
+                out.extend(chars.next());
+            } else if c == open {
+                quote = None;
+            }
+            continue;
+        }
+        match (c, chars.peek()) {
+            ('/', Some('/')) => {
+                while chars.next_if(|next| *next != '\n').is_some() {}
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut previous = ' ';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+                out.push(' ');
+            }
+            ('"' | '\'', _) => {
+                quote = Some(c);
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn strip_trailing_commas(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut quote = None;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        i += 1;
+        if let Some(open) = quote {
+            out.push(c);
+            if c == '\\' {
+                if let Some(next) = chars.get(i) {
+                    out.push(*next);
+                    i += 1;
+                }
+            } else if c == open {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '"' || c == '\'' {
+            quote = Some(c);
+        }
+        if c == ',' && chars[i..].iter().find(|next| !next.is_whitespace()).is_some_and(|next| matches!(next, '}' | ']')) {
+            continue;
+        }
+        out.push(c);
+    }
+    out
 }
 
 pub fn native_agent(agent: &str) -> bool {
@@ -855,6 +1098,115 @@ mod tests {
         data.status = "idle".into();
         refresh_liveness(&mut data, 60000);
         assert_eq!(data.status, "idle");
+    }
+
+    const PLUGIN_DIR: &str = "/home/me/.local/state/super-desktop/harness/openclaw";
+
+    fn plugin_state(config: &str) -> OpenClawPlugin {
+        openclaw_plugin_in(config, Path::new(PLUGIN_DIR), Path::new("/home/me"))
+    }
+
+    /// The shape `openclaw plugins install --link` + `plugins enable` +
+    /// `config set …allowConversationAccess` leave (OpenClaw 2026.9.5).
+    fn registered() -> Value {
+        json!({
+            "gateway": {"mode": "local"},
+            "plugins": {
+                "entries": {
+                    "openrouter": {"enabled": true},
+                    "super-desktop-metadata": {"enabled": true, "hooks": {"allowConversationAccess": true}}
+                },
+                "load": {"paths": [PLUGIN_DIR]}
+            }
+        })
+    }
+
+    #[test]
+    fn openclaw_plugin_detection_reads_the_registered_plugin() {
+        use OpenClawPlugin::{Connected, Missing, Unreadable};
+        assert_eq!(plugin_state(&registered().to_string()), Connected);
+        let with = |edit: &dyn Fn(&mut Value)| {
+            let mut config = registered();
+            edit(&mut config);
+            plugin_state(&config.to_string())
+        };
+        // Same folder written as `~/…`, with a trailing slash or `.` segments.
+        for path in ["~/.local/state/super-desktop/harness/openclaw", &format!("{PLUGIN_DIR}/"),
+            "/home/me/.local/state/./super-desktop/harness/openclaw"]
+        {
+            assert_eq!(with(&|c| c["plugins"]["load"]["paths"] = json!(["/other/plugin", path])), Connected, "{path}");
+        }
+        let missing = |state: OpenClawPlugin| matches!(state, Missing(_));
+        assert!(missing(with(&|c| c["plugins"]["entries"]["super-desktop-metadata"]["enabled"] = json!(false))));
+        assert!(missing(with(&|c| { c["plugins"]["entries"]["super-desktop-metadata"].as_object_mut().unwrap().remove("enabled"); })));
+        assert!(missing(with(&|c| { c["plugins"]["entries"].as_object_mut().unwrap().remove("super-desktop-metadata"); })));
+        assert!(missing(with(&|c| c["plugins"]["load"]["paths"] = json!(["/somewhere/else/openclaw"]))));
+        assert!(missing(with(&|c| { c["plugins"].as_object_mut().unwrap().remove("load"); })));
+        assert!(missing(with(&|c| c["plugins"]["entries"]["super-desktop-metadata"]["hooks"]["allowConversationAccess"] = json!(false))));
+        assert!(missing(with(&|c| c["plugins"]["enabled"] = json!(false))));
+        assert!(missing(with(&|c| c["plugins"]["deny"] = json!(["super-desktop-metadata"]))));
+        assert!(missing(with(&|c| c["plugins"]["allow"] = json!(["voice-call"]))));
+        assert_eq!(with(&|c| c["plugins"]["allow"] = json!(["voice-call", "super-desktop-metadata"])), Connected);
+        assert_eq!(with(&|c| c["plugins"]["allow"] = json!([])), Connected);
+        // A config without any plugins section (fresh OpenClaw).
+        assert!(missing(plugin_state(r#"{"gateway":{"mode":"local"}}"#)));
+        assert!(missing(plugin_state("{}")));
+        // Malformed or not an object.
+        for broken in ["", "{", "{\"plugins\": }", "[1, 2]", "plugins: {entries: {}}", "\u{0}"] {
+            assert_eq!(plugin_state(broken), Unreadable, "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn openclaw_plugin_detection_accepts_json5_comments_and_trailing_commas() {
+        let hand_edited = format!(r#"// ~/.openclaw/openclaw.json
+{{
+  /* local gateway */
+  "gateway": {{ "mode": "local", "url": "ws://127.0.0.1:18789//x" }},
+  "plugins": {{
+    "entries": {{
+      "super-desktop-metadata": {{ "enabled": true, "hooks": {{ "allowConversationAccess": true, }}, }},
+    }},
+    "load": {{ "paths": ["{PLUGIN_DIR}", ], }}, // registered by SUPER DESKTOP
+  }},
+}}
+"#);
+        assert_eq!(plugin_state(&hand_edited), OpenClawPlugin::Connected);
+        // Comment markers and commas inside strings are data.
+        assert_eq!(strip_json_comments(r#"{"a":"x // y /* z */"} // c"#).trim(), r#"{"a":"x // y /* z */"}"#);
+        assert_eq!(strip_trailing_commas(r#"{"a":"b,}", "c":[1,],}"#), r#"{"a":"b,}", "c":[1]}"#);
+    }
+
+    #[test]
+    fn openclaw_config_location_follows_openclaw_overrides() {
+        let at = |vars: &[(&str, &str)]| {
+            let vars: std::collections::HashMap<String, String> =
+                vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            openclaw_config_location(&|key| vars.get(key).cloned())
+        };
+        let home = PathBuf::from("/home/me");
+        assert_eq!(at(&[("HOME", "/home/me")]), Some((home.join(".openclaw/openclaw.json"), home.clone())));
+        assert_eq!(
+            at(&[("HOME", "/home/me"), ("OPENCLAW_STATE_DIR", "~/claw-state")]),
+            Some((home.join("claw-state/openclaw.json"), home.clone()))
+        );
+        // An explicit config path wins over the state directory.
+        assert_eq!(
+            at(&[("HOME", "/home/me"), ("OPENCLAW_STATE_DIR", "/srv/claw"), ("OPENCLAW_CONFIG_PATH", "/etc/claw.json")]),
+            Some((PathBuf::from("/etc/claw.json"), home.clone()))
+        );
+        // OPENCLAW_HOME replaces $HOME for OpenClaw's own defaults; blank,
+        // "undefined" and "null" count as unset.
+        let other = PathBuf::from("/data/claw-home");
+        assert_eq!(
+            at(&[("HOME", "/home/me"), ("OPENCLAW_HOME", "/data/claw-home"), ("OPENCLAW_CONFIG_PATH", " ")]),
+            Some((other.join(".openclaw/openclaw.json"), other))
+        );
+        assert_eq!(
+            at(&[("HOME", "/home/me"), ("OPENCLAW_HOME", "undefined"), ("OPENCLAW_STATE_DIR", "null")]),
+            Some((home.join(".openclaw/openclaw.json"), home))
+        );
+        assert_eq!(at(&[]), None);
     }
 
     #[test]

@@ -99,15 +99,11 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
             name: "Cursor Agent", icon: "🎯", commands: &["cursor-agent"],
             default_args: &[], npx_package: None,
         },
-        // These two are useful alongside terminal agents, but are not
-        // interactive coding-agent chats. Keep their actual role visible.
+        // Useful alongside terminal agents, but not an interactive
+        // coding-agent chat. Keep its actual role visible.
         "herder" => AgentConfig {
             name: "Herder worker", icon: "🐑", commands: &["herder"],
             default_args: &["worker"], npx_package: None,
-        },
-        "t3code" => AgentConfig {
-            name: "T3 Code server", icon: "🌐", commands: &["t3"],
-            default_args: &["serve"], npx_package: None,
         },
         // `code` opens Reasonix' interactive coding session. Deliberately no
         // permission flag: Reasonix keeps its own `workspace-write` sandbox
@@ -160,7 +156,6 @@ pub const HARNESS_KEYS: &[&str] = &[
     "kiro",
     "cursor",
     "herder",
-    "t3code",
     // Retired (see RETIRED_HARNESSES): kept launchable, listed last.
     "gemini",
     "shell",
@@ -291,6 +286,13 @@ pub fn harness_command_with(key: &str, args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// Absolute path of the installed binary for `key` (PATH, then common user
+/// bin folders), without its starting parameters. For helper subcommands such
+/// as `openclaw plugins install`, which must run the same CLI a card would.
+pub fn harness_binary(key: &str) -> Option<String> {
+    harness_candidates(key).iter().find_map(|cmd| which(cmd))
 }
 
 /// Binaries that can serve `key`, in preference order.
@@ -1074,7 +1076,10 @@ pub fn status_for_pane(
     }
 
     if crate::harness_metadata::native_agent(agent_type) || agent_type.starts_with("custom-") {
-        if let Some(metadata) = metadata() {
+        // An adapter that never reported (an OpenClaw gateway without our
+        // plugin, hooks that did not run) has no status to give: use the
+        // screen like any other launcher rather than a permanent UNKNOWN.
+        if let Some(metadata) = metadata().filter(|m| m.adapter_reported()) {
             if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
                 return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
             }
@@ -2484,7 +2489,6 @@ mod tests {
             ("qwen", "qwen", &[][..]), ("crush", "crush", &[][..]),
             ("kimi", "kimi", &[][..]), ("herder", "herder", &["worker"][..]),
             ("kiro", "kiro-cli", &[][..]), ("cursor", "cursor-agent", &[][..]),
-            ("t3code", "t3", &["serve"][..]),
         ] {
             assert!(HARNESS_KEYS.contains(&key));
             let cfg = get_agent_config(key);

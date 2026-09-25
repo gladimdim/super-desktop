@@ -272,6 +272,180 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button, Button) {
     (row, params, btn)
 }
 
+/// The blocking OpenClaw steps behind the plugin line under OpenClaw's row.
+/// Plain function pointers, so they can run on a worker thread and tests can
+/// swap in fakes (a test must never touch the real gateway or its config).
+#[derive(Clone, Copy)]
+struct OpenClawActions {
+    detect: fn() -> crate::harness_metadata::OpenClawPlugin,
+    connect: fn() -> Result<(), String>,
+    restart: fn() -> Result<(), String>,
+}
+
+impl OpenClawActions {
+    const SYSTEM: Self = Self {
+        detect: crate::harness_metadata::openclaw_plugin,
+        connect: crate::harness_metadata::connect_openclaw,
+        restart: crate::harness_metadata::restart_openclaw_gateway,
+    };
+}
+
+/// What the OpenClaw plugin setup is doing right now.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PluginStep {
+    Idle,
+    Connecting,
+    /// Registered from Settings: the running gateway still has to load it.
+    RestartNeeded,
+    Restarting,
+    Restarted,
+}
+
+/// The setup state every OpenClaw plugin line shares. Settings rebuilds its
+/// harness list on each open, and a registration that is still running, or a
+/// gateway restart still owed, must be neither forgotten nor started twice.
+/// Main thread only.
+#[derive(Default)]
+struct PluginSetup {
+    step: Cell<Option<PluginStep>>,
+    error: RefCell<Option<String>>,
+    /// Repaint callbacks of the lines on screen (dead once a line is dropped).
+    lines: RefCell<Vec<std::rc::Weak<dyn Fn()>>>,
+}
+
+impl PluginSetup {
+    fn step(&self) -> PluginStep {
+        self.step.get().unwrap_or(PluginStep::Idle)
+    }
+
+    fn set(&self, step: PluginStep, error: Option<String>) {
+        self.step.set(Some(step));
+        self.error.replace(error);
+        let lines: Vec<_> = self.lines.borrow().iter().filter_map(std::rc::Weak::upgrade).collect();
+        for paint in lines {
+            paint();
+        }
+    }
+}
+
+thread_local! {
+    static PLUGIN_SETUP: Rc<PluginSetup> = Rc::default();
+}
+
+/// The line under an installed OpenClaw's row. OpenClaw cards get status,
+/// prompts and native titles only through the SUPER DESKTOP gateway plugin,
+/// so say whether it is connected and offer the one-click setup
+/// (`install_openclaw`), then a gateway restart. Both run off the GTK thread.
+fn openclaw_plugin_notice(actions: OpenClawActions) -> Box {
+    use crate::harness_metadata::OpenClawPlugin;
+    let setup = PLUGIN_SETUP.with(Rc::clone);
+    // A finished restart or an old error was already reported.
+    match setup.step() {
+        PluginStep::Restarted => setup.set(PluginStep::Idle, None),
+        step => { setup.error.replace(None); setup.step.set(Some(step)); }
+    }
+    let line = Box::new(Orientation::Horizontal, 8);
+    line.add_css_class("harness-plugin-notice");
+    let text = Label::new(None);
+    text.add_css_class("harness-plugin-text");
+    text.set_xalign(0.0);
+    text.set_hexpand(true);
+    text.set_wrap(true);
+    text.set_valign(Align::Center);
+    line.append(&text);
+    let connected = Label::new(Some("Connected"));
+    connected.add_css_class("harness-plugin-connected");
+    connected.set_valign(Align::Center);
+    connected.set_tooltip_text(Some("OpenClaw loads the SUPER DESKTOP gateway plugin: cards report status, prompts and titles"));
+    line.append(&connected);
+    let connect = Button::with_label("Connect");
+    connect.add_css_class("launcher-btn");
+    connect.add_css_class("launcher-btn-primary");
+    connect.set_valign(Align::Center);
+    connect.set_tooltip_text(Some("Register the SUPER DESKTOP plugin with OpenClaw (openclaw plugins install)"));
+    line.append(&connect);
+    let restart = Button::with_label("Restart gateway");
+    restart.add_css_class("launcher-btn");
+    restart.set_valign(Align::Center);
+    restart.set_tooltip_text(Some("openclaw gateway restart"));
+    line.append(&restart);
+
+    let paint: Rc<dyn Fn()> = {
+        let (text, connected, connect, restart) = (text.clone(), connected.clone(), connect.clone(), restart.clone());
+        let setup = Rc::clone(&setup);
+        Rc::new(move || {
+            let plugin = (actions.detect)();
+            let step = setup.step();
+            let (message, tooltip) = match (step, plugin) {
+                (PluginStep::Connecting, _) => ("Connecting… registering the plugin with OpenClaw", None),
+                (PluginStep::Restarting, _) => ("Restarting the OpenClaw gateway…", None),
+                (PluginStep::RestartNeeded, _) => (
+                    "Plugin registered. Restart the OpenClaw gateway to load it; open cards update from their next turn.",
+                    None,
+                ),
+                (PluginStep::Restarted, _) => ("Gateway restarted. OpenClaw cards report status from their next turn.", None),
+                (PluginStep::Idle, OpenClawPlugin::Connected) => ("Status & titles come from the SUPER DESKTOP plugin", None),
+                (PluginStep::Idle, OpenClawPlugin::Missing(why)) => ("Status & titles need the SUPER DESKTOP plugin", Some(why)),
+                (PluginStep::Idle, OpenClawPlugin::Unreadable) => (
+                    "Status & titles need the SUPER DESKTOP plugin (OpenClaw's config could not be read)",
+                    None,
+                ),
+            };
+            let failed = setup.error.borrow().clone();
+            text.set_text(failed.as_deref().unwrap_or(message));
+            text.set_tooltip_text(tooltip);
+            if failed.is_some() {
+                text.add_css_class("launcher-note-error");
+            } else {
+                text.remove_css_class("launcher-note-error");
+            }
+            connected.set_visible(plugin == OpenClawPlugin::Connected && step != PluginStep::Connecting);
+            connect.set_visible(plugin != OpenClawPlugin::Connected || step == PluginStep::Connecting);
+            connect.set_sensitive(step != PluginStep::Connecting);
+            restart.set_visible(matches!(step, PluginStep::RestartNeeded | PluginStep::Restarting));
+            restart.set_sensitive(step != PluginStep::Restarting);
+        })
+    };
+    setup.lines.borrow_mut().retain(|line| line.strong_count() > 0);
+    setup.lines.borrow_mut().push(Rc::downgrade(&paint));
+    // One blocking OpenClaw step on a worker; `done` or `fallback` is next.
+    let run = {
+        let setup = Rc::clone(&setup);
+        move |busy: PluginStep, work: fn() -> Result<(), String>, done: PluginStep, fallback: PluginStep| {
+            if matches!(setup.step(), PluginStep::Connecting | PluginStep::Restarting) {
+                return;
+            }
+            setup.set(busy, None);
+            let setup = Rc::clone(&setup);
+            glib::MainContext::default().spawn_local(async move {
+                match gtk4::gio::spawn_blocking(work).await {
+                    Ok(Ok(())) => setup.set(done, None),
+                    Ok(Err(message)) => setup.set(fallback, Some(message)),
+                    Err(_) => setup.set(fallback, Some("The OpenClaw step stopped unexpectedly".into())),
+                }
+            });
+        }
+    };
+    // The buttons own this line's repaint; the shared state only holds it
+    // weakly, so a line dropped from the rebuilt list stops being painted.
+    connect.connect_clicked({
+        let (run, paint) = (run.clone(), Rc::clone(&paint));
+        move |_| {
+            let _owned = &paint;
+            run(PluginStep::Connecting, actions.connect, PluginStep::RestartNeeded, PluginStep::Idle)
+        }
+    });
+    restart.connect_clicked({
+        let paint = Rc::clone(&paint);
+        move |_| {
+            let _owned = &paint;
+            run(PluginStep::Restarting, actions.restart, PluginStep::Restarted, PluginStep::RestartNeeded)
+        }
+    });
+    paint();
+    line
+}
+
 fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Button, Button) {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("harness-row");
@@ -807,7 +981,7 @@ pub fn build_harness_settings_panel(
     let missing_count = chip("…");
     missing_head.append(&missing_count);
     let missing_hint = Label::new(Some(
-        "These are available once installed on this PC. Herder runs a job worker; T3 Code runs a web server."
+        "These are available once installed on this PC. Herder runs a job worker."
     ));
     missing_hint.add_css_class("launcher-hint");
     missing_hint.set_xalign(0.0);
@@ -1556,6 +1730,9 @@ pub fn build_harness_settings_panel(
                     }
                 });
                 rows.append(&row);
+                if info.key == "openclaw" {
+                    rows.append(&openclaw_plugin_notice(OpenClawActions::SYSTEM));
+                }
                 row_buttons.borrow_mut().push((key, btn));
             }
 
@@ -1786,7 +1963,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&bin).unwrap();
         std::env::set_var("HOME", &home);
-        if crate::tmux::detect_harness_command("t3code").is_some() {
+        if crate::tmux::detect_harness_command("kiro").is_some() {
             std::fs::remove_dir_all(&home).unwrap();
             return;
         }
@@ -1800,16 +1977,225 @@ mod tests {
             Rc::new(|_| {}), Rc::new(|_| {}),
             ConnectionHooks::inert(),
         );
-        assert!(!detected.borrow().contains(&"t3code".to_string()));
-        let t3 = bin.join("t3");
-        std::fs::write(&t3, "#!/bin/sh\n").unwrap();
+        assert!(!detected.borrow().contains(&"kiro".to_string()));
+        let kiro = bin.join("kiro-cli");
+        std::fs::write(&kiro, "#!/bin/sh\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&t3, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&kiro, std::fs::Permissions::from_mode(0o755)).unwrap();
         find_buttons(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("⟳ Rescan"))
             .unwrap().emit_clicked();
-        assert!(detected.borrow().contains(&"t3code".to_string()));
+        assert!(detected.borrow().contains(&"kiro".to_string()));
         assert_eq!(state.borrow().visible_harnesses, None);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn saved_t3code_selection_is_ignored_without_an_empty_button() {
+        // T3 Code was removed: an older state.json may still list it (and a
+        // T3 card). Loading must not fail and no launcher may appear for it.
+        let saved = r#"{"notes":[],"terminals":[{"id":"t","session_name":"sd_term_old_t3","agent_type":"t3code",
+            "command":"/usr/bin/t3 serve","x":0,"y":0,"created_at":0}],
+            "visible_harnesses":["t3code","claude"]}"#;
+        let state: AppState = serde_json::from_str(saved).expect("an old t3code state still loads");
+        assert!(!crate::tmux::HARNESS_KEYS.contains(&"t3code"));
+        let detected = vec![info("claude"), info("shell")];
+        assert_eq!(visible_keys(&state, &detected), vec!["claude".to_string()]);
+        assert_eq!(resolve_visible(Some(&["t3code".to_string()]), &detected), Vec::<String>::new());
+        // Toggling in Settings saves only known keys, dropping the stale one.
+        let mut selection = visible_keys(&state, &detected);
+        toggle(&mut selection, "shell", &detected_keys(&detected));
+        assert_eq!(selection, vec!["claude".to_string(), "shell".to_string()]);
+        // The saved card restores as a generic terminal running its own command.
+        let card = &state.terminals[0];
+        assert_eq!(crate::tmux::get_agent_config(&card.agent_type).name, "Terminal");
+        assert_eq!(
+            crate::tmux::resolve_resume_command_with_session(&card.agent_type, Some(card.command.as_str()), None),
+            "/usr/bin/t3 serve"
+        );
+        assert!(crate::brand::logo_path("t3code", false).is_none());
+        assert!(crate::brand::logo_filename("t3code", true).is_none());
+    }
+
+    /// Fake OpenClaw for the plugin line: 0 missing, 1 connected, 2 unreadable.
+    static FAKE_PLUGIN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+    static FAKE_FAILS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static FAKE_RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn fake_detect() -> crate::harness_metadata::OpenClawPlugin {
+        use crate::harness_metadata::OpenClawPlugin;
+        match FAKE_PLUGIN.load(std::sync::atomic::Ordering::SeqCst) {
+            1 => OpenClawPlugin::Connected,
+            2 => OpenClawPlugin::Unreadable,
+            _ => OpenClawPlugin::Missing("the plugin is not registered"),
+        }
+    }
+
+    fn fake_connect() -> Result<(), String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        FAKE_RUNS.fetch_add(1, SeqCst);
+        std::thread::sleep(Duration::from_millis(50));
+        if FAKE_FAILS.load(SeqCst) {
+            return Err("OpenClaw plugin registration failed: boom".into());
+        }
+        FAKE_PLUGIN.store(1, SeqCst);
+        Ok(())
+    }
+
+    fn fake_restart() -> Result<(), String> {
+        use std::sync::atomic::Ordering::SeqCst;
+        FAKE_RUNS.fetch_add(1, SeqCst);
+        if FAKE_FAILS.load(SeqCst) {
+            return Err("Gateway restart failed: no service".into());
+        }
+        Ok(())
+    }
+
+    fn pump_until(what: &str, done: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// Text, chip, Connect and Restart of one plugin line.
+    fn plugin_line(line: &gtk4::Widget) -> (String, bool, Button, Button) {
+        let text = find_widgets(line, "harness-plugin-text")[0].clone().downcast::<Label>().unwrap();
+        let chip = find_widgets(line, "harness-plugin-connected")[0].clone();
+        let button = |label: &str| find_buttons(line, "launcher-btn").into_iter()
+            .find(|b| b.label().as_deref() == Some(label)).unwrap();
+        (text.text().to_string(), shown(&chip), button("Connect"), button("Restart gateway"))
+    }
+
+    #[test]
+    fn openclaw_plugin_line_connects_then_offers_a_gateway_restart() {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("harness_settings::tests::openclaw_plugin_line_connects_then_offers_a_gateway_restart");
+            return;
+        }
+        gtk4::init().unwrap();
+        let actions = OpenClawActions { detect: fake_detect, connect: fake_connect, restart: fake_restart };
+        let line = openclaw_plugin_notice(actions).upcast::<gtk4::Widget>();
+        let (text, chip, connect, restart) = plugin_line(&line);
+        assert_eq!(text, "Status & titles need the SUPER DESKTOP plugin");
+        assert!(!chip && shown(&connect) && !shown(&restart));
+        let text_label = find_widgets(&line, "harness-plugin-text")[0].clone();
+        assert_eq!(text_label.tooltip_text().as_deref(), Some("the plugin is not registered"));
+
+        // A failed registration explains itself and can be retried.
+        FAKE_FAILS.store(true, SeqCst);
+        connect.emit_clicked();
+        let (text, _, connect, _) = plugin_line(&line);
+        assert!(text.starts_with("Connecting"), "{text}");
+        assert!(!connect.is_sensitive(), "no second registration while one runs");
+        connect.emit_clicked();
+        // Settings rebuilds its list on every open: a rebuilt line knows too.
+        let during = openclaw_plugin_notice(actions).upcast::<gtk4::Widget>();
+        assert!(!plugin_line(&during).2.is_sensitive());
+        pump_until("the failed registration", || plugin_line(&line).2.is_sensitive());
+        assert_eq!(FAKE_RUNS.load(SeqCst), 1);
+        let (text, chip, connect, restart) = plugin_line(&line);
+        assert_eq!(text, "OpenClaw plugin registration failed: boom");
+        assert!(text_label.has_css_class("launcher-note-error"));
+        assert!(!chip && shown(&connect) && !shown(&restart));
+
+        // Success: Connected, and the running gateway still has to load it.
+        FAKE_FAILS.store(false, SeqCst);
+        connect.emit_clicked();
+        pump_until("the registration", || shown(&plugin_line(&line).3));
+        let (text, chip, connect, restart) = plugin_line(&line);
+        assert!(text.starts_with("Plugin registered. Restart the OpenClaw gateway"), "{text}");
+        assert!(!text_label.has_css_class("launcher-note-error"));
+        assert!(chip && !shown(&connect) && restart.is_sensitive());
+        assert!(shown(&plugin_line(&during).3), "every open line is repainted");
+        // Reopening Settings keeps the restart the gateway still needs.
+        let reopened = openclaw_plugin_notice(actions).upcast::<gtk4::Widget>();
+        let (text, chip, _, again) = plugin_line(&reopened);
+        assert!(text.starts_with("Plugin registered."), "{text}");
+        assert!(chip && shown(&again));
+
+        FAKE_FAILS.store(true, SeqCst);
+        restart.emit_clicked();
+        pump_until("the failed restart", || plugin_line(&line).3.is_sensitive());
+        let (text, _, _, restart) = plugin_line(&line);
+        assert!(text.contains("no service"), "{text}");
+        assert!(shown(&restart), "a failed restart can be retried");
+        FAKE_FAILS.store(false, SeqCst);
+        restart.emit_clicked();
+        pump_until("the restart", || !shown(&plugin_line(&line).3));
+        let (text, chip, connect, _) = plugin_line(&line);
+        assert_eq!(text, "Gateway restarted. OpenClaw cards report status from their next turn.");
+        assert!(chip && !shown(&connect));
+        assert!(!shown(&plugin_line(&reopened).3));
+        assert_eq!(FAKE_RUNS.load(SeqCst), 4);
+
+        // Already connected: just say so. An unreadable config still offers setup.
+        let (text, chip, connect, restart) = plugin_line(&openclaw_plugin_notice(actions).upcast());
+        assert_eq!(text, "Status & titles come from the SUPER DESKTOP plugin");
+        assert!(chip && !shown(&connect) && !shown(&restart));
+        FAKE_PLUGIN.store(2, SeqCst);
+        let (text, chip, connect, _) = plugin_line(&openclaw_plugin_notice(actions).upcast());
+        assert!(text.contains("could not be read"), "{text}");
+        assert!(!chip && shown(&connect));
+    }
+
+    #[test]
+    fn openclaw_row_shows_the_plugin_state_from_openclaws_config() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("harness_settings::tests::openclaw_row_shows_the_plugin_state_from_openclaws_config");
+            return;
+        }
+        gtk4::init().unwrap();
+        // An isolated home and OpenClaw config: never the user's.
+        let home = std::env::temp_dir().join(format!("sd-openclaw-row-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".local/bin")).unwrap();
+        std::env::set_var("HOME", &home);
+        for key in ["OPENCLAW_HOME", "OPENCLAW_STATE_DIR"] {
+            std::env::remove_var(key);
+        }
+        let config = home.join("claw/openclaw.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        std::env::set_var("OPENCLAW_CONFIG_PATH", &config);
+        if crate::tmux::harness_binary("openclaw").is_none() {
+            let fake = home.join(".local/bin/openclaw");
+            std::fs::write(&fake, "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::write(&config, r#"{"gateway":{"mode":"local"}}"#).unwrap();
+        let panel = build_harness_settings_panel(
+            Rc::new(RefCell::new(AppState::default())),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        let line = || {
+            let lines = find_widgets(&panel.widget, "harness-plugin-notice");
+            assert_eq!(lines.len(), 1, "one plugin line, for OpenClaw only");
+            assert_eq!(lines[0].prev_sibling(), Some(harness_row_named(&panel.widget, "OpenClaw")));
+            lines[0].clone()
+        };
+        let (text, chip, connect, _) = plugin_line(&line());
+        assert_eq!(text, "Status & titles need the SUPER DESKTOP plugin");
+        assert!(!chip && shown(&connect));
+
+        let plugin = home.join(".local/state/super-desktop/harness/openclaw");
+        std::fs::write(&config, serde_json::json!({"plugins": {
+            "entries": {"super-desktop-metadata": {"enabled": true, "hooks": {"allowConversationAccess": true}}},
+            "load": {"paths": [plugin]}}}).to_string()).unwrap();
+        (panel.refresh)();
+        let (text, chip, connect, _) = plugin_line(&line());
+        assert_eq!(text, "Status & titles come from the SUPER DESKTOP plugin");
+        assert!(chip && !shown(&connect));
+
+        std::fs::write(&config, "{ not json").unwrap();
+        (panel.refresh)();
+        let (text, chip, connect, _) = plugin_line(&line());
+        assert!(text.contains("could not be read"), "{text}");
+        assert!(!chip && shown(&connect));
         std::fs::remove_dir_all(&home).unwrap();
     }
 

@@ -1397,6 +1397,28 @@ separator.launcher-sep {{
     font-size: 10px;
 }}
 
+/* The line under OpenClaw's row: its status/title plugin, and the setup. */
+.harness-plugin-notice {{
+    border-left: 2px solid {btn_border};
+    margin: 0 0 4px 24px;
+    padding: 2px 0 2px 10px;
+}}
+
+.harness-plugin-text {{
+    color: {light_foreground};
+    font-size: 10.5px;
+}}
+
+.harness-plugin-connected {{
+    background-color: {status_active_bg};
+    color: {bright_green};
+    border: 1px solid {status_active_border};
+    border-radius: 9999px;
+    padding: 1px 8px;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
 .harness-toggle {{
     background-color: {btn_bg};
     color: {light_foreground};
@@ -1678,6 +1700,9 @@ mod tests {
             "harness-toggle",
             "harness-toggle-on",
             "harness-toggle-off",
+            "harness-plugin-notice",
+            "harness-plugin-text",
+            "harness-plugin-connected",
             // Connections pages, the invitation flow and the approval panel.
             "pairing-panel",
             "pairing-device-name",

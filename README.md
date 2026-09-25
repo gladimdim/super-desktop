@@ -212,10 +212,17 @@ Herder retains its fallback until a verified SVG is available. See
 Claude Code, OpenCode and Pi now have scoped native metadata adapters for new
 terminal sessions. They report conversation names where available, submitted
 prompts, working/idle, permission waits and errors. Codex uses its own rollout
-events and conversation index. OpenClaw TUI is discoverable after installation
-and has an optional gateway plugin. See [integration coverage, setup and remaining
+events and conversation index. OpenClaw TUI is discoverable after installation;
+its status and titles come from a SUPER DESKTOP gateway plugin. **Settings →
+Harness launchers** shows under the OpenClaw row whether that plugin is connected,
+with **Connect** and **Restart gateway** buttons to set it up, and a new OpenClaw
+card without it shows a one-time "OpenClaw status needs setup" hint. Until a native
+adapter reports, a card uses the prompt typed into it and the on-screen status, so
+it is never left blank. See [integration coverage, setup and remaining
 validation](docs/HARNESS_INTEGRATIONS.md); launcher availability alone does not
-mean a harness has a verified native adapter.
+mean a harness has a verified native adapter. T3 Code is no longer offered (it runs
+a web server, not a terminal harness); an existing T3 card reopens as a plain
+terminal running its saved command.
 
 PC card title fallbacks and Android prompt labels share the last submitted input for each
 tmux session. New input sent through the desktop, remote desktop, or Android
@@ -261,7 +268,6 @@ to an idle Codex terminal. See [image prompts, compatibility and upload limits](
 | 🧰 Kiro CLI | `kiro-cli` |
 | 🎯 Cursor Agent | `cursor-agent` |
 | 🐑 Herder worker | `herder worker` (job supervisor, not an interactive chat) |
-| 🌐 T3 Code server | `t3 serve` (open the web UI in a browser) |
 | 💻 Shell | `bash` / `zsh` / `fish` |
 
 Fresh installations show the first three detected harnesses in the toolbar (or
