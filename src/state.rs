@@ -157,6 +157,11 @@ pub struct AppState {
     /// retired one back on keeps it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_harness_swaps: Vec<String>,
+    /// Label colour (a `crate::tag` index) per project folder: new cards in a
+    /// folder take its colour, and a colour picked on a card becomes it. See
+    /// `crate::folder_colors`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub folder_tags: std::collections::BTreeMap<String, u8>,
 }
 
 impl Default for AppState {
@@ -185,6 +190,7 @@ impl Default for AppState {
             top_bar_size: TopBarSize::Large,
             sleep_lock_on_ac: false,
             retired_harness_swaps: Vec::new(),
+            folder_tags: std::collections::BTreeMap::new(),
         }
     }
 }

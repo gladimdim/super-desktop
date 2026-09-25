@@ -2038,7 +2038,7 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         assert_eq!(tag_color(9), None, "out-of-range tags fall back to none");
         assert_eq!(tag_color(5), Some("#22d3ee"), "cyan (the default tag)");
         assert_eq!(tag_color(1), Some("#f87171"));
-        assert_eq!(tag_color(crate::tag::DEFAULT_TERMINAL_TAG), Some("#22d3ee"));
+        assert_eq!(tag_color(crate::tag::TAG_CYAN), Some("#22d3ee"));
         // Every palette entry resolves to a hex colour.
         for n in 1..=crate::tag::TAG_COUNT {
             assert!(tag_color(n).is_some_and(|c| c.starts_with('#') && c.len() == 7));

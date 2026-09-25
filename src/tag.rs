@@ -17,9 +17,8 @@ pub const TAG_COLORS: [&str; 8] = [
 
 pub const TAG_NONE: u8 = 0;
 pub const TAG_COUNT: u8 = 8;
-/// Default group color for a newly created terminal harness: cyan (#22d3ee).
+/// Cyan (#22d3ee): the first folder's label color (see `folder_colors`).
 pub const TAG_CYAN: u8 = 5;
-pub const DEFAULT_TERMINAL_TAG: u8 = TAG_CYAN;
 
 pub fn normalize_tag(tag: u8) -> u8 {
     if tag >= 1 && tag <= TAG_COUNT {

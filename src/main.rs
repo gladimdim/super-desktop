@@ -6,6 +6,7 @@ mod custom_harness;
 mod prompt_image;
 mod prompt_history;
 mod shell_title;
+mod folder_colors;
 mod harness_metadata;
 mod harness_record;
 mod preload;

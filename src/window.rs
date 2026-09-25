@@ -18,7 +18,6 @@ use crate::mini_terminal::{
 use crate::overlap_ghost::GhostLayer;
 use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
-use crate::tag::DEFAULT_TERMINAL_TAG;
 use crate::tmux::create_session;
 
 #[derive(Clone, Copy)]
@@ -1273,6 +1272,13 @@ impl SuperDesktopWindow {
         let workspace_dir = directory.map(str::to_owned)
             .unwrap_or_else(|| crate::state::effective_workspace_dir(&self.state.borrow()));
         crate::state::remember_workspace_dir(&mut self.state.borrow_mut(), &workspace_dir);
+        // Same folder, same label colour (see `folder_colors`).
+        let tag = {
+            let mut state = self.state.borrow_mut();
+            let tag = crate::folder_colors::tag_for_new_card(&state, &workspace_dir);
+            crate::folder_colors::remember(&mut state, &workspace_dir, tag);
+            tag
+        };
         let custom_command = self.state.borrow().custom_harnesses.iter()
             .find(|item| item.id == agent_type && item.validate().is_ok())
             .map(|item| item.command());
@@ -1311,7 +1317,7 @@ impl SuperDesktopWindow {
             icon_x: None,
             icon_y: None,
             created_at: now,
-            tag: DEFAULT_TERMINAL_TAG,
+            tag,
             agent_session_id: None,
             workspace_dir: Some(workspace_dir),
         };
@@ -1395,6 +1401,9 @@ impl SuperDesktopWindow {
             let (px, py) = displayed_pos(&final_data);
             canvas_term_end.move_(&widget, px, py);
             let mut s = state_end.borrow_mut();
+            // A colour picked on the card's dot becomes its folder's colour.
+            let previous = s.terminals.iter().find(|t| t.session_name == final_data.session_name).cloned();
+            crate::folder_colors::note_card_saved(&mut s, previous.as_ref(), &final_data);
             if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == final_data.session_name) {
                 *t = final_data;
             } else {
