@@ -10,13 +10,29 @@ The Android repository's own `AGENTS.md` has the full Android feature and build
 instructions. Changes only to PC-to-PC or Linux-only behavior do not require an
 Android feature inventory update.
 
-## Plans and design notes stay private
+## Docs and plans live in the private OmarchyAILauncher repository
 
-This repository is public. Plans, protocol notes, performance measurements and
-implementation write-ups live in the private sibling repository at
-`OmarchyAILauncher/desktop-docs/`. Add or update them there, not here; keep this
-repository's Markdown to the README, SECURITY.md, these instructions and asset
-licenses.
+This repository is public. Its plans, design notes, protocol notes,
+performance measurements and implementation write-ups are kept secret in the
+private sibling repository, at `../OmarchyAILauncher/desktop-docs/` (index:
+`desktop-docs/README.md`). It holds the PC-to-PC plan and protocol, harness
+integrations and logos, completion notifications, file previews, image prompts,
+mobile terminal output and Linux performance notes.
+
+- Read the relevant `desktop-docs/` file before changing that area, and update
+  it in the same work when behavior, limits or plans change. Commit and push
+  that update in the OmarchyAILauncher repository.
+- Write every new plan, design document, investigation or measurement there,
+  and add it to the index. Never add one to this repository, including under
+  `docs/`, which is the public website.
+- Public files (README, SECURITY.md, the website, code comments, test
+  docstrings, commit messages) must not link to or quote those notes, or
+  describe unreleased plans. Describe shipped, user-facing behavior only.
+- This repository's Markdown is limited to README.md, SECURITY.md, these
+  instructions, `assets/logos/` attribution and licenses, and
+  `docs/screenshots/README.md`.
+- If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
+  the notes here.
 
 ## Responsive toolbar invariant
 
