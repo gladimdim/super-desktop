@@ -242,14 +242,14 @@ to an idle Codex terminal. See [image prompts, compatibility and upload limits](
 
 | | |
 |---|---|
-| 🌌 Antigravity CLI | `agy` / `antigravity` |
+| 🌌 Antigravity CLI | `agy` / `antigravity` — install with `mise use -g agy` or `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, sign in once by running `agy`. For phone scrollback set `"altScreenMode": "never"` in `~/.gemini/antigravity-cli/settings.json` (there is no per-launch flag). |
 | ⚡ Claude Code | `claude` |
 | 🤖 OpenAI Codex | `codex` |
 | 🔮 OpenCode | `opencode` |
 | 🚀 Grok CLI | `grok` |
 | 🧭 Reasonix | `reasonix code` (or `npx -y reasonix code`) |
 | 🧠 Aider | `aider` |
-| ✦ Gemini CLI | `gemini` |
+| ✦ Gemini CLI | `gemini` — no longer maintained upstream; still launches, but fresh installs do not add it to the top bar and an existing Gemini button switches to Antigravity once `agy` is installed (turn Gemini back on in ⚙ Settings to keep it). |
 | 🪽 Hermes Agent | `hermes` |
 | 🥧 Pi | `pi` |
 | 🪿 Goose | `goose session` |

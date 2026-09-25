@@ -828,11 +828,17 @@ impl RemoteCanvas {
             // remote card has the host's card to draw instead, so it resizes as
             // the edge is dragged. The commit at the end is what the host is
             // told about.
+            let view = weak_resize.upgrade();
             if let Some(card) = resize_slot.borrow().as_ref() {
                 canvas_for_resize.move_(&card.container, x, y);
                 card.container.set_size_request(width, height);
+                // Keep the host's grid while the body changes size: only the
+                // font follows the drag (see `card_source::fit_font`).
+                if let Some(view) = &view {
+                    fit_card_body(card, width, height, view.scale());
+                }
             }
-            if let Some(view) = weak_resize.upgrade() {
+            if let Some(view) = view {
                 view.gesturing.borrow_mut().insert(id_resize.clone());
             }
         };
@@ -1247,14 +1253,7 @@ impl RemoteCanvas {
             }
             card.set_workspace_size(transform.content_width, transform.content_height);
             card.adopt_host_geometry(width, height);
-            // The font follows the host's grid, not this machine's theme: the
-            // emulator has to line up with the host's own columns and rows.
-            let header = if card.header_visible() {
-                ((HEADER_HEIGHT * scale).round() as i32).clamp(16, (height / 2).max(16))
-            } else {
-                0
-            };
-            card.set_fit(width as f64, f64::from((height - header).max(1)), scale);
+            fit_card_body(card, width, height, scale);
             self.place(id, card, x, y);
             self.placed
                 .borrow_mut()
@@ -1354,6 +1353,18 @@ fn terminal_data(host: &DesktopCard, scale: f64) -> TerminalData {
 
 /// The layout to ask the host for, translated out of this canvas's pixels.
 ///
+/// Fit a remote card's emulator to its body: the card size minus the header.
+/// The font follows the host's grid, not this machine's theme: the emulator
+/// has to line up with the host's own columns and rows.
+fn fit_card_body(card: &MiniTerminalCard, width: i32, height: i32, scale: f64) {
+    let header = if card.header_visible() {
+        ((HEADER_HEIGHT * scale).round() as i32).clamp(16, (height / 2).max(16))
+    } else {
+        0
+    };
+    card.set_fit(f64::from(width), f64::from((height - header).max(1)), scale);
+}
+
 /// Moving, resizing and iconifying are the same command because the card's own
 /// gestures already wrote all of them into `data`: one drop carries whatever
 /// the user changed.

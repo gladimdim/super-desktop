@@ -22,6 +22,11 @@ pub const RETRY_AFTER: Duration = Duration::from_secs(5);
 /// clips, exactly like a small local card does.
 pub const MIN_FONT: f64 = 3.0;
 pub const MAX_FONT: f64 = 40.0;
+/// Below `MIN_FONT` text is unreadable, but a card drawn smaller than the
+/// host's grid at `MIN_FONT` still has to keep that grid: otherwise VTE drops
+/// rows and the host's output lands on the wrong lines (and stays scrambled
+/// after the card grows again). Fitting may go down to this instead.
+const GRID_FLOOR_FONT: f64 = 1.0;
 /// How deep a remote emulator's scrollback is. The host owns the real
 /// scrollback; this is only what the viewer can reach locally.
 pub const REMOTE_SCROLLBACK: i64 = 2000;
@@ -266,11 +271,30 @@ impl RemoteSession {
     }
 }
 
+/// Pack a remote card's emulator at its natural size (the host grid times the
+/// cell size), centred in the card body.
+///
+/// VTE derives its grid from whatever it is allocated, so an emulator that
+/// expanded to fill the body silently became e.g. 70×21 or 76×22 for a 76×21
+/// host. The host's tmux then drew into a different screen than the one shown:
+/// its scroll region and line feeds landed a row off, leaving the text a line
+/// above the cursor, and long lines wrapped. A natural-size emulator keeps
+/// exactly the grid `set_size` gives it; the body's remainder is a margin.
+pub fn pack_remote_emulator(terminal: &vte4::Terminal) {
+    terminal.set_hexpand(false);
+    terminal.set_vexpand(false);
+    terminal.set_halign(gtk4::Align::Center);
+    terminal.set_valign(gtk4::Align::Center);
+}
+
 /// Size the emulator's font so the host's whole grid fits the card body.
 ///
-/// VTE cell metrics scale with the font size, so two or three passes converge;
-/// the result matches the host's own layout scale, and the host's grid is never
-/// changed by it.
+/// The emulator keeps the host's grid (see `pack_remote_emulator`); only the
+/// font changes. VTE cells are whole pixels, so after estimating, the font
+/// steps down until the whole grid (as VTE measures it, padding included)
+/// fits the space the emulator really has: its parent's allocation once laid
+/// out, never more than the body the view computed. The host's own grid is
+/// never changed by it.
 pub fn fit_font(
     terminal: &vte4::Terminal,
     body_width: f64,
@@ -281,21 +305,44 @@ pub fn fit_font(
     let Some(grid) = grid else {
         return;
     };
-    let target_width = body_width / f64::from(grid.columns.max(1));
-    let target_height = body_height / f64::from(grid.rows.max(1));
+    let (mut width, mut height) = (body_width, body_height);
+    if let Some(parent) = terminal.parent() {
+        if parent.width() > 1 && parent.height() > 1 {
+            width = width.min(f64::from(parent.width()));
+            height = height.min(f64::from(parent.height()));
+        }
+    }
+    if width < 1.0 || height < 1.0 {
+        return;
+    }
+    // VTE may have re-derived its grid from an earlier allocation.
+    terminal.set_size(i64::from(grid.columns.max(1)), i64::from(grid.rows.max(1)));
+    let natural = || {
+        let (_, w, _, _) = terminal.measure(gtk4::Orientation::Horizontal, -1);
+        let (_, h, _, _) = terminal.measure(gtk4::Orientation::Vertical, -1);
+        (f64::from(w), f64::from(h))
+    };
     let mut size = (10.0 * scale).clamp(MIN_FONT, MAX_FONT);
     for _ in 0..3 {
         crate::mini_terminal::apply_vte_theme(terminal, size);
-        let cell_width = terminal.char_width() as f64;
-        let cell_height = terminal.char_height() as f64;
-        if cell_width <= 0.0 || cell_height <= 0.0 {
+        let (w, h) = natural();
+        if w <= 0.0 || h <= 0.0 {
             return;
         }
-        let factor = (target_width / cell_width).min(target_height / cell_height);
-        if !factor.is_finite() || (factor - 1.0).abs() < 0.02 {
-            return;
+        let factor = (width / w).min(height / h);
+        if !factor.is_finite() || (factor - 1.0).abs() < 0.01 {
+            break;
         }
         size = (size * factor).clamp(MIN_FONT, MAX_FONT);
+    }
+    // Whole-pixel cells: never let the grid overflow the space it has.
+    for _ in 0..60 {
+        crate::mini_terminal::apply_vte_theme(terminal, size);
+        let (w, h) = natural();
+        if (w <= width && h <= height) || size <= GRID_FLOOR_FONT {
+            break;
+        }
+        size = (size * 0.97).max(GRID_FLOOR_FONT);
     }
 }
 
@@ -371,6 +418,68 @@ mod tests {
         assert!(!is_submit_key(Key::Return, ModifierType::CONTROL_MASK));
         assert!(!is_submit_key(Key::Return, ModifierType::ALT_MASK));
         assert!(!is_submit_key(Key::a, none));
+    }
+
+    #[test]
+    fn remote_emulator_keeps_the_host_grid_at_any_card_size() {
+        crate::gtk_test::run_in_child_process(
+            "card_source::tests::remote_emulator_grid_inner",
+        );
+    }
+
+    /// A remote card body is a vertical box the card sizes; the emulator in it
+    /// must show exactly the host's grid, whatever the body size. Before, it
+    /// expanded and VTE re-derived e.g. 70×21 or 74×22 for a 76×21 host, which
+    /// put the host's text a line above its cursor.
+    #[test]
+    fn remote_emulator_grid_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use vte4::prelude::*;
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let pump = |ms: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < until {
+                while gtk4::glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let mut wrong = Vec::new();
+        for &(columns, rows) in &[(76u16, 21u16), (80, 24), (99, 38), (156, 40)] {
+            for &(width, height) in &[(640, 450), (600, 300), (500, 330), (733, 402), (420, 250), (900, 600)] {
+                let body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                body.set_size_request(width, height);
+                let terminal = vte4::Terminal::new();
+                // What `spawn_vte` sets before a remote card packs it.
+                terminal.set_hexpand(true);
+                terminal.set_vexpand(true);
+                pack_remote_emulator(&terminal);
+                body.append(&terminal);
+                let window = gtk4::Window::new();
+                window.set_default_size(width, height);
+                window.set_resizable(false);
+                window.set_child(Some(&body));
+                window.present();
+                pump(120);
+                let grid = TerminalSize { columns, rows };
+                terminal.set_size(i64::from(columns), i64::from(rows));
+                fit_font(&terminal, f64::from(width), f64::from(height), Some(grid), 1.0);
+                pump(150);
+                let shown = (terminal.column_count(), terminal.row_count());
+                let fits = terminal.width() <= body.width() && terminal.height() <= body.height();
+                if shown != (i64::from(columns), i64::from(rows)) || !fits {
+                    wrong.push(format!(
+                        "host {columns}x{rows} in {width}x{height}: shows {}x{} at {}x{} in {}x{}",
+                        shown.0, shown.1, terminal.width(), terminal.height(), body.width(), body.height()
+                    ));
+                }
+                window.close();
+                pump(50);
+            }
+        }
+        assert!(wrong.is_empty(), "emulator grid differs from the host's:\n{}", wrong.join("\n"));
     }
 
     #[test]

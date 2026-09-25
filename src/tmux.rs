@@ -150,7 +150,6 @@ pub const HARNESS_KEYS: &[&str] = &[
     "grok",
     "reasonix",
     "aider",
-    "gemini",
     "hermes",
     "pi",
     "openclaw",
@@ -162,8 +161,23 @@ pub const HARNESS_KEYS: &[&str] = &[
     "cursor",
     "herder",
     "t3code",
+    // Retired (see RETIRED_HARNESSES): kept launchable, listed last.
+    "gemini",
     "shell",
 ];
+
+/// Harnesses whose upstream is no longer maintained, with their successor.
+/// They still launch when installed, but fresh installs never pick them for
+/// the top bar and `state::retire_harnesses` swaps them for the successor once.
+pub const RETIRED_HARNESSES: &[(&str, &str)] = &[
+    // Google moved individual developers from Gemini CLI to Antigravity CLI.
+    ("gemini", "antigravity"),
+];
+
+/// The successor of a retired harness, e.g. `"antigravity"` for `"gemini"`.
+pub fn retired_successor(key: &str) -> Option<&'static str> {
+    RETIRED_HARNESSES.iter().find(|(old, _)| *old == key).map(|(_, new)| *new)
+}
 
 /// A harness type that resolves on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2329,9 +2343,11 @@ mod tests {
 
     #[test]
     fn test_resolve_command_ai_agent_arguments() {
-        // Antigravity
-        let agy_cmd = resolve_command("antigravity", None);
-        assert!(agy_cmd.ends_with("--dangerously-skip-permissions"), "Antigravity must include --dangerously-skip-permissions, got: {}", agy_cmd);
+        // Antigravity (`agy`); without it the command falls back to the shell.
+        if which("agy").is_some() || which("antigravity").is_some() {
+            let agy_cmd = resolve_command("antigravity", None);
+            assert!(agy_cmd.ends_with("--dangerously-skip-permissions"), "Antigravity must include --dangerously-skip-permissions, got: {}", agy_cmd);
+        }
 
         // Claude
         let claude_cmd = resolve_command("claude", None);

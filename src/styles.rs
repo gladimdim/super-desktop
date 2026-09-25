@@ -928,6 +928,14 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     border-color: {usage_crit};
 }}
 
+/* Remote top bar: only "Connected" / "Disconnected". */
+.remote-connected {{
+    color: {accent};
+}}
+.remote-disconnected {{
+    color: {usage_crit};
+}}
+
 /* ================= Settings and Android Connection Pages ================= */
 /* `harness_settings` owns the card chrome (`mini-terminal` + `harness-panel`
    + `term-header`) and swaps dedicated destination pages into its body. */
@@ -1379,6 +1387,14 @@ separator.launcher-sep {{
     color: {dark_foreground};
     font-family: '{font_family}', monospace;
     font-size: 10.5px;
+}}
+
+.harness-retired {{
+    color: {dark_foreground};
+    border: 1px solid {btn_border};
+    border-radius: 9999px;
+    padding: 0 6px;
+    font-size: 10px;
 }}
 
 .harness-toggle {{

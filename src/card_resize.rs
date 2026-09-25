@@ -147,6 +147,8 @@ pub fn attach_resize_borders_with(
         root.add_overlay(&zone);
 
         let start = Rc::new(Cell::new(None::<Rect>));
+        // Where the pointer was pressed, in surface (window) coordinates.
+        let pressed_at = Rc::new(Cell::new(None::<(f64, f64)>));
         let pending = Rc::new(Cell::new(None::<Rect>));
         let tick_active = Rc::new(Cell::new(false));
         let drag = GestureDrag::new();
@@ -157,8 +159,10 @@ pub fn attach_resize_borders_with(
         let on_begin_begin = Rc::clone(&on_begin);
         let limits_begin = Rc::clone(&limits_cell);
         let limits_source = Rc::clone(&limits_now);
+        let pressed_begin = Rc::clone(&pressed_at);
         drag.connect_drag_begin(move |gesture, _, _| {
             limits_begin.set(limits_source());
+            pressed_begin.set(surface_point(gesture));
             let rect = get_start_begin();
             start_begin.set(rect);
             if rect.is_some() {
@@ -175,10 +179,12 @@ pub fn attach_resize_borders_with(
         let preview_update = Rc::clone(&on_preview);
         let root_weak = root.downgrade();
         let limits_update = Rc::clone(&limits_cell);
-        drag.connect_drag_update(move |_, dx, dy| {
+        let pressed_update = Rc::clone(&pressed_at);
+        drag.connect_drag_update(move |gesture, dx, dy| {
             let Some(initial) = start_update.get() else {
                 return;
             };
+            let (dx, dy) = pointer_offset(pressed_update.get(), surface_point(gesture), (dx, dy));
             pending_update.set(Some(resized_rect(edge, initial, dx, dy, limits_update.get())));
             if tick_update.replace(true) {
                 return;
@@ -205,14 +211,41 @@ pub fn attach_resize_borders_with(
         let pending_end = Rc::clone(&pending);
         let commit_end = Rc::clone(&on_commit);
         let limits_end = Rc::clone(&limits_cell);
-        drag.connect_drag_end(move |_, dx, dy| {
+        let pressed_end = Rc::clone(&pressed_at);
+        drag.connect_drag_end(move |gesture, dx, dy| {
             let Some(initial) = start_end.take() else {
                 return;
             };
+            let (dx, dy) = pointer_offset(pressed_end.take(), surface_point(gesture), (dx, dy));
             pending_end.set(None);
             commit_end(resized_rect(edge, initial, dx, dy, limits_end.get()));
         });
         zone.add_controller(drag);
+    }
+}
+
+/// The gesture's current pointer position in surface (window) coordinates.
+fn surface_point(gesture: &GestureDrag) -> Option<(f64, f64)> {
+    gesture.current_event().and_then(|event| event.position())
+}
+
+/// How far the pointer moved since the press.
+///
+/// GTK reports a drag's offset in the dragged widget's own coordinates. A
+/// resize handle sits on the card's edge, and a remote card is resized live
+/// (the host's card *is* the preview), so the handle moves under the pointer
+/// while it is dragged: widget-relative offsets then lag by exactly that
+/// movement and the card flips between the old and new size. Surface
+/// coordinates do not move with the card. GTK's own offset is the fallback
+/// when an event carries no position.
+fn pointer_offset(
+    pressed: Option<(f64, f64)>,
+    now: Option<(f64, f64)>,
+    widget_offset: (f64, f64),
+) -> (f64, f64) {
+    match (pressed, now) {
+        (Some((px, py)), Some((x, y))) => (x - px, y - py),
+        _ => widget_offset,
     }
 }
 
@@ -271,6 +304,17 @@ fn place_zone(zone: &gtk4::Box, edge: Edge) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resize_offsets_ignore_the_handle_moving_with_the_card() {
+        // Pressed at x=500 on an east handle; the live-resized remote card has
+        // since grown by 40 px, so the handle (and GTK's widget-relative
+        // offset) moved with it: GTK now reports 20, the pointer moved 60.
+        assert_eq!(pointer_offset(Some((500.0, 300.0)), Some((560.0, 310.0)), (20.0, 10.0)), (60.0, 10.0));
+        // Without positions, GTK's own offset is used.
+        assert_eq!(pointer_offset(None, Some((560.0, 310.0)), (20.0, 10.0)), (20.0, 10.0));
+        assert_eq!(pointer_offset(Some((500.0, 300.0)), None, (20.0, 10.0)), (20.0, 10.0));
+    }
 
     fn limits() -> Limits {
         Limits {

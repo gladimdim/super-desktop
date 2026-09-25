@@ -50,7 +50,7 @@ pub fn harness_tooltip(key: &str) -> &'static str {
         "grok" => "Launch Grok CLI (--dangerously-skip-permissions)",
         "reasonix" => "Launch Reasonix (reasonix code, else npx -y reasonix code)",
         "aider" => "Launch Aider (--yes-always)",
-        "gemini" => "Launch Gemini CLI",
+        "gemini" => "Launch Gemini CLI (no longer maintained; Antigravity replaces it)",
         "hermes" => "Launch Hermes Agent",
         "pi" => "Launch Pi coding agent",
         "openclaw" => "Launch OpenClaw TUI connected to its gateway",

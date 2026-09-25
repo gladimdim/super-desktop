@@ -236,6 +236,17 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button, Button) {
     name.set_valign(Align::Center);
     row.append(&name);
 
+    if let Some(successor) = crate::tmux::retired_successor(info.key) {
+        let retired = Label::new(Some("No longer maintained"));
+        retired.add_css_class("harness-retired");
+        retired.set_valign(Align::Center);
+        retired.set_tooltip_text(Some(&format!(
+            "Upstream stopped maintaining it; {} replaces it",
+            crate::tmux::get_agent_config(successor).name
+        )));
+        row.append(&retired);
+    }
+
     let cmd = Label::new(Some(&info.command));
     cmd.add_css_class("harness-cmd");
     cmd.set_xalign(0.0);

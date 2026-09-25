@@ -49,7 +49,6 @@ pub struct MachineView {
     /// One launch at a time: a slow host must not make two cards per click.
     launching: Cell<bool>,
     status: gtk4::Label,
-    details: gtk4::Label,
     /// Fit / 100% for the remote workspace, left of Hide.
     fit_button: gtk4::ToggleButton,
     actual_button: gtk4::ToggleButton,
@@ -113,10 +112,11 @@ impl MachineView {
         chrome.append(&folder_bar.widget);
         let right = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
         right.set_valign(gtk4::Align::Center);
-        let details = gtk4::Label::new(None);
-        details.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-        right.append(&details);
-        let status = gtk4::Label::new(Some("Connecting…"));
+        // Only "Connected" or "Disconnected": the launcher icons already say
+        // what that PC can run, and the reason for a disconnect is in the
+        // tooltip and in the view itself.
+        let status = gtk4::Label::new(Some(connection_label(false)));
+        status.add_css_class("remote-connection");
         status.set_xalign(0.0);
         // Optional text: it shrinks before the view toggle and Hide do.
         status.set_ellipsize(gtk4::pango::EllipsizeMode::End);
@@ -184,7 +184,6 @@ impl MachineView {
             target: RefCell::new(None),
             launching: Cell::new(false),
             status,
-            details,
             fit_button,
             actual_button,
             busy: Cell::new(false),
@@ -589,7 +588,6 @@ impl MachineView {
         self.bar.apply(&crate::harness_bar::HarnessState::none());
         self.bar.note("");
         self.folder_bar.clear();
-        self.details.set_text("");
         match peer {
             None => {
                 self.selection.borrow_mut().select(MachineSelection::Local);
@@ -600,7 +598,7 @@ impl MachineView {
                     .borrow_mut()
                     .select(MachineSelection::Remote(id));
                 self.remote_button.set_label(&label);
-                self.status.set_text("Connecting…");
+                self.set_connection(false, "Connecting to this PC…");
                 self.canvas.show_message("Connecting to this PC…");
                 self.stack.set_visible_child_name("remote");
                 self.refresh();
@@ -700,7 +698,7 @@ impl MachineView {
             // a later verified snapshot may subscribe again.
             Update::Ended(reason) => {
                 self.release_events();
-                self.status.set_text(remote_status(reason));
+                self.set_connection(false, remote_status(reason));
             }
         }
     }
@@ -768,21 +766,11 @@ impl MachineView {
     /// its event stream.
     fn show_snapshot(&self, peer: &Peer, capabilities: &Capabilities, snapshot: &WorkspaceSnapshot) {
         let view = self;
-        view.status.set_text(&format!(
-            "Connected · {} consoles",
-            snapshot.local.cards.len()
-        ));
-        let harnesses = snapshot
-            .local
-            .harness_types
-            .iter()
-            .filter(|h| snapshot.local.visible_harnesses.contains(&h.id))
-            .map(|h| peer_client::label(&h.name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        // The folder has its own control in the bar; this line is
-        // what that PC can run.
-        view.details.set_text(&harnesses);
+        let consoles = snapshot.local.cards.len();
+        view.set_connection(
+            true,
+            &format!("{consoles} console{}", if consoles == 1 { "" } else { "s" }),
+        );
         view.folder_bar.apply(
             &peer_client::label(&snapshot.local.workspace),
             // Only a host that accepts commands can be moved to
@@ -825,7 +813,7 @@ impl MachineView {
 
     fn show_failure(&self, error: &str) {
         let view = self;
-        view.status.set_text(remote_status(error));
+        view.set_connection(false, remote_status(error));
         // A late failure must not leave another PC's consoles on
         // screen: disconnected content is not current content.
         view.canvas.clear();
@@ -834,7 +822,16 @@ impl MachineView {
         view.bar.note("");
         view.folder_bar.clear();
         view.canvas.show_message(remote_status(error));
-        view.details.set_text("");
+    }
+
+    /// The bar's whole status: "Connected" or "Disconnected", with the detail
+    /// (console count, or why it is not connected) as the tooltip.
+    fn set_connection(&self, connected: bool, detail: &str) {
+        self.status.set_text(connection_label(connected));
+        self.status.set_tooltip_text(Some(detail));
+        let (on, off) = ("remote-connected", "remote-disconnected");
+        self.status.add_css_class(if connected { on } else { off });
+        self.status.remove_css_class(if connected { off } else { on });
     }
 }
 
@@ -863,6 +860,10 @@ fn view_mode_label(mode: remote_workspace::ViewMode) -> String {
         remote_workspace::ViewMode::Fit => "100%".to_string(),
         remote_workspace::ViewMode::Actual { zoom } => format!("{:.0}%", zoom * 100.0),
     }
+}
+
+fn connection_label(connected: bool) -> &'static str {
+    if connected { "Connected" } else { "Disconnected" }
 }
 
 /// One place for the viewer-visible wording of a peer failure.
@@ -897,6 +898,15 @@ fn style_peer_button(button: &gtk4::Button, selected: bool) {
 mod tests {
     use super::*;
 
+    fn requeue_sizes(widget: &gtk4::Widget) {
+        widget.queue_resize();
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            requeue_sizes(&current);
+            child = current.next_sibling();
+        }
+    }
+
     #[test]
     fn toolbar_remote_fits_after_workspace_switches() {
         crate::gtk_test::run_in_child_process("machine_selector::tests::toolbar_remote_inner");
@@ -921,9 +931,7 @@ mod tests {
             .set_label(&"A very long paired computer name ".repeat(12));
         view.folder_bar
             .apply(&format!("/home/user/{}", "project/".repeat(60)), &[]);
-        view.status.set_text("Connected · 123 consoles");
-        view.details
-            .set_text(&"Claude, Codex, OpenCode, Custom launcher, ".repeat(10));
+        view.set_connection(true, "123 consoles");
         // A large host with one card parked far past its own edge, drawn
         // live: neither the 100% workspace nor the off-screen card may
         // enlarge the remote workspace (and so the overlay window).
@@ -987,6 +995,11 @@ mod tests {
                     crate::state::TopBarSize::Large,
                 ] {
                     view.paint_top_bar_size(size);
+                    // The size is a CSS class. This part lays out without a
+                    // window, so no frame restyles the bar and GTK would reuse
+                    // sizes measured under the previous size; drop them, as a
+                    // frame does between a size change and layout.
+                    requeue_sizes(view.remote_toolbar.upcast_ref());
                     // Shrink, grow and shrink again, narrow and wide.
                     for width in [1280, 320, 3440, 640, 480, 1024, 360, 2560] {
                         view.stack.set_visible_child_name("local");
@@ -1063,9 +1076,8 @@ mod tests {
         .enumerate()
         {
             if step == 3 {
-                // The short "Connecting…" state, with no harness list.
-                view.details.set_text("");
-                view.status.set_text("Connecting…");
+                // The disconnected state.
+                view.set_connection(false, "Connecting to this PC…");
             }
             window.set_default_size(width, 600);
             view.canvas.set_mode(mode, None);
@@ -1394,7 +1406,8 @@ mod tests {
         assert!(view.live.get(), "a connected subscription stands the poll down");
         view.on_event(snapshot(1, 1, 100));
         assert_eq!(view.canvas.card_count(), 1);
-        assert_eq!(view.status.text(), "Connected · 1 consoles");
+        assert_eq!(view.status.text(), "Connected");
+        assert_eq!(view.status.tooltip_text().as_deref(), Some("1 console"));
         // A host-side move arrives as the next event and is drawn at once.
         view.on_event(snapshot(2, 2, 700));
         assert_eq!(view.canvas.card_position("card-one"), Some((700, 200)));
@@ -1416,7 +1429,11 @@ mod tests {
         assert!(!view.live.get() && view.events.borrow().is_none());
         // An ended subscription says why and is not kept.
         view.on_event(Update::Ended("peer_revoked_or_expired"));
-        assert_eq!(view.status.text(), "Pairing required · Add this PC again");
+        assert_eq!(view.status.text(), "Disconnected");
+        assert_eq!(
+            view.status.tooltip_text().as_deref(),
+            Some("Pairing required · Add this PC again")
+        );
     }
 
     #[test]
@@ -1768,7 +1785,9 @@ mod tests {
         ask(serde_json::json!({"do": "revoke", "host": "a"}), true);
         let ended = until(2.0, "revoked streams released on A", &|| clients(&a) == 0);
         until(6.0, "revocation explained", &|| {
-            view.status.text() == "Pairing required · Add this PC again" && view.canvas.card_count() == 0
+            view.status.text() == "Disconnected"
+                && view.status.tooltip_text().as_deref() == Some("Pairing required · Add this PC again")
+                && view.canvas.card_count() == 0
         });
         until(3.0, "no socket kept to a revoked host", &|| own_connections(a.port) == 0);
         report("Revoke (GUI)", format!(

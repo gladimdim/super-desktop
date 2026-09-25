@@ -2026,11 +2026,12 @@ fn spawn_vte(
         term.add_controller(keys);
         // Size the font for the host's grid once this card has a body: until
         // then the theme font stands in and the view refits after layout.
+        crate::card_source::pack_remote_emulator(&term);
+        preview_box.append(&term);
         let (body_width, body_height, scale) = fit.get();
         if body_width > 1.0 && body_height > 1.0 {
             crate::card_source::fit_font(&term, body_width, body_height, session.grid(), scale);
         }
-        preview_box.append(&term);
         *vte.borrow_mut() = Some(term);
         session.attach();
         return;

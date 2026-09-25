@@ -609,9 +609,10 @@ No production daemon or bridge credentials are used.
 
 The top-left selector defaults to **This PC**. Open it to read the current peer
 registry, including PCs added with `peer-add` while the application was running.
-Selecting a peer displays its host workspace path, harness names and console
-layout, and each visible console is a real terminal showing that host session's
-live output.
+Selecting a peer displays its host workspace path, its harness launch icons and
+console layout, and each visible console is a real terminal showing that host
+session's live output. The bar's status reads only **Connected** or
+**Disconnected**; its tooltip has the console count or the reason.
 
 Cards are the local workspace's own card widget, so they show the host's
 positions, sizes, stacking order, iconified state and expanded geometry,

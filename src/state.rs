@@ -152,6 +152,11 @@ pub struct AppState {
     /// Prevent suspend while external power is connected. Off by default.
     #[serde(default)]
     pub sleep_lock_on_ac: bool,
+    /// Retired harness keys already swapped for their successor in
+    /// `visible_harnesses` (see `retire_harnesses`), so a user who turns the
+    /// retired one back on keeps it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_harness_swaps: Vec<String>,
 }
 
 impl Default for AppState {
@@ -179,6 +184,7 @@ impl Default for AppState {
             used_dirs: Vec::new(),
             top_bar_size: TopBarSize::Large,
             sleep_lock_on_ac: false,
+            retired_harness_swaps: Vec::new(),
         }
     }
 }
@@ -351,7 +357,10 @@ pub fn load_state() -> AppState {
             if let Ok(mut state) = serde_json::from_str::<AppState>(&content) {
                 let changed_history = normalize_workspace_history(&mut state);
                 let changed_order = normalize_terminal_order(&mut state);
-                if changed_history || changed_order {
+                let changed_harnesses = retire_harnesses(&mut state, |key| {
+                    crate::tmux::detect_harness_command(key).is_some()
+                });
+                if changed_history || changed_order || changed_harnesses {
                     // Persist the migration immediately. Otherwise the eighth
                     // old dropdown entry would only live in memory and could
                     // be lost if the daemon exits before another UI change.
@@ -371,10 +380,40 @@ pub fn load_state() -> AppState {
 fn fresh_install_state(detected: &[crate::tmux::HarnessInfo]) -> AppState {
     AppState {
         visible_harnesses: Some(
-            detected.iter().take(3).map(|h| h.key.to_string()).collect(),
+            detected
+                .iter()
+                .filter(|h| crate::tmux::retired_successor(h.key).is_none())
+                .take(3)
+                .map(|h| h.key.to_string())
+                .collect(),
         ),
         ..AppState::default()
     }
+}
+
+/// Once per retired harness: in the saved top bar, replace it with its
+/// successor at the same position, as soon as the successor is installed.
+/// Until then nothing changes, so the bar never loses a working launcher.
+fn retire_harnesses(state: &mut AppState, installed: impl Fn(&str) -> bool) -> bool {
+    let mut changed = false;
+    for (old, new) in crate::tmux::RETIRED_HARNESSES {
+        if state.retired_harness_swaps.iter().any(|done| done == old) {
+            continue;
+        }
+        let Some(visible) = state.visible_harnesses.as_mut() else { continue };
+        let Some(at) = visible.iter().position(|key| key == old) else { continue };
+        if !installed(new) {
+            continue;
+        }
+        if visible.iter().any(|key| key == new) {
+            visible.remove(at);
+        } else {
+            visible[at] = new.to_string();
+        }
+        state.retired_harness_swaps.push(old.to_string());
+        changed = true;
+    }
+    changed
 }
 
 pub fn save_state(state: &AppState) {
@@ -593,6 +632,49 @@ mod tests {
     fn test_default_state_starts_unconfigured() {
         assert_eq!(AppState::default().visible_harnesses, None);
         assert_eq!(AppState::default().top_bar_size, TopBarSize::Large);
+    }
+
+    fn harness_infos(keys: &[&'static str]) -> Vec<crate::tmux::HarnessInfo> {
+        keys.iter()
+            .map(|&key| crate::tmux::HarnessInfo { key, name: key, icon: "", command: key.to_string() })
+            .collect()
+    }
+
+    #[test]
+    fn fresh_install_never_picks_a_retired_harness() {
+        let state = fresh_install_state(&harness_infos(&["gemini", "claude", "codex", "shell"]));
+        assert_eq!(state.visible_harnesses, Some(vec!["claude".into(), "codex".into(), "shell".into()]));
+    }
+
+    #[test]
+    fn retired_gemini_is_swapped_for_antigravity_once() {
+        let mut state = AppState {
+            visible_harnesses: Some(vec!["claude".into(), "gemini".into(), "shell".into()]),
+            ..AppState::default()
+        };
+        // Successor not installed yet: keep the working Gemini button.
+        assert!(!retire_harnesses(&mut state, |_| false));
+        assert_eq!(state.visible_harnesses.as_deref().unwrap(), ["claude", "gemini", "shell"]);
+        // Installed: Antigravity takes Gemini's place, recorded once.
+        assert!(retire_harnesses(&mut state, |key| key == "antigravity"));
+        assert_eq!(state.visible_harnesses.as_deref().unwrap(), ["claude", "antigravity", "shell"]);
+        assert_eq!(state.retired_harness_swaps, ["gemini"]);
+        // A user who turns Gemini back on keeps it.
+        state.visible_harnesses.as_mut().unwrap().push("gemini".into());
+        assert!(!retire_harnesses(&mut state, |_| true));
+        assert!(state.visible_harnesses.as_ref().unwrap().contains(&"gemini".to_string()));
+        let saved: AppState = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(saved.retired_harness_swaps, ["gemini"]);
+    }
+
+    #[test]
+    fn retiring_gemini_does_not_duplicate_a_visible_antigravity() {
+        let mut state = AppState {
+            visible_harnesses: Some(vec!["antigravity".into(), "gemini".into()]),
+            ..AppState::default()
+        };
+        assert!(retire_harnesses(&mut state, |_| true));
+        assert_eq!(state.visible_harnesses.as_deref().unwrap(), ["antigravity"]);
     }
 
     #[test]
