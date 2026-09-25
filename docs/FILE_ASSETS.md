@@ -34,8 +34,11 @@ categorized browser and bridge file protocol are unchanged.
   before decoding (200 frames / 16 million cumulative canvas pixels).
 - PDF: one rasterized page at a time; Previous/Next navigate pages. There is no
   page-count discovery yet; advancing past the last page reports unavailable.
-- Markdown: native-text headings and fenced code; other Markdown remains literal
-  in this first version. HTML and image/link directives do not execute or fetch.
+- Markdown: Android renders it as native text (headings, emphasis, lists and task
+  lists, quotes, code, tables, strikethrough, links; tapped links open only for
+  http(s) URLs). The desktop viewer styles headings and fenced code and leaves
+  other Markdown literal. On both, HTML stays inert text and images are never
+  fetched.
 - Text/source/JSON/YAML/CSV/etc.: selectable text, with a 64K-character preview.
 
 Android's **Share** action explicitly downloads the original and opens
