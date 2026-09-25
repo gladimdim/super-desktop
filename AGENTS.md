@@ -10,6 +10,14 @@ The Android repository's own `AGENTS.md` has the full Android feature and build
 instructions. Changes only to PC-to-PC or Linux-only behavior do not require an
 Android feature inventory update.
 
+## Plans and design notes stay private
+
+This repository is public. Plans, protocol notes, performance measurements and
+implementation write-ups live in the private sibling repository at
+`OmarchyAILauncher/desktop-docs/`. Add or update them there, not here; keep this
+repository's Markdown to the README, SECURITY.md, these instructions and asset
+licenses.
+
 ## Responsive toolbar invariant
 
 The local and remote top bars must fit the current display's allocated logical

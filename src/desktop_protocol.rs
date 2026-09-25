@@ -2,7 +2,7 @@
 //!
 //! Wire types are deliberately explicit: exporting AppState would leak local
 //! preferences and eventually outgoing peer credentials. Unimplemented features
-//! must not be advertised by the bridge. See docs/REMOTE_DESKTOP_PROTOCOL.md.
+//! must not be advertised by the bridge.
 #![allow(dead_code)] // Contracts consumed by the following implementation steps.
 
 use serde::{Deserialize, Serialize};

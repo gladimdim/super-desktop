@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two-PC release measurements (docs/REMOTE_DESKTOP_PLAN.md, section 10).
+"""Two-PC release measurements.
 
 Measures, between a viewer PC (A) and a host PC (B):
   * echo latency: a key typed on A travels to B's shell and its echo comes back

@@ -54,7 +54,7 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 
 - **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize from any edge or corner, and group color tags.
 - **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize from any edge or corner with a ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged. Each project folder gets its own label color: a new harness takes the color of its folder, so Claude and Codex working in the same folder match, and a new folder gets a color no other folder uses yet. Pick another color on any card's dot and later harnesses in that folder use it. Drop a card on another one and the buried terminal keeps a **dotted ghost outline** of itself — it disappears only while you are working in that terminal or in the card that covers it, so a stacked desk never hides a session you forgot about.
-- **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable. [File preview details](docs/FILE_ASSETS.md).
+- **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
 - **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
 - **🔢 Keyboard terminal picker** — hold **Alt for 30 ms** to dim terminal output and show dotted borders with centered digits. Press **Alt+0 … Alt+9** to raise and focus that terminal immediately, even before the preview appears; compact cards restore first. Each terminal gets the first free digit when created or restored (starting at **0**), and keeps it while open. Closing a card frees its digit without renumbering the others. Up to ten terminals per local or remote PC view get shortcuts; extra cards remain mouse-accessible. Release Alt or press Escape to dismiss. Assignments are rebuilt when cards are restored after restarting the app.
@@ -137,9 +137,6 @@ button, and removing a saved PC from the GUI. To remove a saved PC, run
 | *The other PC already has a request from this address* | Wait two minutes for that request to expire, then use a new link. |
 | The host answers 404 for `/api/v1/desktop/capabilities` | An old bridge is still running there. `./rebuild.sh` on the host restarts both processes. |
 
-Design and protocol details: [implementation plan](docs/REMOTE_DESKTOP_PLAN.md)
-and [protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md).
-
 ### Sleep lock on charger
 
 In **Settings → Sleep lock**, enable **Prevent sleep while plugged in** to keep
@@ -218,8 +215,7 @@ Harness launchers** shows under the OpenClaw row whether that plugin is connecte
 with **Connect** and **Restart gateway** buttons to set it up, and a new OpenClaw
 card without it shows a one-time "OpenClaw status needs setup" hint. Until a native
 adapter reports, a card uses the prompt typed into it and the on-screen status, so
-it is never left blank. See [integration coverage, setup and remaining
-validation](docs/HARNESS_INTEGRATIONS.md); launcher availability alone does not
+it is never left blank. Launcher availability alone does not
 mean a harness has a verified native adapter. T3 Code is no longer offered (it runs
 a web server, not a terminal harness); an existing T3 card reopens as a plain
 terminal running its saved command.
@@ -243,11 +239,10 @@ Android labels; AI harness prompt titles are unchanged.
 Android's per-terminal bell can report explicit Codex, Claude Code, Pi and OpenCode response completion,
 including while the phone UI is hidden using an opt-in foreground monitor. Pi
 requires a new launch with the updated desktop extension and updated Android app.
-Other harnesses do not yet have verified completion adapters. See
-[completion alerts and delivery limits](docs/COMPLETION_NOTIFICATIONS.md).
+Other harnesses do not yet have verified completion adapters.
 
 Android can also attach an image using **＋** and send it together with a prompt
-to an idle Codex terminal. See [image prompts, compatibility and upload limits](docs/IMAGE_PROMPTS.md).
+to an idle Codex terminal.
 
 | | |
 |---|---|
@@ -335,7 +330,6 @@ super-desktop desktop-workspace # local card layout + epoch/revisions as JSON (d
 
 State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Rebuild after updates with `./rebuild.sh`.
 
-See [Linux performance](PERFORMANCE.md) for startup changes, measured command latency, and opt-in startup profiling.
 
 ---
 
@@ -423,13 +417,11 @@ super-desktop status
 ## 🏗️ Project layout (for contributors)
 
 PC-to-PC workspaces (user guide: [Use another PC's harnesses](#use-another-pcs-harnesses)):
-see the [implementation plan](docs/REMOTE_DESKTOP_PLAN.md) and the
-[protocol notes](docs/REMOTE_DESKTOP_PROTOCOL.md). A remote workspace is drawn
+a remote workspace is drawn
 by the same widgets a local one is (`harness_bar.rs`, `mini_terminal.rs`) with
 only the source swapped (`card_source.rs`); every remote control is one typed
 command carrying the card revision this view drew. The
-[peer CLI](docs/REMOTE_DESKTOP_PROTOCOL.md#outgoing-pc-pairing-cli-increment)
-pairs PCs, fetches remote layouts, streams one console (`peer-attach`) or its
+peer CLI pairs PCs, fetches remote layouts, streams one console (`peer-attach`) or its
 events (`peer-events`) and sends one command (`peer-command`);
 `python3 tests/two_pc_matrix.py` runs the simulated two-PC regression matrix.
 

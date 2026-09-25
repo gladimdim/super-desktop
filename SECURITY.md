@@ -172,7 +172,6 @@ text, 64 references per terminal, 64 terminal catalogs and four jobs per process
 Revocation is checked during chunked content writes. Exported copies cannot be
 revoked. PDF rasterization requires a no-network bubblewrap sandbox with CPU,
 memory, output and wall-clock bounds; it never falls back to unsandboxed parsing.
-See [file previews](docs/FILE_ASSETS.md) for decoder limits and known limitations.
 
 64 simultaneous network connections; 12 per source IP; 5-second total initial
 TLS/request deadline enforced by a socket reaper; 16 KiB headers and normal bodies;
@@ -183,7 +182,6 @@ overall. The authenticated image-prompt route alone allows a 3 MiB JSON body, a
 and four concurrent jobs shared with file previews. Authorization and origin
 checks happen before accepting the larger body. Images are validated, capped,
 re-encoded and privately staged; no client-selected file paths or overwrites.
-See [image prompt security and retention](docs/IMAGE_PROMPTS.md).
 Pairing is invitation-
 gated and limited to eight pending/recent requests and one per source per 120 seconds.
 At most 64 paired devices and 256 rejected devices (the oldest rejection is
