@@ -1,7 +1,8 @@
 use gtk4::gdk;
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
 
@@ -173,8 +174,9 @@ impl OmarchyTheme {
 }
 
 static CURRENT_THEME: RwLock<Option<OmarchyTheme>> = RwLock::new(None);
-static LAST_THEME_SIGNATURE: RwLock<Option<ThemeSignature>> = RwLock::new(None);
+static LAST_THEME: RwLock<Option<SeenTheme>> = RwLock::new(None);
 
+/// What the theme files say. A change of theme is a change of these contents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ThemeSignature {
     colors_path: PathBuf,
@@ -182,18 +184,96 @@ struct ThemeSignature {
     colors: Vec<u8>,
 }
 
+impl ThemeSignature {
+    fn read(colors_path: PathBuf, name_path: &Path) -> Self {
+        Self {
+            colors: fs::read(&colors_path).unwrap_or_default(),
+            colors_path,
+            theme_name: fs::read_to_string(name_path).unwrap_or_default(),
+        }
+    }
+}
+
+/// One file as `stat` sees it, `None` when it is missing. Writing, replacing
+/// or renaming the file changes at least one field — `ctime` included, which
+/// neither `cp -p` nor `touch` can set back — so an equal stamp means the file
+/// was not touched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime: (i64, i64),
+    ctime: (i64, i64),
+}
+
+impl FileStamp {
+    fn of(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime: (meta.mtime(), meta.mtime_nsec()),
+            ctime: (meta.ctime(), meta.ctime_nsec()),
+        })
+    }
+}
+
+/// Both theme files as `stat` sees them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ThemeStamp {
+    colors_path: PathBuf,
+    colors: Option<FileStamp>,
+    theme_name: Option<FileStamp>,
+}
+
+impl ThemeStamp {
+    fn of(colors_path: &Path, name_path: &Path) -> Self {
+        Self {
+            colors_path: colors_path.to_path_buf(),
+            colors: FileStamp::of(colors_path),
+            theme_name: FileStamp::of(name_path),
+        }
+    }
+}
+
+/// The theme the daemon last loaded. The contents decide whether the theme
+/// changed; the stamp only lets an untouched pair of files skip being read —
+/// the overlay checks every second while it is visible.
+#[derive(Debug, Clone)]
+struct SeenTheme {
+    stamp: ThemeStamp,
+    signature: ThemeSignature,
+}
+
+impl SeenTheme {
+    /// Stamp first, then read: the stamp kept is never newer than the
+    /// contents, so a write racing the load is noticed by the next check.
+    fn load(colors_path: PathBuf, name_path: &Path) -> Self {
+        let stamp = ThemeStamp::of(&colors_path, name_path);
+        Self { stamp, signature: ThemeSignature::read(colors_path, name_path) }
+    }
+
+    /// Whether the files now say something else than when they were seen.
+    /// Untouched files are only `stat`ed; touched ones are read and compared,
+    /// and a rewrite with the same bytes just refreshes the stamp.
+    fn changed(&mut self, colors_path: PathBuf, name_path: &Path) -> bool {
+        let stamp = ThemeStamp::of(&colors_path, name_path);
+        if stamp == self.stamp {
+            return false;
+        }
+        if ThemeSignature::read(colors_path, name_path) != self.signature {
+            return true;
+        }
+        self.stamp = stamp;
+        false
+    }
+}
+
 fn theme_name_path() -> PathBuf {
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     PathBuf::from(home).join(".local/state/omarchy/current/theme.name")
-}
-
-fn current_signature() -> ThemeSignature {
-    let colors_path = get_theme_colors_path();
-    ThemeSignature {
-        colors: fs::read(&colors_path).unwrap_or_default(),
-        colors_path,
-        theme_name: fs::read_to_string(theme_name_path()).unwrap_or_default(),
-    }
 }
 
 pub fn get_theme_colors_path() -> PathBuf {
@@ -242,15 +322,16 @@ pub fn load_current_theme() -> OmarchyTheme {
 
     theme.font_family = detect_font_family();
 
-    let signature = current_signature();
-    let colors_path = signature.colors_path.clone();
+    let seen = SeenTheme::load(get_theme_colors_path(), &name_path);
 
-    if let Ok(content) = fs::read_to_string(&colors_path) {
-        parse_colors_into(&content, &mut theme);
+    // The bytes the signature holds, so the palette and what later checks
+    // compare against are one read of the file.
+    if let Ok(content) = std::str::from_utf8(&seen.signature.colors) {
+        parse_colors_into(content, &mut theme);
     }
 
-    if let Ok(mut last) = LAST_THEME_SIGNATURE.write() {
-        *last = Some(signature);
+    if let Ok(mut last) = LAST_THEME.write() {
+        *last = Some(seen);
     }
 
     theme
@@ -325,10 +406,12 @@ pub fn reload_theme() -> OmarchyTheme {
 }
 
 pub fn check_theme_changed() -> bool {
-    let current = current_signature();
-    LAST_THEME_SIGNATURE
-        .read()
-        .map(|last| last.as_ref() != Some(&current))
+    LAST_THEME
+        .write()
+        .map(|mut last| match last.as_mut() {
+            Some(seen) => seen.changed(get_theme_colors_path(), &theme_name_path()),
+            None => true,
+        })
         .unwrap_or(true)
 }
 
@@ -342,5 +425,110 @@ pub fn current_theme_fresh() -> OmarchyTheme {
         reload_theme()
     } else {
         current_theme()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A private copy of Omarchy's two theme files.
+    struct Files {
+        dir: PathBuf,
+        colors: PathBuf,
+        name: PathBuf,
+    }
+
+    impl Files {
+        fn new(test: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("sd-theme-{test}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let files = Self { colors: dir.join("colors.toml"), name: dir.join("theme.name"), dir };
+            files.replace(&files.colors, "accent = \"#aabbcc\"\n");
+            files.replace(&files.name, "Tokyo Night\n");
+            files
+        }
+
+        /// Write through a new file renamed over the old one, as a theme switch
+        /// does. The new file exists before the old one goes, so it never gets
+        /// the old inode back.
+        fn replace(&self, path: &Path, text: &str) {
+            let next = self.dir.join("next");
+            fs::write(&next, text).unwrap();
+            fs::rename(&next, path).unwrap();
+        }
+
+        fn load(&self) -> SeenTheme {
+            SeenTheme::load(self.colors.clone(), &self.name)
+        }
+
+        fn changed(&self, seen: &mut SeenTheme) -> bool {
+            seen.changed(self.colors.clone(), &self.name)
+        }
+    }
+
+    impl Drop for Files {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn theme_check_trusts_an_untouched_stamp_without_reading() {
+        let files = Files::new("untouched");
+        let mut seen = files.load();
+        assert!(!files.changed(&mut seen));
+        // Were the files read, these contents would differ from them: an
+        // unchanged stamp must answer without reading.
+        seen.signature.colors = b"something else".to_vec();
+        seen.signature.theme_name = "Another".into();
+        assert!(!files.changed(&mut seen));
+    }
+
+    #[test]
+    fn theme_check_ignores_a_rewrite_with_the_same_bytes() {
+        let files = Files::new("same-bytes");
+        let mut seen = files.load();
+        files.replace(&files.colors, "accent = \"#aabbcc\"\n");
+        files.replace(&files.name, "Tokyo Night\n");
+        assert_ne!(seen.stamp, ThemeStamp::of(&files.colors, &files.name));
+        assert!(!files.changed(&mut seen), "same contents are the same theme");
+        // …and the new stamp is kept, so the next check is `stat` only again.
+        assert_eq!(seen.stamp, ThemeStamp::of(&files.colors, &files.name));
+        seen.signature.colors.clear();
+        assert!(!files.changed(&mut seen));
+    }
+
+    #[test]
+    fn theme_check_sees_every_real_change() {
+        let files = Files::new("changes");
+        // Same length, different palette.
+        let mut seen = files.load();
+        files.replace(&files.colors, "accent = \"#ccbbaa\"\n");
+        assert!(files.changed(&mut seen));
+        // A change is reported until the theme is loaded again.
+        assert!(files.changed(&mut seen));
+        let mut seen = files.load();
+        assert!(!files.changed(&mut seen));
+
+        // Only the name moves.
+        files.replace(&files.name, "Catppuccin\n");
+        assert!(files.changed(&mut seen));
+
+        // A missing file coming back is a change; so is it going away.
+        let mut seen = files.load();
+        fs::remove_file(&files.name).unwrap();
+        assert!(files.changed(&mut seen));
+        let mut seen = files.load();
+        assert!(!files.changed(&mut seen));
+        files.replace(&files.name, "Catppuccin\n");
+        assert!(files.changed(&mut seen));
+
+        // The colors path switching (state dir appearing over config dir).
+        let mut seen = files.load();
+        let other = files.dir.join("other.toml");
+        fs::write(&other, "accent = \"#000000\"\n").unwrap();
+        assert!(seen.changed(other, &files.name));
     }
 }

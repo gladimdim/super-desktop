@@ -272,20 +272,23 @@ impl MachineView {
         // The fallback for hosts without `workspace-events-v1`, and for the
         // time a subscription is down: a live subscription replaces it. While
         // it is live, a quiet host sends no snapshot that would retry a
-        // console whose stream dropped, so the tick does that locally.
-        glib::timeout_add_local(Duration::from_secs(2), move || {
-            let Some(view) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            if view.remote.is_mapped() {
+        // console whose stream dropped, so the tick does that locally. It
+        // exists only while the remote view is on screen (the map above
+        // refreshes at once).
+        crate::launcher_settings::tick_while_mapped(
+            &[view.remote.clone().upcast()],
+            Duration::from_secs(2),
+            move || {
+                let Some(view) = weak.upgrade() else {
+                    return;
+                };
                 if view.live.get() {
                     view.canvas.retry_streams();
                 } else {
                     view.refresh();
                 }
-            }
-            glib::ControlFlow::Continue
-        });
+            },
+        );
         view
     }
     pub fn keyboard_cards(&self) -> Vec<Rc<crate::mini_terminal::MiniTerminalCard>> {
@@ -307,6 +310,11 @@ impl MachineView {
     /// The remote bar's harness logos, for the window's theme swap.
     pub fn brand_images(&self) -> Vec<(gtk4::Image, String)> {
         self.bar.brand_images()
+    }
+
+    /// The window's theme swap, for the remote consoles.
+    pub fn apply_theme(&self, theme: &crate::theme::OmarchyTheme) {
+        self.canvas.apply_theme(theme);
     }
 
     /// Match the local dock's top-bar size, so the toolbar does not change
@@ -561,7 +569,7 @@ impl MachineView {
             popover.connect_show(move |_| {
                 if let Some(window) = weak.upgrade() {
                     mode.set(window.keyboard_mode());
-                    window.set_keyboard_mode(KeyboardMode::Exclusive);
+                    crate::window::set_overlay_keyboard_mode(&window, KeyboardMode::Exclusive);
                 }
             });
             let weak = window.downgrade();
@@ -569,7 +577,7 @@ impl MachineView {
                 if let Some(window) = weak.upgrade() {
                     // A PC switch may already have reset keyboard ownership.
                     if window.keyboard_mode() == KeyboardMode::Exclusive {
-                        window.set_keyboard_mode(previous.get());
+                        crate::window::set_overlay_keyboard_mode(&window, previous.get());
                     }
                 }
             });

@@ -8,7 +8,7 @@ use crate::{
     peer_pairing::{self, Event, Session},
 };
 use gtk4::{glib, prelude::*};
-use gtk4_layer_shell::{KeyboardMode, LayerShell};
+use gtk4_layer_shell::KeyboardMode;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -248,7 +248,7 @@ impl PairingWizard {
         self.open.set(true);
         self.widget.set_visible(true);
         if let Some(window) = self.window.upgrade() {
-            window.set_keyboard_mode(KeyboardMode::Exclusive);
+            crate::window::set_overlay_keyboard_mode(&window, KeyboardMode::Exclusive);
         }
     }
 
@@ -265,7 +265,7 @@ impl PairingWizard {
         self.widget.set_visible(false);
         if let Some(window) = self.window.upgrade() {
             vte4::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
-            window.set_keyboard_mode(KeyboardMode::OnDemand);
+            crate::window::set_overlay_keyboard_mode(&window, KeyboardMode::OnDemand);
         }
     }
 

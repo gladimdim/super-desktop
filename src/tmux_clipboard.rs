@@ -76,14 +76,21 @@ fn tmux(base: &[&str]) -> Command {
     command
 }
 
-/// The command bound to `key` in `table`, as `list-keys` prints it
-/// (`bind-key [-r] [-N note] -T table key command`).
+/// Every key table's bindings in one `list-keys`: tables are server-wide.
+fn list_keys(base: &[&str]) -> Option<String> {
+    let out = tmux(base).arg("list-keys").output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The command bound to `key` in `table`.
+#[cfg(test)]
 fn bound_command(base: &[&str], table: &str, key: &str) -> Option<String> {
-    let out = tmux(base).args(["list-keys", "-T", table]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    bound_in(&list_keys(base)?, table, key)
+}
+
+/// The command bound to `key` in `table`, from `list-keys` output
+/// (`bind-key [-r] [-N note] -T table key command`, one line per binding).
+fn bound_in(text: &str, table: &str, key: &str) -> Option<String> {
     let marker = format!(" -T {table} ");
     text.lines().find_map(|line| {
         // list-keys pads columns with extra spaces; normalise the prefix only.
@@ -99,8 +106,9 @@ fn bound_command(base: &[&str], table: &str, key: &str) -> Option<String> {
 }
 
 fn install_bindings_on(base: &[&str], copier: &str) {
+    let Some(listing) = list_keys(base) else { return };
     for (table, key) in BINDINGS {
-        let Some(original) = bound_command(base, table, key) else { continue };
+        let Some(original) = bound_in(&listing, table, key) else { continue };
         if original.contains(CONDITION) {
             continue; // Already wrapped.
         }
@@ -117,6 +125,26 @@ fn install_pane_hook_on(base: &[&str], session: &str, hook: &str) {
         .output();
 }
 
+/// `install_pane_hook_on` for many sessions, chained with `;` into one tmux
+/// command per chunk. tmux skips the rest of a chain after a failed command
+/// (a session that ended meanwhile), so a failed chunk is redone one by one.
+fn install_pane_hooks_on(base: &[&str], sessions: &[&str], hook: &str) {
+    for chunk in sessions.chunks(64) {
+        let mut command = tmux(base);
+        for (index, session) in chunk.iter().enumerate() {
+            if index > 0 {
+                command.arg(";");
+            }
+            command.args(["set-hook", "-p", "-t", &format!("={session}:"), "pane-set-clipboard", hook]);
+        }
+        if !command.output().is_ok_and(|out| out.status.success()) {
+            for session in chunk {
+                install_pane_hook_on(base, session, hook);
+            }
+        }
+    }
+}
+
 /// Route mouse and OSC 52 copies of `session` to the desktop clipboard.
 /// Idempotent; called whenever a card's session is created or attached.
 pub fn install_session(session: &str) {
@@ -131,18 +159,27 @@ pub fn install_session(session: &str) {
 
 /// Daemon start: cover cards whose sessions outlived the previous daemon.
 pub fn install_existing_sessions() {
-    let Ok(out) = Command::new(crate::tmux::tmux_bin())
-        .args(["list-sessions", "-F", "#{session_name}"])
-        .output()
-    else {
+    let bin = crate::tmux::tmux_bin();
+    install_existing_sessions_on(&[bin.as_str()], "wl-copy");
+}
+
+/// One `list-sessions`, one `list-keys` (plus a `bind-key` per binding not
+/// wrapped yet) and one chained `set-hook` for every card session, instead
+/// of nine tmux processes per session.
+fn install_existing_sessions_on(base: &[&str], copier: &str) {
+    let Ok(out) = tmux(base).args(["list-sessions", "-F", "#{session_name}"]).output() else {
         return;
     };
     if !out.status.success() {
         return;
     }
-    for session in String::from_utf8_lossy(&out.stdout).lines() {
-        install_session(session);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let sessions: Vec<&str> = text.lines().filter(|name| name.starts_with(SESSION_PREFIX)).collect();
+    if sessions.is_empty() {
+        return;
     }
+    install_bindings_on(base, copier);
+    install_pane_hooks_on(base, &sessions, &pane_hook_with(copier));
 }
 
 #[cfg(test)]
@@ -296,6 +333,32 @@ mod tests {
         let buffers = server.cmd().arg("list-buffers").output().unwrap();
         assert!(String::from_utf8_lossy(&buffers.stdout).contains("personal te"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn existing_card_sessions_are_covered_in_a_few_commands() {
+        let Some(server) = Server::start("existing") else { return };
+        for name in ["sd_term_one", "sd_term_two", "personal"] {
+            server.session(name, "sleep 30");
+        }
+        let hooks = |session: &str| {
+            let out = server.cmd().args(["show-hooks", "-p", "-t", &format!("={session}:")]).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        install_existing_sessions_on(&server.base(), "wl-copy");
+        for session in ["sd_term_one", "sd_term_two"] {
+            assert!(hooks(session).contains("pane-set-clipboard"), "{session}: {}", hooks(session));
+        }
+        assert!(!hooks("personal").contains("pane-set-clipboard"));
+        for (table, key) in BINDINGS {
+            let bound = bound_command(&server.base(), table, key).unwrap_or_default();
+            assert_eq!(bound.matches(CONDITION).count(), 1, "{table} {key}: {bound}");
+        }
+        // A session that ended between listing and hooking fails its chain;
+        // the sessions after it are still covered.
+        server.session("sd_term_three", "sleep 30");
+        install_pane_hooks_on(&server.base(), &["sd_term_gone", "sd_term_three"], &pane_hook_with("wl-copy"));
+        assert!(hooks("sd_term_three").contains("pane-set-clipboard"));
     }
 
     #[test]

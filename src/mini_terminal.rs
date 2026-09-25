@@ -181,6 +181,59 @@ impl HoverRaiseLock {
     }
 }
 
+/// Whether a card's terminal widget draws.
+///
+/// Two independent reasons stop it: the overlay is unmapped (the whole-window
+/// hide), or the cards painted above it hide it completely (see
+/// `overlap_ghost::hidden_indexes`). It draws only while neither holds, so a
+/// show cannot bring back a buried terminal, and an uncover cannot draw into a
+/// hidden overlay.
+///
+/// Stopping only hides the widget. The emulator, its PTY and the tmux client
+/// stay; it keeps reading output and is not reallocated while hidden, so tmux
+/// sees no resize, and it paints its current screen as soon as it draws again.
+pub struct VteDrawing {
+    mapped: Cell<bool>,
+    covered: Cell<bool>,
+}
+
+impl VteDrawing {
+    pub fn new() -> Self {
+        Self {
+            mapped: Cell::new(true),
+            covered: Cell::new(false),
+        }
+    }
+
+    /// The overlay was mapped or unmapped.
+    pub fn set_mapped(&self, mapped: bool, term: Option<&VteTerminal>) {
+        self.mapped.set(mapped);
+        self.apply(term);
+    }
+
+    /// The cards above hide this terminal completely, or no longer do.
+    pub fn set_covered(&self, covered: bool, term: Option<&VteTerminal>) {
+        self.covered.set(covered);
+        self.apply(term);
+    }
+
+    pub fn drawing(&self) -> bool {
+        self.mapped.get() && !self.covered.get()
+    }
+
+    /// Bring the widget in line with both reasons. The widget is compared, not
+    /// the last value set: a terminal re-created by a restore starts visible.
+    fn apply(&self, term: Option<&VteTerminal>) {
+        let Some(term) = term else {
+            return;
+        };
+        let drawing = self.drawing();
+        if term.is_visible() != drawing {
+            term.set_visible(drawing);
+        }
+    }
+}
+
 /// How long a card stays "in use" after the last sign of the user working in it
 /// (a keystroke, a launch, an expand).
 pub const ACTIVE_FOR: Duration = Duration::from_secs(3);
@@ -343,6 +396,8 @@ pub struct MiniTerminalCard {
     notice_generation: Rc<Cell<u64>>,
     preview_box: gtk4::Box,
     vte: Rc<RefCell<Option<VteTerminal>>>,
+    /// Whether that terminal draws: the overlay is mapped and no card hides it.
+    vte_drawing: VteDrawing,
     session_task: Arc<crate::session_task::SessionTask>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
@@ -360,6 +415,9 @@ pub struct MiniTerminalCard {
     /// The body size and fit scale a remote view sized this card to, so its
     /// font follows the host's grid.
     fit: Rc<Cell<(f64, f64, f64)>>,
+    /// What that font was last fitted to, so drawing this card again at the
+    /// same size leaves its emulator alone.
+    font_fit: Rc<RefCell<Option<crate::card_source::FontFit>>>,
     /// The workspace this card is bounded by, in its own pixels. A local card
     /// is bounded by this machine's screen; a remote one by the host's
     /// workspace as the view currently draws it, which changes with the
@@ -438,6 +496,7 @@ impl MiniTerminalCard {
         let expanded = Rc::new(RefCell::new(false));
         let vte = Rc::new(RefCell::new(None));
         let fit: Rc<Cell<(f64, f64, f64)>> = Rc::new(Cell::new((0.0, 0.0, scale)));
+        let font_fit = Rc::new(RefCell::new(None));
         let source_message: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
         let on_toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(on_toggle);
         let on_close = Rc::new(on_close);
@@ -751,6 +810,7 @@ impl MiniTerminalCard {
             CardSource::Remote { peer, card_id, .. } => {
                 let feed = Rc::clone(&vte);
                 let fit_for_grid = Rc::clone(&fit);
+                let font_fit_for_grid = Rc::clone(&font_fit);
                 let slot = Rc::clone(&source_message);
                 let used = Rc::clone(&vte);
                 let used_feed = Rc::clone(&used);
@@ -773,6 +833,7 @@ impl MiniTerminalCard {
                             height,
                             Some(grid),
                             scale,
+                            &font_fit_for_grid,
                         );
                     }),
                     on_message: Rc::new(move |text| {
@@ -826,6 +887,7 @@ impl MiniTerminalCard {
             notice_generation: Rc::new(Cell::new(0)),
             preview_box,
             vte,
+            vte_drawing: VteDrawing::new(),
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
             on_raise: Rc::clone(&on_raise_rc),
@@ -836,6 +898,7 @@ impl MiniTerminalCard {
             source,
             remote,
             fit,
+            font_fit,
             workspace: Rc::new(Cell::new((screen_w, screen_h))),
             source_message: Rc::clone(&source_message),
             iconify_action: Rc::new(RefCell::new(None)),
@@ -966,6 +1029,7 @@ impl MiniTerminalCard {
             let hint_label = card.hint_label.clone();
             let source_message = Rc::clone(&source_message);
             let fit = Rc::clone(&card.fit);
+            let font_fit = Rc::clone(&card.font_fit);
             let workspace = Rc::clone(&card.workspace);
             let on_save = Rc::clone(&on_drag_end);
             let on_toggle_restore = Rc::clone(&on_toggle);
@@ -1007,7 +1071,7 @@ impl MiniTerminalCard {
                 container.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
-                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore, remote_restore.clone(), &fit);
+                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore, remote_restore.clone(), &fit, &font_fit);
                 } else if let Some(term) = vte.borrow().as_ref() {
                     let theme = crate::theme::current_theme();
                     let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
@@ -1499,7 +1563,22 @@ impl MiniTerminalCard {
             return;
         };
         let grid = self.remote.as_ref().and_then(|session| session.grid());
-        crate::card_source::fit_font(&terminal, body_width, body_height, grid, scale);
+        crate::card_source::fit_font(
+            &terminal,
+            body_width,
+            body_height,
+            grid,
+            scale,
+            &self.font_fit,
+        );
+    }
+
+    /// Fit the emulator's font again for the body the view last drew this
+    /// card at. Nothing is touched unless the emulator's space or font changed
+    /// since (its body was allocated, or something else set a font).
+    pub fn refit(&self) {
+        let (body_width, body_height, scale) = self.fit.get();
+        self.set_fit(body_width, body_height, scale);
     }
 
     /// Show what the host reports about this card: its title, whether its
@@ -1590,10 +1669,101 @@ impl MiniTerminalCard {
 
     /// Unmap the VTE widget without detaching tmux. Hide uses this so a
     /// GPU-heavy local model cannot stall compositor frames on live terminals.
+    /// A terminal that other cards hide stays hidden when the overlay comes
+    /// back (see [`VteDrawing`]).
     pub fn set_vte_drawing(&self, drawing: bool) {
-        if let Some(term) = self.vte.borrow().as_ref() {
-            term.set_visible(drawing);
+        // Out of the borrow: hiding a widget can emit signals that re-enter
+        // this card.
+        let term = self.vte.borrow().clone();
+        self.vte_drawing.set_mapped(drawing, term.as_ref());
+    }
+
+    /// The cards painted above hide this terminal completely (`true`), so it
+    /// stops drawing, or no longer do. See `overlap_ghost::hidden_indexes`.
+    pub fn set_vte_covered(&self, covered: bool) {
+        let term = self.vte.borrow().clone();
+        self.vte_drawing.set_covered(covered, term.as_ref());
+    }
+
+    /// True when this card's terminal can stop drawing without side effects.
+    ///
+    /// It needs a terminal that does not hold the keyboard focus (hiding would
+    /// drop it) and that was laid out at `rect`'s size, so its PTY and the tmux
+    /// client already have the card's grid: a terminal that never drew would
+    /// attach at the emulator's default size and resize tmux when it finally
+    /// appears, and one hidden before a pending resize would keep tmux at the
+    /// old size. A card allocated larger than `rect` fails the same check,
+    /// since the planner would miss the part that sticks out. A terminal that
+    /// is already paused may stay so; one just shown again has no size until
+    /// the next frame, and pauses at a later refresh (the overlay runs one
+    /// every second).
+    pub fn vte_can_pause(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect) -> bool {
+        let Some(term) = self.vte.borrow().clone() else {
+            return false;
+        };
+        if !term.is_visible() {
+            return true;
         }
+        if term.is_focus() || term.width() <= 0 || term.height() <= 0 {
+            return false;
+        }
+        // The card's 1.5px agent border puts its border box half a pixel
+        // outside the allocation on each side, so an up-to-date card measures
+        // 1px more than `rect`; a stale one is off by a whole resize.
+        self.container.compute_bounds(canvas).is_some_and(|bounds| {
+            (bounds.width() as f64 - rect.width as f64).abs() <= 2.0
+                && (bounds.height() as f64 - rect.height as f64).abs() <= 2.0
+        })
+    }
+
+    /// True while this card is dragged (the window's drag handler marks it).
+    pub fn is_being_dragged(&self) -> bool {
+        self.container.has_css_class("dragging")
+    }
+
+    /// Open this iconified card at `width`×`height` with an emulator that runs
+    /// nothing, for GTK tests that must not start tmux sessions.
+    #[cfg(test)]
+    pub fn open_with_bare_terminal(&self, width: i32, height: i32) {
+        {
+            let mut data = self.data.borrow_mut();
+            data.iconified = false;
+            data.width = width;
+            data.height = height;
+        }
+        self.container.set_size_request(width, height);
+        let term = VteTerminal::new();
+        term.set_hexpand(true);
+        term.set_vexpand(true);
+        self.preview_box.append(&term);
+        *self.vte.borrow_mut() = Some(term);
+        self.apply_chrome();
+    }
+
+    /// Whether this card's emulator widget is shown, for tests of the wiring.
+    #[cfg(test)]
+    pub fn vte_visible(&self) -> bool {
+        self.vte.borrow().as_ref().is_some_and(|term| term.is_visible())
+    }
+
+    /// This card's emulator widget, for tests that move the keyboard focus.
+    #[cfg(test)]
+    pub fn vte_widget(&self) -> Option<VteTerminal> {
+        self.vte.borrow().clone()
+    }
+
+    /// This card's own `tmux attach` client, to pause while the overlay stays
+    /// hidden (see `hidden_pause`). `None` for a remote card, an iconified one
+    /// (no VTE) and a VTE that has not spawned its client yet.
+    pub fn attach_target(&self) -> Option<crate::hidden_pause::Target> {
+        if self.remote.is_some() || self.session_task.is_closed() {
+            return None;
+        }
+        let pty = self.vte.borrow().as_ref()?.pty()?;
+        Some(crate::hidden_pause::Target {
+            session: self.data.borrow().session_name.clone(),
+            tty: crate::hidden_pause::pty_name(pty.fd())?,
+        })
     }
 
     fn attach_vte_with_inventory(&self, inventory: Option<Arc<crate::tmux::SessionInventory>>) {
@@ -1613,6 +1783,7 @@ impl MiniTerminalCard {
             &self.activity,
             self.remote.clone(),
             &self.fit,
+            &self.font_fit,
         );
     }
 
@@ -1640,21 +1811,20 @@ impl MiniTerminalCard {
         if let Some(path) = crate::brand::logo_path(&self.data.borrow().agent_type, theme.mode == "light") {
             for image in &self.brand_images { image.set_from_file(Some(&path)); }
         }
-        if let Some(term) = self.vte.borrow().as_ref() {
-            let font_size = if self.is_expanded() { 11 } else { 10 };
-            let font = gtk4::pango::FontDescription::from_string(&format!("{} {}", theme.font_family, font_size));
-            term.set_font(Some(&font));
-
-            let fg = gdk::RGBA::parse(&theme.foreground).ok();
-            let bg = gdk::RGBA::parse(&theme.darker_background).ok();
-            let palette = theme.get_ansi_palette();
-            let palette_refs: Vec<&gdk::RGBA> = palette.iter().collect();
-            term.set_colors(fg.as_ref(), bg.as_ref(), &palette_refs);
-
-            if let Ok(cursor) = gdk::RGBA::parse(&theme.accent) {
-                term.set_color_cursor(Some(&cursor));
-            }
+        let Some(term) = self.vte.borrow().as_ref().cloned() else {
+            return;
+        };
+        if self.source.is_remote() {
+            // A remote emulator's font follows the host's grid, not a fixed
+            // size: refit it, in the new theme's family if that changed.
+            apply_vte_colors(&term, theme);
+            self.refit();
+            return;
         }
+        let font_size = if self.is_expanded() { 11 } else { 10 };
+        let font = gtk4::pango::FontDescription::from_string(&format!("{} {}", theme.font_family, font_size));
+        term.set_font(Some(&font));
+        apply_vte_colors(&term, theme);
     }
 
     /// Refresh this card alone (one worker, one tmux inventory).
@@ -1922,14 +2092,25 @@ fn apply_status_view(badge: &Label, compact: &Label, status: &str) {
 /// Apply the active Omarchy theme and a font size to a VTE terminal.
 ///
 /// One source of truth for terminal rendering: a local card and the remote live
-/// view must paint the host's bytes identically. Fractional sizes are supported
-/// because a remote card fits the host's grid into the viewer's own screen.
+/// view must paint the host's bytes identically.
 pub fn apply_vte_theme(term: &VteTerminal, font_size: f64) {
     let theme = crate::theme::current_theme();
-    let mut font = gtk4::pango::FontDescription::from_string(&theme.font_family);
-    font.set_size((font_size * f64::from(gtk4::pango::SCALE)).round() as i32);
-    term.set_font(Some(&font));
+    term.set_font(Some(&vte_font(&theme.font_family, font_size)));
+    apply_vte_colors(term, &theme);
+}
 
+/// A terminal font: the theme's family at a size in points. Fractional sizes
+/// are supported because a remote card fits the host's grid into the viewer's
+/// own screen.
+pub fn vte_font(family: &str, font_size: f64) -> gtk4::pango::FontDescription {
+    let mut font = gtk4::pango::FontDescription::from_string(family);
+    font.set_size((font_size * f64::from(gtk4::pango::SCALE)).round() as i32);
+    font
+}
+
+/// A theme's colors on a VTE terminal: foreground, background, palette and
+/// cursor.
+pub fn apply_vte_colors(term: &VteTerminal, theme: &crate::theme::OmarchyTheme) {
     let fg = gdk::RGBA::parse(&theme.foreground).ok();
     let bg = gdk::RGBA::parse(&theme.darker_background).ok();
     let palette = theme.get_ansi_palette();
@@ -1961,6 +2142,7 @@ fn spawn_vte(
     activity: &Rc<CardActivity>,
     remote: Option<Rc<RemoteSession>>,
     fit: &Rc<Cell<(f64, f64, f64)>>,
+    font_fit: &RefCell<Option<crate::card_source::FontFit>>,
 ) {
     if session_task.is_closed() { return; }
     remove_vte(vte, preview_box);
@@ -2059,7 +2241,14 @@ fn spawn_vte(
         preview_box.append(&term);
         let (body_width, body_height, scale) = fit.get();
         if body_width > 1.0 && body_height > 1.0 {
-            crate::card_source::fit_font(&term, body_width, body_height, session.grid(), scale);
+            crate::card_source::fit_font(
+                &term,
+                body_width,
+                body_height,
+                session.grid(),
+                scale,
+                font_fit,
+            );
         }
         *vte.borrow_mut() = Some(term);
         session.attach();
@@ -2384,7 +2573,7 @@ mod tests {
         spawn_vte(&slot, &preview, &Rc::new(RefCell::new(data)), false,
             &toggle, &Rc::new(RefCell::new(false)), &task, None, HoverRaiseLock::new(),
             &Rc::new(CardActivity::new(Rc::new(|| {}))), None,
-            &Rc::new(Cell::new((0.0, 0.0, 1.0))));
+            &Rc::new(Cell::new((0.0, 0.0, 1.0))), &RefCell::new(None));
         assert!(slot.borrow().is_some(), "placeholder exists before async setup");
         task.close();
         remove_vte(&slot, &preview);
@@ -2595,5 +2784,111 @@ mod tests {
         // The pointer wins over an expired keyboard state.
         activity.set_pointer_inside(true);
         assert!(activity.is_active(start + Duration::from_secs(600)));
+    }
+
+    #[test]
+    fn a_covered_terminal_stops_drawing_without_resizing_tmux() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::vte_drawing_gtk");
+    }
+
+    /// Pausing a buried terminal must look like nothing happened to it: the
+    /// card keeps its size, the PTY (tmux's view of the window) keeps its
+    /// grid, output keeps being read, and the whole-window hide and the cover
+    /// compose instead of overriding each other.
+    #[test]
+    fn vte_drawing_gtk() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let pump = || {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let window = gtk4::Window::new();
+        // The card's own layout: a fixed-size body whose preview box holds the
+        // terminal.
+        let card = gtk4::Box::new(Orientation::Vertical, 0);
+        card.set_size_request(480, 320);
+        let header = Label::new(Some("header"));
+        card.append(&header);
+        let preview_box = gtk4::Box::new(Orientation::Vertical, 0);
+        preview_box.set_vexpand(true);
+        card.append(&preview_box);
+        let term = VteTerminal::new();
+        term.set_hexpand(true);
+        term.set_vexpand(true);
+        preview_box.append(&term);
+        // A PTY with no child process: its window size is what an attached
+        // tmux client would be told.
+        let pty = term
+            .pty_new_sync(PtyFlags::DEFAULT, None::<&gtk4::gio::Cancellable>)
+            .unwrap();
+        term.set_pty(Some(&pty));
+        window.set_child(Some(&card));
+        window.present();
+        pump();
+
+        let card_size = (card.width(), card.height());
+        let grid = (term.column_count(), term.row_count());
+        assert!(grid.0 > 20 && grid.1 > 5, "laid out at the card's size: {grid:?}");
+        let pty_size = pty.size().unwrap();
+        assert_eq!(pty_size, (grid.1 as i32, grid.0 as i32));
+
+        let drawing = VteDrawing::new();
+        assert!(drawing.drawing());
+        drawing.set_covered(true, Some(&term));
+        assert!(!term.is_visible() && !drawing.drawing());
+        term.feed(b"written while buried\r\n");
+        pump();
+        assert!(!term.is_mapped());
+        assert_eq!((card.width(), card.height()), card_size, "the card keeps its size");
+        assert_eq!(pty.size().unwrap(), pty_size, "tmux sees no resize");
+        let text = term.text_format(vte4::Format::Text).unwrap_or_default();
+        assert!(
+            text.contains("written while buried"),
+            "a paused terminal keeps reading output: {text:?}"
+        );
+
+        // The overlay hides and shows while the terminal is buried: the show
+        // must not bring it back.
+        drawing.set_mapped(false, Some(&term));
+        drawing.set_mapped(true, Some(&term));
+        assert!(!term.is_visible(), "a show left the buried terminal paused");
+
+        // Uncovered while the overlay is hidden: it waits for the show.
+        drawing.set_mapped(false, Some(&term));
+        drawing.set_covered(false, Some(&term));
+        assert!(!term.is_visible());
+        drawing.set_mapped(true, Some(&term));
+        assert!(term.is_visible());
+        // Shown again, it is laid out anew on the next frame (Broadway runs
+        // few): only then would a changed size reach the PTY.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while term.width() <= 0 && Instant::now() < deadline {
+            pump();
+        }
+        assert!(term.is_mapped() && term.width() > 0, "laid out again");
+        assert_eq!((term.column_count(), term.row_count()), grid);
+        assert_eq!(pty.size().unwrap(), pty_size, "tmux sees no resize");
+        assert_eq!((card.width(), card.height()), card_size);
+        let text = term.text_format(vte4::Format::Text).unwrap_or_default();
+        assert!(
+            text.contains("written while buried"),
+            "the terminal shows what arrived while it was paused: {text:?}"
+        );
+
+        // A terminal re-created while its card is buried (a restore) starts
+        // visible; the next decision brings it in line.
+        drawing.set_covered(true, Some(&term));
+        let fresh = VteTerminal::new();
+        preview_box.append(&fresh);
+        assert!(fresh.is_visible());
+        drawing.set_covered(true, Some(&fresh));
+        assert!(!fresh.is_visible());
+        window.close();
     }
 }

@@ -287,6 +287,68 @@ pub fn pack_remote_emulator(terminal: &vte4::Terminal) {
     terminal.set_valign(gtk4::Align::Center);
 }
 
+/// What a remote emulator's font was last fitted to, and what that fit left on
+/// screen.
+///
+/// Every VTE font change re-measures the glyphs and redraws the whole
+/// terminal, even a change to the font it already has, and a view draws its
+/// cards again far more often than their size changes. A card keeps one of
+/// these so that fitting it again for the same space leaves the emulator
+/// alone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FontFit {
+    inputs: FitInputs,
+    shown: Shown,
+}
+
+/// Everything a fit depends on.
+#[derive(Clone, Debug, PartialEq)]
+struct FitInputs {
+    /// The space the grid had: the body, bounded by the emulator's parent
+    /// once that is allocated.
+    width: f64,
+    height: f64,
+    /// The host's grid, as the emulator is sized to it.
+    grid: (i64, i64),
+    scale: f64,
+    /// The theme's font family: another family measures differently.
+    family: String,
+}
+
+/// What an emulator shows: its font's family and size (in Pango units) and
+/// its grid.
+#[derive(Clone, Debug, PartialEq)]
+struct Shown {
+    family: Option<String>,
+    size: i32,
+    grid: (i64, i64),
+}
+
+impl Shown {
+    fn of(terminal: &vte4::Terminal) -> Self {
+        let font = terminal.font();
+        Self {
+            family: font
+                .as_ref()
+                .and_then(|font| font.family())
+                .map(|family| family.to_string()),
+            size: font.map_or(0, |font| font.size()),
+            grid: (terminal.column_count(), terminal.row_count()),
+        }
+    }
+}
+
+impl FontFit {
+    /// Whether fitting for `inputs` would change nothing: they are the ones
+    /// this fit was made for, and the emulator still shows what it left.
+    /// Something else may have set a font since (restoring an icon sets the
+    /// theme's), or VTE may have re-derived the grid from a short allocation;
+    /// either needs a real fit.
+    fn covers(&self, inputs: &FitInputs, shown: &Shown) -> bool {
+        self.inputs == *inputs && self.shown == *shown
+    }
+}
+
 /// Size the emulator's font so the host's whole grid fits the card body.
 ///
 /// The emulator keeps the host's grid (see `pack_remote_emulator`); only the
@@ -295,12 +357,16 @@ pub fn pack_remote_emulator(terminal: &vte4::Terminal) {
 /// fits the space the emulator really has: its parent's allocation once laid
 /// out, never more than the body the view computed. The host's own grid is
 /// never changed by it.
+///
+/// `last` is the card's own record of its previous fit: the same space, grid,
+/// scale and theme font leave the emulator untouched.
 pub fn fit_font(
     terminal: &vte4::Terminal,
     body_width: f64,
     body_height: f64,
     grid: Option<TerminalSize>,
     scale: f64,
+    last: &RefCell<Option<FontFit>>,
 ) {
     let Some(grid) = grid else {
         return;
@@ -315,16 +381,54 @@ pub fn fit_font(
     if width < 1.0 || height < 1.0 {
         return;
     }
+    let inputs = FitInputs {
+        width,
+        height,
+        grid: (i64::from(grid.columns.max(1)), i64::from(grid.rows.max(1))),
+        scale,
+        family: crate::theme::current_theme().font_family,
+    };
+    let shown = Shown::of(terminal);
+    if last
+        .borrow()
+        .as_ref()
+        .is_some_and(|fit| fit.covers(&inputs, &shown))
+    {
+        return;
+    }
     // VTE may have re-derived its grid from an earlier allocation.
-    terminal.set_size(i64::from(grid.columns.max(1)), i64::from(grid.rows.max(1)));
+    if shown.grid != inputs.grid {
+        terminal.set_size(inputs.grid.0, inputs.grid.1);
+    }
     let natural = || {
         let (_, w, _, _) = terminal.measure(gtk4::Orientation::Horizontal, -1);
         let (_, h, _, _) = terminal.measure(gtk4::Orientation::Vertical, -1);
         (f64::from(w), f64::from(h))
     };
-    let mut size = (10.0 * scale).clamp(MIN_FONT, MAX_FONT);
+    // Only the font changes here: the colors are the theme's, set when the
+    // emulator is built and when the theme changes. VTE re-measures its glyphs
+    // even for the font it already has, so a size already on screen is
+    // measured as it is.
+    let family = crate::mini_terminal::vte_font(&inputs.family, 10.0).family();
+    let mut on_screen = (shown.family.as_deref() == family.as_deref()).then_some(shown.size);
+    // Cells grow with the font, so what is on screen already says which size
+    // to try: a card that changed a little changes its font a little. An
+    // emulator in another family starts from a card's size at this scale.
+    let mut size = on_screen
+        .filter(|units| *units > 0)
+        .map_or(10.0 * scale, |units| {
+            f64::from(units) / f64::from(gtk4::pango::SCALE)
+        })
+        .clamp(MIN_FONT, MAX_FONT);
+    let mut show = |size: f64| {
+        let font = crate::mini_terminal::vte_font(&inputs.family, size);
+        if on_screen != Some(font.size()) {
+            terminal.set_font(Some(&font));
+            on_screen = Some(font.size());
+        }
+    };
     for _ in 0..3 {
-        crate::mini_terminal::apply_vte_theme(terminal, size);
+        show(size);
         let (w, h) = natural();
         if w <= 0.0 || h <= 0.0 {
             return;
@@ -337,13 +441,17 @@ pub fn fit_font(
     }
     // Whole-pixel cells: never let the grid overflow the space it has.
     for _ in 0..60 {
-        crate::mini_terminal::apply_vte_theme(terminal, size);
+        show(size);
         let (w, h) = natural();
         if (w <= width && h <= height) || size <= GRID_FLOOR_FONT {
             break;
         }
         size = (size * 0.97).max(GRID_FLOOR_FONT);
     }
+    *last.borrow_mut() = Some(FontFit {
+        inputs,
+        shown: Shown::of(terminal),
+    });
 }
 
 /// Enter, keypad Enter and the ISO Enter key submit the line.
@@ -465,7 +573,14 @@ mod tests {
                 pump(120);
                 let grid = TerminalSize { columns, rows };
                 terminal.set_size(i64::from(columns), i64::from(rows));
-                fit_font(&terminal, f64::from(width), f64::from(height), Some(grid), 1.0);
+                fit_font(
+                    &terminal,
+                    f64::from(width),
+                    f64::from(height),
+                    Some(grid),
+                    1.0,
+                    &RefCell::new(None),
+                );
                 pump(150);
                 let shown = (terminal.column_count(), terminal.row_count());
                 let fits = terminal.width() <= body.width() && terminal.height() <= body.height();
@@ -480,6 +595,141 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "emulator grid differs from the host's:\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_fit_is_only_made_again_when_its_inputs_or_the_emulator_changed() {
+        let inputs = FitInputs {
+            width: 640.0,
+            height: 450.0,
+            grid: (80, 24),
+            scale: 1.0,
+            family: "Mono".into(),
+        };
+        let shown = Shown {
+            family: Some("Mono".into()),
+            size: 9 * gtk4::pango::SCALE,
+            grid: (80, 24),
+        };
+        let fit = FontFit {
+            inputs: inputs.clone(),
+            shown: shown.clone(),
+        };
+        assert!(fit.covers(&inputs, &shown));
+        // Another space, grid, scale or theme font needs a new fit.
+        for changed in [
+            FitInputs { width: 639.0, ..inputs.clone() },
+            FitInputs { height: 451.0, ..inputs.clone() },
+            FitInputs { grid: (80, 25), ..inputs.clone() },
+            FitInputs { scale: 0.5, ..inputs.clone() },
+            FitInputs { family: "Other Mono".into(), ..inputs.clone() },
+        ] {
+            assert!(!fit.covers(&changed, &shown), "{changed:?}");
+        }
+        // So does an emulator that no longer shows what the fit left: a font
+        // set since (a restored icon, a theme), or a grid VTE re-derived.
+        for changed in [
+            Shown { size: 10 * gtk4::pango::SCALE, ..shown.clone() },
+            Shown { family: Some("Other Mono".into()), ..shown.clone() },
+            Shown { family: None, ..shown.clone() },
+            Shown { grid: (79, 24), ..shown.clone() },
+        ] {
+            assert!(!fit.covers(&inputs, &changed), "{changed:?}");
+        }
+    }
+
+    #[test]
+    fn a_fitted_emulator_is_left_alone_until_its_space_or_font_changes() {
+        crate::gtk_test::run_in_child_process("card_source::tests::fit_memo_inner");
+    }
+
+    /// A view draws its cards again on every snapshot and every resize frame.
+    /// Each VTE font change re-measures the glyphs and redraws the terminal,
+    /// so a fit that has nothing to change must not set a font at all, and a
+    /// fit sets nothing but the font.
+    #[test]
+    fn fit_memo_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use vte4::prelude::*;
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let pump = |ms: u64| {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < until {
+                while gtk4::glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let body = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        body.set_size_request(640, 450);
+        let terminal = vte4::Terminal::new();
+        terminal.set_hexpand(true);
+        terminal.set_vexpand(true);
+        pack_remote_emulator(&terminal);
+        body.append(&terminal);
+        let window = gtk4::Window::new();
+        window.set_default_size(640, 450);
+        window.set_resizable(false);
+        window.set_child(Some(&body));
+        window.present();
+        // What `spawn_vte` builds the emulator with.
+        crate::mini_terminal::apply_vte_theme(&terminal, 10.0);
+        pump(120);
+        let grid = TerminalSize { columns: 99, rows: 38 };
+        let last = RefCell::new(None);
+        // The host's grid, whole inside the space as VTE measures it (padding
+        // included), and still the grid once GTK has laid the new font out: a
+        // short allocation would have made VTE re-derive a smaller one.
+        let holds_grid_in = |width: i32, height: i32| {
+            let clock = terminal.frame_clock().expect("a mapped emulator");
+            let laid_out = clock.frame_counter() + 2;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while clock.frame_counter() < laid_out {
+                assert!(std::time::Instant::now() < deadline, "no frame after the fit");
+                pump(20);
+            }
+            let (_, natural_width, _, _) = terminal.measure(gtk4::Orientation::Horizontal, -1);
+            let (_, natural_height, _, _) = terminal.measure(gtk4::Orientation::Vertical, -1);
+            (terminal.column_count(), terminal.row_count()) == (99, 38)
+                && natural_width <= width
+                && natural_height <= height
+        };
+        fit_font(&terminal, 640.0, 450.0, Some(grid), 1.0, &last);
+        assert!(holds_grid_in(640, 450));
+        let fitted = terminal.font().unwrap().size();
+
+        let changes = Rc::new(Cell::new(0));
+        terminal.connect_notify_local(Some("font-desc"), {
+            let changes = Rc::clone(&changes);
+            move |_, _| changes.set(changes.get() + 1)
+        });
+        // Drawn again at the same size, as every snapshot and relayout does.
+        for _ in 0..3 {
+            fit_font(&terminal, 640.0, 450.0, Some(grid), 1.0, &last);
+        }
+        assert_eq!(changes.get(), 0, "an unchanged fit set a font");
+        assert_eq!(terminal.font().unwrap().size(), fitted);
+
+        // Something else set a font since (restoring an icon sets the theme's
+        // own size): the next fit is made again, and changes only the font.
+        let red = gtk4::gdk::RGBA::new(1.0, 0.0, 0.0, 1.0);
+        terminal.set_color_background(&red);
+        let family = crate::theme::current_theme().font_family;
+        terminal.set_font(Some(&crate::mini_terminal::vte_font(&family, 10.0)));
+        changes.set(0);
+        fit_font(&terminal, 640.0, 450.0, Some(grid), 1.0, &last);
+        assert!(changes.get() >= 1, "a replaced font was not fitted again");
+        assert!(holds_grid_in(640, 450));
+        assert_eq!(terminal.color_background_for_draw(), red);
+
+        // A smaller body: a smaller font, the same host grid.
+        fit_font(&terminal, 500.0, 350.0, Some(grid), 1.0, &last);
+        assert!(holds_grid_in(500, 350));
+        assert!(terminal.font().unwrap().size() < fitted);
+        window.close();
+        pump(50);
     }
 
     #[test]

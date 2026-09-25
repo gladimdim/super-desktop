@@ -99,6 +99,8 @@ pub struct Picker {
     hold: RefCell<Hold>,
     showing: Cell<bool>,
     selected: Cell<Option<usize>>,
+    /// Told when the preview goes up (`true`) and comes down (`false`).
+    on_showing: RefCell<Option<Rc<dyn Fn(bool)>>>,
 }
 
 impl Picker {
@@ -124,6 +126,7 @@ impl Picker {
             hold: RefCell::new(Hold::default()),
             showing: Cell::new(false),
             selected: Cell::new(None),
+            on_showing: RefCell::new(None),
         });
         let weak = Rc::downgrade(&picker);
         picker.layer.set_draw_func(move |layer, cr, _, _| {
@@ -200,6 +203,22 @@ impl Picker {
             }
         });
         picker
+    }
+
+    /// Call `f` when the preview goes up (`true`) and when it comes down
+    /// (`false`). The preview dims every card, so whatever lies under a card
+    /// shows through it meanwhile.
+    pub fn connect_showing(&self, f: impl Fn(bool) + 'static) {
+        *self.on_showing.borrow_mut() = Some(Rc::new(f));
+    }
+
+    fn notify_showing(&self, showing: bool) {
+        // Out of the borrow: the callback may touch widgets whose signals
+        // come back here.
+        let callback = self.on_showing.borrow().clone();
+        if let Some(callback) = callback {
+            callback(showing);
+        }
     }
 
     fn press(
@@ -284,11 +303,15 @@ impl Picker {
         for target in self.targets.borrow().iter() {
             target.widget.add_css_class("terminal-picker-ghost");
         }
+        self.notify_showing(true);
         self.layer.set_visible(true);
         self.layer.queue_draw();
         // Only the visible preview follows moving/resizing cards each frame.
-        // The normal desktop does not retain a repaint timer.
+        // The normal desktop does not retain a repaint timer. The layer is a
+        // full-screen Cairo drawing, so it is repainted only on the frames
+        // where an outline actually moved, not at the display rate.
         let weak = Rc::downgrade(self);
+        let drawn = RefCell::new(self.target_bounds());
         self.layer.add_tick_callback(move |layer, _| {
             let Some(picker) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
@@ -305,13 +328,32 @@ impl Picker {
                 picker.cancel();
                 return glib::ControlFlow::Break;
             }
-            layer.queue_draw();
+            let bounds = picker.target_bounds();
+            if bounds != *drawn.borrow() {
+                *drawn.borrow_mut() = bounds;
+                layer.queue_draw();
+            }
             glib::ControlFlow::Continue
         });
     }
 
+    /// Where each target's outline goes, as the draw function computes it.
+    fn target_bounds(&self) -> Vec<Option<[f32; 4]>> {
+        self.targets
+            .borrow()
+            .iter()
+            .map(|target| {
+                if !target.widget.is_mapped() {
+                    return None;
+                }
+                let rect = target.widget.compute_bounds(&self.layer)?;
+                Some([rect.x(), rect.y(), rect.width(), rect.height()])
+            })
+            .collect()
+    }
+
     fn hide(&self) {
-        self.showing.set(false);
+        let was_showing = self.showing.replace(false);
         self.layer.set_visible(false);
         let widgets: Vec<_> = self
             .targets
@@ -321,6 +363,10 @@ impl Picker {
             .collect();
         for widget in widgets {
             widget.remove_css_class("terminal-picker-ghost");
+        }
+        // Every cancel ends up here: report the preview going away only once.
+        if was_showing {
+            self.notify_showing(false);
         }
     }
 
@@ -481,6 +527,11 @@ mod tests {
             })
         };
         let picker = Picker::install(&window, &overlay, targets);
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        picker.connect_showing({
+            let reports = Rc::clone(&reports);
+            move |showing| reports.borrow_mut().push(showing)
+        });
         window.present();
         let pump = |ms| {
             let deadline = std::time::Instant::now() + Duration::from_millis(ms);
@@ -501,6 +552,8 @@ mod tests {
         assert!(zero.has_css_class("terminal-picker-ghost"));
         assert!(three.has_css_class("terminal-picker-ghost"));
         assert!(!picker.layer.can_target());
+        // The overlay lets every terminal draw while the cards are dimmed.
+        assert_eq!(*reports.borrow(), [true]);
         if let Ok(path) = std::env::var("SUPER_DESKTOP_PICKER_PREVIEW") {
             let snapshot = gtk4::Snapshot::new();
             let paintable = gtk4::WidgetPaintable::new(Some(&overlay));
@@ -515,6 +568,7 @@ mod tests {
         }
         assert_eq!(picker.press(gdk::Key::_3, KEY_3, alt), glib::Propagation::Stop);
         assert_eq!(selected.get(), Some(3));
+        assert_eq!(*reports.borrow(), [true, false]);
         let focused = gtk4::prelude::RootExt::focus(&window).unwrap();
         assert!(focused == three.clone().upcast::<gtk4::Widget>() || focused.is_ancestor(&three));
         assert!(!picker.layer.is_visible());
@@ -591,6 +645,14 @@ mod tests {
         assert!(!zero.has_css_class("terminal-picker-ghost"));
         assert!(!picker.layer.is_visible());
         assert!(picker.hold.borrow().keys.is_empty());
+        // Every preview was reported once up and once down, however many
+        // cancels followed it.
+        let reports = reports.borrow();
+        assert!(reports.len() > 2 && reports.len() % 2 == 0, "{reports:?}");
+        assert!(
+            reports.chunks(2).all(|pair| pair == [true, false]),
+            "{reports:?}"
+        );
         window.close();
     }
 

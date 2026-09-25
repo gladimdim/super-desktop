@@ -133,6 +133,31 @@ fn alive(fd: &OwnedFd) -> bool {
     }
 }
 
+/// How often an enabled lock re-reads the power source.
+const POWER_POLL: Duration = Duration::from_secs(2);
+
+/// Wait for the next setting from `set_enabled`: `Ok(Some(value))` for one,
+/// `Ok(None)` when `poll` passed without one (time to re-read the power
+/// source), `Err(())` once the sender is gone.
+///
+/// Disabled, there is nothing to re-read — the status says "Off" and no lease
+/// is held whatever the power source — so it blocks until the setting changes
+/// instead of waking the worker (and reading sysfs) every `poll`.
+fn next_setting(
+    receiver: &mpsc::Receiver<bool>,
+    enabled: bool,
+    poll: Duration,
+) -> Result<Option<bool>, ()> {
+    if !enabled {
+        return receiver.recv().map(Some).map_err(|_| ());
+    }
+    match receiver.recv_timeout(poll) {
+        Ok(value) => Ok(Some(value)),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(()),
+    }
+}
+
 struct Runtime {
     updates: mpsc::Sender<bool>,
     status: Arc<Mutex<String>>,
@@ -160,10 +185,10 @@ pub fn set_enabled(enabled: bool) {
                 let mut enabled = false;
                 let mut lease = Lease::<OwnedFd> { held: None };
                 loop {
-                    match receiver.recv_timeout(Duration::from_secs(2)) {
-                        Ok(value) => enabled = value,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    match next_setting(&receiver, enabled, POWER_POLL) {
+                        Ok(Some(value)) => enabled = value,
+                        Ok(None) => {}
+                        Err(()) => break,
                     }
                     while let Ok(value) = receiver.try_recv() {
                         enabled = value;
@@ -277,6 +302,32 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
         assert_eq!(power_source(&root, true), Power::Unknown);
         assert_eq!(power_source(&root, false), Power::Unknown);
+    }
+
+    #[test]
+    fn a_disabled_lock_sleeps_until_the_setting_changes() {
+        let poll = Duration::from_millis(10);
+        // Enabled: a quiet channel times out, which is the cue to re-read power.
+        let (sender, receiver) = mpsc::channel();
+        assert_eq!(next_setting(&receiver, true, poll), Ok(None));
+        sender.send(false).unwrap();
+        assert_eq!(next_setting(&receiver, true, poll), Ok(Some(false)));
+
+        // Disabled: no timeout at all. The value sent long after `poll` is the
+        // first thing it returns.
+        let started = std::time::Instant::now();
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            sender.send(true).unwrap();
+            sender
+        });
+        assert_eq!(next_setting(&receiver, false, poll), Ok(Some(true)));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+
+        // A dropped sender ends the worker in either state.
+        drop(late.join().unwrap());
+        assert_eq!(next_setting(&receiver, false, poll), Err(()));
+        assert_eq!(next_setting(&receiver, true, poll), Err(()));
     }
 
     #[test]

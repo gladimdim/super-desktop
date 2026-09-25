@@ -84,6 +84,15 @@ pub struct RemoteCanvas {
     /// not steal the pointer path.
     hover_lock: crate::mini_terminal::HoverRaiseLock,
     snapshot: RefCell<Option<WorkspaceSnapshot>>,
+    /// The snapshot `apply` last drew, exactly as the host sent it, with the
+    /// host's answer about layout commands. Forgotten whenever this view
+    /// changes a card on its own (a gesture, a command's answer), so the next
+    /// snapshot is drawn in full even if the host's did not change.
+    drawn: RefCell<Option<(WorkspaceSnapshot, bool)>>,
+    /// How many times the cards were laid out, for checks that a snapshot
+    /// already on screen is not laid out again.
+    #[cfg(test)]
+    layouts: Cell<usize>,
     peer: RefCell<Option<Peer>>,
     /// The host advertises `workspace-layout-v1`, so it accepts commands. A
     /// host that does not keeps its own layout: a drop is dropped rather than
@@ -158,6 +167,9 @@ impl RemoteCanvas {
             stacking: RefCell::new(Vec::new()),
             hover_lock: crate::mini_terminal::HoverRaiseLock::new(),
             snapshot: RefCell::new(None),
+            drawn: RefCell::new(None),
+            #[cfg(test)]
+            layouts: Cell::new(0),
             peer: RefCell::new(None),
             layout_writable: Cell::new(false),
             on_changed: RefCell::new(None),
@@ -493,6 +505,12 @@ impl RemoteCanvas {
         self.outbox.borrow().clone().unwrap_or_default()
     }
 
+    /// How many times the cards were laid out so far.
+    #[cfg(test)]
+    pub fn layouts(&self) -> usize {
+        self.layouts.get()
+    }
+
     /// The viewport widget, for checks against real GTK geometry.
     #[cfg(test)]
     pub fn viewport(&self) -> &gtk4::ScrolledWindow {
@@ -538,6 +556,15 @@ impl RemoteCanvas {
             .iter()
             .find(|card| card.card_id == card_id)
             .cloned()
+    }
+
+    /// Follow a theme change: the consoles take its colors and logos, and
+    /// their fonts its family, still fitted to each host grid.
+    pub fn apply_theme(&self, theme: &crate::theme::OmarchyTheme) {
+        let cards: Vec<Rc<MiniTerminalCard>> = self.cards.borrow().values().cloned().collect();
+        for card in cards {
+            card.apply_theme(theme);
+        }
     }
 
     /// Stop every stream while the overlay is hidden.
@@ -599,6 +626,7 @@ impl RemoteCanvas {
         self.glides.borrow_mut().clear();
         self.stacking.borrow_mut().clear();
         *self.snapshot.borrow_mut() = None;
+        *self.drawn.borrow_mut() = None;
         *self.peer.borrow_mut() = None;
         // Another PC decides for itself whether it accepts layout commands.
         self.layout_writable.set(false);
@@ -620,6 +648,20 @@ impl RemoteCanvas {
         incoming: &WorkspaceSnapshot,
         layout_writable: bool,
     ) {
+        if self.holds(peer, incoming, layout_writable) {
+            // The snapshot on screen, again: every poll of a quiet host. Laying
+            // the cards out anew would change nothing and still cost each one a
+            // relayout, so only what a snapshot does besides drawing is done:
+            // a renewed pairing serves the next command, a stream that ended
+            // is retried, and an emulator whose body was allocated since its
+            // last fit is fitted to it (free when nothing moved).
+            *self.peer.borrow_mut() = Some(peer.clone());
+            self.retry_streams();
+            for card in self.cards.borrow().values().cloned().collect::<Vec<_>>() {
+                card.refit();
+            }
+            return;
+        }
         {
             let mut pending = self.pending_moves.borrow_mut();
             pending.retain(|id, pos| {
@@ -700,6 +742,24 @@ impl RemoteCanvas {
             self.drive_stream(&card, host, live_now);
         }
         self.relayout();
+        *self.drawn.borrow_mut() = Some((incoming.clone(), layout_writable));
+    }
+
+    /// Whether `incoming` is the snapshot this view last drew, for the same PC
+    /// and viewport, with nothing of the view's own in flight: no gesture, no
+    /// drop the host has not confirmed, no glide.
+    fn holds(&self, peer: &Peer, incoming: &WorkspaceSnapshot, layout_writable: bool) -> bool {
+        !redraws(self.drawn.borrow().as_ref(), incoming, layout_writable)
+            && self
+                .peer
+                .borrow()
+                .as_ref()
+                .is_some_and(|known| known.machine_id == peer.machine_id)
+            && self.laid_out_for.get() == self.viewport_size()
+            && self.gesturing.borrow().is_empty()
+            && self.pending_moves.borrow().is_empty()
+            && self.glides.borrow().is_empty()
+            && self.snapping.borrow().is_empty()
     }
 
     /// Re-attach any console that should be live but lost its stream.
@@ -894,6 +954,9 @@ impl RemoteCanvas {
     /// conflict rather than overwritten.
     fn commit_card_layout(self: &Rc<Self>, card_id: &str, data: &TerminalData) {
         self.gesturing.borrow_mut().remove(card_id);
+        // The gesture changed the card here (an icon, say) whatever the host
+        // does with it: the next snapshot puts back what the host has.
+        *self.drawn.borrow_mut() = None;
         let Some(host) = self.card(card_id) else {
             self.relayout();
             return;
@@ -1025,6 +1088,9 @@ impl RemoteCanvas {
         reply: &Result<Result<CommandReply, peer_client::PeerError>, E>,
     ) {
         let feedback = command_feedback::for_card(kind, Outcome::of(reply));
+        // An answer redraws geometry only; the next snapshot, even one the host
+        // did not change, is drawn in full again (card modes included).
+        *self.drawn.borrow_mut() = None;
         match (reply, feedback.geometry) {
             (Ok(Ok(reply)), Geometry::Adopt | Geometry::SnapToHost) => {
                 self.adopt(card_id, reply, feedback.geometry == Geometry::SnapToHost);
@@ -1146,7 +1212,11 @@ impl RemoteCanvas {
             && card.container.is_mapped()
             && gtk4::Settings::default().is_none_or(|settings| settings.is_gtk_enable_animations());
         if !animate {
-            self.canvas.move_(&card.container, x, y);
+            // GtkFixed lays itself out again after every move, even one to
+            // where the card already is.
+            if !already_at(from, x, y) {
+                self.canvas.move_(&card.container, x, y);
+            }
             return;
         }
         self.glides.borrow_mut().insert(id.to_string(), (x, y));
@@ -1206,6 +1276,8 @@ impl RemoteCanvas {
         let Some(snapshot) = self.presented_snapshot() else {
             return;
         };
+        #[cfg(test)]
+        self.layouts.set(self.layouts.get() + 1);
         let local = &snapshot.local;
         let transform = self.transform();
         let scale = transform.scale;
@@ -1397,6 +1469,26 @@ fn host_layout(host: &DesktopCard, data: &TerminalData, scale: f64) -> Option<Ca
     Some(layout)
 }
 
+/// Whether a snapshot has to be drawn: anything but the very snapshot this view
+/// last drew, with the same answer about layout commands. Inside one epoch the
+/// host advances its revision whenever anything it publishes changes, so a
+/// quiet host's polls compare equal.
+fn redraws(
+    drawn: Option<&(WorkspaceSnapshot, bool)>,
+    incoming: &WorkspaceSnapshot,
+    layout_writable: bool,
+) -> bool {
+    drawn.is_none_or(|(snapshot, writable)| {
+        *writable != layout_writable || snapshot != incoming
+    })
+}
+
+/// Whether a canvas child at `from` is already at `(x, y)`. GtkFixed keeps a
+/// child's position in single precision, so that is the precision compared.
+fn already_at(from: (f64, f64), x: f64, y: f64) -> bool {
+    from == (f64::from(x as f32), f64::from(y as f32))
+}
+
 /// How long a refused card takes to glide back to the host's position.
 const GLIDE_MICROS: i64 = 220_000;
 
@@ -1498,6 +1590,132 @@ mod tests {
         // Ease-out: past halfway at half time, never overshooting.
         assert!(x > 50.0 && x < 100.0 && !done);
         assert_eq!(glide_step((0.0, 0.0), (100.0, 50.0), GLIDE_MICROS * 3), (100.0, 50.0, true));
+    }
+
+    #[test]
+    fn only_a_snapshot_other_than_the_one_drawn_is_drawn_again() {
+        let drawn = crate::remote_workspace::fixture();
+        let shown = (drawn.clone(), true);
+        // Nothing drawn yet: the first snapshot is always drawn.
+        assert!(redraws(None, &drawn, true));
+        // A quiet host polled again.
+        assert!(!redraws(Some(&shown), &drawn.clone(), true));
+        // The host's answer about layout commands changed.
+        assert!(redraws(Some(&shown), &drawn, false));
+        // A newer revision, and a restarted host whose revisions start again.
+        let mut newer = drawn.clone();
+        newer.local.revision += 1;
+        assert!(redraws(Some(&shown), &newer, true));
+        let mut restarted = drawn.clone();
+        restarted.local.epoch = "host-two".into();
+        assert!(redraws(Some(&shown), &restarted, true));
+        // Content that changed without a revision (never sent by a correct
+        // host) is still drawn: only the very same snapshot is skipped.
+        let mut moved = drawn.clone();
+        moved.local.cards[0].layout.x += 10;
+        assert!(redraws(Some(&shown), &moved, true));
+    }
+
+    #[test]
+    fn a_card_already_in_place_is_not_moved_again() {
+        assert!(already_at((0.0, 0.0), 0.0, 0.0));
+        assert!(already_at((100.0, 200.0), 100.0, 200.0));
+        // GtkFixed hands positions back in single precision.
+        let stored = (f64::from(100.3f32), f64::from(57.9f32));
+        assert!(already_at(stored, 100.3, 57.9));
+        assert!(!already_at(stored, 100.4, 57.9));
+        assert!(!already_at((100.0, 200.0), 100.0, 201.0));
+    }
+
+    #[test]
+    fn a_poll_that_brings_the_same_snapshot_lays_nothing_out() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::same_snapshot_inner");
+    }
+
+    #[test]
+    fn same_snapshot_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        use crate::desktop_protocol::CommandResult;
+        gtk4::init().unwrap();
+        let canvas = RemoteCanvas::new();
+        canvas.capture_commands();
+        // A host whose session is gone renders as a card but is never
+        // streamed, so this check opens no socket.
+        let mut snapshot = crate::remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        let peer = peer_client::test_peer('a');
+        canvas.apply(&peer, &snapshot, true);
+        assert_eq!(canvas.layouts(), 1);
+
+        // A quiet host, polled again and again.
+        canvas.apply(&peer, &snapshot, true);
+        canvas.apply(&peer, &snapshot.clone(), true);
+        assert_eq!(canvas.layouts(), 1);
+        assert_eq!(canvas.card_count(), 1);
+
+        // Whatever the host changed is drawn: a new revision...
+        let mut moved = snapshot.clone();
+        moved.local.revision = 2;
+        moved.local.cards[0].revision = 2;
+        moved.local.cards[0].layout.x = 700;
+        canvas.apply(&peer, &moved, true);
+        assert_eq!(canvas.layouts(), 2);
+        assert_eq!(canvas.card_position("card-one"), Some((700, 200)));
+        // ...another answer about layout commands...
+        canvas.apply(&peer, &moved, false);
+        assert_eq!(canvas.layouts(), 3);
+        assert!(!canvas.layout_is_writable());
+        canvas.apply(&peer, &moved, false);
+        assert_eq!(canvas.layouts(), 3);
+        // ...and a restarted host, whose revisions start again.
+        let mut restarted = snapshot.clone();
+        restarted.local.epoch = "host-two".into();
+        canvas.apply(&peer, &restarted, true);
+        assert_eq!(canvas.layouts(), 4);
+        assert_eq!(canvas.card_position("card-one"), Some((100, 200)));
+
+        // A drop: the view relays it and keeps the card where it was released
+        // until the host confirms it. A poll that has not seen the drop yet
+        // is drawn in full, so the card stays at the drop.
+        let data = {
+            let card = canvas.card_widget("card-one").unwrap();
+            let mut data = card.data.borrow().clone();
+            data.x += 150;
+            data
+        };
+        canvas.commit_card_layout("card-one", &data);
+        assert_eq!(canvas.captured().len(), 1);
+        canvas.apply(&peer, &restarted, true);
+        assert_eq!(canvas.layouts(), 5);
+        // The host refuses it: the card goes back at once, and the next poll
+        // is drawn in full even though the host's snapshot did not change,
+        // so the card's own chrome is put back as the host has it too.
+        let conflict: Result<_, ()> = Ok(Ok(CommandReply {
+            request_id: "m1".into(),
+            machine_id: peer.machine_id.clone(),
+            epoch: "host-two".into(),
+            revision: 1,
+            result: CommandResult::Conflict {
+                card_id: "card-one".into(),
+                card_revision: Some(1),
+                layout: Some(restarted.local.cards[0].layout.clone()),
+                expanded: Some(false),
+            },
+        }));
+        canvas.finish("card-one", CardCommand::Layout, &conflict);
+        assert_eq!(canvas.layouts(), 6);
+        canvas.apply(&peer, &restarted, true);
+        assert_eq!(canvas.layouts(), 7);
+        canvas.apply(&peer, &restarted, true);
+        assert_eq!(canvas.layouts(), 7);
+
+        // Leaving the PC forgets what was drawn: coming back draws it.
+        canvas.clear();
+        canvas.apply(&peer, &restarted, true);
+        assert_eq!(canvas.layouts(), 8);
+        assert_eq!(canvas.card_count(), 1);
     }
 
     #[test]

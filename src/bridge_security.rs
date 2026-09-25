@@ -214,6 +214,10 @@ impl Write for Connection {
 }
 
 static CLIENTS: Mutex<Vec<(u64, String, String, TcpStream, Option<std::time::Instant>)>> = Mutex::new(Vec::new());
+/// Wakes the deadline/expiry watchdog when the first client is admitted; it
+/// sleeps while `CLIENTS` is empty, since it only ever acts on those sockets.
+static CLIENTS_ADMITTED: Condvar = Condvar::new();
+const WATCHDOG_INTERVAL: Duration = Duration::from_millis(250);
 static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static LAST_SEEN: OnceLock<Mutex<HashMap<String, std::time::Instant>>> = OnceLock::new();
 pub(super) fn note_activity(token: &str) {
@@ -234,7 +238,9 @@ impl Admission {
         let mut clients = CLIENTS.lock().ok()?;
         if clients.len() >= 64 || clients.iter().filter(|(_,p,_,_,_)| p == &peer).count() >= 12 { return None }
         let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        clients.push((id,peer,String::new(),socket.try_clone().ok()?,Some(std::time::Instant::now()+Duration::from_secs(5)))); Some(Self(id))
+        clients.push((id,peer,String::new(),socket.try_clone().ok()?,Some(std::time::Instant::now()+Duration::from_secs(5))));
+        CLIENTS_ADMITTED.notify_all();
+        Some(Self(id))
     }
     pub(super) fn identify(&self, token: &str) {
         if let Ok(mut clients) = CLIENTS.lock() { if let Some(c) = clients.iter_mut().find(|c| c.0 == self.0) { c.2 = digest(token.as_bytes()); c.4 = None; } }
@@ -258,7 +264,12 @@ pub(super) fn serve_control() -> io::Result<()> {
     // Enforce a total handshake/header/body deadline even if a TLS peer trickles
     // bytes fast enough to avoid individual socket read timeouts.
     std::thread::spawn(|| loop {
-        std::thread::sleep(Duration::from_millis(250));
+        // Nothing to enforce without a connection: sleep until one is
+        // admitted, whose first check then comes one interval later as before.
+        if let Ok(clients) = CLIENTS.lock() {
+            drop(CLIENTS_ADMITTED.wait_while(clients, |clients| clients.is_empty()));
+        }
+        std::thread::sleep(WATCHDOG_INTERVAL);
         let expired: Vec<String> = pair_state().lock().map(|s| s.cfg.devices.iter()
             .filter(|d| d.expires <= now_epoch()).map(|d| d.token_hash.clone()).collect()).unwrap_or_default();
         if let Ok(clients) = CLIENTS.lock() {

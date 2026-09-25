@@ -1190,6 +1190,26 @@ pub struct PaneRow {
     pub shell_tracking: bool,
     /// `@super_desktop_shell_command`.
     pub shell_command: String,
+    /// What a capture of this session would read; `None` when this pane is
+    /// not the one a capture addresses, or tmux left a field empty.
+    pub stamp: Option<PaneStamp>,
+}
+
+/// The parts of an inventory row a pane's text depends on. Output updates
+/// `window_activity` (tmux does this whatever `monitor-activity` says);
+/// resizes, `clear-history`, `respawn-pane` and `select-pane` do not, so size,
+/// history, cursor, process and pane identity are compared as well.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneStamp {
+    pub pane_id: String,
+    pub pid: String,
+    pub width: u64,
+    pub height: u64,
+    pub history_size: u64,
+    pub cursor: (u64, u64),
+    pub alternate: bool,
+    /// `window_activity`: the second of the window's last output.
+    pub activity: u64,
 }
 
 /// Every session's pane in one `tmux list-panes -a` call.
@@ -1230,7 +1250,7 @@ impl PaneSnapshot {
 // Records are split on RS, not newlines, so a value may contain newlines.
 const PANE_RECORD: char = '\u{1e}';
 const PANE_FIELD: char = '\u{1f}';
-const PANE_FORMAT_FIELDS: [&str; 11] = [
+const PANE_FORMAT_FIELDS: [&str; 19] = [
     "#{session_name}",
     "#{window_active}",
     "#{pane_pid}",
@@ -1242,6 +1262,15 @@ const PANE_FORMAT_FIELDS: [&str; 11] = [
     "#{@super_desktop_last_prompt}",
     "#{@super_desktop_shell_tracking}",
     "#{@super_desktop_shell_command}",
+    // `PaneStamp`, for reusing an unchanged pane's capture.
+    "#{pane_id}",
+    "#{pane_active}",
+    "#{pane_width}",
+    "#{history_size}",
+    "#{cursor_x}",
+    "#{cursor_y}",
+    "#{alternate_on}",
+    "#{window_activity}",
 ];
 
 pub fn pane_snapshot_format() -> String {
@@ -1288,10 +1317,31 @@ pub fn parse_pane_snapshot(text: &str) -> PaneSnapshot {
                 last_prompt: fields[8].trim().to_string(),
                 shell_tracking: fields[9].trim() == "1",
                 shell_command: fields[10].trim().to_string(),
+                stamp: parse_pane_stamp(&fields),
             },
         );
     }
     snapshot
+}
+
+fn parse_pane_stamp(fields: &[&str]) -> Option<PaneStamp> {
+    // `capture-pane -t <session>` reads the active pane; the row is the first
+    // pane of the active window, which is that pane unless the window is split.
+    if fields[12].trim() != "1" {
+        return None;
+    }
+    let number = |index: usize| fields[index].trim().parse::<u64>().ok();
+    let pane_id = fields[11].trim();
+    Some(PaneStamp {
+        pane_id: (!pane_id.is_empty()).then(|| pane_id.to_string())?,
+        pid: fields[2].trim().to_string(),
+        width: number(13)?,
+        height: number(5)?,
+        history_size: number(14)?,
+        cursor: (number(15)?, number(16)?),
+        alternate: fields[17].trim() == "1",
+        activity: number(18)?,
+    })
 }
 
 /// Only visible rows can describe the current TUI state. Ignore scrollback.
@@ -1357,6 +1407,11 @@ pub fn capture_pane_ansi(session_name: &str) -> Option<String> {
 }
 
 fn capture_pane(session_name: &str, ansi: bool, history: u32) -> Option<String> {
+    capture_pane_raw(session_name, ansi, history).filter(|text| !text.trim().is_empty())
+}
+
+/// `capture-pane` output, blank or not; `None` when tmux failed.
+fn capture_pane_raw(session_name: &str, ansi: bool, history: u32) -> Option<String> {
     let mut command = Command::new("tmux");
     command.arg("capture-pane");
     if ansi {
@@ -1370,11 +1425,121 @@ fn capture_pane(session_name: &str, ansi: bool, history: u32) -> Option<String> 
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
-    if text.trim().is_empty() {
-        return None;
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// `capture_pane_text` of a listed session, reusing the previous capture while
+/// its inventory row says the pane has not changed (see `capture_reusable`).
+pub fn capture_pane_text_for(session_name: &str, row: &PaneRow) -> Option<String> {
+    reused_capture(session_name, row, CaptureKind::Card).filter(|text| !text.trim().is_empty())
+}
+
+/// `capture_visible_screen` of a listed session, reused like
+/// `capture_pane_text_for`.
+pub fn capture_visible_screen_for(session_name: &str, row: &PaneRow) -> Option<String> {
+    reused_capture(session_name, row, CaptureKind::Visible)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum CaptureKind {
+    /// Visible screen plus `CARD_CAPTURE_HISTORY` lines (`capture_pane_text`).
+    Card,
+    /// Visible rows only (`capture_visible_screen`).
+    Visible,
+}
+
+struct CachedCapture {
+    stamp: PaneStamp,
+    /// Wall clock just before `capture-pane` ran.
+    taken: SystemTime,
+    text: String,
+}
+
+/// Unchanged captures are still re-read this often, for changes tmux's
+/// inventory does not show (a `send-keys -R` reset that keeps cursor and
+/// history, a clock step).
+const CAPTURE_REUSE_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+/// Entries are evicted with their pane (`retain_captures`); this only bounds
+/// a process that never passes an inventory.
+const CAPTURE_CACHE_MAX: usize = 256;
+
+type CaptureCache = std::collections::HashMap<(String, CaptureKind), CachedCapture>;
+static CAPTURES: std::sync::OnceLock<std::sync::Mutex<CaptureCache>> = std::sync::OnceLock::new();
+
+/// Whether a capture taken at `taken` of the pane described by `cached` still
+/// shows the pane now described by `current`.
+///
+/// Any output after the capture moves `window_activity` to that output's
+/// second, which is at least the capture's second. `window_activity` only
+/// has one-second resolution, so a capture taken in the same second as the
+/// pane's last output may have missed output later in that second: it is
+/// reused only when it was taken in a later second than `current.activity`.
+fn capture_reusable(cached: &PaneStamp, taken: SystemTime, current: &PaneStamp, now: SystemTime) -> bool {
+    let Ok(taken_second) = taken.duration_since(UNIX_EPOCH).map(|since| since.as_secs()) else {
+        return false;
+    };
+    cached == current
+        && taken_second > current.activity
+        // A clock stepped backwards makes the age an error: capture again.
+        && now.duration_since(taken).is_ok_and(|age| age < CAPTURE_REUSE_MAX)
+}
+
+fn reused_capture(session_name: &str, row: &PaneRow, kind: CaptureKind) -> Option<String> {
+    let cache = CAPTURES.get_or_init(Default::default);
+    reuse_or_capture(cache, session_name, row.stamp.as_ref(), kind, || match kind {
+        CaptureKind::Card => capture_pane_raw(session_name, false, CARD_CAPTURE_HISTORY),
+        CaptureKind::Visible => capture_visible_screen(session_name),
+    })
+}
+
+/// The cached text of `session_name`'s `kind` capture if `stamp` shows the
+/// pane unchanged, else `capture()` (remembered when it succeeds). Without a
+/// stamp there is nothing to compare, so it always captures.
+fn reuse_or_capture(
+    cache: &std::sync::Mutex<CaptureCache>,
+    session_name: &str,
+    stamp: Option<&PaneStamp>,
+    kind: CaptureKind,
+    capture: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let Some(stamp) = stamp else {
+        return capture();
+    };
+    let key = (session_name.to_string(), kind);
+    if let Ok(cache) = cache.lock() {
+        if let Some(cached) = cache
+            .get(&key)
+            .filter(|cached| capture_reusable(&cached.stamp, cached.taken, stamp, SystemTime::now()))
+        {
+            return Some(cached.text.clone());
+        }
+    }
+    // Before the capture: output while it runs must not look older than it.
+    let taken = SystemTime::now();
+    let text = capture()?;
+    if let Ok(mut cache) = cache.lock() {
+        if cache.len() >= CAPTURE_CACHE_MAX && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, CachedCapture { stamp: stamp.clone(), taken, text: text.clone() });
     }
     Some(text)
+}
+
+/// Forget captures of sessions `snapshot` (a full inventory) no longer lists
+/// with a stamp.
+pub fn retain_captures(snapshot: &PaneSnapshot) {
+    if let Some(cache) = CAPTURES.get() {
+        retain_captures_in(cache, snapshot);
+    }
+}
+
+fn retain_captures_in(cache: &std::sync::Mutex<CaptureCache>, snapshot: &PaneSnapshot) {
+    if let Ok(mut cache) = cache.lock() {
+        cache.retain(|(session, _), _| {
+            matches!(snapshot.lookup(session), PaneLookup::Row(row) if row.stamp.is_some())
+        });
+    }
 }
 
 pub use crate::terminal_text::strip_terminal_escapes;
@@ -3465,5 +3630,173 @@ mod tests {
         let fallback =
             resolve_resume_command_with_session("opencode", Some("/usr/bin/opencode"), Some("  "));
         assert!(fallback.contains("--continue") && fallback.contains("--fork"));
+    }
+
+    fn stamp(activity: u64) -> PaneStamp {
+        PaneStamp {
+            pane_id: "%3".into(),
+            pid: "4242".into(),
+            width: 80,
+            height: 24,
+            history_size: 12,
+            cursor: (2, 23),
+            alternate: false,
+            activity,
+        }
+    }
+
+    fn at(seconds: f64) -> SystemTime {
+        UNIX_EPOCH + std::time::Duration::from_secs_f64(seconds)
+    }
+
+    #[test]
+    fn capture_reuse_needs_an_unchanged_pane_and_a_later_second() {
+        let cached = stamp(1_000);
+        // Last output at 1000.x, captured at 1001.2: nothing can have arrived
+        // after the capture without moving window_activity past 1000.
+        assert!(capture_reusable(&cached, at(1_001.2), &stamp(1_000), at(1_002.5)));
+        // Captured in the second of the last output: more output later in
+        // that second would leave window_activity at 1000.
+        assert!(!capture_reusable(&cached, at(1_000.9), &stamp(1_000), at(1_002.5)));
+        assert!(!capture_reusable(&cached, at(1_000.0), &stamp(1_000), at(1_001.0)));
+        // Output after the capture.
+        assert!(!capture_reusable(&cached, at(1_001.2), &stamp(1_001), at(1_002.5)));
+        assert!(!capture_reusable(&cached, at(1_001.2), &stamp(1_003), at(1_003.5)));
+        // Changes that print nothing: resize (reflow), clear-history,
+        // respawn-pane, another pane, a reset that moves the cursor, and
+        // switching screens.
+        let changed = [
+            PaneStamp { width: 60, ..stamp(1_000) },
+            PaneStamp { height: 30, ..stamp(1_000) },
+            PaneStamp { history_size: 0, ..stamp(1_000) },
+            PaneStamp { pid: "4343".into(), ..stamp(1_000) },
+            PaneStamp { pane_id: "%4".into(), ..stamp(1_000) },
+            PaneStamp { cursor: (0, 0), ..stamp(1_000) },
+            PaneStamp { alternate: true, ..stamp(1_000) },
+        ];
+        for current in &changed {
+            assert!(!capture_reusable(&cached, at(1_001.2), current, at(1_002.5)), "{current:?}");
+        }
+        // Re-read at least every CAPTURE_REUSE_MAX, and after a clock step back.
+        let max = CAPTURE_REUSE_MAX.as_secs_f64();
+        assert!(capture_reusable(&cached, at(1_001.2), &stamp(1_000), at(1_001.2 + max - 0.1)));
+        assert!(!capture_reusable(&cached, at(1_001.2), &stamp(1_000), at(1_001.2 + max)));
+        assert!(!capture_reusable(&cached, at(1_001.2), &stamp(1_000), at(1_001.1)));
+    }
+
+    #[test]
+    fn unchanged_capture_is_reused_per_session_and_kind() {
+        let cache = std::sync::Mutex::new(CaptureCache::new());
+        let runs = std::cell::Cell::new(0);
+        let capture = |text: &'static str| {
+            let runs = &runs;
+            move || {
+                runs.set(runs.get() + 1);
+                Some(text.to_string())
+            }
+        };
+        // Output long enough ago that any capture now is in a later second.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let idle = stamp(now - 5);
+        let first = reuse_or_capture(&cache, "sd_term_a", Some(&idle), CaptureKind::Card, capture("one"));
+        let again = reuse_or_capture(&cache, "sd_term_a", Some(&idle), CaptureKind::Card, capture("two"));
+        assert_eq!((first.as_deref(), again.as_deref(), runs.get()), (Some("one"), Some("one"), 1));
+        // Each kind and session has its own capture.
+        reuse_or_capture(&cache, "sd_term_a", Some(&idle), CaptureKind::Visible, capture("v"));
+        reuse_or_capture(&cache, "sd_term_b", Some(&idle), CaptureKind::Card, capture("b"));
+        assert_eq!(runs.get(), 3);
+        // New output captures again and replaces the entry.
+        let busy = stamp(now - 1);
+        let fresh = reuse_or_capture(&cache, "sd_term_a", Some(&busy), CaptureKind::Card, capture("three"));
+        assert_eq!((fresh.as_deref(), runs.get()), (Some("three"), 4));
+        assert_eq!(reuse_or_capture(&cache, "sd_term_a", Some(&busy), CaptureKind::Card, capture("x")).as_deref(), Some("three"));
+        assert_eq!(runs.get(), 4);
+        // Output in the second a capture is taken is never trusted.
+        let current = stamp(now + 60);
+        reuse_or_capture(&cache, "sd_term_c", Some(&current), CaptureKind::Card, capture("c"));
+        reuse_or_capture(&cache, "sd_term_c", Some(&current), CaptureKind::Card, capture("c"));
+        assert_eq!(runs.get(), 6);
+        // No stamp (split window, older tmux): always capture, never cache.
+        reuse_or_capture(&cache, "sd_term_d", None, CaptureKind::Card, capture("d"));
+        reuse_or_capture(&cache, "sd_term_d", None, CaptureKind::Card, capture("d"));
+        assert_eq!(runs.get(), 8);
+        // A failed capture is not remembered.
+        let failed = reuse_or_capture(&cache, "sd_term_e", Some(&idle), CaptureKind::Card, || None);
+        assert!(failed.is_none());
+        reuse_or_capture(&cache, "sd_term_e", Some(&idle), CaptureKind::Card, capture("e"));
+        assert_eq!(runs.get(), 9);
+        // Panes gone from the inventory, or no longer stamped, are forgotten.
+        let fields = |session: &str, active: &str| {
+            let mut row = vec![session, "1", "4242", "codex", "0", "24", "/tmp", "", "", "", ""];
+            row.extend(["%3", active, "80", "12", "2", "23", "0", "1000"]);
+            format!("\u{1e}{}\n", row.join("\u{1f}"))
+        };
+        let listing = [fields("sd_term_a", "1"), fields("sd_term_b", "0")].concat();
+        retain_captures_in(&cache, &parse_pane_snapshot(&listing));
+        let mut kept: Vec<_> = cache.lock().unwrap().keys().cloned().collect();
+        kept.sort_by_key(|(session, kind)| (session.clone(), *kind == CaptureKind::Visible));
+        assert_eq!(
+            kept,
+            [("sd_term_a".to_string(), CaptureKind::Card), ("sd_term_a".to_string(), CaptureKind::Visible)]
+        );
+    }
+
+    /// What reuse relies on, against a real tmux server: an idle pane's row
+    /// (and a capture of it) leaves the stamp alone, and output changes it.
+    #[test]
+    fn pane_stamp_changes_with_output_only() {
+        let session = format!("test_sd_{}", unique_session_name());
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+            }
+        }
+        let made = Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "20", "-s", &session, "cat"])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let _cleanup = Cleanup(session.clone());
+        let row = || match pane_snapshot().expect("tmux answers").lookup(&session) {
+            PaneLookup::Row(row) => row.clone(),
+            _ => panic!("session row missing"),
+        };
+        let first = row();
+        let stamp = first.stamp.clone().expect("a single-pane session is stamped");
+        assert_eq!((stamp.width, stamp.height, stamp.pid.as_str()), (80, 20, first.pid.as_str()));
+        assert!(stamp.pane_id.starts_with('%'));
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        assert!(stamp.activity > 0 && stamp.activity <= now, "window_activity is in seconds: {stamp:?}");
+        // Idle: capturing and listing again change nothing.
+        let cache = std::sync::Mutex::new(CaptureCache::new());
+        let capture = || capture_pane_raw(&session, false, CARD_CAPTURE_HISTORY);
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let _ = capture();
+        assert_eq!(row().stamp, Some(stamp.clone()));
+        // Once a second has passed since the last output, a capture is reused.
+        while SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() <= stamp.activity {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let idle = row().stamp;
+        assert_eq!(idle, Some(stamp.clone()));
+        let before = reuse_or_capture(&cache, &session, idle.as_ref(), CaptureKind::Card, capture).unwrap();
+        let reused = reuse_or_capture(&cache, &session, row().stamp.as_ref(), CaptureKind::Card, || {
+            panic!("an unchanged pane was captured again")
+        });
+        assert_eq!(reused.as_deref(), Some(before.as_str()));
+        // Output (the pty's echo and cat's copy) changes the stamp at once.
+        let marker = "stamp-marker";
+        let sent = Command::new("tmux").args(["send-keys", "-t", &session, marker, "Enter"]).output().unwrap();
+        assert!(sent.status.success());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut screen = before.clone();
+        while !screen.contains(marker) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let current = row().stamp;
+            screen = reuse_or_capture(&cache, &session, current.as_ref(), CaptureKind::Card, capture).unwrap();
+        }
+        assert!(screen.contains(marker), "output was not captured again: {screen:?}");
+        assert_ne!(row().stamp, Some(stamp));
     }
 }

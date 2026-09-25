@@ -7,7 +7,9 @@
 //! `state.json` reads. Now one collector thread runs only while someone
 //! consumes the list (a stream client, or a GET in the last few seconds),
 //! produces at most one document per second from one `tmux list-panes -a` and
-//! one capture per session, and every consumer shares the serialized result.
+//! one capture per session whose pane changed since its last capture (see
+//! `tmux::capture_pane_text_for`), and every consumer shares the serialized
+//! result.
 //! Stream clients are sent a document only when its content changed, plus a
 //! heartbeat so Android's 45 s dead-socket timer never fires.
 use super::*;
@@ -285,7 +287,7 @@ fn live_sessions(state: &crate::state::AppState, snapshot: Option<&PaneSnapshot>
 }
 
 /// Every launcher-visible harness from one state read, one inventory and one
-/// capture per session.
+/// capture per session whose pane changed.
 pub(super) fn collect(state: &crate::state::AppState, snapshot: Option<&PaneSnapshot>) -> Vec<serde_json::Value> {
     let meta: HashMap<String, LauncherSessionMeta> = state
         .terminals
@@ -297,6 +299,9 @@ pub(super) fn collect(state: &crate::state::AppState, snapshot: Option<&PaneSnap
             )
         })
         .collect();
+    if let Some(snapshot) = snapshot {
+        crate::tmux::retain_captures(snapshot);
+    }
     let mut out = vec![];
     for session in live_sessions(state, snapshot) {
         let (agent_type, cmd_fallback, persisted_sid, tag, workspace_dir) = meta
@@ -307,10 +312,15 @@ pub(super) fn collect(state: &crate::state::AppState, snapshot: Option<&PaneSnap
         let custom = state.custom_harnesses.iter().find(|item| item.id == agent_type);
         let agent_name = custom.map_or(cfg.name, |item| item.name.as_str());
         let agent_icon = custom.map_or(cfg.icon, |item| item.icon.as_str());
-        // One capture serves preview, footer settings, status and the draft.
-        let screen = capture_pane_text(&session).unwrap_or_default();
-        let (footer_model, effort) = harness_model_effort(&agent_type, &screen);
         let lookup = snapshot.map(|s| s.lookup(&session));
+        // One capture serves preview, footer settings, status and the draft,
+        // and is reused while the pane's inventory row shows no change.
+        let screen = match &lookup {
+            Some(PaneLookup::Row(row)) => crate::tmux::capture_pane_text_for(&session, row),
+            _ => capture_pane_text(&session),
+        }
+        .unwrap_or_default();
+        let (footer_model, effort) = harness_model_effort(&agent_type, &screen);
         let (status, metadata, title, prompt) = match lookup {
             Some(PaneLookup::Row(row)) => {
                 let metadata = crate::harness_metadata::inspect_option(&agent_type, &row.metadata_option);
@@ -430,6 +440,75 @@ mod tests {
         assert!(frame_due(Some(1), 2, Duration::ZERO));
         // Android drops a socket after 45 s of silence.
         assert!(HEARTBEAT < Duration::from_secs(45));
+    }
+
+    /// A reused capture must give the phone exactly the document a fresh
+    /// capture of the same pane gives.
+    #[test]
+    fn reused_captures_give_identical_documents() {
+        let session = crate::tmux::unique_session_name();
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+            }
+        }
+        // A screen-status agent's footer and working line at the bottom of a
+        // short pane, then silence.
+        let script = "printf 'MODEL gpt-test EFFORT high\\n⠋ Responding… 3s\\n'; exec sleep 600";
+        let made = Command::new("tmux")
+            .args(["new-session", "-d", "-x", "80", "-y", "4", "-s", &session, script])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let _cleanup = Cleanup(session.clone());
+        let mut state = crate::state::AppState::default();
+        state.terminals.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "card", "session_name": session, "agent_type": "grok", "command": "grok",
+                "x": 0, "y": 0, "created_at": 1.0,
+            }))
+            .unwrap(),
+        );
+        // This session's row only, so other sessions on the server stay out.
+        let snapshot = || {
+            let format = crate::tmux::pane_snapshot_format();
+            let target = format!("={session}:");
+            let out = Command::new("tmux").args(["list-panes", "-t", &target, "-F", &format]).output().unwrap();
+            crate::tmux::parse_pane_snapshot(&String::from_utf8_lossy(&out.stdout))
+        };
+        let document = || {
+            let mut items = collect(&state, Some(&snapshot()));
+            for item in &mut items {
+                item.as_object_mut().unwrap().remove("updatedAt");
+            }
+            serde_json::to_string(&items).unwrap()
+        };
+        // Wait for the output, then for a later second so the next capture
+        // can be reused.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = snapshot();
+            let PaneLookup::Row(row) = snapshot.lookup(&session) else { panic!("session row missing") };
+            let activity = row.stamp.as_ref().expect("stamped").activity;
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+            let screen = crate::tmux::capture_pane_text(&session).unwrap_or_default();
+            if screen.contains("Responding") && now > activity {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the pane never settled: {screen:?}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let fresh = document();
+        let reused = document();
+        assert_eq!(fresh, reused);
+        let items: serde_json::Value = serde_json::from_str(&fresh).unwrap();
+        assert_eq!(items[0]["status"], "WORKING", "{items}");
+        assert_eq!((&items[0]["model"], &items[0]["effort"]), (&"gpt-test".into(), &"high".into()));
+        assert!(items[0]["preview"].as_str().unwrap().contains("Responding… 3s"));
+        // Forget every capture: a fresh one gives the same document again.
+        crate::tmux::retain_captures(&PaneSnapshot::default());
+        assert_eq!(document(), fresh);
     }
 
     #[test]

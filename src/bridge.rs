@@ -1220,6 +1220,12 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
                 desktop::get_workspace(stream);
             }
         }
+        // The daemon's liveness probe (every 5 s, owner-only socket) needs no
+        // address discovery: that ran `ip` whenever its cache had expired.
+        // Older bridges ignore the query and answer the full ping.
+        ("GET", "/api/v1/ping") if local && req.query.split('&').any(|pair| pair == HEALTH_QUERY) => {
+            respond(stream, 200, "OK", &health_body())
+        }
         ("GET", "/api/v1/ping") => {
             let bridge_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
             respond(
@@ -1412,15 +1418,77 @@ fn mdns_advertised(port: u16) -> bool {
     false
 }
 
-/// Single `avahi-browse -rtp` sweep for our own record.
+/// Longest single `avahi-browse` sweep. Resolving another host's record on the
+/// LAN has hung it for minutes, which held up the retries above and left
+/// `mdns.json` stale.
+const BROWSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Single `avahi-browse -rtp` sweep for our own record. Stops at the first
+/// line that shows it, so a sweep stuck on another record still counts ours.
 fn browse_once(port: u16) -> bool {
-    let out = Command::new("avahi-browse")
-        .args(["-rtp", MDNS_SERVICE_TYPE])
-        .output();
-    let Ok(out) = out else { return false };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .any(|line| browse_line_matches(line, port))
+    let mut command = Command::new("avahi-browse");
+    command.args(["-rtp", MDNS_SERVICE_TYPE]);
+    any_output_line(command, BROWSE_TIMEOUT, |line| browse_line_matches(line, port))
+}
+
+/// Run `command` until a line of its stdout satisfies `found` (true), or it
+/// exits or `timeout` passes (false). The child is killed and reaped on every
+/// path; lines printed before a hang are still examined.
+fn any_output_line(mut command: Command, timeout: Duration, mut found: impl FnMut(&str) -> bool) -> bool {
+    use std::os::fd::AsRawFd;
+    struct Reaped(std::process::Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let spawned = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn();
+    let Ok(mut child) = spawned.map(Reaped) else { return false };
+    let Some(mut stdout) = child.0.stdout.take() else { return false };
+    let deadline = std::time::Instant::now() + timeout;
+    let mut line = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let mut poll = libc::pollfd { fd: stdout.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
+        match unsafe { libc::poll(&mut poll, 1, ms) } {
+            0 => continue,
+            ready if ready < 0 => {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return false;
+            }
+            _ => {}
+        }
+        let n = match stdout.read(&mut chunk) {
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        };
+        if n == 0 {
+            return !line.is_empty() && found(&String::from_utf8_lossy(&line));
+        }
+        for &byte in &chunk[..n] {
+            if byte != b'\n' {
+                line.push(byte);
+                continue;
+            }
+            if found(&String::from_utf8_lossy(&line)) {
+                return true;
+            }
+            line.clear();
+        }
+        // No resolve line is this long; don't buffer a runaway one.
+        if line.len() > 64 * 1024 {
+            return false;
+        }
+    }
 }
 
 /// Does one `avahi-browse -p` line resolve OUR service on OUR port?
@@ -1513,6 +1581,21 @@ fn tailscale_ip_uncached() -> Option<String> {
         .find(|l| !l.is_empty())
 }
 
+/// Query that turns a ping on the owner-only control socket into a health
+/// probe; see `health_body`.
+const HEALTH_QUERY: &str = "health=1";
+
+/// Answer to the daemon's health probe: what `bridge_running` checks, without
+/// the phone-facing ping's addresses, LAN IP or hostname (no subprocess).
+fn health_body() -> serde_json::Value {
+    serde_json::json!({
+        "status": "ok",
+        "service": SERVICE_NAME,
+        "protocolVersion": PROTOCOL_VERSION,
+        "port": BRIDGE_PORT,
+    })
+}
+
 /// True when a bridge answers on loopback (this laptop).
 pub fn bridge_running(port: u16) -> bool {
     bridge_ping_body(port)
@@ -1524,7 +1607,7 @@ fn bridge_ping_body(_port: u16) -> Option<String> {
     let mut s = std::os::unix::net::UnixStream::connect(security::control_path()).ok()?;
     s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
     s.set_write_timeout(Some(Duration::from_secs(3))).ok()?;
-    s.write_all(b"GET /api/v1/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+    s.write_all(format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes())
         .ok()?;
     let mut resp = String::new();
     s.read_to_string(&mut resp).ok()?;
@@ -2165,6 +2248,75 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
             "+;wlo1;IPv4;x;_omarchy-harness._tcp;local",
             8759
         ));
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    #[test]
+    fn test_browse_is_bounded_and_uses_lines_printed_before_a_hang() {
+        let ours = |line: &str| browse_line_matches(line, 8759);
+        let record = "=;wlo1;IPv4;x;_omarchy-harness._tcp;local;h.local;10.0.0.1;8759;";
+        // Our record resolved, then the sweep hangs on another host: found at
+        // once, and the stuck child is killed (reaping it would otherwise
+        // wait for the 30 s sleep).
+        let start = std::time::Instant::now();
+        let script = format!("echo '+;wlo1;IPv4;x;_omarchy-harness._tcp;local'; echo '{record}'; exec sleep 30");
+        assert!(any_output_line(sh(&script), Duration::from_secs(10), ours));
+        assert!(start.elapsed() < Duration::from_secs(5), "{:?}", start.elapsed());
+        // A sweep that hangs without our record gives up at the timeout.
+        let start = std::time::Instant::now();
+        assert!(!any_output_line(sh("echo '+;wlo1;IPv4;x;_other._tcp;local'; exec sleep 30"),
+            Duration::from_millis(300), ours));
+        let took = start.elapsed();
+        assert!(took >= Duration::from_millis(300) && took < Duration::from_secs(5), "{took:?}");
+        // A sweep that finishes: every line counts, the last even without a newline.
+        assert!(any_output_line(sh(&format!("echo other; printf '%s' '{record}'")), Duration::from_secs(10), ours));
+        assert!(!any_output_line(sh("echo other"), Duration::from_secs(10), ours));
+        // A missing avahi-browse is "not advertised", never a hang.
+        assert!(!any_output_line(Command::new("/nonexistent/avahi-browse"), Duration::from_secs(10), ours));
+        assert!(BROWSE_TIMEOUT <= Duration::from_secs(3));
+    }
+
+    /// One request on a connection served in-process: (status, body).
+    fn serve_one(connection: Connection, client: &mut impl Read, request: &str, writer: &mut impl Write) -> (u16, serde_json::Value) {
+        let server = std::thread::spawn(move || serve_connection(connection, None));
+        writer.write_all(request.as_bytes()).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        (head.split_whitespace().nth(1).unwrap().parse().unwrap(), serde_json::from_str(body).unwrap())
+    }
+
+    #[test]
+    fn test_daemon_health_probe_skips_address_discovery_only_on_the_control_socket() {
+        let probe = format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\nConnection: close\r\n\r\n");
+        // The daemon's probe over the owner-only socket: just what
+        // `bridge_running` checks, with no addresses (no `ip` run).
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let (status, body) = serve_one(Connection::local(server), &mut client, &probe, &mut writer);
+        assert_eq!(status, 200);
+        assert_eq!((body["status"].as_str(), body["service"].as_str()), (Some("ok"), Some(SERVICE_NAME)));
+        for field in ["addresses", "lanIp", "tailscaleIp", "hostname", "time"] {
+            assert!(body.get(field).is_none(), "{field} in {body}");
+        }
+        // Over the network the same query is the unchanged phone-facing ping.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let mut writer = client.try_clone().unwrap();
+        let (status, body) = serve_one(Connection::plain(server), &mut client, &probe, &mut writer);
+        assert_eq!(status, 200);
+        for field in ["status", "service", "protocolVersion", "hostname", "lanIp", "bridgeId", "addresses", "tailscaleIp", "port", "time"] {
+            assert!(body.get(field).is_some(), "{field} missing from {body}");
+        }
     }
 
     #[test]

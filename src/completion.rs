@@ -332,8 +332,13 @@ type Cached = (Stamp, (String, Option<String>));
 static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
 
 pub(crate) fn inspect(id: &str, pid: u32) -> Completion {
+    inspect_rollout(id, rollout(pid))
+}
+
+/// `inspect` for the rollout `rollout(pane_pid)` already found.
+fn inspect_rollout(id: &str, found: Option<(PathBuf, String)>) -> Completion {
     let mut result = unknown(id);
-    let Some((fd, identity)) = rollout(pid) else {
+    let Some((fd, identity)) = found else {
         return result;
     };
     let Ok(mut file) = File::open(fd) else {
@@ -422,7 +427,34 @@ pub(crate) fn inspect(id: &str, pid: u32) -> Completion {
     result
 }
 
-pub fn collect(ids: &[String]) -> Vec<Completion> {
+/// What a `collect_watched` answer depends on besides the tmux inventory.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Watched {
+    /// `state.json`, each native metadata file (hooks replace it by rename),
+    /// and for Codex the rollout, its directory and the CLI's descriptor
+    /// (`/proc/<pid>/fd/<n>`), which stops resolving when Codex closes it.
+    pub files: Vec<PathBuf>,
+    /// Each pane process and native agent process: one exiting, or its PID
+    /// being reused, changes the answer.
+    pub processes: Vec<u32>,
+    /// Sessions whose metadata files (`<session>-<stamp>.json` in
+    /// `launch_dir`) are listed: a relaunch in the session adds one.
+    pub sessions: Vec<String>,
+    pub launch_dir: Option<PathBuf>,
+}
+
+/// Completion state of each terminal in `ids`, plus what the answer was read
+/// from. While no watched file changes, every watched process lives on and no
+/// watched session gains a metadata file, only the tmux inventory can change
+/// the answer (for example a pane appearing). The harness directory's own
+/// stamp is not watched: every working agent's hooks write there. The bridge's
+/// long poll relies on this to avoid running `tmux` every second.
+pub fn collect_watched(ids: &[String]) -> (Vec<Completion>, Watched) {
+    let mut watch = Watched {
+        files: vec![crate::state::get_state_path()],
+        launch_dir: crate::harness_record::root(),
+        ..Default::default()
+    };
     let state = crate::state::load_state();
     // One inventory call, no capture-pane, prompt inspection, or terminal stream changes.
     // The metadata option comes from the same listing: a per-session
@@ -436,30 +468,48 @@ pub fn collect(ids: &[String]) -> Vec<Completion> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
-    ids.iter()
+    let terminals = ids
+        .iter()
         .map(|id| {
             let Some(terminal) = state.terminals.iter().find(|t| &t.session_name == id) else {
                 return unknown(id);
             };
+            if terminal.agent_type != "codex" {
+                watch.sessions.push(id.clone());
+            }
             if let [(pid, option)] = session_panes(&panes, id)[..] {
+                watch.processes.push(pid);
                 if terminal.agent_type == "codex" {
-                    api_state(inspect(id, pid))
-                } else if let Some(metadata) =
-                    crate::harness_metadata::inspect_option(&terminal.agent_type, option)
-                {
-                    if crate::harness_metadata::owns_pane(&metadata, pid) {
-                        native_completion(id, &metadata)
-                    } else {
-                        unknown(id)
+                    let found = rollout(pid);
+                    if let Some((fd, identity)) = &found {
+                        let path = PathBuf::from(identity);
+                        watch.files.extend(path.parent().map(Path::to_path_buf));
+                        watch.files.push(path);
+                        watch.files.push(fd.clone());
                     }
+                    api_state(inspect_rollout(id, found))
                 } else {
-                    unknown(id)
+                    if !option.is_empty() {
+                        watch.files.push(PathBuf::from(option));
+                    }
+                    match crate::harness_metadata::inspect_option(&terminal.agent_type, option) {
+                        Some(metadata) if crate::harness_metadata::owns_pane(&metadata, pid) => {
+                            watch.processes.push(metadata.pid);
+                            native_completion(id, &metadata)
+                        }
+                        _ => unknown(id),
+                    }
                 }
             } else {
                 unknown(id)
             }
         })
-        .collect()
+        .collect();
+    watch.files.sort();
+    watch.files.dedup();
+    watch.processes.sort_unstable();
+    watch.processes.dedup();
+    (terminals, watch)
 }
 
 /// The completions API only reports `working`, `completed` or `unknown`; a

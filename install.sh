@@ -122,12 +122,21 @@ else
 fi
 
 # 4. Add Layer Rule for blur effect to ~/.config/hypr/hyprland.lua
+# The overlay animates its own slide. Without no_anim Hyprland also fades the
+# layer (Omarchy: ~180ms in, ~140ms more after the unmap), on every toggle.
+LAYER_RULE_OLD='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })'
+LAYER_RULE='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })'
 mkdir -p "$(dirname "$HYPRLAND_LUA")"
 touch "$HYPRLAND_LUA"
-if ! grep -q "super-desktop" "$HYPRLAND_LUA"; then
+if grep -qxF "$LAYER_RULE_OLD" "$HYPRLAND_LUA"; then
+    # Only the exact line this script used to write; a customized rule is kept.
+    migrated="$(awk -v old="$LAYER_RULE_OLD" -v new="$LAYER_RULE" '$0 == old { print new; next } { print }' "$HYPRLAND_LUA")"
+    printf '%s\n' "$migrated" > "$HYPRLAND_LUA"
+    echo "✓ Turned off Hyprland's layer fade for the overlay in $HYPRLAND_LUA"
+elif ! grep -q "super-desktop" "$HYPRLAND_LUA"; then
     echo "" >> "$HYPRLAND_LUA"
     echo "-- Super Desktop overlay blur effect" >> "$HYPRLAND_LUA"
-    echo 'hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })' >> "$HYPRLAND_LUA"
+    echo "$LAYER_RULE" >> "$HYPRLAND_LUA"
     echo "✓ Added layer rule to $HYPRLAND_LUA"
 else
     echo "✓ Hyprland layer rule already present in $HYPRLAND_LUA"

@@ -10,6 +10,7 @@ mod folder_colors;
 mod frame_profile;
 mod harness_metadata;
 mod harness_record;
+mod hidden_pause;
 mod preload;
 mod terminal_text;
 mod asset_pdf;
@@ -97,7 +98,7 @@ pub mod gtk_test {
         // keyboard focus from each other's windows.
         let mut server = None;
         if std::env::var_os("SD_GTK_TESTS_ON_DESKTOP").is_none() {
-            let Some((child, display)) = private_display() else {
+            let Some((child, display, socket)) = private_display() else {
                 eprintln!("skipping GTK test `{inner_test}`: gtk4-broadwayd is not available (never falling back to the desktop)");
                 return;
             };
@@ -108,12 +109,16 @@ pub mod gtk_test {
                 .env_remove("WAYLAND_SOCKET")
                 .env_remove("DISPLAY")
                 .env_remove("HYPRLAND_INSTANCE_SIGNATURE");
-            server = Some(child);
+            server = Some((child, socket));
         }
         let out = command.output().expect("spawn child test process");
-        if let Some(mut server) = server {
+        if let Some((mut server, socket)) = server {
             let _ = server.kill();
             let _ = server.wait();
+            // A killed server leaves its socket behind, and a display whose
+            // socket exists counts as taken: without this, every run used up
+            // display numbers until none was left and GTK tests were skipped.
+            let _ = std::fs::remove_file(socket);
         }
         assert!(
             out.status.success(),
@@ -146,7 +151,7 @@ pub mod gtk_test {
 
     /// A private Broadway display (`":N"`) for one GTK test child. The server
     /// also gets SIGTERM if this test process dies, so none outlive the run.
-    fn private_display() -> Option<(std::process::Child, String)> {
+    fn private_display() -> Option<(std::process::Child, String, std::path::PathBuf)> {
         use std::os::unix::process::CommandExt;
         use std::sync::atomic::{AtomicU32, Ordering};
         static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -160,8 +165,17 @@ pub mod gtk_test {
             let number = 100 + (base + NEXT.fetch_add(1, Ordering::Relaxed)) % 500;
             let socket = runtime.join(format!("broadway{}.socket", number + 1));
             let port_free = std::net::TcpListener::bind(("127.0.0.1", (8080 + number) as u16)).is_ok();
-            if socket.exists() || !port_free {
+            if !port_free {
                 continue;
+            }
+            if socket.exists() {
+                // Left by a server that was killed (older runs never removed
+                // it). One that nobody serves any more, with its web port free,
+                // no longer holds the display.
+                if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+                    continue;
+                }
+                let _ = std::fs::remove_file(&socket);
             }
             let display = format!(":{number}");
             let mut server = std::process::Command::new("gtk4-broadwayd");
@@ -180,7 +194,7 @@ pub mod gtk_test {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
             while std::time::Instant::now() < deadline {
                 if socket.exists() {
-                    return Some((child, display));
+                    return Some((child, display, socket));
                 }
                 if let Ok(Some(_)) = child.try_wait() {
                     break; // Lost a race for this display; try the next one.
@@ -200,7 +214,7 @@ use gtk4::prelude::*;
 use gtk4::Application;
 use futures_util::StreamExt;
 use serde_json::json;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -321,7 +335,7 @@ struct AppContext {
     /// "The pointer is parked in the top-left corner zone", written by the
     /// corner surface while the overlay is hidden and by the overlay window
     /// itself while it is visible (see `hotcorner`).
-    hot_inside: Rc<Cell<bool>>,
+    hot_inside: Rc<hotcorner::Zone>,
 }
 
 fn main() {
@@ -462,8 +476,11 @@ fn main() {
             .stderr(std::process::Stdio::null())
             .spawn();
 
-        for _ in 0..25 {
-            thread::sleep(Duration::from_millis(60));
+        // The new daemon listens ~60ms after it starts. A missing socket fails
+        // to connect at once, so polling finely costs nothing and shows the
+        // overlay up to one interval sooner (was 60ms steps, same 1.5s budget).
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(15));
             // `Stalled` counts as "answered by something": the daemon we
             // spawned exits when it finds a live one instead of stealing the
             // socket (see start_ipc_thread), so never spawn a second process
@@ -512,7 +529,7 @@ fn run_daemon(start_visible: bool) {
         local_workspace: Rc::new(workspace_model::LocalWorkspace::new(initial_state)),
         window: None,
         shown: false,
-        hot_inside: Rc::new(Cell::new(false)),
+        hot_inside: Rc::new(hotcorner::Zone::default()),
     }));
 
     // Older installs bound the shortcut on press (which repeats while held).
@@ -699,6 +716,7 @@ fn warm_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
     let local_state = ctx.borrow().local_workspace.state();
     let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside, local_state);
     // Not presented: the window stays unmapped until the first show.
+    win.arm_hidden_pause();
     ctx.borrow_mut().window = Some(win);
 }
 
@@ -1078,6 +1096,9 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             // process alive with no window — which is how a "killed" daemon
             // used to stay around holding the socket.
             let _ = fs::remove_file(get_socket_path());
+            if let Some(win) = live_window(ctx) {
+                win.resume_hidden_clients();
+            }
             glib::timeout_add_local_once(Duration::from_millis(150), || {
                 state::flush_state_saves();
                 std::process::exit(0);
@@ -1091,6 +1112,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
 #[cfg(test)]
 mod ipc_tests {
     use super::*;
+    use std::cell::Cell;
     use std::os::unix::net::UnixListener;
 
     #[test]

@@ -18,9 +18,16 @@
 //! cards painted *above* a card hide it: a raised card is fully visible and
 //! needs no hint about itself.
 //!
-//! The planner ([`ghost_indexes`], [`covered_ratio`]) is plain geometry that
-//! unit tests cover; [`GhostLayer`] is the thin GTK side that places one
-//! outline widget per hidden card.
+//! The same stacking also decides which terminals may stop drawing. GTK does
+//! no occlusion culling inside a window: a buried terminal that redraws (a
+//! spinner) still damages its area, so the card over it is repainted and the
+//! compositor re-blurs the region. A terminal that the cards above it hide
+//! *completely* ([`hidden_indexes`], a far stricter rule than the outlines'
+//! 70%) has its emulator widget hidden until anything uncovers it.
+//!
+//! The planners ([`ghost_indexes`], [`covered_ratio`], [`hidden_indexes`]) are
+//! plain geometry that unit tests cover; [`GhostLayer`] is the thin GTK side
+//! that places one outline widget per hidden card and pauses the terminals.
 
 use gtk4::prelude::*;
 use gtk4::{Fixed, Widget};
@@ -33,6 +40,17 @@ use crate::mini_terminal::MiniTerminalCard;
 /// Fraction of a card that must be covered, by the cards painted above it, for
 /// that card to earn a ghost outline.
 pub const OVERLAP_HIDE_RATIO: f64 = 0.70;
+
+/// Corner radius of a card at its roundest: an open or expanded card is 14px,
+/// the 128×128 icon 18px (`.mini-terminal` in `styles.rs`). A card's corners
+/// are transparent, so whatever lies under one shows through there.
+pub const CARD_CORNER_RADIUS: f64 = 18.0;
+
+/// How far a terminal's card may reach past the cards covering it and still
+/// count as hidden. The emulator sits well inside its card (the preview box's
+/// 8px margin, its border and padding), so a 1px sliver of card edge never
+/// shows terminal output; it absorbs rounding in the geometry.
+pub const COVER_TOLERANCE: f64 = 1.0;
 
 /// One terminal as the ghost planner sees it.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,6 +102,69 @@ pub fn covered_ratio(target: Rect, coverers: &[Rect]) -> f64 {
     (Area::union(&hidden) / area).clamp(0.0, 1.0)
 }
 
+/// One terminal as the draw planner sees it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawPlacement {
+    /// Where the card is drawn on the overlay canvas.
+    pub rect: Rect,
+    /// This terminal draws whatever covers it: the user is working in it, it
+    /// holds the keyboard focus, or it cannot pause yet (see
+    /// `MiniTerminalCard::vte_can_pause`).
+    pub keep_drawing: bool,
+}
+
+/// Indexes into `placements` (bottom-most first) whose terminal the cards
+/// painted above it hide completely, so it can stop drawing.
+///
+/// Unlike [`ghost_indexes`] a coverer's own activity does not matter: the
+/// terminals under the one somebody is typing in, or under an expanded card,
+/// are exactly the ones whose redraws cost the most.
+pub fn hidden_indexes(placements: &[DrawPlacement]) -> Vec<usize> {
+    let mut hidden = Vec::new();
+    for (index, card) in placements.iter().enumerate() {
+        if card.keep_drawing {
+            continue;
+        }
+        let coverers: Vec<Rect> = placements[index + 1..]
+            .iter()
+            .map(|coverer| coverer.rect)
+            .collect();
+        if fully_covered(card.rect, &coverers) {
+            hidden.push(index);
+        }
+    }
+    hidden
+}
+
+/// True when `coverers` hide every pixel of `target`, give or take
+/// [`COVER_TOLERANCE`] along its edges.
+///
+/// A coverer only counts where it is opaque for sure: its rectangle without
+/// the [`CARD_CORNER_RADIUS`] square at each corner, since a rounded corner is
+/// transparent and whatever is under it shows through. Growing the target by
+/// the radius instead is not enough: four cards meeting in the middle of a
+/// fifth leave a hole where their corners meet. The shadows cards cast are
+/// see-through and never count either.
+pub fn fully_covered(target: Rect, coverers: &[Rect]) -> bool {
+    let inner = Area {
+        x0: target.x + COVER_TOLERANCE,
+        y0: target.y + COVER_TOLERANCE,
+        x1: target.x + target.width as f64 - COVER_TOLERANCE,
+        y1: target.y + target.height as f64 - COVER_TOLERANCE,
+    };
+    let Some(needed) = inner.size() else {
+        return false;
+    };
+    let opaque: Vec<Area> = coverers
+        .iter()
+        .flat_map(|coverer| Area::opaque_parts(*coverer))
+        .filter_map(|part| part.clip(&inner))
+        .collect();
+    // Integer card geometry makes the union exact; the epsilon is only there
+    // for the floating-point sum of the slabs.
+    Area::union(&opaque) >= needed - 1e-6
+}
+
 /// Axis-aligned rectangle with floating-point edges, so an intersection never
 /// loses area to rounding.
 #[derive(Clone, Copy)]
@@ -95,14 +176,52 @@ struct Area {
 }
 
 impl Area {
+    fn from_rect(rect: Rect) -> Self {
+        Self {
+            x0: rect.x,
+            y0: rect.y,
+            x1: rect.x + rect.width as f64,
+            y1: rect.y + rect.height as f64,
+        }
+    }
+
     fn intersection(a: Rect, b: Rect) -> Option<Self> {
+        Self::from_rect(a).clip(&Self::from_rect(b))
+    }
+
+    /// The part of `self` inside `other`, if any.
+    fn clip(&self, other: &Area) -> Option<Self> {
         let area = Self {
-            x0: a.x.max(b.x),
-            y0: a.y.max(b.y),
-            x1: (a.x + a.width as f64).min(b.x + b.width as f64),
-            y1: (a.y + a.height as f64).min(b.y + b.height as f64),
+            x0: self.x0.max(other.x0),
+            y0: self.y0.max(other.y0),
+            x1: self.x1.min(other.x1),
+            y1: self.y1.min(other.y1),
         };
-        (area.x1 > area.x0 && area.y1 > area.y0).then_some(area)
+        area.size().map(|_| area)
+    }
+
+    /// Area in square pixels, or `None` when the rectangle is empty.
+    fn size(&self) -> Option<f64> {
+        (self.x1 > self.x0 && self.y1 > self.y0).then(|| (self.x1 - self.x0) * (self.y1 - self.y0))
+    }
+
+    /// The card's surely opaque region, as two overlapping bands: the "plus"
+    /// left once the [`CARD_CORNER_RADIUS`] square at each corner is cut off.
+    fn opaque_parts(rect: Rect) -> [Area; 2] {
+        let card = Self::from_rect(rect);
+        let r = CARD_CORNER_RADIUS;
+        [
+            Self {
+                x0: card.x0 + r,
+                x1: card.x1 - r,
+                ..card
+            },
+            Self {
+                y0: card.y0 + r,
+                y1: card.y1 - r,
+                ..card
+            },
+        ]
     }
 
     /// Area of the union of `rects`, by splitting them on every vertical edge
@@ -164,8 +283,13 @@ pub struct GhostLayer {
     screen_w: i32,
     screen_h: i32,
     /// False while the overlay slides in or out, or is unmapped: a ghost must
-    /// not hang in mid-air at rest poses the cards have not reached yet.
+    /// not hang in mid-air at rest poses the cards have not reached yet. No
+    /// terminal is paused meanwhile either, since the cards move on their own
+    /// paths and uncover each other.
     live: Cell<bool>,
+    /// Set while every terminal must draw whatever covers it: the Alt picker
+    /// dims the cards, and the terminals under them show through.
+    all_drawing: Cell<bool>,
     outlines: RefCell<Vec<Outline>>,
 }
 
@@ -191,17 +315,20 @@ impl GhostLayer {
             screen_w,
             screen_h,
             live: Cell::new(true),
+            all_drawing: Cell::new(false),
             outlines: RefCell::new(Vec::new()),
         })
     }
 
-    /// Recompute the outlines from the live cards and their stacking order.
+    /// Recompute the outlines, and which terminals draw, from the live cards
+    /// and their stacking order.
     pub fn refresh(&self) {
         if !self.live.get() {
             return;
         }
         let cards = self.cards.borrow().clone();
-        let placements: Vec<TerminalPlacement> = paint_order(&self.canvas, &cards)
+        let ordered = paint_order(&self.canvas, &cards);
+        let placements: Vec<TerminalPlacement> = ordered
             .iter()
             .map(|card| TerminalPlacement {
                 session: card.data.borrow().session_name.clone(),
@@ -210,6 +337,58 @@ impl GhostLayer {
             })
             .collect();
         self.apply(&placements);
+        self.pause_hidden_terminals(&ordered);
+    }
+
+    /// Stop drawing the terminals that the cards above them hide completely,
+    /// and let every other terminal draw.
+    ///
+    /// Nothing pauses while a card is dragged: what it covers changes on every
+    /// frame, and hiding and re-mapping terminals as it passes over them would
+    /// cost more than it saves. The drag's end refreshes and pauses again. A
+    /// resize only moves the dashed preview; the card itself changes once, at
+    /// the commit, which refreshes too.
+    fn pause_hidden_terminals(&self, ordered: &[Rc<MiniTerminalCard>]) {
+        let all_drawing =
+            self.all_drawing.get() || ordered.iter().any(|card| card.is_being_dragged());
+        let hidden = if all_drawing {
+            Vec::new()
+        } else {
+            let placements: Vec<DrawPlacement> = ordered
+                .iter()
+                .map(|card| {
+                    let rect = card.canvas_rect(self.screen_w, self.screen_h);
+                    DrawPlacement {
+                        rect,
+                        keep_drawing: card.user_is_active()
+                            || !card.vte_can_pause(&self.canvas, rect),
+                    }
+                })
+                .collect();
+            hidden_indexes(&placements)
+        };
+        for (index, card) in ordered.iter().enumerate() {
+            card.set_vte_covered(hidden.contains(&index));
+        }
+    }
+
+    /// Let every terminal draw again, whatever covers it.
+    fn draw_all_terminals(&self) {
+        let cards = self.cards.borrow().clone();
+        for card in cards.iter() {
+            card.set_vte_covered(false);
+        }
+    }
+
+    /// Keep every terminal drawing while `keep` is set (the Alt picker is up),
+    /// and go back to pausing the hidden ones once it is cleared.
+    pub fn keep_all_drawing(&self, keep: bool) {
+        self.all_drawing.set(keep);
+        if keep {
+            self.draw_all_terminals();
+        } else {
+            self.refresh();
+        }
     }
 
     /// Draw an outline for every buried card in `placements` and hide the rest.
@@ -255,15 +434,18 @@ impl GhostLayer {
         self.prune(placements);
     }
 
-    /// Take every outline off screen and stop reacting to card changes.
+    /// Take every outline off screen, let every terminal draw, and stop
+    /// reacting to card changes.
     pub fn suspend(&self) {
         self.live.set(false);
         for outline in self.outlines.borrow().iter() {
             outline.hide();
         }
+        self.draw_all_terminals();
     }
 
-    /// Allow outlines again (the slide settled) and redraw them.
+    /// Allow outlines again (the slide settled) and redraw them; the hidden
+    /// terminals pause again.
     pub fn resume(&self) {
         self.live.set(true);
         self.refresh();
@@ -539,6 +721,163 @@ mod tests {
         assert_eq!(ghosted(&[icon, over]), ["icon"]);
     }
 
+    fn terminal(rect: Rect) -> DrawPlacement {
+        DrawPlacement {
+            rect,
+            keep_drawing: false,
+        }
+    }
+
+    /// A card `margin` pixels larger than `target` on every side.
+    fn around(target: Rect, margin: i32) -> Rect {
+        rect(
+            target.x as i32 - margin,
+            target.y as i32 - margin,
+            target.width + 2 * margin,
+            target.height + 2 * margin,
+        )
+    }
+
+    #[test]
+    fn a_terminal_pauses_only_when_it_is_covered_completely() {
+        let under = rect(100, 100, 400, 300);
+        // Far enough past every edge that the coverer's round corners are
+        // outside the card underneath.
+        assert_eq!(
+            hidden_indexes(&[terminal(under), terminal(around(under, 40))]),
+            [0]
+        );
+        // 99% is not hidden: the strip still shows live output.
+        let almost = rect(60, 60, 437, 380);
+        assert!(covered_ratio(under, &[almost]) > 0.99);
+        assert!(hidden_indexes(&[terminal(under), terminal(almost)]).is_empty());
+        // The 70% that earns a ghost outline keeps the terminal drawing.
+        let most = rect(100, 100, 288, 300);
+        assert!(covered_ratio(under, &[most]) >= OVERLAP_HIDE_RATIO);
+        assert!(hidden_indexes(&[terminal(under), terminal(most)]).is_empty());
+        // Nothing above it, nothing hidden.
+        assert!(hidden_indexes(&[terminal(under)]).is_empty());
+        assert!(!fully_covered(under, &[]));
+    }
+
+    #[test]
+    fn only_cards_painted_above_pause_a_terminal() {
+        let small = rect(140, 140, 320, 220);
+        let big = rect(100, 100, 400, 300);
+        assert_eq!(hidden_indexes(&[terminal(small), terminal(big)]), [0]);
+        // The big card is painted over the small one's rectangle, not under it.
+        assert!(hidden_indexes(&[terminal(big), terminal(small)]).is_empty());
+    }
+
+    #[test]
+    fn two_cards_together_can_pause_a_terminal() {
+        let under = rect(100, 100, 400, 300);
+        // Each covers a little over half of it and reaches past the outer
+        // edges: their inner corners lie above and below the card.
+        let left = rect(60, 60, 250, 380);
+        let right = rect(290, 60, 250, 380);
+        assert_eq!(
+            hidden_indexes(&[terminal(under), terminal(left), terminal(right)]),
+            [0]
+        );
+        // A 2px gap between them shows a column of the terminal.
+        let apart = rect(312, 60, 250, 380);
+        assert!(hidden_indexes(&[terminal(under), terminal(left), terminal(apart)]).is_empty());
+    }
+
+    #[test]
+    fn a_coverer_s_round_corners_let_the_terminal_show_through() {
+        let under = rect(100, 100, 400, 300);
+        // Exactly the same rectangle: its four transparent corners are over the
+        // card underneath.
+        assert!(!fully_covered(under, &[under]));
+        // Past every edge by the corner radius, the corners no longer matter.
+        let radius = CARD_CORNER_RADIUS as i32;
+        assert!(fully_covered(under, &[around(under, radius)]));
+        assert!(!fully_covered(under, &[around(under, radius - 2)]));
+        // Four cards meeting in the middle cover every pixel as rectangles,
+        // but their corners leave a hole where they meet.
+        let quarters = [
+            rect(60, 60, 240, 190),
+            rect(300, 60, 240, 190),
+            rect(60, 250, 240, 190),
+            rect(300, 250, 240, 190),
+        ];
+        assert_eq!(covered_ratio(under, &quarters), 1.0);
+        assert!(!fully_covered(under, &quarters));
+        // Overlapping by more than the radius, they close the hole again.
+        let overlapping = [
+            rect(60, 60, 260, 210),
+            rect(280, 60, 260, 210),
+            rect(60, 230, 260, 210),
+            rect(280, 230, 260, 210),
+        ];
+        assert!(fully_covered(under, &overlapping));
+    }
+
+    #[test]
+    fn a_one_pixel_sliver_still_counts_as_covered() {
+        let over = rect(60, 60, 480, 380);
+        // One pixel past the coverer's left edge: that is card border.
+        assert!(fully_covered(rect(59, 100, 400, 300), &[over]));
+        assert!(fully_covered(rect(141, 100, 400, 300), &[over]));
+        // Two pixels are not.
+        assert!(!fully_covered(rect(58, 100, 400, 300), &[over]));
+        assert!(!fully_covered(rect(100, 142, 400, 300), &[over]));
+        // A card too thin to hold a terminal is never paused.
+        assert!(!fully_covered(rect(100, 100, 2, 300), &[over]));
+    }
+
+    #[test]
+    fn an_expanded_card_pauses_every_terminal_it_hides() {
+        let (x, y, width, height) = crate::mini_terminal::expanded_rect(2560, 1440);
+        let expanded = DrawPlacement {
+            rect: Rect {
+                x,
+                y,
+                width: width as i32,
+                height: height as i32,
+            },
+            // Expanded counts as the user working in it.
+            keep_drawing: true,
+        };
+        let inside = terminal(rect(600, 400, 640, 480));
+        let icon = terminal(rect(1800, 900, 128, 128));
+        // Reaches above the expanded card: its title bar is on screen.
+        let straddling = terminal(rect(1200, 100, 640, 480));
+        let placements = [inside, straddling, icon, expanded];
+        assert_eq!(hidden_indexes(&placements), [0, 2]);
+
+        // A card raised over the expanded one draws, and hides what it covers
+        // even where the expanded card does not reach.
+        let raised = terminal(rect(200, 300, 400, 300));
+        let under_raised = terminal(rect(230, 340, 200, 150));
+        assert!(!fully_covered(under_raised.rect, &[expanded.rect]));
+        assert_eq!(
+            hidden_indexes(&[under_raised, expanded, raised]),
+            [0],
+            "the expanded card and the raised card both draw"
+        );
+    }
+
+    #[test]
+    fn the_terminal_in_use_keeps_drawing_under_anything() {
+        let under = rect(100, 100, 400, 300);
+        let over = terminal(around(under, 40));
+        let in_use = DrawPlacement {
+            rect: under,
+            keep_drawing: true,
+        };
+        assert!(hidden_indexes(&[in_use, over]).is_empty());
+        // The coverer being in use does not matter: that is when the buried
+        // terminals' redraws cost the most.
+        let over_in_use = DrawPlacement {
+            keep_drawing: true,
+            ..over
+        };
+        assert_eq!(hidden_indexes(&[terminal(under), over_in_use]), [0]);
+    }
+
     /// Let GTK run an allocation pass: `Fixed::child_position` only reports the
     /// new spot once the canvas has laid out again.
     fn pump() {
@@ -642,6 +981,267 @@ mod tests {
         layer.apply(&[]);
         assert!(outlines(&canvas).is_empty());
         assert!(hud.parent().is_some(), "the toolbar stays in the canvas");
+    }
+
+    #[test]
+    fn buried_terminals_pause_and_draw_again_on_every_trigger() {
+        crate::gtk_test::run_in_child_process("overlap_ghost::tests::pause_gtk");
+    }
+
+    /// The wiring from the overlay's triggers to real cards' terminals: a raise,
+    /// the whole-window hide and show, a slide, the Alt picker, a drag, a move,
+    /// the keyboard focus, an expand and its collapse, a card that has not been
+    /// laid out yet, and a close.
+    #[test]
+    fn pause_gtk() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        // A card asks tmux for its status (when it is made and collapsed). Point
+        // tmux at a directory that does not exist: it cannot create its socket
+        // directory there, so every probe fails without reaching the user's
+        // server or leaving anything on disk.
+        let no_tmux = std::env::temp_dir()
+            .join(format!("sd-pause-test-{}", std::process::id()))
+            .join("missing");
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        std::env::set_var("TMUX_TMPDIR", &no_tmux);
+
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        // Broadway runs few frames, and a terminal shown again only has a size
+        // after the next one: wait for what a test step needs.
+        let settle = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !done() && std::time::Instant::now() < deadline {
+                while gtk4::glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert!(done(), "GTK never got there");
+        };
+        let laid_out = |card: &Rc<MiniTerminalCard>| {
+            card.vte_widget().is_some_and(|term| term.width() > 0)
+        };
+        let (screen_w, screen_h) = (1000, 700);
+        let window = gtk4::Window::new();
+        let canvas = Fixed::new();
+        canvas.set_size_request(screen_w, screen_h);
+        let hud = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        canvas.put(&hud, 0.0, 0.0);
+        window.set_child(Some(&canvas));
+        let cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>> = Rc::new(RefCell::new(Vec::new()));
+        let layer = GhostLayer::new(&canvas, &hud, Rc::clone(&cards), screen_w, screen_h);
+
+        // Raise like the window does: to the top of the canvas, under the
+        // toolbar, then recompute.
+        let raise = {
+            let canvas = canvas.clone();
+            let hud = hud.clone();
+            let layer = Rc::downgrade(&layer);
+            Rc::new(move |widget: Widget| {
+                crate::window::raise_canvas_child(&canvas, &widget);
+                crate::window::raise_canvas_child(&canvas, &hud);
+                if let Some(layer) = layer.upgrade() {
+                    layer.refresh();
+                }
+            })
+        };
+        let make = |session: &str, x: i32, y: i32, width: i32, height: i32| {
+            let on_raise = Rc::clone(&raise);
+            let touched = Rc::downgrade(&layer);
+            let data = crate::state::TerminalData {
+                id: session.to_string(),
+                session_name: session.to_string(),
+                agent_type: "shell".to_string(),
+                command: "/usr/bin/bash".to_string(),
+                x,
+                y,
+                width,
+                height,
+                restored_width: width,
+                restored_height: height,
+                // Iconified cards start without an emulator (and so without a
+                // tmux session); the bare one below runs nothing.
+                iconified: true,
+                icon_x: None,
+                icon_y: None,
+                created_at: 0.0,
+                tag: 0,
+                agent_session_id: None,
+                workspace_dir: None,
+            };
+            let card = Rc::new(MiniTerminalCard::new(
+                data,
+                |_, _, _| {},
+                |_, _| {},
+                |_| {},
+                |_| {},
+                |_, _, _, _, _| {},
+                || {},
+                move |widget| on_raise(widget),
+                |_| {},
+                move || {
+                    if let Some(layer) = touched.upgrade() {
+                        layer.refresh();
+                    }
+                },
+                screen_w,
+                screen_h,
+                None,
+                Some(Rc::new(Vec::new())),
+                crate::mini_terminal::HoverRaiseLock::new(),
+                crate::card_source::CardSource::Local,
+            ));
+            card.open_with_bare_terminal(width, height);
+            canvas.put(&card.container, x as f64, y as f64);
+            crate::window::raise_canvas_child(&canvas, &hud);
+            cards.borrow_mut().push(Rc::clone(&card));
+            card
+        };
+        let raise_card = |card: &Rc<MiniTerminalCard>| raise(card.container.clone().upcast());
+        let move_card = |card: &Rc<MiniTerminalCard>, x: i32, y: i32| {
+            crate::mini_terminal::set_displayed_pos(&mut card.data.borrow_mut(), x, y);
+            canvas.move_(&card.container, x as f64, y as f64);
+        };
+
+        // `top` hides `bottom` with 40px to spare on every side; `side` and
+        // `small` are in the open.
+        let bottom = make("sd-pause-bottom", 100, 120, 400, 300);
+        let side = make("sd-pause-side", 600, 120, 360, 300);
+        let top = make("sd-pause-top", 60, 80, 480, 380);
+        let small = make("sd-pause-small", 520, 440, 360, 180);
+        let all = [&bottom, &side, &top, &small];
+        window.present();
+        settle(&|| all.iter().all(|card| laid_out(card)));
+        // Mapping may have focused a terminal, which raises its card.
+        gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&Widget>);
+        for card in all {
+            crate::window::raise_canvas_child(&canvas, &card.container);
+        }
+        crate::window::raise_canvas_child(&canvas, &hud);
+
+        // Laid out at its own size (the fractional border adds a pixel).
+        let bounds = |card: &Rc<MiniTerminalCard>| {
+            let bounds = card.container.compute_bounds(&canvas).unwrap();
+            (bounds.width(), bounds.height())
+        };
+        let size = bounds(&bottom);
+        assert!((size.0 - 400.0).abs() <= 2.0 && (size.1 - 300.0).abs() <= 2.0, "{size:?}");
+        layer.refresh();
+        assert!(!bottom.vte_visible(), "a terminal hidden completely stops drawing");
+        assert!(side.vte_visible() && top.vte_visible() && small.vte_visible());
+        settle(&|| !bottom.vte_widget().unwrap().is_mapped());
+        assert_eq!(bounds(&bottom), size, "pausing does not resize the card");
+
+        raise_card(&bottom);
+        assert!(bottom.vte_visible(), "a raise brings it back at once");
+        // Buried again before it was laid out: it has no size until the next
+        // frame, so it pauses at the next refresh (the overlay runs one every
+        // second), never before.
+        raise_card(&top);
+        assert!(bottom.vte_visible());
+        settle(&|| laid_out(&bottom));
+        layer.refresh();
+        assert!(!bottom.vte_visible());
+
+        // The overlay is hidden and shown while the card is buried.
+        for card in all {
+            card.set_vte_drawing(false);
+        }
+        assert!(all.iter().all(|card| !card.vte_visible()));
+        for card in all {
+            card.set_vte_drawing(true);
+        }
+        assert!(!bottom.vte_visible(), "showing the overlay keeps it paused");
+        assert!(side.vte_visible() && top.vte_visible() && small.vte_visible());
+
+        // A slide moves the cards on their own paths: everything draws until
+        // they are at rest.
+        layer.suspend();
+        assert!(bottom.vte_visible());
+        settle(&|| laid_out(&bottom));
+        layer.refresh();
+        assert!(bottom.vte_visible(), "nothing pauses mid-slide");
+        layer.resume();
+        assert!(!bottom.vte_visible());
+
+        // The Alt picker dims every card.
+        layer.keep_all_drawing(true);
+        assert!(bottom.vte_visible());
+        settle(&|| laid_out(&bottom));
+        layer.refresh();
+        assert!(bottom.vte_visible(), "nothing pauses under the picker");
+        layer.keep_all_drawing(false);
+        assert!(!bottom.vte_visible());
+
+        // A drag draws everything until it ends.
+        top.container.add_css_class("dragging");
+        layer.refresh();
+        assert!(bottom.vte_visible(), "nothing pauses during a drag");
+        settle(&|| laid_out(&bottom));
+        layer.refresh();
+        assert!(bottom.vte_visible());
+        top.container.remove_css_class("dragging");
+        layer.refresh();
+        assert!(!bottom.vte_visible());
+
+        // Moving the coverer so that a strip of the card shows.
+        move_card(&top, 140, 80);
+        layer.refresh();
+        assert!(bottom.vte_visible(), "a visible strip means drawing");
+        settle(&|| laid_out(&bottom));
+        move_card(&top, 60, 80);
+        layer.refresh();
+        assert!(!bottom.vte_visible());
+
+        // Hiding the terminal that holds the keyboard would drop the focus.
+        raise_card(&bottom);
+        settle(&|| laid_out(&bottom));
+        bottom.vte_widget().unwrap().grab_focus();
+        assert!(bottom.vte_widget().unwrap().is_focus());
+        raise_card(&top);
+        assert!(bottom.vte_visible(), "the focused terminal keeps drawing");
+        gtk4::prelude::GtkWindowExt::set_focus(&window, None::<&Widget>);
+        layer.refresh();
+        assert!(!bottom.vte_visible());
+
+        // Expanding a card pauses what it hides, like the window's expand:
+        // the card grows, then moves to the top of the canvas.
+        side.expand(screen_w, screen_h);
+        let (x, y, _, _) = crate::mini_terminal::expanded_rect(screen_w, screen_h);
+        canvas.remove(&side.container);
+        canvas.put(&side.container, x, y);
+        crate::window::raise_canvas_child(&canvas, &hud);
+        layer.refresh();
+        assert!(side.vte_visible(), "the expanded card draws");
+        assert!(!small.vte_visible(), "a card inside the expanded one pauses");
+        assert!(top.vte_visible(), "a card reaching past it keeps drawing");
+        side.collapse();
+        move_card(&side, 600, 120);
+        layer.refresh();
+        assert!(small.vte_visible(), "collapsing brings it back");
+        assert!(!bottom.vte_visible());
+
+        // A card that was never laid out has not sized its PTY yet: it is not
+        // paused until it has drawn once.
+        let fresh = make("sd-pause-fresh", 120, 140, 360, 240);
+        raise_card(&top);
+        assert!(fresh.vte_visible(), "a terminal that never drew is not paused");
+        settle(&|| laid_out(&fresh));
+        // Broadway may hand the newly mapped card a pointer crossing, which
+        // raises it: put the coverer back on top once it has drawn.
+        raise_card(&top);
+        assert!(!fresh.vte_visible(), "once it has drawn, it pauses");
+
+        // Closing the coverer sets everything under it free.
+        cards.borrow_mut().retain(|card| !Rc::ptr_eq(card, &top));
+        canvas.remove(&top.container);
+        layer.refresh();
+        assert!(bottom.vte_visible() && fresh.vte_visible());
+
+        window.close();
+        assert!(!no_tmux.exists(), "no tmux server may start for this test");
     }
 
     #[test]

@@ -28,11 +28,15 @@ struct Trajectory {
     ty: f64,
 }
 
-/// Critically-damped spring (rad/s). Settle time is about 4/ω.
-/// Appear is a touch slower so high-refresh screens get more in-between frames.
-const SLIDE_OMEGA_IN: f64 = 15.0;
-/// Hide is stiffer so a reverse during appear still clears the screen promptly.
-const SLIDE_OMEGA_OUT: f64 = 20.0;
+/// Critically-damped spring (rad/s). With the launch impulse the cards are
+/// within 1% of the target after about 6.5/ω, and `spring_settled` reports
+/// rest after about 9/ω.
+/// Appear is a touch slower so high-refresh screens get more in-between
+/// frames: 99% at ~300ms (ω=15 took ~420ms, and ~570ms to settle).
+const SLIDE_OMEGA_IN: f64 = 22.0;
+/// Hide is stiffer so a reverse during appear still clears the screen
+/// promptly: 99% off-screen at ~230ms, before `HIDE_FALLBACK` unmaps.
+const SLIDE_OMEGA_OUT: f64 = 28.0;
 /// Initial speed (progress / second) when starting from rest. A spring at v=0
 /// eases in; this impulse makes the first frames shoot in from the edge.
 const SLIDE_LAUNCH_IN: f64 = 5.5;
@@ -46,9 +50,31 @@ const HUD_OFFSCREEN_PAD: f64 = 40.0;
 const HUD_MIN_HEIGHT: i32 = 56;
 /// Hide must not wait forever on Hyprland vsync. A local LLM (LM Studio /
 /// llama.cpp) can fill the GPU so frame callbacks never run, which used to
-/// leave the overlay mapped after Toggle. 4/ω_out ≈ 200ms; this is one
-/// extra refresh of slack, then we unmap anyway.
+/// leave the overlay mapped after Toggle. The hide spring is 99% off-screen
+/// at ~230ms; the last fraction of a percent would take another ~100ms to
+/// report rest, so this unmaps on time either way.
 pub(crate) const HIDE_FALLBACK: Duration = Duration::from_millis(280);
+
+thread_local! {
+    /// From the start of a hide until the next show, the overlay's keyboard
+    /// and pointer belong to the desktop again (see `release_input`).
+    static INPUT_RELEASED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Set the overlay's layer-shell keyboard interactivity.
+///
+/// Every overlay caller goes through here: releasing input makes the keyboard
+/// and pointer leave the surface, and the focus and pointer handlers that
+/// fire for that must not take the keyboard back while the overlay slides out.
+pub(crate) fn set_overlay_keyboard_mode(window: &impl IsA<gtk4::Window>, mode: KeyboardMode) {
+    if overlay_keyboard_mode_allowed(mode, INPUT_RELEASED.with(Cell::get)) {
+        window.set_keyboard_mode(mode);
+    }
+}
+
+fn overlay_keyboard_mode_allowed(mode: KeyboardMode, input_released: bool) -> bool {
+    mode == KeyboardMode::None || !input_released
+}
 
 fn top_bar_height(size: TopBarSize) -> i32 {
     match size {
@@ -311,6 +337,8 @@ pub struct SuperDesktopWindow {
     /// Bumped by `show_again`; a slide-out that finishes afterwards must not
     /// unmap the window again (hide → show inside the 140ms animation).
     show_token: std::cell::Cell<u64>,
+    /// Pauses the local cards' tmux clients while the overlay stays hidden.
+    hidden_pause: Rc<crate::hidden_pause::Controller>,
     /// After a new harness is spawned, hover-raise on other cards is ignored
     /// until this hold expires so the pointer path cannot bury the new card.
     hover_raise_lock: HoverRaiseLock,
@@ -326,7 +354,7 @@ impl SuperDesktopWindow {
     pub fn new<FClose: Fn() + 'static>(
         app: &Application,
         on_request_close: FClose,
-        hot_inside: Rc<Cell<bool>>,
+        hot_inside: Rc<crate::hotcorner::Zone>,
         state: Rc<RefCell<AppState>>,
     ) -> Rc<Self> {
         crate::startup::mark("overlay construction started");
@@ -340,7 +368,9 @@ impl SuperDesktopWindow {
             window.set_anchor(edge, true);
         }
 
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        // A new overlay owns its input until its first hide.
+        INPUT_RELEASED.with(|released| released.set(false));
+        set_overlay_keyboard_mode(&window, KeyboardMode::OnDemand);
         window.add_css_class("super-desktop-window");
         crate::frame_profile::watch(&window, "overlay");
 
@@ -541,7 +571,7 @@ impl SuperDesktopWindow {
                     settings.set_visible(false);
                     wizard.close();
                     vte4::GtkWindowExt::set_focus(&window, None::<&gtk4::Widget>);
-                    window.set_keyboard_mode(KeyboardMode::OnDemand);
+                    set_overlay_keyboard_mode(&window, KeyboardMode::OnDemand);
                 }
             }),
             on_close_rc.clone(),
@@ -632,6 +662,7 @@ impl SuperDesktopWindow {
             ws_popover: workspace_bar.popover.clone(),
             ws_bar: workspace_bar.clone(),
             show_token: std::cell::Cell::new(0),
+            hidden_pause: crate::hidden_pause::Controller::new(),
             hover_raise_lock: HoverRaiseLock::new(),
             terminal_picker: RefCell::new(None),
         });
@@ -644,7 +675,7 @@ impl SuperDesktopWindow {
             let focus = EventControllerFocus::new();
             let win = win_rc.window.clone();
             focus.connect_enter(move |_| {
-                win.set_keyboard_mode(KeyboardMode::Exclusive);
+                set_overlay_keyboard_mode(&win, KeyboardMode::Exclusive);
             });
             let win = win_rc.window.clone();
             let terms = Rc::clone(&win_rc.terminal_cards);
@@ -656,7 +687,7 @@ impl SuperDesktopWindow {
                 // delegate. A real click elsewhere remains unfocused after
                 // the grace period, closes the list and returns to OnDemand.
                 if popover.is_visible() && !popover.is_autohide() {
-                    win.set_keyboard_mode(KeyboardMode::Exclusive);
+                    set_overlay_keyboard_mode(&win, KeyboardMode::Exclusive);
                     let controller = controller.clone();
                     let win = win.clone();
                     let terms = Rc::clone(&terms);
@@ -667,7 +698,7 @@ impl SuperDesktopWindow {
                         }
                         popover.popdown();
                         let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
-                        win.set_keyboard_mode(if any_expanded {
+                        set_overlay_keyboard_mode(&win, if any_expanded {
                             KeyboardMode::Exclusive
                         } else {
                             KeyboardMode::OnDemand
@@ -676,7 +707,7 @@ impl SuperDesktopWindow {
                     return;
                 }
                 let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
-                win.set_keyboard_mode(if any_expanded {
+                set_overlay_keyboard_mode(&win, if any_expanded {
                     KeyboardMode::Exclusive
                 } else {
                     KeyboardMode::OnDemand
@@ -695,7 +726,7 @@ impl SuperDesktopWindow {
             let motion = EventControllerMotion::new();
             let win = win_rc.window.clone();
             motion.connect_enter(move |_, _, _| {
-                win.set_keyboard_mode(KeyboardMode::Exclusive);
+                set_overlay_keyboard_mode(&win, KeyboardMode::Exclusive);
             });
             let win = win_rc.window.clone();
             let entry = workspace_bar.entry.clone();
@@ -703,7 +734,7 @@ impl SuperDesktopWindow {
             motion.connect_leave(move |_| {
                 if !entry.has_focus() {
                     let any_expanded = terms.borrow().iter().any(|t| t.is_expanded());
-                    win.set_keyboard_mode(if any_expanded {
+                    set_overlay_keyboard_mode(&win, if any_expanded {
                         KeyboardMode::Exclusive
                     } else {
                         KeyboardMode::OnDemand
@@ -902,6 +933,10 @@ impl SuperDesktopWindow {
                 activate: Rc::new(move || card.select_with_keyboard()),
             }).collect()
         }));
+        // The preview dims every card, so the terminals under other cards show
+        // through while it is up: none of them may be paused meanwhile.
+        let ghosts_picker = Rc::clone(&win_rc.ghosts);
+        picker.connect_showing(move |showing| ghosts_picker.keep_all_drawing(showing));
         *win_rc.terminal_picker.borrow_mut() = Some(picker);
 
         // Esc key
@@ -992,20 +1027,21 @@ impl SuperDesktopWindow {
         vte4::GtkWindowExt::set_focus(&win_rc.window, None::<&gtk4::Widget>);
         win_rc.load_items();
 
-        // Periodic status refresh
+        // Periodic status refresh. Off screen there is nothing to update:
+        // per-card status probes are pure `tmux` processes, so the timer only
+        // exists while the window is mapped — a hidden daemon gets no wakeup
+        // from it. `show_again` refreshes at once, so the first tick one
+        // second after the map is not a stale second.
         let win_w = Rc::downgrade(&win_rc);
-        glib::timeout_add_local(std::time::Duration::from_millis(1000), move || {
-            if let Some(w) = win_w.upgrade() {
-                // Off screen there is nothing to update: per-card status probes
-                // are pure `tmux` processes, so skip them while hidden.
-                if w.window.is_visible() {
+        crate::launcher_settings::tick_while_mapped(
+            &[win_rc.window.clone().upcast()],
+            std::time::Duration::from_millis(1000),
+            move || {
+                if let Some(w) = win_w.upgrade() {
                     w.periodic_refresh();
                 }
-                glib::ControlFlow::Continue
-            } else {
-                glib::ControlFlow::Break
-            }
-        });
+            },
+        );
 
         crate::startup::mark("overlay constructed (terminal preparation queued)");
         win_rc.window.add_tick_callback(|_, _| {
@@ -1661,7 +1697,7 @@ impl SuperDesktopWindow {
                 self.canvas.move_(&term.container, px, py);
             }
         }
-        self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+        set_overlay_keyboard_mode(&self.window, KeyboardMode::OnDemand);
 
         let start_y = 110.0;
         let gap = 20.0;
@@ -1742,6 +1778,7 @@ impl SuperDesktopWindow {
     pub fn start_slide_out<F: Fn() + 'static>(&self, on_finish: F) {
         if let Some(picker) = self.terminal_picker.borrow().as_ref() { picker.cancel(); }
         self.machine_view.dismiss();
+        self.release_input();
         // Outlines describe rest positions, so they go away with the cards.
         self.ghosts.suspend();
         // Live terminals slide out with their content, so hide reads as one
@@ -2234,6 +2271,9 @@ impl SuperDesktopWindow {
         for card in cards.iter() {
             card.apply_theme(&theme);
         }
+        // Remote consoles too: their colors are set only when an emulator is
+        // built and here, never again while its font is fitted.
+        self.machine_view.apply_theme(&theme);
         // Swap monochrome toolbar logos for the new mode (light/dark).
         let light_theme = theme.mode == "light";
         for (img, agent) in self.brand_images.borrow().iter() {
@@ -2253,14 +2293,18 @@ impl SuperDesktopWindow {
     /// load, panels, one `tmux` exec per card, ~30 forks) that used to sit
     /// between the shortcut and the overlay appearing.
     pub fn show_again(&self) {
+        // First: paused tmux clients redraw within a few ms of this, before
+        // the slide-in brings their cards on screen.
+        self.hidden_pause.on_shown();
         self.show_token.set(self.show_token.get().wrapping_add(1));
+        self.reclaim_input();
         self.set_terminal_gpu_mapped(true);
         self.window.present();
         self.window.set_visible(true);
         // Re-assert keyboard interactivity: typing in a card flips it to
         // Exclusive (see `apply_terminal_expand`), and a re-mapped layer surface
         // must not come back without it.
-        self.window.set_keyboard_mode(KeyboardMode::OnDemand);
+        set_overlay_keyboard_mode(&self.window, KeyboardMode::OnDemand);
         self.start_slide_in();
         // Card statuses went stale while off screen (the periodic refresh is
         // paused then); this refreshes them on worker threads.
@@ -2319,11 +2363,58 @@ impl SuperDesktopWindow {
         // them earlier blanked the view before it could animate out. Their
         // cards keep the last frame, so showing again reconnects immediately.
         self.machine_view.suspend_streams();
+        self.arm_hidden_pause();
+    }
+
+    /// The overlay is off screen (unmapped, or built but never shown): pause
+    /// the local cards' tmux clients if it stays that way (`hidden_pause`).
+    pub fn arm_hidden_pause(&self) {
+        let cards = Rc::clone(&self.terminal_cards);
+        self.hidden_pause.on_hidden(move || {
+            let cards: Vec<Rc<MiniTerminalCard>> = cards.borrow().clone();
+            cards.iter().filter_map(|card| card.attach_target()).collect()
+        });
+    }
+
+    /// The daemon is about to exit: wake any paused tmux client first.
+    pub fn resume_hidden_clients(&self) {
+        self.hidden_pause.resume_before_exit();
+    }
+
+    /// Give the keyboard and pointer back to the desktop as the hide starts.
+    ///
+    /// The unmap waits for the slide-out (up to `HIDE_FALLBACK`), and until
+    /// then a full-screen surface that still takes input swallows the keys
+    /// and clicks meant for the window underneath (with a card expanded, the
+    /// keyboard is even `Exclusive`). An empty input region lets clicks
+    /// through; `reclaim_input` undoes both on the next show.
+    fn release_input(&self) {
+        INPUT_RELEASED.with(|released| released.set(true));
+        set_overlay_keyboard_mode(&self.window, KeyboardMode::None);
+        if let Some(surface) = self.window.surface() {
+            surface.set_input_region(Some(&gtk4::cairo::Region::create()));
+        }
+    }
+
+    fn reclaim_input(&self) {
+        INPUT_RELEASED.with(|released| released.set(false));
+        if let Some(surface) = self.window.surface() {
+            // `None` is the whole surface, GTK's default.
+            surface.set_input_region(None);
+        }
     }
 
     /// Hide VTE widgets so hide/unmap does not composite live GPU terminals.
+    ///
+    /// Mapping again only brings back the terminals no card hides: the overlap
+    /// layer pauses the buried ones (see `MiniTerminalCard::set_vte_covered`).
+    /// A show starts a slide, which suspends that layer and so lets them all
+    /// draw until the cards are at rest.
     fn set_terminal_gpu_mapped(&self, mapped: bool) {
-        for card in self.terminal_cards.borrow().iter() {
+        // Snapshot: hiding a widget can emit signals that re-enter the card
+        // list (see `terminal_cards`).
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        for card in cards.iter() {
             card.set_vte_drawing(mapped);
         }
     }
@@ -2464,7 +2555,7 @@ fn apply_terminal_expand(
         }
     }
 
-    window.set_keyboard_mode(if will_expand {
+    set_overlay_keyboard_mode(window, if will_expand {
         KeyboardMode::Exclusive
     } else {
         KeyboardMode::OnDemand
@@ -2497,11 +2588,40 @@ mod tests {
 
     #[test]
     fn hide_fallback_does_not_wait_on_a_stuck_compositor() {
-        // Settle time of the hide spring is about 4/ω_out ≈ 200ms. The
-        // fallback must fire after that, and well before a frozen overlay
-        // feels like a hang.
+        // The fallback must fire after the cards are visually gone, and well
+        // before a frozen overlay feels like a hang.
         assert!(HIDE_FALLBACK >= Duration::from_millis(200));
         assert!(HIDE_FALLBACK <= Duration::from_millis(400));
+        let (x, _) = slide_pose_at(1.0, -SLIDE_LAUNCH_OUT, 0.0, SLIDE_OMEGA_OUT, HIDE_FALLBACK);
+        assert!(x < 0.01, "the fallback unmaps cards still {:.1}% on screen", x * 100.0);
+    }
+
+    /// Where a slide starting at (`x`, `v`) is after `elapsed` of 60 Hz frames.
+    fn slide_pose_at(x: f64, v: f64, target: f64, omega: f64, elapsed: Duration) -> (f64, f64) {
+        let frames = (elapsed.as_secs_f64() * 60.0).floor() as usize;
+        (0..frames).fold((x, v), |(x, v), _| spring_step(x, v, target, 1.0 / 60.0, omega))
+    }
+
+    #[test]
+    fn a_hiding_overlay_cannot_take_the_keyboard_back() {
+        // Released: the focus/pointer leave handlers the release itself
+        // triggers must not flip the surface back to OnDemand/Exclusive.
+        assert!(overlay_keyboard_mode_allowed(KeyboardMode::None, true));
+        assert!(!overlay_keyboard_mode_allowed(KeyboardMode::OnDemand, true));
+        assert!(!overlay_keyboard_mode_allowed(KeyboardMode::Exclusive, true));
+        for mode in [KeyboardMode::None, KeyboardMode::OnDemand, KeyboardMode::Exclusive] {
+            assert!(overlay_keyboard_mode_allowed(mode, false));
+        }
+    }
+
+    #[test]
+    fn slides_finish_their_visible_motion_quickly() {
+        // Hyprland adds nothing on top (the install rule turns layer fades
+        // off), so these are the latencies the user sees on every toggle.
+        let (x, _) = slide_pose_at(0.0, SLIDE_LAUNCH_IN, 1.0, SLIDE_OMEGA_IN, Duration::from_millis(320));
+        assert!(x > 0.99, "slide-in only {:.1}% there after 320ms", x * 100.0);
+        let (x, _) = slide_pose_at(1.0, -SLIDE_LAUNCH_OUT, 0.0, SLIDE_OMEGA_OUT, Duration::from_millis(250));
+        assert!(x < 0.01, "slide-out still {:.1}% on screen after 250ms", x * 100.0);
     }
 
     #[test]

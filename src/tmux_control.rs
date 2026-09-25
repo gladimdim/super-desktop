@@ -370,6 +370,9 @@ mod tests {
             panic!("inventory row missing")
         };
         assert_eq!((&row.pid, row.height, &row.cwd), (&expected_row.pid, expected_row.height, &expected_row.cwd));
+        let pane = |row: &crate::tmux::PaneRow| row.stamp.as_ref().map(|s| (s.pane_id.clone(), s.width));
+        assert!(pane(row).is_some(), "the control client's row is stamped too");
+        assert_eq!(pane(row), pane(expected_row));
         let expected = crate::tmux::pane_grid(&session);
         assert!(expected.is_some());
         assert_eq!(control.pane_grid().unwrap(), expected);

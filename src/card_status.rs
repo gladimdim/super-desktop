@@ -5,7 +5,8 @@
 //! processes per card per second; here one `tmux list-panes -a` describes every
 //! session, and a card only captures its pane when the capture is used (a
 //! visible preview, or a screen-based status for an agent without native
-//! metadata). Runs on a worker thread, never on the GTK main thread.
+//! metadata), and only when the inventory shows the pane changed since its
+//! last capture. Runs on a worker thread, never on the GTK main thread.
 use crate::harness_metadata::Metadata;
 use crate::tmux::{PaneLookup, PaneRow, PaneSnapshot, SessionStatus};
 
@@ -81,6 +82,9 @@ pub fn refresh(requests: Vec<CardRequest>) -> Vec<CardUpdate> {
         return Vec::new();
     }
     let snapshot = crate::tmux::pane_snapshot();
+    if let Some(snapshot) = &snapshot {
+        crate::tmux::retain_captures(snapshot);
+    }
     requests
         .iter()
         .map(|request| refresh_one(request, snapshot.as_ref()))
@@ -107,9 +111,10 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
         .filter(|_| has_native_metadata(agent))
         .and_then(|row| crate::harness_metadata::inspect_option(agent, &row.metadata_option));
     // The preview capture doubles as the status screen; otherwise the status
-    // captures only the visible rows, and only if it gets that far.
+    // captures only the visible rows, and only if it gets that far. Either is
+    // reused while the pane has not changed since the last refresh.
     let screen = match (row, request.preview_lines) {
-        (Some(_), Some(_)) => crate::tmux::capture_pane_text(session),
+        (Some(row), Some(_)) => crate::tmux::capture_pane_text_for(session, row),
         _ => None,
     };
     let status = match row {
@@ -122,7 +127,7 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
                 if request.preview_lines.is_some() {
                     screen.clone()
                 } else {
-                    crate::tmux::capture_visible_screen(session)
+                    crate::tmux::capture_visible_screen_for(session, row)
                 }
             },
         ),
@@ -264,8 +269,17 @@ fn legacy(request: &CardRequest) -> CardUpdate {
 mod tests {
     use super::*;
 
-    fn row(fields: &[&str]) -> String {
+    fn record(fields: &[&str]) -> String {
         format!("\u{1e}{}\n", fields.join("\u{1f}"))
+    }
+
+    /// The stamp fields of an active pane: id, active, width, history size,
+    /// cursor x/y, alternate screen, window activity.
+    const STAMP: [&str; 8] = ["%7", "1", "132", "30", "4", "39", "0", "1790000000"];
+
+    /// A listing record: the card's fields, then `STAMP`.
+    fn row(fields: &[&str]) -> String {
+        record(&[fields, &STAMP[..]].concat())
     }
 
     #[test]
@@ -281,6 +295,20 @@ mod tests {
             row(&["sd_term_c", "1", "30", "codex", "0", "24", "/tmp/with\ttab", "", "fix\nthis", "", ""]),
             // A value containing the field separator is never guessed at.
             row(&["sd_term_d", "1", "40", "pi", "0", "24", "/tmp/d", "", "bad\u{1f}value", "", ""]),
+            // Neither is a record of another length (an older format).
+            record(&["sd_term_e", "1", "50", "pi", "0", "24", "/tmp/e", "", "", "", ""]),
+            // A split window whose first pane is not the active one, and a
+            // tmux that left a stamp field empty: listed, but not stamped.
+            record(&[
+                &["sd_term_f", "1", "60", "grok", "0", "24", "/tmp/f", "", "", "", ""][..],
+                &["%8", "0", "80", "0", "0", "0", "0", "1790000000"],
+            ]
+            .concat()),
+            record(&[
+                &["sd_term_g", "1", "70", "grok", "0", "24", "/tmp/g", "", "", "", ""][..],
+                &["%9", "1", "80", "0", "0", "0", "0", ""],
+            ]
+            .concat()),
         ]
         .concat();
         let snapshot = crate::tmux::parse_pane_snapshot(&text);
@@ -297,7 +325,26 @@ mod tests {
         assert_eq!(c.cwd, "/tmp/with\ttab");
         assert_eq!(c.last_prompt, "fix\nthis");
         assert!(matches!(snapshot.lookup("sd_term_d"), PaneLookup::Unknown));
+        assert!(matches!(snapshot.lookup("sd_term_e"), PaneLookup::Unknown));
         assert!(matches!(snapshot.lookup("sd_term_gone"), PaneLookup::Missing));
+        // What an unchanged pane's capture is reused by.
+        assert_eq!(
+            a.stamp,
+            Some(crate::tmux::PaneStamp {
+                pane_id: "%7".into(),
+                pid: "10".into(),
+                width: 132,
+                height: 40,
+                history_size: 30,
+                cursor: (4, 39),
+                alternate: false,
+                activity: 1_790_000_000,
+            })
+        );
+        let PaneLookup::Row(f) = snapshot.lookup("sd_term_f") else { panic!("f") };
+        assert_eq!((f.pid.as_str(), f.stamp.as_ref()), ("60", None));
+        let PaneLookup::Row(g) = snapshot.lookup("sd_term_g") else { panic!("g") };
+        assert_eq!((g.pid.as_str(), g.stamp.as_ref()), ("70", None));
     }
 
     #[test]

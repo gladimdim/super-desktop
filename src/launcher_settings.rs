@@ -201,6 +201,61 @@ pub(crate) fn background_refresh<T: Send + 'static>(
     })
 }
 
+/// Run `tick` every `interval` while any of `widgets` is mapped, with no timer
+/// at all otherwise: it is added on map and removed once the last of them
+/// unmaps. A timer that only checks `is_mapped` still wakes the main thread
+/// every interval for the rest of the daemon's life, so a closed page or a
+/// hidden overlay has to take its timer down with it.
+///
+/// The first tick comes one `interval` after the map; a caller that needs
+/// fresh content at once refreshes from its own `connect_map` or navigation.
+pub(crate) fn tick_while_mapped(
+    widgets: &[gtk4::Widget],
+    interval: std::time::Duration,
+    tick: impl Fn() + 'static,
+) {
+    let tick: Rc<dyn Fn()> = Rc::new(tick);
+    let source: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let start: Rc<dyn Fn()> = {
+        let source = Rc::clone(&source);
+        Rc::new(move || {
+            if source.borrow().is_some() {
+                return;
+            }
+            let tick = Rc::clone(&tick);
+            let id = glib::timeout_add_local(interval, move || {
+                tick();
+                glib::ControlFlow::Continue
+            });
+            *source.borrow_mut() = Some(id);
+        })
+    };
+    let watched: Rc<[glib::WeakRef<gtk4::Widget>]> =
+        widgets.iter().map(|widget| widget.downgrade()).collect();
+    for widget in widgets {
+        widget.connect_map({
+            let start = Rc::clone(&start);
+            move |_| start()
+        });
+        let source = Rc::clone(&source);
+        let watched = Rc::clone(&watched);
+        widget.connect_unmap(move |_| {
+            // `is_mapped` is already false for the widget being unmapped.
+            if watched.iter().any(|w| w.upgrade().is_some_and(|w| w.is_mapped())) {
+                return;
+            }
+            // The timer never ends itself, so a stored id is always live.
+            let id = source.borrow_mut().take();
+            if let Some(id) = id {
+                id.remove();
+            }
+        });
+    }
+    if widgets.iter().any(|widget| widget.is_mapped()) {
+        start();
+    }
+}
+
 fn set_text(label: &Label, text: &str) {
     if label.text().as_str() != text {
         label.set_text(text);
@@ -865,29 +920,13 @@ pub fn build_connection_pages(
     // on the settings card's first open. The content is filled when the card
     // navigates here (`refresh`) and then every 2s while a page stays on screen.
     //
-    // `is_mapped` is false both when the card navigated away from these pages
-    // and when the card (or the whole overlay) is hidden, so nothing probes
-    // tmux / `tailscale` / `hostname` for a page nobody is looking at.
-    let watched: Vec<glib::WeakRef<gtk4::Widget>> =
-        pages.iter().map(|(_, widget)| widget.downgrade()).collect();
+    // No page is mapped both when the card navigated away from these pages and
+    // when the card (or the whole overlay) is hidden, so nothing probes tmux /
+    // `tailscale` / `hostname` for a page nobody is looking at — and no timer
+    // wakes the daemon for one either.
+    let watched: Vec<gtk4::Widget> = pages.iter().map(|(_, widget)| widget.clone()).collect();
     let tick = Rc::clone(&refresh);
-    glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-        let mut alive = false;
-        let mut shown = false;
-        for page in &watched {
-            if let Some(page) = page.upgrade() {
-                alive = true;
-                shown |= page.is_mapped();
-            }
-        }
-        if !alive {
-            return glib::ControlFlow::Break;
-        }
-        if shown {
-            tick();
-        }
-        glib::ControlFlow::Continue
-    });
+    tick_while_mapped(&watched, std::time::Duration::from_secs(2), move || tick());
 
     ConnectionPages {
         pages,
@@ -1159,6 +1198,79 @@ mod tests {
             .into_iter()
             .find_map(|w| w.downcast::<Button>().ok())
             .unwrap_or_else(|| panic!("no button .{class}"))
+    }
+
+    #[test]
+    fn test_tick_while_mapped_runs_only_on_screen() {
+        crate::gtk_test::run_in_child_process("launcher_settings::tests::tick_while_mapped_child");
+    }
+
+    /// Only meaningful when re-run as the single test of a fresh process.
+    #[test]
+    fn tick_while_mapped_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let context = glib::MainContext::default();
+        let wakeups = Cell::new(0u32);
+        // Run the loop for `ms`, and say how many ticks happened meanwhile.
+        // `wakeups` counts every dispatch, so a timer that fires and does
+        // nothing is caught too.
+        let run = |ticks: &Rc<Cell<u32>>, ms: u64| {
+            let before = ticks.get();
+            wakeups.set(0);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+            while std::time::Instant::now() < deadline {
+                while context.iteration(false) {
+                    wakeups.set(wakeups.get() + 1);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            ticks.get() - before
+        };
+        // Short, so a timer left running would dispatch dozens of times in
+        // any of the windows measured below.
+        let interval = std::time::Duration::from_millis(5);
+        let window = gtk4::Window::new();
+        let root = Box::new(Orientation::Vertical, 0);
+        let (first, second) = (Box::new(Orientation::Vertical, 0), Box::new(Orientation::Vertical, 0));
+        root.append(&first);
+        root.append(&second);
+        window.set_child(Some(&root));
+        let ticks = Rc::new(Cell::new(0));
+        let count = Rc::clone(&ticks);
+        tick_while_mapped(&[first.clone().upcast(), second.clone().upcast()], interval, move || {
+            count.set(count.get() + 1)
+        });
+
+        assert_eq!(run(&ticks, 150), 0, "never mapped: no ticks");
+        window.present();
+        assert!(run(&ticks, 200) >= 3, "mapped: ticking");
+        // One of two hidden: the other still keeps it going.
+        first.set_visible(false);
+        assert!(run(&ticks, 200) >= 3);
+        second.set_visible(false);
+        run(&ticks, 50);
+        assert_eq!(run(&ticks, 200), 0, "nothing mapped: no ticks");
+        // Not zero: the display connection may still deliver the odd event.
+        assert!(wakeups.get() < 10, "nothing mapped: no timer either ({})", wakeups.get());
+        second.set_visible(true);
+        assert!(run(&ticks, 200) >= 3, "mapped again: ticking again");
+        // Hiding the whole window unmaps everything, as hiding the overlay does.
+        first.set_visible(true);
+        window.set_visible(false);
+        run(&ticks, 150);
+        assert_eq!(run(&ticks, 200), 0, "hidden window: no ticks");
+        assert!(wakeups.get() < 10, "hidden window: no timer either ({})", wakeups.get());
+        window.present();
+        assert!(run(&ticks, 200) >= 3);
+
+        // Already on screen when the helper is attached: it starts at once.
+        let late = Rc::new(Cell::new(0));
+        let count = Rc::clone(&late);
+        tick_while_mapped(&[first.clone().upcast()], interval, move || count.set(count.get() + 1));
+        assert!(run(&late, 200) >= 3);
     }
 
     #[test]

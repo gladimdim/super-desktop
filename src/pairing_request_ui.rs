@@ -410,18 +410,24 @@ impl PairingRequestPanel {
                 panel.poll();
             }
         });
-        // One request to the bridge per second, and only while open.
+        // One request to the bridge per second, and only while open. The
+        // timer itself exists only while the panel is on screen: hiding the
+        // overlay closes the panel (`SuperDesktopWindow::hide_now`), so a
+        // closed panel costs no wakeups.
         let weak = Rc::downgrade(&panel);
-        glib::timeout_add_local(Duration::from_secs(1), move || {
-            let Some(panel) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            if panel.open.get() {
-                panel.paint_expiry();
-                panel.poll();
-            }
-            glib::ControlFlow::Continue
-        });
+        crate::launcher_settings::tick_while_mapped(
+            &[panel.widget.clone().upcast()],
+            Duration::from_secs(1),
+            move || {
+                let Some(panel) = weak.upgrade() else {
+                    return;
+                };
+                if panel.open.get() {
+                    panel.paint_expiry();
+                    panel.poll();
+                }
+            },
+        );
         panel
     }
 

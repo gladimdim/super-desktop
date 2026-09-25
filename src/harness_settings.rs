@@ -36,7 +36,8 @@ use crate::tmux::{detect_harnesses, HarnessInfo};
 /// holds the keyboard (see `shortcut::begin_capture`), so "the user clicked
 /// Record and walked away" has to end on its own.
 const RECORD_WATCHDOG: Duration = Duration::from_millis(10_000);
-/// The watchdog is checked by a 250ms tick, not by a timer of its own.
+/// The watchdog is checked by a 250ms tick, not by a timer of its own. The
+/// tick runs only while a recording is armed.
 const RECORD_TICK: Duration = Duration::from_millis(250);
 
 /// The one way out of a recording; `None` keeps the note as it is.
@@ -676,16 +677,11 @@ pub fn build_harness_settings_panel(
         let refresh = Rc::clone(&count_refresh);
         move |_| refresh()
     });
-    let entry_weak = btn_launcher.downgrade();
-    gtk4::glib::timeout_add_local(std::time::Duration::from_secs(2), move || {
-        let Some(entry) = entry_weak.upgrade() else {
-            return gtk4::glib::ControlFlow::Break;
-        };
-        if entry.is_mapped() {
-            count_refresh();
-        }
-        gtk4::glib::ControlFlow::Continue
-    });
+    crate::launcher_settings::tick_while_mapped(
+        &[btn_launcher.clone().upcast()],
+        Duration::from_secs(2),
+        move || count_refresh(),
+    );
 
     let home_footer = Label::new(Some("Settings are saved as you change them."));
     home_footer.add_css_class("launcher-footer");
@@ -1083,15 +1079,25 @@ pub fn build_harness_settings_panel(
             crate::sleep_lock::set_enabled(enabled);
         }
     });
-    let weak_status = sleep_status.downgrade();
-    glib::timeout_add_local(Duration::from_secs(1), move || {
-        let Some(label) = weak_status.upgrade() else { return glib::ControlFlow::Break; };
-        if label.is_mapped() {
+    // Shown right away on map (the status is one mutex read), then every
+    // second while the page stays on screen.
+    let paint_status: Rc<dyn Fn()> = {
+        let weak_status = sleep_status.downgrade();
+        Rc::new(move || {
+            let Some(label) = weak_status.upgrade() else { return; };
             let text = crate::sleep_lock::status();
             if label.text().as_str() != text { label.set_text(&text); }
-        }
-        glib::ControlFlow::Continue
+        })
+    };
+    sleep_status.connect_map({
+        let paint_status = Rc::clone(&paint_status);
+        move |_| paint_status()
     });
+    crate::launcher_settings::tick_while_mapped(
+        &[sleep_status.clone().upcast()],
+        Duration::from_secs(1),
+        move || paint_status(),
+    );
 
     let home_view = settings_scroll(&home_root);
     let shortcut_view = settings_scroll(&shortcut_root);
@@ -1492,9 +1498,52 @@ pub fn build_harness_settings_panel(
         })
     };
 
+    // Two ways out of a recording nobody finishes: the panel/overlay going
+    // away, and the watchdog. Both matter because the recorder holds the
+    // keyboard — a stuck recording is a desktop with no working shortcuts.
+    // Every recording starts its own tick, which ends with that recording (or
+    // when a newer one replaces it), so none runs while nothing is recorded.
+    let watch_recording: Rc<dyn Fn()> = {
+        let recording = Rc::clone(&recording);
+        let stop_recording = Rc::clone(&stop_recording);
+        let panel = outer.downgrade();
+        let generation = Rc::new(Cell::new(0u64));
+        Rc::new(move || {
+            generation.set(generation.get().wrapping_add(1));
+            let ticket = generation.get();
+            let generation = Rc::clone(&generation);
+            let recording = Rc::clone(&recording);
+            let stop_recording = Rc::clone(&stop_recording);
+            let panel = panel.clone();
+            let mut armed_ticks = 0u32;
+            let max_ticks = (RECORD_WATCHDOG.as_millis() / RECORD_TICK.as_millis()).max(1) as u32;
+            glib::timeout_add_local(RECORD_TICK, move || {
+                let Some(panel) = panel.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                if !recording.get() || generation.get() != ticket {
+                    return glib::ControlFlow::Break;
+                }
+                armed_ticks += 1;
+                // `is_mapped`, not `is_visible`: hiding the whole overlay unmaps the
+                // window without ever touching the panel's own visibility flag.
+                if !panel.is_mapped() {
+                    stop_recording(Some("Recording cancelled — the panel was closed."));
+                    return glib::ControlFlow::Break;
+                }
+                if armed_ticks >= max_ticks {
+                    stop_recording(Some("No combination captured — try again."));
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        })
+    };
+
     let start_recording: Rc<dyn Fn()> = {
         let recording = Rc::clone(&recording);
         let armed = Rc::clone(&armed);
+        let watch_recording = Rc::clone(&watch_recording);
         let paint = Rc::clone(&paint_recorder);
         let shortcut_note = shortcut_note.clone();
         let btn_record = btn_record.clone();
@@ -1512,6 +1561,7 @@ pub fn build_harness_settings_panel(
             let unguarded = !guard.armed();
             *armed.borrow_mut() = Some(guard);
             recording.set(true);
+            watch_recording();
             shortcut_note.set_visible(false);
             if unguarded {
                 shortcut_note.add_css_class("launcher-note-error");
@@ -1575,35 +1625,6 @@ pub fn build_harness_settings_panel(
             }
         }
     });
-
-    // Two ways out of a recording nobody finishes: the panel/overlay going
-    // away, and the watchdog. Both matter because the recorder holds the
-    // keyboard — a stuck recording is a desktop with no working shortcuts.
-    {
-        let recording = Rc::clone(&recording);
-        let stop_recording = Rc::clone(&stop_recording);
-        let panel = outer.downgrade();
-        let mut armed_ticks = 0u32;
-        let max_ticks = (RECORD_WATCHDOG.as_millis() / RECORD_TICK.as_millis()).max(1) as u32;
-        glib::timeout_add_local(RECORD_TICK, move || {
-            let Some(panel) = panel.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-            if !recording.get() {
-                armed_ticks = 0;
-                return glib::ControlFlow::Continue;
-            }
-            armed_ticks += 1;
-            // `is_mapped`, not `is_visible`: hiding the whole overlay unmaps the
-            // window without ever touching the panel's own visibility flag.
-            if !panel.is_mapped() {
-                stop_recording(Some("Recording cancelled — the panel was closed."));
-            } else if armed_ticks >= max_ticks {
-                stop_recording(Some("No combination captured — try again."));
-            }
-            glib::ControlFlow::Continue
-        });
-    }
 
     // ---- shared state: selection, detection order, row buttons ----
     let selection: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
