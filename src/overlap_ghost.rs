@@ -646,7 +646,7 @@ mod tests {
 
     #[test]
     fn an_outline_follows_its_card_after_a_resize() {
-        crate::gtk_test::run_in_child_process("overlap_ghost::tests::outline_resize_gtk");
+        crate::gtk_test::run_in_child_process_needing_large_screen("overlap_ghost::tests::outline_resize_gtk");
     }
 
     #[test]

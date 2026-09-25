@@ -909,7 +909,7 @@ mod tests {
 
     #[test]
     fn toolbar_remote_fits_after_workspace_switches() {
-        crate::gtk_test::run_in_child_process("machine_selector::tests::toolbar_remote_inner");
+        crate::gtk_test::run_in_child_process_needing_large_screen("machine_selector::tests::toolbar_remote_inner");
     }
 
     #[test]

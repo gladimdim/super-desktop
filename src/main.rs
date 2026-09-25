@@ -75,18 +75,45 @@ pub mod gtk_test {
 
     /// Run `inner_test` (full path, e.g. `styles::tests::css_gtk_inner`) alone
     /// in a fresh process, and fail this test when the child fails.
+    ///
+    /// GTK tests never open windows on the user's desktop: the child runs on a
+    /// private, invisible Broadway display (`gtk4-broadwayd`) and loses every
+    /// variable that could reach the real Wayland/X session. Set
+    /// `SD_GTK_TESTS_ON_DESKTOP=1` to run them on the desktop on purpose. Without
+    /// `gtk4-broadwayd` the GTK test is skipped rather than shown on screen.
     pub fn run_in_child_process(inner_test: &str) {
         assert!(
             !is_child(),
             "run_in_child_process must not be called from the child process"
         );
         let exe = std::env::current_exe().expect("current test executable");
-        let out = std::process::Command::new(exe)
+        let mut command = std::process::Command::new(exe);
+        command
             .args(["--exact", inner_test, "--nocapture"])
             .env(CHILD_ENV, "1")
-            .env("RUST_TEST_THREADS", "1")
-            .output()
-            .expect("spawn child test process");
+            .env("RUST_TEST_THREADS", "1");
+        // Each child gets its own display: parallel tests must not take
+        // keyboard focus from each other's windows.
+        let mut server = None;
+        if std::env::var_os("SD_GTK_TESTS_ON_DESKTOP").is_none() {
+            let Some((child, display)) = private_display() else {
+                eprintln!("skipping GTK test `{inner_test}`: gtk4-broadwayd is not available (never falling back to the desktop)");
+                return;
+            };
+            command
+                .env("GDK_BACKEND", "broadway")
+                .env("BROADWAY_DISPLAY", display)
+                .env_remove("WAYLAND_DISPLAY")
+                .env_remove("WAYLAND_SOCKET")
+                .env_remove("DISPLAY")
+                .env_remove("HYPRLAND_INSTANCE_SIGNATURE");
+            server = Some(child);
+        }
+        let out = command.output().expect("spawn child test process");
+        if let Some(mut server) = server {
+            let _ = server.kill();
+            let _ = server.wait();
+        }
         assert!(
             out.status.success(),
             "GTK test `{inner_test}` failed in its own process:\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -95,9 +122,74 @@ pub mod gtk_test {
         );
     }
 
+    /// `run_in_child_process` for a test that maps windows larger than a
+    /// Broadway display's fixed 1024×768 screen, or needs exact window
+    /// geometry. On the private Broadway display it is skipped with a message
+    /// (it cannot run there, and must not fall back to the user's desktop); it
+    /// runs with `SD_GTK_TESTS_ON_DESKTOP=1`.
+    pub fn run_in_child_process_needing_large_screen(inner_test: &str) {
+        if std::env::var_os("SD_GTK_TESTS_ON_DESKTOP").is_none() {
+            eprintln!(
+                "skipping GTK test `{inner_test}`: it needs a screen larger than the private \
+                 Broadway display (1024x768). Run it on purpose with SD_GTK_TESTS_ON_DESKTOP=1."
+            );
+            return;
+        }
+        run_in_child_process(inner_test);
+    }
+
     /// True inside that child process, where the GTK assertions may run.
     pub fn is_child() -> bool {
         std::env::var(CHILD_ENV).is_ok()
+    }
+
+    /// A private Broadway display (`":N"`) for one GTK test child. The server
+    /// also gets SIGTERM if this test process dies, so none outlive the run.
+    fn private_display() -> Option<(std::process::Child, String)> {
+        use std::os::unix::process::CommandExt;
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        // Displays 100–599: Broadway's local web viewer then uses ports
+        // 8180–8679, clear of the harness bridge (8759).
+        let base = std::process::id() % 500;
+        for _ in 0..100 {
+            let number = 100 + (base + NEXT.fetch_add(1, Ordering::Relaxed)) % 500;
+            let socket = runtime.join(format!("broadway{}.socket", number + 1));
+            let port_free = std::net::TcpListener::bind(("127.0.0.1", (8080 + number) as u16)).is_ok();
+            if socket.exists() || !port_free {
+                continue;
+            }
+            let display = format!(":{number}");
+            let mut server = std::process::Command::new("gtk4-broadwayd");
+            server
+                .args([display.as_str(), "--address", "127.0.0.1"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            unsafe {
+                server.pre_exec(|| {
+                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                    Ok(())
+                });
+            }
+            let mut child = server.spawn().ok()?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if socket.exists() {
+                    return Some((child, display));
+                }
+                if let Ok(Some(_)) = child.try_wait() {
+                    break; // Lost a race for this display; try the next one.
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        None
     }
 }
 

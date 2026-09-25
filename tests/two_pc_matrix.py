@@ -1416,6 +1416,35 @@ def scenario_legacy(env):
 # GTK phase: the real MachineView against the same isolated hosts.
 # --------------------------------------------------------------------------
 
+def private_broadway_display(runtime):
+    """Start gtk4-broadwayd on a free display (local-only web viewer) and
+    return ":N"; the process is tracked so the matrix stops it at exit."""
+    import socket as socket_module
+    if not shutil.which("gtk4-broadwayd"):
+        return None
+    for number in range(100 + os.getpid() % 500, 100 + os.getpid() % 500 + 60):
+        number = (number - 100) % 500 + 100
+        sock = pathlib.Path(runtime) / f"broadway{number + 1}.socket"
+        probe = socket_module.socket()
+        try:
+            probe.bind(("127.0.0.1", 8080 + number))
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        if sock.exists():
+            continue
+        track(subprocess.Popen(["gtk4-broadwayd", f":{number}", "--address", "127.0.0.1"],
+                               stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if sock.exists():
+                return f":{number}"
+            time.sleep(0.02)
+    return None
+
+
 def gui_phase(env, test_binary):
     a, b, c, root = env["a"], env["b"], env["c"], env["root"]
     log("GUI: the real selector and remote canvas against A, B and an old host")
@@ -1441,6 +1470,16 @@ def gui_phase(env, test_binary):
     gui_env["SUPER_DESKTOP_TWO_PC_TEST_INPUT"] = str(spec_path)
     gui_env["SUPER_DESKTOP_GTK_TEST_CHILD"] = "1"
     gui_env["RUST_TEST_THREADS"] = "1"
+    # Never open windows on the user's desktop: draw on a private, invisible
+    # Broadway display unless SD_GTK_TESTS_ON_DESKTOP is set on purpose.
+    if not os.environ.get("SD_GTK_TESTS_ON_DESKTOP"):
+        display = private_broadway_display(gui_env["XDG_RUNTIME_DIR"])
+        check(display is not None, "private Broadway display for the GUI phase",
+              "install gtk4 (gtk4-broadwayd) or set SD_GTK_TESTS_ON_DESKTOP=1")
+        gui_env["GDK_BACKEND"] = "broadway"
+        gui_env["BROADWAY_DISPLAY"] = display
+        for name in ("WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE"):
+            gui_env.pop(name, None)
     child = track(subprocess.Popen(
         [test_binary, "--exact", "machine_selector::tests::two_pc_inner", "--nocapture"],
         env=gui_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True))

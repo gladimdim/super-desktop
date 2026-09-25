@@ -60,3 +60,22 @@ as "user" turns, and sends them to the `UserPromptSubmit` hook.
 - Any change to prompt/title capture, harness hooks or adapters must preserve
   and run `cargo test card_title_`. Those tests must fail if the filter is
   removed; add a case for every new injected-turn shape you see in the wild.
+
+## GTK tests never use the user's desktop
+
+Tests must not open windows on the user's screen. Every GTK test runs its
+assertions in a child process through `gtk_test::run_in_child_process`, which
+starts a private, invisible Broadway display (`gtk4-broadwayd`, one per child,
+web viewer bound to 127.0.0.1) and strips `WAYLAND_DISPLAY`, `DISPLAY` and the
+Hyprland variables from the child. Without `gtk4-broadwayd` the test is skipped;
+it never falls back to the desktop. Do not call `gtk4::init()` outside such a
+child, and do not launch GTK probes, screenshots (`grim`) or input injection
+(`wtype`) against the real session.
+
+Broadway's screen is fixed at 1024×768, so tests that map larger windows or
+need exact window geometry use `run_in_child_process_needing_large_screen` and
+are skipped by default (currently the toolbar mapped-window hit tests, the
+remote pan/zoom drag, the slide and the outline-resize tests). Run them only
+with the user's agreement via `SD_GTK_TESTS_ON_DESKTOP=1`, or once a hidden
+large virtual screen (Xvfb) is wired in. Report these skips explicitly. The same
+rule covers scripts: `tests/two_pc_matrix.py` runs its GUI phase on Broadway.

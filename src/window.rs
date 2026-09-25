@@ -2505,12 +2505,12 @@ mod tests {
 
     #[test]
     fn slide_moves_a_card_inside_its_own_canvas() {
-        crate::gtk_test::run_in_child_process("window::tests::slide_inside_own_canvas_inner");
+        crate::gtk_test::run_in_child_process_needing_large_screen("window::tests::slide_inside_own_canvas_inner");
     }
 
     #[test]
     fn toolbar_controls_stay_on_screen() {
-        crate::gtk_test::run_in_child_process("window::tests::toolbar_controls_inner");
+        crate::gtk_test::run_in_child_process_needing_large_screen("window::tests::toolbar_controls_inner");
     }
 
     #[test]

@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn a_drag_at_100_percent_with_pan_sends_host_geometry() {
-        crate::gtk_test::run_in_child_process("remote_terminal::tests::pan_zoom_inner");
+        crate::gtk_test::run_in_child_process_needing_large_screen("remote_terminal::tests::pan_zoom_inner");
     }
 
     #[test]
