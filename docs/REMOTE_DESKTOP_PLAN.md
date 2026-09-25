@@ -818,7 +818,16 @@ repository-prescribed `./rebuild.sh --no-daemon` for build-only validation. Use
 do not disturb live sessions to execute automated tests.
 
 Record input-to-display latency and idle CPU/network usage for one, four and
-eight visible terminals, plus repeated switch/reconnect cycles. Initial LAN
+eight visible terminals, plus repeated switch/reconnect cycles.
+`tests/two_pc_measure.py` automates the transport part between two real PCs:
+`sample` on the host, `viewer MACHINE_ID` on the viewer (it creates, types
+into and closes its own Shell cards on the host), then `report` for a markdown
+summary for the release PR. It times keystroke echo through the real pinned
+attach path, counts only the TCP traffic between the two PCs, and checks the
+host bridge's memory, descriptors, threads and tmux clients across repeated
+attach/detach cycles. It uses the CLI viewer, so the viewer's GTK rendering
+cost is measured separately (`sample` on the viewer while the overlay shows
+the host). `simulate` validates the tool itself on one machine. Initial LAN
 target: p95 echo latency below 100 ms on an unloaded wired network; report hardware
 and conditions rather than treating this as an Internet guarantee. Require bounded
 memory, file descriptors and attach-client counts after repeated disconnects, and
