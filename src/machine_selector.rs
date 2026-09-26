@@ -1,6 +1,7 @@
 //! Paired-PC selector and the live remote workspace view.
 //! Workers own only network data; generation checks guard every GTK update.
 use crate::{
+    connection_panel::ConnectionPanel,
     desktop_protocol::{Capabilities, MachineSelection, WorkspaceSnapshot},
     peer_client::{self, Peer},
     peer_events::{Action, EventCursor, Update, WorkspaceEvents},
@@ -40,6 +41,9 @@ pub struct MachineView {
     remote_toolbar: gtk4::Box,
     selection: RefCell<Selection>,
     canvas: Rc<RemoteCanvas>,
+    /// What the canvas shows while the selected PC is connecting or cannot be
+    /// reached: why, what to do, and the network between the two PCs.
+    panel: Rc<ConnectionPanel>,
     /// The host's own harness list, in the shared launch bar.
     bar: Rc<crate::harness_bar::HarnessBar>,
     /// The host's folders, in the shared folder control.
@@ -168,6 +172,8 @@ impl MachineView {
         remote.append(&toolbar);
         remote.append(&bar.note);
         let canvas = RemoteCanvas::new();
+        let panel = ConnectionPanel::new();
+        canvas.area.add_named(&panel.widget, Some(CONNECTION_PAGE));
         remote.append(&canvas.area);
         stack.add_named(&remote, Some("remote"));
         stack.set_visible_child_name("local");
@@ -179,6 +185,7 @@ impl MachineView {
             remote_toolbar: toolbar,
             selection: RefCell::new(Selection::default()),
             canvas,
+            panel,
             bar,
             folder_bar,
             target: RefCell::new(None),
@@ -204,6 +211,23 @@ impl MachineView {
                 }
             }
         }));
+        view.panel.connect_retry({
+            let weak = Rc::downgrade(&view);
+            move || {
+                if let Some(view) = weak.upgrade() {
+                    view.refresh();
+                }
+            }
+        });
+        view.panel.connect_pair({
+            let weak = Rc::downgrade(&view);
+            move || {
+                let open = weak.upgrade().and_then(|view| view.on_add_pc.borrow().clone());
+                if let Some(open) = open {
+                    open();
+                }
+            }
+        });
         *on_folder.borrow_mut() = Some(Rc::new({
             let weak = Rc::downgrade(&view);
             move |dir: String| {
@@ -602,12 +626,13 @@ impl MachineView {
                 self.stack.set_visible_child_name("local");
             }
             Some((id, label)) => {
+                self.panel.connecting(&id, &label);
+                self.canvas.area.set_visible_child_name(CONNECTION_PAGE);
                 self.selection
                     .borrow_mut()
                     .select(MachineSelection::Remote(id));
                 self.remote_button.set_label(&label);
                 self.set_connection(false, "Connecting to this PC…");
-                self.canvas.show_message("Connecting to this PC…");
                 self.stack.set_visible_child_name("remote");
                 self.refresh();
             }
@@ -829,7 +854,11 @@ impl MachineView {
         view.bar.apply(&crate::harness_bar::HarnessState::none());
         view.bar.note("");
         view.folder_bar.clear();
-        view.canvas.show_message(remote_status(error));
+        if let Some((_, id)) = view.selection.borrow().request() {
+            let label = view.remote_button.label().unwrap_or_default();
+            view.panel.failed(&id, &label, error);
+        }
+        view.canvas.area.set_visible_child_name(CONNECTION_PAGE);
     }
 
     /// The bar's whole status: "Connected" or "Disconnected", with the detail
@@ -869,6 +898,9 @@ fn view_mode_label(mode: remote_workspace::ViewMode) -> String {
         remote_workspace::ViewMode::Actual { zoom } => format!("{:.0}%", zoom * 100.0),
     }
 }
+
+/// The canvas area's page for `ConnectionPanel`.
+const CONNECTION_PAGE: &str = "connection";
 
 fn connection_label(connected: bool) -> &'static str {
     if connected { "Connected" } else { "Disconnected" }
@@ -1303,7 +1335,7 @@ mod tests {
         // instead of leaving an empty area.
         assert_eq!(
             view.canvas.area.visible_child_name().as_deref(),
-            Some("message")
+            Some(CONNECTION_PAGE)
         );
         // Reconciliation and geometry need no network: a host whose session is
         // gone renders as a card but is never streamed.
@@ -1442,6 +1474,73 @@ mod tests {
             view.status.tooltip_text().as_deref(),
             Some("Pairing required · Add this PC again")
         );
+    }
+
+    #[test]
+    fn remote_failure_shows_connection_status() {
+        crate::gtk_test::run_in_child_process("machine_selector::tests::failure_inner");
+    }
+
+    #[test]
+    fn failure_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let view = MachineView::new(&gtk4::Fixed::new(), Rc::new(|| {}), Rc::new(|| {}));
+        // No socket and no system probe in this test: the fetch is held back
+        // by `busy`, and the panel's checks are canned.
+        view.busy.set(true);
+        view.panel.set_diagnose(std::sync::Arc::new(|_: &str, _: &str| {
+            crate::connection_panel::Diagnosis {
+                interfaces: Some(Vec::new()),
+                tailscale: crate::connection_panel::Tailscale::NotInstalled,
+                device: None,
+                remote: None,
+            }
+        }));
+        let opened = Rc::new(Cell::new(false));
+        view.set_add_pc_action(Rc::new({
+            let opened = Rc::clone(&opened);
+            move || opened.set(true)
+        }));
+        let label = "A very long paired computer name ".repeat(6);
+        view.select(Some(("a".repeat(32), label.clone())));
+        assert_eq!(view.canvas.area.visible_child_name().as_deref(), Some(CONNECTION_PAGE));
+        assert_eq!(view.panel.title(), format!("Connecting to {label}…"));
+
+        // The failure replaces the one-line message with the full status.
+        view.show_failure("connection_failed_or_pin_mismatch");
+        assert_eq!(view.canvas.area.visible_child_name().as_deref(), Some(CONNECTION_PAGE));
+        assert_eq!(view.status.text(), "Disconnected");
+        assert_eq!(view.panel.title(), format!("Cannot reach {label}"));
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while view.panel.title() != "This PC is offline" {
+            assert!(std::time::Instant::now() < until, "the checks never finished");
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // It never widens or lengthens the remote workspace.
+        assert!(view.stack.measure(gtk4::Orientation::Horizontal, -1).0 <= 320);
+        assert!(view.stack.measure(gtk4::Orientation::Vertical, 320).0 <= 600);
+
+        // Retry asks the host again (held back here, so it is queued).
+        let (retry, pair) = view.panel.buttons();
+        // Selecting the PC already queued one.
+        view.again.set(false);
+        retry.emit_clicked();
+        assert!(view.again.get(), "Retry asks for a fresh snapshot");
+        // A pairing problem opens Add a PC.
+        view.show_failure("peer_revoked_or_expired");
+        assert!(pair.is_visible());
+        pair.emit_clicked();
+        assert!(opened.get());
+        // A snapshot takes the canvas back.
+        let mut snapshot = remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        view.canvas.apply(&peer_client::test_peer('a'), &snapshot, true);
+        assert_eq!(view.canvas.area.visible_child_name().as_deref(), Some("canvas"));
     }
 
     #[test]

@@ -8,6 +8,26 @@ thread_local! {
 }
 
 pub fn generate_css(theme: &OmarchyTheme) -> String {
+    let mut css = theme_css(theme);
+    css.push_str(&icon_radius_css());
+    css
+}
+
+/// One class per corner radius an iconified card can have, since GTK takes a
+/// border radius from CSS only: an icon drawn smaller or larger than 128 px
+/// (a remote PC's, fitted into the view) rounds its corners in proportion
+/// instead of turning into a circle. See `mini_terminal::icon_radius_class`.
+fn icon_radius_css() -> String {
+    (1..=crate::mini_terminal::MAX_ICON_RADIUS)
+        .map(|radius| {
+            format!(
+                ".mini-terminal.term-compact.term-icon-radius-{radius} {{ border-radius: {radius}px; }}\n"
+            )
+        })
+        .collect()
+}
+
+fn theme_css(theme: &OmarchyTheme) -> String {
     format!(
 r#"
 /* ================= Base Window & Backdrop ================= */
@@ -166,6 +186,12 @@ button.machine-peer-selected {{
 
 .remote-canvas {{
     background-color: {darker_background};
+    border-radius: 12px;
+}}
+
+/* That PC's screen edge, drawn over its cards (remote_terminal.rs). */
+.remote-canvas-border {{
+    border: 2px solid {accent};
     border-radius: 12px;
 }}
 
@@ -733,24 +759,20 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     border: none;
 }}
 
+/* An iconified card's logo, name, bar and buttons are sized in Rust, in
+   proportion to the icon (`CompactChrome::fit` in mini_terminal.rs), and so is
+   its corner radius (`icon_radius_css`). */
 .term-agent-icon {{
     color: {bright_foreground};
-    font-size: 38px;
 }}
 
 .term-agent-name {{
     color: {light_foreground};
-    font-size: 11px;
     font-weight: 700;
     margin-top: 3px;
 }}
 
-.term-compact-top-bar {{
-    margin: 6px 8px 0 8px;
-}}
-
 .term-compact-status {{
-    font-size: 11px;
     padding: 0;
     background: transparent;
     border: none;
@@ -767,14 +789,18 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 .term-compact-actions {{
     background-color: {compact_actions_bg};
     border-radius: 6px;
-    padding: 1px 2px;
+    padding: 0;
 }}
 
-.term-compact-btn {{
-    min-width: 20px;
-    min-height: 20px;
-    padding: 1px 4px;
-    font-size: 11px;
+.term-btn.term-compact-btn {{
+    min-width: 0;
+    min-height: 0;
+    padding: 0;
+}}
+
+.tag-dot.term-compact-tag {{
+    min-width: 0;
+    min-height: 0;
 }}
 
 /* Invisible Windows-style resize targets on all four edges and corners.
@@ -934,6 +960,45 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
 }}
 .remote-disconnected {{
     color: {usage_crit};
+}}
+
+/* A paired PC that is connecting or cannot be reached (connection_panel.rs):
+   the likeliest cause, the fix, and a checklist of each link between the two
+   PCs in the invitation's `invite-step` rows. */
+.remote-status {{
+    background-color: {term_card_bg};
+    border: 1px solid {btn_border};
+    border-radius: 14px;
+    padding: 22px 24px 16px 24px;
+    margin: 16px;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+}}
+.invite-step-mark.remote-status-mark {{
+    min-width: 46px;
+    min-height: 46px;
+    font-size: 21px;
+}}
+.remote-status-title {{
+    color: {bright_foreground};
+    font-size: 18px;
+    font-weight: 800;
+}}
+.remote-status-hint {{
+    color: {light_foreground};
+    font-size: 12px;
+    margin-bottom: 4px;
+}}
+.remote-status-checks .invite-step-detail {{
+    font-family: '{font_family}', monospace;
+}}
+.remote-status-footer {{
+    color: {dark_foreground};
+    font-size: 10.5px;
+}}
+/* The GTK theme's button image would cover the pill's own colours here. */
+.remote-status button.launcher-btn {{
+    background-image: none;
+    box-shadow: none;
 }}
 
 /* ================= Settings and Android Connection Pages ================= */
@@ -1715,6 +1780,28 @@ mod tests {
             "invite-card",
             "connections-pending",
             "connections-warning-chip",
+        ] {
+            assert!(
+                css.contains(&format!(".{class}")),
+                "missing CSS rule for .{class}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_remote_view_styles_exist() {
+        // The outline of that PC's screen, and the panel it shows while it
+        // is connecting or unreachable (its checklist rows are the
+        // invitation's, already covered above).
+        let css = generate_css(&current_theme());
+        for class in [
+            "remote-canvas-border",
+            "remote-status",
+            "remote-status-mark",
+            "remote-status-title",
+            "remote-status-hint",
+            "remote-status-checks",
+            "remote-status-footer",
         ] {
             assert!(
                 css.contains(&format!(".{class}")),

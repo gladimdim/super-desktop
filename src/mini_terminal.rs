@@ -351,6 +351,115 @@ fn seed_icon_pos(data: &mut TerminalData) {
     }
 }
 
+/// The side of an iconified card in a workspace drawn at `scale`: 128 px on
+/// this machine's screen, and a remote PC's 128 logical px fitted into its view.
+pub fn icon_side(scale: f64) -> i32 {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    (f64::from(ICON_SIZE) * scale).round().max(1.0) as i32
+}
+
+/// The corner radius of a 128 px icon.
+const ICON_RADIUS: f64 = 18.0;
+/// How much larger than 128 px an icon's chrome grows at most (a 100% view
+/// zoomed in draws icons up to 3×).
+const MAX_ICON_SCALE: f64 = 4.0;
+/// The largest radius `icon_radius_class` names; styles.rs defines a class for
+/// every radius up to it.
+pub const MAX_ICON_RADIUS: i32 = (ICON_RADIUS * MAX_ICON_SCALE) as i32;
+/// A card's border is at most this wide on each side. The chrome of an icon is
+/// fitted inside it.
+const CARD_BORDER: i32 = 2;
+/// Below this the agent's name is noise rather than text, so a small icon
+/// shows its logo alone.
+const MIN_NAME_FONT_PX: f64 = 8.0;
+
+/// The CSS class that rounds an icon `side` px square like a 128 px one.
+fn icon_radius_class(side: i32) -> String {
+    let radius = (ICON_RADIUS * f64::from(side) / f64::from(ICON_SIZE)).round() as i32;
+    format!("term-icon-radius-{}", radius.clamp(1, MAX_ICON_RADIUS))
+}
+
+/// Set a label's font size in pixels, over the size its CSS gives it.
+fn set_font_px(label: &Label, px: f64) {
+    let attrs = gtk4::pango::AttrList::new();
+    let size = (px.max(1.0) * f64::from(gtk4::pango::SCALE)).round() as i32;
+    attrs.insert(gtk4::pango::AttrSize::new_size_absolute(size));
+    label.set_attributes(Some(&attrs));
+}
+
+/// Everything an iconified card draws: the logo and name in the middle, and the
+/// bar with its status, tag, restore and close buttons across the top.
+///
+/// Its sizes are set here rather than in CSS, in proportion to the icon's side.
+/// An icon is 128 px on this machine, but a remote PC's icon is fitted into the
+/// view with the rest of that PC's workspace, and chrome kept at full size
+/// would hang off a small square. At 128 px these are the icon's usual sizes.
+#[derive(Clone)]
+struct CompactChrome {
+    card: Overlay,
+    top_bar: gtk4::Box,
+    status: Label,
+    tag: Button,
+    actions: gtk4::Box,
+    restore: Button,
+    close: Button,
+    icon_box: gtk4::Box,
+    logo: Option<gtk4::Image>,
+    glyph: Label,
+    name: Label,
+    /// The side the chrome was last sized for, so laying out the same icon
+    /// again changes nothing.
+    side: Rc<Cell<i32>>,
+}
+
+impl CompactChrome {
+    /// Size everything for an icon `side` px square.
+    fn fit(&self, side: i32) {
+        let previous = self.side.replace(side);
+        if previous == side {
+            return;
+        }
+        self.card.remove_css_class(&icon_radius_class(previous));
+        self.card.add_css_class(&icon_radius_class(side));
+        // What fits inside the card's border, relative to a 128 px icon's.
+        let k = (f64::from(side - 2 * CARD_BORDER) / f64::from(ICON_SIZE - 2 * CARD_BORDER))
+            .clamp(0.05, MAX_ICON_SCALE);
+        // Rounded down, so the parts never add up to more than the icon.
+        let px = |value: f64| (value * k).floor() as i32;
+        self.top_bar.set_margin_top(px(6.0));
+        self.top_bar.set_margin_start(px(8.0));
+        self.top_bar.set_margin_end(px(8.0));
+        self.top_bar.set_spacing(px(4.0));
+        set_font_px(&self.status, 11.0 * k);
+        self.tag.set_size_request(px(18.0), px(18.0));
+        // The buttons' margins pad the rounded box behind them.
+        self.actions.set_spacing(px(2.0));
+        for button in [&self.restore, &self.close] {
+            button.set_size_request(px(32.0), px(26.0));
+            button.set_margin_top(px(1.0));
+            button.set_margin_bottom(px(1.0));
+            if let Some(label) = button.child().and_downcast::<Label>() {
+                set_font_px(&label, 11.0 * k);
+            }
+        }
+        self.restore.set_margin_start(px(2.0));
+        self.close.set_margin_end(px(2.0));
+        self.icon_box.set_spacing(px(2.0));
+        if let Some(logo) = &self.logo {
+            logo.set_pixel_size(px(48.0).max(1));
+        }
+        // The fallback glyph is sized in points, so it follows the desktop's
+        // text scaling as it always has.
+        let glyph = gtk4::pango::AttrList::new();
+        glyph.insert(gtk4::pango::AttrSize::new(
+            (38.0 * k * f64::from(gtk4::pango::SCALE)).round() as i32,
+        ));
+        self.glyph.set_attributes(Some(&glyph));
+        set_font_px(&self.name, 11.0 * k);
+        self.name.set_visible(11.0 * k >= MIN_NAME_FONT_PX);
+    }
+}
+
 /// One of the card's own actions, stored after construction so a remote command
 /// runs exactly the code the matching local button or gesture runs.
 type CardAction = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -375,18 +484,14 @@ pub struct MiniTerminalCard {
     oc_recheck_at: Rc<RefCell<std::time::Instant>>,
     status_badge: Label,
     refresh_in_flight: Rc<Cell<bool>>,
-    compact_status: Label,
     preview_label: Label,
-    icon_box: gtk4::Box,
-    _icon_label: Label,
-    _icon_name_label: Label,
+    /// Everything the card draws while iconified.
+    compact: CompactChrome,
     meta_label: Label,
     hint_label: Label,
     _iconify_btn: Button,
     expand_btn: Button,
     compact_restore_btn: Button,
-    _compact_kill_btn: Button,
-    compact_top_bar: gtk4::Box,
     /// A brief line about the last command this card sent to another PC
     /// (see `command_feedback`). Floats under the header, never takes input,
     /// never changes the card's size, and dismisses itself.
@@ -470,8 +575,8 @@ impl MiniTerminalCard {
     {
         let scale = source.scale();
         if term_data.iconified {
-            term_data.width = ICON_SIZE;
-            term_data.height = ICON_SIZE;
+            term_data.width = icon_side(scale);
+            term_data.height = icon_side(scale);
         } else {
             let (cw, ch) =
                 clamp_card_size_at(term_data.width, term_data.height, screen_w, screen_h, scale);
@@ -672,20 +777,21 @@ impl MiniTerminalCard {
 
         let icon_label = Label::new(Some(display_icon));
         icon_label.add_css_class("term-agent-icon");
-        let attrs = gtk4::pango::AttrList::new();
-        attrs.insert(gtk4::pango::AttrSize::new(38 * gtk4::pango::SCALE));
-        icon_label.set_attributes(Some(&attrs));
-        if let Some(path) = &logo {
+        let icon_logo = logo.as_ref().map(|path| {
             let image = gtk4::Image::from_file(path);
-            image.set_pixel_size(48);
             icon_box.append(&image);
-            brand_images.push(image);
-        } else {
+            brand_images.push(image.clone());
+            image
+        });
+        if icon_logo.is_none() {
             icon_box.append(&icon_label);
         }
 
         let icon_name_label = Label::new(Some(display_name));
         icon_name_label.add_css_class("term-agent-name");
+        // A long custom name shortens instead of widening the icon.
+        icon_name_label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        icon_name_label.set_single_line_mode(true);
         icon_box.append(&icon_name_label);
 
         icon_box.set_visible(false);
@@ -739,15 +845,16 @@ impl MiniTerminalCard {
                 tag_save_c(r.upcast(), &tag_data_c.borrow());
             }
         });
+        compact_tag.add_css_class("term-compact-tag");
         tag_sync.borrow_mut().push(compact_tag.downgrade());
         compact_top_bar.append(&compact_tag);
 
-        let top_bar_spacer = gtk4::Box::new(Orientation::Horizontal, 0);
-        top_bar_spacer.set_hexpand(true);
-        compact_top_bar.append(&top_bar_spacer);
-
+        // Right-aligned by its own expansion: a spacer would add two gaps the
+        // bar of a small icon has no room for.
         let compact_actions = gtk4::Box::new(Orientation::Horizontal, 2);
         compact_actions.add_css_class("term-compact-actions");
+        compact_actions.set_hexpand(true);
+        compact_actions.set_halign(Align::End);
 
         // Button to expand the window into its previous "larger" size set by user
         let compact_restore_btn = Button::with_label("🗖");
@@ -768,6 +875,20 @@ impl MiniTerminalCard {
 
         compact_top_bar.append(&compact_actions);
         root.add_overlay(&compact_top_bar);
+        let compact = CompactChrome {
+            card: root.clone(),
+            top_bar: compact_top_bar,
+            status: compact_status,
+            tag: compact_tag,
+            actions: compact_actions,
+            restore: compact_restore_btn.clone(),
+            close: compact_kill_btn.clone(),
+            icon_box,
+            logo: icon_logo,
+            glyph: icon_label,
+            name: icon_name_label,
+            side: Rc::new(Cell::new(0)),
+        };
 
         // Command feedback. An overlay child is not part of the card's own
         // size request, so a long line wraps inside the card instead of
@@ -870,18 +991,13 @@ impl MiniTerminalCard {
             oc_recheck_at: Rc::new(RefCell::new(std::time::Instant::now())),
             status_badge,
             refresh_in_flight: Rc::new(Cell::new(false)),
-            compact_status,
             preview_label,
-            icon_box,
-            _icon_label: icon_label,
-            _icon_name_label: icon_name_label,
+            compact,
             meta_label,
             hint_label,
             _iconify_btn: iconify_btn.clone(),
             expand_btn,
             compact_restore_btn: compact_restore_btn.clone(),
-            _compact_kill_btn: compact_kill_btn.clone(),
-            compact_top_bar,
             notice,
             notice_label,
             notice_generation: Rc::new(Cell::new(0)),
@@ -956,13 +1072,13 @@ impl MiniTerminalCard {
             let header = card.header.clone();
             let footer = card.footer.clone();
             let preview_label = card.preview_label.clone();
-            let icon_box = card.icon_box.clone();
-            let compact_top_bar = card.compact_top_bar.clone();
+            let compact = card.compact.clone();
             let expand_btn = card.expand_btn.clone();
             let hint_label = card.hint_label.clone();
             let source_message = Rc::clone(&source_message);
             let compact_restore_btn = card.compact_restore_btn.clone();
             let remote = card.remote.clone();
+            let fit = Rc::clone(&card.fit);
             let on_save = Rc::clone(&on_drag_end);
             Rc::new(move || {
                 if *expanded.borrow() {
@@ -973,14 +1089,16 @@ impl MiniTerminalCard {
                     hint_label.set_label(&card_hint(&source_message));
                 }
                 remove_vte(&vte, &preview_box);
+                // The icon of a remote card is the host's, at the view's scale.
+                let side = icon_side(fit.get().2);
                 {
                     let mut d = data.borrow_mut();
-                    if d.width > ICON_SIZE || d.height > ICON_SIZE {
+                    if d.width > side || d.height > side {
                         d.restored_width = d.width;
                         d.restored_height = d.height;
                     }
-                    d.width = ICON_SIZE;
-                    d.height = ICON_SIZE;
+                    d.width = side;
+                    d.height = side;
                     d.iconified = true;
                     // Minimizing returns to the remembered icon spot.
                     seed_icon_pos(&mut d);
@@ -989,19 +1107,18 @@ impl MiniTerminalCard {
                         d.restored_width, d.restored_height
                     )));
                 }
-                container.set_size_request(ICON_SIZE, ICON_SIZE);
+                container.set_size_request(side, side);
                 apply_layout(
                     false,
-                    ICON_SIZE,
-                    ICON_SIZE,
+                    side,
+                    side,
                     true,
                     screen_w,
                     &container,
                     &header,
                     &footer,
                     &preview_label,
-                    &icon_box,
-                    &compact_top_bar,
+                    &compact,
                     false,
                 );
                 on_save(container.clone().upcast(), &data.borrow());
@@ -1023,8 +1140,7 @@ impl MiniTerminalCard {
             let header = card.header.clone();
             let footer = card.footer.clone();
             let preview_label = card.preview_label.clone();
-            let icon_box = card.icon_box.clone();
-            let compact_top_bar = card.compact_top_bar.clone();
+            let compact = card.compact.clone();
             let expand_btn = card.expand_btn.clone();
             let hint_label = card.hint_label.clone();
             let source_message = Rc::clone(&source_message);
@@ -1088,8 +1204,7 @@ impl MiniTerminalCard {
                     &header,
                     &footer,
                     &preview_label,
-                    &icon_box,
-                    &compact_top_bar,
+                    &compact,
                     vte.borrow().is_some(),
                 );
                 on_save(container.clone().upcast(), &data.borrow());
@@ -1490,8 +1605,7 @@ impl MiniTerminalCard {
             &self.header,
             &self.footer,
             &self.preview_label,
-            &self.icon_box,
-            &self.compact_top_bar,
+            &self.compact,
             vte_attached,
         );
     }
@@ -1508,7 +1622,7 @@ impl MiniTerminalCard {
     pub fn show_notice(&self, notice: crate::command_feedback::Notice) {
         reveal_notice(
             (&self.notice, &self.notice_label, &self.notice_generation),
-            (&self.header, &self.compact_top_bar),
+            (&self.header, &self.compact.top_bar),
             notice,
         );
     }
@@ -1590,7 +1704,7 @@ impl MiniTerminalCard {
         }
         apply_status_view(
             &self.status_badge,
-            &self.compact_status,
+            &self.compact.status,
             match alive {
                 Some(false) => "EXITED",
                 // The host's session is alive but its state is the host's
@@ -1857,7 +1971,7 @@ impl MiniTerminalCard {
         };
 
         let status_badge = self.status_badge.downgrade();
-        let compact_status = self.compact_status.downgrade();
+        let compact_status = self.compact.status.downgrade();
         let preview_label = self.preview_label.downgrade();
         let meta_label = self.meta_label.downgrade();
         let title_label = self.title_label.downgrade();
@@ -1882,7 +1996,7 @@ impl MiniTerminalCard {
             }
         };
         let notice_parts = (self.notice.downgrade(), self.notice_label.downgrade(),
-            Rc::clone(&self.notice_generation), self.header.downgrade(), self.compact_top_bar.downgrade());
+            Rc::clone(&self.notice_generation), self.header.downgrade(), self.compact.top_bar.downgrade());
         let notice_session = sess_name.clone();
         let data_weak = Rc::downgrade(&self.data);
         let data_snapshot: Option<TerminalData> =
@@ -2348,27 +2462,27 @@ fn spawn_vte(
 
 fn apply_layout(
     expanded: bool,
-    _width: i32,
-    _height: i32,
+    width: i32,
+    height: i32,
     iconified: bool,
     _screen_w: i32,
     root: &Overlay,
     header: &gtk4::Box,
     footer: &gtk4::Box,
     preview_label: &Label,
-    icon_box: &gtk4::Box,
-    compact_top_bar: &gtk4::Box,
+    chrome: &CompactChrome,
     vte_attached: bool,
 ) {
     let compact = !expanded && iconified;
     header.set_visible(!compact);
     footer.set_visible(!compact);
     preview_label.set_visible(!compact && !expanded && !vte_attached);
-    icon_box.set_visible(compact);
-    compact_top_bar.set_visible(compact && !expanded);
+    chrome.icon_box.set_visible(compact);
+    chrome.top_bar.set_visible(compact && !expanded);
     crate::card_resize::set_resize_borders_visible(root, !expanded && !compact);
 
     if compact {
+        chrome.fit(width.min(height));
         root.add_css_class("term-compact");
     } else {
         root.remove_css_class("term-compact");

@@ -112,6 +112,10 @@ and click **Revoke**. The viewer's streams close within a second.
   To zoom (25–300%), use Ctrl+scroll or pinch; click the button to return to
   100%. Terminals are redrawn at the new font size rather than scaled. The view
   is never sent to the host or saved.
+- An outline in the theme's accent colour marks the edges of that PC's screen.
+  **Fit** centres it with a margin on every side; at **100%** you can scroll a
+  margin past each edge, so the outline stays visible at both ends. A card you
+  drag stops at that edge, so it always stays whole on that PC's screen.
 - Each action reports its result in a short line under the card's header, or
   under the top bar for launches and folder picks. The line clears itself.
   - *Changed on that PC · showing its layout*: someone changed that card there
@@ -119,6 +123,12 @@ and click **Revoke**. The viewer's streams close within a second.
   - *Cannot reach that PC · change not applied*: the request never arrived.
   - *Result unknown · check before retrying*: the request was sent but no
     answer came back. It is never resent automatically.
+- While a PC is connecting or cannot be reached, its workspace shows why and
+  what to do, above a checklist of each link between the two PCs: this PC's
+  network (Wi-Fi name or Ethernet, and address), Tailscale (on or off, and
+  whether that PC is online in your tailnet), the route to that PC, and
+  whether its port 8759 answers. **Retry now** tries again at once and
+  repeats the checks; **Pair again** appears when only a new pairing helps.
 - Switching back to **This PC**, hiding the overlay, or restarting either PC
   leaves every harness running.
 
@@ -130,8 +140,10 @@ button, and removing a saved PC from the GUI. To remove a saved PC, run
 | You see | Do this |
 | --- | --- |
 | *Update SUPER DESKTOP on the host* (or *on that PC*) | That PC runs an older build: `git pull && ./rebuild.sh` there. |
-| *Pairing required · Add this PC again* | The host revoked this PC, or its 90-day credential expired. Pair again with a new link. |
-| *Cannot reach this PC* or *Reconnecting…* | Check that the host is on, SUPER DESKTOP is running there, and port 8759/tcp is reachable over LAN or Tailscale. Consoles reconnect on their own. |
+| *… needs pairing again* or *Pairing required · Add this PC again* | The host revoked this PC, or its 90-day credential expired. Click **Pair again** and use a new link. |
+| *… is not answering*, *Cannot reach this PC* or *Reconnecting…* | Check that the host is on, SUPER DESKTOP is running there, and port 8759/tcp is reachable over LAN or Tailscale. The checklist under the message shows which link fails. Consoles reconnect on their own. |
+| *Tailscale is off on this PC* | That PC was paired at its Tailscale address. Run `tailscale up` on this PC. |
+| *… is on another network* | That PC's LAN address is outside this PC's network. Join its network, or pair the two PCs over Tailscale. |
 | *That PC restarted · change not applied* | Its SUPER DESKTOP restarted before the change arrived, and the view has refreshed. Repeat the action if you still want it. |
 | *The other PC rejected this PC earlier…* | On the host, remove this PC in Settings → Connections → Rejected devices, then use a new link. |
 | *The other PC already has a request from this address* | Wait two minutes for that request to expire, then use a new link. |

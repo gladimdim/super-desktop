@@ -34,14 +34,15 @@ pub type ModeCallback = Rc<dyn Fn(ViewMode)>;
 
 /// The host's workspace, rendered live inside the viewer's canvas.
 pub struct RemoteCanvas {
-    /// `message` (status/errors) or `canvas` (live cards).
+    /// `message` (a status line), `canvas` (live cards), or a page its owner
+    /// adds (the machine selector's connection panel).
     pub area: gtk4::Stack,
     /// The viewport. In Fit mode it never scrolls; in 100% mode it pans over
     /// the host's workspace. It asks for no size of its own, so neither a
     /// large host nor an off-screen card can enlarge the overlay window.
     scroller: gtk4::ScrolledWindow,
-    /// Sized to exactly the host workspace at the current scale (the
-    /// scroll range), and centered in the viewport when it is smaller.
+    /// The host workspace at the current scale with `GUTTER` margins (the
+    /// scroll range), centered in the viewport when it fits.
     page: gtk4::Overlay,
     frame: gtk4::Box,
     /// The cards, in canvas pixels (`host × scale`). An overlay child of
@@ -115,8 +116,8 @@ impl RemoteCanvas {
         message.set_justify(gtk4::Justification::Center);
         message.add_css_class("term-preview-text");
         area.add_named(&message, Some("message"));
-        // viewport → page (host-sized, centered) → frame (background) with
-        // the card canvas laid over it.
+        // viewport → page (host-sized plus its gutter, centered) → frame
+        // (background) with the card canvas and then the border laid over it.
         let frame = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
         frame.add_css_class("remote-canvas");
         let canvas = gtk4::Fixed::new();
@@ -125,10 +126,21 @@ impl RemoteCanvas {
         let page = gtk4::Overlay::new();
         page.set_halign(gtk4::Align::Center);
         page.set_valign(gtk4::Align::Center);
+        page.set_margin_start(remote_workspace::GUTTER);
+        page.set_margin_end(remote_workspace::GUTTER);
+        page.set_margin_top(remote_workspace::GUTTER);
+        page.set_margin_bottom(remote_workspace::GUTTER);
         page.set_child(Some(&frame));
         page.add_overlay(&canvas);
         page.set_measure_overlay(&canvas, false);
         page.set_clip_overlay(&canvas, false);
+        // That PC's screen edge, drawn over its cards so it shows at any zoom
+        // and against any wallpaper. It never takes a click.
+        let border = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        border.add_css_class("remote-canvas-border");
+        border.set_can_target(false);
+        page.add_overlay(&border);
+        page.set_measure_overlay(&border, false);
         let scroller = gtk4::ScrolledWindow::new();
         scroller.set_policy(gtk4::PolicyType::External, gtk4::PolicyType::External);
         scroller.set_propagate_natural_width(false);
@@ -383,17 +395,18 @@ impl RemoteCanvas {
     /// here as well, so the value is not clamped against the previous zoom's
     /// range before the viewport's next allocation catches up.
     fn show_pan(&self, transform: &ViewTransform) {
+        let (width, height) = transform.extent();
         for (adjustment, value, content, page) in [
             (
                 self.scroller.hadjustment(),
                 transform.pan_x,
-                transform.content_width,
+                width,
                 transform.view_width,
             ),
             (
                 self.scroller.vadjustment(),
                 transform.pan_y,
-                transform.content_height,
+                height,
                 transform.view_height,
             ),
         ] {
@@ -851,11 +864,23 @@ impl RemoteCanvas {
 
         let weak_update = Rc::downgrade(self);
         let id_update = id.clone();
+        let slot_drag = Rc::clone(&slot);
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
-            // The gesture owns this card's geometry until it ends: a snapshot
-            // that arrives mid-drag must not pull the card back.
+            let (mut x, mut y) = (x, y);
             if let Some(view) = weak_update.upgrade() {
+                // The gesture owns this card's geometry until it ends: a
+                // snapshot that arrives mid-drag must not pull the card back.
                 view.gesturing.borrow_mut().insert(id_update.clone());
+                // The card stops at that PC's screen edge instead of sliding
+                // under it.
+                (x, y) = view.keep_inside(&id_update, x, y);
+                if let Some(card) = slot_drag.borrow().as_ref() {
+                    crate::mini_terminal::set_displayed_pos(
+                        &mut card.data.borrow_mut(),
+                        x.round() as i32,
+                        y.round() as i32,
+                    );
+                }
             }
             canvas_for_drag.move_(&widget, x, y);
         };
@@ -962,10 +987,13 @@ impl RemoteCanvas {
             return;
         };
         let scale = self.scale();
-        let Some(layout) = host_layout(&host, data, scale) else {
+        let Some(mut layout) = host_layout(&host, data, scale) else {
             self.relayout();
             return;
         };
+        if let Some(size) = self.host_size() {
+            keep_on_screen(&host, &mut layout, size);
+        }
         // Keep the card where it was released until the host confirms it, so a
         // poll that started before this command cannot pull it back.
         let origin = if layout.iconified {
@@ -1385,6 +1413,25 @@ impl RemoteCanvas {
         self.transform().scale
     }
 
+    /// A card's canvas position `(x, y)` during a drag, held where all of the
+    /// card stays on the host's screen (`remote_workspace::card_origin_range`).
+    fn keep_inside(&self, card_id: &str, x: f64, y: f64) -> (f64, f64) {
+        let (Some(host), Some((width, height))) = (self.card(card_id), self.host_size()) else {
+            return (x, y);
+        };
+        let scale = self.scale();
+        if host.expanded || !scale.is_finite() || scale <= 0.0 {
+            return (x, y);
+        }
+        let rect = remote_workspace::card_rect(&host, width, height);
+        let ((min_x, max_x), (min_y, max_y)) =
+            remote_workspace::card_origin_range(width, height, rect.width, rect.height);
+        (
+            (x / scale).clamp(min_x, max_x) * scale,
+            (y / scale).clamp(min_y, max_y) * scale,
+        )
+    }
+
     /// The whole host canvas in this view's pixels. A card's own gestures are
     /// bounded by it, exactly as a local card is bounded by the screen.
     fn fitted_size(&self) -> (i32, i32) {
@@ -1440,6 +1487,27 @@ fn fit_card_body(card: &MiniTerminalCard, width: i32, height: i32, scale: f64) {
 /// Moving, resizing and iconifying are the same command because the card's own
 /// gestures already wrote all of them into `data`: one drop carries whatever
 /// the user changed.
+/// Hold a dropped card's origin where all of it stays on the host's screen of
+/// `width × height`: the icon's spot for an icon, the card's for a card.
+fn keep_on_screen(host: &DesktopCard, layout: &mut CardLayout, (width, height): (u32, u32)) {
+    if host.expanded {
+        return;
+    }
+    let mut dropped = host.clone();
+    dropped.layout = layout.clone();
+    let rect = remote_workspace::card_rect(&dropped, width, height);
+    let inside = |x, y| remote_workspace::clamp_card_inside(width, height, rect.width, rect.height, x, y);
+    if layout.iconified {
+        let (x, y) = inside(
+            layout.icon_x.unwrap_or(layout.x),
+            layout.icon_y.unwrap_or(layout.y),
+        );
+        (layout.icon_x, layout.icon_y) = (Some(x), Some(y));
+    } else {
+        (layout.x, layout.y) = inside(layout.x, layout.y);
+    }
+}
+
 fn host_layout(host: &DesktopCard, data: &TerminalData, scale: f64) -> Option<CardLayout> {
     if !scale.is_finite() || scale <= 0.0 {
         return None;
@@ -1459,8 +1527,17 @@ fn host_layout(host: &DesktopCard, data: &TerminalData, scale: f64) -> Option<Ca
         layout.iconified = false;
         layout.x = to_host(f64::from(data.x)).clamp(-MAX, MAX);
         layout.y = to_host(f64::from(data.y)).clamp(-MAX, MAX);
-        let width = to_host(f64::from(data.width)).clamp(1, MAX) as u32;
-        let height = to_host(f64::from(data.height)).clamp(1, MAX) as u32;
+        // A size this view drew from the host's own is the host's own: a move
+        // must not round the card a pixel smaller or larger on every drop.
+        let size = |drawn: i32, own: u32| {
+            if drawn == (f64::from(own) * scale).round().max(24.0) as i32 {
+                own
+            } else {
+                to_host(f64::from(drawn)).clamp(1, MAX) as u32
+            }
+        };
+        let width = size(data.width, host.layout.width);
+        let height = size(data.height, host.layout.height);
         layout.width = width;
         layout.height = height;
         layout.restored_width = width;
@@ -1571,6 +1648,16 @@ mod tests {
         assert_eq!((layout.width, layout.height), (640, 480));
         // A scale that cannot be inverted is refused rather than guessed at.
         assert!(host_layout(&host, &data, 0.0).is_none());
+        // At a scale that does not divide evenly, a move keeps the host's own
+        // size instead of rounding it on every drop; a resize still counts.
+        let mut odd = terminal_data(&host, 0.39);
+        // What `relayout` draws a 640×480 card at: 249.6 and 187.2, rounded.
+        (odd.width, odd.height) = (250, 187);
+        let layout = host_layout(&host, &odd, 0.39).unwrap();
+        assert_eq!((layout.width, layout.height), (640, 480));
+        let mut resized = odd.clone();
+        resized.width = 300;
+        assert_eq!(host_layout(&host, &resized, 0.39).unwrap().width, 769);
 
         // An icon moves in its own slot and keeps the saved card origin.
         data.iconified = true;
@@ -1813,7 +1900,8 @@ mod tests {
         let canvas = RemoteCanvas::new();
         canvas.capture_commands();
         let window = gtk4::Window::new();
-        window.set_default_size(960, 600);
+        // 960 px of workspace plus the gutter on both sides: half scale.
+        window.set_default_size(992, 600);
         window.set_resizable(false);
         window.set_child(Some(&canvas.area));
         window.present();
@@ -1831,7 +1919,7 @@ mod tests {
         let peer = peer_client::test_peer('a');
         canvas.apply(&peer, &snapshot, true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while canvas.viewport().width() != 960 || canvas.viewport().height() != 600 {
+        while canvas.viewport().width() != 992 || canvas.viewport().height() != 600 {
             pump();
             assert!(std::time::Instant::now() < deadline, "viewport never allocated");
         }
@@ -1925,10 +2013,11 @@ mod tests {
         pump();
         let t = canvas.transform();
         assert_eq!((t.pan_x, t.pan_y), (60.0, 150.0));
-        assert!(near(drawn(), (40.0, 50.0)), "{:?}", drawn());
+        // Host (100, 200), less the pan, plus the gutter.
+        assert!(near(drawn(), (56.0, 66.0)), "{:?}", drawn());
         assert!(near(drawn(), t.host_to_view(100.0, 200.0)));
         // Grab the header where it is drawn, drop it 300 → and 100 ↓.
-        canvas.drag_card_in_view("card-one", (60.0, 58.0), (360.0, 158.0));
+        canvas.drag_card_in_view("card-one", (76.0, 74.0), (376.0, 174.0));
         match canvas.captured().last() {
             Some(WorkspaceCommand::SetLayout { expected_revision, layout, .. }) => {
                 // The revision the conflict published travels with the drop.
@@ -1993,6 +2082,177 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_is_centered_and_its_edge_stays_in_view() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::gutter_inner");
+    }
+
+    #[test]
+    fn gutter_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let canvas = RemoteCanvas::new();
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 500);
+        window.set_child(Some(&canvas.area));
+        window.present();
+        let peer = peer_client::test_peer('a');
+        let gutter = f32::from(i16::try_from(remote_workspace::GUTTER).unwrap());
+        // Clear of an overlay scrollbar, whatever the gutter is set to.
+        assert!(gutter >= 8.0, "the screen edge needs room to be seen");
+        let border = {
+            let mut child = canvas.page.first_child();
+            loop {
+                let widget = child.expect("the border is a page overlay");
+                if widget.has_css_class("remote-canvas-border") {
+                    break widget;
+                }
+                child = widget.next_sibling();
+            }
+        };
+        assert!(!border.can_target(), "the border never takes a click");
+        // The frame's margins inside the viewport, once GTK has drawn what
+        // the transform says: (left, right, top, bottom).
+        let edges = |what: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                let t = canvas.transform();
+                let (Some(view), Some(frame)) = (
+                    canvas.scroller.compute_bounds(&window),
+                    canvas.frame.compute_bounds(&window),
+                ) else {
+                    continue;
+                };
+                let (x, y) = t.origin();
+                let drawn = (frame.x() - view.x(), frame.y() - view.y());
+                if t.view_width > 1
+                    && (f64::from(drawn.0) - x).abs() <= 0.5
+                    && (f64::from(drawn.1) - y).abs() <= 0.5
+                    && frame.width() as i32 == t.content_width
+                    && frame.height() as i32 == t.content_height
+                {
+                    assert_eq!(border.compute_bounds(&window), Some(frame), "{what}: border on the edge");
+                    break (
+                        drawn.0,
+                        view.width() - drawn.0 - frame.width(),
+                        drawn.1,
+                        view.height() - drawn.1 - frame.height(),
+                    );
+                }
+                assert!(std::time::Instant::now() < deadline, "{what}: never drawn where the transform says");
+            }
+        };
+        for (host_width, host_height) in [(3440, 1440), (1920, 1200), (400, 300)] {
+            let mut snapshot = crate::remote_workspace::fixture();
+            snapshot.local.canvas.width = host_width;
+            snapshot.local.canvas.height = host_height;
+            snapshot.local.cards[0].session_alive = Some(false);
+            canvas.clear();
+            canvas.apply(&peer, &snapshot, true);
+            let case = format!("host {host_width}x{host_height}");
+            // Fit: centered, with at least the gutter on every side.
+            canvas.set_mode(ViewMode::Fit, None);
+            let (left, right, top, bottom) = edges(&format!("{case} Fit"));
+            assert!(left >= gutter && right >= gutter && top >= gutter && bottom >= gutter, "{case}: {left} {right} {top} {bottom}");
+            assert!((left - right).abs() <= 1.0 && (top - bottom).abs() <= 1.0, "{case}: centered");
+            // 100%, panned to either end: the edge on that side is one gutter
+            // inside the viewport, never under the display's edge.
+            canvas.set_mode(ViewMode::Actual { zoom: 1.0 }, None);
+            let scrolls = canvas.transform().max_pan();
+            for (end, value) in [("start", 0.0), ("end", 1.0e9)] {
+                canvas.scroller.hadjustment().set_value(value);
+                canvas.scroller.vadjustment().set_value(value);
+                let (left, right, top, bottom) = edges(&format!("{case} 100% {end}"));
+                let (near_x, near_y) = if value == 0.0 { (left, top) } else { (right, bottom) };
+                if scrolls.0 > 0.0 {
+                    assert_eq!(near_x, gutter, "{case} 100% {end}");
+                } else {
+                    assert!((left - right).abs() <= 1.0 && left >= gutter, "{case}: centered");
+                }
+                if scrolls.1 > 0.0 {
+                    assert_eq!(near_y, gutter, "{case} 100% {end}");
+                } else {
+                    assert!((top - bottom).abs() <= 1.0 && top >= gutter, "{case}: centered");
+                }
+            }
+        }
+        window.close();
+    }
+
+    #[test]
+    fn a_card_cannot_be_dragged_off_that_pcs_screen() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::keep_inside_inner");
+    }
+
+    #[test]
+    fn keep_inside_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let canvas = RemoteCanvas::new();
+        canvas.capture_commands();
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 500);
+        window.set_child(Some(&canvas.area));
+        window.present();
+        // Host 1920×1080 with one 640×480 card. Its session is gone, so this
+        // check opens no socket.
+        let peer = peer_client::test_peer('a');
+        let mut snapshot = crate::remote_workspace::fixture();
+        snapshot.local.cards[0].session_alive = Some(false);
+        let show = |snapshot: &WorkspaceSnapshot| {
+            canvas.clear();
+            canvas.apply(&peer, snapshot, true);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                let card = canvas.card_widget("card-one").unwrap();
+                let origin = gtk4::graphene::Point::new(0.0, 0.0);
+                if canvas.transform().view_width > 1 && card.container.compute_point(&window, &origin).is_some() {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "never drawn");
+            }
+        };
+        let dropped = |grab: (f64, f64), release: (f64, f64)| {
+            canvas.drag_card_in_view("card-one", grab, release);
+            match canvas.captured().last() {
+                Some(WorkspaceCommand::SetLayout { layout, .. }) => layout.clone(),
+                other => panic!("expected a layout command, got {other:?}"),
+            }
+        };
+        let close = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).abs() < 1e-6 && (a.1 - b.1).abs() < 1e-6;
+        show(&snapshot);
+        let scale = canvas.transform().scale;
+        let at = |x: f64, y: f64| (x * scale, y * scale);
+        // While dragging, the card stops at each edge of that PC's screen.
+        assert!(close(canvas.keep_inside("card-one", -5000.0, -5000.0), at(10.0, 70.0)));
+        assert!(close(canvas.keep_inside("card-one", 1e6, 1e6), at(1270.0, 590.0)));
+        assert!(close(canvas.keep_inside("card-one", 300.0 * scale, 200.0 * scale), at(300.0, 200.0)));
+        // A drop past an edge is sent where the whole card is still on it.
+        let layout = dropped((0.0, 0.0), (-5000.0, -5000.0));
+        assert_eq!((layout.x, layout.y), (10, 70));
+        let layout = dropped((0.0, 0.0), (20000.0, 20000.0));
+        assert_eq!((layout.x, layout.y), (1270, 590));
+        assert_eq!((layout.width, layout.height), (640, 480), "a move never resizes");
+        // An icon keeps its 128 px square on the screen the same way.
+        snapshot.local.cards[0].layout.iconified = true;
+        show(&snapshot);
+        assert!(close(canvas.keep_inside("card-one", 1e6, -1e6), at(1782.0, 70.0)));
+        let layout = dropped((0.0, 0.0), (20000.0, 20000.0));
+        assert_eq!((layout.icon_x, layout.icon_y), (Some(1782), Some(942)));
+        assert_eq!((layout.x, layout.y), (100, 200), "the card's own spot is untouched");
+        window.close();
+    }
+
+    #[test]
     fn remote_consoles_are_the_same_widget_the_local_workspace_uses() {
         crate::gtk_test::run_in_child_process("remote_terminal::tests::widget_inner");
     }
@@ -2025,5 +2285,157 @@ mod tests {
         snapshot.local.cards.clear();
         canvas.apply(&peer_client::test_peer('a'), &snapshot, true);
         assert_eq!(canvas.card_count(), 0);
+    }
+
+    #[test]
+    fn a_remote_icon_draws_its_chrome_at_the_views_scale() {
+        crate::gtk_test::run_in_child_process("remote_terminal::tests::icon_chrome_inner");
+    }
+
+    /// Every widget drawn inside `root`, with its class names.
+    fn drawn_widgets(root: &gtk4::Widget) -> Vec<gtk4::Widget> {
+        let mut found = Vec::new();
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            if widget.is_drawable() && !widget.is::<gtk4::Popover>() {
+                found.push(widget.clone());
+                found.extend(drawn_widgets(&widget));
+            }
+            child = widget.next_sibling();
+        }
+        found
+    }
+
+    #[test]
+    fn icon_chrome_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let canvas = RemoteCanvas::new();
+        canvas.capture_commands();
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 450);
+        window.set_resizable(false);
+        window.set_child(Some(&canvas.area));
+        window.present();
+        let pump = || {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        let peer = peer_client::test_peer('a');
+        let icon_snapshot = |host_width: u32| {
+            let mut snapshot = crate::remote_workspace::fixture();
+            snapshot.local.canvas.width = host_width;
+            snapshot.local.canvas.height = host_width * 9 / 16;
+            snapshot.local.cards[0].session_alive = Some(false);
+            snapshot.local.cards[0].layout.iconified = true;
+            snapshot
+        };
+        // The canvas is shown with the first snapshot; the scale needs its size.
+        canvas.apply(&peer, &icon_snapshot(640), true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while canvas.viewport().width() < 700 {
+            pump();
+            assert!(std::time::Instant::now() < deadline, "viewport never allocated");
+        }
+        let bounds = |widget: &gtk4::Widget, card: &Rc<MiniTerminalCard>| {
+            widget.compute_bounds(&card.container).expect("allocated")
+        };
+        let with_class = |card: &Rc<MiniTerminalCard>, class: &str| {
+            drawn_widgets(card.container.upcast_ref())
+                .into_iter()
+                .filter(|widget| widget.has_css_class(class))
+                .collect::<Vec<_>>()
+        };
+
+        // The host's icon at 100%, fitted to a smaller view, fitted to a tiny
+        // one, and zoomed in. Its session is gone, so this opens no socket.
+        let cases = [
+            (640, ViewMode::Fit),
+            (1280, ViewMode::Fit),
+            (1920, ViewMode::Fit),
+            (3840, ViewMode::Fit),
+            (1920, ViewMode::Actual { zoom: 2.0 }),
+        ];
+        for (host_width, mode) in cases {
+            canvas.clear();
+            canvas.apply(&peer, &icon_snapshot(host_width), true);
+            canvas.set_mode(mode, Some((0.0, 0.0)));
+            let scale = canvas.transform().scale;
+            let side = (128.0 * scale).round().max(24.0);
+            let case = format!("host {host_width} px, {mode:?}, scale {scale:.3}");
+            let card = canvas.card_widget("card-one").unwrap();
+            // The icon is the host's 128 px square at this scale, not the size
+            // its chrome would ask for.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let icon = loop {
+                pump();
+                if let Some(icon) = card.container.compute_bounds(&card.container) {
+                    // Within the card's 1.5 px border's rounding.
+                    if (f64::from(icon.width()) - side).abs() <= 1.0
+                        && (f64::from(icon.height()) - side).abs() <= 1.0
+                    {
+                        break icon;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{case}: icon never took its {side} px side, is {:?}",
+                    card.container.compute_bounds(&card.container)
+                );
+            };
+            assert!(card.is_compact(), "{case}");
+
+            // Nothing of the icon is drawn outside it: not the bar, not a
+            // button, not the logo or the name.
+            for widget in drawn_widgets(card.container.upcast_ref()) {
+                let inner = bounds(&widget, &card);
+                assert!(
+                    inner.x() >= icon.x() - 0.5
+                        && inner.y() >= icon.y() - 0.5
+                        && inner.x() + inner.width() <= icon.x() + icon.width() + 0.5
+                        && inner.y() + inner.height() <= icon.y() + icon.height() + 0.5,
+                    "{case}: {} {:?} at {:?} leaves the icon {:?}",
+                    widget.type_(),
+                    widget.css_classes(),
+                    inner,
+                    icon
+                );
+            }
+
+            // The bar and its buttons are the host icon's, scaled like it: a
+            // 32×26 button on a 128 px icon.
+            let k = (side - 4.0) / 124.0;
+            let bar = with_class(&card, "term-compact-top-bar");
+            assert_eq!(bar.len(), 1, "{case}: the bar is drawn");
+            let buttons = with_class(&card, "term-compact-btn");
+            assert_eq!(buttons.len(), 2, "{case}: restore and close are drawn");
+            for button in &buttons {
+                let drawn = bounds(button, &card);
+                assert!(
+                    (f64::from(drawn.width()) - 32.0 * k).abs() <= 1.5
+                        && (f64::from(drawn.height()) - 26.0 * k).abs() <= 1.5,
+                    "{case}: button {drawn:?} is not 32×26 at {k:.3}"
+                );
+            }
+            let bar = bounds(&bar[0], &card);
+            assert!(
+                f64::from(bar.height()) <= 34.0 * k + 1.5,
+                "{case}: bar {bar:?} is taller than the icon's own at {k:.3}"
+            );
+            // The corners round like a 128 px icon's 18 px.
+            let radius = ((18.0 * side / 128.0).round() as i32).clamp(1, 72);
+            assert!(
+                card.container.has_css_class(&format!("term-icon-radius-{radius}")),
+                "{case}: {:?}",
+                card.container.css_classes()
+            );
+            // The name is shown while it is readable, and dropped below.
+            let named = !with_class(&card, "term-agent-name").is_empty();
+            assert_eq!(named, 11.0 * k >= 8.0, "{case}: name shown = {named}");
+        }
+        window.close();
     }
 }

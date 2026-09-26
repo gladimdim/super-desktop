@@ -124,6 +124,11 @@ impl Default for ViewMode {
     }
 }
 
+/// Space kept around the host workspace on every side, in both modes: its
+/// border is never flush with the viewer's edge or under an overlay
+/// scrollbar, and panning to either end shows the same margin.
+pub const GUTTER: i32 = 16;
+
 /// Zoom bounds in 100% mode. The emulator's own font bounds
 /// (`card_source::MIN_FONT`/`MAX_FONT`) make anything beyond these unreadable.
 pub const MIN_ZOOM: f64 = 0.25;
@@ -144,8 +149,8 @@ pub fn clamp_zoom(zoom: f64) -> f64 {
 /// * **host** — the host's logical pixels, what every command carries;
 /// * **canvas** — the scaled workspace the cards live in (`host × scale`);
 ///   a card's own gestures work here, so pan never reaches them;
-/// * **view** — the visible viewport: the canvas centered when it is smaller
-///   than the viewport, and scrolled by `pan` when it is larger.
+/// * **view** — the visible viewport: the canvas centered when it fits with
+///   its `GUTTER` on both sides, and scrolled by `pan` when it does not.
 ///
 /// Sizes are rounded to whole pixels exactly as GTK allocates them, so the
 /// transform matches the real widget geometry and input coordinates.
@@ -177,7 +182,8 @@ impl ViewTransform {
         let view_height = view_height.max(1);
         let scale = match mode {
             ViewMode::Fit => {
-                fit(host_width, host_height, f64::from(view_width), f64::from(view_height)).0
+                let inner = |view: i32| f64::from(view - 2 * GUTTER);
+                fit(host_width, host_height, inner(view_width), inner(view_height)).0
             }
             ViewMode::Actual { zoom } => clamp_zoom(zoom),
         };
@@ -198,11 +204,20 @@ impl ViewTransform {
         transform
     }
 
+    /// The scroll range: the content with its gutter on both sides.
+    pub fn extent(&self) -> (i32, i32) {
+        (
+            self.content_width + 2 * GUTTER,
+            self.content_height + 2 * GUTTER,
+        )
+    }
+
     /// The largest pan on each axis: zero when the content fits.
     pub fn max_pan(&self) -> (f64, f64) {
+        let (width, height) = self.extent();
         (
-            f64::from((self.content_width - self.view_width).max(0)),
-            f64::from((self.content_height - self.view_height).max(0)),
+            f64::from((width - self.view_width).max(0)),
+            f64::from((height - self.view_height).max(0)),
         )
     }
 
@@ -221,11 +236,20 @@ impl ViewTransform {
         self.pan_y = clamp(pan.1, max_y);
     }
 
-    /// Where the canvas's origin is in the viewport.
+    /// Where the canvas's origin is in the viewport: centered when the
+    /// content fits with its gutter (as GTK centers the page and its
+    /// margins), else one gutter in from the scrolled edge.
     pub fn origin(&self) -> (f64, f64) {
+        let axis = |view: i32, content: i32, pan: f64| {
+            if content + 2 * GUTTER <= view {
+                f64::from((view - content) / 2)
+            } else {
+                f64::from(GUTTER) - pan
+            }
+        };
         (
-            f64::from((self.view_width - self.content_width).max(0) / 2) - self.pan_x,
-            f64::from((self.view_height - self.content_height).max(0) / 2) - self.pan_y,
+            axis(self.view_width, self.content_width, self.pan_x),
+            axis(self.view_height, self.content_height, self.pan_y),
         )
     }
 
@@ -262,11 +286,12 @@ impl ViewTransform {
             (0.0, 0.0),
         );
         if !matches!(mode, ViewMode::Fit) {
-            let centered_x = f64::from((next.view_width - next.content_width).max(0) / 2);
-            let centered_y = f64::from((next.view_height - next.content_height).max(0) / 2);
+            // The pan that puts the origin where the point stays put; a
+            // workspace that fits cannot pan and is centered instead.
+            let gutter = f64::from(GUTTER);
             next.set_pan((
-                centered_x + hx * next.scale - anchor.0,
-                centered_y + hy * next.scale - anchor.1,
+                gutter + hx * next.scale - anchor.0,
+                gutter + hy * next.scale - anchor.1,
             ));
         }
         next
@@ -279,6 +304,49 @@ pub fn clamp_card_origin(canvas_w: u32, canvas_h: u32, x: i32, y: i32) -> (i32, 
     let max_x = (canvas_w as i32 - 80).max(10);
     let max_y = (canvas_h as i32 - 60).max(70);
     (x.clamp(10, max_x), y.clamp(70, max_y))
+}
+
+/// How far a card stays in from the host's right and bottom edges; the left
+/// and top minimums are `clamp_card_origin`'s. A resize is held to the same box
+/// (`mini_terminal::workspace_limits`).
+const EDGE: f64 = 10.0;
+
+/// The origins a `card_w × card_h` card may have so that all of it stays on
+/// the host's screen, as `((min_x, max_x), (min_y, max_y))` in host pixels.
+/// None is an origin the host would move the card from, and a card larger
+/// than the screen keeps its top-left corner in view.
+pub fn card_origin_range(
+    canvas_w: u32,
+    canvas_h: u32,
+    card_w: f64,
+    card_h: f64,
+) -> ((f64, f64), (f64, f64)) {
+    let (min_x, min_y) = clamp_card_origin(canvas_w, canvas_h, i32::MIN, i32::MIN);
+    let (last_x, last_y) = clamp_card_origin(canvas_w, canvas_h, i32::MAX, i32::MAX);
+    let range = |min: i32, last: i32, side: u32, size: f64| {
+        let min = f64::from(min);
+        (min, (f64::from(side) - size - EDGE).min(f64::from(last)).max(min))
+    };
+    (
+        range(min_x, last_x, canvas_w, card_w),
+        range(min_y, last_y, canvas_h, card_h),
+    )
+}
+
+/// `card_origin_range` for a whole-pixel origin, as a command carries it.
+pub fn clamp_card_inside(
+    canvas_w: u32,
+    canvas_h: u32,
+    card_w: f64,
+    card_h: f64,
+    x: i32,
+    y: i32,
+) -> (i32, i32) {
+    let ((min_x, max_x), (min_y, max_y)) = card_origin_range(canvas_w, canvas_h, card_w, card_h);
+    (
+        f64::from(x).clamp(min_x, max_x).round() as i32,
+        f64::from(y).clamp(min_y, max_y).round() as i32,
+    )
 }
 
 #[cfg(test)]
@@ -310,15 +378,25 @@ mod tests {
 
     #[test]
     fn fit_transform_centers_and_never_enlarges() {
-        // Host larger than the viewer: half scale, centered vertically.
-        let t = ViewTransform::new(ViewMode::Fit, 1920, 1080, 960, 600, (400.0, 400.0));
+        // Host larger than the viewer: half scale inside the gutter, centered.
+        let t = ViewTransform::new(ViewMode::Fit, 1920, 1080, 992, 600, (400.0, 400.0));
         assert_eq!(t.scale, 0.5);
         assert_eq!((t.content_width, t.content_height), (960, 540));
         // Fit never pans, whatever is asked for.
         assert_eq!((t.pan_x, t.pan_y), (0.0, 0.0));
-        assert_eq!(t.origin(), (0.0, 30.0));
-        assert_eq!(t.host_to_view(100.0, 200.0), (50.0, 130.0));
-        assert_eq!(t.view_to_host(50.0, 130.0), (100.0, 200.0));
+        assert_eq!(t.max_pan(), (0.0, 0.0));
+        assert_eq!(t.origin(), (16.0, 30.0));
+        assert_eq!(t.host_to_view(100.0, 200.0), (66.0, 130.0));
+        assert_eq!(t.view_to_host(66.0, 130.0), (100.0, 200.0));
+        // Every edge keeps at least the gutter, on any viewer shape.
+        for (width, height) in [(992, 600), (3440, 1350), (1280, 1400), (600, 360)] {
+            let t = ViewTransform::new(ViewMode::Fit, 1920, 1080, width, height, (0.0, 0.0));
+            let (x, y) = t.origin();
+            assert!(x >= 16.0 && y >= 16.0, "{width}x{height}: {:?}", t.origin());
+            assert!(x + f64::from(t.content_width) <= f64::from(width - 16));
+            assert!(y + f64::from(t.content_height) <= f64::from(height - 16));
+            assert!((x - f64::from(width - t.content_width) / 2.0).abs() <= 0.5, "centered");
+        }
         // Host smaller than the viewer: 1:1 and centered, never scaled up.
         let t = ViewTransform::new(ViewMode::Fit, 1280, 720, 2560, 1440, (0.0, 0.0));
         assert_eq!(t.scale, 1.0);
@@ -338,12 +416,19 @@ mod tests {
         );
         assert_eq!(t.scale, 1.0);
         assert_eq!((t.content_width, t.content_height), (1920, 1080));
-        assert_eq!(t.max_pan(), (960.0, 480.0));
+        // The scroll range includes the gutter on both sides.
+        assert_eq!(t.max_pan(), (992.0, 512.0));
         assert_eq!((t.pan_x, t.pan_y), (500.0, 100.0));
         // A host point is exactly one viewer pixel per host pixel, shifted by
-        // the pan.
-        assert_eq!(t.host_to_view(700.0, 200.0), (200.0, 100.0));
-        assert_eq!(t.view_to_host(200.0, 100.0), (700.0, 200.0));
+        // the pan and the gutter.
+        assert_eq!(t.host_to_view(700.0, 200.0), (216.0, 116.0));
+        assert_eq!(t.view_to_host(216.0, 116.0), (700.0, 200.0));
+        // Both ends of the pan show the workspace's edge one gutter inside the
+        // viewport, never under its edge.
+        let start = ViewTransform::new(ViewMode::Actual { zoom: 1.0 }, 1920, 1080, 960, 600, (0.0, 0.0));
+        assert_eq!(start.host_to_view(0.0, 0.0), (16.0, 16.0));
+        let end = ViewTransform::new(ViewMode::Actual { zoom: 1.0 }, 1920, 1080, 960, 600, (1e9, 1e9));
+        assert_eq!(end.host_to_view(1920.0, 1080.0), (944.0, 584.0));
         // Pan is clamped to the content on both ends, and rounded like GTK.
         let t = ViewTransform::new(
             ViewMode::Actual { zoom: 1.0 },
@@ -353,7 +438,7 @@ mod tests {
             600,
             (5000.0, -40.0),
         );
-        assert_eq!((t.pan_x, t.pan_y), (960.0, 0.0));
+        assert_eq!((t.pan_x, t.pan_y), (992.0, 0.0));
         let t = ViewTransform::new(
             ViewMode::Actual { zoom: 1.0 },
             1920,
@@ -409,6 +494,32 @@ mod tests {
     }
 
     #[test]
+    fn a_card_stays_entirely_on_the_host_screen() {
+        let inside = |x, y| clamp_card_inside(1920, 1080, 640.0, 480.0, x, y);
+        // Past the top-left: the host's own minimum origin, below its bar.
+        assert_eq!(inside(-500, -500), (10, 70));
+        // Past the bottom-right: the whole card in view, 10 px from the edge.
+        assert_eq!(inside(5000, 5000), (1270, 590));
+        assert_eq!(inside(1600, 700), (1270, 590));
+        // Anywhere inside is left alone.
+        assert_eq!(inside(300, 200), (300, 200));
+        assert_eq!(inside(1270, 590), (1270, 590));
+        // An icon is its 128 px square.
+        assert_eq!(clamp_card_inside(1920, 1080, 128.0, 128.0, 9000, -9), (1782, 70));
+        // A card larger than the screen keeps its top-left corner in view.
+        assert_eq!(clamp_card_inside(800, 600, 1200.0, 900.0, 400, 400), (10, 70));
+        // Nothing here is an origin the host would move the card from.
+        for (x, y) in [(-500, -500), (5000, 5000), (300, 200), (10, 70)] {
+            let origin = clamp_card_inside(1920, 1080, 40.0, 30.0, x, y);
+            assert_eq!(clamp_card_origin(1920, 1080, origin.0, origin.1), origin);
+        }
+        assert_eq!(
+            card_origin_range(1920, 1080, 640.0, 480.0),
+            ((10.0, 1270.0), (70.0, 590.0))
+        );
+    }
+
+    #[test]
     fn zooming_keeps_the_point_under_the_anchor() {
         let host = (1920, 1080);
         let start = ViewTransform::new(ViewMode::Actual { zoom: 1.0 }, host.0, host.1, 800, 600, (400.0, 200.0));
@@ -421,17 +532,17 @@ mod tests {
         assert!((after.0 - under.0).abs() * zoomed.scale <= 0.5 + 1e-9);
         assert!((after.1 - under.1).abs() * zoomed.scale <= 0.5 + 1e-9);
         // Fit → 100% around the viewport center keeps the center's host point.
-        let fit = ViewTransform::new(ViewMode::Fit, host.0, host.1, 960, 600, (0.0, 0.0));
-        let center = (480.0, 300.0);
+        let fit = ViewTransform::new(ViewMode::Fit, host.0, host.1, 992, 600, (0.0, 0.0));
+        let center = (496.0, 300.0);
         let under = fit.view_to_host(center.0, center.1);
         let actual = fit.rezoomed(ViewMode::Actual { zoom: 1.0 }, host.0, host.1, center);
-        assert_eq!((actual.pan_x, actual.pan_y), (480.0, 240.0));
+        assert_eq!((actual.pan_x, actual.pan_y), (480.0, 256.0));
         assert!(close(actual.view_to_host(center.0, center.1), under));
         // Back to fit: the pan is gone and the whole workspace is visible.
         let back = actual.rezoomed(ViewMode::Fit, host.0, host.1, center);
         assert_eq!(back, fit);
         // An anchor near the edge cannot pan past the content.
-        let edge = fit.rezoomed(ViewMode::Actual { zoom: 3.0 }, host.0, host.1, (960.0, 600.0));
+        let edge = fit.rezoomed(ViewMode::Actual { zoom: 3.0 }, host.0, host.1, (992.0, 600.0));
         assert_eq!((edge.pan_x, edge.pan_y), edge.max_pan());
     }
 
