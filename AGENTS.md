@@ -16,7 +16,7 @@ This repository is public. Its plans, design notes, protocol notes,
 performance measurements and implementation write-ups are kept secret in the
 private sibling repository, at `../OmarchyAILauncher/desktop-docs/` (index:
 `desktop-docs/README.md`). It holds the PC-to-PC plan and protocol, harness
-integrations and logos, completion notifications, file previews, image prompts,
+integrations and logos, completion notifications, file previews, phone prompt attachments,
 mobile terminal output and Linux performance notes.
 
 - Read the relevant `desktop-docs/` file before changing that area, and update

@@ -241,8 +241,14 @@ including while the phone UI is hidden using an opt-in foreground monitor. Pi
 requires a new launch with the updated desktop extension and updated Android app.
 Other harnesses do not yet have verified completion adapters.
 
-Android can also attach an image using **＋** and send it together with a prompt
-to an idle Codex terminal.
+Android can send images and files with a prompt to any idle harness: **＋**
+picks an image or a file or pastes an image from the clipboard (pasting into
+the text field and dropping a file on a terminal work too), up to 4 attachments
+and 16 MB per prompt. The PC keeps them privately in
+`~/.local/state/super-desktop/uploads/`, outside every workspace. Codex, Claude
+Code, Grok and OpenCode's full interface receive images as their own image
+attachments; other harnesses, and all other files, get the file's path in the
+prompt, and a shell gets the quoted path after the command.
 
 | | |
 |---|---|

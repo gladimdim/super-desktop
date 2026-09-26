@@ -85,7 +85,7 @@ socket, carries no workspace data, and is limited to four readers.
 The attach stream carries the bytes of one owned `sd_term_*` session in both
 directions. Binary frames from an authenticated viewer are raw terminal input:
 the bridge writes them into that session's PTY behind the same per-session
-input guard that serializes phone keystrokes and image-prompt submission. A
+input guard that serializes phone keystrokes and phone attachment prompts. A
 busy guard or a PTY that cannot accept the bytes drops them; they are never
 queued for a later write. Text frames remain control-only (`grid`). A card id
 is resolved against the daemon's own workspace snapshot, so an unowned or
@@ -177,11 +177,16 @@ memory, output and wall-clock bounds; it never falls back to unsandboxed parsing
 TLS/request deadline enforced by a socket reaper; 16 KiB headers and normal bodies;
 16 KiB inbound WebSocket frames; 125-byte control frames. A command document is
 capped at 8 KiB and its deduplication cache at 16 answers per credential and 256
-overall. The authenticated image-prompt route alone allows a 3 MiB JSON body, a
-30-second upload deadline,
-and four concurrent jobs shared with file previews. Authorization and origin
-checks happen before accepting the larger body. Images are validated, capped,
-re-encoded and privately staged; no client-selected file paths or overwrites.
+overall. Two authenticated phone upload routes alone accept larger JSON bodies:
+image prompts up to 3 MiB within 30 seconds, and attachment prompts (images and
+files) up to about 21.4 MiB within 180 seconds; both share four concurrent jobs
+with file previews. Authorization and origin checks happen before accepting the
+larger body, and chunked bodies are refused. Images are validated, capped and
+re-encoded from their pixels; files are stored as sent. Everything is staged
+privately (0700 folders, 0600 files) outside every workspace under names the PC
+rebuilds; no client-selected file paths or overwrites. A request ID can be
+submitted once, even across restarts, and a full upload folder refuses new
+uploads rather than deleting old ones.
 Pairing is invitation-
 gated and limited to eight pending/recent requests and one per source per 120 seconds.
 At most 64 paired devices and 256 rejected devices (the oldest rejection is

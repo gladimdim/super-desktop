@@ -1,12 +1,9 @@
-//! Private, bounded image staging and Codex's native bracketed-paste attachment.
+//! Image validation, the per-terminal input lock, and the original
+//! single-image route (`/image-prompt`), which older phone apps still use.
+//! Staging and delivery live in `prompt_attachments`.
 use gtk4::gdk_pixbuf::prelude::*;
 use sha2::{Digest, Sha256};
-use std::fs::{DirBuilder, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
 
 pub const MAX_IMAGE: usize = 2 * 1024 * 1024;
 pub const MAX_BODY: usize = 3 * 1024 * 1024;
@@ -44,7 +41,7 @@ pub fn validate_prompt(text: &str, request: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize(encoded: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn normalize(encoded: &str) -> Result<Vec<u8>, String> {
     if encoded.len() > (MAX_IMAGE + 2) / 3 * 4 || encoded.as_bytes().contains(&0) {
         return Err("image_too_large".into());
     }
@@ -90,69 +87,6 @@ fn normalize(encoded: &str) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-fn stage(directory: &Path, key: &str, image: &[u8]) -> Result<PathBuf, String> {
-    static STORAGE: Mutex<()> = Mutex::new(());
-    let _guard = STORAGE.lock().map_err(|_| "storage_unavailable")?;
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(directory)
-        .map_err(|_| "image_storage_unavailable")?;
-    let dir = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
-        .open(directory)
-        .map_err(|_| "unsafe_image_storage")?;
-    let meta = dir.metadata().map_err(|_| "image_storage_unavailable")?;
-    if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o077 != 0 {
-        return Err("unsafe_image_storage".into());
-    }
-    // Retain images for conversation resume. Never silently prune an image an agent may use.
-    let mut total = 0u64;
-    let mut count = 0;
-    for entry in std::fs::read_dir(directory).map_err(|_| "image_storage_unavailable")? {
-        let entry = entry.map_err(|_| "image_storage_unavailable")?;
-        total += entry
-            .metadata()
-            .map_err(|_| "image_storage_unavailable")?
-            .len();
-        count += 1;
-        if count >= 1024 {
-            return Err("image_storage_full".into());
-        }
-    }
-    if total + image.len() as u64 > 64 * 1024 * 1024 {
-        return Err("image_storage_full".into());
-    }
-    let name = std::ffi::CString::new(format!("{key}.png")).unwrap();
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::AlreadyExists {
-                "request_already_attempted_check_terminal_do_not_resend"
-            } else {
-                "image_storage_unavailable"
-            }
-            .into(),
-        );
-    }
-    // File creation is also the durable no-replay marker, retained even on uncertain failure.
-    let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
-    file.write_all(image)
-        .and_then(|_| file.sync_all())
-        .map_err(|_| "image_storage_write_failed")?;
-    dir.sync_all().map_err(|_| "image_storage_write_failed")?;
-    Ok(directory.join(format!("{key}.png")))
-}
-
 fn composer_line(screen: &str) -> Option<&str> {
     screen
         .trim_end()
@@ -162,7 +96,7 @@ fn composer_line(screen: &str) -> Option<&str> {
         .find_map(|line| line.split_once('›').map(|(_, content)| content))
 }
 
-fn empty_composer(screen: &str) -> bool {
+pub(crate) fn empty_composer(screen: &str) -> bool {
     let Some(line) = composer_line(screen) else {
         return false;
     };
@@ -172,90 +106,21 @@ fn empty_composer(screen: &str) -> bool {
         || (line.contains("\x1b[2m") && plain.trim() == "Ask Codex to do anything")
 }
 
+/// The single-image route: one image and the prompt, delivered like any
+/// other attachment prompt.
 pub fn submit(
     session: &str,
     owner: &str,
     body: &serde_json::Value,
     authorized: impl Fn() -> bool,
 ) -> Result<(), String> {
+    use crate::prompt_attachments::{Attachment, Kind};
     let text = body["text"].as_str().ok_or("invalid_prompt")?;
     let request = body["requestId"].as_str().ok_or("invalid_request_id")?;
     validate_prompt(text, request)?;
     let image = normalize(body["imageBase64"].as_str().ok_or("missing_image")?)?;
-    let _input = input_guard(session)?;
-    let state = crate::state::load_state();
-    if !state
-        .terminals
-        .iter()
-        .any(|t| t.session_name == session && t.agent_type == "codex")
-    {
-        return Err("image_prompts_require_codex".into());
-    }
-    let status = crate::tmux::inspect_status(session, "codex");
-    if !matches!(status.status, "IDLE" | "FINISHED") || status.cmd != "codex" {
-        return Err("wait_for_idle_terminal".into());
-    }
-    let mut control = crate::tmux_control::Control::open(session)?;
-    if !empty_composer(&control.capture()?) {
-        return Err("clear_remote_draft_or_close_menu_first".into());
-    }
-    let home = std::env::var_os("HOME").ok_or("image_storage_unavailable")?;
-    let key = format!(
-        "{:x}",
-        Sha256::digest(format!("{owner}\0{session}\0{request}"))
-    );
-    if !authorized() {
-        return Err("device_revoked".into());
-    }
-    let path = stage(
-        &PathBuf::from(home).join(".local/state/super-desktop/prompt-images"),
-        &key,
-        &image,
-    )?;
-    if !authorized() {
-        return Err("device_revoked".into());
-    }
-    prepare_composer(&mut control, &path, text, &authorized)?;
-    control.send("", true)?;
-    crate::prompt_history::record(session, text);
-    Ok(())
-}
-
-fn prepare_composer(
-    control: &mut crate::tmux_control::Control,
-    path: &Path,
-    text: &str,
-    authorized: impl Fn() -> bool,
-) -> Result<(), String> {
-    if path.to_string_lossy().chars().any(char::is_control) {
-        return Err("invalid_image_storage_path".into());
-    }
-    control.send(&format!("\x1b[200~{}\x1b[201~", path.display()), false)?;
-    let started = Instant::now();
-    loop {
-        if !authorized() {
-            return Err("device_revoked".into());
-        }
-        let screen = control.capture()?;
-        let attached = composer_line(&screen)
-            .map(crate::tmux::strip_terminal_escapes)
-            .is_some_and(|s| s.trim() == "[Image #1]");
-        if attached {
-            break;
-        }
-        if started.elapsed() > Duration::from_secs(3) {
-            return Err("attachment_not_confirmed_check_remote_draft".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    if !text.is_empty() {
-        control.send(&format!("\x1b[200~{text}\x1b[201~"), false)?;
-    }
-    std::thread::sleep(Duration::from_millis(200));
-    if !authorized() {
-        return Err("device_revoked_check_remote_draft".into());
-    }
-    Ok(())
+    let attachment = Attachment { kind: Kind::Image, name: "image.png".into(), bytes: image };
+    crate::prompt_attachments::submit(session, owner, text, request, &[attachment], authorized)
 }
 
 #[cfg(test)]
@@ -287,63 +152,13 @@ mod tests {
         ));
     }
     #[test]
-    fn validates_real_pixels_and_stages_without_replay() {
+    fn validates_real_pixels() {
         let pixbuf =
             gtk4::gdk_pixbuf::Pixbuf::new(gtk4::gdk_pixbuf::Colorspace::Rgb, false, 8, 2, 2)
                 .unwrap();
         pixbuf.fill(0xff0000ff);
         let png = pixbuf.save_to_bufferv("png", &[]).unwrap();
         let bytes = normalize(&crate::ws::base64(&png)).unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "sd-prompt-image-{}",
-            crate::tmux::unique_session_name()
-        ));
-        let key = "a".repeat(64);
-        let path = stage(&dir, &key, &bytes).unwrap();
-        assert!(stage(&dir, &key, &bytes)
-            .unwrap_err()
-            .contains("already_attempted"));
-        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o600);
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(dir).unwrap();
-    }
-
-    #[test]
-    #[ignore = "Requires an explicitly created disposable Codex tmux session; never submits a prompt"]
-    fn native_codex_attachment_probe() {
-        let session = std::env::var("SD_IMAGE_PROBE_SESSION").unwrap();
-        assert!(session.starts_with("sd_image_attachment_probe"));
-        let mut control = crate::tmux_control::Control::open(&session).unwrap();
-        assert!(
-            empty_composer(&control.capture().unwrap()),
-            "Probe requires an empty composer"
-        );
-        let pixbuf =
-            gtk4::gdk_pixbuf::Pixbuf::new(gtk4::gdk_pixbuf::Colorspace::Rgb, false, 8, 2, 2)
-                .unwrap();
-        pixbuf.fill(0xff0000ff);
-        let dir = std::env::temp_dir().join(format!(
-            "sd-image-probe-{}",
-            crate::tmux::unique_session_name()
-        ));
-        let path = stage(
-            &dir,
-            &"b".repeat(64),
-            &pixbuf.save_to_bufferv("png", &[]).unwrap(),
-        )
-        .unwrap();
-        prepare_composer(
-            &mut control,
-            &path,
-            "attachment integration check - not submitted",
-            || true,
-        )
-        .unwrap();
-        let screen = crate::tmux::strip_terminal_escapes(&control.capture().unwrap());
-        assert!(screen.contains("[Image #1]"));
-        assert!(screen.contains("attachment integration check - not submitted"));
-        control.send("\x15", false).unwrap(); // Clear only the draft created in this disposable test.
-        std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir(dir).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG"));
     }
 }

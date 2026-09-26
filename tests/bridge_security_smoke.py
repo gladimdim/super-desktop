@@ -72,6 +72,8 @@ def main():
             assert request("/api/v1/completions", {"sessions": []})[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {})[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, headers={"Content-Length": "99999999"})[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/attachment-prompt", {})[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/attachment-prompt", {}, headers={"Content-Length": "99999999"})[0] == 401
             assert request("/api/v1/pair/invitation", {})[0] == 403
             assert request("/api/v1/pair", {"deviceName": "stranger"})[0] == 403
             assert request("/api/v1/ping", headers={"Origin": "https://untrusted.example"})[0] == 403
@@ -109,6 +111,19 @@ def main():
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {"requestId": "a" * 32, "text": "hello", "imageBase64": "invalid"}, token=token)[0] == 409
             # Authorized image route accepts >16 KiB, but the general request limit stays unchanged.
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {"requestId": "a" * 32, "text": "hello", "imageBase64": "A" * 20000}, token=token)[0] == 409
+            # Attachment prompts: same admission, a larger body of their own.
+            attach = "/api/v1/harnesses/sd_term_probe/attachment-prompt"
+            assert request(attach, {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
+            assert request(attach, {}, token=token, headers={"Content-Length": "99999999"}) == (413, {"error": "attachments_too_large"})
+            file_4mib = {"kind": "file", "name": "big.bin", "dataBase64": "A" * (4 * 1024 * 1024 // 3 * 4)}
+            big = {"requestId": "b" * 32, "text": "hello", "attachments": [file_4mib]}
+            # Over the image route's 3 MiB, within this route's: parsed, then refused
+            # only because the terminal does not exist.
+            assert request(attach, big, token=token) == (409, {"error": "no_such_session"})
+            assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token,
+                           headers={"Content-Length": str(4 * 1024 * 1024)}) == (413, {"error": "image_too_large"})
+            assert request(attach, {"requestId": "a" * 32, "attachments": [{"kind": "file", "name": "x", "dataBase64": "!"}]}, token=token) \
+                == (409, {"error": "invalid_attachment_encoding"})
             assert request("/api/v1/completions", {"sessions": ["../invalid"]}, token=token)[0] == 400
             assert request("/api/v1/completions", {"sessions": ["x"] * 33}, token=token)[0] == 400
             status, completion = request("/api/v1/completions", {"sessions": ["sd_term_missing"]}, token=token)
@@ -137,6 +152,7 @@ def main():
                                         "expectedRevision": 1}}, token=token)[0] == 401
             assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token)[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/attachment-prompt", {}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401
             assert request("/api/v1/pair/poll", rid)[0] == 404
             while live.recv(65536):

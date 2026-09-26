@@ -574,10 +574,22 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
     let keep_alive = http11 && !headers.get("connection").is_some_and(|v| {
         v.split(',').any(|token| token.trim().eq_ignore_ascii_case("close"))
     });
-    let image_upload = method == "POST" && crate::prompt_image::route(&path).is_some();
+    // Prompt uploads alone may send a large body, each within its own limit
+    // and deadline: (body limit, deadline, error when over the limit).
+    let upload = match method.as_str() {
+        "POST" if crate::prompt_image::route(&path).is_some() => {
+            Some((crate::prompt_image::MAX_BODY, Duration::from_secs(30), "image_too_large"))
+        }
+        "POST" if crate::prompt_attachments::route(&path).is_some() => Some((
+            crate::prompt_attachments::MAX_BODY,
+            crate::prompt_attachments::UPLOAD_DEADLINE,
+            "attachments_too_large",
+        )),
+        _ => None,
+    };
     if headers.contains_key("transfer-encoding") { return None; }
     let mut upload_slot = None;
-    if image_upload {
+    if let Some((limit, deadline, too_large)) = upload {
         let head = Request { method: method.clone(), path: path.clone(), query: String::new(), keep_alive: false, headers: headers.clone(), body: String::new(), _upload_slot: None };
         if headers.contains_key("origin") || headers.contains_key("sec-fetch-site") {
             respond(stream, 403, "Forbidden", &serde_json::json!({"error":"browser_access_disabled"}));
@@ -586,8 +598,8 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
         if !require_pairing(stream, &head, AuthReply::Plain) {
             return None;
         }
-        if content_len > crate::prompt_image::MAX_BODY {
-            respond(stream, 413, "Payload Too Large", &serde_json::json!({"error":"image_too_large"}));
+        if content_len > limit {
+            respond(stream, 413, "Payload Too Large", &serde_json::json!({"error":too_large}));
             return None;
         }
         upload_slot = crate::assets::Transfer::acquire();
@@ -598,7 +610,7 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
         let token = bearer(&headers);
         stream.credential(token);
         if let Some(guard) = admission { guard.identify(token); }
-        stream.upload_deadline();
+        stream.upload_deadline(deadline);
     } else if content_len > 16384 { return None; }
     // Bytes past this request's body belong to the next pipelined request.
     let body_end = (header_end + content_len).min(total);
@@ -619,7 +631,9 @@ fn read_request(stream: &mut Connection, admission: Option<&security::Admission>
         query,
         keep_alive,
         headers,
-        body: String::from_utf8_lossy(&body).to_string(),
+        // Valid UTF-8 (every JSON body) is kept as is: an upload is not copied.
+        body: String::from_utf8(body)
+            .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned()),
         _upload_slot: upload_slot,
     })
 }
@@ -970,6 +984,23 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
             stream.persist = false;
             let body = serde_json::from_str(&req.body).unwrap_or_default();
             let result = crate::prompt_image::submit(session, &security::digest(bearer(&req.headers).as_bytes()), &body, || stream.still_authorized());
+            wake_terminal_streams(session);
+            return match result {
+                Ok(()) => respond(stream, 200, "OK", &serde_json::json!({"status":"submitted"})),
+                Err(error) => respond(stream, 409, "Conflict", &serde_json::json!({"error":error})),
+            };
+        }
+        if let Some(session) = crate::prompt_attachments::route(&path) {
+            if !require_pairing(stream, req, AuthReply::Plain) {
+                return;
+            }
+            stream.streaming();
+            // Uploads run under their own long deadline: never reuse the socket.
+            stream.persist = false;
+            let owner = security::digest(bearer(&req.headers).as_bytes());
+            let result = crate::prompt_attachments::parse(&req.body).and_then(|(text, request, attachments)| {
+                crate::prompt_attachments::submit(session, &owner, &text, &request, &attachments, || stream.still_authorized())
+            });
             wake_terminal_streams(session);
             return match result {
                 Ok(()) => respond(stream, 200, "OK", &serde_json::json!({"status":"submitted"})),

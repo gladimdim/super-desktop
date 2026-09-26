@@ -4,6 +4,7 @@ mod asset_history;
 mod completion;
 mod custom_harness;
 mod prompt_image;
+mod prompt_attachments;
 mod prompt_history;
 mod shell_title;
 mod folder_colors;

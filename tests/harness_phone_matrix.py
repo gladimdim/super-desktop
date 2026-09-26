@@ -38,6 +38,13 @@ reply in the stream, scrollback growth, title == prompt,
 tailAnsi frames are sanitized, then saved as Android parser fixtures
 (`harness-frames/*.ansi` plus `manifest.tsv`).
 
+With `--attachments`, it also checks phone prompt attachments without
+submitting anything: the ignored unit test
+`prompt_attachments::tests::native_attachment_probe` stages a real PNG and a
+text file and fills the harness's composer exactly as the bridge does (native
+`[Image …]` attachment, or the paths in the prompt), reports what the
+harness shows, and the draft is cleared. Enter is never sent.
+
 SAFETY: without `--submit`, typed text is never submitted. `--claude-bang`
 opts in to Claude's `!` bash mode, which in some Claude input modes also
 triggers a model reply. Trust, login and onboarding dialogs are never
@@ -51,6 +58,7 @@ tmux server, ~/.config/super-desktop and paired devices are never touched.
 Every process started here is stopped by its own PID or private socket.
 """
 import argparse
+import base64
 import base64
 import hashlib
 import json
@@ -142,6 +150,10 @@ ESCAPES = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)
 
 SUBMIT = False
 CLAUDE_BANG = False
+ATTACHMENTS = False
+# Harnesses that turn a pasted image path into their own attachment
+# (prompt_attachments::delivery); OpenCode only outside its `--mini` interface.
+NATIVE_ATTACHMENTS = {"claude", "codex", "opencode", "grok"}
 
 
 def log(message):
@@ -852,6 +864,9 @@ def probe(world, key, row, clean, fixtures, workspace):
         if marker in visible(json.loads(last_frame_message(stream))):
             row["notes"].append("marker visible after keys")
 
+        if ATTACHMENTS:
+            attachment_probe(world, row, key, session, inputs, launched["command"])
+
         # (g) Claude `!` bash mode. NOT guaranteed local: in some input modes
         # (e.g. "manual mode") Claude Code 2.1.281 sends the command output to
         # the model and replies. Opt-in only.
@@ -876,7 +891,8 @@ def probe(world, key, row, clean, fixtures, workspace):
                 row["notes"].append(f"stream sessionTitle contains injected text: {title!r}")
                 break
         row["result"] = "PASS" if (row["first_frame"] and row["echo"] and row["clear"] != "NO"
-                                   and row["keys"] == "ok" and row["title_ok"]) else "FAIL"
+                                   and row["keys"] == "ok" and row["title_ok"]
+                                   and row.get("attach", "ok").startswith("ok")) else "FAIL"
         if SUBMIT and row["result"] == "PASS":
             submit(world, row, key, session, stream, inputs, frames_to_save, [marker] + row.get("injected", []))
     finally:
@@ -888,6 +904,98 @@ def probe(world, key, row, clean, fixtures, workspace):
         if created:
             row["workspace_files"] = created
         row["_frames"] = frames_to_save
+
+
+def attachment_probe(world, row, key, session, inputs, launch):
+    """Fill the composer with an image, a file and a line of text the way the
+    bridge's attachment prompt does, check what the harness shows, clear it."""
+    out = world.root / f"attachments-{key}.json"
+    env = dict(world.env, SD_ATTACHMENT_PROBE_SESSION=session, SD_ATTACHMENT_PROBE_AGENT=key,
+               SD_ATTACHMENT_PROBE_OUT=str(out), SD_ATTACHMENT_PROBE_LAUNCH=launch, RUST_TEST_THREADS="1")
+    result = subprocess.run([str(world.launch_exe), "--exact", "prompt_attachments::tests::native_attachment_probe",
+                             "--ignored", "--nocapture", "--quiet"], env=env, capture_output=True,
+                            encoding="utf-8", errors="replace", timeout=90)
+    report = json.loads(out.read_text()) if out.exists() else {}
+    screen = report.get("screen", "")
+    native = report.get("delivery") == "Native"
+    failures = []
+    if report.get("prepared") != "ok":
+        failures.append(f"prepare: {report.get('prepared') or result.stdout[-400:] + result.stderr[-400:]}")
+    if not report.get("textShown"):
+        failures.append("prompt text not in the composer")
+    if native and report.get("imageMarkers", 0) < 1:
+        failures.append("no [Image …] attachment")
+    if native and "probe.png" in screen:
+        failures.append("image path left as text")
+    if not native and "probe.png" not in screen.replace("\n", "").replace(" ", ""):
+        failures.append("image path not in the prompt")
+    mini = key == "opencode" and "--mini" in launch.split()
+    if (key in NATIVE_ATTACHMENTS and not mini) != native:
+        failures.append(f"delivery {report.get('delivery')} for `{report.get('command')}`")
+    row["attach"] = ("ok " if not failures else "FAIL ") + f"{report.get('delivery')} ({report.get('command')})"
+    if failures:
+        row["notes"].append("attachments: " + "; ".join(failures))
+        lines = [line.rstrip() for line in screen.rstrip().splitlines() if line.strip()]
+        log(f"{key}: attachment screen (last lines):\n  " + "\n  ".join(lines[-12:]))
+    # Clear the draft: attachment chips, the paths and the text.
+    for _ in range(3):
+        inputs.send(BACKSPACE * 200)
+        time.sleep(0.3)
+    inputs.send(CTRL_U)
+    time.sleep(0.5)
+    if "attachment check - not submitted" in world.capture(session):
+        row["notes"].append("attachment draft not fully cleared (left for teardown)")
+
+
+def shell_attachment_end_to_end(world, rows):
+    """The whole phone path, with no model: POST an attachment prompt for a
+    shell card exactly as Android does, let bash run `wc -c` on the staged
+    file, then check the private copy and that the request cannot replay."""
+    row = {"harness": "shell (end to end)", "launched": "no", "result": "FAIL", "notes": []}
+    rows.append(row)
+    workspace = private_dir(world.root / "ws-shell-attachment")
+    session = world.launch("shell", workspace)["session"]
+    row["launched"] = "yes"
+    try:
+        # Whatever the user's prompt looks like: drawn, and then quiet.
+        if not wait_for(lambda: world.capture(session).strip(), 15):
+            row["notes"].append("no shell prompt")
+            return
+        time.sleep(1.5)
+        content = b"hello from the phone\n"
+        body = {"requestId": secrets.token_hex(16), "text": "wc -c",
+                "attachments": [{"kind": "file", "name": "hello note.txt",
+                                 "dataBase64": base64.b64encode(content).decode()}]}
+        status, answer = world.https(f"/api/v1/harnesses/{session}/attachment-prompt", body, token=world.token)
+        if (status, answer) != (200, {"status": "submitted"}):
+            row["notes"].append(f"submit answered {status} {answer}")
+            return
+        uploads = world.home / ".local/state/super-desktop/uploads"
+        # `-J`: the long path wraps in the pane; join it back into one line.
+        joined = lambda: world.tmux("capture-pane", "-p", "-J", "-t", f"={session}:", check=False)
+        ran = wait_for(lambda: re.search(rf"^{len(content)} \S*/hello_note\.txt\s*$", joined(), re.M), 10)
+        stored = list(uploads.glob("*/hello_note.txt"))
+        row["attach"] = "ok Shell (bash)" if ran and stored else "FAIL Shell (bash)"
+        if not ran:
+            row["notes"].append("`wc -c` on the staged file never printed its size")
+            log("shell screen:\n  " + "\n  ".join(joined().rstrip().splitlines()[-6:]))
+        if not stored or stored[0].read_bytes() != content:
+            row["notes"].append("the file was not stored byte for byte")
+        elif (stored[0].stat().st_mode & 0o777, stored[0].parent.stat().st_mode & 0o777,
+              uploads.stat().st_mode & 0o777) != (0o600, 0o700, 0o700):
+            row["notes"].append("stored file or folders are not private")
+        status, answer = world.https(f"/api/v1/harnesses/{session}/attachment-prompt", body, token=world.token)
+        if status != 409 or "already_attempted" not in str(answer):
+            row["notes"].append(f"a replayed request answered {status} {answer}")
+        body["requestId"] = secrets.token_hex(16)
+        body["text"] = ""
+        status, answer = world.https(f"/api/v1/harnesses/{session}/attachment-prompt", body, token=world.token)
+        if (status, answer) != (409, {"error": "type_a_command_for_the_attachment"}):
+            row["notes"].append(f"a shell attachment without a command answered {status} {answer}")
+        row["result"] = "PASS" if row["attach"].startswith("ok") and not row["notes"] else "FAIL"
+    finally:
+        log(f"shell attachment end to end: {row['result']} {row['notes']}")
+        world.tmux("kill-session", "-t", f"={session}", check=False)
 
 
 def completion(world, session):
@@ -1191,6 +1299,8 @@ def main():
                         help="Claude only: run `!echo …; seq 1 60` to prove scrollback (may cause a model turn)")
     parser.add_argument("--submit", action="store_true",
                         help="also submit ONE tiny tool-free prompt per harness (real model request)")
+    parser.add_argument("--attachments", action="store_true",
+                        help="also check phone prompt attachments in each composer (never submitted)")
     parser.add_argument("--fixtures-dir", default=str(ANDROID_FIXTURES))
     args = parser.parse_args()
     if bool(args.binary) != bool(args.test_binary):
@@ -1199,9 +1309,10 @@ def main():
     selected = [h for h in HARNESSES if not wanted or h[0] in wanted or wanted & set(h[1])]
     if wanted and not selected:
         parser.error("unknown harness: " + ", ".join(sorted(wanted)))
-    global SUBMIT, CLAUDE_BANG
+    global SUBMIT, CLAUDE_BANG, ATTACHMENTS
     SUBMIT = args.submit
     CLAUDE_BANG = args.claude_bang
+    ATTACHMENTS = args.attachments
     binary, test_binary = locate_binaries(args)
     fixtures = None
     if not args.no_fixtures:
@@ -1215,6 +1326,8 @@ def main():
     world = None
     try:
         world = World(root, binary, test_binary)
+        if ATTACHMENTS:
+            shell_attachment_end_to_end(world, rows)
         for key, commands, npx in selected:
             row = {"harness": key, "launched": "no", "result": "SKIP", "notes": []}
             rows.append(row)
@@ -1279,6 +1392,8 @@ def main():
     print()
     header = ["harness", "result", "echo", "clear", "keys", "screen", "history", "status", "title_ok",
               "local", "fixtures", "notes"]
+    if ATTACHMENTS:
+        header[-1:-1] = ["attachments"]
     if SUBMIT:
         header[-1:-1] = ["prompt", "transitions", "reply", "scrollback", "title==prompt", "completion", "error"]
     print(" | ".join(header))
@@ -1288,6 +1403,7 @@ def main():
             row["harness"], row["result"], row.get("echo", ""), row.get("clear", ""), row.get("keys", ""),
             screen, row.get("history", ""), row.get("status", ""), row.get("title_ok", ""),
             row.get("local", ""), ",".join(row.get("fixtures", []))]
+            + ([row.get("attach", "")] if ATTACHMENTS else [])
             + ([row.get("prompt", ""), row.get("transitions", ""), row.get("reply", ""),
                 row.get("scrollback", ""), row.get("title_eq", ""), row.get("completion", ""),
                 row.get("error", "")] if SUBMIT else [])

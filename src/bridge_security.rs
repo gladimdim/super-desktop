@@ -149,7 +149,7 @@ impl Connection {
         true
     }
     pub(super) fn streaming(&mut self) { self.deadline = None; }
-    pub(super) fn upload_deadline(&mut self) { self.deadline = Some(std::time::Instant::now() + Duration::from_secs(30)); }
+    pub(super) fn upload_deadline(&mut self, allowed: Duration) { self.deadline = Some(std::time::Instant::now() + allowed); }
     pub(super) fn credential(&mut self, token: &str) {
         self.credential_hash = Some(digest(token.as_bytes()));
         // The caller has just validated this token.
