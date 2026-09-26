@@ -256,9 +256,11 @@ Other harnesses do not yet have verified completion adapters.
 
 Android can send images and files with a prompt to any idle harness: **＋**
 picks an image or a file or pastes an image from the clipboard (pasting into
-the text field and dropping a file on a terminal work too), up to 4 attachments
-and 16 MB per prompt. The PC keeps them privately in
-`~/.local/state/super-desktop/uploads/`, outside every workspace. Codex, Claude
+the text field and dropping a file on a terminal work too). **Share → SUPER
+DESKTOP** in any other Android app asks which harness gets the files or text,
+and adds them to its draft. Up to 4 attachments and 16 MB go with one prompt.
+The PC keeps them privately in `~/.local/state/super-desktop/uploads/`,
+outside every workspace. Codex, Claude
 Code, Grok and OpenCode's full interface receive images as their own image
 attachments; other harnesses, and all other files, get the file's path in the
 prompt, and a shell gets the quoted path after the command.
