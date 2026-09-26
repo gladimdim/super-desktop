@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SUPER DESKTOP — your AI workspace for Omarchy</title>
-<meta name="description" content="SUPER DESKTOP: a hidden overlay workspace for Hyprland/Omarchy with sticky notes and mini AI-terminal windows, live remote sessions from your other PCs, and an optional encrypted phone bridge. Press SUPER + SHIFT + Q.">
+<meta name="description" content="SUPER DESKTOP: every AI coding agent on every PC, in a hidden Omarchy / Hyprland workspace you reach from your other PCs, your Android phone and soon iPhone. Direct and encrypted, with no accounts or servers.">
 <style>
   :root {
     --bg: #0b0e14;
@@ -64,15 +64,14 @@
     border-radius: 999px; padding: 8px 16px 8px 10px; font-size: 14.5px;
   }
   .harness img { width: 22px; height: 22px; }
-  table.keys { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 15px; }
-  table.keys td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
-  table.keys td:first-child { white-space: nowrap; width: 220px; }
+  .card .harness-row { margin-top: 12px; gap: 6px; }
+  .card .harness { font-size: 13px; padding: 4px 10px; }
+  .card .harness img { width: 16px; height: 16px; }
   pre {
     background: #070a10; border: 1px solid var(--border); border-radius: var(--radius);
     padding: 18px; overflow-x: auto; font-size: 14px; line-height: 1.7;
   }
   code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  pre .c { color: #5b6577; }
   .note {
     background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
     border-radius: 10px; padding: 14px 18px; margin-top: 16px; font-size: 15px; color: var(--muted);
@@ -105,13 +104,6 @@
   details { margin-top: 12px; }
   summary { cursor: pointer; color: var(--accent); padding: 10px 0; }
   details figure { margin-top: 12px; }
-  .tour { display: grid; gap: 28px; margin: 32px 0 24px; }
-  .tour figure { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 24px; align-items: center; }
-  .tour h3 { margin: 0 0 6px; font-size: 19px; }
-  .tour p { margin: 0; color: var(--muted); }
-  .tour .shot { display: flex; justify-content: center; align-items: center; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: #070a10; }
-  .tour .shot img { display: block; max-width: 100%; height: auto; border-radius: 6px; }
-  @media (max-width: 760px) { .tour figure { grid-template-columns: minmax(0, 1fr); gap: 12px; } }
   #install { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 28px; }
   #install h2 { margin-top: 0; }
   .news { border: 1px solid var(--border); border-left: 4px solid var(--accent2); border-radius: var(--radius); padding: 24px; background: var(--panel); }
@@ -133,8 +125,6 @@
     h2 { font-size: 25px; }
     section { margin-top: 36px; }
     #install, .news { padding: 20px; }
-    table.keys, table.keys tbody, table.keys tr, table.keys td { display: block; }
-    table.keys td:first-child { width: auto; border-bottom: 0; padding-bottom: 0; white-space: normal; }
   }
 </style>
 </head>
@@ -144,13 +134,13 @@
   <header class="hero">
     <div class="bolt" aria-hidden="true">⚡</div>
     <h1>SUPER <span class="grad">DESKTOP</span></h1>
-    <p class="tagline">Your AI terminals and notes, one shortcut away. SUPER DESKTOP is a hidden workspace for Omarchy / Hyprland that keeps your agents running and lets you reach them from another PC or your Android phone.</p>
+    <p class="tagline">Every AI coding agent on every PC, one shortcut away, and in your pocket. A hidden workspace for Omarchy / Hyprland that links your PCs and phones directly, with no accounts and no servers.</p>
     <div class="cta">
       <a class="btn primary" href="#install">Install</a>
       <a class="btn ghost" href="#features">Main features</a>
       <a class="btn ghost" href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </div>
-    <p><a class="pill news-link" href="#ios">iPhone + Android apps in development →</a></p>
+    <p><a class="pill news-link" href="#ios">Android app available · iPhone in development →</a></p>
     <p style="margin-top:22px"><span class="kbd">SUPER + SHIFT + Q</span></p>
   </header>
 
@@ -170,29 +160,6 @@
         <a href="screenshots/desktop-toggle.gif">Open GIF</a>
       </div>
     </figure>
-    <div class="tour">
-      <figure>
-        <figcaption>
-          <h3>Every harness, one click away</h3>
-          <p>The top bar lists the coding agents installed on this PC, here Claude Code, Codex, OpenCode, Grok and Reasonix, plus a plain shell. Click one and a new live terminal card starts that agent in the selected folder.</p>
-        </figcaption>
-        <div class="shot"><img src="screenshots/harness-bar.webp" width="680" height="64" loading="lazy" alt="SUPER DESKTOP top bar with launcher buttons for Claude, Codex, OpenCode, Grok, Reasonix and Shell."></div>
-      </figure>
-      <figure>
-        <figcaption>
-          <h3>Your other PCs, right in the overlay</h3>
-          <p>The <strong>This PC</strong> menu lists the computers you have paired. Pick one to see and type into its live workspace, or choose <strong>Add a PC</strong> to connect a new machine with a one-time link and a matching code.</p>
-        </figcaption>
-        <div class="shot"><img src="screenshots/pc-selector.webp" width="316" height="214" loading="lazy" alt="The This PC menu open, listing This PC, a paired computer named gladimdim-b9, and an Add a PC action."></div>
-      </figure>
-      <figure>
-        <figcaption>
-          <h3>Choose where each harness starts</h3>
-          <p>The folder next to the logo is the working directory for the next harness. Your recent project folders are one click away, and <strong>×</strong> removes one from the list.</p>
-        </figcaption>
-        <div class="shot"><img src="screenshots/folder-picker.webp" width="640" height="290" loading="lazy" alt="Working-directory dropdown open under the top bar, listing recent project folders such as Star_Chumaki, super-desktop and OmarchyAILauncher with their paths."></div>
-      </figure>
-    </div>
     <details>
       <summary>View the desktop screenshots</summary>
       <figure>
@@ -223,17 +190,68 @@
 
   <section id="features">
     <h2>Main features</h2>
-    <p class="sub">A second, invisible desktop on top of your Omarchy workspace. Press the shortcut — notes and AI terminals glide in. Press it again — your desktop is completely clean. Everything keeps running in the background.</p>
+    <p class="sub">Your agents keep running on every PC. Open them from any other PC or from your phone, directly and privately.</p>
     <div class="grid">
-      <div class="card"><h3>📝 Sticky notes</h3><p>Click and type. Notes follow your Omarchy theme, autosave, drag, resize, and take group color tags.</p></div>
-      <div class="card"><h3>💻 AI terminals</h3><p>Live mini-terminals running coding agents. Iconify to 128×128, ghost-resize, expand to 80% of the screen.</p></div>
-      <div class="card"><h3>🪄 True overlay</h3><p>Hidden means hidden — nothing occupies Hyprland workspaces. Slide-in animations plus background blur.</p></div>
-      <div class="card"><h3>🎨 Native theming</h3><p>Colors, fonts, and terminal palette come from the active Omarchy theme and sync instantly on switch.</p></div>
-      <div class="card"><h3>🎯 Hot corner</h3><p>Park the pointer in the top-left corner for two seconds and the overlay toggles — no keyboard needed.</p></div>
-      <div class="card"><h3>⌨ Your own shortcut</h3><p>SUPER + SHIFT + Q out of the box — click <strong>Record</strong> in ⚙ Settings, press any combination, and it becomes the key that toggles the overlay.</p></div>
-      <div class="card"><h3>🖥️ Remote sessions</h3><p>Pair another PC and its windows appear live in your overlay — same layout, same sessions, and you can type into them.</p></div>
-      <div class="card"><h3>📱 Phone linking</h3><p>Watch and control sessions from Android, use two panes on wide screens, and receive completion alerts for supported agents. iPhone and Android companion apps are in active development, with full foldable support planned across both platforms.</p></div>
+      <div class="card"><h3>📱 Android + iPhone remote access</h3><p>Open every session from your phone: live terminals, prompts with pictures and files, and completion alerts. Android is available now; the iPhone app is in development.</p></div>
+      <div class="card"><h3>📖 Built for foldables</h3><p>Unfold for two live terminals side by side next to your harness list, with layouts that follow every fold and resize. On Android today, coming to iPhone.</p></div>
+      <div class="card"><h3>🖥️ All your PCs, connected</h3><p>Pair as many PCs as you like. Each one can open any other's workspace, to watch and type into its sessions as if you were there.</p></div>
+      <div class="card"><h3>🔒 No accounts, no servers</h3><p>Your PCs and phones talk directly over your own network or Tailscale, encrypted and pinned to each device. Nothing to sign up for, no cloud in between.</p></div>
+      <div class="card"><h3>⚡ Native and fast</h3><p>Rust, GTK4 and tmux: no Electron, no web views. The workspace is there the moment you press the shortcut, and your agents keep running while it is hidden.</p></div>
+      <div class="card"><h3>🤖 Use any harness</h3><p>Every coding agent installed on the PC gets a one-click launcher.</p>
+        <div class="harness-row">
+          <span class="harness"><img src="logos/anthropic-white.svg" alt="">Claude Code</span>
+          <span class="harness"><img src="logos/openai-white.svg" alt="">Codex</span>
+          <span class="harness"><img src="logos/opencode-light.svg" alt="">OpenCode</span>
+          <span class="harness"><img src="logos/grok-white.svg" alt="">Grok</span>
+          <span class="harness"><img src="logos/google.svg" alt="">Antigravity</span>
+          <span class="harness">Pi</span>
+          <span class="harness">Aider</span>
+          <span class="harness">Reasonix</span>
+          <span class="harness">DeepSeek</span>
+          <span class="harness">Hermes</span>
+          <span class="harness">Goose</span>
+          <span class="harness">Qwen Code</span>
+          <span class="harness">Crush</span>
+          <span class="harness">Kimi</span>
+          <span class="harness">Kiro</span>
+          <span class="harness">Cursor Agent</span>
+          <span class="harness"><img src="logos/shell-white.svg" alt="">Shell</span>
+        </div>
+      </div>
+      <div class="card"><h3>🧩 Bring your own harness</h3><p>Any other command-line agent: add it in ⚙ Settings → Harness launchers → <strong>Add a harness</strong>, and it gets the same launcher and live terminal card as the built-in ones.</p></div>
     </div>
+  </section>
+
+  <section id="remote">
+    <h2>Remote sessions — your other PCs <span class="pill live">live</span></h2>
+    <p class="sub">Connect a second computer and its whole workspace opens inside your overlay. Every window becomes a live terminal, so you can watch and use that machine's sessions without getting up.</p>
+    <div class="grid">
+      <div class="card"><h3>↔ Connect either way</h3><p>Send a one-time connection link to another PC, or accept one from it. A single panel handles both directions, so either machine can be the one you look at.</p></div>
+      <div class="card"><h3>🔐 You approve every PC</h3><p>The same code appears on both screens and access is granted only after you confirm it on the computer being shared. Nothing connects behind your back.</p></div>
+      <div class="card"><h3>🖥️ Their layout, your screen</h3><p>Windows sit exactly where they do on the other computer — same sizes and stacking — laid out neatly to fit your display.</p></div>
+      <div class="card"><h3>⌨ Type as if you were there</h3><p>Click a window and start typing. Your keys, paste and Ctrl+C go straight to the session running on the other machine.</p></div>
+    </div>
+    <h3 style="margin-top:32px">In three steps</h3>
+    <ol class="steps">
+      <li>Share a connection link from one computer to the other.</li>
+      <li>Check that the code matches on both screens and approve.</li>
+      <li>The other PC's workspace opens and stays one click away.</li>
+    </ol>
+    <div class="note">Keep <strong>both</strong> computers up to date for the smoothest experience. Once a PC is paired it is remembered — it stays in your list and never needs pairing again.</div>
+  </section>
+
+  <section id="phone">
+    <h2>Phone linking <span class="pill">optional</span></h2>
+    <p class="sub">Take your AI sessions with you. Pair an Android phone and it reaches your SUPER DESKTOP terminals over your own network, with everything kept private between your devices.</p>
+    <div class="grid">
+      <div class="card"><h3>💻 Sessions in your pocket</h3><p>See your running sessions on your phone and type into them, with the terminal's output and colours kept intact.</p></div>
+      <div class="card"><h3>🔔 Know when it's done</h3><p>Opt into completion alerts for Codex, Claude Code, Pi and OpenCode sessions. Delivery depends on your connection and Android background settings.</p></div>
+      <div class="card"><h3>🖼️ Send pictures and files</h3><p>Attach images and files to a prompt for any harness, or share them to SUPER DESKTOP from any other app.</p></div>
+      <div class="card"><h3>⌨ Remote keys &amp; saved drafts</h3><p>Send Enter, arrows, Tab, paging keys, and Ctrl-C without sending your draft. Unsent text is saved separately for each session.</p></div>
+      <div class="card"><h3>📂 Files &amp; Links</h3><p>Browse referenced images, PDFs, Markdown, and code, or open and copy links from the terminal output.</p></div>
+      <div class="card"><h3>🔒 Pair once, revoke anytime</h3><p>Pair by scanning a QR code and confirming the matching code on your desktop. Access can be taken away from any phone whenever you like.</p></div>
+    </div>
+    <div class="note">A paired phone can <strong>operate</strong> your terminals, not just watch them — so only pair devices you trust, and remove any phone you no longer use.</div>
   </section>
 
   <section id="ios" class="news" aria-labelledby="ios-heading">
@@ -265,89 +283,13 @@
     <p class="shots-note">iOS app in development, captured in the iPhone Duo simulator against a test bridge.</p>
   </section>
 
-  <section id="remote">
-    <h2>Remote sessions — your other PCs <span class="pill live">live</span></h2>
-    <p class="sub">Connect a second computer and its whole workspace opens inside your overlay. Every window becomes a live terminal, so you can watch and use that machine's sessions without getting up.</p>
-    <div class="grid">
-      <div class="card"><h3>↔ Connect either way</h3><p>Send a one-time connection link to another PC, or accept one from it. A single panel handles both directions, so either machine can be the one you look at.</p></div>
-      <div class="card"><h3>🔐 You approve every PC</h3><p>The same code appears on both screens and access is granted only after you confirm it on the computer being shared. Nothing connects behind your back.</p></div>
-      <div class="card"><h3>🖥️ Their layout, your screen</h3><p>Windows sit exactly where they do on the other computer — same sizes and stacking — laid out neatly to fit your display.</p></div>
-      <div class="card"><h3>⌨ Type as if you were there</h3><p>Click a window and start typing. Your keys, paste and Ctrl+C go straight to the session running on the other machine.</p></div>
-    </div>
-    <h3 style="margin-top:32px">In three steps</h3>
-    <ol class="steps">
-      <li>Share a connection link from one computer to the other.</li>
-      <li>Check that the code matches on both screens and approve.</li>
-      <li>The other PC's workspace opens and stays one click away.</li>
-    </ol>
-    <div class="note">Keep <strong>both</strong> computers up to date for the smoothest experience. Once a PC is paired it is remembered — it stays in your list and never needs pairing again.</div>
-  </section>
-
-  <section id="phone">
-    <h2>Phone linking <span class="pill">optional</span></h2>
-    <p class="sub">Take your AI sessions with you. Pair an Android phone and it reaches your SUPER DESKTOP terminals over your own network, with everything kept private between your devices.</p>
-    <div class="grid">
-      <div class="card"><h3>💻 Sessions in your pocket</h3><p>See your running sessions on your phone and type into them, with the terminal's output and colours kept intact.</p></div>
-      <div class="card"><h3>🔔 Know when it's done</h3><p>Opt into completion alerts for supported Codex and Pi sessions. Delivery depends on your connection and Android background settings.</p></div>
-      <div class="card"><h3>🖼️ Send a picture</h3><p>Attach an image and send it with a prompt to an idle Codex session.</p></div>
-      <div class="card"><h3>⌨ Remote keys &amp; saved drafts</h3><p>Send Enter, arrows, Tab, paging keys, and Ctrl-C without sending your draft. Unsent text is saved separately for each session.</p></div>
-      <div class="card"><h3>📂 Files &amp; Links</h3><p>Browse referenced images, PDFs, Markdown, and code, or open and copy links from the terminal output.</p></div>
-      <div class="card"><h3>🔒 Pair once, revoke anytime</h3><p>Pair by scanning a QR code and confirming the matching code on your desktop. Access can be taken away from any phone whenever you like.</p></div>
-    </div>
-    <div class="note">A paired phone can <strong>operate</strong> your terminals, not just watch them — so only pair devices you trust, and remove any phone you no longer use.</div>
-  </section>
-
-  <section>
-    <h2>Supported AI harnesses</h2>
-    <p class="sub">Only harnesses actually installed on the machine are offered in the top bar.</p>
-    <div class="harness-row">
-      <span class="harness"><img src="logos/anthropic-white.svg" alt="">Claude Code</span>
-      <span class="harness"><img src="logos/openai-white.svg" alt="">OpenAI Codex</span>
-      <span class="harness"><img src="logos/opencode-light.svg" alt="">OpenCode</span>
-      <span class="harness"><img src="logos/grok-white.svg" alt="">Grok CLI</span>
-      <span class="harness"><img src="logos/google.svg" alt="">Antigravity</span>
-      <span class="harness"><img src="logos/shell-white.svg" alt="">Aider · Reasonix · Shell</span>
-    </div>
-    <p class="sub" style="margin-top:14px">Android completion alerts support <strong>Codex and Pi</strong> with the updated bridge and compatible sessions. Image prompts currently support idle <strong>Codex</strong> sessions. Other agents remain available for terminal viewing and input; history access depends on the agent’s terminal mode.</p>
-  </section>
-
-  <section>
-    <h2>Keybindings</h2>
-    <table class="keys">
-      <tr><td><span class="kbd">SUPER + SHIFT + Q</span></td><td><strong>Show / hide SUPER DESKTOP</strong> — works in EN + UK layouts, and any other combination can be recorded in ⚙ Settings → <em>Show / hide shortcut</em></td></tr>
-      <tr><td><span class="kbd">Esc</span></td><td>Hide the overlay</td></tr>
-      <tr><td>Pointer in the top-left corner (2s)</td><td>Show / hide SUPER DESKTOP</td></tr>
-      <tr><td><span class="kbd">Ctrl + N</span> / <span class="kbd">Ctrl + T</span></td><td>New note / new terminal</td></tr>
-      <tr><td>Double-click terminal</td><td>Expand to 80% / collapse back</td></tr>
-    </table>
-  </section>
-
-  <section>
-    <h2>Useful commands</h2>
-    <pre><code>super-desktop toggle          <span class="c"># show / hide</span>
-super-desktop status          <span class="c"># visible? notes / terminals count</span>
-super-desktop add-note "Buy milk"
-super-desktop add-term claude <span class="c"># + antigravity, codex, opencode, grok, reasonix, aider, shell</span>
-super-desktop reload-theme
-./rebuild.sh                  <span class="c"># rebuild after git pull (in a clone)</span></code></pre>
-  </section>
-
-  <section>
-    <h2>Learn more</h2>
-    <div class="grid">
-      <div class="card"><h3>📄 Full README</h3><p>Every feature, keybinding and command in one place — <a href="https://github.com/gladimdim/super-desktop#readme">README</a>.</p></div>
-      <div class="card"><h3>🔐 Security</h3><p>How pairing, access control and sharing between devices work — <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a>.</p></div>
-      <div class="card"><h3>📎 File previews</h3><p>Open images, GIFs, PDF pages, Markdown and code straight from a terminal — see the <a href="https://github.com/gladimdim/super-desktop#readme">README</a>.</p></div>
-      <div class="card"><h3>🌙 Sleep lock</h3><p>Keep your AI sessions reachable while your laptop is on charge, even with the lid closed.</p></div>
-    </div>
-  </section>
-
   </main>
 
   <footer>
     Built in Rust (GTK4 · LayerShell · VTE · tmux) for Omarchy &amp; Hyprland.<br>
     Local overlay · remote PC-to-PC sessions · phone linking.<br>
-    <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a> · MIT-style open source — issues and PRs welcome.
+    <a href="https://github.com/gladimdim/super-desktop#readme">README</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a><br>
+    MIT-style open source — issues and PRs welcome.
   </footer>
 
 </div>
