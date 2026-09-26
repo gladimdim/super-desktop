@@ -39,9 +39,15 @@ Then press **SUPER + SHIFT + Q** (SUPER is usually the Windows key), or run
 an installed harness in the top bar. Install and sign in to your preferred AI
 CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
 
-To update later, run the same command again. It fast-forwards the source,
-rebuilds it, and restarts SUPER DESKTOP if it is running. Your settings, notes
-and running harnesses are kept.
+To update later, open **⚙ Settings → Updates**, or run the same command
+again. Settings → Updates compares this build's version with the newest on
+GitHub (every commit raises the version) and lists what a newer version
+brings. **Update** fast-forwards the source and rebuilds it; SUPER DESKTOP
+restarts on the new build only once the build succeeds, and a notification
+says how it went (the log is `~/.local/state/super-desktop/update.log`). The
+install command also rebuilds and restarts SUPER DESKTOP if it is running.
+Either way your settings, notes and running harnesses are kept, and a clone
+with uncommitted changes or commits of its own is not updated.
 
 **Installing from a clone.** If you work on the code, clone the repository and
 run `./install.sh` inside it. The installer then builds and installs that clone
@@ -433,7 +439,7 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 
 ### 5. Updating an existing install
 
-Run the install command again, then `super-desktop status`. It fast-forwards the clone the install runs from, rebuilds, and restarts the daemon and bridge when run inside the Hyprland session. A clone with local changes is left as it is: there, use `git pull && ./rebuild.sh`.
+Run the install command again, then `super-desktop status`. It fast-forwards the clone the install runs from, rebuilds, and restarts the daemon and bridge when run inside the Hyprland session. A clone with local changes is left as it is: there, use `git pull && ./rebuild.sh`. The user can do the same from ⚙ Settings → Updates, which checks the clone's upstream branch on GitHub, fast-forwards it and runs `rebuild.sh` (log: `~/.local/state/super-desktop/update.log`).
 
 ---
 
@@ -465,8 +471,10 @@ events (`peer-events`) and sends one command (`peer-command`);
 │   ├── sticky_note.rs       # Sticky note widget
 │   ├── tag.rs / brand.rs    # group color tags, agent brand assets
 │   ├── harness_settings.rs / launcher_settings.rs  # ⚙ settings card (shortcut + top bar + 📱 launcher connection page)
+│   ├── updates.rs           # ⚙ Settings → Updates: compare with GitHub, fast-forward, rebuild.sh
 │   ├── usage.rs / ws.rs     # usage stats, misc helpers
 │   └── crashlog.rs          # panic hook (release builds abort; crashes leave a trace)
+├── .githooks/pre-commit     # raises the patch version on every commit (git config core.hooksPath .githooks)
 ├── assets/                  # vendored toolbar logos → ~/.config/super-desktop/assets/
 ├── Cargo.toml               # gtk4, gtk4-layer-shell, vte4, serde, serde_json, chrono, libc
 ├── install.sh               # one-command install and update (see §1 above)

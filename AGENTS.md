@@ -34,6 +34,18 @@ mobile terminal output and Linux performance notes.
 - If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
   the notes here.
 
+## Every commit raises the version
+
+Settings → Updates offers an update when the version in Cargo.toml on GitHub
+is newer than the running build, so every commit raises it. The checked-in
+`.githooks/pre-commit` raises the patch version in `Cargo.toml` and
+`Cargo.lock` on each commit, touching only the version line. Enable it once
+per clone with `git config core.hooksPath .githooks`, and do not bypass it
+(`--no-verify`). Raise the minor or major version by editing `Cargo.toml` in
+the commit itself; the hook keeps a raised version and syncs `Cargo.lock`. A
+rebase or merge conflict in the version line resolves to the higher version;
+the next commit raises it again.
+
 ## Responsive toolbar invariant
 
 The local and remote top bars must fit the current display's allocated logical

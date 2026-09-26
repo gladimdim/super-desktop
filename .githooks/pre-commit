@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Every commit raises the patch version of the super-desktop package in
+# Cargo.toml and Cargo.lock, so each commit's build has a version of its own
+# and Settings → Updates can tell when GitHub has a newer one. A commit that
+# already raises the version (a minor or major release) keeps it, and
+# Cargo.lock follows it either way, so `cargo build --locked` still works.
+#
+# Enable once per clone:  git config core.hooksPath .githooks
+#
+# Only the version line changes, in the staged copy and in the work tree:
+# unstaged edits to either file stay unstaged.
+set -euo pipefail
+
+cd "$(git rev-parse --show-toplevel)"
+
+version_of() {
+    sed -n '/^\[package\]/,/^\[/s/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' | head -n 1
+}
+
+# True when version $1 is newer than version $2.
+newer() {
+    [[ "$1" != "$2" && "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n 1)" == "$1" ]]
+}
+
+git cat-file -e :Cargo.toml 2>/dev/null || exit 0
+staged="$(git show :Cargo.toml | version_of)"
+[[ -n "$staged" ]] || exit 0
+head="$(git show HEAD:Cargo.toml 2>/dev/null | version_of || true)"
+
+if [[ -n "$head" ]] && newer "$staged" "$head"; then
+    next="$staged"
+else
+    # An index older than HEAD (left by a partial commit) bumps from HEAD.
+    base="$staged"
+    if [[ -n "$head" ]] && newer "$head" "$staged"; then
+        base="$head"
+    fi
+    IFS=. read -r major minor patch <<<"$base"
+    next="$major.$minor.$((patch + 1))"
+fi
+
+bump_manifest() {
+    sed '/^\[package\]/,/^\[/s/^version = "[0-9.]*"$/version = "'"$next"'"/'
+}
+bump_lock() {
+    sed '/^name = "super-desktop"$/{n;s/^version = "[0-9.]*"$/version = "'"$next"'"/;}'
+}
+
+# Rewrite the staged copy of $1 through $2, and the work tree's copy likewise.
+bump() {
+    local file="$1" filter="$2" mode blob
+    git cat-file -e ":$file" 2>/dev/null || return 0
+    mode="$(git ls-files -s -- "$file" | cut -d' ' -f1)"
+    blob="$(git show ":$file" | "$filter" | git hash-object -w --stdin)"
+    git update-index --cacheinfo "$mode,$blob,$file"
+    if [[ -f "$file" ]]; then
+        "$filter" <"$file" >"$file.version-bump"
+        cat "$file.version-bump" >"$file"
+        rm -f "$file.version-bump"
+    fi
+}
+
+bump Cargo.toml bump_manifest
+bump Cargo.lock bump_lock

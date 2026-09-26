@@ -54,7 +54,189 @@ enum SettingsPage {
     HarnessArgs,
     TopBar,
     SleepLock,
+    Updates,
     Connections(ConnectionPage),
+}
+
+/// How long a check started by opening Settings stays good; the Updates page
+/// and its button always check again.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// Settings → Updates (see `updates`): this build's version, a check against
+/// the clone's GitHub branch, and the update itself. Returns what starts a
+/// check: `true` always, `false` only when the last one is an hour old. The
+/// home entry's `entry_chip` names a newer version when a check finds one.
+fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
+    use crate::updates;
+    let current = updates::running();
+    let (head, body) = section_card(root, "", "SUPER DESKTOP");
+    head.append(&chip(&format!("This build {current}")));
+
+    let text = |classes: &[&str]| {
+        let label = Label::new(None);
+        for class in classes {
+            label.add_css_class(class);
+        }
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_wrap_mode(pango::WrapMode::WordChar);
+        label
+    };
+    let status = text(&["launcher-note", "update-status"]);
+    status.set_text("Not checked yet.");
+    body.append(&status);
+    let changes = text(&["update-changes"]);
+    changes.set_visible(false);
+    body.append(&changes);
+    let blocked = text(&["launcher-note", "launcher-note-error"]);
+    blocked.set_visible(false);
+    body.append(&blocked);
+    let actions = Box::new(Orientation::Horizontal, 8);
+    let btn_check = Button::with_label("⟳ Check again");
+    btn_check.add_css_class("launcher-btn");
+    btn_check.set_tooltip_text(Some("Ask GitHub for the newest version"));
+    let btn_update = Button::with_label("⬇ Update");
+    btn_update.add_css_class("launcher-btn");
+    btn_update.add_css_class("launcher-btn-primary");
+    btn_update.set_visible(false);
+    actions.append(&btn_check);
+    actions.append(&btn_update);
+    body.append(&actions);
+    let source = text(&["launcher-hint"]);
+    source.set_selectable(true);
+    source.set_visible(false);
+    body.append(&source);
+    let hint = text(&["launcher-hint"]);
+    hint.set_text(
+        "Updating fast-forwards the clone SUPER DESKTOP runs from and rebuilds it with its rebuild.sh. \
+         The build runs first, and SUPER DESKTOP restarts on it only if it succeeds; terminal cards keep \
+         running. A clone with uncommitted changes or commits of its own is left alone.",
+    );
+    body.append(&hint);
+
+    let found: Rc<RefCell<Option<updates::Status>>> = Rc::new(RefCell::new(None));
+    let checked_at: Rc<Cell<Option<std::time::Instant>>> = Rc::new(Cell::new(None));
+    let updating = Rc::new(Cell::new(false));
+    let show_error = {
+        let status = status.clone();
+        move |message: &str| {
+            status.add_css_class("launcher-note-error");
+            status.set_text(message);
+        }
+    };
+
+    let apply = {
+        let (status, changes, blocked, source) = (status.clone(), changes.clone(), blocked.clone(), source.clone());
+        let (btn_check, btn_update, entry_chip) = (btn_check.clone(), btn_update.clone(), entry_chip.clone());
+        let (found, updating, show_error) = (Rc::clone(&found), Rc::clone(&updating), show_error.clone());
+        move |result: Result<updates::Status, String>| {
+            if updating.get() {
+                return;
+            }
+            btn_check.set_sensitive(true);
+            status.remove_css_class("launcher-note-error");
+            let checked = match result {
+                Ok(checked) => checked,
+                Err(error) => {
+                    show_error(&error);
+                    changes.set_visible(false);
+                    blocked.set_visible(false);
+                    btn_update.set_visible(false);
+                    *found.borrow_mut() = None;
+                    return;
+                }
+            };
+            source.set_text(&format!("From {} ({}) into {}", checked.url, checked.upstream, checked.dir.display()));
+            source.set_visible(true);
+            if checked.available() {
+                status.set_text(&format!("SUPER DESKTOP {} is available. This build is {}.", checked.latest, checked.current));
+                let mut list: Vec<String> = checked.changes.iter().map(|subject| format!("• {subject}")).collect();
+                if checked.more > 0 {
+                    list.push(format!("…and {} more", checked.more));
+                }
+                changes.set_text(&list.join("\n"));
+                changes.set_visible(!list.is_empty());
+                blocked.set_text(checked.blocked.as_deref().unwrap_or(""));
+                blocked.set_visible(checked.blocked.is_some());
+                btn_update.set_label(&format!("⬇ Update to {}", checked.latest));
+                btn_update.set_visible(true);
+                btn_update.set_sensitive(checked.blocked.is_none());
+                entry_chip.set_text(&format!("{} available", checked.latest));
+                entry_chip.add_css_class("update-available");
+            } else {
+                status.set_text(&format!(
+                    "Up to date. This build is {}; the newest on {} is {}.",
+                    checked.current, checked.upstream, checked.latest
+                ));
+                changes.set_visible(false);
+                blocked.set_visible(false);
+                btn_update.set_visible(false);
+                entry_chip.set_text(&checked.current.to_string());
+                entry_chip.remove_css_class("update-available");
+            }
+            *found.borrow_mut() = Some(checked);
+        }
+    };
+    let refresh = crate::launcher_settings::background_refresh(updates::check, apply);
+    let start_check: Rc<dyn Fn(bool)> = {
+        let (status, btn_check, btn_update) = (status.clone(), btn_check.clone(), btn_update.clone());
+        let (checked_at, updating) = (Rc::clone(&checked_at), Rc::clone(&updating));
+        Rc::new(move |force| {
+            if updating.get()
+                || (!force && checked_at.get().is_some_and(|at| at.elapsed() < UPDATE_CHECK_INTERVAL))
+            {
+                return;
+            }
+            checked_at.set(Some(std::time::Instant::now()));
+            status.remove_css_class("launcher-note-error");
+            status.set_text("Checking GitHub…");
+            btn_check.set_sensitive(false);
+            btn_update.set_sensitive(false);
+            refresh();
+        })
+    };
+    btn_check.connect_clicked({
+        let start_check = Rc::clone(&start_check);
+        move |_| start_check(true)
+    });
+    btn_update.connect_clicked({
+        let (status, btn_check) = (status.clone(), btn_check.clone());
+        move |button| {
+            let Some(checked) = found.borrow().clone() else { return };
+            updating.set(true);
+            button.set_sensitive(false);
+            btn_check.set_sensitive(false);
+            status.remove_css_class("launcher-note-error");
+            status.set_text(&format!(
+                "Updating to {}: building. This takes a minute or two, and SUPER DESKTOP restarts on \
+                 the new build when it is ready. Terminal cards keep running.",
+                checked.latest
+            ));
+            let (button, btn_check, show_error, updating) =
+                (button.clone(), btn_check.clone(), show_error.clone(), Rc::clone(&updating));
+            glib::MainContext::default().spawn_local(async move {
+                let latest = checked.latest;
+                // A successful rebuild replaces this daemon before it ends,
+                // so coming back here means it did not.
+                let result = gtk4::gio::spawn_blocking(move || {
+                    let paths = updates::Paths::user()?;
+                    let child = updates::start_update(&checked, &paths)?;
+                    updates::wait_rebuild(child, &paths)
+                })
+                .await
+                .unwrap_or_else(|_| Err("the update stopped unexpectedly".to_string()));
+                updating.set(false);
+                btn_check.set_sensitive(true);
+                if let Err(reason) = result {
+                    let message = format!("The update to {latest} did not finish: {reason}");
+                    show_error(&message);
+                    button.set_sensitive(true);
+                    gtk4::gio::spawn_blocking(move || updates::notify("SUPER DESKTOP update did not finish", &message));
+                }
+            });
+        }
+    });
+    start_check
 }
 
 fn settings_entry(icon: &str, title: &str, summary: &str, class: &str) -> (Button, Box) {
@@ -683,6 +865,18 @@ pub fn build_harness_settings_panel(
         move || count_refresh(),
     );
 
+    let (btn_updates, updates_trailing) = settings_entry(
+        "⟳",
+        "Updates",
+        "Check GitHub for a newer SUPER DESKTOP and update this computer.",
+        "settings-updates-entry",
+    );
+    btn_updates.set_tooltip_text(Some("Check for a newer version"));
+    let updates_chip = chip(&crate::updates::running().to_string());
+    updates_chip.add_css_class("update-version");
+    updates_trailing.prepend(&updates_chip);
+    home_root.append(&btn_updates);
+
     let home_footer = Label::new(Some("Settings are saved as you change them."));
     home_footer.add_css_class("launcher-footer");
     home_footer.set_xalign(0.5);
@@ -1099,6 +1293,16 @@ pub fn build_harness_settings_panel(
         move || paint_status(),
     );
 
+    let updates_root = Box::new(Orientation::Vertical, 10);
+    updates_root.add_css_class("launcher-body");
+    let check_updates = build_updates_page(&updates_root, &updates_chip);
+    // Opening Settings checks at most hourly, so the entry can name a newer
+    // version; opening the page always checks.
+    btn_updates.connect_map({
+        let check_updates = Rc::clone(&check_updates);
+        move |_| check_updates(false)
+    });
+
     let home_view = settings_scroll(&home_root);
     let shortcut_view = settings_scroll(&shortcut_root);
     let harnesses_view = settings_scroll(&harnesses_root);
@@ -1106,6 +1310,7 @@ pub fn build_harness_settings_panel(
     let args_view = settings_scroll(&args_root);
     let top_bar_view = settings_scroll(&top_bar_root);
     let sleep_view = settings_scroll(&sleep_root);
+    let updates_view = settings_scroll(&updates_root);
 
     // Connections is a family of destinations with its own overview. They
     // own their live bridge controls and refresh only while shown. `nav` is
@@ -1140,6 +1345,7 @@ pub fn build_harness_settings_panel(
         view.set_visible(false);
     }
     pages.append(&sleep_view);
+    pages.append(&updates_view);
     pages.append(&args_view);
     args_view.set_visible(false);
     shortcut_view.set_visible(false);
@@ -1147,6 +1353,7 @@ pub fn build_harness_settings_panel(
     custom_view.set_visible(false);
     top_bar_view.set_visible(false);
     sleep_view.set_visible(false);
+    updates_view.set_visible(false);
     outer.append(&pages);
 
     let current_page = Rc::new(Cell::new(SettingsPage::Home));
@@ -1159,6 +1366,8 @@ pub fn build_harness_settings_panel(
         let top_bar_view = top_bar_view.clone();
         let connection_pages = Rc::clone(&connection_pages);
         let sleep_view = sleep_view.clone();
+        let updates_view = updates_view.clone();
+        let check_updates = Rc::clone(&check_updates);
         let btn_back = btn_back.clone();
         let badge = badge.clone();
         let title = title.clone();
@@ -1179,6 +1388,7 @@ pub fn build_harness_settings_panel(
                 view.set_visible(page == SettingsPage::Connections(connection));
             }
             sleep_view.set_visible(page == SettingsPage::SleepLock);
+            updates_view.set_visible(page == SettingsPage::Updates);
             // An invitation lives only while its page is shown.
             if page != SettingsPage::Connections(ConnectionPage::Invite) {
                 connection_pages.invite.stop();
@@ -1229,6 +1439,12 @@ pub fn build_harness_settings_panel(
                     title.set_label("Sleep lock");
                     subtitle.set_label("Keep harnesses available on charger power");
                 }
+                SettingsPage::Updates => {
+                    badge.set_label("⟳");
+                    title.set_label("Updates");
+                    subtitle.set_label("Newer versions from GitHub");
+                    check_updates(true);
+                }
                 SettingsPage::Connections(connection) => {
                     let (icon, heading, summary) = connection_pages.header(connection);
                     badge.set_label(icon);
@@ -1246,6 +1462,7 @@ pub fn build_harness_settings_panel(
         (&btn_top_bar_page, SettingsPage::TopBar),
         (&btn_launcher, SettingsPage::Connections(ConnectionPage::Overview)),
         (&btn_sleep_lock, SettingsPage::SleepLock),
+        (&btn_updates, SettingsPage::Updates),
     ] {
         let nav = Rc::clone(&nav);
         button.connect_clicked(move |_| nav(page));
@@ -2517,8 +2734,8 @@ mod tests {
         let pages = find_widgets(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            14,
-            "hub + four destinations + custom harness page + seven Connections pages + harness parameters page"
+            15,
+            "hub + four destinations + custom harness page + seven Connections pages + updates + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
@@ -2526,10 +2743,10 @@ mod tests {
             .collect();
         // hub, shortcut, harnesses, custom, top bar,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
-        // harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1, 1]);
+        // updates, harness parameters
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 17);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 18);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -2548,6 +2765,7 @@ mod tests {
             ("settings-top-bar-entry", 4, "Top bar"),
             ("android-settings-entry", 5, "Connections"),
             ("settings-sleep-lock-entry", 12, "Sleep lock"),
+            ("settings-updates-entry", 13, "Updates"),
         ] {
             let button = find_buttons(&panel.widget, class)
                 .into_iter()
@@ -2567,6 +2785,28 @@ mod tests {
             assert!(!shown(&btn_back));
             assert_eq!(title_text(&panel.widget), "Settings");
         }
+
+        // The hub entry names this build; the Updates page checks on opening.
+        // A test binary is not a clone's release build, so the check says it
+        // cannot update rather than asking git anything.
+        let version = crate::updates::running().to_string();
+        assert!(find_labels(&panel.widget, "update-version").iter().any(|chip| chip.text() == version));
+        find_buttons(&panel.widget, "settings-updates-entry")[0].emit_clicked();
+        let status = find_labels(&panel.widget, "update-status").into_iter().next().expect("update status");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while status.text() == "Checking GitHub…" || status.text() == "Not checked yet." {
+            assert!(std::time::Instant::now() < deadline, "the check never answered");
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(status.text().contains("cannot update itself"), "{}", status.text());
+        assert!(status.has_css_class("launcher-note-error"));
+        let update = find_buttons(&panel.widget, "launcher-btn-primary")
+            .into_iter()
+            .find(|button| button.label().is_some_and(|label| label.starts_with("⬇ Update")))
+            .expect("the update button exists");
+        assert!(!update.is_visible(), "nothing to update from here");
+        btn_back.emit_clicked();
 
         find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
         find_buttons(&panel.widget, "settings-add-harness-entry")[0].emit_clicked();
@@ -2734,6 +2974,22 @@ mod tests {
             .expect("card title is a Label")
             .label()
             .to_string()
+    }
+
+    /// Every label carrying `class` in the subtree rooted at `w`.
+    fn find_labels(w: &gtk4::Widget, class: &str) -> Vec<Label> {
+        let mut out = Vec::new();
+        if w.has_css_class(class) {
+            if let Some(label) = w.downcast_ref::<Label>() {
+                out.push(label.clone());
+            }
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            out.extend(find_labels(&c, class));
+            child = c.next_sibling();
+        }
+        out
     }
 
     /// Every button carrying `class` in the subtree rooted at `w`.

@@ -1192,6 +1192,24 @@ button.term-jump-newest:hover {{
     font-size: 11.5px;
     font-weight: 700;
 }}
+/* Settings → Updates (updates.rs): the commits an update brings, and the
+   hub entry's chip once a newer version is known. */
+.update-changes {{
+    font-family: '{font_family}', monospace;
+    font-size: 11px;
+    color: {foreground};
+    background-color: {launcher_section_bg};
+    border: 1px solid {launcher_section_border};
+    border-radius: 8px;
+    padding: 8px 10px;
+}}
+.term-status-badge.update-available {{
+    color: {darker_background};
+    background-color: {accent};
+    border-color: {accent};
+    font-weight: 700;
+}}
+
 .connections-warning-chip {{
     background-color: {danger_bg};
     color: {bright_yellow};
@@ -1803,6 +1821,14 @@ mod tests {
                 css.contains(&format!(".{class}")),
                 "missing CSS rule for .{class}"
             );
+        }
+    }
+
+    #[test]
+    fn test_update_styles_exist() {
+        let css = generate_css(&current_theme());
+        for rule in [".update-changes {", ".term-status-badge.update-available {"] {
+            assert!(css.contains(rule), "missing CSS rule {rule}");
         }
     }
 

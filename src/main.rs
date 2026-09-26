@@ -8,6 +8,7 @@ mod prompt_attachments;
 mod prompt_history;
 mod shell_title;
 mod scrollback;
+mod updates;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;
@@ -574,6 +575,10 @@ fn run_daemon(start_visible: bool) {
     });
     start_ipc_thread(ipc_tx);
     startup::mark("IPC listening");
+    // A start that finishes an update from Settings → Updates says how it went.
+    let _ = thread::Builder::new()
+        .name("super-desktop-update-notice".to_string())
+        .spawn(updates::announce_finished_update);
     // Panes created in an already running tmux server inherit its global
     // environment, which still carries layer-shell if that server was started
     // from a preloaded environment.
