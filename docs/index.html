@@ -64,6 +64,10 @@
     border-radius: 999px; padding: 8px 16px 8px 10px; font-size: 14.5px;
   }
   .harness img { width: 22px; height: 22px; }
+  /* A card with a lot to show takes two columns, so its neighbours stay short.
+     Dense flow backfills the gap it would leave at three columns. */
+  .grid.dense { grid-auto-flow: dense; }
+  @media (min-width: 500px) { .card.wide { grid-column: span 2; } }
   .card .harness-row { margin-top: 12px; gap: 6px; }
   .card .harness { font-size: 13px; padding: 4px 10px; }
   .card .harness img { width: 16px; height: 16px; }
@@ -191,13 +195,13 @@
   <section id="features">
     <h2>Main features</h2>
     <p class="sub">Your agents keep running on every PC. Open them from any other PC or from your phone, directly and privately.</p>
-    <div class="grid">
+    <div class="grid dense">
       <div class="card"><h3>📱 Android + iPhone remote access</h3><p>Open every session from your phone: live terminals, prompts with pictures and files, and completion alerts. Android is available now; the iPhone app is in development.</p></div>
       <div class="card"><h3>📖 Built for foldables</h3><p>Unfold for two live terminals side by side next to your harness list, with layouts that follow every fold and resize. On Android today, coming to iPhone.</p></div>
       <div class="card"><h3>🖥️ All your PCs, connected</h3><p>Pair as many PCs as you like. Each one can open any other's workspace, to watch and type into its sessions as if you were there.</p></div>
       <div class="card"><h3>🔒 No accounts, no servers</h3><p>Your PCs and phones talk directly over your own network or Tailscale, encrypted and pinned to each device. Nothing to sign up for, no cloud in between.</p></div>
       <div class="card"><h3>⚡ Native and fast</h3><p>Rust, GTK4 and tmux: no Electron, no web views. The workspace is there the moment you press the shortcut, and your agents keep running while it is hidden.</p></div>
-      <div class="card"><h3>🤖 Use any harness</h3><p>Every coding agent installed on the PC gets a one-click launcher.</p>
+      <div class="card wide"><h3>🤖 Use any harness</h3><p>Every coding agent installed on the PC gets a one-click launcher.</p>
         <div class="harness-row">
           <span class="harness"><img src="logos/anthropic-white.svg" alt="">Claude Code</span>
           <span class="harness"><img src="logos/openai-white.svg" alt="">Codex</span>
