@@ -179,16 +179,21 @@ clears, as usual in tmux. Copies an app makes itself over OSC 52 (for example
 fullscreen Claude Code's selection) reach the clipboard too. Both need
 `wl-copy` and apply to SUPER DESKTOP sessions only; other tmux sessions keep
 their own bindings. To keep a highlight and copy by keyboard instead, hold
-**Shift** while dragging, then press **Ctrl+Shift+C**. Paste uses VTE's native handling,
-including bracketed paste when enabled by the running app. In Codex cards,
-**Ctrl+V** also pastes text when the clipboard offers it, including Chrome
-selections with both plain text and HTML. This prevents Codex's image-paste
-shortcut from misreading copied text. Image-only Ctrl+V still reaches Codex;
-other terminal apps keep their normal Ctrl+V behavior.
+**Shift** while dragging, then press **Ctrl+Shift+C**. As in Omarchy's own
+terminals, **Ctrl+Insert** copies and **Shift+Insert** pastes the clipboard, so
+Omarchy's **Super+C** and **Super+V** work in cards too. Paste uses VTE's
+native handling, including bracketed paste when enabled by the running app. In
+harness cards **Ctrl+V** also pastes text when the clipboard offers it,
+including Chrome selections with both plain text and HTML; an image-only
+clipboard still sends Ctrl+V to the harness, which attaches the image. Shell
+cards keep their normal Ctrl+V (Vim's block selection, the shell's quoted
+insert). The shortcuts work with a non-Latin keyboard layout active too.
 
-The clipboard regression test owns its clipboard: run it on an isolated display,
-for example with `gtk4-broadwayd :37` running, then
-`GDK_BACKEND=broadway BROADWAY_DISPLAY=:37 GSK_RENDERER=cairo cargo test clipboard_round_trip -- --ignored`.
+Scroll back in a local card and **↓ Jump to newest** appears at its bottom:
+click it to leave the history and follow new output again (scrolling back to
+the end, or pressing **q**, leaves it too). The scrolling is tmux's copy mode,
+so apps that draw their own full screen or read the mouse themselves scroll on
+their own and show no button.
 
 ### Terminal history on mobile
 

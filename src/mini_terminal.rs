@@ -500,6 +500,8 @@ pub struct MiniTerminalCard {
     /// Bumped by every notice, so an older timer cannot hide a newer one.
     notice_generation: Rc<Cell<u64>>,
     preview_box: gtk4::Box,
+    /// **↓ Jump to newest**, over the terminal while its pane is scrolled back.
+    jump: crate::scrollback::JumpButton,
     vte: Rc<RefCell<Option<VteTerminal>>>,
     /// Whether that terminal draws: the overlay is mapped and no card hides it.
     vte_drawing: VteDrawing,
@@ -796,7 +798,20 @@ impl MiniTerminalCard {
 
         icon_box.set_visible(false);
         preview_box.append(&icon_box);
-        body.append(&preview_box);
+        // The terminal area, with Jump to newest over its bottom edge. Only a
+        // local card has a pane here to scroll back.
+        let preview_area = Overlay::new();
+        preview_area.set_vexpand(true);
+        preview_area.set_child(Some(&preview_box));
+        let jump = crate::scrollback::JumpButton::new(&data.borrow().session_name, {
+            let vte = Rc::clone(&vte);
+            move || vte.borrow().is_some()
+        });
+        preview_area.add_overlay(&jump.button);
+        if !source.is_remote() {
+            jump.watch(&preview_box);
+        }
+        body.append(&preview_area);
 
         // Footer for normal card
         let footer = gtk4::Box::new(Orientation::Horizontal, 6);
@@ -1002,6 +1017,7 @@ impl MiniTerminalCard {
             notice_label,
             notice_generation: Rc::new(Cell::new(0)),
             preview_box,
+            jump,
             vte,
             vte_drawing: VteDrawing::new(),
             visual_pos,
@@ -1080,6 +1096,7 @@ impl MiniTerminalCard {
             let remote = card.remote.clone();
             let fit = Rc::clone(&card.fit);
             let on_save = Rc::clone(&on_drag_end);
+            let jump = card.jump.clone();
             Rc::new(move || {
                 if *expanded.borrow() {
                     *expanded.borrow_mut() = false;
@@ -1089,6 +1106,7 @@ impl MiniTerminalCard {
                     hint_label.set_label(&card_hint(&source_message));
                 }
                 remove_vte(&vte, &preview_box);
+                jump.hide();
                 // The icon of a remote card is the host's, at the view's scale.
                 let side = icon_side(fit.get().2);
                 {
@@ -2003,6 +2021,7 @@ impl MiniTerminalCard {
             data_weak.upgrade().map(|d| d.borrow().clone());
         let on_persist = Rc::clone(&self.on_session_persist);
         let in_flight = Rc::downgrade(&self.refresh_in_flight);
+        let jump = self.jump.clone();
         self.refresh_in_flight.set(true);
 
         let request = crate::card_status::CardRequest {
@@ -2013,7 +2032,7 @@ impl MiniTerminalCard {
             need_resolve,
         };
         let apply = Box::new(move |update: Option<crate::card_status::CardUpdate>| {
-            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, notice }) = update else {
+            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, notice, scrolled_back }) = update else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -2022,6 +2041,9 @@ impl MiniTerminalCard {
 
             if let (Some(badge), Some(compact)) = (status_badge.upgrade(), compact_status.upgrade()) {
                 apply_status_view(&badge, &compact, status_info.status);
+            }
+            if let Some(scrolled_back) = scrolled_back {
+                jump.listed(scrolled_back);
             }
 
             if let (Some(label), Some(meta)) = (preview_label.upgrade(), meta_label.upgrade()) {
@@ -3004,6 +3026,118 @@ mod tests {
         assert!(fresh.is_visible());
         drawing.set_covered(true, Some(&fresh));
         assert!(!fresh.is_visible());
+        window.close();
+    }
+
+    #[test]
+    fn jump_to_newest_shows_while_the_pane_is_scrolled_back() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::jump_to_newest_gtk");
+    }
+
+    /// A local card over a private tmux server's session: scrolling back shows
+    /// the button, clicking it returns the pane to its newest output, and an
+    /// icon never shows it.
+    #[test]
+    fn jump_to_newest_gtk() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let session = "sd_term_jump_newest";
+        let server = crate::scrollback::tests::Server::with_history(session);
+        let scrollback = server.scrollback();
+        let wait = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !done() {
+                assert!(Instant::now() < deadline, "timed out: {what}");
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let data = crate::state::TerminalData {
+            id: session.to_string(),
+            session_name: session.to_string(),
+            agent_type: "claude".to_string(),
+            command: "claude".to_string(),
+            x: 20,
+            y: 80,
+            width: 480,
+            height: 320,
+            restored_width: 480,
+            restored_height: 320,
+            // No emulator until the bare one below: nothing attaches to tmux.
+            iconified: true,
+            icon_x: None,
+            icon_y: None,
+            created_at: 0.0,
+            tag: 0,
+            agent_session_id: None,
+            workspace_dir: None,
+        };
+        let card = Rc::new(MiniTerminalCard::new(
+            data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        ));
+        card.jump.use_scrollback(scrollback.clone());
+        card.open_with_bare_terminal(480, 320);
+        let window = gtk4::Window::new();
+        let canvas = gtk4::Fixed::new();
+        canvas.put(&card.container, 20.0, 20.0);
+        window.set_child(Some(&canvas));
+        window.set_default_size(700, 500);
+        window.present();
+        let button = card.jump.button.clone();
+        assert!(!button.is_visible(), "a card following its output shows no button");
+        assert!(!button.is_focusable(), "the keyboard stays with the terminal");
+
+        // The mouse wheel over the terminal: tmux enters copy mode, and the
+        // card asks tmux once the scrolling stops. The terminal still gets it.
+        server.scroll_back(session);
+        let scroll = card.preview_box.observe_controllers().into_iter()
+            .filter_map(|controller| controller.ok()?.downcast::<gtk4::EventControllerScroll>().ok())
+            .next()
+            .expect("the terminal area watches scrolling");
+        assert!(!scroll.emit_by_name::<bool>("scroll", &[&0.0f64, &-1.0f64]), "scrolling reaches the terminal");
+        wait("the button shows after scrolling back", &|| button.is_visible());
+        assert!(button.is_mapped());
+        assert!(button.width() < card.container.width(), "a pill, not a bar");
+
+        // Clicking returns the pane to its newest output. A listing taken
+        // before the jump does not bring the button back.
+        button.emit_clicked();
+        assert!(!button.is_visible());
+        wait("copy mode ends", &|| scrollback.in_mode(session) == Some(false));
+        card.jump.listed(true);
+        assert!(!button.is_visible(), "a stale listing is not believed right after a jump");
+
+        // Typing while it shows: `q` ends copy mode in tmux, and the card
+        // notices without waiting for the next listing.
+        server.scroll_back(session);
+        card.jump.check_soon();
+        wait("the button shows again", &|| button.is_visible());
+        let keys = card.preview_box.observe_controllers().into_iter()
+            .filter_map(|controller| controller.ok()?.downcast::<gtk4::EventControllerKey>().ok())
+            .next()
+            .expect("the terminal area watches keys");
+        server.run(&["send-keys", "-t", &format!("={session}:"), "-X", "cancel"]);
+        assert!(!keys.emit_by_name::<bool>("key-pressed", &[&gdk::Key::q, &24u32, &gdk::ModifierType::empty()]));
+        wait("the button hides after copy mode ends", &|| !button.is_visible());
+
+        // An icon has no terminal to jump in.
+        server.scroll_back(session);
+        card.jump.check_soon();
+        wait("the button shows before iconifying", &|| button.is_visible());
+        assert!(card.set_iconified(true));
+        assert!(!button.is_visible());
+        card.jump.listed(true);
+        card.jump.check_soon();
+        let settle = Instant::now() + Duration::from_millis(400);
+        while Instant::now() < settle {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!button.is_visible(), "an icon never shows the button");
         window.close();
     }
 }

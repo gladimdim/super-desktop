@@ -31,6 +31,9 @@ pub struct CardUpdate {
     /// A setup hint for this card (see `setup_notice`); the card shows it once
     /// per session (`claim_setup_notice`), not on every refresh.
     pub notice: Option<crate::command_feedback::Notice>,
+    /// The pane is scrolled back in tmux's copy mode (`PaneRow::in_mode`), so
+    /// the card offers to jump back to the newest output. `None`: unknown.
+    pub scrolled_back: Option<bool>,
 }
 
 /// An OpenClaw card whose gateway does not load the SUPER DESKTOP plugin never
@@ -138,7 +141,8 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
     let prompt = card_prompt(agent, row, metadata.as_ref(), oc_id.as_deref());
     let prompt = card_title(agent, metadata.as_ref(), oc_id.as_deref(), &status.pid).or(prompt);
     let notice = setup_notice(metadata.as_ref(), crate::harness_metadata::openclaw_plugin);
-    CardUpdate { status, preview, prompt, oc_id, notice }
+    let scrolled_back = Some(row.is_some_and(|row| row.in_mode));
+    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back }
 }
 
 fn preview_text(screen: Option<&str>, status: &SessionStatus, lines: usize) -> String {
@@ -262,7 +266,9 @@ fn legacy(request: &CardRequest) -> CardUpdate {
         crate::harness_metadata::inspect(session, agent).as_ref(),
         crate::harness_metadata::openclaw_plugin,
     );
-    CardUpdate { status, preview, prompt, oc_id, notice }
+    // Without the inventory the card keeps its button as it is; the next
+    // refresh or scroll corrects it.
+    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back: None }
 }
 
 #[cfg(test)]
@@ -277,9 +283,9 @@ mod tests {
     /// cursor x/y, alternate screen, window activity.
     const STAMP: [&str; 8] = ["%7", "1", "132", "30", "4", "39", "0", "1790000000"];
 
-    /// A listing record: the card's fields, then `STAMP`.
+    /// A listing record: the card's fields, then `STAMP`, then not in a mode.
     fn row(fields: &[&str]) -> String {
-        record(&[fields, &STAMP[..]].concat())
+        record(&[fields, &STAMP[..], &["0"]].concat())
     }
 
     #[test]
@@ -301,12 +307,19 @@ mod tests {
             // tmux that left a stamp field empty: listed, but not stamped.
             record(&[
                 &["sd_term_f", "1", "60", "grok", "0", "24", "/tmp/f", "", "", "", ""][..],
-                &["%8", "0", "80", "0", "0", "0", "0", "1790000000"],
+                &["%8", "0", "80", "0", "0", "0", "0", "1790000000", "0"],
             ]
             .concat()),
             record(&[
                 &["sd_term_g", "1", "70", "grok", "0", "24", "/tmp/g", "", "", "", ""][..],
-                &["%9", "1", "80", "0", "0", "0", "0", ""],
+                &["%9", "1", "80", "0", "0", "0", "0", "", "0"],
+            ]
+            .concat()),
+            // Scrolled back through the history: the pane is in copy mode.
+            record(&[
+                &["sd_term_h", "1", "80", "claude", "0", "24", "/tmp/h", "", "", "", ""][..],
+                &STAMP[..],
+                &["1"],
             ]
             .concat()),
         ]
@@ -327,6 +340,8 @@ mod tests {
         assert!(matches!(snapshot.lookup("sd_term_d"), PaneLookup::Unknown));
         assert!(matches!(snapshot.lookup("sd_term_e"), PaneLookup::Unknown));
         assert!(matches!(snapshot.lookup("sd_term_gone"), PaneLookup::Missing));
+        let PaneLookup::Row(h) = snapshot.lookup("sd_term_h") else { panic!("h") };
+        assert!(h.in_mode && !a.in_mode && !b.in_mode, "copy mode is read per pane");
         // What an unchanged pane's capture is reused by.
         assert_eq!(
             a.stamp,

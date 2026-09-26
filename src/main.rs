@@ -7,6 +7,7 @@ mod prompt_image;
 mod prompt_attachments;
 mod prompt_history;
 mod shell_title;
+mod scrollback;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;

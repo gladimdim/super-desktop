@@ -935,6 +935,24 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     font-weight: 600;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
 }}
+
+/* ↓ Jump to newest, over a card whose pane is scrolled back through its
+   history (scrollback.rs): the theme's accent, so it reads over any output. */
+button.term-jump-newest {{
+    background-image: none;
+    background-color: {accent};
+    color: {darker_background};
+    border: none;
+    border-radius: 9999px;
+    padding: 3px 12px;
+    min-height: 0;
+    font-size: 11px;
+    font-weight: 700;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45);
+}}
+button.term-jump-newest:hover {{
+    background-color: {bright_foreground};
+}}
 .term-notice-info {{
     color: {accent};
 }}
@@ -1786,6 +1804,12 @@ mod tests {
                 "missing CSS rule for .{class}"
             );
         }
+    }
+
+    #[test]
+    fn test_jump_to_newest_style_exists() {
+        let css = generate_css(&current_theme());
+        assert!(css.contains("button.term-jump-newest {"), "missing CSS rule for .term-jump-newest");
     }
 
     #[test]

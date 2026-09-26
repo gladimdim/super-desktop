@@ -1193,6 +1193,9 @@ pub struct PaneRow {
     /// What a capture of this session would read; `None` when this pane is
     /// not the one a capture addresses, or tmux left a field empty.
     pub stamp: Option<PaneStamp>,
+    /// The pane is in a mode, which for a card is copy mode: its view is
+    /// scrolled back through the history instead of following new output.
+    pub in_mode: bool,
 }
 
 /// The parts of an inventory row a pane's text depends on. Output updates
@@ -1250,7 +1253,7 @@ impl PaneSnapshot {
 // Records are split on RS, not newlines, so a value may contain newlines.
 const PANE_RECORD: char = '\u{1e}';
 const PANE_FIELD: char = '\u{1f}';
-const PANE_FORMAT_FIELDS: [&str; 19] = [
+const PANE_FORMAT_FIELDS: [&str; 20] = [
     "#{session_name}",
     "#{window_active}",
     "#{pane_pid}",
@@ -1271,6 +1274,8 @@ const PANE_FORMAT_FIELDS: [&str; 19] = [
     "#{cursor_y}",
     "#{alternate_on}",
     "#{window_activity}",
+    // `PaneRow::in_mode`: scrolled back through the history (copy mode).
+    "#{pane_in_mode}",
 ];
 
 pub fn pane_snapshot_format() -> String {
@@ -1318,6 +1323,7 @@ pub fn parse_pane_snapshot(text: &str) -> PaneSnapshot {
                 shell_tracking: fields[9].trim() == "1",
                 shell_command: fields[10].trim().to_string(),
                 stamp: parse_pane_stamp(&fields),
+                in_mode: fields[19].trim() == "1",
             },
         );
     }
@@ -3728,7 +3734,7 @@ mod tests {
         // Panes gone from the inventory, or no longer stamped, are forgotten.
         let fields = |session: &str, active: &str| {
             let mut row = vec![session, "1", "4242", "codex", "0", "24", "/tmp", "", "", "", ""];
-            row.extend(["%3", active, "80", "12", "2", "23", "0", "1000"]);
+            row.extend(["%3", active, "80", "12", "2", "23", "0", "1000", "0"]);
             format!("\u{1e}{}\n", row.join("\u{1f}"))
         };
         let listing = [fields("sd_term_a", "1"), fields("sd_term_b", "0")].concat();
