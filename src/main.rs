@@ -9,6 +9,7 @@ mod prompt_history;
 mod shell_title;
 mod scrollback;
 mod updates;
+mod floating_panel;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;

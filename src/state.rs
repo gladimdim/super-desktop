@@ -162,6 +162,10 @@ pub struct AppState {
     /// `crate::folder_colors`.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub folder_tags: std::collections::BTreeMap<String, u8>,
+    /// Where the user last dragged the ⚙ Settings card (its top-left), or
+    /// `None` for centered. Kept on screen whatever the display is now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_panel_pos: Option<(i32, i32)>,
 }
 
 impl Default for AppState {
@@ -191,6 +195,7 @@ impl Default for AppState {
             sleep_lock_on_ac: false,
             retired_harness_swaps: Vec::new(),
             folder_tags: std::collections::BTreeMap::new(),
+            settings_panel_pos: None,
         }
     }
 }

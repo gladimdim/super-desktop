@@ -548,8 +548,6 @@ impl SuperDesktopWindow {
         );
         *settings_for_wizard.borrow_mut() = Some(settings_panel.widget.clone());
         settings_panel.widget.set_visible(false);
-        settings_panel.widget.set_halign(Align::Center);
-        settings_panel.widget.set_valign(Align::Center);
 
         let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
@@ -909,8 +907,30 @@ impl SuperDesktopWindow {
         win_rc.canvas.put(&hud, 0.0, 0.0);
         raise_canvas_child(&win_rc.canvas, &hud);
 
-        // Added after the HUD so the settings card floats above it.
+        // Added after the HUD so the settings card floats above it. It moves by
+        // its header like a terminal card, at a fixed size, and never over the bar.
         root_overlay.add_overlay(&settings_panel.widget);
+        crate::floating_panel::MovablePanel::install(
+            &root_overlay,
+            &settings_panel.widget,
+            crate::harness_settings::SETTINGS_PANEL_SIZE,
+            Rc::new({
+                let state = Rc::clone(&win_rc.state);
+                move || top_bar_height(state.borrow().top_bar_size)
+            }),
+            win_rc.state.borrow().settings_panel_pos,
+            Rc::new({
+                let state = Rc::clone(&win_rc.state);
+                move |position| {
+                    let snapshot = {
+                        let mut s = state.borrow_mut();
+                        s.settings_panel_pos = Some(position);
+                        s.clone()
+                    };
+                    crate::state::save_state_async(snapshot);
+                }
+            }),
+        );
         root_overlay.add_overlay(&pairing_wizard.widget);
         // Last: a request is decided above whatever else is open.
         root_overlay.add_overlay(&pairing_requests.widget);
