@@ -69,8 +69,10 @@ pub fn clean(value: &str) -> String {
 
 /// Messages a harness injects into the conversation as if the user typed them.
 /// Claude Code writes background-task results (`<task-notification>`), slash
-/// command echoes, `!` shell input/output and reminders as "user" turns, and
-/// also passes them to the `UserPromptSubmit` hook. None of them is a prompt.
+/// command echoes, `!` shell input/output, reminders and messages from another
+/// Claude Code session (`<cross-session-message>`, and its delivery and idle
+/// notices) as "user" turns, and also passes them to the `UserPromptSubmit`
+/// hook. None of them is a prompt.
 const SYNTHETIC_PROMPT_PREFIXES: &[&str] = &[
     "<task-notification",
     "<system-reminder",
@@ -83,6 +85,10 @@ const SYNTHETIC_PROMPT_PREFIXES: &[&str] = &[
     "<bash-stderr",
     "<user-prompt-submit-hook",
     "caveat: the messages below were generated",
+    // The hook gets the bare message; the transcript prefaces it.
+    "<cross-session-message",
+    "another claude session sent a message",
+    "[cross-session ",
 ];
 
 /// True only for text a person submitted as a prompt.
@@ -460,7 +466,7 @@ pub fn claude_transcript_scan(bytes: &[u8], session: &str) -> TranscriptScan {
             || record["promptSource"] == "system"
             || matches!(
                 record["origin"]["kind"].as_str(),
-                Some("task-notification" | "auto-continuation")
+                Some("task-notification" | "auto-continuation" | "peer")
             );
         if injected {
             if record["type"] == "user" {
