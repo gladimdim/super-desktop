@@ -29,6 +29,12 @@ RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"
 CONFIG_DIR="$HOME/.config/super-desktop"
 SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/super-desktop.sock"
 
+# install.sh sets Rust up in ~/.cargo without adding it to shell profiles.
+CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+if ! command -v cargo >/dev/null 2>&1 && [[ -x "$CARGO_BIN/cargo" ]]; then
+  PATH="$CARGO_BIN:$PATH"
+fi
+
 CLEAN=0
 START_DAEMON=1
 

@@ -11,42 +11,43 @@
 
 ## 👤 For humans
 
-### Step 1 — Install manually
+### Step 1 — Install
 
-On an **Omarchy desktop**, open a terminal and run these commands as your normal
-user (do not run `install.sh` with `sudo`):
-
-```bash
-mkdir -p ~/GitHub
-git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
-cd ~/GitHub/super-desktop
-./install.sh
-```
-
-The installer builds the app from source, adds it to your application launcher,
-and configures the shortcut, startup, and Omarchy theme integration. Follow any
-package-install prompts; the first build can take a few minutes. Keep the cloned
-folder: the installed command points to the binary built inside it.
-
-If required tools or libraries are missing, install them and rerun `./install.sh`:
+On an **Omarchy desktop**, open a terminal and run this command as your normal
+user (not with `sudo`):
 
 ```bash
-omarchy pkg add git tmux pkg-config gtk4 gtk-layer-shell vte4 rustup
-rustup default stable
+curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash
 ```
+
+The installer needs nothing set up beforehand. It:
+
+- installs the system packages it needs that are missing, with `pacman` (it
+  asks for your password once): the build tools, GTK 4, gtk4-layer-shell, VTE,
+  tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap and poppler;
+- installs Rust with the official rustup into `~/.cargo` and `~/.rustup` when
+  there is no Rust 1.92 or newer, without changing your shell profile;
+- downloads the source to `~/.local/share/super-desktop/source` and builds it
+  (the first build takes several minutes);
+- adds the app to your application launcher, and configures the shortcut,
+  startup and Omarchy theme integration.
+
+Keep the source folder: the installed command runs the binaries built there.
 
 Then press **SUPER + SHIFT + Q** (SUPER is usually the Windows key), or run
 `super-desktop toggle`, to open the overlay. Choose a project folder and click
 an installed harness in the top bar. Install and sign in to your preferred AI
 CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
 
-To update later:
+To update later, run the same command again. It fast-forwards the source,
+rebuilds it, and restarts SUPER DESKTOP if it is running. Your settings, notes
+and running harnesses are kept.
 
-```bash
-cd ~/GitHub/super-desktop
-git pull
-./rebuild.sh
-```
+**Installing from a clone.** If you work on the code, clone the repository and
+run `./install.sh` inside it. The installer then builds and installs that clone
+and leaves its git state alone; update it with `git pull && ./rebuild.sh`.
+Running the one-line command later updates the clone your install runs from,
+as long as it has no local changes.
 
 ### What you get
 
@@ -80,8 +81,8 @@ that PC*:
 
 Changes made on that PC appear as soon as it publishes them. Pairing is one-way:
 approving a PC lets it open this one, not the reverse. Install the same current
-build on both PCs (`git pull && ./rebuild.sh`, which also restarts the separate
-bridge process).
+build on both PCs (run the install command again, or `git pull && ./rebuild.sh`
+in a clone; both also restart the separate bridge process).
 
 **Pair two PCs**
 
@@ -139,7 +140,7 @@ button, and removing a saved PC from the GUI. To remove a saved PC, run
 
 | You see | Do this |
 | --- | --- |
-| *Update SUPER DESKTOP on the host* (or *on that PC*) | That PC runs an older build: `git pull && ./rebuild.sh` there. |
+| *Update SUPER DESKTOP on the host* (or *on that PC*) | That PC runs an older build: run the install command there, or `git pull && ./rebuild.sh` in its clone. |
 | *… needs pairing again* or *Pairing required · Add this PC again* | The host revoked this PC, or its 90-day credential expired. Click **Pair again** and use a new link. |
 | *… is not answering*, *Cannot reach this PC* or *Reconnecting…* | Check that the host is on, SUPER DESKTOP is running there, and port 8759/tcp is reachable over LAN or Tailscale. The checklist under the message shows which link fails. Consoles reconnect on their own. |
 | *Tailscale is off on this PC* | That PC was paired at its Tailscale address. Run `tailscale up` on this PC. |
@@ -147,7 +148,7 @@ button, and removing a saved PC from the GUI. To remove a saved PC, run
 | *That PC restarted · change not applied* | Its SUPER DESKTOP restarted before the change arrived, and the view has refreshed. Repeat the action if you still want it. |
 | *The other PC rejected this PC earlier…* | On the host, remove this PC in Settings → Connections → Rejected devices, then use a new link. |
 | *The other PC already has a request from this address* | Wait two minutes for that request to expire, then use a new link. |
-| The host answers 404 for `/api/v1/desktop/capabilities` | An old bridge is still running there. `./rebuild.sh` on the host restarts both processes. |
+| The host answers 404 for `/api/v1/desktop/capabilities` | An old bridge is still running there. Running the install command (or `./rebuild.sh`) on the host restarts both processes. |
 
 ### Sleep lock on charger
 
@@ -346,7 +347,7 @@ super-desktop harnesses       # one-shot JSON dump of sessions (debug)
 super-desktop desktop-workspace # local card layout + epoch/revisions as JSON (debug)
 ```
 
-State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Rebuild after updates with `./rebuild.sh`.
+State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace folder and the folders used before). Update with the install command, or with `./rebuild.sh` in a clone.
 
 
 ---
@@ -360,28 +361,30 @@ State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace
 
 - OS is Omarchy/Arch, Wayland Hyprland session with a display (`echo $WAYLAND_DISPLAY` must be non-empty for the overlay; build works headless, showing does not).
 - You run commands as the **user** (never root for build/install steps).
-- `git`, `tmux`, `pkg-config`, `sqlite3` should exist. If anything is missing: `omarchy pkg add <name>` (e.g. `omarchy pkg add tmux sqlite3`). `sqlite3` is optional but recommended — without it, opencode card titles fall back to plain labels.
-- GTK4 system libs are preinstalled on Omarchy (`gtk4`, `gtk-layer-shell`, `vte4`). If the build fails on missing `vte-2.91-gtk4` (pkg-config) or GTK headers, install them first: `omarchy pkg add vte4 gtk4 gtk-layer-shell pkg-config`.
-- Rust toolchain: the installer offers to add `rustup` via `omarchy pkg add rustup` when run in a terminal, and runs `rustup default stable` when rustup has no default toolchain yet (a fresh rustup cannot run `cargo` until one is selected). Prefer running the installer **from a real terminal** (it needs a TTY for package prompts).
+- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
+- Installing packages runs `sudo pacman`, which reads the user's password from the terminal. Run the installer in a terminal the user can type into. Without one, install the missing packages first (the installer prints the `pacman` command).
 
-### 1. Clone and install (the only supported way)
+### 1. Install (the only supported way)
 
 ```bash
-git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
-cd ~/GitHub/super-desktop
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash
 ```
 
+From an existing clone, `./install.sh` installs that clone instead and does not touch its git state.
+
 `install.sh` does, in order:
-1. Ensures `cargo` and `vte4` (warns instead of prompting when no TTY).
-2. `cargo build --release`.
-3. Symlinks `~/.local/bin/super-desktop` → `target/release/super-desktop-client`, a lightweight native IPC client. Existing-daemon commands avoid loading GTK/VTE; cold starts delegate to the main binary with layer-shell preloaded. The repository's `bin/super-desktop` remains a build-on-demand fallback.
-4. Copies `assets/` → `~/.config/super-desktop/assets/`.
-5. Installs the desktop entry `~/.local/share/applications/super-desktop.desktop`.
-6. Writes the toggle binding into a marked block in `~/.config/hypr/bindings.lua` — `hl.unbind` + `o.bind("SUPER + SHIFT + Q", …)` plus the `code:24` form that keeps it working on the UK/Cyrillic layouts — and `o.exec_on_start("super-desktop daemon")`. Migrates and skips what is already there, so re-running is safe. Everything between the two markers belongs to the app: the ⚙ Settings panel rewrites that block when the user records another shortcut (see `src/shortcut.rs`).
-7. Appends the blur rule to `~/.config/hypr/hyprland.lua`: `hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })`.
-8. Installs the theme hook `~/.config/omarchy/hooks/theme-set.d/super-desktop` (runs `super-desktop reload-theme` on theme switch).
-9. `hyprctl reload` + `hyprctl configerrors` validation.
+1. Refuses to run as root; checks for Omarchy and `pacman`.
+2. Installs missing Arch packages with one `sudo pacman -S --needed` call.
+3. Uses a working Rust 1.92+; otherwise selects or updates rustup's stable toolchain, or downloads the official `rustup-init`, checks its SHA-256 and installs stable with `--no-modify-path`.
+4. Picks the source: the clone holding the script; else `$SUPER_DESKTOP_DIR`; else the clone `~/.local/bin/super-desktop` already links into; else clones `~/.local/share/super-desktop/source`. An existing clone is fast-forwarded only when it has no local changes.
+5. `cargo build --release --locked`.
+6. Symlinks `~/.local/bin/super-desktop` → `target/release/super-desktop-client`, a lightweight native IPC client. Existing-daemon commands avoid loading GTK/VTE; cold starts delegate to the main binary with layer-shell preloaded. The repository's `bin/super-desktop` remains a build-on-demand fallback.
+7. Copies `assets/` → `~/.config/super-desktop/assets/`.
+8. Installs the desktop entry `~/.local/share/applications/super-desktop.desktop`.
+9. Writes the toggle binding into a marked block in `~/.config/hypr/bindings.lua` — `hl.unbind` + `o.bind("SUPER + SHIFT + Q", …)` plus the `code:24` form that keeps it working on the UK/Cyrillic layouts — and `o.exec_on_start("super-desktop daemon")`. Migrates and skips what is already there, so re-running is safe. Everything between the two markers belongs to the app: the ⚙ Settings panel rewrites that block when the user records another shortcut (see `src/shortcut.rs`).
+10. Appends the layer rule to `~/.config/hypr/hyprland.lua`: `hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })`.
+11. Installs the theme hook `~/.config/omarchy/hooks/theme-set.d/super-desktop` (runs `super-desktop reload-theme` on theme switch).
+12. If a daemon is running and the script runs inside the Hyprland session, `rebuild.sh` restarts it and its bridge on the new build; otherwise `hyprctl reload` + `hyprctl configerrors` validation.
 
 ### 2. Verify the install (all must pass)
 
@@ -410,25 +413,20 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 | `Daemon not running` after reboot/login | Start it: `super-desktop daemon` runs hidden (autostart line in `bindings.lua` covers future logins) |
 | Overlay shows but immediately hides / toggle misbehaves | Two daemons are running — `pkill -f 'super-desktop.*daemon'`, remove stale socket, start exactly one |
 | The hot corner does nothing | `hyprctl layers | grep sd-hotcorner` — the 8x8 corner surface must be there, on the overlay layer. It is an input zone, not a visible one: it paints 1/255 black, which is what keeps GTK from treating it as click-through (see `src/hotcorner.rs`). |
-| The toggle shortcut does nothing | `grep -A4 'super-desktop shortcut' ~/.config/hypr/bindings.lua` — the managed block must hold the combination you expect; re-run `./install.sh`; `hyprctl reload`; `hyprctl configerrors` |
+| The toggle shortcut does nothing | `grep -A4 'super-desktop shortcut' ~/.config/hypr/bindings.lua` — the managed block must hold the combination you expect; re-run the installer; `hyprctl reload`; `hyprctl configerrors` |
 | A shortcut recorded in ⚙ Settings does nothing | Opening ⚙ Settings → *Record* parks Hyprland in a throwaway submap, so any combination is captured even if a bind already owns it; the new bind then needs a reload. Check `hyprctl configerrors`, then re-record. |
 | Global shortcuts stopped working after using ⚙ Settings → *Record* | The recorder releases the submap on Esc, on Cancel and after 10s. If it was killed mid-recording: `hyprctl dispatch 'hl.dsp.submap("reset")'` |
-| Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk-layer-shell pkg-config`, then `./rebuild.sh` |
-| Build fails: no `cargo` | `omarchy pkg add rustup`, open a new shell, then `./install.sh` |
-| `rustup could not choose a version of cargo to run` | No default toolchain yet: `rustup default stable`, then `./install.sh` (the installer now does this itself) |
+| Installer stops at the package step | `sudo pacman -Syu` if the package database is out of date, then `sudo pacman -S --needed` with the packages it printed, then run the installer again |
+| Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk4-layer-shell pkgconf`, then `./rebuild.sh` |
+| Installer says rustup's default is too old or not working | `rustup default stable`, then run the installer again |
 | Theme changes don't restyle the overlay | Check `~/.config/omarchy/hooks/theme-set.d/super-desktop` is executable; run `super-desktop reload-theme` manually |
-| Card shows another card's prompt in its title | Fixed in current code (owned-session resolution + self-heal). Update to latest (`git pull` + `./rebuild.sh`); titles correct themselves within ~30s of the overlay being visible |
+| Card shows another card's prompt in its title | Fixed in current code (owned-session resolution + self-heal). Update to latest (run the installer again); titles correct themselves within ~30s of the overlay being visible |
 | Need daemon logs | `/tmp/super-desktop-daemon.log` |
 | Nuclear reset of overlay state | Back up then delete `~/.config/super-desktop/state.json`; `super-desktop kill`; start daemon (cards/notes start fresh; tmux sessions are recreated on demand) |
 
 ### 5. Updating an existing install
 
-```bash
-cd ~/GitHub/super-desktop
-git pull
-./rebuild.sh
-super-desktop status
-```
+Run the install command again, then `super-desktop status`. It fast-forwards the clone the install runs from, rebuilds, and restarts the daemon and bridge when run inside the Hyprland session. A clone with local changes is left as it is: there, use `git pull && ./rebuild.sh`.
 
 ---
 
@@ -464,7 +462,7 @@ events (`peer-events`) and sends one command (`peer-command`);
 │   └── crashlog.rs          # panic hook (release builds abort; crashes leave a trace)
 ├── assets/                  # vendored toolbar logos → ~/.config/super-desktop/assets/
 ├── Cargo.toml               # gtk4, gtk4-layer-shell, vte4, serde, serde_json, chrono, libc
-├── install.sh               # fresh install (see §1 above)
+├── install.sh               # one-command install and update (see §1 above)
 ├── rebuild.sh               # rebuild + Hyprland reload + daemon restart (see §3 above)
 └── super-desktop.desktop    # desktop entry template
 ```

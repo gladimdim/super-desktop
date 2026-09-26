@@ -213,15 +213,10 @@
 
   <section id="install" aria-labelledby="install-heading">
     <h2 id="install-heading">Install</h2>
-    <p class="sub">Run these commands in a terminal on your Omarchy / Hyprland machine.</p>
-    <div class="note"><strong>Set up Rust before running <code>./install.sh</code>.</strong> Install a Rust toolchain with Cargo using <a href="https://rustup.rs/">rustup</a>. If rustup is already installed without a toolchain, run <code>rustup default stable</code>. Open a new terminal and check that both commands below succeed.</div>
-    <pre><code>rustc --version
-cargo --version</code></pre>
-    <p>Then clone and install SUPER DESKTOP. The script builds from source, so the first build can take a few minutes.</p>
-    <pre><code>git clone https://github.com/gladimdim/super-desktop.git ~/GitHub/super-desktop
-cd ~/GitHub/super-desktop
-./install.sh</code></pre>
-    <p>Press <span class="kbd">SUPER + SHIFT + Q</span> to open your workspace.</p>
+    <p class="sub">Run this command in a terminal on your Omarchy machine, as your normal user.</p>
+    <pre><code>curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code></pre>
+    <p>Nothing needs to be set up first. The installer adds the system packages it needs (it asks for your password once), installs Rust with rustup if you don't have it, then downloads, builds and installs SUPER DESKTOP. The first build takes several minutes.</p>
+    <p>Press <span class="kbd">SUPER + SHIFT + Q</span> to open your workspace. To update later, run the same command again.</p>
     <div class="note"><strong>Using remote sessions?</strong> Install on the second PC too, then pair the two. Install the AI command-line tools you want to use separately.</div>
     <p class="sub">Full prerequisites and troubleshooting: <a href="https://github.com/gladimdim/super-desktop#readme">installation guide</a>.</p>
   </section>
@@ -334,7 +329,7 @@ super-desktop status          <span class="c"># visible? notes / terminals count
 super-desktop add-note "Buy milk"
 super-desktop add-term claude <span class="c"># + antigravity, codex, opencode, grok, reasonix, aider, shell</span>
 super-desktop reload-theme
-./rebuild.sh                  <span class="c"># rebuild after updates (in repo dir)</span></code></pre>
+./rebuild.sh                  <span class="c"># rebuild after git pull (in a clone)</span></code></pre>
   </section>
 
   <section>
