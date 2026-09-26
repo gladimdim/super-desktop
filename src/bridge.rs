@@ -730,6 +730,17 @@ const STREAM_MAX_SECS: u64 = 1800;
 /// is still there — including a Ping, which is answered so picky clients stay
 /// happy. A read timeout just means "nothing to read".
 fn ws_client_alive(stream: &mut Connection) -> bool {
+    // Usually nothing is waiting: ask the socket rather than read with a 1 ms
+    // timeout, which sleeps a whole kernel tick before every capture. A hang-up
+    // polls as readable (EOF) and, like buffered plaintext, takes the path below.
+    if !stream.has_buffered_input() {
+        if let Some(fd) = stream.raw_fd() {
+            let mut poll = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            if unsafe { libc::poll(&mut poll, 1, 0) } == 0 {
+                return true;
+            }
+        }
+    }
     let _ = stream.set_read_timeout(Some(Duration::from_millis(1)));
     // A timeout in the middle of read_exact would discard a partial frame.
     // Probe without consuming, then finish the frame or close the connection.

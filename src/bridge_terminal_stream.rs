@@ -3,7 +3,10 @@
 //! The stream's private tmux control client receives `%output` notifications;
 //! they only mark the pane dirty (their payload is discarded). A dirty pane is
 //! re-captured over that same connection, at most `MIN_FRAME` apart, with a
-//! `SAFETY_POLL` capture in case a notification is missed. Status and grid
+//! `SAFETY_POLL` capture in case a notification is missed. A capture woken by
+//! phone input alone that finds the screen unchanged (the program has not
+//! redrawn yet) does not start a new `MIN_FRAME` wait, so the redraw's own
+//! notification is captured at once instead of up to a frame later. Status and grid
 //! queries also use the control connection, and run only after output or
 //! layout notifications (or at a slow cadence) instead of spawning
 //! `list-panes`/`show-options`/`display-message` every half second.
@@ -163,6 +166,10 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
     // Last sent content, compared before anything is serialized.
     let mut sent: Option<SentFrame> = None;
     let mut sent_at = Instant::now();
+    // What `MIN_FRAME` is measured from, and whether this pass was woken by
+    // phone input alone.
+    let mut throttle_from = Instant::now();
+    let mut input_probe = false;
     while Instant::now() < deadline {
         if !ws_client_alive(stream) {
             return;
@@ -230,7 +237,11 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
             return;
         }
         let captured_at = Instant::now();
-        let next = wait_for_change(&activity, seen, captured_at, deadline);
+        if changed || !input_probe {
+            throttle_from = captured_at;
+        }
+        let next = wait_for_change(&activity, seen, captured_at, throttle_from, deadline);
+        input_probe = next.input != seen.input && next.output == seen.output && next.layout == seen.layout;
         output_dirty |= next.output != seen.output || next.input != seen.input;
         layout_dirty |= next.layout != seen.layout;
         seen = next;
@@ -238,15 +249,16 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
     let _ = crate::ws::write_close(stream, 1000, "reconnect");
 }
 
-/// Sleep until the pane is dirty (then no sooner than `MIN_FRAME` after the
-/// last capture) or `SAFETY_POLL` passes. Returns the latest activity.
-fn wait_for_change(activity: &Activity, seen: ActivityState, captured_at: Instant, deadline: Instant) -> ActivityState {
+/// Sleep until the pane is dirty (then no sooner than `MIN_FRAME` after
+/// `throttle_from`, the last capture that counted) or `SAFETY_POLL` passes
+/// since the last capture. Returns the latest activity.
+fn wait_for_change(activity: &Activity, seen: ActivityState, captured_at: Instant, throttle_from: Instant, deadline: Instant) -> ActivityState {
     let poll_at = (captured_at + SAFETY_POLL).min(deadline);
     loop {
         let now = Instant::now();
         let current = activity.snapshot();
         if current != seen {
-            let earliest = captured_at + MIN_FRAME;
+            let earliest = throttle_from + MIN_FRAME;
             if now < earliest {
                 std::thread::sleep(earliest - now);
             }
@@ -406,12 +418,26 @@ mod tests {
         activity.poke();
         let captured = Instant::now();
         let far = captured + Duration::from_secs(60);
-        wait_for_change(&activity, seen, captured, far);
+        wait_for_change(&activity, seen, captured, captured, far);
         assert!(captured.elapsed() >= MIN_FRAME, "captures are at most ~30 per second");
         let quiet = activity.snapshot();
         let started = Instant::now();
-        wait_for_change(&activity, quiet, started, started + Duration::from_millis(50));
+        wait_for_change(&activity, quiet, started, started, started + Duration::from_millis(50));
         assert!(started.elapsed() >= Duration::from_millis(50));
         assert!(started.elapsed() < SAFETY_POLL);
+    }
+
+    /// An unchanged capture woken by phone input keeps the earlier throttle
+    /// base, so the redraw that follows is captured at once, not a frame later.
+    #[test]
+    fn input_probe_does_not_delay_the_redraw() {
+        let activity = Activity::default();
+        let counted = Instant::now() - MIN_FRAME;
+        let probe = Instant::now();
+        let seen = activity.snapshot();
+        activity.poke();
+        let far = probe + Duration::from_secs(60);
+        wait_for_change(&activity, seen, probe, counted, far);
+        assert!(probe.elapsed() < MIN_FRAME / 2, "waited {:?}", probe.elapsed());
     }
 }

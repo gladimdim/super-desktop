@@ -131,6 +131,16 @@ impl Connection {
         }
         buf[0] = self.pending[0]; Ok(1)
     }
+    /// Input a read returns without waiting on the socket: a pushed-back byte,
+    /// plaintext rustls already decrypted from an earlier record, or the peer's
+    /// already-received close.
+    pub(super) fn has_buffered_input(&mut self) -> bool {
+        if !self.pending.is_empty() { return true }
+        match &mut self.transport {
+            Transport::Tls(s) => s.conn.process_new_packets().map_or(true, |io| io.plaintext_bytes_to_read() > 0 || io.peer_has_closed()),
+            _ => false,
+        }
+    }
     /// Return bytes read past the end of one request (HTTP pipelining) so the
     /// next `read` sees them first.
     pub(super) fn unread(&mut self, bytes: &[u8]) {
