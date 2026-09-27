@@ -343,6 +343,10 @@ pub struct SuperDesktopWindow {
     /// until this hold expires so the pointer path cannot bury the new card.
     hover_raise_lock: HoverRaiseLock,
     terminal_picker: RefCell<Option<Rc<crate::terminal_picker::Picker>>>,
+    /// Keeps the ⚙ Settings card's placement alive: the overlay asks it where
+    /// the card goes and how big it is, and stretches the card over the whole
+    /// screen once it is dropped.
+    settings_layout: RefCell<Option<Rc<crate::floating_panel::MovablePanel>>>,
 }
 
 impl SuperDesktopWindow {
@@ -663,6 +667,7 @@ impl SuperDesktopWindow {
             hidden_pause: crate::hidden_pause::Controller::new(),
             hover_raise_lock: HoverRaiseLock::new(),
             terminal_picker: RefCell::new(None),
+            settings_layout: RefCell::new(None),
         });
 
         // The overlay is OnDemand so an unfocused HUD does not eat desktop
@@ -907,30 +912,39 @@ impl SuperDesktopWindow {
         win_rc.canvas.put(&hud, 0.0, 0.0);
         raise_canvas_child(&win_rc.canvas, &hud);
 
-        // Added after the HUD so the settings card floats above it. It moves by
-        // its header like a terminal card, at a fixed size, and never over the bar.
-        root_overlay.add_overlay(&settings_panel.widget);
-        crate::floating_panel::MovablePanel::install(
+        // Added after the HUD so the settings card floats above it. It moves
+        // by its header and resizes by its edges like a terminal card, and
+        // never over the bar. Where and how big the user left it is kept.
+        let (saved_pos, saved_size) = {
+            let state = win_rc.state.borrow();
+            (state.settings_panel_pos, state.settings_panel_size)
+        };
+        *win_rc.settings_layout.borrow_mut() = Some(crate::floating_panel::MovablePanel::install(
             &root_overlay,
             &settings_panel.widget,
-            crate::harness_settings::SETTINGS_PANEL_SIZE,
+            crate::floating_panel::PanelLayout {
+                default_size: crate::harness_settings::SETTINGS_PANEL_DEFAULT_SIZE,
+                min_size: crate::harness_settings::SETTINGS_PANEL_MIN_SIZE,
+                saved_pos,
+                saved_size,
+            },
             Rc::new({
                 let state = Rc::clone(&win_rc.state);
                 move || top_bar_height(state.borrow().top_bar_size)
             }),
-            win_rc.state.borrow().settings_panel_pos,
             Rc::new({
                 let state = Rc::clone(&win_rc.state);
-                move |position| {
+                move |position, size| {
                     let snapshot = {
                         let mut s = state.borrow_mut();
                         s.settings_panel_pos = Some(position);
+                        s.settings_panel_size = Some(size);
                         s.clone()
                     };
                     crate::state::save_state_async(snapshot);
                 }
             }),
-        );
+        ));
         root_overlay.add_overlay(&pairing_wizard.widget);
         // Last: a request is decided above whatever else is open.
         root_overlay.add_overlay(&pairing_requests.widget);

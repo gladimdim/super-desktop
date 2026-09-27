@@ -166,6 +166,11 @@ pub struct AppState {
     /// `None` for centered. Kept on screen whatever the display is now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_panel_pos: Option<(i32, i32)>,
+    /// The size the user last dragged the ⚙ Settings card to, or `None` for
+    /// [`crate::harness_settings::SETTINGS_PANEL_DEFAULT_SIZE`]. Fitted to the
+    /// display in use, so a size from a larger screen still opens whole here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_panel_size: Option<(i32, i32)>,
 }
 
 impl Default for AppState {
@@ -196,6 +201,7 @@ impl Default for AppState {
             retired_harness_swaps: Vec::new(),
             folder_tags: std::collections::BTreeMap::new(),
             settings_panel_pos: None,
+            settings_panel_size: None,
         }
     }
 }

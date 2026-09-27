@@ -306,9 +306,13 @@ fn suggested_harness_name(executable: &str) -> Option<String> {
 }
 
 
-/// The settings card's size. It is fixed: the user moves the card, never
-/// resizes it, and a page with more to show scrolls inside it.
-pub const SETTINGS_PANEL_SIZE: (i32, i32) = (660, 620);
+/// The settings card's size the first time it opens, before the user has
+/// dragged its edges. A saved size replaces it (see `state`).
+pub const SETTINGS_PANEL_DEFAULT_SIZE: (i32, i32) = (1024, 768);
+
+/// The smallest the card may be dragged to. Every page fits inside it, so a
+/// page with more to show scrolls rather than pushing the card wider.
+pub const SETTINGS_PANEL_MIN_SIZE: (i32, i32) = (660, 620);
 
 /// Floating card + its refresh handle. The overlay adds `widget` centered and
 /// toggles visibility; `refresh` re-detects the harnesses on this machine and
@@ -727,7 +731,7 @@ pub fn build_harness_settings_panel(
     let outer = Box::new(Orientation::Vertical, 0);
     outer.add_css_class("mini-terminal");
     outer.add_css_class("harness-panel");
-    outer.set_size_request(SETTINGS_PANEL_SIZE.0, SETTINGS_PANEL_SIZE.1);
+    outer.set_size_request(SETTINGS_PANEL_MIN_SIZE.0, SETTINGS_PANEL_MIN_SIZE.1);
 
     // ---- header: badge, title + subtitle, ← back, close ----
     let header = Box::new(Orientation::Horizontal, 10);

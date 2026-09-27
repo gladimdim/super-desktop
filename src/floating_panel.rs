@@ -1,10 +1,12 @@
-//! A floating panel (⚙ Settings) the user moves by its header, like a
-//! terminal card, at a fixed size.
+//! A floating panel (⚙ Settings) the user moves by its header and resizes by
+//! its edges, like a terminal card.
 //!
 //! The overlay places it through `get-child-position`: a page with more to
-//! show scrolls inside it rather than resizing it, and a drag only changes
-//! where it is. It always stays whole on screen and below the top bar, so the
-//! bar's Arrange, Settings and Hide are never under it.
+//! show scrolls inside it rather than resizing it, and only a drag on the
+//! header or an edge changes where it is or how big it is. It always stays
+//! whole on screen and below the top bar, so the bar's Arrange, Settings and
+//! Hide are never under it.
+use crate::card_resize::{Limits, Rect};
 use gtk4::{gdk, prelude::*};
 use std::cell::Cell;
 use std::rc::Rc;
@@ -52,37 +54,68 @@ fn on_header(panel: &gtk4::Widget, x: f64, y: f64) -> bool {
 /// Where a drag began: the pointer in surface coordinates, and the panel's top-left.
 type DragStart = ((f64, f64), (i32, i32));
 
-/// A panel in `overlay` the user drags by its header; `saved` is where it was
-/// left last time (its top-left) and `moved` is told where a drag left it.
+/// How big a panel is and where it sits: the size it opens at, the smallest
+/// the user may shrink it to, and what they left behind last time.
+#[derive(Clone, Copy, Debug)]
+pub struct PanelLayout {
+    pub default_size: (i32, i32),
+    pub min_size: (i32, i32),
+    /// The panel's top-left last time; `None` is centered.
+    pub saved_pos: Option<(i32, i32)>,
+    /// The size the user last dragged it to; `None` is `default_size`.
+    pub saved_size: Option<(i32, i32)>,
+}
+
+/// A panel in `overlay` the user drags by its header and resizes by its
+/// edges. `changed` is told where and how big a drag left it.
 pub struct MovablePanel {
     overlay: gtk4::Overlay,
-    panel: gtk4::Widget,
-    size: (i32, i32),
+    /// The panel and its resize handles: the child `overlay` places.
+    shell: gtk4::Overlay,
+    min_size: (i32, i32),
+    /// The size the user chose, before it is fitted to this screen.
+    size: Cell<(i32, i32)>,
     top: Rc<dyn Fn() -> i32>,
     /// Top-left the user chose, already kept on screen; `None` is centered.
     wanted: Cell<Option<(i32, i32)>>,
 }
 
 impl MovablePanel {
+    /// Keep the returned handle for as long as the panel lives: the overlay
+    /// asks it where the panel goes, and stretches the panel over the whole
+    /// screen once it is gone.
+    #[must_use]
     pub fn install(
         overlay: &gtk4::Overlay,
         panel: &impl IsA<gtk4::Widget>,
-        size: (i32, i32),
+        layout: PanelLayout,
         top: Rc<dyn Fn() -> i32>,
-        saved: Option<(i32, i32)>,
-        moved: Rc<dyn Fn((i32, i32))>,
+        changed: Rc<dyn Fn((i32, i32), (i32, i32))>,
     ) -> Rc<Self> {
+        // The panel gets an overlay of its own to carry the eight resize
+        // handles, and follows it in and out of view.
+        let panel: gtk4::Widget = panel.clone().upcast();
+        let shell = gtk4::Overlay::new();
+        shell.set_child(Some(&panel));
+        shell.set_visible(panel.get_visible());
+        panel.connect_visible_notify({
+            let shell = shell.clone();
+            move |panel| shell.set_visible(panel.get_visible())
+        });
+        overlay.add_overlay(&shell);
+
         let this = Rc::new(Self {
             overlay: overlay.clone(),
-            panel: panel.clone().upcast(),
-            size,
+            shell: shell.clone(),
+            min_size: layout.min_size,
+            size: Cell::new(fit_min(layout.saved_size.unwrap_or(layout.default_size), layout.min_size)),
             top,
-            wanted: Cell::new(saved),
+            wanted: Cell::new(layout.saved_pos),
         });
         let weak = Rc::downgrade(&this);
         overlay.connect_get_child_position(move |overlay, child| {
             let this = weak.upgrade()?;
-            if *child != this.panel {
+            if *child != this.shell {
                 return None;
             }
             let (x, y, width, height) = this.rect(overlay);
@@ -98,7 +131,7 @@ impl MovablePanel {
         let begin = Rc::clone(&start);
         drag.connect_drag_begin(move |gesture, x, y| {
             let Some(this) = weak.upgrade() else { return };
-            let (Some(at), true) = (pointer(gesture), on_header(&this.panel, x, y)) else {
+            let (Some(at), true) = (pointer(gesture), on_header(this.shell.upcast_ref(), x, y)) else {
                 gesture.set_state(gtk4::EventSequenceState::Denied);
                 return;
             };
@@ -115,35 +148,122 @@ impl MovablePanel {
             this.move_to((origin.0 + (at.0 - from.0) as i32, origin.1 + (at.1 - from.1) as i32));
         });
         let weak = Rc::downgrade(&this);
+        let moved = Rc::clone(&changed);
         drag.connect_drag_end(move |_, _, _| {
             if start.take().is_none() {
                 return;
             }
-            if let Some(position) = weak.upgrade().and_then(|this| this.wanted.get()) {
-                moved(position);
+            if let Some((Some(position), size)) = weak.upgrade().map(|this| this.geometry()) {
+                moved(position, size);
             }
         });
-        this.panel.add_controller(drag);
+        shell.add_controller(drag);
+
+        this.attach_resize_handles(changed);
         this
     }
 
+    /// The eight edge and corner targets, resizing the panel live.
+    fn attach_resize_handles(self: &Rc<Self>, changed: Rc<dyn Fn((i32, i32), (i32, i32))>) {
+        let weak = Rc::downgrade(self);
+        let limits: Rc<dyn Fn() -> Limits> = Rc::new(move || {
+            weak.upgrade().map_or(IDLE_LIMITS, |this| this.limits())
+        });
+        let weak = Rc::downgrade(self);
+        let get_start: Rc<dyn Fn() -> Option<Rect>> = Rc::new(move || {
+            let this = weak.upgrade()?;
+            let (x, y, width, height) = this.rect(&this.overlay);
+            Some(Rect { x: x as f64, y: y as f64, width, height })
+        });
+        let weak = Rc::downgrade(self);
+        let on_preview: Rc<dyn Fn(Rect)> = Rc::new(move |rect| {
+            if let Some(this) = weak.upgrade() {
+                this.set_geometry((rect.x as i32, rect.y as i32), (rect.width, rect.height));
+            }
+        });
+        let weak = Rc::downgrade(self);
+        let on_commit: Rc<dyn Fn(Rect)> = Rc::new(move |rect| {
+            let Some(this) = weak.upgrade() else { return };
+            this.set_geometry((rect.x as i32, rect.y as i32), (rect.width, rect.height));
+            if let (Some(position), size) = this.geometry() {
+                changed(position, size);
+            }
+        });
+        crate::card_resize::attach_resize_borders_with(
+            &self.shell,
+            limits,
+            get_start,
+            Rc::new(|| {}),
+            on_preview,
+            on_commit,
+        );
+    }
+
     fn rect(&self, overlay: &gtk4::Overlay) -> (i32, i32, i32, i32) {
-        place((overlay.width(), overlay.height()), self.size, (self.top)(), self.wanted.get())
+        place((overlay.width(), overlay.height()), self.size.get(), (self.top)(), self.wanted.get())
+    }
+
+    /// Where a resize may take each edge, and how big the result may be: on
+    /// screen, below the top bar, and never below what the pages need.
+    fn limits(&self) -> Limits {
+        let (screen_width, screen_height) = (self.overlay.width(), self.overlay.height());
+        let top = (self.top)();
+        Limits {
+            min_width: self.min_size.0,
+            min_height: self.min_size.1,
+            max_width: (screen_width - 2 * MARGIN).max(self.min_size.0),
+            max_height: (screen_height - top - 2 * MARGIN).max(self.min_size.1),
+            left: MARGIN as f64,
+            top: (top + MARGIN) as f64,
+            right: (screen_width - MARGIN) as f64,
+            bottom: (screen_height - MARGIN) as f64,
+        }
+    }
+
+    /// The panel's top-left (`None` while centered) and its chosen size.
+    pub fn geometry(&self) -> (Option<(i32, i32)>, (i32, i32)) {
+        (self.wanted.get(), self.size.get())
+    }
+
+    /// Put the panel's top-left at `position` at `size`, both kept on screen.
+    pub fn set_geometry(&self, position: (i32, i32), size: (i32, i32)) {
+        let size = fit_min(size, self.min_size);
+        let (x, y, _, _) = place(
+            (self.overlay.width(), self.overlay.height()),
+            size,
+            (self.top)(),
+            Some(position),
+        );
+        let moved = self.wanted.replace(Some((x, y))) != Some((x, y));
+        let resized = self.size.replace(size) != size;
+        if moved || resized {
+            self.overlay.queue_allocate();
+        }
     }
 
     /// Put the panel's top-left at `position`, kept on screen.
     pub fn move_to(&self, position: (i32, i32)) {
-        let (x, y, _, _) = place(
-            (self.overlay.width(), self.overlay.height()),
-            self.size,
-            (self.top)(),
-            Some(position),
-        );
-        if self.wanted.replace(Some((x, y))) != Some((x, y)) {
-            self.overlay.queue_allocate();
-        }
+        self.set_geometry(position, self.size.get());
     }
 }
+
+/// A size no smaller than the panel's pages need.
+fn fit_min(size: (i32, i32), min: (i32, i32)) -> (i32, i32) {
+    (size.0.max(min.0), size.1.max(min.1))
+}
+
+/// Stand-in bounds for a panel that is already gone: every resize on it is
+/// denied before these are read.
+const IDLE_LIMITS: Limits = Limits {
+    min_width: 1,
+    min_height: 1,
+    max_width: 1,
+    max_height: 1,
+    left: 0.0,
+    top: 0.0,
+    right: 0.0,
+    bottom: 0.0,
+};
 
 #[cfg(test)]
 mod tests {
@@ -174,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn the_settings_panel_moves_by_its_header_at_a_fixed_size() {
+    fn the_settings_panel_moves_by_its_header_and_resizes_by_its_edges() {
         crate::gtk_test::run_in_child_process("floating_panel::tests::movable_inner");
     }
 
@@ -201,11 +321,17 @@ mod tests {
         let content = gtk4::Label::new(Some("page"));
         content.set_vexpand(true);
         panel.append(&content);
-        overlay.add_overlay(&panel);
-        let saved: Rc<Cell<Option<(i32, i32)>>> = Rc::new(Cell::new(None));
-        let movable = MovablePanel::install(&overlay, &panel, (400, 300), Rc::new(|| 46), None, Rc::new({
+        // `install` puts it in the overlay, inside its own resize shell.
+        let saved: Rc<Cell<Option<((i32, i32), (i32, i32))>>> = Rc::new(Cell::new(None));
+        let layout = PanelLayout {
+            default_size: (400, 300),
+            min_size: (200, 150),
+            saved_pos: None,
+            saved_size: None,
+        };
+        let movable = MovablePanel::install(&overlay, &panel, layout, Rc::new(|| 46), Rc::new({
             let saved = Rc::clone(&saved);
-            move |position| saved.set(Some(position))
+            move |position, size| saved.set(Some((position, size)))
         }));
         let window = gtk4::Window::new();
         window.set_default_size(1000, 700);
@@ -238,6 +364,25 @@ mod tests {
         content.set_size_request(-1, 900);
         let after = bounds(&|r| r.x() == 120.0);
         assert_eq!((after.width(), after.height()), (400.0, 300.0));
+        // Dragging an edge does: the size the user chose is kept, down to the
+        // minimum and up to what the screen holds.
+        movable.set_geometry((120, 200), (640, 400));
+        let grown = bounds(&|r| r.width() == 640.0);
+        assert_eq!((grown.x(), grown.y(), grown.height()), (120.0, 200.0, 400.0));
+        movable.set_geometry((120, 200), (10, 10));
+        let shrunk = bounds(&|r| r.width() == 200.0);
+        assert_eq!(shrunk.height(), 150.0);
+        // A moved panel keeps the size it was given.
+        movable.move_to((300, 250));
+        let kept = bounds(&|r| r.x() == 300.0);
+        assert_eq!((kept.width(), kept.height()), (200.0, 150.0));
+        movable.set_geometry((120, 200), (400, 300));
+        bounds(&|r| r.width() == 400.0);
+        // Eight resize targets, on the panel itself.
+        let zones = std::iter::successors(movable.shell.first_child(), gtk4::Widget::next_sibling)
+            .filter(|w| w.has_css_class("card-resize-zone"))
+            .count();
+        assert_eq!(zones, 8);
         // Dragged past an edge: kept whole on screen, below the bar.
         movable.move_to((-300, -300));
         let clamped = bounds(&|r| r.x() == 8.0);
@@ -254,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn the_real_settings_panel_fits_its_fixed_size() {
+    fn the_real_settings_panel_fits_its_smallest_size() {
         crate::gtk_test::run_in_child_process("floating_panel::tests::real_size_inner");
     }
 
@@ -265,8 +410,8 @@ mod tests {
         }
         gtk4::init().unwrap();
         crate::styles::apply_styles();
-        // No page may need more than the size the panel is locked to: it
-        // scrolls inside it instead.
+        // No page may need more than the smallest the panel can be dragged
+        // to: it scrolls inside it instead.
         let state = Rc::new(std::cell::RefCell::new(crate::state::AppState::default()));
         let panel = crate::harness_settings::build_harness_settings_panel(
             state,
@@ -276,7 +421,7 @@ mod tests {
             Rc::new(|_| {}),
             crate::launcher_settings::ConnectionHooks::inert(),
         );
-        let (width, height) = crate::harness_settings::SETTINGS_PANEL_SIZE;
+        let (width, height) = crate::harness_settings::SETTINGS_PANEL_MIN_SIZE;
         let min_width = panel.widget.measure(gtk4::Orientation::Horizontal, -1).0;
         let min_height = panel.widget.measure(gtk4::Orientation::Vertical, width).0;
         assert!(min_width <= width && min_height <= height, "needs {min_width}x{min_height}");
