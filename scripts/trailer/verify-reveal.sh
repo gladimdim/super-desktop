@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks that the overlay reveal in a take plays once.
 #
-#   ./verify-reveal.sh ~/Videos/super-desktop-trailer-footage/desktop-raw-a.mkv
+#   ./verify-reveal.sh ~/Videos/SuperDesktop/super-desktop-trailer-footage/desktop-raw-a.mkv
 #   ./verify-reveal.sh take.mkv 2.0 3.4 0.4      # window start, end, reference
 #
 # The reveal can play twice: the overlay settles, a chunk of it drops out for a

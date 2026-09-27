@@ -11,7 +11,7 @@ set -euo pipefail
 
 TRAILER_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd "$TRAILER_DIR/../.." && pwd)
-FOOTAGE=${FOOTAGE:-$HOME/Videos/super-desktop-trailer-footage}
+FOOTAGE=${FOOTAGE:-$HOME/Videos/SuperDesktop/super-desktop-trailer-footage}
 ASSETS=${ASSETS:-$FOOTAGE/assets}
 
 W=1920; H=1080; FPS=30

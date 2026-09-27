@@ -2,7 +2,7 @@
 # Assembles the 43.7 s trailer from the takes in $FOOTAGE and the generated
 # assets in $ASSETS.
 #
-#   ./make-assets.sh && ./build.sh                 -> ~/Videos/super-desktop-trailer.mp4
+#   ./make-assets.sh && ./build.sh                 -> ~/Videos/SuperDesktop/super-desktop-trailer.mp4
 #   ./build.sh out.mp4 --web                       -> also writes the page copy
 #
 # --web additionally encodes the copy that ships in docs/video/: CRF 22, which
@@ -11,7 +11,7 @@
 # H.264 plays in every current browser and a VP9 twin would double page weight.
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
-OUT=${1:-$HOME/Videos/super-desktop-trailer.mp4}
+OUT=${1:-$HOME/Videos/SuperDesktop/super-desktop-trailer.mp4}
 WEB=${2:-}
 
 require_footage desktop-raw-a.mkv desktop-raw-b.mkv android-raw.mp4

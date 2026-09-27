@@ -32,14 +32,14 @@ Set it going by hand first if you want a running agent in the shot.
 ## Building it
 
     ./make-assets.sh          # captions, keycaps, bolt, cards, 108 logo frames
-    ./build.sh                # -> ~/Videos/super-desktop-trailer.mp4 + poster
+    ./build.sh                # -> ~/Videos/SuperDesktop/super-desktop-trailer.mp4 + poster
     ./build.sh out.mp4 --web  # also refreshes docs/video/ for the website
 
 `make-assets.sh` regenerates every overlay from scratch — the copy lives in one
 block at the top of that file, so changing a caption never means editing
-ImageMagick calls. Takes and generated assets live in
-`$FOOTAGE` (`~/Videos/super-desktop-trailer-footage` by default), outside the
-repository: the raw captures are large and not worth versioning.
+ImageMagick calls. Takes and generated assets live in `$FOOTAGE`
+(`~/Videos/SuperDesktop/super-desktop-trailer-footage` by default), outside
+the repository: the raw captures are large and not worth versioning.
 
 `common.sh` holds the palette, fonts and helpers, and is sourced by the rest.
 

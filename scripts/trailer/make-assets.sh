@@ -2,7 +2,7 @@
 # Generates every overlay, card and animation frame the trailer needs.
 # Nothing here depends on the captures, so it is safe to re-run at any time.
 #
-#   ./make-assets.sh            -> $HOME/Videos/super-desktop-trailer-footage/assets
+#   ./make-assets.sh            -> $HOME/Videos/SuperDesktop/super-desktop-trailer-footage/assets
 #   ASSETS=/tmp/a ./make-assets.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
