@@ -17,6 +17,7 @@ mod harness_record;
 mod hidden_pause;
 mod preload;
 mod terminal_text;
+mod terminal_frame;
 mod asset_pdf;
 mod asset_view;
 mod bridge;

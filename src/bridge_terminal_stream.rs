@@ -85,29 +85,22 @@ pub(super) struct Frame<'a> {
 /// One serialized stream frame. Without `ansi_only` the frame is unchanged
 /// from earlier bridges (`tail` plain + `tailAnsi`). With it, `tail` is
 /// omitted whenever `tailAnsi` is present.
-pub(super) fn frame_json(frame: &Frame) -> String {
-    let mut document = serde_json::json!({
-        "id": frame.id,
-        "agentType": frame.agent_type,
-        "status": frame.status.status,
-        "sessionTitle": frame.title,
-        "label": frame.status.label,
-        "tag": frame.tag,
-        "tagColor": tag_color(frame.tag),
-        // `tailAnsi` is the exact tmux styling for clients that render ANSI SGR.
-        "tailAnsi": frame.ansi,
-        "tailFormat": frame.ansi.is_some().then_some("ansi-sgr"),
-        // The pane's own grid, so a client can lay this text out at the width
-        // it was rendered at instead of guessing from the lines.
-        "columns": frame.grid.map(|grid| grid.columns),
-        "rows": frame.grid.map(|grid| grid.rows),
-        "updatedAt": frame.updated_at,
-    });
-    if !(frame.ansi_only && frame.ansi.is_some()) {
-        // `tail` stays plain for existing launchers.
-        document["tail"] = serde_json::json!(frame.ansi.map(strip_terminal_escapes));
+pub(super) fn frame_json<'out>(frame: &Frame, output: &'out mut Vec<u8>) -> &'out [u8] {
+    crate::terminal_frame::Frame {
+        id: frame.id,
+        agent_type: frame.agent_type,
+        status: frame.status.status,
+        label: frame.status.label,
+        title: frame.title,
+        tag: frame.tag,
+        tag_color: tag_color(frame.tag),
+        ansi: frame.ansi,
+        columns: frame.grid.map(|grid| grid.columns),
+        rows: frame.grid.map(|grid| grid.rows),
+        ansi_only: frame.ansi_only,
+        updated_at: frame.updated_at,
     }
-    document.to_string()
+    .write_json(output)
 }
 
 /// Content of the last frame sent: status, label, title, styled tail, grid.
@@ -170,6 +163,7 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
     // phone input alone.
     let mut throttle_from = Instant::now();
     let mut input_probe = false;
+    let mut output = Vec::new();
     while Instant::now() < deadline {
         if !ws_client_alive(stream) {
             return;
@@ -226,8 +220,10 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
                 grid,
                 ansi_only,
                 updated_at: &utc_now_iso(),
-            });
-            if crate::ws::write_text(stream, &text).is_err() {
+            }, &mut output);
+            // serde_json produces valid UTF-8: send its bytes as a text frame
+            // without allocating a String or validating that output again.
+            if crate::ws::write_frame(stream, 0x1, text).is_err() {
                 return;
             }
             sent_at = Instant::now();
@@ -282,7 +278,7 @@ mod tests {
 
     fn frame(ansi: Option<&str>, ansi_only: bool) -> serde_json::Value {
         let status = status();
-        serde_json::from_str(&frame_json(&Frame {
+        serde_json::from_slice(frame_json(&Frame {
             id: "sd_term_x",
             agent_type: "shell",
             status: &status,
@@ -292,7 +288,7 @@ mod tests {
             grid: Some(TerminalSize { columns: 80, rows: 24 }),
             ansi_only,
             updated_at: "2026-09-24T00:00:00.000Z",
-        }))
+        }, &mut Vec::new()))
         .unwrap()
     }
 

@@ -9,6 +9,7 @@
 //! submitted until the whole prompt is in the composer, and then Enter is sent
 //! once.
 use crate::prompt_image::{input_guard, normalize, validate_prompt};
+use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
 use std::fs::{DirBuilder, File, OpenOptions};
@@ -130,42 +131,7 @@ fn decode(encoded: &str) -> Result<Vec<u8>, String> {
     if encoded.len() > (MAX_TOTAL + 2) / 3 * 4 {
         return Err("attachments_too_large".into());
     }
-    if !canonical_base64(encoded.as_bytes()) {
-        return Err("invalid_attachment_encoding".into());
-    }
-    Ok(gtk4::glib::base64_decode(encoded))
-}
-
-/// Standard alphabet, whole quanta, padding only at the end, and no bits
-/// set past the data (so exactly one encoding is accepted for any bytes).
-fn canonical_base64(encoded: &[u8]) -> bool {
-    fn value(c: u8) -> Option<u8> {
-        match c {
-            b'A'..=b'Z' => Some(c - b'A'),
-            b'a'..=b'z' => Some(c - b'a' + 26),
-            b'0'..=b'9' => Some(c - b'0' + 52),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    if encoded.is_empty() || encoded.len() % 4 != 0 {
-        return false;
-    }
-    let padding = encoded.iter().rev().take_while(|&&c| c == b'=').count();
-    if padding > 2 {
-        return false;
-    }
-    let data = &encoded[..encoded.len() - padding];
-    if !data.iter().all(|&c| value(c).is_some()) {
-        return false;
-    }
-    let last = data.last().and_then(|&c| value(c)).unwrap_or(0);
-    match padding {
-        1 => last & 0b11 == 0,
-        2 => last & 0b1111 == 0,
-        _ => true,
-    }
+    STANDARD.decode(encoded).map_err(|_| "invalid_attachment_encoding".into())
 }
 
 /// A file name that is safe to store and to paste: letters and digits of any
@@ -649,9 +615,43 @@ mod tests {
         assert_eq!(parse(&bad).unwrap_err(), "invalid_prompt");
         assert_eq!(parse("{").unwrap_err(), "bad_json");
         // Only the canonical encoding of any bytes is accepted.
-        assert!(canonical_base64(b"YQ==") && canonical_base64(b"YWI=") && canonical_base64(b"YWJj"));
-        assert!(!canonical_base64(b"YR==") && !canonical_base64(b"YWJ=") && !canonical_base64(b"YQ"));
-        assert!(!canonical_base64(b"Y===") && !canonical_base64(b"YQ=a") && !canonical_base64(b"-_=="));
+        assert!(decode("YQ==").is_ok() && decode("YWI=").is_ok() && decode("YWJj").is_ok());
+        assert!(decode("YR==").is_err() && decode("YWJ=").is_err() && decode("YQ").is_err());
+        assert!(decode("Y===").is_err() && decode("YQ=a").is_err() && decode("-_==").is_err());
+    }
+
+    #[test]
+    fn decoding_accepts_only_canonical_bytes_including_all_tails() {
+        for len in 1..=129 {
+            let bytes: Vec<_> = (0..len).map(|i| (i * 197 + len) as u8).collect();
+            let encoded = crate::ws::base64(&bytes);
+            assert_eq!(decode(&encoded).unwrap(), bytes);
+        }
+        // Check all ASCII substitutions, including padding, NUL, whitespace,
+        // bad alphabet bytes and nonzero unused bits, against canonical re-encoding.
+        for encoded in ["AA==", "AAA=", "AAAA", "+/8=", "YWJjZA==", "YWJjZGU="] {
+            for at in 0..encoded.len() {
+                for byte in 0..=127 {
+                    let mut candidate = encoded.as_bytes().to_vec();
+                    candidate[at] = byte;
+                    let candidate = String::from_utf8(candidate).unwrap();
+                    // GLib takes a C string; the previous validator rejected NUL
+                    // before calling it, as the new decoder must do too.
+                    let expected = if byte == 0 {
+                        None
+                    } else {
+                        let decoded = gtk4::glib::base64_decode(&candidate);
+                        (crate::ws::base64(&decoded) == candidate).then_some(decoded)
+                    };
+                    assert_eq!(decode(&candidate).ok(), expected, "{candidate:?}");
+                }
+            }
+        }
+        for bad in ["", "YQ", "YQ=", "YQ===", "YQ==\n", "YQ==YQ==", "éAAA", "\u{a0}AAA"] {
+            assert!(decode(bad).is_err(), "{bad:?}");
+        }
+        let encoded = "A".repeat((MAX_TOTAL + 2) / 3 * 4 + 4);
+        assert_eq!(decode(&encoded).unwrap_err(), "attachments_too_large");
     }
 
     #[test]

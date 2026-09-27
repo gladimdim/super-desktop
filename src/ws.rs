@@ -117,19 +117,22 @@ pub(crate) fn apply_mask(bytes: &mut [u8], mask: [u8; 4]) {
 
 /// Write one unmasked frame (server→client frames must not be masked).
 pub fn write_frame<W: Write>(out: &mut W, opcode: u8, payload: &[u8]) -> io::Result<()> {
-    let mut header = Vec::with_capacity(10);
-    header.push(0x80 | opcode); // FIN + opcode, no fragmentation
+    let mut header = [0u8; 10];
+    header[0] = 0x80 | opcode; // FIN + opcode, no fragmentation
     let len = payload.len();
-    if len < 126 {
-        header.push(len as u8);
+    let header_len = if len < 126 {
+        header[1] = len as u8;
+        2
     } else if len <= u16::MAX as usize {
-        header.push(126);
-        header.extend_from_slice(&(len as u16).to_be_bytes());
+        header[1] = 126;
+        header[2..4].copy_from_slice(&(len as u16).to_be_bytes());
+        4
     } else {
-        header.push(127);
-        header.extend_from_slice(&(len as u64).to_be_bytes());
-    }
-    out.write_all(&header)?;
+        header[1] = 127;
+        header[2..10].copy_from_slice(&(len as u64).to_be_bytes());
+        10
+    };
+    out.write_all(&header[..header_len])?;
     out.write_all(payload)?;
     out.flush()
 }
@@ -298,6 +301,51 @@ mod tests {
         assert_eq!(long[1], 126);
         assert_eq!(u16::from_be_bytes([long[2], long[3]]), 200);
         assert_eq!(long.len(), 4 + 200);
+    }
+
+    #[test]
+    fn outgoing_headers_cover_all_lengths_and_short_writes() {
+        #[derive(Default)]
+        struct ShortWriter { bytes: Vec<u8>, flushed: bool }
+        impl Write for ShortWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let n = bytes.len().min(7);
+                self.bytes.extend_from_slice(&bytes[..n]);
+                Ok(n)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                self.flushed = true;
+                Ok(())
+            }
+        }
+        for length in [0, 1, 125, 126, 127, 65535, 65536, 131072] {
+            for opcode in [OP_TEXT, OP_BINARY] {
+                let payload: Vec<_> = (0..length).map(|i| i as u8).collect();
+                let mut expected = vec![0x80 | opcode];
+                if length < 126 {
+                    expected.push(length as u8);
+                } else if length <= u16::MAX as usize {
+                    expected.push(126);
+                    expected.extend_from_slice(&(length as u16).to_be_bytes());
+                } else {
+                    expected.push(127);
+                    expected.extend_from_slice(&(length as u64).to_be_bytes());
+                }
+                expected.extend_from_slice(&payload);
+                let mut out = ShortWriter::default();
+                write_frame(&mut out, opcode, &payload).unwrap();
+                assert_eq!(out.bytes, expected);
+                assert!(out.flushed);
+            }
+        }
+        struct FailedWriter;
+        impl Write for FailedWriter {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> io::Result<()> { panic!("flushed after failed write") }
+        }
+        assert_eq!(write_text(&mut FailedWriter, "x").unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[test]

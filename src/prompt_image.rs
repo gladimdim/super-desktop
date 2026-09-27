@@ -2,6 +2,7 @@
 //! single-image route (`/image-prompt`), which older phone apps still use.
 //! Staging and delivery live in `prompt_attachments`.
 use gtk4::gdk_pixbuf::prelude::*;
+use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -45,8 +46,9 @@ pub(crate) fn normalize(encoded: &str) -> Result<Vec<u8>, String> {
     if encoded.len() > (MAX_IMAGE + 2) / 3 * 4 || encoded.as_bytes().contains(&0) {
         return Err("image_too_large".into());
     }
-    let bytes = gtk4::glib::base64_decode(encoded);
-    if bytes.is_empty() || bytes.len() > MAX_IMAGE || crate::ws::base64(&bytes) != encoded {
+    // Decode and check canonical padding/trailing bits in the same pass.
+    let bytes = STANDARD.decode(encoded).map_err(|_| "invalid_image_encoding")?;
+    if bytes.is_empty() || bytes.len() > MAX_IMAGE {
         return Err("invalid_image_encoding".into());
     }
     // Only JPEG/PNG. Reject SVG, animated formats and arbitrary files regardless of MIME.
@@ -151,6 +153,20 @@ mod tests {
             "› \x1b[2m[Pasted text #1 +10 lines]\x1b[0m\n"
         ));
     }
+    #[test]
+    fn image_encoding_remains_strict_before_pixel_decoding() {
+        for bad in ["", "YQ", "YQ=", "YR==", "YWJ=", "YQ===", "Y Q==", "YQ==\n", "-_==", "éAAA"] {
+            assert_eq!(normalize(bad).unwrap_err(), "invalid_image_encoding", "{bad:?}");
+        }
+        assert_eq!(normalize("YQ\0=").unwrap_err(), "image_too_large");
+        let oversized = "A".repeat((MAX_IMAGE + 2) / 3 * 4 + 4);
+        assert_eq!(normalize(&oversized).unwrap_err(), "image_too_large");
+        // Same encoded length as the largest permitted image, but padding
+        // determines whether the decoded bytes actually fit the limit.
+        let too_many_bytes = crate::ws::base64(&vec![0; MAX_IMAGE + 1]);
+        assert_eq!(normalize(&too_many_bytes).unwrap_err(), "invalid_image_encoding");
+    }
+
     #[test]
     fn validates_real_pixels() {
         let pixbuf =
