@@ -103,7 +103,8 @@
   .screenshots { margin-top: 24px; }
   figure { margin: 0; }
   .screenshot-link { display: block; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: #070a10; }
-  .screenshot-link img { display: block; width: 100%; height: auto; }
+  .screenshot-link img, .screenshot-link video { display: block; width: 100%; height: auto; }
+  .trailer { margin-top: 32px; }
   figcaption { padding: 12px 0; color: var(--muted); font-size: 14px; }
   details { margin-top: 12px; }
   summary { cursor: pointer; color: var(--accent); padding: 10px 0; }
@@ -149,6 +150,24 @@
   </header>
 
   <main>
+  <section class="trailer" aria-labelledby="trailer-heading">
+    <h2 id="trailer-heading">Watch it work</h2>
+    <p class="sub">Forty seconds, recorded on a real desktop: the shortcut, a live agent session, another PC, and your phone.</p>
+    <figure>
+      <div class="screenshot-link">
+        <video controls preload="none" playsinline width="1920" height="1080"
+               poster="video/super-desktop-trailer-poster.webp">
+          <source src="video/super-desktop-trailer.mp4" type="video/mp4">
+          <p>Your browser cannot play this video.
+             <a href="video/super-desktop-trailer.mp4">Download it instead</a>.</p>
+        </video>
+      </div>
+      <figcaption>The overlay slides in over this website, a prompt is typed into a live Claude Code session,
+        another PC's harnesses open from the same top bar, and an unfolded Android phone reaches the same
+        sessions. No narration — it runs silent.</figcaption>
+    </figure>
+  </section>
+
   <section class="screenshots" aria-labelledby="screenshots-heading">
     <h2 id="screenshots-heading">A real working desktop</h2>
     <p class="sub">Chrome stays underneath. One shortcut brings your live AI workspace into view.</p>
