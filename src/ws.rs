@@ -87,18 +87,32 @@ pub fn read_frame<R: Read>(input: &mut R) -> io::Result<Option<Frame>> {
         input.read_exact(&mut payload)?;
     }
     if masked {
-        for (i, byte) in payload.iter_mut().enumerate() {
-            *byte ^= mask[i % 4];
-        }
+        apply_mask(&mut payload, mask);
     }
     Ok(Some(match opcode {
-        OP_TEXT => Frame::Text(String::from_utf8_lossy(&payload).to_string()),
+        OP_TEXT => Frame::Text(String::from_utf8(payload)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())),
         OP_BINARY => Frame::Binary(payload),
         OP_PING => Frame::Ping(payload),
         OP_PONG => Frame::Pong(payload),
         OP_CLOSE => Frame::Close,
         other => Frame::Other(other),
     }))
+}
+
+/// Four-byte words expose the repeated XOR to the compiler's vectorizer.
+/// Byte-array loads work at any alignment and on either endianness; no CPU
+/// extension beyond the selected Rust target's baseline is required.
+pub(crate) fn apply_mask(bytes: &mut [u8], mask: [u8; 4]) {
+    let mask_word = u32::from_ne_bytes(mask);
+    let mut chunks = bytes.chunks_exact_mut(4);
+    for chunk in &mut chunks {
+        let word = u32::from_ne_bytes(chunk.try_into().unwrap()) ^ mask_word;
+        chunk.copy_from_slice(&word.to_ne_bytes());
+    }
+    for (i, byte) in chunks.into_remainder().iter_mut().enumerate() {
+        *byte ^= mask[i];
+    }
 }
 
 /// Write one unmasked frame (server→client frames must not be masked).
@@ -302,5 +316,48 @@ mod tests {
         assert_eq!(read_frame(&mut close.as_slice()).unwrap(), Some(Frame::Close));
         // A peer that just drops the connection reads as a clean hang-up.
         assert_eq!(read_frame(&mut [].as_slice()).unwrap(), None);
+    }
+
+    #[test]
+    fn masking_matches_bytes_for_unaligned_inputs_and_tails() {
+        for mask in [[0; 4], [255; 4], [0x37, 0xfa, 0x21, 0x3d], [1, 2, 4, 8]] {
+            for offset in 0..32 {
+                for length in (0..=129).chain([255, 256, 257, 16383, 16384]) {
+                    let mut bytes: Vec<u8> = (0..offset + length).map(|i| i as u8).collect();
+                    let mut expected = bytes.clone();
+                    for (i, byte) in expected[offset..].iter_mut().enumerate() {
+                        *byte ^= mask[i % 4];
+                    }
+                    apply_mask(&mut bytes[offset..], mask);
+                    assert_eq!(bytes, expected, "offset {offset}, length {length}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn optimized_frame_reader_preserves_payloads_and_limits() {
+        let mask = [0x37, 0xfa, 0x21, 0x3d];
+        for size in [0, 1, 31, 32, 33, 125, 126, 127, 16384, 16385] {
+            let payload: Vec<u8> = (0..size).map(|i| i as u8).collect();
+            let mut frame = vec![0x82];
+            if size < 126 {
+                frame.push(0x80 | size as u8);
+            } else {
+                frame.push(0xfe);
+                frame.extend_from_slice(&(size as u16).to_be_bytes());
+            }
+            frame.extend_from_slice(&mask);
+            frame.extend(payload.iter().enumerate().map(|(i, &b)| b ^ mask[i % 4]));
+            let result = read_frame(&mut frame.as_slice());
+            if size > 16384 {
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            } else {
+                assert_eq!(result.unwrap(), Some(Frame::Binary(payload.clone())));
+                frame[0] = 0x81;
+                assert_eq!(read_frame(&mut frame.as_slice()).unwrap(),
+                    Some(Frame::Text(String::from_utf8_lossy(&payload).into_owned())));
+            }
+        }
     }
 }

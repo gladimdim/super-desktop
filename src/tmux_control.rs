@@ -75,14 +75,14 @@ pub(crate) enum Notice {
     Other,
 }
 
-pub(crate) fn classify(line: &str) -> Notice {
-    let name = line.split(' ').next().unwrap_or("");
+fn classify(line: &[u8]) -> Notice {
+    let name = line.split(|&byte| byte == b' ').next().unwrap_or_default();
     match name {
-        "%output" | "%extended-output" => Notice::Output,
-        "%layout-change" | "%window-pane-changed" | "%session-window-changed"
-        | "%session-changed" | "%window-add" | "%window-close" | "%unlinked-window-add"
-        | "%unlinked-window-close" | "%client-session-changed" => Notice::Layout,
-        "%exit" => Notice::Exit,
+        b"%output" | b"%extended-output" => Notice::Output,
+        b"%layout-change" | b"%window-pane-changed" | b"%session-window-changed"
+        | b"%session-changed" | b"%window-add" | b"%window-close" | b"%unlinked-window-add"
+        | b"%unlinked-window-close" | b"%client-session-changed" => Notice::Layout,
+        b"%exit" => Notice::Exit,
         _ => Notice::Other,
     }
 }
@@ -106,15 +106,10 @@ fn read_lines(output: impl std::io::Read, sender: SyncSender<String>, activity: 
         if raw.last() == Some(&b'\r') {
             raw.pop();
         }
-        let line = String::from_utf8_lossy(&raw).into_owned();
-        if let Some(tag) = block.as_deref() {
-            if line.strip_prefix("%end ").or_else(|| line.strip_prefix("%error ")) == Some(tag) {
-                block = None;
-            }
-        } else if let Some(tag) = line.strip_prefix("%begin ") {
-            block = Some(tag.to_string());
-        } else {
-            match classify(&line) {
+        // Output payloads are discarded outside command blocks. Classify
+        // their ASCII prefix before allocating or validating the payload.
+        if block.is_none() && !raw.starts_with(b"%begin ") {
+            match classify(&raw) {
                 Notice::Output => {
                     if let Some(activity) = &activity {
                         activity.bump(|s| s.output = s.output.wrapping_add(1));
@@ -131,6 +126,14 @@ fn read_lines(output: impl std::io::Read, sender: SyncSender<String>, activity: 
                 Notice::Other => continue,
             }
         }
+        let line = String::from_utf8_lossy(&raw).into_owned();
+        if let Some(tag) = block.as_deref() {
+            if line.strip_prefix("%end ").or_else(|| line.strip_prefix("%error ")) == Some(tag) {
+                block = None;
+            }
+        } else if let Some(tag) = line.strip_prefix("%begin ") {
+            block = Some(tag.to_string());
+        }
         if sender.send(line).is_err() {
             break;
         }
@@ -138,6 +141,19 @@ fn read_lines(output: impl std::io::Read, sender: SyncSender<String>, activity: 
     if let Some(activity) = &activity {
         activity.bump(|s| s.closed = true);
     }
+}
+
+fn hex_keys(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len().saturating_mul(3).saturating_sub(1));
+    for (i, &byte) in bytes.iter().enumerate() {
+        if i != 0 {
+            out.push(' ');
+        }
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 15) as usize] as char);
+    }
+    out
 }
 
 impl Control {
@@ -242,12 +258,7 @@ impl Control {
     pub fn send(&mut self, text: &str, enter: bool) -> Result<(), String> {
         if !text.is_empty() {
             // Hex bytes keep all user input out of the tmux command language.
-            let bytes = text
-                .as_bytes()
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let bytes = hex_keys(text.as_bytes());
             self.command(&format!("send-keys -t {} -H {bytes}", self.pane))?;
         }
         if enter {
@@ -298,6 +309,30 @@ impl Drop for Control {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_keys_keeps_every_byte_out_of_the_command_language() {
+        assert_eq!(hex_keys(b""), "");
+        assert_eq!(hex_keys(b"\0\n\r\x1b; '$`\\"), "00 0a 0d 1b 3b 20 27 24 60 5c");
+        let bytes: Vec<u8> = (0..=255).collect();
+        let expected = bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+        assert_eq!(hex_keys(&bytes), expected);
+        let text = "Готово ✓ 日本語";
+        assert_eq!(hex_keys(text.as_bytes()).split(' ').count(), text.len());
+    }
+
+    #[test]
+    fn reader_keeps_lossy_command_text_and_exact_notification_names() {
+        let raw = b"%output-not-a-notice %1 ignored\n%output %1 \xff\n%begin 1 2 0\r\n\xff\xfe\n%exit still command text\n%end wrong tag\n%error 1 2 0\n%extended-output %1 \xff\n%exit\r\n";
+        let (sender, lines) = mpsc::sync_channel(16);
+        let activity = Arc::new(Activity::default());
+        read_lines(&raw[..], sender, Some(activity.clone()));
+        assert_eq!(lines.try_iter().collect::<Vec<_>>(), [
+            "%begin 1 2 0", "��", "%exit still command text", "%end wrong tag", "%error 1 2 0", "%exit",
+        ]);
+        assert_eq!(activity.snapshot().output, 2);
+        assert!(activity.snapshot().closed);
+    }
 
     #[test]
     fn reader_forwards_blocks_and_counts_notifications() {
