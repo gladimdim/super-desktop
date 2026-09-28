@@ -25,7 +25,7 @@ pub struct CardRequest {
 pub struct CardUpdate {
     pub status: SessionStatus,
     pub preview: Option<String>,
-    /// Session title, else the last submitted prompt.
+    /// Last submitted prompt, matching the phone list’s `lastPrompt`.
     pub prompt: Option<String>,
     pub oc_id: Option<String>,
     /// A setup hint for this card (see `setup_notice`); the card shows it once
@@ -139,7 +139,6 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
     let preview = request.preview_lines.map(|lines| preview_text(screen.as_deref(), &status, lines));
     let oc_id = resolve_oc_id(request);
     let prompt = card_prompt(agent, row, metadata.as_ref(), oc_id.as_deref());
-    let prompt = card_title(agent, metadata.as_ref(), oc_id.as_deref(), &status.pid).or(prompt);
     let notice = setup_notice(metadata.as_ref(), crate::harness_metadata::openclaw_plugin);
     let scrolled_back = Some(row.is_some_and(|row| row.in_mode));
     CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back }
@@ -261,7 +260,6 @@ fn legacy(request: &CardRequest) -> CardUpdate {
         oc_id.as_deref(),
         screen.as_deref().unwrap_or(""),
     );
-    let prompt = crate::bridge::session_title(session, agent, &status.pid).or(prompt);
     let notice = setup_notice(
         crate::harness_metadata::inspect(session, agent).as_ref(),
         crate::harness_metadata::openclaw_plugin,
@@ -407,9 +405,6 @@ mod tests {
             let metadata = silent(agent);
             let prompt = card_prompt(agent, Some(&typed), Some(&metadata), None);
             assert_eq!(prompt.as_deref(), Some("Fix the login bug"), "{agent}");
-            // The card title is the native title, else this prompt.
-            let title = card_title(agent, Some(&metadata), None, "0").or(prompt);
-            assert_eq!(title.as_deref(), Some("Fix the login bug"), "{agent}");
         }
         // The phone's lastPrompt (`bridge::last_user_text`) makes the same call.
         assert_eq!(
@@ -561,6 +556,56 @@ mod tests {
         }
         assert_eq!(batched[1].prompt.as_deref(), Some("typed\tprompt"));
         assert!(batched[0].preview.is_none() && batched[2].preview.is_some());
+    }
+
+    /// Exercise both production refresh paths with an old conversation name
+    /// and changing prompts; the name must never replace the phone's lastPrompt.
+    #[test]
+    fn card_title_refresh_uses_latest_prompt_instead_of_conversation_name() {
+        use std::{fs, process::Command};
+        let session = format!("test_sd_{}", crate::tmux::unique_session_name());
+        struct Cleanup { session: String, files: Vec<std::path::PathBuf> }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["kill-session", "-t", &self.session]).output();
+                for file in &self.files { let _ = fs::remove_file(file); }
+            }
+        }
+        let mut cleanup = Cleanup { session: session.clone(), files: Vec::new() };
+        assert!(Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "bash", "--norc", "--noprofile"])
+            .status().unwrap().success());
+        let root = crate::harness_record::root().unwrap();
+        fs::create_dir_all(&root).unwrap();
+        for agent in ["claude", "pi", "opencode", "openclaw"] {
+            for (index, prompt) in ["First request", "Now fix the latest issue", "", "<task-notification>injected</task-notification>"].iter().enumerate() {
+                let path = root.join(format!("{session}-{agent}-{index}.json"));
+                cleanup.files.push(path.clone());
+                let metadata = Metadata {
+                    version: 1, agent: agent.into(), native_session: "own".into(),
+                    title: "Old conversation summary".into(), prompt: (*prompt).into(),
+                    status: "idle".into(), pid: std::process::id(),
+                    process_start: crate::harness_record::start_time(std::process::id()).unwrap(),
+                    ..Default::default()
+                };
+                fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+                assert!(Command::new("tmux").args([
+                    "set-option", "-t", &session, "@super_desktop_metadata", path.to_str().unwrap(),
+                ]).status().unwrap().success());
+                let request = CardRequest {
+                    session: session.clone(), agent: agent.into(), preview_lines: None,
+                    oc_id: None, need_resolve: false,
+                };
+                let snapshot = crate::tmux::pane_snapshot().unwrap();
+                assert!(matches!(snapshot.lookup(&session), PaneLookup::Row(_)));
+                // Per-session readers cache metadata for 250 ms; the UI refreshes once a second.
+                std::thread::sleep(std::time::Duration::from_millis(260));
+                let expected = crate::bridge::last_user_text(&session, agent, None, "");
+                assert_eq!(expected.as_deref(), (index < 2).then_some(*prompt));
+                assert_eq!(refresh_one(&request, Some(&snapshot)).prompt, expected, "batched {agent} {index}");
+                assert_eq!(legacy(&request).prompt, expected, "legacy {agent} {index}");
+            }
+        }
     }
 
     /// A gone session costs no subprocess and says so.
