@@ -266,7 +266,9 @@ including while the phone UI is hidden using an opt-in foreground monitor. Pi
 requires a new launch with the updated desktop extension and updated Android app.
 Other harnesses do not yet have verified completion adapters.
 
-Android can send images and files with a prompt to any idle harness: **＋**
+Android can send images and files with a prompt to any harness, whether it is idle or
+still working (a working agent queues it for its next turn, exactly as typed input is
+queued): **＋**
 picks an image or a file or pastes an image from the clipboard (pasting into
 the text field and dropping a file on a terminal work too). **Share → SUPER
 DESKTOP** in any other Android app asks which harness gets the files or text,

@@ -98,11 +98,21 @@ fn composer_line(screen: &str) -> Option<&str> {
         .find_map(|line| line.split_once('›').map(|(_, content)| content))
 }
 
+/// Codex's idle animation paints braille "sparkles" across the composer row, in and
+/// around its own placeholder (`›⠁Ask Codex to do anything⡀   ⠂ …`). They are
+/// decoration the user never typed, so they are removed before the row is read.
+fn without_sparkles(plain: &str) -> String {
+    plain
+        .chars()
+        .filter(|c| !('\u{2800}'..='\u{28ff}').contains(c))
+        .collect()
+}
+
 pub(crate) fn empty_composer(screen: &str) -> bool {
     let Some(line) = composer_line(screen) else {
         return false;
     };
-    let plain = crate::tmux::strip_terminal_escapes(line);
+    let plain = without_sparkles(&crate::tmux::strip_terminal_escapes(line));
     // Codex 0.154: placeholder is dim, actual draft text isn't. Unknown UI fails closed.
     plain.trim().is_empty()
         || (line.contains("\x1b[2m") && plain.trim() == "Ask Codex to do anything")
@@ -146,6 +156,15 @@ mod tests {
         assert!(empty_composer(
             "\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n"
         ));
+        // Codex's idle animation sparkles in and around its own placeholder: the
+        // row is still empty. This is the line a live 0.154 card draws.
+        assert!(empty_composer(
+            "\x1b[1m›\x1b[0m\x1b[38;2;112;111;109m\x1b[48;2;44;44;43m⠁\x1b[2m\x1b[39mAsk Codex to do anything\
+             \x1b[0m\x1b[38;2;124;122;120m\x1b[48;2;44;44;43m⡀\x1b[39m    \x1b[38;2;80;79;77m⠂\x1b[39m\n"
+        ));
+        assert!(empty_composer("\x1b[1m›\x1b[0m ⠁  ⡀   ⠂ ⣿\n"));
+        // Text among the sparkles is still the user's draft.
+        assert!(!empty_composer("› ⠁ already typing ⡀\n"));
         assert!(!empty_composer("› already typing\n"));
         assert!(!empty_composer("› [Image #1]\n"));
         assert!(!empty_composer("Choose a model\n"));

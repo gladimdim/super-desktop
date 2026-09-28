@@ -8,6 +8,12 @@
 //! the prompt; a shell gets the quoted paths after the command. Nothing is
 //! submitted until the whole prompt is in the composer, and then Enter is sent
 //! once.
+//!
+//! A harness that is still working takes the prompt too: the keystrokes are the
+//! same ones the phone's text input already sends at any time, and agent TUIs
+//! queue them for the next turn. A pane whose process has exited has nowhere to
+//! put them, and a composer that already holds text the user typed on the PC is
+//! never pasted over.
 use crate::prompt_image::{input_guard, normalize, validate_prompt};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use sha2::{Digest, Sha256};
@@ -514,8 +520,13 @@ pub fn submit(
         return Err("no_such_session".into());
     }
     let status = crate::tmux::inspect_status(session, &terminal.agent_type);
-    if !matches!(status.status, "IDLE" | "FINISHED") {
-        return Err("wait_for_idle_terminal".into());
+    // A working harness is not a closed door: typed input is queued by every
+    // agent TUI, and a prompt with attachments is the same keystrokes. Only a
+    // pane whose process is gone has nowhere to put them. What still protects
+    // the terminal is the composer check below: nothing is pasted over text
+    // the user is holding on the PC.
+    if status.status == "EXITED" {
+        return Err("no_such_session".into());
     }
     let delivery = delivery(&terminal.agent_type, &status.cmd, &terminal.command);
     // A shell would run the file itself: it needs a command to go with it.
