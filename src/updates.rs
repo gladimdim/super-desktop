@@ -544,8 +544,8 @@ mod tests {
     fn a_clone_pinned_to_a_release_tag_is_offered_a_switch_to_the_latest() {
         let scratch = Scratch::new("pinned");
         let (author, installed) = repositories(&scratch);
-        // Release v1.1.0, then move master on.
-        test_git(&author, &["tag", "v1.1.0"]);
+        // Release v1.1.0 with an annotated tag, as real releases are, then move master on.
+        test_git(&author, &["tag", "-a", "v1.1.0", "-m", "SUPER DESKTOP 1.1.0"]);
         test_git(&author, &["tag", "not-a-release"]);
         test_git(&author, &["push", "--quiet", "origin", "--tags"]);
         publish(&author, "1.1.1", "Add the first thing");

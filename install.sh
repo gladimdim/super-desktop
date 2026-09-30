@@ -337,10 +337,13 @@ prepare_source() {
     else
         say "Downloading SUPER DESKTOP into $dir..."
         mkdir -p "$(dirname "$dir")"
-        local ref="$BRANCH"
-        [[ -n "$RELEASE" && "$RELEASE" != latest ]] && ref="$RELEASE"
-        git -c advice.detachedHead=false clone --branch "$ref" "$REPO_URL" "$dir" </dev/null ||
-            die "Could not clone $REPO_URL at $ref. Check the network connection and the name (releases: $RELEASES_URL), then run the installer again."
+        # Clone the branch, then check the release out: `git clone --branch <tag>`
+        # prints a confusing "is not a commit!" warning for an annotated tag.
+        git -c advice.detachedHead=false clone --branch "$BRANCH" "$REPO_URL" "$dir" </dev/null ||
+            die "Could not clone $REPO_URL. Check the network connection and run the installer again."
+        if [[ -n "$RELEASE" && "$RELEASE" != latest ]]; then
+            checkout_release "$dir" "$RELEASE"
+        fi
     fi
     SRC="$(cd "$dir" && pwd)"
 }
