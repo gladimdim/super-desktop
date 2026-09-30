@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy policy — SUPER DESKTOP</title>
+<meta name="description" content="Privacy policy for the SUPER DESKTOP Linux app and its Android companion: no accounts, no servers, no analytics and no ads. Your devices talk directly to each other.">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --text: #e6e9f0;
+    --muted: #9aa3b5;
+    --accent: #22d3ee;
+    --border: #262e42;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #16202f 0%, var(--bg) 60%) fixed, var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px 80px; }
+  .back { display: inline-block; margin-bottom: 24px; text-decoration: none; }
+  h1 { font-size: 38px; margin: 0 0 6px; letter-spacing: -1px; }
+  h2 { font-size: 22px; margin: 40px 0 6px; letter-spacing: -0.3px; }
+  .updated { color: var(--muted); margin: 0 0 24px; }
+  p, li { color: var(--text); }
+  ul { padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  a { color: var(--accent); }
+  a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+  .summary {
+    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    border-radius: var(--radius); padding: 16px 20px; margin: 20px 0;
+  }
+  .summary p { margin: 0 0 8px; }
+  .summary p:last-child { margin-bottom: 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border: 1px solid var(--border); }
+  th { background: var(--panel); color: var(--muted); font-weight: 600; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+  footer { margin-top: 56px; color: var(--muted); font-size: 14px; }
+  @media (max-width: 600px) {
+    h1 { font-size: 30px; }
+    th, td { padding: 8px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="./">← SUPER DESKTOP</a>
+  <h1>Privacy policy</h1>
+  <p class="updated">Applies to the SUPER DESKTOP app for Linux and the SUPER DESKTOP Android app (package <code>com.gladimdim.superdesktop</code>). Last updated 29 September 2026.</p>
+
+  <div class="summary">
+    <p><strong>In short:</strong> SUPER DESKTOP has no accounts, no servers of ours, no analytics, no advertising and no tracking. The developer does not receive, collect or store any of your data.</p>
+    <p>Your phone and your computers talk directly to each other, over your own network or Tailscale, and everything you type or see stays between them.</p>
+  </div>
+
+  <h2>Who we are</h2>
+  <p>SUPER DESKTOP is made by Dmytro Gladkyi, an independent developer (“we”, “us”). The Linux app is open source at <a href="https://github.com/gladimdim/super-desktop">github.com/gladimdim/super-desktop</a>.</p>
+
+  <h2>What the apps handle, and where it goes</h2>
+  <table>
+    <thead><tr><th>Information</th><th>Where it lives</th><th>Sent to us?</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>Pairing details for each of your computers: its name and address, a pairing token, and the pinned certificate that identifies it</td>
+        <td>On your phone, in encrypted storage backed by the Android Keystore. Excluded from Android backup.</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td>Terminal output, the prompts you type, drafts, images and files you attach, file names and folder paths</td>
+        <td>Sent only to the computer you chose, over a certificate-pinned encrypted (HTTPS/WSS) connection. Unsent drafts and a short-lived cache stay on your phone.</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td>App settings: theme, card colours, widget and usage-card choices, notification choices</td>
+        <td>On your phone only</td>
+        <td>No</td>
+      </tr>
+      <tr>
+        <td>Free-trial day count and cached Pro status</td>
+        <td>On your phone only</td>
+        <td>No</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>Terminal output and prompts can contain whatever your AI coding tools show or you type, including source code. That content travels only between your own devices. What the AI tools running on your computers then send to their own providers is governed by those tools and providers, not by SUPER DESKTOP.</p>
+
+  <h2>Purchases</h2>
+  <p>The Android app has a one-time optional purchase, SUPER DESKTOP Pro, handled entirely by Google Play. Google processes your payment and tells the app whether the purchase exists. We never see your payment details, name or Google account, and the app has no SUPER DESKTOP account. Google's handling of that information is described in <a href="https://policies.google.com/privacy">Google's privacy policy</a>. Google Play Billing also sends its own diagnostic data to Google.</p>
+
+  <h2>Permissions the Android app asks for</h2>
+  <ul>
+    <li><strong>Internet, network state, Wi-Fi state and multicast</strong>: to connect to your computers and to find them on the same Wi-Fi network (mDNS discovery). The app connects only to computers you paired.</li>
+    <li><strong>Camera</strong>: only when you choose to scan a pairing QR code. Camera images are read on the spot to decode the code; they are not saved or sent anywhere.</li>
+    <li><strong>Notifications</strong>: for completion alerts and the optional connection notification, if you turn them on.</li>
+    <li><strong>Foreground service (connected device)</strong>: to keep watching your computers for completion alerts while the app is in the background, if you turn alerts on.</li>
+    <li><strong>Vibration</strong>: for haptic feedback.</li>
+    <li><strong>Photos and files</strong>: the app can only read an image or file you explicitly pick or share to it, using Android's system pickers and share sheet. It does not browse your storage.</li>
+  </ul>
+  <p>The app does not read your contacts, messages, microphone or location.</p>
+
+  <h2>What we do not do</h2>
+  <ul>
+    <li>No advertising, and no advertising or analytics SDKs.</li>
+    <li>No crash-reporting or usage-tracking service run by us.</li>
+    <li>No selling, sharing or renting of data. We have none to share.</li>
+  </ul>
+  <p>Google Play may show us aggregate technical statistics about the app, such as installs and crash rates, through the Play Console. We do not receive them per person.</p>
+
+  <h2>Demo mode</h2>
+  <p>The Android app has a demo mode with two pretend computers that live inside the phone. It makes no network connections and sends nothing anywhere.</p>
+
+  <h2>Your control and deleting data</h2>
+  <ul>
+    <li>Remove a computer in Settings → Connections to delete its pairing details from the phone. To revoke a phone's access, remove it in SUPER DESKTOP's Settings → Connections on the computer.</li>
+    <li>Uninstalling the Android app, or clearing its storage in Android settings, deletes everything the app keeps on the phone. This also restarts the free trial; Restore purchase brings Pro back.</li>
+    <li>Because we hold no data about you, there is nothing to request from us or to erase on our side.</li>
+  </ul>
+
+  <h2>Children</h2>
+  <p>SUPER DESKTOP is a developer tool and is not directed at children under 13. We do not knowingly collect information from anyone.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the new version is published on this page with a new date. A change that affects what the app collects would also be described in the app's release notes.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about privacy: please open an issue at <a href="https://github.com/gladimdim/super-desktop/issues">github.com/gladimdim/super-desktop/issues</a>.</p>
+
+  <footer>
+    <a href="./">SUPER DESKTOP</a> · <a href="https://github.com/gladimdim/super-desktop">GitHub</a>
+  </footer>
+</div>
+</body>
+</html>
