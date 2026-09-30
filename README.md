@@ -426,7 +426,7 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 
 | Symptom | Fix |
 |---|---|
-| `Daemon not running` after reboot/login | Start it: `super-desktop daemon` runs hidden (autostart line in `bindings.lua` covers future logins) |
+| `Daemon not running` after reboot/login | Start it: `super-desktop daemon` runs hidden (autostart line in `autostart.lua` covers future logins) |
 | Overlay shows but immediately hides / toggle misbehaves | Two daemons are running — `pkill -f 'super-desktop.*daemon'`, remove stale socket, start exactly one |
 | The hot corner does nothing | `hyprctl layers | grep sd-hotcorner` — the 8x8 corner surface must be there, on the overlay layer. It is an input zone, not a visible one: it paints 1/255 black, which is what keeps GTK from treating it as click-through (see `src/hotcorner.rs`). |
 | The toggle shortcut does nothing | `grep -A4 'super-desktop shortcut' ~/.config/hypr/bindings.lua` — the managed block must hold the combination you expect; re-run the installer; `hyprctl reload`; `hyprctl configerrors` |
