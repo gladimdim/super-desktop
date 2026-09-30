@@ -47,13 +47,14 @@ A release is an annotated git tag `vX.Y.Z` on the commit whose `Cargo.toml`
 version is X.Y.Z, plus a GitHub Release. People use it to install an exact
 version (`SUPER_DESKTOP_VERSION=vX.Y.Z` with `install.sh`, see the README's
 "Installing a specific version"), for example to match an older phone app.
-Make one only when the user says to release; never tag on your own. Every
-commit raises the version, so most versions are never tagged.
+Make one only when the user says to release; never tag on your own. The
+version changes only for a release, so every version is a release.
 
 When the user asks for a release:
 
 1. Start from a clean `master` that is pushed, with the tests passing. Read the
-   last tag (`git tag --sort=-v:refname | head -1`) and the current version.
+   last tag (`git tag --sort=-v:refname | head -1`) and the current version,
+   and get the new version from the user.
 2. Write the changelog from `git log <last tag>..HEAD` in plain language, in
    groups: what users see, bridge changes, fixes. Public rules apply: shipped
    behavior only, no links to the private notes, no unreleased plans.
@@ -66,7 +67,9 @@ When the user asks for a release:
    needs.
 4. Show the user the changelog and those versions, and publish only after they
    agree.
-5. Tag and publish: `git tag -a vX.Y.Z -m "SUPER DESKTOP X.Y.Z" <commit>`,
+5. Raise the version in `Cargo.toml` and `Cargo.lock` in one release commit
+   ("Release X.Y.Z") and push it. Then tag and publish that commit:
+   `git tag -a vX.Y.Z -m "SUPER DESKTOP X.Y.Z" <commit>`,
    `git push origin vX.Y.Z`, then `gh release create vX.Y.Z --title
    "SUPER DESKTOP X.Y.Z" --notes-file <notes>`. The notes start with three
    lines: Protocol, Android app (oldest to newest), and Install
@@ -105,17 +108,19 @@ mobile terminal output and Linux performance notes.
 - If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
   the notes here.
 
-## Every commit raises the version
+## The version changes only for a release
 
-Settings → Updates offers an update when the version in Cargo.toml on GitHub
-is newer than the running build, so every commit raises it. The checked-in
-`.githooks/pre-commit` raises the patch version in `Cargo.toml` and
-`Cargo.lock` on each commit, touching only the version line. Enable it once
-per clone with `git config core.hooksPath .githooks`, and do not bypass it
-(`--no-verify`). Raise the minor or major version by editing `Cargo.toml` in
-the commit itself; the hook keeps a raised version and syncs `Cargo.lock`. A
-rebase or merge conflict in the version line resolves to the higher version;
-the next commit raises it again.
+Do not raise the version in `Cargo.toml` and `Cargo.lock` in ordinary commits.
+It changes only when the user tells you to release a new version, and then to
+the version they name (ask which if they did not): a release commit edits both
+files together, and that commit is tagged (see "Releases (git tags)"). Settings
+→ Updates offers an update when the version in Cargo.toml on GitHub is newer than
+the running build, so it notices a release when its version bump reaches
+`master`. The checked-in `.githooks/pre-commit` never changes a version; it
+refuses a commit whose `Cargo.toml` and `Cargo.lock` versions differ. Enable it
+once per clone with `git config core.hooksPath .githooks`, and do not bypass it
+(`--no-verify`). A rebase or merge conflict in the version line resolves to the
+higher version.
 
 ## Responsive toolbar invariant
 

@@ -41,7 +41,7 @@ CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
 
 To update later, open **⚙ Settings → Updates**, or run the same command
 again. Settings → Updates compares this build's version with the newest on
-GitHub (every commit raises the version) and lists what a newer version
+GitHub (the version is raised for each release) and lists what a newer version
 brings. **Update** fast-forwards the source and rebuilds it; SUPER DESKTOP
 restarts on the new build only once the build succeeds, and a notification
 says how it went (the log is `~/.local/state/super-desktop/update.log`). The
@@ -515,7 +515,7 @@ events (`peer-events`) and sends one command (`peer-command`);
 │   ├── updates.rs           # ⚙ Settings → Updates: compare with GitHub, fast-forward, rebuild.sh
 │   ├── usage.rs / ws.rs     # usage stats, misc helpers
 │   └── crashlog.rs          # panic hook (release builds abort; crashes leave a trace)
-├── .githooks/pre-commit     # raises the patch version on every commit (git config core.hooksPath .githooks)
+├── .githooks/pre-commit     # refuses a commit whose Cargo.toml and Cargo.lock versions differ (git config core.hooksPath .githooks)
 ├── assets/                  # vendored toolbar logos → ~/.config/super-desktop/assets/
 ├── Cargo.toml               # gtk4, gtk4-layer-shell, vte4, serde, serde_json, chrono, libc
 ├── install.sh               # one-command install and update (see §1 above)

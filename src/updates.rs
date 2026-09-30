@@ -1,9 +1,10 @@
 //! Settings → Updates: compare this build with its GitHub repository and
 //! update the clone it was built from.
 //!
-//! Every commit raises the patch version in Cargo.toml (`.githooks/pre-commit`),
-//! so a newer version on the clone's upstream branch means newer code. A check
-//! fetches that branch, which changes no file, and reads its Cargo.toml.
+//! The version in Cargo.toml is raised only for a release (see AGENTS.md), so a
+//! newer version on the clone's upstream branch means a new release has reached
+//! it. A check fetches that branch, which changes no file, and reads its
+//! Cargo.toml.
 //! Updating fast-forwards the clone and starts its `rebuild.sh` in a session of
 //! its own. That script builds first and replaces this daemon only once the
 //! build succeeded, so a failed update leaves the running app alone and this
@@ -616,9 +617,11 @@ mod tests {
         assert_eq!(update_outcome("garbage", Version(1, 1, 3), log), None);
     }
 
-    /// The repository's pre-commit hook, in a scratch repository.
+    /// The repository's pre-commit hook, in a scratch repository: it never
+    /// changes a version, and refuses a commit where Cargo.toml and Cargo.lock
+    /// disagree.
     #[test]
-    fn every_commit_raises_the_patch_version() {
+    fn a_commit_leaves_the_version_alone_and_keeps_the_lock_in_step() {
         let scratch = Scratch::new("hook");
         let repo = scratch.0.join("repo");
         test_git(&scratch.0, &["init", "--quiet", "--initial-branch=master", repo.to_str().unwrap()]);
@@ -636,35 +639,32 @@ mod tests {
                 lock_version(&committed("Cargo.lock")).unwrap(),
             )
         };
-        assert_eq!(versions(), ("1.1.1".into(), "1.1.1".into()));
+        assert_eq!(versions(), ("1.1.0".into(), "1.1.0".into()));
 
+        // Ordinary commits do not raise it, and leave the work tree clean.
         std::fs::write(repo.join("README.md"), "two\n").unwrap();
         test_git(&repo, &["commit", "--quiet", "-am", "Second"]);
-        assert_eq!(versions(), ("1.1.2".into(), "1.1.2".into()));
-        // The work tree follows, so nothing is left to commit.
+        assert_eq!(versions(), ("1.1.0".into(), "1.1.0".into()));
         assert_eq!(test_git(&repo, &["status", "--porcelain"]), "");
 
-        // An unstaged edit to Cargo.toml stays out of the commit.
-        let edited = manifest("1.1.2").replace("[dependencies]\n", "[dependencies]\nserde = \"1\"\n");
-        std::fs::write(repo.join("Cargo.toml"), &edited).unwrap();
-        std::fs::write(repo.join("README.md"), "three\n").unwrap();
-        test_git(&repo, &["add", "README.md"]);
-        test_git(&repo, &["commit", "--quiet", "-m", "Third"]);
-        assert_eq!(versions(), ("1.1.3".into(), "1.1.3".into()));
-        assert!(!committed("Cargo.toml").contains("serde"));
-        let work_tree = std::fs::read_to_string(repo.join("Cargo.toml")).unwrap();
-        assert!(work_tree.contains("serde") && manifest_version(&work_tree) == Some(Version(1, 1, 3)), "{work_tree}");
-
-        // A release raised by hand keeps its version, and the lock follows it.
+        // A manifest raised without its lock is refused.
         std::fs::write(repo.join("Cargo.toml"), manifest("1.2.0")).unwrap();
-        test_git(&repo, &["commit", "--quiet", "-am", "Release 1.2"]);
+        let refused = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false"])
+            .args(["commit", "--quiet", "-am", "Half a release"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!refused.status.success(), "a manifest and a lock that disagree must not be committed");
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("Cargo.lock says 1.1.0"));
+        assert_eq!(versions(), ("1.1.0".into(), "1.1.0".into()));
+
+        // A release raises both together.
+        std::fs::write(repo.join("Cargo.lock"), lock("1.2.0")).unwrap();
+        test_git(&repo, &["commit", "--quiet", "-am", "Release 1.2.0"]);
         assert_eq!(versions(), ("1.2.0".into(), "1.2.0".into()));
-        // A partial commit (`git commit <paths>`) still raises it.
-        std::fs::write(repo.join("README.md"), "four\n").unwrap();
-        test_git(&repo, &["commit", "--quiet", "-m", "Fourth", "README.md"]);
-        assert_eq!(versions(), ("1.2.1".into(), "1.2.1".into()));
-        std::fs::write(repo.join("README.md"), "five\n").unwrap();
-        test_git(&repo, &["commit", "--quiet", "-am", "Fifth"]);
-        assert_eq!(versions(), ("1.2.2".into(), "1.2.2".into()), "never lowered after a partial commit");
     }
 }
