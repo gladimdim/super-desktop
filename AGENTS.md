@@ -10,6 +10,77 @@ The Android repository's own `AGENTS.md` has the full Android feature and build
 instructions. Changes only to PC-to-PC or Linux-only behavior do not require an
 Android feature inventory update.
 
+## Bridge protocol compatibility (released PCs and released phones)
+
+The phone bridge (`PROTOCOL.md` in the private repository, wire version 3)
+connects SUPER DESKTOP on a PC to the Android app. The two are updated
+independently: PCs through Settings → Updates or the install command, phones
+through Google Play. Any released desktop build must keep working with any
+released Android build, in both directions. Never assume both sides update
+together.
+
+- **Before changing the bridge in any way, ask the user and wait for a yes.**
+  That covers every endpoint, message, field, header, pairing, auth or
+  discovery change, additive or not. Say what changes, why, and how old phones
+  and old PCs keep working. Do not start the change on a maybe.
+- Change the bridge only additively: new optional fields, endpoints and
+  headers. Never remove, rename or retype a field, change a unit or meaning,
+  tighten validation, or reuse an old name for new behavior. A breaking wire
+  change needs the user's agreement first.
+- An old phone on this new PC must keep working unchanged, and a new phone on
+  an old PC must degrade cleanly. Keep every existing response shape, status
+  code and route, and keep ignoring unknown request fields.
+- A change to the bridge is made together with the matching Android work in
+  `../OmarchyAILauncher` and published together: publish the desktop release
+  first, then the app, after testing this build against the latest released
+  Android app and the new app against this build. Do not release the bridge
+  side alone unless the change is additive and verified against the released app.
+- State the minimum version each side needs in the commit message and in the
+  notes (`designs/ANDROID_FEATURES.md` and `PROTOCOL.md` in the private
+  repository).
+- Keep the compatibility paths and their tests; remove one only after the user
+  confirms that no supported release still uses it.
+
+## Releases (git tags)
+
+A release is an annotated git tag `vX.Y.Z` on the commit whose `Cargo.toml`
+version is X.Y.Z, plus a GitHub Release. People use it to install an exact
+version (`SUPER_DESKTOP_VERSION=vX.Y.Z` with `install.sh`, see the README's
+"Installing a specific version"), for example to match an older phone app.
+Make one only when the user says to release; never tag on your own. Every
+commit raises the version, so most versions are never tagged.
+
+When the user asks for a release:
+
+1. Start from a clean `master` that is pushed, with the tests passing. Read the
+   last tag (`git tag --sort=-v:refname | head -1`) and the current version.
+2. Write the changelog from `git log <last tag>..HEAD` in plain language, in
+   groups: what users see, bridge changes, fixes. Public rules apply: shipped
+   behavior only, no links to the private notes, no unreleased plans.
+3. Work out the protocol version (`PROTOCOL.md` in the private repository) and
+   the phone app versions it works with: the oldest and the newest Android app,
+   from `../OmarchyAILauncher/designs/ANDROID_FEATURES.md`, the app's
+   `versionName` and Play release history, and a real check with each
+   supported app build where you can. Say plainly what was tested and what was
+   not. If the release changes the bridge, name the minimum version each side
+   needs.
+4. Show the user the changelog and those versions, and publish only after they
+   agree.
+5. Tag and publish: `git tag -a vX.Y.Z -m "SUPER DESKTOP X.Y.Z" <commit>`,
+   `git push origin vX.Y.Z`, then `gh release create vX.Y.Z --title
+   "SUPER DESKTOP X.Y.Z" --notes-file <notes>`. The notes start with three
+   lines: Protocol, Android app (oldest to newest), and Install
+   (`SUPER_DESKTOP_VERSION=vX.Y.Z` command), then the changelog. Leave the
+   Android line out, and name no app version anywhere, until the user says the
+   Android app is public.
+6. Add a row to the README's compatibility table (a normal commit; the release
+   tag stays on the release commit). Then check the command in a scratch
+   clone (`git clone --branch vX.Y.Z`), never on the user's own install, and
+   open the Release page.
+7. Never move, delete or re-tag a published tag. A mistake is fixed with a new
+   release. Tell the user to release the matching Android build in the same
+   window when the bridge changed.
+
 ## Docs and plans live in the private OmarchyAILauncher repository
 
 This repository is public. Its plans, design notes, protocol notes,
