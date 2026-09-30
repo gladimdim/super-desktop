@@ -110,7 +110,8 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
     hint.set_text(
         "Updating fast-forwards the clone SUPER DESKTOP runs from and rebuilds it with its rebuild.sh. \
          The build runs first, and SUPER DESKTOP restarts on it only if it succeeds; terminal cards keep \
-         running. A clone with uncommitted changes or commits of its own is left alone.",
+         running. A clone with uncommitted changes or commits of its own is left alone. A copy installed \
+         at a release tag stays on that version until you switch to the latest here.",
     );
     body.append(&hint);
 
@@ -148,8 +149,15 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
             };
             source.set_text(&format!("From {} ({}) into {}", checked.url, checked.upstream, checked.dir.display()));
             source.set_visible(true);
+            let pinned = checked.pinned.as_deref();
             if checked.available() {
-                status.set_text(&format!("SUPER DESKTOP {} is available. This build is {}.", checked.latest, checked.current));
+                status.set_text(&match pinned {
+                    Some(tag) => format!(
+                        "Pinned to {tag}. SUPER DESKTOP {} is the newest; this build is {}. Switching leaves the pinned version.",
+                        checked.latest, checked.current
+                    ),
+                    None => format!("SUPER DESKTOP {} is available. This build is {}.", checked.latest, checked.current),
+                });
                 let mut list: Vec<String> = checked.changes.iter().map(|subject| format!("• {subject}")).collect();
                 if checked.more > 0 {
                     list.push(format!("…and {} more", checked.more));
@@ -158,14 +166,18 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
                 changes.set_visible(!list.is_empty());
                 blocked.set_text(checked.blocked.as_deref().unwrap_or(""));
                 blocked.set_visible(checked.blocked.is_some());
-                btn_update.set_label(&format!("⬇ Update to {}", checked.latest));
+                btn_update.set_label(&match pinned {
+                    Some(_) => format!("⬇ Switch to {}", checked.latest),
+                    None => format!("⬇ Update to {}", checked.latest),
+                });
                 btn_update.set_visible(true);
                 btn_update.set_sensitive(checked.blocked.is_none());
                 entry_chip.set_text(&format!("{} available", checked.latest));
                 entry_chip.add_css_class("update-available");
             } else {
                 status.set_text(&format!(
-                    "Up to date. This build is {}; the newest on {} is {}.",
+                    "{}Up to date. This build is {}; the newest on {} is {}.",
+                    pinned.map(|tag| format!("Pinned to {tag}. ")).unwrap_or_default(),
                     checked.current, checked.upstream, checked.latest
                 ));
                 changes.set_visible(false);

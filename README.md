@@ -55,6 +55,44 @@ and leaves its git state alone; update it with `git pull && ./rebuild.sh`.
 Running the one-line command later updates the clone your install runs from,
 as long as it has no local changes.
 
+### Installing a specific version
+
+The phone app and the PC talk over a protocol that must match, so if your
+phone app is older you may want the PC build made for it. Every release is a
+git tag named `vX.Y.Z` with [release notes on GitHub](https://github.com/gladimdim/super-desktop/releases)
+that give what changed, the protocol version, and the phone app versions that
+work with it. Install one with the same command plus
+`SUPER_DESKTOP_VERSION`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v1.1.17 bash
+```
+
+This works for a first install and on a PC that already has SUPER DESKTOP
+(`v1.1.17` and `1.1.17` are the same). The source then stays on that release:
+running the plain install command again keeps it, and **⚙ Settings → Updates**
+shows "Pinned to v1.1.17" and offers **Switch to** the newest. To move to the
+newest yourself, or to another release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=latest bash
+```
+
+Settings → Updates only understands a pinned install in releases newer than
+`v1.1.17`; on `v1.1.17` itself use the install command above to move. A clone
+with uncommitted changes is left as it is. Install the same release on every
+PC you connect to each other.
+
+| SUPER DESKTOP | Protocol |
+| --- | --- |
+| `v1.1.17` | 3 |
+
+Look up your phone app's version in Android's **App info** for SUPER DESKTOP.
+Each release's notes give the protocol version and the phone app versions it was
+checked with. From `v1.1.17` on, the protocol only grows, so a newer PC build is
+meant to keep working with older phone apps; pick an older release when its
+notes say your phone app needs it.
+
 ### What you get
 
 SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy workspace:

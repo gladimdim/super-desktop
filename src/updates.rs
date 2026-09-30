@@ -9,6 +9,10 @@
 //! build succeeded, so a failed update leaves the running app alone and this
 //! process reports it. A clone with uncommitted changes or commits of its own
 //! is never updated.
+//!
+//! A clone pinned to a release tag (`vX.Y.Z`, a detached HEAD, see the README's
+//! "Installing a specific version") is checked against `origin/master`; its
+//! update is "switch to the latest", which checks out `master` again.
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -171,6 +175,9 @@ pub struct Status {
     pub more: usize,
     /// Why this clone cannot be updated as it is, if it cannot.
     pub blocked: Option<String>,
+    /// The release tag this clone is pinned to (a detached HEAD exactly on a
+    /// `vX.Y.Z` tag), which it stays on until the user switches to the latest.
+    pub pinned: Option<String>,
 }
 
 impl Status {
@@ -184,10 +191,29 @@ pub fn check() -> Result<Status, String> {
     check_clone(&this_clone()?, running())
 }
 
-/// Fetch `dir`'s upstream branch and compare its version with `current`.
+/// The release tag `dir` is pinned to: HEAD is detached exactly on a `vX.Y.Z` tag.
+fn pinned_tag(dir: &Path) -> Option<String> {
+    if run(dir, &["symbolic-ref", "--quiet", "HEAD"]).is_ok() {
+        return None;
+    }
+    let tags = run(dir, &["tag", "--points-at", "HEAD"]).ok()?;
+    tags.lines()
+        .map(str::trim)
+        .filter(|tag| tag.strip_prefix('v').and_then(Version::parse).is_some())
+        .max_by_key(|tag| Version::parse(&tag[1..]))
+        .map(str::to_string)
+}
+
+/// Fetch `dir`'s upstream branch and compare its version with `current`. A
+/// clone pinned to a release tag has no upstream, so it is compared with
+/// `origin/master`.
 pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
-    let upstream = run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
-        .map_err(|_| format!("The branch checked out in {} follows no branch on GitHub, so there is nothing to compare with.", dir.display()))?;
+    let pinned = pinned_tag(dir);
+    let upstream = match &pinned {
+        Some(_) => "origin/master".to_string(),
+        None => run(dir, &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+            .map_err(|_| format!("The branch checked out in {} follows no branch on GitHub, so there is nothing to compare with.", dir.display()))?,
+    };
     let (remote, branch) = upstream
         .split_once('/')
         .ok_or_else(|| format!("{upstream} is not a remote branch."))?;
@@ -204,6 +230,7 @@ pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
         current,
         latest,
         blocked: blocker(dir, &upstream),
+        pinned,
         upstream,
         url,
         dir: dir.to_path_buf(),
@@ -248,7 +275,11 @@ pub fn start_update(status: &Status, paths: &Paths) -> Result<Child, String> {
     if let Some(reason) = blocker(&status.dir, &status.upstream) {
         return Err(reason);
     }
-    run(&status.dir, &["merge", "--ff-only", "--quiet", &status.upstream])?;
+    match (&status.pinned, status.upstream.split_once('/')) {
+        // Leave the pinned tag: go back to `master`, following origin/master.
+        (Some(_), Some((_, branch))) => run(&status.dir, &["checkout", "--quiet", "-B", branch, &status.upstream])?,
+        _ => run(&status.dir, &["merge", "--ff-only", "--quiet", &status.upstream])?,
+    };
     start_rebuild(&status.dir, status.latest, paths)
 }
 
@@ -507,6 +538,58 @@ mod tests {
         assert_eq!(std::fs::read_to_string(installed.join("built")).unwrap().trim(), "built");
         assert!(std::fs::read_to_string(&paths.log).unwrap().contains("building"));
         assert!(!check_clone(&installed, Version(1, 1, 2)).unwrap().available());
+    }
+
+    #[test]
+    fn a_clone_pinned_to_a_release_tag_is_offered_a_switch_to_the_latest() {
+        let scratch = Scratch::new("pinned");
+        let (author, installed) = repositories(&scratch);
+        // Release v1.1.0, then move master on.
+        test_git(&author, &["tag", "v1.1.0"]);
+        test_git(&author, &["tag", "not-a-release"]);
+        test_git(&author, &["push", "--quiet", "origin", "--tags"]);
+        publish(&author, "1.1.1", "Add the first thing");
+        publish(&author, "1.1.2", "Fix the second thing");
+        test_git(&installed, &["fetch", "--quiet", "--tags"]);
+        test_git(&installed, &["checkout", "--quiet", "--detach", "v1.1.0"]);
+        let current = Version(1, 1, 0);
+
+        // No upstream branch, yet the check works, against origin/master.
+        assert_eq!(pinned_tag(&installed).as_deref(), Some("v1.1.0"));
+        let status = check_clone(&installed, current).unwrap();
+        assert_eq!(status.pinned.as_deref(), Some("v1.1.0"));
+        assert_eq!(status.upstream, "origin/master");
+        assert!(status.available());
+        assert_eq!(status.latest, Version(1, 1, 2));
+        assert_eq!(status.changes, ["Fix the second thing", "Add the first thing"]);
+        assert_eq!(status.blocked, None);
+        // A check leaves the pin alone, and a plain branch is never taken for a pin.
+        assert_eq!(pinned_tag(&installed).as_deref(), Some("v1.1.0"));
+        test_git(&installed, &["checkout", "--quiet", "-B", "master", "origin/master"]);
+        assert_eq!(pinned_tag(&installed), None);
+    }
+
+    #[test]
+    fn switching_a_pinned_clone_to_the_latest_returns_it_to_master() {
+        let scratch = Scratch::new("unpin");
+        let (author, installed) = repositories(&scratch);
+        test_git(&author, &["tag", "v1.1.0"]);
+        test_git(&author, &["push", "--quiet", "origin", "--tags"]);
+        publish(&author, "1.1.1", "Add the first thing");
+        test_git(&installed, &["fetch", "--quiet", "--tags"]);
+        test_git(&installed, &["checkout", "--quiet", "--detach", "v1.1.0"]);
+
+        let status = check_clone(&installed, Version(1, 1, 0)).unwrap();
+        let paths = Paths { log: scratch.0.join("state/update.log"), pending: scratch.0.join("state/update-pending") };
+        let child = start_update(&status, &paths).unwrap();
+        assert_eq!(std::fs::read_to_string(&paths.pending).unwrap().trim(), "1.1.1");
+        assert_eq!(wait_rebuild(child, &paths), Ok(()));
+        // On master again, following origin/master, at the newest commit.
+        assert_eq!(test_git(&installed, &["symbolic-ref", "--short", "HEAD"]), "master");
+        assert_eq!(test_git(&installed, &["rev-parse", "--abbrev-ref", "@{upstream}"]), "origin/master");
+        assert_eq!(test_git(&installed, &["rev-parse", "HEAD"]), test_git(&author, &["rev-parse", "HEAD"]));
+        assert_eq!(pinned_tag(&installed), None);
+        assert!(!check_clone(&installed, Version(1, 1, 1)).unwrap().available());
     }
 
     #[test]

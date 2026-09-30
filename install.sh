@@ -13,7 +13,8 @@
 #   2. installs Rust with rustup when there is no Rust 1.92 or newer, into
 #      ~/.cargo and ~/.rustup, without editing your shell profile;
 #   3. clones the source into ~/.local/share/super-desktop/source, or
-#      fast-forwards the clone an earlier install runs from;
+#      fast-forwards the clone an earlier install runs from (or, with
+#      SUPER_DESKTOP_VERSION, checks out that release);
 #   4. builds the release binaries in that clone;
 #   5. links ~/.local/bin/super-desktop, copies the toolbar assets, and adds
 #      the launcher entry, the SUPER + SHIFT + Q binding, the overlay's layer
@@ -26,6 +27,11 @@
 #   SUPER_DESKTOP_DIR     clone to install from (default: step 3)
 #   SUPER_DESKTOP_REPO    git URL to clone
 #   SUPER_DESKTOP_BRANCH  branch to clone (default: master)
+#   SUPER_DESKTOP_VERSION release to install, for example v1.1.17 (or 1.1.17):
+#                         the source stays on that tag until you install
+#                         another release, or "latest" to return to the branch.
+#                         Unset, an install keeps following the branch, and a
+#                         pinned install stays on its release.
 #
 # Everything runs from main, called on the last line, so a download cut
 # short runs nothing.
@@ -37,6 +43,9 @@ SELF="${BASH_SOURCE[0]:-}"
 INSTALL_COMMAND="curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash"
 REPO_URL="${SUPER_DESKTOP_REPO:-https://github.com/gladimdim/super-desktop.git}"
 BRANCH="${SUPER_DESKTOP_BRANCH:-master}"
+# "", "latest", or a release tag vX.Y.Z; see resolve_release.
+RELEASE="${SUPER_DESKTOP_VERSION:-}"
+RELEASES_URL="https://github.com/gladimdim/super-desktop/releases"
 DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-desktop/source"
 
 # The oldest Rust that builds the locked dependencies (gtk4 0.11).
@@ -79,6 +88,12 @@ Environment:
                         or the clone an earlier install runs from)
   SUPER_DESKTOP_REPO    git URL to clone (default: $REPO_URL)
   SUPER_DESKTOP_BRANCH  branch to clone (default: $BRANCH)
+  SUPER_DESKTOP_VERSION release to install, for example v1.1.17, or "latest"
+                        to return to the branch (releases: $RELEASES_URL)
+
+A specific release, for example the one that matches an older phone app:
+
+  ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=v1.1.17 bash
 EOF
 }
 
@@ -222,10 +237,74 @@ installed_checkout() {
     printf '%s\n' "$dir"
 }
 
-# Fast-forward only: a clone with local work or its own history is installed
-# as it is.
-update_checkout() {
+# SUPER_DESKTOP_VERSION as "", "latest" or a tag vX.Y.Z (1.1.17 is v1.1.17).
+resolve_release() {
+    [[ -z "$RELEASE" || "$RELEASE" == latest ]] && return
+    RELEASE="v${RELEASE#v}"
+    [[ "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+        die "SUPER_DESKTOP_VERSION must look like v1.1.17, or be \"latest\". See $RELEASES_URL"
+}
+
+# The release tag vX.Y.Z that "$1" is pinned to (HEAD detached exactly on it).
+pinned_release() {
+    local tag
+    git -C "$1" symbolic-ref -q HEAD >/dev/null 2>&1 && return 1
+    tag="$(git -C "$1" tag --points-at HEAD | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+    [[ -n "$tag" ]] || return 1
+    printf '%s\n' "$tag"
+}
+
+# Move the clone to the release tag "$2". A clone with local changes is left
+# as it is; a tag that does not exist stops the install.
+checkout_release() {
+    local dir="$1" tag="$2"
+    say "Switching $dir to $tag..."
+    if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
+        warn "$dir has local changes, so it was not switched to $tag. Installing it as it is."
+        return
+    fi
+    git -C "$dir" fetch --quiet --tags origin </dev/null ||
+        die "Could not fetch the releases from $REPO_URL. Check the network connection and run the installer again."
+    git -C "$dir" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null ||
+        die "There is no release $tag. The releases are listed at $RELEASES_URL"
+    git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach "$tag" ||
+        die "Could not check out $tag in $dir."
+}
+
+# Back from a pinned release to the tip of the branch.
+switch_to_branch() {
     local dir="$1"
+    say "Switching $dir back to $BRANCH..."
+    if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
+        warn "$dir has local changes, so it was not switched. Installing it as it is."
+        return
+    fi
+    git -C "$dir" fetch --quiet --no-tags origin "$BRANCH" </dev/null ||
+        die "Could not fetch $BRANCH from $REPO_URL. Check the network connection and run the installer again."
+    git -C "$dir" checkout --quiet -B "$BRANCH" "origin/$BRANCH" ||
+        die "Could not switch $dir to $BRANCH."
+}
+
+# An existing clone: a requested release wins; "latest" leaves a pin; with
+# nothing requested a pinned clone stays put and any other clone fast-forwards
+# only (a clone with local work or its own history is installed as it is).
+update_checkout() {
+    local dir="$1" pinned=""
+    pinned="$(pinned_release "$dir")" || pinned=""
+    if [[ -n "$RELEASE" && "$RELEASE" != latest ]]; then
+        checkout_release "$dir" "$RELEASE"
+        return
+    fi
+    if [[ -n "$pinned" ]]; then
+        if [[ "$RELEASE" == latest ]]; then
+            switch_to_branch "$dir"
+        else
+            say "$dir is pinned to $pinned, so it was not updated."
+            say "  Newest:  ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=latest bash"
+            say "  Another: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=vX.Y.Z bash   (releases: $RELEASES_URL)"
+        fi
+        return
+    fi
     say "Updating $dir..."
     if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
         warn "$dir has local changes, so it was not updated. Installing it as it is."
@@ -238,9 +317,11 @@ update_checkout() {
 
 prepare_source() {
     local dir
+    resolve_release
     if dir="$(script_checkout)"; then
         SRC="$dir"
         say "Installing from this clone: $SRC"
+        [[ -z "$RELEASE" ]] || warn "SUPER_DESKTOP_VERSION is ignored when installing from a clone: check out the release in the clone yourself."
         return
     fi
     dir="${SUPER_DESKTOP_DIR:-}"
@@ -256,8 +337,10 @@ prepare_source() {
     else
         say "Downloading SUPER DESKTOP into $dir..."
         mkdir -p "$(dirname "$dir")"
-        git clone --branch "$BRANCH" "$REPO_URL" "$dir" </dev/null ||
-            die "Could not clone $REPO_URL. Check the network connection and run the installer again."
+        local ref="$BRANCH"
+        [[ -n "$RELEASE" && "$RELEASE" != latest ]] && ref="$RELEASE"
+        git -c advice.detachedHead=false clone --branch "$ref" "$REPO_URL" "$dir" </dev/null ||
+            die "Could not clone $REPO_URL at $ref. Check the network connection and the name (releases: $RELEASES_URL), then run the installer again."
     fi
     SRC="$(cd "$dir" && pwd)"
 }
@@ -440,7 +523,13 @@ summary() {
     say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
     say "Install and sign in to the AI coding CLIs you want to use separately."
     say "Source: $SRC (keep it: the installed command runs the binaries built there)"
-    say "Update: $INSTALL_COMMAND"
+    local pinned
+    if pinned="$(pinned_release "$SRC")"; then
+        say "Pinned to $pinned. It stays on this release until you choose another:"
+        say "  Newest: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=latest bash"
+    else
+        say "Update: $INSTALL_COMMAND"
+    fi
     if ((RUST_INSTALLED)); then
         say "Rust was installed into ${CARGO_HOME:-$HOME/.cargo}/bin and is not on your PATH."
     fi
