@@ -215,6 +215,14 @@ as "user" turns, and sends them to the `UserPromptSubmit` hook.
   and run `cargo test card_title_`. Those tests must fail if the filter is
   removed; add a case for every new injected-turn shape you see in the wild.
 
+## No system dialogs from the overlay
+
+SUPER DESKTOP is a layer-shell overlay, not a normal window. Never open a
+GTK `FileDialog`, `FileChooserNative` or any other portal dialog from it:
+requesting one ended the daemon (no panic, no core dump), and such a
+dialog would open underneath the overlay anyway. Pick files and folders
+inside the overlay (see `plugin_ui::settings_page::path_browser`).
+
 ## GTK tests never use the user's desktop
 
 Tests must not open windows on the user's screen. Every GTK test runs its
