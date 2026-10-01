@@ -624,9 +624,45 @@ pub fn create_session(
     custom_command: Option<&str>,
     workspace_dir: Option<&str>,
 ) -> (String, String) {
+    create_session_with(agent_type, custom_command, workspace_dir, &[])
+}
+
+/// `cmd` followed by `initial`, each quoted for the shell tmux runs it in.
+fn launch_line(cmd: &str, initial: &[String]) -> String {
+    let mut line = cmd.to_string();
+    for arg in initial {
+        if let Ok(quoted) = shlex::try_quote(arg) {
+            line.push(' ');
+            line.push_str(&quoted);
+        }
+    }
+    line
+}
+
+/// The arguments that start `agent` with a first prompt it then works on,
+/// for the harnesses that have one. `None`: this harness cannot be started
+/// with a prompt.
+pub fn initial_prompt_args(agent: &str, prompt: &str) -> Option<Vec<String>> {
+    match agent {
+        "claude" | "codex" => Some(vec![prompt.to_string()]),
+        "opencode" => Some(vec!["--prompt".into(), prompt.to_string()]),
+        "gemini" => Some(vec!["-i".into(), prompt.to_string()]),
+        _ => None,
+    }
+}
+
+/// `create_session`, with `initial` arguments on this launch only (a first
+/// prompt). The returned command, which is saved with the card, resumed after
+/// a reboot and shown to the phone, never contains them: a prompt runs once.
+pub fn create_session_with(
+    agent_type: &str,
+    custom_command: Option<&str>,
+    workspace_dir: Option<&str>,
+    initial: &[String],
+) -> (String, String) {
     let session_name = unique_session_name();
     let cmd = resolve_command(agent_type, custom_command);
-    let launch = crate::shell_title::launch_command(agent_type, &cmd);
+    let launch = crate::shell_title::launch_command(agent_type, &launch_line(&cmd, initial));
     let launch = crate::harness_metadata::prepare(&session_name, agent_type, &launch);
     let cwd = resolve_workspace_dir(workspace_dir);
 
@@ -2293,6 +2329,16 @@ pub(crate) fn opencode_db_title(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_launch_prompt_is_one_quoted_argument() {
+        let prompt = "Commit and push: 'quotes', $HOME, `ticks`; rm -rf /\nsecond line";
+        let line = launch_line("claude --model opus", &initial_prompt_args("claude", prompt).unwrap());
+        assert_eq!(shlex::split(&line).unwrap(), vec!["claude", "--model", "opus", prompt]);
+        let line = launch_line("opencode", &initial_prompt_args("opencode", "go").unwrap());
+        assert_eq!(line, "opencode --prompt go");
+        assert!(initial_prompt_args("aider", "x").is_none());
+    }
 
     /// Driven by tests/harness_phone_matrix.py: launch one harness through the
     /// desktop's own `create_session` (resolved command, default flags, shell

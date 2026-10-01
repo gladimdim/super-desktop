@@ -54,6 +54,9 @@ super-desktop plugin logs git-flush                         # host errors come w
 ```
 
 - `${fixture}` is `tests/fixtures/` copied to a temporary directory.
+- `setup` (optional) is a shell command run in that copy before the plugin
+  starts, with `$FIXTURE` set to it: create git repositories, files, and so
+  on. A failing setup fails the scenario.
 - `settings` are saved (and checked against the manifest) before the plugin starts.
 - `llm.reply` (or `llm.replies: [...]`, one per call, the last repeating)
   answers `llm.complete` without a real provider; `llm.unavailable: true`
@@ -73,8 +76,9 @@ super-desktop plugin logs git-flush                         # host errors come w
     `{"contrib": "<id>", "badge"?, "label"?, …}` (the last `contrib.update`
     values), `{"notify": {"title"?, "body"?, "urgency"?}}`.
 - The headless host simulates `contrib.update`, `ui.open/patch/close` and
-  `ui.notify` (recorded, never shown). Other desktop methods answer
-  `unavailable` there; test those on a real desktop with `plugin link`,
+  `ui.notify` (recorded, never shown). `harness.launch` is recorded and
+  answers a made-up card id (no harness starts), and `workspace.cards` answers
+  an empty workspace. Other desktop methods answer `unavailable` there; test those on a real desktop with `plugin link`,
   `plugin views` and `plugin interact`.
 - After the last step, the plugin is turned off and the run fails if any of
   its processes is still running. Settings, data and the log of a test run

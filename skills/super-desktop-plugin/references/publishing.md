@@ -47,15 +47,22 @@ fix a mistake with a new version.
 
 ## Registries
 
-The official registry is a GitHub repository whose `registry.json` lists
-plugins:
+The official registry is the GitHub repository
+[`gladimdim/super-desktop-plugins`](https://github.com/gladimdim/super-desktop-plugins),
+whose `registry.json` lists plugins (normative schema:
+`schemas/registry.schema.json`):
 
 ```json
-{ "id": "git-flush", "name": "Git Flush", "description": "…", "repo": "owner/super-desktop-git-flush",
-  "tags": ["git", "llm"], "author": "owner", "minHost": "1.2.0" }
+{
+  "registryVersion": 1,
+  "plugins": [
+    { "id": "flusher", "name": "Flusher", "description": "…", "repo": "gladimdim/super-desktop-flusher",
+      "tags": ["git", "agents"], "author": "gladimdim", "minHost": "1.2.0" }
+  ]
+}
 ```
 
-Open a pull request adding your entry. Reviewed versions get
+Open a pull request adding your entry, sorted by id. Reviewed versions get
 `reviewedTag`/`reviewedCommit` and a badge in the app. A local registry is the
 same file (or a folder of plugin folders) added in Settings → Plugins →
 Sources.

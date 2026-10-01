@@ -34,6 +34,8 @@ pub trait Workspace {
     fn sliding(&self) -> bool;
     /// Recompute the outlines of cards other cards cover.
     fn refresh_ghosts(&self);
+    /// A new harness card, optionally started with a first prompt.
+    fn launch(&self, agent: &str, folder: &str, prompt: Option<&str>) -> Result<String, &'static str>;
 }
 
 /// One plugin's contribution to a card's title.
@@ -471,13 +473,9 @@ impl Manager {
                 Ok(json!({"rect": {"x": data.x, "y": data.y, "w": data.width, "h": data.height}}))
             }
             "harness.launch" => {
-                let agent = params["agent"].as_str().unwrap_or_default().to_string();
-                let folder = params["folder"].as_str().unwrap_or_default().to_string();
-                let session = self
-                    .workspace()?
-                    .command(&WorkspaceCommand::CreateTerminal { agent_type: agent, workspace: folder })
-                    .map_err(refused)?
-                    .unwrap_or_default();
+                let agent = params["agent"].as_str().unwrap_or_default();
+                let folder = params["folder"].as_str().unwrap_or_default();
+                let session = self.workspace()?.launch(agent, folder, params["prompt"].as_str()).map_err(refused)?;
                 let card = self.workspace()?.cards().into_iter().find(|c| c.data.borrow().session_name == session);
                 Ok(json!({"card": card.map(|c| c.data.borrow().id.clone())}))
             }

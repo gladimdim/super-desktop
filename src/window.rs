@@ -1386,6 +1386,32 @@ impl SuperDesktopWindow {
     }
 
     pub fn create_new_terminal_in(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>) -> String {
+        self.create_new_terminal_with(agent_type, cmd, x, y, directory, &[])
+    }
+
+    /// A harness card for a plugin (`harness.launch`): a harness this PC
+    /// offers, in a folder that exists, optionally started with a first
+    /// prompt. The prompt is passed once, on the command line; the card's
+    /// saved command never contains it.
+    pub fn launch_for_plugin(&self, agent_type: &str, folder: &str, prompt: Option<&str>) -> Result<String, &'static str> {
+        if !crate::tmux::HARNESS_KEYS.contains(&agent_type)
+            && !self.state.borrow().custom_harnesses.iter().any(|item| item.id == agent_type && item.validate().is_ok())
+        {
+            return Err("unsupported_harness");
+        }
+        let directory = crate::state::clean_dir(folder).ok_or("invalid_workspace")?;
+        let initial = match prompt {
+            Some(prompt) => crate::tmux::initial_prompt_args(agent_type, prompt).ok_or("no_initial_prompt")?,
+            None => Vec::new(),
+        };
+        let session = self.create_new_terminal_with(agent_type, None, None, None, Some(&directory), &initial);
+        if session.is_empty() || !crate::tmux::session_alive(&session) {
+            return Err("terminal_unavailable");
+        }
+        Ok(session)
+    }
+
+    fn create_new_terminal_with(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>, initial: &[String]) -> String {
         // The folder from the top bar field: this card's harness starts there,
         // and keeps it for its whole life (see TerminalData::workspace_dir).
         let workspace_dir = directory.map(str::to_owned)
@@ -1401,7 +1427,7 @@ impl SuperDesktopWindow {
         let custom_command = self.state.borrow().custom_harnesses.iter()
             .find(|item| item.id == agent_type && item.validate().is_ok())
             .map(|item| item.command());
-        let (sess, cmd_run) = create_session(agent_type, custom_command.as_deref().or(cmd), Some(&workspace_dir));
+        let (sess, cmd_run) = crate::tmux::create_session_with(agent_type, custom_command.as_deref().or(cmd), Some(&workspace_dir), initial);
         let idx = self.terminal_cards.borrow().len();
 
         // Default size for a new harness: 640x480, clamped to the screen.
@@ -3164,5 +3190,9 @@ impl crate::plugin_ui::cards::Workspace for PluginWorkspace {
         if let Some(window) = self.0.upgrade() {
             window.ghosts.refresh();
         }
+    }
+
+    fn launch(&self, agent: &str, folder: &str, prompt: Option<&str>) -> Result<String, &'static str> {
+        self.0.upgrade().ok_or("desktop_not_ready")?.launch_for_plugin(agent, folder, prompt)
     }
 }

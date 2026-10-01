@@ -38,4 +38,11 @@ def type_line(context):
     record("never read back")
 
 
+@plugin.command("cardkit.launch")
+def launch(context):
+    args = context["args"]
+    reply = plugin.call("harness.launch", agent=args["agent"], folder=args["folder"], prompt=args["prompt"])
+    record(f"launched {reply['card']}")
+
+
 plugin.run()

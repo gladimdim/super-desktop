@@ -327,15 +327,19 @@ pub fn dispatch(ctx: &Context, method: &str, params: &Value) -> Result<Value, Rp
             }
         }
         "harness.launch" => {
-            string(params, "agent", 96, &docs_for(method))?;
+            let agent = string(params, "agent", 96, &docs_for(method))?;
             string(params, "folder", 4096, &docs_for(method))?;
-            if params.get("prompt").is_some_and(|p| !p.is_null()) {
-                return Err(RpcError::new(
-                    rpc::UNAVAILABLE,
-                    "harness.launch with a prompt is not supported by this build yet",
-                    "Launch without a prompt, then send it with terminal.send once the harness is ready.",
-                    &docs_for(method),
-                ));
+            if let Some(prompt) = params.get("prompt").filter(|p| !p.is_null()) {
+                let prompt = prompt.as_str().filter(|p| p.len() <= 16 * 1024 && !p.contains('\0'))
+                    .ok_or_else(|| RpcError::invalid_params("`prompt` is text of at most 16 KiB", &docs_for(method)))?;
+                if crate::tmux::initial_prompt_args(&agent, prompt).is_none() {
+                    return Err(RpcError::new(
+                        rpc::UNAVAILABLE,
+                        format!("`{agent}` cannot be started with a prompt"),
+                        "Use claude, codex, opencode or gemini, or launch without a prompt and send it with terminal.send once the harness is ready.",
+                        &docs_for(method),
+                    ));
+                }
             }
             ctx.ui.call(&manifest.id, method, params.clone())
         }

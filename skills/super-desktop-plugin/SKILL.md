@@ -163,6 +163,7 @@ Breaking any of these fails validation, testing or review.
 | `schemas/manifest.schema.json` | Normative manifest schema (JSON Schema 2020-12). |
 | `schemas/host-api.openrpc.json` | Normative API (OpenRPC 1.3): methods, params, results, errors. |
 | `schemas/ui.schema.json` | Normative view nodes and patch operations. |
+| `schemas/registry.schema.json` | Normative `registry.json` of a plugin registry. |
 | `sdk/python/sd_plugin.py` | Python runtime: copy next to `main.py`. |
 | `examples/git-flush/` | Process plugin: toolbar badge, global shortcut, panel, settings, LLM, review-then-act. |
 | `examples/window-controls/` | Process plugin: `cardControls` with snap-left/right and to-edge icon. |

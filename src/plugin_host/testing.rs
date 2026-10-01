@@ -71,6 +71,12 @@ impl Ui for Headless {
                 let handle = params["handle"].as_str().unwrap_or_default();
                 state.views.remove(handle).map(|_| json!({})).ok_or_else(|| RpcError::new(rpc::NOT_FOUND, format!("no open view `{handle}`"), "It is already closed.", "references/ui.md#declaring-and-opening"))
             }
+            // Recorded, never started: expect it with {"call": "harness.launch", "params": …}.
+            "harness.launch" => {
+                state.next_handle += 1;
+                Ok(json!({"card": format!("test-card-{}", state.next_handle)}))
+            }
+            "workspace.cards" => Ok(json!({"screen": {"w": 1920, "h": 1080, "top": 46}, "cards": []})),
             _ => Err(RpcError::new(rpc::UNAVAILABLE, format!("{method} is not simulated by plugin test"), "Test it on a real desktop with plugin link.", "references/testing.md")),
         }
     }
@@ -240,6 +246,20 @@ fn run_inner(dir: &Path, manifest: &Arc<Manifest>, path: &Path, lines: &mut Vec<
     // Host files (set once by `run_all`) start empty for every scenario.
     if let Some(home) = std::env::var_os("SUPER_DESKTOP_PLUGIN_HOME") {
         let _ = std::fs::remove_dir_all(&home);
+    }
+    // `setup`: a shell command run in the fixtures copy first (e.g. to create
+    // git repositories), with $FIXTURE pointing at it.
+    if let Some(setup) = scenario.get("setup").and_then(Value::as_str) {
+        let out = std::process::Command::new("sh")
+            .args(["-c", setup])
+            .current_dir(&fixtures)
+            .env("FIXTURE", &fixtures)
+            .output()
+            .map_err(|e| format!("setup: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("setup failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        lines.push("ok   setup".into());
     }
     for (key, value) in scenario["settings"].as_object().into_iter().flatten() {
         super::store::set_setting(manifest, key, value.clone()).map_err(|why| format!("settings.{key}: {why}"))?;

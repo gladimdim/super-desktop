@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gladimdim/super-desktop/skills/super-desktop-plugin/schemas/registry.schema.json",
+  "title": "SUPER DESKTOP plugin registry (registry.json), registryVersion 1",
+  "description": "A list of plugins people can find and install. Listing is not trust: installs pin the commit of a tag. One entry per plugin; ids are unique.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["registryVersion", "plugins"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "registryVersion": { "const": 1 },
+    "plugins": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "description", "repo", "author", "minHost"],
+        "properties": {
+          "id": { "description": "The plugin's manifest id.", "type": "string", "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 48 },
+          "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "repo": { "description": "GitHub owner/name of the plugin's own repository.", "type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$" },
+          "tags": { "type": "array", "maxItems": 8, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9-]{1,24}$" } },
+          "author": { "type": "string", "minLength": 1, "maxLength": 100 },
+          "minHost": { "description": "The lowest SUPER DESKTOP version the plugin works with (its engines.superDesktop lower bound).", "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+          "reviewedTag": { "description": "A release tag someone reviewed with the super-desktop-plugin-review skill.", "type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$" },
+          "reviewedCommit": { "type": "string", "pattern": "^[0-9a-f]{40}$" }
+        },
+        "dependentRequired": { "reviewedTag": ["reviewedCommit"], "reviewedCommit": ["reviewedTag"] }
+      }
+    }
+  }
+}

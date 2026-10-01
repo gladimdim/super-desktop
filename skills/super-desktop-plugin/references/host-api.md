@@ -132,10 +132,15 @@ Permissions: `terminal.read` / `terminal.write`. `terminal.text {card, lines?}` 
 with an explicit user action; never type into a harness on a timer.
 
 ### `harness.launch`
-Permission: `harness.launch`. `{agent, folder}` → `{card}`. `agent` is a built-in key (`claude`, `codex`,
-`opencode`, …) or a custom launcher key. `prompt` is not supported by this
-build yet (`unavailable`): launch, wait until the harness is ready
-(`terminal.text`), then `terminal.send` the prompt with `enter`.
+Permission: `harness.launch`. `{agent, folder, prompt?}` → `{card}`. `agent` is
+a built-in key (`claude`, `codex`, `opencode`, `gemini`, …) or a custom
+launcher key; `folder` must exist. With `prompt`, the harness starts working on
+it at once: it is passed one time on the harness's command line (`claude` and
+`codex` take it as their prompt, `opencode` as `--prompt`, `gemini` as `-i`;
+other harnesses answer `unavailable`). The prompt is never saved with the card,
+so a restart does not run it again, and it is not shown to other devices. The
+card is a normal, visible card: the person sees the agent work and answers
+its permission questions there.
 
 ### `harness.writeConfig`
 Permission: `harness.provide`. `{path, content}` → `{}`. Writes a config file your harness needs, under

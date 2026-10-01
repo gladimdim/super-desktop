@@ -10,6 +10,7 @@ see (the desktop-workspace snapshot) never changes.
 import json
 import shutil
 import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -101,6 +102,27 @@ def main():
         check(press(first, "cardkit.button"), "press the card button")
         check(wait_for(lambda: "read back plugin-was-42" in events(), timeout=20) is not None, "it typed into the terminal and read the output back", events())
         check(any(e.startswith("cards 2 screen") for e in events()), "workspace.cards saw both cards")
+        # harness.launch with a first prompt: the harness gets it once, as one
+        # argument; the saved command and the phone's list never contain it.
+        argv_file = box.base / "claude-argv.json"
+        box.stub("claude", f"""#!/usr/bin/env python3
+import json, sys, time
+json.dump(sys.argv[1:], open({str(argv_file)!r}, "w"))
+time.sleep(600)
+""")
+        prompt = "Flush these repos: 'a b', $HOME and `x`"
+        folder = box.base / "work"
+        folder.mkdir()
+        check(box.cli("run", "cardkit", "cardkit.launch", json.dumps({"agent": "claude", "folder": str(folder), "prompt": prompt})).returncode == 0, "launch claude with a prompt")
+        check(wait_for(lambda: any(e.startswith("launched sd_") for e in events())) is not None, "a card was opened", events())
+        argv = wait_for(lambda: argv_file.exists() and json.loads(argv_file.read_text()))
+        check(argv is not None and prompt in argv, "the harness received the prompt as one argument", argv)
+        state = (box.home / ".config/super-desktop/state.json").read_text()
+        check(prompt not in state and "Flush these repos" not in state, "the saved command has no prompt")
+        listed = subprocess.run([str(BIN), "harnesses"], env=box.env, capture_output=True, text=True, timeout=30).stdout
+        check("Flush these repos" not in listed, "the phone's harness list has no prompt")
+        refused = box.cli("run", "cardkit", "cardkit.launch", json.dumps({"agent": "shell", "folder": str(folder), "prompt": "x"}))
+        check(wait_for(lambda: any("cannot be started with a prompt" in l for l in (box.home / ".local/state/super-desktop/plugins/cardkit/plugin.log").read_text().splitlines())) is not None, "a harness without a prompt argument is refused with a reason")
         check(box.cli("deactivate", "cardkit").returncode == 0, "Card Kit off")
         back = wait_for(lambda: cards()[1][first]["title"]["drawn"] == cards()[1][first]["title"]["published"] and cards()[1][first])
         check(back is not None and back["title"]["chipsBefore"] == [] and back["buttons"] == [], "title, chip and button are gone", cards()[1].get(first))
