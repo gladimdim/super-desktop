@@ -700,6 +700,10 @@ pub fn apply_plugin_binds_at(bindings_path: &Path, hyprctl_bin: &str, binds: &[P
     let dump = hyprctl_run(hyprctl_bin, &["binds"]).unwrap_or_default();
     let refused = plugin_bind_conflicts(&dump, binds);
     let accepted: Vec<PluginBind> = binds.iter().enumerate().filter(|(i, _)| !refused.iter().any(|(r, _)| r == i)).map(|(_, b)| b.clone()).collect();
+    // No Hyprland config here: nothing to bind into, and no folder of ours to create.
+    if !accepted.is_empty() && !bindings_path.parent().is_some_and(Path::is_dir) {
+        return Err(format!("{} does not exist: global shortcuts need Hyprland's config", bindings_path.parent().map(|p| p.display().to_string()).unwrap_or_default()));
+    }
     let existing = fs::read_to_string(bindings_path).unwrap_or_default();
     let updated = rewrite_plugin_binds(&existing, &accepted);
     if updated != existing {

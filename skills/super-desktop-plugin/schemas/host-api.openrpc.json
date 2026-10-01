@@ -649,7 +649,7 @@
         }
       ],
       "x-permission": "ui.popup",
-      "summary": "Open a declared view with a node tree (see ui.schema.json). Opening a view while the overlay is hidden shows the overlay. Opening the same view again raises it and returns the same handle.",
+      "summary": "Open a declared view with a node tree (see ui.schema.json). Opening a view while the overlay is hidden shows the overlay. Opening a view that is already open replaces its content with the new model, raises it and returns the same handle.",
       "params": [
         {
           "name": "view",
@@ -722,7 +722,8 @@
         "schema": {
           "type": "object"
         }
-      }
+      },
+      "summary": "Apply operations in order. 'set' changes only the props it names (none is required); 'replace' and 'append' take complete nodes. An op that names a missing node fails the patch with invalid_params naming the op."
     },
     {
       "name": "ui.close",

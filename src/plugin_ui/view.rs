@@ -71,7 +71,7 @@ impl Tree {
             match op["op"].as_str().unwrap_or_default() {
                 "set" => {
                     let props = op["props"].as_object().cloned().unwrap_or_default();
-                    crate::plugin_host::ui_model::check_props(&node.kind, &props, id).map_err(|e| format!("ops[{index}]: {}", e.reason()))?;
+                    crate::plugin_host::ui_model::check_props(&node.kind, &props, id, true).map_err(|e| format!("ops[{index}]: {}", e.reason()))?;
                     self.apply(&node, &props);
                 }
                 "remove" => {
@@ -119,6 +119,85 @@ impl Tree {
                     return Err(format!("id `{id}` already exists in the view"));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Every node's current state, for `super-desktop plugin views`.
+    pub fn snapshot(&self) -> Value {
+        let nodes = self.nodes.borrow();
+        let mut out = Map::new();
+        for (id, node) in nodes.iter() {
+            let mut state = json!({"type": node.kind, "visible": node.widget.is_visible(), "enabled": node.widget.is_sensitive()});
+            if let Some(label) = &node.label {
+                state["text"] = json!(label.text().to_string());
+            }
+            if let Some(button) = &node.button {
+                state["label"] = json!(button.label().map(|l| l.to_string()));
+            }
+            if let Some(check) = &node.check {
+                state["value"] = json!(check.is_active());
+                state["label"] = json!(check.label().map(|l| l.to_string()));
+            }
+            if let Some(switch) = &node.switch {
+                state["value"] = json!(switch.is_active());
+            }
+            if let Some(entry) = &node.entry {
+                state["value"] = json!(entry.text().to_string());
+            }
+            if let Some(text) = &node.text {
+                let buffer = text.buffer();
+                state["value"] = json!(buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string());
+            }
+            if let Some((dropdown, values)) = &node.dropdown {
+                state["value"] = json!(values.borrow().get(dropdown.selected() as usize));
+            }
+            if let Some((bar, _)) = &node.progress {
+                state["value"] = json!(bar.fraction());
+            }
+            out.insert(id.clone(), state);
+        }
+        Value::Object(out)
+    }
+
+    /// Operate a node's real widget as a user would (`super-desktop plugin
+    /// interact`): the plugin gets exactly the events a person would cause.
+    pub fn interact(&self, id: &str, event: &str, value: &Value) -> Result<(), String> {
+        let node = self.nodes.borrow().get(id).cloned().ok_or_else(|| format!("no node `{id}` in this view"))?;
+        // What a person cannot reach, an agent cannot either.
+        let mut widget = Some(node.widget.clone());
+        while let Some(current) = widget {
+            if !current.is_visible() {
+                return Err(format!("`{id}` is hidden"));
+            }
+            if current == self.root.clone().upcast::<gtk4::Widget>() {
+                break;
+            }
+            widget = current.parent();
+        }
+        if !node.widget.is_sensitive() {
+            return Err(format!("`{id}` is disabled"));
+        }
+        match (node.kind.as_str(), event) {
+            ("button", "click") => node.button.as_ref().expect("button").emit_clicked(),
+            ("checkbox", "change") => node.check.as_ref().expect("checkbox").set_active(value.as_bool().ok_or("value must be true or false")?),
+            ("toggle", "change") => node.switch.as_ref().expect("toggle").set_active(value.as_bool().ok_or("value must be true or false")?),
+            ("entry", "change") => node.entry.as_ref().expect("entry").set_text(value.as_str().ok_or("value must be text")?),
+            ("entry", "submit") => {
+                let entry = node.entry.as_ref().expect("entry");
+                if let Some(text) = value.as_str() {
+                    entry.set_text(text);
+                }
+                entry.emit_activate();
+            }
+            ("textArea", "change") => node.text.as_ref().expect("textArea").buffer().set_text(value.as_str().ok_or("value must be text")?),
+            ("select", "change") => {
+                let (dropdown, values) = node.dropdown.as_ref().expect("select");
+                let wanted = value.as_str().ok_or("value must be one of the option values")?;
+                let index = values.borrow().iter().position(|v| v == wanted).ok_or_else(|| format!("`{wanted}` is not an option"))?;
+                dropdown.set_selected(index as u32);
+            }
+            (kind, event) => return Err(format!("a {kind} has no `{event}` event")),
         }
         Ok(())
     }
@@ -631,6 +710,10 @@ mod tests {
         assert!(tree.patch(&[json!({"op": "set", "id": "missing", "props": {}})]).unwrap_err().contains("no node `missing`"));
         assert!(tree.patch(&[json!({"op": "append", "id": "rows", "node": {"type": "label", "id": "status", "text": "dup"}})]).unwrap_err().contains("already exists"));
         assert!(tree.patch(&[json!({"op": "append", "id": "status", "node": {"type": "spinner", "id": "s"}})]).unwrap_err().contains("cannot have children"));
+        tree.patch(&[json!({"op": "set", "id": "go", "props": {"visible": false}})]).expect("a partial set needs no label");
+        assert!(tree.interact("go", "click", &Value::Null).unwrap_err().contains("hidden"));
+        tree.patch(&[json!({"op": "set", "id": "go", "props": {"visible": true, "enabled": false}})]).unwrap();
+        assert!(tree.interact("go", "click", &Value::Null).unwrap_err().contains("disabled"));
         tree.patch(&[json!({"op": "remove", "id": "rows"})]).unwrap();
         assert!(!tree.nodes.borrow().contains_key("row-1"), "removing a container forgets its children");
     }

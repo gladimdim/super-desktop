@@ -50,7 +50,7 @@ fn check_node(node: &Value, path: &str, ids: &mut BTreeSet<String>, count: &mut 
         return Err(err(path, format!("id `{id}` is used twice in the view")));
     }
     let path = format!("{path}[{id}]");
-    check_props(kind, object, &path)?;
+    check_props(kind, object, &path, false)?;
     if let Some(children) = object.get("children") {
         if !matches!(kind, "column" | "row" | "list" | "scroll") {
             return Err(err(&path, format!("`{kind}` cannot have children")));
@@ -66,9 +66,11 @@ fn check_node(node: &Value, path: &str, ids: &mut BTreeSet<String>, count: &mut 
     Ok(())
 }
 
-/// The props a `set` may change, checked against the node's type.
-pub fn check_props(kind: &str, props: &serde_json::Map<String, Value>, path: &str) -> Result<(), RpcError> {
+/// Props checked against the node's type. `partial` is a `set`: it changes
+/// only the props it names, so none is required.
+pub fn check_props(kind: &str, props: &serde_json::Map<String, Value>, path: &str, partial: bool) -> Result<(), RpcError> {
     let text = |key: &str, max: usize, required: bool| -> Result<(), RpcError> {
+        let required = required && !partial;
         match props.get(key) {
             None if required => Err(err(path, format!("`{kind}` needs \"{key}\""))),
             None => Ok(()),
@@ -77,6 +79,7 @@ pub fn check_props(kind: &str, props: &serde_json::Map<String, Value>, path: &st
         }
     };
     let boolean = |key: &str, required: bool| -> Result<(), RpcError> {
+        let required = required && !partial;
         match props.get(key) {
             None if required => Err(err(path, format!("`{kind}` needs \"{key}\""))),
             None | Some(Value::Bool(_)) => Ok(()),
@@ -138,6 +141,9 @@ pub fn check_props(kind: &str, props: &serde_json::Map<String, Value>, path: &st
         }
         "select" => {
             text("value", 4096, false)?;
+            if partial && !props.contains_key("options") {
+                return Ok(());
+            }
             let options = props.get("options").and_then(Value::as_array).ok_or_else(|| err(path, "`select` needs \"options\""))?;
             if options.is_empty() || options.len() > 100 {
                 return Err(err(path, "options must have 1–100 entries"));
@@ -203,6 +209,12 @@ mod tests {
             assert!(check_tree(&bad).is_err(), "{bad}");
         }
         assert!(check_op(&json!({"op": "set", "id": "l", "props": {"text": "x"}})).is_ok());
+        // A set changes only what it names: nothing is required.
+        let partial = json!({"visible": true}).as_object().unwrap().clone();
+        for kind in ["button", "label", "checkbox", "select", "badge", "icon"] {
+            assert!(check_props(kind, &partial, "x", true).is_ok(), "{kind}");
+            assert!(check_props(kind, &partial, "x", false).is_err(), "{kind} needs its props when built");
+        }
         assert!(check_op(&json!({"op": "set", "id": "l", "props": {"type": "row"}})).is_err());
         assert!(check_op(&json!({"op": "move", "id": "l"})).is_err());
     }

@@ -100,8 +100,9 @@ keeps data. For larger files use `dataDir`.
 Permission: `ui.popup`.
 `ui.open {view, model, anchor?}` → `{handle}`: shows a declared view with a
 node tree (`ui.md`). It shows the overlay if it was hidden. Opening an open
-view raises it and returns the same handle. `ui.patch {handle, ops}` updates
-nodes by id. `ui.close {handle}`.
+view replaces its content with the new model, raises it and returns the same
+handle. `ui.patch {handle, ops}` updates nodes by id; a `set` changes only the
+props it names. `ui.close {handle}`.
 
 ### `ui.notify`
 Permission: `ui.notify`. `{title, body?, urgency?}`; at most 6 per minute.

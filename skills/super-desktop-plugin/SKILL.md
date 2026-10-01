@@ -69,6 +69,8 @@ scaffolding, and test with `plugin link`, `plugin run` and `plugin logs`.
    (`references/testing.md`). Renderers also get native unit tests.
 7. **Try it for real**: `super-desktop plugin link .`, then
    `super-desktop plugin reload <id>` after each edit, `super-desktop plugin logs <id> --follow`.
+   Drive panels without a mouse: `plugin run`, then `plugin views <id> --json` to
+   read them and `plugin interact <id> <node> click` to press buttons.
 8. **Publish**: tag `v<version>`, GitHub Release, registry PR
    (`references/publishing.md`). Add `AGENTS.md` to the plugin repo.
 9. **Self-review** with the `super-desktop-plugin-review` skill before a release.

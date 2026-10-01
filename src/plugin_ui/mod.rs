@@ -360,7 +360,17 @@ impl Manager {
                     return;
                 }
                 if let Some(error) = error {
-                    eprintln!("SUPER DESKTOP: plugin shortcuts not written: {error}");
+                    // Every global shortcut is off: say so next to each one.
+                    let globals: Vec<(String, String)> = self
+                        .plugins
+                        .borrow()
+                        .iter()
+                        .flat_map(|(id, p)| p.manifest.contributes.shortcuts.iter().filter(|s| s.scope == "global").map(move |s| (id.clone(), s.id.clone())))
+                        .collect();
+                    for (plugin, shortcut) in globals {
+                        api::append_log(&crate::plugin_host::log_file(&plugin), "warn", &format!("shortcut not bound: {error}"));
+                        self.shortcut_problems.borrow_mut().entry(shortcut).or_insert_with(|| error.clone());
+                    }
                 }
                 for (bind, holder) in refused {
                     let plugin = bind.command.split_whitespace().nth(3).unwrap_or_default().to_string();
@@ -687,6 +697,28 @@ impl Manager {
         }
     }
 
+    /// Open views and their nodes' state.
+    pub fn views(&self, id: &str) -> Result<Value, String> {
+        let plugins = self.plugins.borrow();
+        let plugin = plugins.get(id).ok_or_else(|| format!("plugin `{id}` is not on"))?;
+        Ok(Value::Array(plugin.views.iter().map(|(handle, v)| json!({"handle": handle, "view": v.view, "nodes": v.tree.snapshot()})).collect()))
+    }
+
+    /// Operate a node in an open view (the only one, or `view`).
+    pub fn interact(&self, id: &str, view: Option<&str>, node: &str, event: &str, value: &Value) -> Result<(), String> {
+        let tree = {
+            let plugins = self.plugins.borrow();
+            let plugin = plugins.get(id).ok_or_else(|| format!("plugin `{id}` is not on"))?;
+            let mut matching = plugin.views.iter().filter(|(handle, v)| view.is_none_or(|w| w == v.view || w == handle.as_str()));
+            let (_, open) = matching.next().ok_or("no open view (open one first, e.g. with plugin run)")?;
+            if view.is_none() && matching.next().is_some() {
+                return Err("several views are open: name one with --view".into());
+            }
+            Rc::clone(&open.tree)
+        };
+        tree.interact(node, event, value)
+    }
+
     pub fn overlay_shown(self: &Rc<Self>) {
         self.overlay_shown.set(true);
         let ids: Vec<(String, bool)> = self
@@ -800,6 +832,18 @@ pub fn handle_ipc(payload: &str) -> String {
             match manager.plugins.borrow().contains_key(id) {
                 true => json!({"ok": true}),
                 false => json!({"ok": false, "error": format!("{id} is not on (see super-desktop plugin logs {id})")}),
+            }
+        }
+        "views" => match manager.views(id) {
+            Ok(views) => json!({"ok": true, "views": views}),
+            Err(why) => json!({"ok": false, "error": why}),
+        },
+        "interact" => {
+            let view = request["view"].as_str();
+            let result = manager.interact(id, view, request["node"].as_str().unwrap_or_default(), request["event"].as_str().unwrap_or_default(), &request["value"]);
+            match result {
+                Ok(()) => json!({"ok": true}),
+                Err(why) => json!({"ok": false, "error": why}),
             }
         }
         "run" => {

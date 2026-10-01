@@ -18,6 +18,9 @@ const USAGE: &str = "usage: super-desktop plugin <command>
   deactivate ID                turn a plugin off; everything it added goes away
   reload ID                    turn it off and on again (after editing it)
   run ID COMMAND [JSON]        run one of its commands, as if clicked
+  views ID [--json]            its open views and every node's state (text, value, visible, enabled)
+  interact ID NODE EVENT [VALUE] [--view=VIEW]
+                               operate a node as a user would: click, change, submit (VALUE is JSON)
   logs ID [--follow]           its log: stderr, log calls, host errors
   remove ID [--purge]          uninstall; --purge also deletes its settings and data
   disable-all                  turn every plugin off (works without the daemon)";
@@ -47,6 +50,31 @@ pub fn run(args: &[String]) -> i32 {
             _ => Err("plugin run ID COMMAND [JSON]".into()),
         },
         Some("logs") => with_id(&positional, |id| logs(id, args.iter().any(|a| a == "--follow"))),
+        Some("views") => with_id(&positional, |id| {
+            let reply = daemon(json!({"op": "views", "id": id}))?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&reply["views"]).unwrap_or_default());
+            } else {
+                for view in reply["views"].as_array().into_iter().flatten() {
+                    println!("{} ({})", view["view"].as_str().unwrap_or(""), view["handle"].as_str().unwrap_or(""));
+                    for (node, state) in view["nodes"].as_object().into_iter().flatten() {
+                        println!("  {node:<24} {state}");
+                    }
+                }
+            }
+            Ok(())
+        }),
+        Some("interact") => match (positional.get(1), positional.get(2), positional.get(3)) {
+            (Some(id), Some(node), Some(event)) => {
+                let value = match positional.get(4) {
+                    Some(text) => serde_json::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.to_string())),
+                    None => Value::Null,
+                };
+                let view = args.iter().find_map(|a| a.strip_prefix("--view="));
+                daemon(json!({"op": "interact", "id": id, "node": node, "event": event, "value": value, "view": view})).map(|_| ())
+            }
+            _ => Err("plugin interact ID NODE EVENT [VALUE] [--view=VIEW]".into()),
+        },
         Some("remove") => with_id(&positional, |id| remove(id, args.iter().any(|a| a == "--purge"))),
         Some("disable-all") => disable_all(),
         _ => {
@@ -89,7 +117,7 @@ pub fn describe_value() -> Value {
         "limits": super::api::limits(),
         "llmProviders": {"installed": super::llm::available(), "chosen": store::Store::load().llm_provider},
         "sandbox": "not enforced by this build: plugins run as you",
-        "commands": ["describe", "validate", "link", "list", "activate", "deactivate", "reload", "run", "logs", "remove", "disable-all"],
+        "commands": ["describe", "validate", "link", "list", "activate", "deactivate", "reload", "run", "views", "interact", "logs", "remove", "disable-all"],
         "skills": manifest::skills_dir().map(|d| d.display().to_string()),
         "schemas": manifest::skills_dir().map(|d| json!({
             "manifest": d.join("schemas/manifest.schema.json"),

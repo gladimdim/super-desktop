@@ -10,12 +10,28 @@ invisible host.
 | --- | --- |
 | `super-desktop plugin describe --json` | API version, contribution points, permissions, limits and the schema paths of the installed SUPER DESKTOP. If the command is unknown, that build has no plugin support. |
 | `super-desktop plugin validate <dir> --json` | Schema + extra rules (`manifest.md`). Output: `{"ok": bool, "errors": [{path, message, hint, docs}], "warnings": [...]}`. Fix every error before anything else. |
-| `super-desktop plugin new <id> --kind process\|renderer\|both --lang python\|node\|rust` | A starter repository with manifest, entry file, SDK, tests, AGENTS.md and the skill. |
-| `super-desktop plugin test <dir> [scenario]` | Starts a headless host with a fake workspace, activates the plugin, plays the scenarios in `tests/*.json`, then deactivates it and checks that nothing is left behind. |
+| `super-desktop plugin new <id> --kind process\|renderer\|both --lang python\|node\|rust` | A starter repository with manifest, entry file, SDK, tests, AGENTS.md and the skill. Only when `describe` lists `new`. |
+| `super-desktop plugin test <dir> [scenario]` | Starts a headless host with a fake workspace, activates the plugin, plays the scenarios in `tests/*.json`, then deactivates it and checks that nothing is left behind. Only when `describe` lists `test`. |
+| `super-desktop plugin views <id> [--json]` | Every open view of the plugin and each node's state: `text`, `label`, `value`, `visible`, `enabled`. Read it instead of guessing what the panel shows. |
+| `super-desktop plugin interact <id> <node> <event> [value] [--view=<view>]` | Operates a node's real widget as a person would: `click` a button, `change` a checkbox/toggle (`true`), entry/textArea (`"text"`) or select (`"value"`), `submit` an entry. Hidden or disabled nodes refuse, as they would for a person. Text changes reach the plugin after 300 ms. |
 | `super-desktop plugin link <dir>` | Installs the folder in place for real use (asks for consent once). |
 | `super-desktop plugin reload <id>` | Deactivate + activate after an edit. |
 | `super-desktop plugin logs <id> [--follow]` | stderr, `log` calls, host errors with hints. |
 | `super-desktop plugin run <id> <command> [json]` | Runs a command as if clicked; `json` arrives as `context.args`. |
+
+## Driving a panel from a shell
+
+This is how an agent tests a plugin with a real SUPER DESKTOP (after `link` and
+`activate`), without clicking anything:
+
+```sh
+super-desktop plugin run git-flush git-flush.open          # as the shortcut would
+super-desktop plugin views git-flush --json                 # what the panel shows
+super-desktop plugin interact git-flush flush click         # press "Flush all"
+super-desktop plugin views git-flush --json | jq '.[0].nodes.commit.visible'
+super-desktop plugin interact git-flush msg:0 change '"Fix the login form"'
+super-desktop plugin logs git-flush                         # host errors come with hints
+```
 
 ## Scenarios
 

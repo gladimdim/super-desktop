@@ -18,7 +18,9 @@ Normative schema: `schemas/ui.schema.json`.
   (pass `anchor` to `ui.open`). Closed when the overlay hides.
 
 `ui.open {view, model}` → `{handle}`. Keep the handle; patch with it; forget it
-on `view.closed`.
+on `view.closed`. Opening a view that is already open replaces its content with
+the new model, raises it and returns the same handle (a "Refresh" can simply
+open it again).
 
 A toolbar item with `"view"` instead of `"command"` opens the view itself: the
 host shows a placeholder (a `column` with id `root` holding a `spinner`) and
@@ -66,7 +68,10 @@ Limits: 2000 nodes per view, 500 children per node, 64 KiB of text per node.
 ```
 
 Patch what changed instead of reopening the view: it keeps scroll position,
-focus and text the user is typing. A value the user is editing is not
+focus and text the user is typing. A `set` changes only the props it names
+(`{"visible": true}` on a button needs no label); a `replace` or `append`
+node is complete and needs its required props. An op naming a node the view
+does not have fails the whole patch with an error saying which op. A value the user is editing is not
 overwritten by `set` on the same prop while the field has focus.
 
 ## Patterns
