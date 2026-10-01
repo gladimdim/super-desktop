@@ -40,11 +40,6 @@ super-desktop plugin logs git-flush                         # host errors come w
 ```json
 {
   "settings": { "repositories": ["${fixture}/repo-a"] },
-  "workspace": {
-    "screen": { "w": 1920, "h": 1080, "top": 46 },
-    "cards": [{ "id": "c1", "agent": "claude", "folder": "/tmp/x", "status": "idle",
-                "prompt": "fix the login form", "rect": { "x": 300, "y": 200, "w": 640, "h": 480 } }]
-  },
   "llm": { "reply": "{\"subject\": \"Fix login form validation\", \"body\": \"\"}" },
   "steps": [
     { "run": "git-flush.open" },
@@ -57,14 +52,31 @@ super-desktop plugin logs git-flush                         # host errors come w
 ```
 
 - `${fixture}` is `tests/fixtures/` copied to a temporary directory.
-- `llm.reply` (or `llm.replies: [...]`) answers `llm.complete` without a real
-  provider; `llm.unavailable: true` makes it fail with `-32004`.
-- Steps: `run`, `click`, `change` (`{view, node, value}`), `event` (any host
-  notification, e.g. `{"event": "title.inputs", "params": {...}}`),
-  `expect` (`view/node/props`, `call/count/params`, `contrib/badge/label`,
-  `title/card/text`, `card/rect`, `notify/title`), `wait` (ms, ≤ 5000).
-- After the last step, the runner deactivates the plugin and fails if any
-  process, view, title, contribution, bind or journaled file is left.
+- `settings` are saved (and checked against the manifest) before the plugin starts.
+- `llm.reply` (or `llm.replies: [...]`, one per call, the last repeating)
+  answers `llm.complete` without a real provider; `llm.unavailable: true`
+  makes it fail with `-32004`.
+- Steps, in order:
+  - `{"run": "<command>", "args": {...}}` runs a command (`context.source` is `cli`);
+  - `{"click": {"view", "node"}}`, `{"change": {"view", "node", "value"}}`,
+    `{"submit": {"view", "node", "value"?}}` act on a node as a person would:
+    a hidden or disabled node (or one inside a hidden parent) fails the step;
+  - `{"event": "<notification>", "params": {...}}` sends any host notification,
+    e.g. `title.inputs`;
+  - `{"wait": ms}` (at most 5000);
+  - `{"expect": …}` waits up to 5 s for one of:
+    `{"view", "node"?, "props"?}` (the node has these props),
+    `{"call": "<method>", "count"?, "params"?}` (the plugin called the host
+    so; `llm.complete` counts scenario answers),
+    `{"contrib": "<id>", "badge"?, "label"?, …}` (the last `contrib.update`
+    values), `{"notify": {"title"?, "body"?, "urgency"?}}`.
+- The headless host simulates `contrib.update`, `ui.open/patch/close` and
+  `ui.notify` (recorded, never shown). Other desktop methods answer
+  `unavailable` there; test those on a real desktop with `plugin link`,
+  `plugin views` and `plugin interact`.
+- After the last step, the plugin is turned off and the run fails if any of
+  its processes is still running. Settings, data and the log of a test run
+  live in a temporary directory, never the user's.
 
 ## Renderers
 

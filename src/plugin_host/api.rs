@@ -107,7 +107,15 @@ pub trait Ui: Send + Sync + 'static {
     fn call(&self, plugin: &str, method: &str, params: Value) -> Result<Value, RpcError>;
     /// Lifecycle news; must not block.
     fn event(&self, plugin: &str, event: SessionEvent);
+    /// A desktop notification, already checked and rate-limited. The app name
+    /// says which plugin sent it, so none can pass for SUPER DESKTOP itself.
+    fn notify(&self, app: &str, urgency: &str, title: &str, body: &str) {
+        send_notification(app, urgency, title, body);
+    }
 }
+
+/// Answers `llm.complete` instead of the user's provider (`plugin test`).
+pub type LlmOverride = Arc<dyn Fn(&llm::Request) -> Result<llm::Reply, RpcError> + Send + Sync>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionEvent {
@@ -122,12 +130,13 @@ pub struct Context {
     pub log: PathBuf,
     llm_calls: AtomicUsize,
     notifications: Mutex<VecDeque<Instant>>,
+    pub llm: Option<LlmOverride>,
 }
 
 impl Context {
     pub fn new(manifest: Arc<Manifest>, ui: Arc<dyn Ui>) -> Self {
         let log = super::log_file(&manifest.id);
-        Context { manifest, ui, log, llm_calls: AtomicUsize::new(0), notifications: Mutex::default() }
+        Context { manifest, ui, log, llm_calls: AtomicUsize::new(0), notifications: Mutex::default(), llm: None }
     }
 
     pub fn log(&self, level: &str, message: &str) {
@@ -336,7 +345,7 @@ fn notify(ctx: &Context, params: &Value) -> Result<Value, RpcError> {
     // The app name says which plugin this is, so a plugin cannot pass for
     // SUPER DESKTOP's own notices (pairing, updates).
     let app = format!("SUPER DESKTOP · {}", ctx.manifest.name);
-    send_notification(&app, urgency, &title, &body);
+    ctx.ui.notify(&app, urgency, &title, &body);
     Ok(json!({}))
 }
 
@@ -376,9 +385,12 @@ fn llm_complete(ctx: &Context, params: &Value) -> Result<Value, RpcError> {
         ctx.llm_calls.fetch_sub(1, Ordering::SeqCst);
         return Err(RpcError::new(rpc::LIMIT_EXCEEDED, "2 llm.complete calls are already running", "Wait for one to finish; queue the rest.", DOCS));
     }
-    let choice = store::Store::load().llm_provider;
     let started = Instant::now();
-    let result = llm::complete(&choice, &llm::Request { prompt: prompt.clone(), system, max_tokens, json: json_mode, fast });
+    let request = llm::Request { prompt: prompt.clone(), system, max_tokens, json: json_mode, fast };
+    let result = match &ctx.llm {
+        Some(answer) => answer(&request),
+        None => llm::complete(&store::Store::load().llm_provider, &request),
+    };
     ctx.llm_calls.fetch_sub(1, Ordering::SeqCst);
     // Sizes and timing only: prompts can hold the user's code.
     match &result {
@@ -400,6 +412,11 @@ impl Session {
     /// Start the process and activate it. Blocks up to `ACTIVATE_TIMEOUT`:
     /// call it from a worker thread.
     pub fn start(manifest: Arc<Manifest>, dir: &Path, ui: Arc<dyn Ui>) -> Result<Session, String> {
+        Self::start_with(manifest, dir, ui, None)
+    }
+
+    /// `start`, with `llm.complete` answered by `llm` (`plugin test`).
+    pub fn start_with(manifest: Arc<Manifest>, dir: &Path, ui: Arc<dyn Ui>, llm: Option<LlmOverride>) -> Result<Session, String> {
         let main = manifest.main.as_ref().ok_or("the plugin has no process component")?;
         let id = manifest.id.clone();
         let data = super::data_dir(&id);
@@ -412,7 +429,9 @@ impl Session {
             ("SD_PLUGIN_DATA".into(), data.display().to_string()),
             ("PYTHONUNBUFFERED".into(), "1".into()),
         ]);
-        let ctx = Arc::new(Context::new(Arc::clone(&manifest), ui));
+        let mut ctx = Context::new(Arc::clone(&manifest), ui);
+        ctx.llm = llm;
+        let ctx = Arc::new(ctx);
         ctx.log("info", &format!("starting {} {} from {}", manifest.id, manifest.version, dir.display()));
         let (process, events) = Process::spawn(Spawn { command: &main.command, dir, env, log: ctx.log.clone() })
             .map_err(|e| format!("cannot start `{}`: {e}", main.command.join(" ")))?;

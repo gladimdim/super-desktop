@@ -14,7 +14,9 @@ pub mod llm;
 pub mod manifest;
 pub mod process;
 pub mod rpc;
+pub mod scaffold;
 pub mod store;
+pub mod testing;
 pub mod ui_model;
 pub mod version_range;
 
@@ -22,8 +24,14 @@ use std::path::PathBuf;
 
 pub const API_VERSION: u32 = 1;
 
+/// Where the host keeps plugin files: `$HOME`, or `SUPER_DESKTOP_PLUGIN_HOME`
+/// (`plugin test` points it at a temporary directory, so a test never reads or
+/// writes the user's plugin settings, data or logs).
 fn home() -> PathBuf {
-    std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
+    std::env::var_os("SUPER_DESKTOP_PLUGIN_HOME")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
 }
 
 /// `~/.config/super-desktop/plugins.json`: what is installed and active.

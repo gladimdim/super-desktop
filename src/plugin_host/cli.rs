@@ -22,6 +22,10 @@ const USAGE: &str = "usage: super-desktop plugin <command>
   interact ID NODE EVENT [VALUE] [--view=VIEW]
                                operate a node as a user would: click, change, submit (VALUE is JSON)
   logs ID [--follow]           its log: stderr, log calls, host errors
+  new ID [--kind=process|renderer] [--dir=DIR]
+                               a starter plugin: manifest, code, a test scenario, AGENTS.md and the skills
+  test [DIR] [SCENARIO] [--json]
+                               run its tests/*.json scenarios on a headless host (no desktop needed)
   remove ID [--purge]          uninstall; --purge also deletes its settings and data
   disable-all                  turn every plugin off (works without the daemon)";
 
@@ -77,6 +81,12 @@ pub fn run(args: &[String]) -> i32 {
         },
         Some("remove") => with_id(&positional, |id| remove(id, args.iter().any(|a| a == "--purge"))),
         Some("disable-all") => disable_all(),
+        Some("new") => with_id(&positional, |id| {
+            let kind = args.iter().find_map(|a| a.strip_prefix("--kind=")).unwrap_or("process");
+            let dir = args.iter().find_map(|a| a.strip_prefix("--dir=")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(id));
+            super::scaffold::create(id, kind, &dir)
+        }),
+        Some("test") => test(Path::new(positional.get(1).copied().unwrap_or(".")), positional.get(2).copied(), json_out),
         _ => {
             println!("{USAGE}");
             return if positional.is_empty() { 0 } else { 2 };
@@ -117,7 +127,7 @@ pub fn describe_value() -> Value {
         "limits": super::api::limits(),
         "llmProviders": {"installed": super::llm::available(), "chosen": store::Store::load().llm_provider},
         "sandbox": "not enforced by this build: plugins run as you",
-        "commands": ["describe", "validate", "link", "list", "activate", "deactivate", "reload", "run", "views", "interact", "logs", "remove", "disable-all"],
+        "commands": ["describe", "validate", "new", "test", "link", "list", "activate", "deactivate", "reload", "run", "views", "interact", "logs", "remove", "disable-all"],
         "skills": manifest::skills_dir().map(|d| d.display().to_string()),
         "schemas": manifest::skills_dir().map(|d| json!({
             "manifest": d.join("schemas/manifest.schema.json"),
@@ -415,4 +425,21 @@ fn rewrite_binds_without_daemon() {
     if let Err(error) = crate::shortcut::apply_plugin_binds(&desired.global) {
         eprintln!("warning: plugin shortcuts not updated: {error}");
     }
+}
+
+fn test(dir: &Path, only: Option<&str>, json_out: bool) -> Result<(), String> {
+    let outcomes = super::testing::run_all(dir, only)?;
+    let failed = outcomes.iter().filter(|o| !o.ok).count();
+    if json_out {
+        let rows: Vec<Value> = outcomes.iter().map(|o| json!({"scenario": o.name, "ok": o.ok, "log": o.lines})).collect();
+        println!("{}", serde_json::to_string_pretty(&json!({"ok": failed == 0, "scenarios": rows})).unwrap_or_default());
+    } else {
+        for outcome in &outcomes {
+            println!("{} {}", if outcome.ok { "PASS" } else { "FAIL" }, outcome.name);
+            for line in &outcome.lines {
+                println!("  {line}");
+            }
+        }
+    }
+    if failed == 0 { Ok(()) } else { Err(format!("{failed} scenario(s) failed")) }
 }
