@@ -317,6 +317,33 @@ fn editor(setting: &Setting, value: Option<&Value>, save: Rc<dyn Fn(Value)>) -> 
             dropdown.upcast()
         }
         "paths" => paths_editor(setting, value, save),
+        "path" => {
+            let outer = Box::new(Orientation::Vertical, 4);
+            let row = Box::new(Orientation::Horizontal, 6);
+            let entry = gtk4::Entry::new();
+            entry.set_hexpand(true);
+            entry.set_text(value.and_then(Value::as_str).unwrap_or(""));
+            let choose = Button::with_label("Choose…");
+            choose.add_css_class("launcher-btn");
+            row.append(&entry);
+            row.append(&choose);
+            outer.append(&row);
+            let browser = path_browser(setting.path_kind.as_deref() != Some("file"), {
+                let (entry, save) = (entry.clone(), Rc::clone(&save));
+                Rc::new(move |path: std::path::PathBuf| {
+                    entry.set_text(&path.display().to_string());
+                    save(Value::String(path.display().to_string()));
+                })
+            });
+            let open = Rc::clone(&browser.open);
+            choose.connect_clicked(move |_| open());
+            {
+                let save = Rc::clone(&save);
+                entry.connect_activate(move |e| save(Value::String(e.text().to_string())));
+            }
+            outer.append(&browser.widget);
+            outer.upcast()
+        }
         kind => {
             let entry = if kind == "secret" { gtk4::PasswordEntry::new().upcast::<gtk4::Widget>() } else { gtk4::Entry::new().upcast() };
             let editable = entry.clone().dynamic_cast::<gtk4::Editable>().expect("entries are editable");
@@ -349,7 +376,8 @@ fn editor(setting: &Setting, value: Option<&Value>, save: Rc<dyn Fn(Value)>) -> 
     }
 }
 
-/// A list of folders (or files): each row has ✕, and "Add…" opens a chooser.
+/// A list of folders (or files): each row has ✕, and "Add…" opens a browser
+/// inside the card.
 fn paths_editor(setting: &Setting, value: Option<&Value>, save: Rc<dyn Fn(Value)>) -> gtk4::Widget {
     let directory = setting.path_kind.as_deref() != Some("file");
     let paths: Rc<std::cell::RefCell<Vec<String>>> = Rc::new(std::cell::RefCell::new(
@@ -391,28 +419,177 @@ fn paths_editor(setting: &Setting, value: Option<&Value>, save: Rc<dyn Fn(Value)
     let add = Button::with_label(if directory { "Add folder…" } else { "Add file…" });
     add.add_css_class("launcher-btn");
     add.set_halign(Align::Start);
-    add.connect_clicked(move |button| {
-        let dialog = gtk4::FileDialog::new();
-        dialog.set_modal(true);
-        let parent = button.root().and_downcast::<gtk4::Window>();
+    let browser = path_browser(directory, {
         let (paths, save, render) = (Rc::clone(&paths), Rc::clone(&save), Rc::clone(&render));
-        let done = move |result: Result<gtk4::gio::File, glib::Error>| {
-            let Some(path) = result.ok().and_then(|f| f.path()) else { return };
+        Rc::new(move |path: std::path::PathBuf| {
             let text = path.display().to_string();
             if !paths.borrow().contains(&text) {
                 paths.borrow_mut().push(text);
                 save(Value::Array(paths.borrow().iter().map(|p| Value::String(p.clone())).collect()));
                 render();
             }
-        };
-        if directory {
-            dialog.select_folder(parent.as_ref(), gtk4::gio::Cancellable::NONE, done);
-        } else {
-            dialog.open(parent.as_ref(), gtk4::gio::Cancellable::NONE, done);
-        }
+        })
     });
+    {
+        let open = Rc::clone(&browser.open);
+        add.connect_clicked(move |_| open());
+    }
     outer.append(&add);
+    outer.append(&browser.widget);
     outer.upcast()
+}
+
+/// An in-card file or folder browser.
+///
+/// Not a system file dialog: SUPER DESKTOP is a layer-shell overlay, and a
+/// portal dialog needs a normal window to belong to (GTK exits when it tries to
+/// export the overlay's surface for one) and would open underneath the
+/// overlay anyway.
+struct PathBrowser {
+    widget: Box,
+    open: Rc<dyn Fn()>,
+}
+
+/// The sub-folders (and, for files, the files) of `dir`, sorted, hidden ones
+/// left out: (name, is a folder).
+fn list_dir(dir: &std::path::Path, directories_only: bool) -> Result<Vec<(String, bool)>, String> {
+    let mut entries: Vec<(String, bool)> = std::fs::read_dir(dir)
+        .map_err(|e| format!("cannot open {}: {e}", dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let is_dir = e.path().is_dir();
+            (!name.starts_with('.') && (is_dir || !directories_only)).then_some((name, is_dir))
+        })
+        .collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    entries.truncate(500);
+    Ok(entries)
+}
+
+/// `~`, `~/x` and absolute paths; anything else is relative to the home folder.
+fn expand_path(text: &str) -> std::path::PathBuf {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into()));
+    let text = text.trim();
+    match text.strip_prefix('~') {
+        Some(rest) => home.join(rest.trim_start_matches('/')),
+        None if text.starts_with('/') => std::path::PathBuf::from(text),
+        None => home.join(text),
+    }
+}
+
+fn path_browser(directory: bool, on_pick: Rc<dyn Fn(std::path::PathBuf)>) -> PathBrowser {
+    let widget = Box::new(Orientation::Vertical, 6);
+    widget.add_css_class("plugin-path-browser");
+    widget.set_visible(false);
+    let top = Box::new(Orientation::Horizontal, 6);
+    let up = Button::with_label("↑");
+    up.set_tooltip_text(Some("Parent folder"));
+    up.add_css_class("term-btn");
+    let entry = gtk4::Entry::new();
+    entry.set_hexpand(true);
+    entry.set_placeholder_text(Some("Type a path, then Enter"));
+    top.append(&up);
+    top.append(&entry);
+    widget.append(&top);
+    let list = Box::new(Orientation::Vertical, 0);
+    let scroll = gtk4::ScrolledWindow::builder().hscrollbar_policy(gtk4::PolicyType::Never).min_content_height(160).max_content_height(240).propagate_natural_height(true).child(&list).build();
+    widget.append(&scroll);
+    let message = note("");
+    message.set_visible(false);
+    widget.append(&message);
+    let bottom = Box::new(Orientation::Horizontal, 6);
+    let pick = Button::with_label(if directory { "Add this folder" } else { "Add the selected file" });
+    pick.add_css_class("launcher-btn");
+    pick.add_css_class("launcher-btn-primary");
+    let cancel = Button::with_label("Cancel");
+    cancel.add_css_class("launcher-btn");
+    bottom.append(&pick);
+    bottom.append(&cancel);
+    widget.append(&bottom);
+
+    let current: Rc<std::cell::RefCell<std::path::PathBuf>> = Rc::new(std::cell::RefCell::new(expand_path("~")));
+    let chosen_file: Rc<std::cell::RefCell<Option<std::path::PathBuf>>> = Rc::default();
+    let show: Rc<std::cell::RefCell<Option<Rc<dyn Fn(std::path::PathBuf)>>>> = Rc::default();
+    let navigate: Rc<dyn Fn(std::path::PathBuf)> = {
+        let (list, entry, message, current, chosen_file, pick, show) =
+            (list.clone(), entry.clone(), message.clone(), Rc::clone(&current), Rc::clone(&chosen_file), pick.clone(), Rc::clone(&show));
+        Rc::new(move |dir: std::path::PathBuf| {
+            clear(&list);
+            chosen_file.replace(None);
+            match list_dir(&dir, directory) {
+                Ok(entries) => {
+                    message.set_visible(false);
+                    current.replace(dir.clone());
+                    entry.set_text(&dir.display().to_string());
+                    if entries.is_empty() {
+                        list.append(&note(if directory { "No sub-folders." } else { "Empty folder." }));
+                    }
+                    for (name, is_dir) in entries {
+                        let button = Button::with_label(&format!("{} {name}", if is_dir { "📁" } else { "📄" }));
+                        button.add_css_class("flat");
+                        button.set_halign(Align::Start);
+                        let target = dir.join(&name);
+                        let (show, chosen_file, pick) = (Rc::clone(&show), Rc::clone(&chosen_file), pick.clone());
+                        button.connect_clicked(move |_| {
+                            if is_dir {
+                                if let Some(show) = show.borrow().clone() {
+                                    show(target.clone());
+                                }
+                            } else {
+                                chosen_file.replace(Some(target.clone()));
+                                pick.set_label(&format!("Add {}", target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()));
+                            }
+                        });
+                        list.append(&button);
+                    }
+                }
+                Err(why) => {
+                    message.set_text(&why);
+                    message.set_visible(true);
+                }
+            }
+            pick.set_sensitive(directory || chosen_file.borrow().is_some());
+        })
+    };
+    show.replace(Some(Rc::clone(&navigate)));
+    {
+        let (navigate, current) = (Rc::clone(&navigate), Rc::clone(&current));
+        up.connect_clicked(move |_| {
+            let parent = current.borrow().parent().map(std::path::Path::to_path_buf);
+            if let Some(parent) = parent {
+                navigate(parent);
+            }
+        });
+    }
+    {
+        let navigate = Rc::clone(&navigate);
+        entry.connect_activate(move |e| navigate(expand_path(&e.text())));
+    }
+    {
+        let (widget, current, chosen_file) = (widget.clone(), Rc::clone(&current), Rc::clone(&chosen_file));
+        pick.connect_clicked(move |_| {
+            let picked = if directory { Some(current.borrow().clone()) } else { chosen_file.borrow().clone() };
+            if let Some(path) = picked {
+                on_pick(path);
+                widget.set_visible(false);
+            }
+        });
+    }
+    {
+        let widget = widget.clone();
+        cancel.connect_clicked(move |_| widget.set_visible(false));
+    }
+    let open: Rc<dyn Fn()> = {
+        let (widget, navigate, current, entry) = (widget.clone(), Rc::clone(&navigate), Rc::clone(&current), entry.clone());
+        Rc::new(move || {
+            let start = current.borrow().clone();
+            navigate(start);
+            widget.set_visible(true);
+            entry.grab_focus();
+        })
+    };
+    PathBrowser { widget, open }
 }
 
 /// For the hub entry's chip: plugins on / installed.
@@ -490,7 +667,18 @@ mod tests {
         gtk4::init().unwrap();
         let page = build();
         let root: gtk4::Widget = page.widget.clone().upcast();
-        let entries = find::<gtk4::Entry>(&root);
+        // The settings' own fields, not the path field inside a folder browser.
+        let in_browser = |w: &gtk4::Widget| {
+            let mut parent = w.parent();
+            while let Some(p) = parent {
+                if p.has_css_class("plugin-path-browser") {
+                    return true;
+                }
+                parent = p.parent();
+            }
+            false
+        };
+        let entries: Vec<gtk4::Entry> = find::<gtk4::Entry>(&root).into_iter().filter(|e| !in_browser(e.upcast_ref())).collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].text(), "x");
         let switches = find::<gtk4::Switch>(&root);
@@ -508,8 +696,48 @@ mod tests {
         let saved: Value = serde_json::from_str(&std::fs::read_to_string(home.join(".config/super-desktop/plugins/form/settings.json")).unwrap()).unwrap();
         assert_eq!(saved["on"], false);
 
+        // Folders are picked in the card, never through a system dialog.
+        let tree = home.join("code/web");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::create_dir_all(home.join("code/.hidden")).unwrap();
+        let add = find::<gtk4::Button>(&root).into_iter().find(|b| b.label().as_deref() == Some("Add folder…")).unwrap();
+        add.emit_clicked();
+        let browser = find::<gtk4::Box>(&root).into_iter().find(|b| b.has_css_class("plugin-path-browser")).unwrap();
+        assert!(browser.is_visible());
+        let path_entry = find::<gtk4::Entry>(&browser.clone().upcast()).into_iter().next().unwrap();
+        path_entry.set_text("~/code");
+        path_entry.emit_activate();
+        let names: Vec<String> = find::<gtk4::Button>(&browser.clone().upcast()).iter().filter_map(|b| b.label()).map(|l| l.to_string()).collect();
+        assert!(names.contains(&"📁 web".to_string()), "{names:?}");
+        assert!(!names.iter().any(|n| n.contains(".hidden")), "hidden folders are not listed");
+        find::<gtk4::Button>(&browser.clone().upcast()).into_iter().find(|b| b.label().as_deref() == Some("📁 web")).unwrap().emit_clicked();
+        assert_eq!(path_entry.text(), tree.display().to_string());
+        find::<gtk4::Button>(&browser.clone().upcast()).into_iter().find(|b| b.label().as_deref() == Some("Add this folder")).unwrap().emit_clicked();
+        assert!(!browser.is_visible());
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(home.join(".config/super-desktop/plugins/form/settings.json")).unwrap()).unwrap();
+        assert_eq!(saved["folders"], serde_json::json!(["/srv/a", tree.display().to_string()]));
+
         switches[0].set_active(true);
         assert!(store::Store::load().get("form").unwrap().active, "the switch turns it on");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn plugin_settings_paths_are_listed_and_expanded() {
+        let dir = std::env::temp_dir().join(format!("sd-list-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for sub in ["b", "A", ".git"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        std::fs::write(dir.join("file.txt"), "").unwrap();
+        assert_eq!(list_dir(&dir, true).unwrap(), vec![("A".to_string(), true), ("b".to_string(), true)]);
+        assert_eq!(list_dir(&dir, false).unwrap().last().unwrap(), &("file.txt".to_string(), false));
+        assert!(list_dir(&dir.join("missing"), true).unwrap_err().contains("cannot open"));
+        let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
+        assert_eq!(expand_path("~"), home);
+        assert_eq!(expand_path("~/code"), home.join("code"));
+        assert_eq!(expand_path("code"), home.join("code"));
+        assert_eq!(expand_path("/srv"), std::path::PathBuf::from("/srv"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -574,7 +574,7 @@ fn refused(why: &'static str) -> RpcError {
         "harness_not_installed" => ("That harness is not installed on this PC: install it, or let the user choose another one.", "references/host-api.md#harnesslaunch"),
         "unsupported_harness" => ("Use a built-in harness key (claude, codex, …) or a custom launcher's key.", "references/host-api.md#harnesslaunch"),
         "invalid_workspace" => ("The folder must exist and be absolute.", "references/host-api.md#harnesslaunch"),
-        "no_initial_prompt" => ("Only claude, codex, opencode and gemini can be started with a prompt.", "references/host-api.md#harnesslaunch"),
+        "no_initial_prompt" => ("Only claude, codex, grok, cursor, opencode, gemini and antigravity can be started with a prompt.", "references/host-api.md#harnesslaunch"),
         _ => ("Read workspace.cards and try again; the card may have changed.", "references/host-api.md#card"),
     };
     RpcError::new(rpc::UNAVAILABLE, format!("the desktop refused: {why}"), hint, docs)

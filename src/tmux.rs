@@ -643,10 +643,12 @@ fn launch_line(cmd: &str, initial: &[String]) -> String {
 /// for the harnesses that have one. `None`: this harness cannot be started
 /// with a prompt.
 pub fn initial_prompt_args(agent: &str, prompt: &str) -> Option<Vec<String>> {
+    // Each from the harness's own `--help`: an interactive session that starts
+    // on this prompt, not a one-shot non-interactive run.
     match agent {
-        "claude" | "codex" => Some(vec![prompt.to_string()]),
+        "claude" | "codex" | "grok" | "cursor" => Some(vec![prompt.to_string()]),
         "opencode" => Some(vec!["--prompt".into(), prompt.to_string()]),
-        "gemini" => Some(vec!["-i".into(), prompt.to_string()]),
+        "gemini" | "antigravity" => Some(vec!["-i".into(), prompt.to_string()]),
         _ => None,
     }
 }
@@ -2337,6 +2339,8 @@ mod tests {
         assert_eq!(shlex::split(&line).unwrap(), vec!["claude", "--model", "opus", prompt]);
         let line = launch_line("opencode", &initial_prompt_args("opencode", "go").unwrap());
         assert_eq!(line, "opencode --prompt go");
+        assert_eq!(initial_prompt_args("grok", "go").unwrap(), vec!["go"]);
+        assert_eq!(initial_prompt_args("antigravity", "go").unwrap(), vec!["-i", "go"]);
         assert!(initial_prompt_args("aider", "x").is_none());
     }
 

@@ -1110,7 +1110,7 @@
         }
       ],
       "x-permission": "harness.launch",
-      "summary": "Open a new, visible card running a harness in an existing folder. agent is a built-in key (claude, codex, opencode, gemini, ...) or a custom launcher key. With prompt, the harness starts working on it at once (passed once on its command line; claude, codex, opencode and gemini only, others answer unavailable). The prompt is never saved with the card and is not shown to other devices.",
+      "summary": "Open a new, visible card running a harness in an existing folder. agent is a built-in key (claude, codex, opencode, gemini, ...) or a custom launcher key. With prompt, the harness starts working on it at once (passed once on its command line; claude, codex, grok, cursor, opencode, gemini and antigravity only, others answer unavailable). The prompt is never saved with the card and is not shown to other devices.",
       "params": [
         {
           "name": "agent",

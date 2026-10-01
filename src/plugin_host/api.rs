@@ -336,7 +336,7 @@ pub fn dispatch(ctx: &Context, method: &str, params: &Value) -> Result<Value, Rp
                     return Err(RpcError::new(
                         rpc::UNAVAILABLE,
                         format!("`{agent}` cannot be started with a prompt"),
-                        "Use claude, codex, opencode or gemini, or launch without a prompt and send it with terminal.send once the harness is ready.",
+                        "Use claude, codex, grok, cursor, opencode, gemini or antigravity, or launch without a prompt and send it with terminal.send once the harness is ready.",
                         &docs_for(method),
                     ));
                 }

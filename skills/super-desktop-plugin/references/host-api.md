@@ -135,9 +135,10 @@ with an explicit user action; never type into a harness on a timer.
 Permission: `harness.launch`. `{agent, folder, prompt?}` → `{card}`. `agent` is
 a built-in key (`claude`, `codex`, `opencode`, `gemini`, …) or a custom
 launcher key; `folder` must exist. With `prompt`, the harness starts working on
-it at once: it is passed one time on the harness's command line (`claude` and
-`codex` take it as their prompt, `opencode` as `--prompt`, `gemini` as `-i`;
-other harnesses answer `unavailable`). The prompt is never saved with the card,
+it at once: it is passed one time on the harness's command line (`claude`,
+`codex`, `grok` and `cursor` take it as their prompt, `opencode` as
+`--prompt`, `gemini` and `antigravity` as `-i`; other harnesses answer
+`unavailable`). The prompt is never saved with the card,
 so a restart does not run it again, and it is not shown to other devices. The
 card is a normal, visible card: the person sees the agent work and answers
 its permission questions there.
