@@ -55,6 +55,7 @@ enum SettingsPage {
     TopBar,
     SleepLock,
     Updates,
+    Plugins,
     Connections(ConnectionPage),
 }
 
@@ -885,6 +886,17 @@ pub fn build_harness_settings_panel(
         move || count_refresh(),
     );
 
+    let (btn_plugins, _, plugins_trailing) = settings_entry_with_summary(
+        "🧩",
+        "Plugins",
+        "Turn plugins on or off, change their settings, and choose the AI provider they use.",
+        "settings-plugins-entry",
+    );
+    btn_plugins.set_tooltip_text(Some("Plugins"));
+    let plugins_chip = chip(&crate::plugin_ui::settings_page::count_summary());
+    plugins_trailing.prepend(&plugins_chip);
+    home_root.append(&btn_plugins);
+
     let (btn_updates, updates_trailing) = settings_entry(
         "⟳",
         "Updates",
@@ -1331,6 +1343,8 @@ pub fn build_harness_settings_panel(
     let top_bar_view = settings_scroll(&top_bar_root);
     let sleep_view = settings_scroll(&sleep_root);
     let updates_view = settings_scroll(&updates_root);
+    let plugins_page = crate::plugin_ui::settings_page::build();
+    let plugins_view = settings_scroll(&plugins_page.widget);
 
     // Connections is a family of destinations with its own overview. They
     // own their live bridge controls and refresh only while shown. `nav` is
@@ -1366,6 +1380,8 @@ pub fn build_harness_settings_panel(
     }
     pages.append(&sleep_view);
     pages.append(&updates_view);
+    pages.append(&plugins_view);
+    plugins_view.set_visible(false);
     pages.append(&args_view);
     args_view.set_visible(false);
     shortcut_view.set_visible(false);
@@ -1387,6 +1403,9 @@ pub fn build_harness_settings_panel(
         let connection_pages = Rc::clone(&connection_pages);
         let sleep_view = sleep_view.clone();
         let updates_view = updates_view.clone();
+        let plugins_view = plugins_view.clone();
+        let plugins_refresh = Rc::clone(&plugins_page.refresh);
+        let plugins_chip = plugins_chip.clone();
         let check_updates = Rc::clone(&check_updates);
         let btn_back = btn_back.clone();
         let badge = badge.clone();
@@ -1409,6 +1428,8 @@ pub fn build_harness_settings_panel(
             }
             sleep_view.set_visible(page == SettingsPage::SleepLock);
             updates_view.set_visible(page == SettingsPage::Updates);
+            plugins_view.set_visible(page == SettingsPage::Plugins);
+            plugins_chip.set_label(&crate::plugin_ui::settings_page::count_summary());
             // An invitation lives only while its page is shown.
             if page != SettingsPage::Connections(ConnectionPage::Invite) {
                 connection_pages.invite.stop();
@@ -1465,6 +1486,12 @@ pub fn build_harness_settings_panel(
                     subtitle.set_label("Newer versions from GitHub");
                     check_updates(true);
                 }
+                SettingsPage::Plugins => {
+                    badge.set_label("🧩");
+                    title.set_label("Plugins");
+                    subtitle.set_label("Extensions added to this PC");
+                    plugins_refresh();
+                }
                 SettingsPage::Connections(connection) => {
                     let (icon, heading, summary) = connection_pages.header(connection);
                     badge.set_label(icon);
@@ -1483,6 +1510,7 @@ pub fn build_harness_settings_panel(
         (&btn_launcher, SettingsPage::Connections(ConnectionPage::Overview)),
         (&btn_sleep_lock, SettingsPage::SleepLock),
         (&btn_updates, SettingsPage::Updates),
+        (&btn_plugins, SettingsPage::Plugins),
     ] {
         let nav = Rc::clone(&nav);
         button.connect_clicked(move |_| nav(page));

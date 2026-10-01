@@ -8,6 +8,7 @@
 //! Plugin sessions run on worker threads (`plugin_host::api::Session`); when
 //! they need GTK they post a `Job` here and wait for the answer with a
 //! timeout. The GTK thread never waits on a plugin.
+pub mod settings_page;
 pub mod toolbar;
 pub mod view;
 
