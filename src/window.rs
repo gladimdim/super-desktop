@@ -1401,6 +1401,11 @@ impl SuperDesktopWindow {
         }
         let directory = crate::state::clean_dir(folder).ok_or("invalid_workspace")?;
         let initial = match prompt {
+            // A harness that is not installed would start a plain shell, which
+            // would take the prompt for a file to run.
+            Some(_) if crate::tmux::HARNESS_KEYS.contains(&agent_type) && crate::tmux::detect_harness_command(agent_type).is_none() => {
+                return Err("harness_not_installed");
+            }
             Some(prompt) => crate::tmux::initial_prompt_args(agent_type, prompt).ok_or("no_initial_prompt")?,
             None => Vec::new(),
         };

@@ -205,6 +205,12 @@ fn read_stdout(stdout: impl Read, events: Sender<Event>, pending: Pending, reply
             break;
         }
     }
+    // Nobody will answer the requests still waiting: fail them now rather than
+    // at their timeout.
+    let waiting: Vec<_> = pending.lock().unwrap_or_else(|e| e.into_inner()).drain().map(|(_, s)| s).collect();
+    for sender in waiting {
+        let _ = sender.send(Err(RpcError::new(rpc::UNAVAILABLE, "the plugin process exited before answering", "Read its log (super-desktop plugin logs <id>), or run its command by hand to see the error.", "references/host-api.md#lifecycle")));
+    }
     let _ = events.send(Event::Exited);
 }
 
@@ -267,6 +273,17 @@ for line in sys.stdin:
         assert!(matches!(events.recv_timeout(Duration::from_secs(5)).unwrap(), Event::Exited));
         std::thread::sleep(Duration::from_millis(100));
         assert!(std::fs::read_to_string(dir.join("plugin.log")).unwrap().contains("to the log"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugin_process_exit_fails_waiting_requests_at_once() {
+        let (dir, command) = script("dies", "import sys\nprint('SyntaxError: nope', file=sys.stderr)\nsys.exit(1)\n");
+        let (process, _events) = start(&dir, &command);
+        let started = std::time::Instant::now();
+        let error = process.request("activate", json!({}), Duration::from_secs(10)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(3), "not the 10 s timeout");
+        assert_eq!(error.code, rpc::UNAVAILABLE);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

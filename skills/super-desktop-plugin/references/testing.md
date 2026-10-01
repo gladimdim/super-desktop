@@ -70,9 +70,10 @@ super-desktop plugin logs git-flush                         # host errors come w
     e.g. `title.inputs`;
   - `{"wait": ms}` (at most 5000);
   - `{"expect": …}` waits up to 5 s for one of:
-    `{"view", "node"?, "props"?}` (the node has these props),
-    `{"call": "<method>", "count"?, "params"?}` (the plugin called the host
-    so; `llm.complete` counts scenario answers),
+    `{"view", "node"?, "props"?, "propsContain"?}` (the node has these props;
+    `propsContain` values are substrings of its text props),
+    `{"call": "<method>", "count"?, "params"?, "paramsContain"?}` (the plugin
+    called the host so; `llm.complete` counts scenario answers),
     `{"contrib": "<id>", "badge"?, "label"?, …}` (the last `contrib.update`
     values), `{"notify": {"title"?, "body"?, "urgency"?}}`.
 - The headless host simulates `contrib.update`, `ui.open/patch/close` and

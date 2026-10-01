@@ -557,8 +557,18 @@ impl Session {
             Err(error) => {
                 stopping.store(true, Ordering::SeqCst);
                 process.kill(Duration::from_millis(200));
-                ctx.log("error", &format!("activate failed: {}", error.reason()));
-                Err(format!("activate failed: {}", error.reason()))
+                // What the process said last is usually the reason (a syntax
+                // error, a missing module).
+                std::thread::sleep(Duration::from_millis(100));
+                let said: Vec<String> = std::fs::read_to_string(&ctx.log)
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|l| l.split_once(" stderr ").map(|(_, t)| t.trim().to_string()))
+                    .collect();
+                let tail = said[said.len().saturating_sub(3)..].join(" | ");
+                let why = if tail.is_empty() { error.reason() } else { format!("{} — it said: {tail}", error.reason()) };
+                ctx.log("error", &format!("activate failed: {why}"));
+                Err(format!("activate failed: {why}"))
             }
         }
     }
@@ -722,7 +732,7 @@ mod tests {
     fn plugin_spec_docs_pointers_resolve() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let mut pointers: Vec<String> = contract().host.keys().map(|m| docs_for(m)).collect();
-        for file in ["api.rs", "manifest.rs", "rpc.rs", "llm.rs", "ui_model.rs"] {
+        for file in ["api.rs", "manifest.rs", "rpc.rs", "llm.rs", "ui_model.rs", "testing.rs", "../plugin_ui/mod.rs", "../plugin_ui/cards.rs"] {
             let source = std::fs::read_to_string(root.join("src/plugin_host").join(file)).unwrap();
             for (at, _) in source.match_indices("\"references/") {
                 let rest = &source[at + 1..];

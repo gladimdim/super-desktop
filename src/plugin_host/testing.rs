@@ -205,6 +205,15 @@ fn reachable(tree: &Value, id: &str) -> Result<(), String> {
     walk(tree, id).unwrap_or_else(|| Err(format!("no node `{id}` in this view")))
 }
 
+/// Every string in `wanted` is a substring of the same field of `actual`.
+fn contains_text(actual: &Value, wanted: &Value) -> bool {
+    match (actual, wanted) {
+        (Value::Object(a), Value::Object(w)) => w.iter().all(|(k, v)| a.get(k).is_some_and(|x| contains_text(x, v))),
+        (Value::String(a), Value::String(w)) => a.contains(w.as_str()),
+        _ => actual == wanted,
+    }
+}
+
 /// `actual` has every field of `wanted` with the same value (objects nest).
 fn contains(actual: &Value, wanted: &Value) -> bool {
     match (actual, wanted) {
@@ -371,8 +380,9 @@ fn expectation(expect: &Value, ui: &Headless, llm_calls: &Arc<Mutex<usize>>) -> 
         if let Some(node) = expect.get("node").and_then(Value::as_str) {
             let actual = find(tree, node).ok_or_else(|| format!("no node `{node}` in `{view}`"))?;
             let wanted = expect.get("props").cloned().unwrap_or_else(|| json!({}));
-            if !contains(actual, &wanted) {
-                return Err(format!("`{node}` is {actual}, expected {wanted}"));
+            let texts = expect.get("propsContain").cloned().unwrap_or_else(|| json!({}));
+            if !contains(actual, &wanted) || !contains_text(actual, &texts) {
+                return Err(format!("`{node}` is {actual}, expected {wanted} and text containing {texts}"));
             }
         }
         return Ok(());
@@ -382,7 +392,8 @@ fn expectation(expect: &Value, ui: &Headless, llm_calls: &Arc<Mutex<usize>>) -> 
             *llm_calls.lock().unwrap_or_else(|e| e.into_inner())
         } else {
             let wanted = expect.get("params").cloned().unwrap_or_else(|| json!({}));
-            state.calls.iter().filter(|(m, p)| m == method && contains(p, &wanted)).count()
+            let texts = expect.get("paramsContain").cloned().unwrap_or_else(|| json!({}));
+            state.calls.iter().filter(|(m, p)| m == method && contains(p, &wanted) && contains_text(p, &texts)).count()
         };
         return match expect.get("count").and_then(Value::as_u64) {
             Some(n) if count as u64 != n => Err(format!("{method} was called {count} time(s), expected {n}")),
