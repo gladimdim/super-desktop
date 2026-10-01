@@ -39,6 +39,7 @@ mod command_feedback;
 mod harness_bar;
 mod connection_panel;
 mod machine_selector;
+mod markdown_view;
 mod remote_terminal;
 mod remote_workspace;
 mod harness_settings;

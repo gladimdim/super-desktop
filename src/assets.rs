@@ -94,6 +94,11 @@ fn version(meta: &Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
 /// Open every component relative to an already opened directory. No symlinks,
 /// no FIFO/device blocking, and no check-then-open canonicalization race.
 fn open_regular(root: &Path, relative: &Path) -> Result<File, String> {
+    open_in(root, relative, false)
+}
+
+/// `open_regular`, with the file itself opened for writing when `write`.
+fn open_in(root: &Path, relative: &Path, write: bool) -> Result<File, String> {
     if !root.is_absolute() || relative.is_absolute() {
         return Err("outside_workspace".into());
     }
@@ -122,7 +127,7 @@ fn open_regular(root: &Path, relative: &Path) -> Result<File, String> {
         }
         let name = std::ffi::CString::new(name.as_encoded_bytes()).map_err(|_| "invalid_path")?;
         let last = i + 1 == root_components.len() + relative_components.len();
-        let flags = libc::O_RDONLY
+        let flags = if last && write { libc::O_WRONLY } else { libc::O_RDONLY }
             | libc::O_CLOEXEC
             | libc::O_NOFOLLOW
             | libc::O_NONBLOCK
@@ -301,7 +306,7 @@ pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String>
     Ok(result)
 }
 
-pub fn read(session: &str, id: &str) -> Result<(Asset, Vec<u8>), String> {
+fn listed(session: &str, id: &str) -> Result<Entry, String> {
     let root = workspace(session)?;
     let entry = {
         let catalog = catalog().lock().unwrap();
@@ -316,7 +321,53 @@ pub fn read(session: &str, id: &str) -> Result<(Asset, Vec<u8>), String> {
     if entry.root != root {
         return Err("workspace_changed_refresh_list".into());
     }
-    read_entry(&entry)
+    Ok(entry)
+}
+
+pub fn read(session: &str, id: &str) -> Result<(Asset, Vec<u8>), String> {
+    read_entry(&listed(session, id)?)
+}
+
+/// Replace a listed Markdown file's contents with `text`, as edited on this
+/// desktop. The file must still be the one that was read: a change on disk
+/// since then is refused rather than overwritten. Returns the file's new
+/// listing (with a new ID), which replaces the old one.
+pub fn write_markdown(session: &str, id: &str, text: &str) -> Result<Asset, String> {
+    let entry = listed(session, id)?;
+    let saved = write_entry(session, &entry, text)?;
+    let asset = saved.asset.clone();
+    let mut catalog = catalog().lock().unwrap();
+    if let Some(slot) = catalog
+        .sessions
+        .iter_mut()
+        .find(|(s, _)| s == session)
+        .and_then(|(_, entries)| entries.iter_mut().find(|e| e.asset.id == id))
+    {
+        *slot = saved;
+    }
+    Ok(asset)
+}
+
+fn write_entry(session: &str, entry: &Entry, text: &str) -> Result<Entry, String> {
+    use std::io::Write;
+    if entry.asset.kind != "markdown" {
+        return Err("only_markdown_is_editable".into());
+    }
+    if text.len() as u64 > MAX_TEXT {
+        return Err("file_too_large".into());
+    }
+    if text.contains('\0') {
+        return Err("file_content_does_not_match_type".into());
+    }
+    let mut file = open_in(&entry.root, &entry.relative, true)?;
+    if version(&file.metadata().map_err(|_| "file_unavailable")?) != entry.version {
+        return Err("file_changed_on_disk_refresh_list".into());
+    }
+    file.set_len(0).map_err(|_| "write_failed")?;
+    file.write_all(text.as_bytes()).map_err(|_| "write_failed")?;
+    file.sync_data().map_err(|_| "write_failed")?;
+    drop(file);
+    register(&entry.root, session, &entry.asset.relative_path)
 }
 
 fn read_entry(entry: &Entry) -> Result<(Asset, Vec<u8>), String> {
@@ -478,5 +529,34 @@ mod tests {
             .set_len(MAX_TEXT + 1)
             .unwrap();
         assert!(register(&dir.0, "s", "huge.txt").is_err());
+    }
+    #[test]
+    fn saves_edited_markdown_only_over_the_file_that_was_read() {
+        let dir = Fixture::new();
+        std::fs::write(dir.0.join("plan.md"), "# Old").unwrap();
+        let entry = register(&dir.0, "s", "plan.md").unwrap();
+        let saved = write_entry("s", &entry, "# New\n").unwrap();
+        assert_eq!(std::fs::read(dir.0.join("plan.md")).unwrap(), b"# New\n");
+        assert_ne!(saved.asset.id, entry.asset.id);
+        assert_eq!(read_entry(&saved).unwrap().1, b"# New\n");
+        // The old listing no longer matches the file: no blind overwrite.
+        assert!(write_entry("s", &entry, "# Lost").is_err());
+        assert_eq!(std::fs::read(dir.0.join("plan.md")).unwrap(), b"# New\n");
+        // A change made elsewhere after reading is refused too.
+        std::fs::write(dir.0.join("plan.md"), "# Changed elsewhere").unwrap();
+        assert!(write_entry("s", &saved, "# Mine").is_err());
+        assert_eq!(std::fs::read(dir.0.join("plan.md")).unwrap(), b"# Changed elsewhere");
+        // Only Markdown, bounded, and never through a symlink.
+        std::fs::write(dir.0.join("notes.txt"), "x").unwrap();
+        let text = register(&dir.0, "s", "notes.txt").unwrap();
+        assert!(write_entry("s", &text, "y").is_err());
+        let fresh = register(&dir.0, "s", "plan.md").unwrap();
+        assert!(write_entry("s", &fresh, &"a".repeat(MAX_TEXT as usize + 1)).is_err());
+        assert!(write_entry("s", &fresh, "nul\0byte").is_err());
+        std::fs::remove_file(dir.0.join("plan.md")).unwrap();
+        std::fs::write(dir.0.join("target.md"), "safe").unwrap();
+        symlink("target.md", dir.0.join("plan.md")).unwrap();
+        assert!(write_entry("s", &fresh, "# Through a link").is_err());
+        assert_eq!(std::fs::read(dir.0.join("target.md")).unwrap(), b"safe");
     }
 }

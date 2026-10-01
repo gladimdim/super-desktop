@@ -31,11 +31,8 @@ fn theme_css(theme: &OmarchyTheme) -> String {
     format!(
 r#"
 /* ================= Base Window & Backdrop ================= */
-.asset-drawer > contents {{
-    background-color: {term_card_bg};
+.asset-drawer {{
     color: {foreground};
-    border: 1px solid {btn_border};
-    border-radius: 8px;
 }}
 .asset-drawer .asset-group {{
     padding: 8px;
@@ -55,6 +52,10 @@ r#"
     color: {foreground};
     border: 1px solid {btn_border};
     border-radius: 5px;
+}}
+.asset-drawer button:checked {{
+    border-color: {accent};
+    box-shadow: inset 0 -2px {accent};
 }}
 window.super-desktop-window {{
     background-color: {win_bg};

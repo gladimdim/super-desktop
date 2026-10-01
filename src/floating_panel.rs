@@ -8,7 +8,7 @@
 //! Hide are never under it.
 use crate::card_resize::{Limits, Rect};
 use gtk4::{gdk, prelude::*};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 /// Space kept between the panel and the screen's edges.
@@ -78,6 +78,8 @@ pub struct MovablePanel {
     top: Rc<dyn Fn() -> i32>,
     /// Top-left the user chose, already kept on screen; `None` is centered.
     wanted: Cell<Option<(i32, i32)>>,
+    /// The overlay's placement callback for this panel, until `remove`.
+    placement: RefCell<Option<gtk4::glib::SignalHandlerId>>,
 }
 
 impl MovablePanel {
@@ -111,9 +113,10 @@ impl MovablePanel {
             size: Cell::new(fit_min(layout.saved_size.unwrap_or(layout.default_size), layout.min_size)),
             top,
             wanted: Cell::new(layout.saved_pos),
+            placement: RefCell::new(None),
         });
         let weak = Rc::downgrade(&this);
-        overlay.connect_get_child_position(move |overlay, child| {
+        let placement = overlay.connect_get_child_position(move |overlay, child| {
             let this = weak.upgrade()?;
             if *child != this.shell {
                 return None;
@@ -121,6 +124,7 @@ impl MovablePanel {
             let (x, y, width, height) = this.rect(overlay);
             Some(gdk::Rectangle::new(x, y, width, height))
         });
+        this.placement.replace(Some(placement));
 
         // Surface coordinates: the panel moves under the pointer, so offsets
         // measured in its own coordinates would chase themselves.
@@ -244,6 +248,31 @@ impl MovablePanel {
     /// Put the panel's top-left at `position`, kept on screen.
     pub fn move_to(&self, position: (i32, i32)) {
         self.set_geometry(position, self.size.get());
+    }
+
+    /// Put the panel above the overlay's other panels, but under `ceiling`
+    /// (a dialog that must stay on top, such as a pairing request) when given.
+    pub fn raise(&self, ceiling: Option<&gtk4::Widget>) {
+        let ceiling = ceiling.filter(|c| c.parent().as_ref() == Some(self.overlay.upcast_ref()) && **c != self.shell);
+        if self.shell.parent().is_none() || self.shell.next_sibling().as_ref() == ceiling {
+            return;
+        }
+        self.shell.insert_before(&self.overlay, ceiling);
+    }
+
+    /// Whether the panel is still shown in `overlay`.
+    pub fn is_in(&self, overlay: &gtk4::Overlay) -> bool {
+        self.shell.parent().as_ref() == Some(overlay.upcast_ref())
+    }
+
+    /// Take the panel out of the overlay for good, with its placement.
+    pub fn remove(&self) {
+        if let Some(placement) = self.placement.take() {
+            self.overlay.disconnect(placement);
+        }
+        if self.shell.parent().is_some() {
+            self.overlay.remove_overlay(&self.shell);
+        }
     }
 }
 

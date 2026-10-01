@@ -946,6 +946,16 @@ impl SuperDesktopWindow {
             }),
         ));
         root_overlay.add_overlay(&pairing_wizard.widget);
+        // Files & links panels open as their own floating cards, under the
+        // pairing dialogs.
+        crate::asset_view::set_host(
+            &root_overlay,
+            Rc::new({
+                let state = Rc::clone(&win_rc.state);
+                move || top_bar_height(state.borrow().top_bar_size)
+            }),
+            &pairing_wizard.widget,
+        );
         // Last: a request is decided above whatever else is open.
         root_overlay.add_overlay(&pairing_requests.widget);
 

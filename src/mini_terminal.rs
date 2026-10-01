@@ -720,7 +720,10 @@ impl MiniTerminalCard {
         // File previews read this machine's own sessions, so a remote card
         // never gets that button.
         if !source.is_remote() {
-            header.append(&crate::asset_view::button(data.borrow().session_name.clone()));
+            header.append(&crate::asset_view::button(
+                data.borrow().session_name.clone(),
+                display_name.to_string(),
+            ));
         }
 
         // Iconify button: iconifies the window into 128x128 size
