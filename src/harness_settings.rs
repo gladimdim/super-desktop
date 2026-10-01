@@ -2782,8 +2782,8 @@ mod tests {
         let pages = find_widgets(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            15,
-            "hub + four destinations + custom harness page + seven Connections pages + updates + harness parameters page"
+            16,
+            "hub + four destinations + custom harness page + seven Connections pages + updates + plugins + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
@@ -2791,10 +2791,10 @@ mod tests {
             .collect();
         // hub, shortcut, harnesses, custom, top bar,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
-        // updates, harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
+        // updates, plugins (AI provider, installed), harness parameters
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1, 1, 2, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 18);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 20);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -2814,6 +2814,7 @@ mod tests {
             ("android-settings-entry", 5, "Connections"),
             ("settings-sleep-lock-entry", 12, "Sleep lock"),
             ("settings-updates-entry", 13, "Updates"),
+            ("settings-plugins-entry", 14, "Plugins"),
         ] {
             let button = find_buttons(&panel.widget, class)
                 .into_iter()
