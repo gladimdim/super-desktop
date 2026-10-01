@@ -8,6 +8,7 @@
 //! Plugin sessions run on worker threads (`plugin_host::api::Session`); when
 //! they need GTK they post a `Job` here and wait for the answer with a
 //! timeout. The GTK thread never waits on a plugin.
+pub mod cards;
 pub mod settings_page;
 pub mod toolbar;
 pub mod view;
@@ -26,6 +27,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+pub use cards::card_inputs_changed;
 
 /// How long a plugin's worker waits for the GTK thread.
 const UI_TIMEOUT: Duration = Duration::from_secs(2);
@@ -54,7 +57,9 @@ impl api::Ui for Bridge {
         if self.jobs.lock().unwrap_or_else(|e| e.into_inner()).unbounded_send(job).is_err() {
             return Err(RpcError::new(rpc::UNAVAILABLE, "SUPER DESKTOP is shutting down", "Stop.", "references/host-api.md#lifecycle"));
         }
-        answer.recv_timeout(UI_TIMEOUT).unwrap_or_else(|_| {
+        // `card.close` waits for the person to answer its confirmation.
+        let timeout = if method == "card.close" { Duration::from_secs(120) } else { UI_TIMEOUT };
+        answer.recv_timeout(timeout).unwrap_or_else(|_| {
             Err(RpcError::new(rpc::TIMEOUT, format!("{method}: the desktop did not answer in time"), "Retry once; the desktop may be busy.", "references/host-api.md#errors"))
         })
     }
@@ -128,6 +133,10 @@ pub struct Manager {
     shortcut_problems: RefCell<BTreeMap<String, String>>,
     /// Overlay-scope shortcuts: normalized combo → (plugin, command).
     overlay_keys: RefCell<BTreeMap<String, (String, String)>>,
+    /// The local workspace (cards, screen, commands), set by the window.
+    workspace: RefCell<Option<Rc<dyn cards::Workspace>>>,
+    /// card id → plugin id → that plugin's title text and chips.
+    titles: RefCell<BTreeMap<String, BTreeMap<String, cards::TitleState>>>,
 }
 
 thread_local! {
@@ -152,6 +161,8 @@ pub fn manager() -> Rc<Manager> {
         binds_generation: Cell::new(0),
         shortcut_problems: RefCell::default(),
         overlay_keys: RefCell::default(),
+        workspace: RefCell::new(None),
+        titles: RefCell::default(),
     });
     MANAGER.with(|m| m.replace(Some(Rc::clone(&manager))));
     let weak = Rc::downgrade(&manager);
@@ -256,7 +267,11 @@ impl Manager {
     }
 
     fn activate(self: &Rc<Self>, installed: &store::Installed) {
-        let manifest = match cli::installed_manifest(installed).and_then(|m| cli::check_activatable(installed, &m).map(|_| m)) {
+        let running: Vec<(String, Arc<Manifest>)> = self.plugins.borrow().iter().map(|(id, p)| (id.clone(), Arc::clone(&p.manifest))).collect();
+        let manifest = match cli::installed_manifest(installed)
+            .and_then(|m| cli::check_activatable(installed, &m).map(|_| m))
+            .and_then(|m| cli::check_exclusive(&m, &running).map(|_| m))
+        {
             Ok(manifest) => Arc::new(manifest),
             Err(why) => {
                 api::append_log(&crate::plugin_host::log_file(&installed.id), "error", &format!("not turned on: {why}"));
@@ -284,6 +299,7 @@ impl Manager {
                 views: BTreeMap::new(),
             },
         );
+        self.decorate_all();
         if starts_now {
             self.start(&id);
         }
@@ -319,6 +335,7 @@ impl Manager {
             close_view_widgets(&open);
         }
         self.bar.remove_plugin(id);
+        self.forget_cards_of(id);
         self.apply_shortcuts();
         if let Some(session) = plugin.session {
             let _ = std::thread::Builder::new().name(format!("plugin-stop-{id}")).spawn(move || session.stop());
@@ -340,6 +357,7 @@ impl Manager {
         if self.overlay_keys.borrow().values().any(|(plugin, _)| plugin == id) {
             left.push("overlay shortcuts".into());
         }
+        left.extend(self.cards_footprint(id));
         let lua = std::fs::read_to_string(crate::shortcut::bindings_path()).unwrap_or_default();
         if crate::shortcut::plugin_bind_lines(&lua).iter().any(|line| line.contains(&format!("plugin run {id} "))) {
             left.push("global shortcuts in bindings.lua".into());
@@ -350,6 +368,10 @@ impl Manager {
     fn handle(self: &Rc<Self>, job: Job) {
         match job {
             Job::Call { plugin, method, params, reply } => {
+                if method == "card.close" && self.plugins.borrow().contains_key(&plugin) {
+                    self.confirm_close(&plugin, &params, reply);
+                    return;
+                }
                 let result = self.call(&plugin, &method, &params);
                 let _ = reply.send(result);
             }
@@ -419,6 +441,9 @@ impl Manager {
         if let Some(session) = self.session(id) {
             if self.overlay_shown.get() {
                 session.notify("overlay.shown", json!({}));
+            }
+            if let Some(workspace) = self.workspace.borrow().clone() {
+                self.send_title_inputs(Some(id), &workspace.cards());
             }
             for command in queued {
                 session.notify("command", command);
@@ -583,6 +608,7 @@ impl Manager {
                 }
                 Ok(json!({}))
             }
+            m if m == "workspace.cards" || m == "harness.launch" || m.starts_with("card.") || m.starts_with("title.") => self.card_call(id, method, params),
             _ => Err(RpcError::new(rpc::METHOD_NOT_FOUND, format!("{method} is not a desktop call"), "Report this as a SUPER DESKTOP bug.", "references/host-api.md#errors")),
         }
     }
@@ -834,6 +860,14 @@ pub fn handle_ipc(payload: &str) -> String {
                 false => json!({"ok": false, "error": format!("{id} is not on (see super-desktop plugin logs {id})")}),
             }
         }
+        "cards" => {
+            let (w, h, top) = manager.workspace.borrow().as_ref().map(|ws| ws.screen()).unwrap_or((0, 0, 0));
+            json!({"ok": true, "screen": {"w": w, "h": h, "top": top}, "cards": manager.cards_snapshot()})
+        }
+        "press" => match manager.press(request["card"].as_str().unwrap_or_default(), request["control"].as_str().unwrap_or_default()) {
+            Ok(()) => json!({"ok": true}),
+            Err(why) => json!({"ok": false, "error": why}),
+        },
         "views" => match manager.views(id) {
             Ok(views) => json!({"ok": true, "views": views}),
             Err(why) => json!({"ok": false, "error": why}),

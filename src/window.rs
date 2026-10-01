@@ -972,6 +972,9 @@ impl SuperDesktopWindow {
             }),
             &pairing_wizard.widget,
         );
+        // Plugins see and act on this PC's cards through the same commands a
+        // remote PC sends.
+        crate::plugin_ui::manager().set_workspace(Rc::new(PluginWorkspace(Rc::downgrade(&win_rc))));
         // Plugin panels open the same way, under the same dialogs.
         crate::plugin_ui::manager().set_view_host(
             &root_overlay,
@@ -1756,6 +1759,8 @@ impl SuperDesktopWindow {
             card.focus_terminal();
         }
         term_cards.borrow_mut().push(Rc::clone(&card));
+        // Plugin buttons, controls and titles for the new card.
+        crate::plugin_ui::manager().decorate(&card);
         raise_canvas_child(&canvas, &self.hud);
         // A new card can land on top of an existing one (they cascade 32px):
         // its outline shows up right away while the user works in neither.
@@ -3108,5 +3113,26 @@ mod tests {
         canvas.put(&term1, 0.0, 0.0);
         // Expanded terminal 1 is at the top of the canvas, above any other icon and even sticky notes!
         assert_eq!(canvas.last_child().as_ref(), Some(term1.upcast_ref::<gtk4::Widget>()));
+    }
+}
+
+/// The local workspace as plugins see it (`plugin_ui::cards::Workspace`).
+struct PluginWorkspace(std::rc::Weak<SuperDesktopWindow>);
+
+impl crate::plugin_ui::cards::Workspace for PluginWorkspace {
+    fn cards(&self) -> Vec<Rc<MiniTerminalCard>> {
+        self.0.upgrade().map(|w| w.terminal_cards.borrow().clone()).unwrap_or_default()
+    }
+
+    fn screen(&self) -> (i32, i32, i32) {
+        self.0
+            .upgrade()
+            .map(|w| (w.screen_width, w.screen_height, top_bar_height(w.state.borrow().top_bar_size)))
+            .unwrap_or((0, 0, 0))
+    }
+
+    fn command(&self, command: &crate::desktop_protocol::WorkspaceCommand) -> Result<Option<String>, &'static str> {
+        let window = self.0.upgrade().ok_or("desktop_not_ready")?;
+        window.apply_workspace_command(command)
     }
 }

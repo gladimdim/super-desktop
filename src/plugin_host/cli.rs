@@ -21,6 +21,8 @@ const USAGE: &str = "usage: super-desktop plugin <command>
   views ID [--json]            its open views and every node's state (text, value, visible, enabled)
   interact ID NODE EVENT [VALUE] [--view=VIEW]
                                operate a node as a user would: click, change, submit (VALUE is JSON)
+  cards [--json]               this PC's cards: drawn and published title, chips, plugin buttons, controls
+  press CARD CONTROL           press a card's plugin button or control (or builtin:iconify|restore|expand|close)
   logs ID [--follow]           its log: stderr, log calls, host errors
   new ID [--kind=process|renderer] [--dir=DIR]
                                a starter plugin: manifest, code, a test scenario, AGENTS.md and the skills
@@ -54,6 +56,20 @@ pub fn run(args: &[String]) -> i32 {
             _ => Err("plugin run ID COMMAND [JSON]".into()),
         },
         Some("logs") => with_id(&positional, |id| logs(id, args.iter().any(|a| a == "--follow"))),
+        Some("cards") => daemon(json!({"op": "cards"})).map(|reply| {
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&reply["cards"]).unwrap_or_default());
+            } else {
+                for card in reply["cards"].as_array().into_iter().flatten() {
+                    println!("{}  {}  {}", card["id"].as_str().unwrap_or(""), card["agent"].as_str().unwrap_or(""), card["title"]["drawn"].as_str().unwrap_or(""));
+                    println!("    buttons {}  controls {}", card["buttons"], card["controls"]);
+                }
+            }
+        }),
+        Some("press") => match (positional.get(1), positional.get(2)) {
+            (Some(card), Some(control)) => daemon(json!({"op": "press", "card": card, "control": control})).map(|_| ()),
+            _ => Err("plugin press CARD CONTROL".into()),
+        },
         Some("views") => with_id(&positional, |id| {
             let reply = daemon(json!({"op": "views", "id": id}))?;
             if json_out {
@@ -127,7 +143,7 @@ pub fn describe_value() -> Value {
         "limits": super::api::limits(),
         "llmProviders": {"installed": super::llm::available(), "chosen": store::Store::load().llm_provider},
         "sandbox": "not enforced by this build: plugins run as you",
-        "commands": ["describe", "validate", "new", "test", "link", "list", "activate", "deactivate", "reload", "run", "views", "interact", "logs", "remove", "disable-all"],
+        "commands": ["describe", "validate", "new", "test", "link", "list", "activate", "deactivate", "reload", "run", "views", "interact", "cards", "press", "logs", "remove", "disable-all"],
         "skills": manifest::skills_dir().map(|d| d.display().to_string()),
         "schemas": manifest::skills_dir().map(|d| json!({
             "manifest": d.join("schemas/manifest.schema.json"),
@@ -293,6 +309,7 @@ fn set_active(id: &str, active: bool) -> Result<(), String> {
     if active {
         let manifest = installed_manifest(&installed)?;
         check_activatable(&installed, &manifest)?;
+        check_exclusive(&manifest, &active_manifests())?;
     }
     store::update(|s| {
         if let Some(p) = s.get_mut(id) {
@@ -310,6 +327,25 @@ fn set_active(id: &str, active: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Exclusive contribution points take one plugin at a time: `others` are the
+/// plugins on now (not counting this one).
+pub fn check_exclusive(manifest: &Manifest, others: &[(String, std::sync::Arc<Manifest>)]) -> Result<(), String> {
+    for (id, other) in others.iter().filter(|(id, _)| *id != manifest.id) {
+        if manifest.contributes.card_controls.is_some() && other.contributes.card_controls.is_some() {
+            return Err(format!("{} already replaces the card controls; turn {id} off first", other.name));
+        }
+        if manifest.contributes.renderer.is_some() && other.contributes.renderer.is_some() {
+            return Err(format!("{} already lays out the cards; turn {id} off first", other.name));
+        }
+    }
+    Ok(())
+}
+
+/// The plugins on in plugins.json, with manifests that load.
+pub fn active_manifests() -> Vec<(String, std::sync::Arc<Manifest>)> {
+    store::Store::load().plugins.iter().filter(|p| p.active).filter_map(|p| installed_manifest(p).ok().map(|m| (p.id.clone(), std::sync::Arc::new(m)))).collect()
 }
 
 /// Whether a plugin may be turned on: this build is in its range and every

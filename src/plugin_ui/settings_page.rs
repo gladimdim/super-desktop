@@ -141,7 +141,9 @@ fn plugin_card(installed: &store::Installed) -> gtk4::Widget {
         let message = message.clone();
         switch.connect_state_set(move |switch, on| {
             if on {
-                if let Err(why) = cli::installed_manifest(&installed).and_then(|m| cli::check_activatable(&installed, &m)) {
+                if let Err(why) = cli::installed_manifest(&installed)
+                    .and_then(|m| cli::check_activatable(&installed, &m).and_then(|_| cli::check_exclusive(&m, &cli::active_manifests())))
+                {
                     message.set_text(&why);
                     message.set_visible(true);
                     switch.set_active(false);

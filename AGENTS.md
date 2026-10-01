@@ -203,6 +203,14 @@ as "user" turns, and sends them to the `UserPromptSubmit` hook.
   land after the hook). Do not remove either step.
 - An injected turn still counts as a turn for status and completion tracking;
   it only must not replace the prompt.
+- Plugins may draw their own title text and chips on a card
+  (`plugin_ui::cards`, `MiniTerminalCard::set_plugin_title`). That text is
+  display-only on this PC: the card keeps its own title (`base_title`),
+  which is what `desktop_presentation`, the workspace snapshot, the phone's
+  `lastPrompt`/`sessionTitle` and the title's tooltip use, and plugins only
+  ever receive the vetted prompt. Never publish the drawn label's text.
+  `card_title_plugin_text_is_drawn_only` and `tests/plugin_cards_smoke.py`
+  (the published snapshot has no plugin title) cover it.
 - Any change to prompt/title capture, harness hooks or adapters must preserve
   and run `cargo test card_title_`. Those tests must fail if the filter is
   removed; add a case for every new injected-turn shape you see in the wild.

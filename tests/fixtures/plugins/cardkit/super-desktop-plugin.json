@@ -1,0 +1,16 @@
+{
+  "manifestVersion": 1,
+  "id": "cardkit",
+  "name": "Card Kit",
+  "version": "0.1.0",
+  "description": "Test plugin for tests/plugin_cards_smoke.py: titles, chips, a card button, terminal I/O.",
+  "engines": { "superDesktop": ">=1.0.0", "pluginApi": "1" },
+  "main": { "command": ["python3", "main.py"] },
+  "activation": ["onStartup"],
+  "permissions": ["ui.titles", "ui.cardButtons", "cards.read", "terminal.read", "terminal.write"],
+  "contributes": {
+    "commands": [{ "id": "cardkit.type", "title": "Type into the terminal" }],
+    "cardButtons": [{ "id": "cardkit.button", "icon": "🧪", "tooltip": "Type a test line", "command": "cardkit.type" }],
+    "titles": true
+  }
+}

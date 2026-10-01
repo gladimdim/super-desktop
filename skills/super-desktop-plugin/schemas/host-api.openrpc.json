@@ -963,7 +963,7 @@
         }
       ],
       "x-permission": "cards.control",
-      "summary": "Move and resize an open card, saved like a user drag. The host clamps to the screen and minimum size and returns the rectangle applied.",
+      "summary": "Move and resize an open card, saved like a user drag. The host clamps like a drag (on screen, below the bar, minimum size) and returns the rectangle applied. An expanded card refuses until card.collapse.",
       "params": [
         {
           "name": "card",
@@ -1000,7 +1000,7 @@
         }
       ],
       "x-permission": "cards.control",
-      "summary": "Ask to close the card. The user confirms in the built-in dialog; the result says what they chose.",
+      "summary": "Ask to close the card. A small dialog on the card asks the person; the request waits for the answer (up to 2 minutes) and the result says what they chose.",
       "params": [
         {
           "name": "card",
@@ -1110,7 +1110,7 @@
         }
       ],
       "x-permission": "harness.launch",
-      "summary": "Open a new card running a harness in a folder. agent is a built-in key (claude, codex, ...), a custom launcher key, or this plugin's 'p.<plugin>.<id>'.",
+      "summary": "Open a new card running a harness in a folder. agent is a built-in key (claude, codex, ...) or a custom launcher key. A prompt is not supported by this build yet: launch, then terminal.send it.",
       "params": [
         {
           "name": "agent",

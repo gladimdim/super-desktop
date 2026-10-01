@@ -114,11 +114,17 @@ Permission: `cards.read`. `{}` → `{screen: {w, h, top}, cards: [CardInfo]}`, w
 plugin's title). Coordinates are logical pixels; cards live below `top`.
 
 ### `card.*`
-Permission: `cards.control`. `card.iconify {card, at?}`, `card.restore {card}`, `card.expand {card}`,
-`card.collapse {card}`, `card.focus {card}`, `card.setRect {card, rect}` →
-`{rect}` (clamped like a drag, and saved like one), `card.close {card}` →
-`{closed}` (the user confirms in the built-in dialog). These are the same
-actions as the built-in buttons; their results stay after the plugin is off.
+Permission: `cards.control`. `card.iconify {card, at?}` (`at` sets the icon
+spot), `card.restore {card}`, `card.expand {card}`, `card.collapse {card}`,
+`card.focus {card}` (raises it, opens an icon, focuses its terminal),
+`card.setRect {card, rect}` → `{rect}`, `card.close {card}` → `{closed}`.
+They run the same path as the card's own buttons and gestures, so the result
+is saved like a user's and stays after the plugin is off. `setRect` is
+clamped like a drag (the card stays on screen below the bar) and answers
+with the rectangle applied. An expanded card refuses `iconify`, `restore`
+and `setRect` until `card.collapse`. `card.close` asks the person in a small
+dialog on the card ("<plugin> wants to close this terminal"); the request
+waits for the answer (up to 2 minutes) and `closed` says what they chose.
 
 ### `terminal.text` / `terminal.send`
 Permissions: `terminal.read` / `terminal.write`. `terminal.text {card, lines?}` → `{text}`: up to 200 visible lines.
@@ -126,9 +132,10 @@ Permissions: `terminal.read` / `terminal.write`. `terminal.text {card, lines?}` 
 with an explicit user action; never type into a harness on a timer.
 
 ### `harness.launch`
-Permission: `harness.launch`. `{agent, folder, prompt?}` → `{card}`. `agent` is a built-in key (`claude`,
-`codex`, `opencode`, …), a custom launcher key, or your own
-`p.<plugin>.<id>`.
+Permission: `harness.launch`. `{agent, folder}` → `{card}`. `agent` is a built-in key (`claude`, `codex`,
+`opencode`, …) or a custom launcher key. `prompt` is not supported by this
+build yet (`unavailable`): launch, wait until the harness is ready
+(`terminal.text`), then `terminal.send` the prompt with `enter`.
 
 ### `harness.writeConfig`
 Permission: `harness.provide`. `{path, content}` → `{}`. Writes a config file your harness needs, under
@@ -155,7 +162,8 @@ restores the built-in title). Chips: `{text ≤ 24, tone?, tooltip?}`, up to 3
 per side. The tooltip always shows the real prompt. Titles are display-only:
 they never become the prompt, never reach the phone or other PCs, and vanish
 when the plugin is turned off. With several title plugins, chips combine and
-the first plugin (in the user's order) that sets text wins.
+the first plugin (by plugin id) that sets text wins. This build titles this
+PC's own cards (`local: true`).
 
 ## Notifications the host sends
 

@@ -30,7 +30,7 @@ const MAX_LOG: u64 = 4 * 1024 * 1024;
 
 /// Host methods this build answers. Keep in step with the OpenRPC document
 /// (`plugin_spec_implemented_methods_are_in_the_contract`).
-pub const IMPLEMENTED: [&str; 12] = [
+pub const IMPLEMENTED: [&str; 25] = [
     "host.describe",
     "log",
     "contrib.update",
@@ -43,10 +43,20 @@ pub const IMPLEMENTED: [&str; 12] = [
     "ui.close",
     "ui.notify",
     "llm.complete",
+    "workspace.cards",
+    "card.iconify",
+    "card.restore",
+    "card.expand",
+    "card.collapse",
+    "card.focus",
+    "card.setRect",
+    "card.close",
+    "terminal.text",
+    "terminal.send",
+    "harness.launch",
+    "title.set",
+    "title.clear",
 ];
-
-/// Methods the GTK side performs (via `Ui::call`).
-pub const UI_METHODS: [&str; 4] = ["contrib.update", "ui.open", "ui.patch", "ui.close"];
 
 pub fn limits() -> Value {
     json!({
@@ -102,7 +112,7 @@ pub fn contract() -> &'static Contract {
 
 /// What the GTK side does for a plugin.
 pub trait Ui: Send + Sync + 'static {
-    /// One of `UI_METHODS`, already checked. Blocks this worker until the GTK
+    /// A desktop method, already checked. Blocks this worker until the GTK
     /// thread answers (with its own timeout).
     fn call(&self, plugin: &str, method: &str, params: Value) -> Result<Value, RpcError>;
     /// Lifecycle news; must not block.
@@ -273,6 +283,87 @@ pub fn dispatch(ctx: &Context, method: &str, params: &Value) -> Result<Value, Rp
         }
         "ui.close" => {
             string(params, "handle", 64, &docs_for(method))?;
+            ctx.ui.call(&manifest.id, method, params.clone())
+        }
+        "workspace.cards" => ctx.ui.call(&manifest.id, method, params.clone()),
+        "card.restore" | "card.expand" | "card.collapse" | "card.focus" | "card.close" => {
+            string(params, "card", 128, &docs_for(method))?;
+            ctx.ui.call(&manifest.id, method, params.clone())
+        }
+        "card.iconify" | "card.setRect" => {
+            string(params, "card", 128, &docs_for(method))?;
+            let (key, fields): (&str, &[&str]) = if method == "card.setRect" { ("rect", &["x", "y", "w", "h"]) } else { ("at", &["x", "y"]) };
+            if let Some(value) = params.get(key) {
+                let finite = fields.iter().all(|f| value[*f].as_f64().is_some_and(f64::is_finite));
+                if !finite {
+                    return Err(RpcError::invalid_params(format!("`{key}` needs finite numbers {}", fields.join(", ")), &docs_for(method)));
+                }
+            }
+            ctx.ui.call(&manifest.id, method, params.clone())
+        }
+        "terminal.text" | "terminal.send" => {
+            string(params, "card", 128, &docs_for(method))?;
+            // The card's session comes from the desktop; tmux runs here, on
+            // this worker, never on the GTK thread.
+            let session = ctx.ui.call(&manifest.id, "card.session", json!({"card": params["card"]}))?;
+            let session = session["session"].as_str().unwrap_or_default().to_string();
+            if method == "terminal.text" {
+                let lines = match params.get("lines") {
+                    None => 50,
+                    Some(v) => v.as_u64().filter(|n| (1..=200).contains(n)).ok_or_else(|| RpcError::invalid_params("`lines` is 1–200", &docs_for(method)))? as usize,
+                };
+                let screen = crate::tmux::capture_visible_screen(&session)
+                    .ok_or_else(|| RpcError::new(rpc::UNAVAILABLE, "the terminal could not be read", "The session may have ended; read workspace.cards again.", &docs_for(method)))?;
+                let all: Vec<&str> = screen.trim_end().lines().collect();
+                let text = all[all.len().saturating_sub(lines)..].join("\n");
+                Ok(json!({"text": text}))
+            } else {
+                let text = string(params, "text", 16 * 1024, &docs_for(method))?;
+                let enter = param(params, "enter").as_bool().unwrap_or(false);
+                crate::tmux::send_keys(&session, &text, enter)
+                    .map_err(|why| RpcError::new(rpc::UNAVAILABLE, format!("typing failed: {why}"), "The session may have ended; read workspace.cards again.", &docs_for(method)))?;
+                ctx.log("info", &format!("terminal.send: {} characters to {session}{}", text.chars().count(), if enter { " + Enter" } else { "" }));
+                Ok(json!({}))
+            }
+        }
+        "harness.launch" => {
+            string(params, "agent", 96, &docs_for(method))?;
+            string(params, "folder", 4096, &docs_for(method))?;
+            if params.get("prompt").is_some_and(|p| !p.is_null()) {
+                return Err(RpcError::new(
+                    rpc::UNAVAILABLE,
+                    "harness.launch with a prompt is not supported by this build yet",
+                    "Launch without a prompt, then send it with terminal.send once the harness is ready.",
+                    &docs_for(method),
+                ));
+            }
+            ctx.ui.call(&manifest.id, method, params.clone())
+        }
+        "title.clear" => {
+            string(params, "card", 128, &docs_for(method))?;
+            ctx.ui.call(&manifest.id, method, params.clone())
+        }
+        "title.set" => {
+            let docs = docs_for(method);
+            string(params, "card", 128, &docs)?;
+            match params.get("text") {
+                None | Some(Value::Null) => {}
+                Some(Value::String(t)) if t.chars().count() <= 200 => {}
+                Some(_) => return Err(RpcError::invalid_params("`text` is a string of at most 200 characters, or null", &docs)),
+            }
+            for key in ["chipsBefore", "chipsAfter"] {
+                if let Some(chips) = params.get(key) {
+                    let chips = chips.as_array().filter(|c| c.len() <= 3).ok_or_else(|| RpcError::invalid_params(format!("`{key}` is an array of at most 3 chips"), &docs))?;
+                    for chip in chips {
+                        let text_ok = chip["text"].as_str().is_some_and(|t| (1..=24).contains(&t.chars().count()));
+                        let tone_ok = chip.get("tone").is_none_or(|t| t.as_str().is_some_and(|t| ["neutral", "accent", "success", "warning", "error"].contains(&t)));
+                        let tip_ok = chip.get("tooltip").is_none_or(|t| t.as_str().is_some_and(|t| t.chars().count() <= 120));
+                        if !(text_ok && tone_ok && tip_ok) {
+                            return Err(RpcError::invalid_params(format!("each chip in `{key}` is {{text: 1–24 characters, tone?, tooltip?}}"), &docs));
+                        }
+                    }
+                }
+            }
             ctx.ui.call(&manifest.id, method, params.clone())
         }
         _ => unreachable!("every IMPLEMENTED method is matched"),

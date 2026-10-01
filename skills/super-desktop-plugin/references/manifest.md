@@ -79,7 +79,7 @@ emoji or a relative `.svg`/`.png` (at most 256 KiB).
 | `toolbar` | additive | `[{id, icon, tooltip, label?, command \| view}]` | Placed after the harness launchers, inside the scrolling part of the bar. Labels hide on narrow screens. At most 4. Update label/badge/visibility at run time with `contrib.update`. |
 | `toolbarHide` | additive | `["brand", "shortcutHint", "newNote", "usage", "launcher:<key>"]` | Arrange, Settings, Hide and the PC selector cannot be hidden. |
 | `cardButtons` | additive | `[{id, icon, tooltip, command, showInIcon?, when?}]` | Local cards only. `when: {agents, status, iconified}` filters cards. At most 2. The command's context carries the card. |
-| `cardControls` | exclusive | `{id, controls, iconControls?}` | Replaces the window buttons on local cards. Entries are `builtin:iconify`, `builtin:restore`, `builtin:expand`, `builtin:close` or `{id, icon, tooltip, command}`; 1–6 each. The header's right-click menu keeps the built-in actions. |
+| `cardControls` | exclusive | `{id, controls, iconControls?}` | Replaces the window buttons on local cards (`iconControls`: on the icon form; without it the icon keeps restore and close). Entries are `builtin:iconify`, `builtin:restore`, `builtin:expand`, `builtin:close` (each exactly like the card's own button) or `{id, icon, tooltip, command}`; 1–6 each. A right-click on the card's header or icon bar always offers the built-in actions. Turning on a second plugin with card controls is refused until the first is off. |
 | `titles` | additive | `true` | The plugin sets titles with `title.set`; needs `activation: ["onStartup"]`. |
 | `renderer` | exclusive | `{id, wasm}` | A WASM module; see `renderer-abi.md`. |
 | `harnesses` | additive | `[{…}]` | See `harnesses.md`. At most 4. |
