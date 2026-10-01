@@ -4,20 +4,70 @@
   "name": "Smoke",
   "version": "0.1.0",
   "description": "Test plugin for tests/plugin_smoke.py: records what the host asks of it.",
-  "engines": { "superDesktop": ">=1.0.0", "pluginApi": "1" },
-  "main": { "command": ["python3", "main.py"] },
-  "activation": ["onStartup"],
-  "permissions": ["ui.toolbar", "ui.popup"],
+  "engines": {
+    "superDesktop": ">=1.0.0",
+    "pluginApi": "1"
+  },
+  "main": {
+    "command": [
+      "python3",
+      "main.py"
+    ]
+  },
+  "activation": [
+    "onStartup"
+  ],
+  "permissions": [
+    "ui.toolbar",
+    "ui.popup",
+    "shortcuts.global"
+  ],
   "contributes": {
     "commands": [
-      { "id": "smoke.open", "title": "Open the smoke panel" },
-      { "id": "smoke.crash", "title": "Exit at once" },
-      { "id": "smoke.spawn", "title": "Start a child that ignores SIGTERM" }
+      {
+        "id": "smoke.open",
+        "title": "Open the smoke panel"
+      },
+      {
+        "id": "smoke.crash",
+        "title": "Exit at once"
+      },
+      {
+        "id": "smoke.spawn",
+        "title": "Start a child that ignores SIGTERM"
+      }
     ],
     "toolbar": [
-      { "id": "smoke.button", "icon": "🧪", "label": "Smoke", "tooltip": "Smoke test", "command": "smoke.open" }
+      {
+        "id": "smoke.button",
+        "icon": "🧪",
+        "label": "Smoke",
+        "tooltip": "Smoke test",
+        "command": "smoke.open"
+      }
     ],
-    "views": [{ "id": "smoke.panel", "title": "Smoke", "kind": "panel" }],
-    "settings": [{ "key": "greeting", "type": "string", "title": "Greeting", "default": "hello" }]
+    "views": [
+      {
+        "id": "smoke.panel",
+        "title": "Smoke",
+        "kind": "panel"
+      }
+    ],
+    "settings": [
+      {
+        "key": "greeting",
+        "type": "string",
+        "title": "Greeting",
+        "default": "hello"
+      }
+    ],
+    "shortcuts": [
+      {
+        "id": "smoke.key",
+        "command": "smoke.open",
+        "default": "SUPER + ALT + F12",
+        "scope": "global"
+      }
+    ]
   }
 }

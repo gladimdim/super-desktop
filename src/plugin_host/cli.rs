@@ -264,7 +264,12 @@ fn set_active(id: &str, active: bool) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     match daemon(json!({"op": "sync"})) {
         Ok(_) => println!("{id} is {}.", if active { "on" } else { "off" }),
-        Err(_) => println!("{id} will be {} when SUPER DESKTOP starts.", if active { "on" } else { "off" }),
+        Err(_) => {
+            if !active {
+                rewrite_binds_without_daemon();
+            }
+            println!("{id} will be {} when SUPER DESKTOP starts.", if active { "on" } else { "off" });
+        }
     }
     Ok(())
 }
@@ -324,7 +329,9 @@ fn logs(id: &str, follow: bool) -> Result<(), String> {
 fn remove(id: &str, purge: bool) -> Result<(), String> {
     let installed = store::Store::load().get(id).cloned().ok_or_else(|| format!("no plugin `{id}` is installed"))?;
     store::update(|s| s.plugins.retain(|p| p.id != id)).map_err(|e| e.to_string())?;
-    let _ = daemon(json!({"op": "sync"}));
+    if daemon(json!({"op": "sync"})).is_err() {
+        rewrite_binds_without_daemon();
+    }
     if let Source::Git { .. } = installed.source {
         let _ = std::fs::remove_dir_all(super::code_dir(id));
     }
@@ -343,7 +350,12 @@ fn disable_all() -> Result<(), String> {
         n
     })
     .map_err(|e| e.to_string())?;
-    let _ = daemon(json!({"op": "sync"}));
+    if daemon(json!({"op": "sync"})).is_err() {
+        // No daemon to do it: take every plugin shortcut out of bindings.lua.
+        if let Err(error) = crate::shortcut::apply_plugin_binds(&[]) {
+            eprintln!("warning: plugin shortcuts not removed: {error}");
+        }
+    }
     println!("Turned off {count} plugin(s).");
     Ok(())
 }
@@ -366,4 +378,13 @@ fn daemon(request: Value) -> Result<Value, String> {
 
 fn daemon_status() -> Option<serde_json::Map<String, Value>> {
     daemon(json!({"op": "status"})).ok().and_then(|v| v["plugins"].as_object().cloned())
+}
+
+/// With no daemon running, `bindings.lua` still must not keep shortcuts of
+/// plugins that are off or removed.
+fn rewrite_binds_without_daemon() {
+    let desired = super::binds::desired_from_store(&store::Store::load());
+    if let Err(error) = crate::shortcut::apply_plugin_binds(&desired.global) {
+        eprintln!("warning: plugin shortcuts not updated: {error}");
+    }
 }

@@ -1058,6 +1058,16 @@ impl SuperDesktopWindow {
                 }
                 return glib::Propagation::Stop;
             }
+            // Plugin shortcuts that work inside the overlay. A focused
+            // terminal keeps every combination without SUPER.
+            if let crate::shortcut::Capture::Combo(combo) = crate::shortcut::interpret(key, state) {
+                let in_terminal = win_w.upgrade().and_then(|w| gtk4::prelude::RootExt::focus(&w.window)).is_some_and(|focused| {
+                    focused.type_().name().contains("Terminal") || focused.has_css_class("term-vte")
+                });
+                if crate::plugin_ui::manager().overlay_shortcut(&combo, in_terminal) {
+                    return glib::Propagation::Stop;
+                }
+            }
             glib::Propagation::Proceed
         });
         win_rc.window.add_controller(key_ctrl);

@@ -165,6 +165,9 @@ fn plugin_card(installed: &store::Installed) -> gtk4::Widget {
         if !permissions.is_empty() {
             card.append(&note(&format!("It {}.", permissions.join(", "))));
         }
+        for shortcut in &manifest.contributes.shortcuts {
+            card.append(&shortcut_row(installed, manifest, shortcut));
+        }
         if !manifest.contributes.settings.is_empty() {
             let form = settings_form(manifest);
             card.append(&form);
@@ -174,6 +177,70 @@ fn plugin_card(installed: &store::Installed) -> gtk4::Widget {
     log.set_selectable(true);
     card.append(&log);
     card.upcast()
+}
+
+/// One shortcut: on/off, its key (Hyprland spelling), and why it is not
+/// active when it is not. Saved as an override in `plugins.json`.
+fn shortcut_row(installed: &store::Installed, manifest: &Manifest, shortcut: &crate::plugin_host::manifest::Shortcut) -> gtk4::Widget {
+    let row = Box::new(Orientation::Horizontal, 8);
+    let override_value = installed.shortcuts.get(&shortcut.id).cloned();
+    let combo = match &override_value {
+        Some(Some(combo)) => combo.clone(),
+        _ => shortcut.default.clone(),
+    };
+    let switch = gtk4::Switch::new();
+    switch.set_valign(Align::Center);
+    switch.set_active(!matches!(override_value, Some(None)));
+    let title = manifest.contributes.commands.iter().find(|c| c.id == shortcut.command).map(|c| c.title.as_str()).unwrap_or(&shortcut.command);
+    let scope = if shortcut.scope == "global" { "everywhere" } else { "inside SUPER DESKTOP" };
+    let label = Label::new(Some(&format!("⌨ {title} ({scope})")));
+    label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    let entry = gtk4::Entry::new();
+    entry.set_text(&combo);
+    entry.set_width_chars(18);
+    entry.set_tooltip_text(Some("Write it like Hyprland: SUPER + SHIFT + G, or F7. Press Enter to save."));
+    row.append(&switch);
+    row.append(&label);
+    row.append(&entry);
+    let outer = Box::new(Orientation::Vertical, 2);
+    outer.append(&row);
+    let problem = note(&super::manager().shortcut_problem(&shortcut.id).unwrap_or_default());
+    problem.add_css_class("launcher-note-error");
+    problem.set_visible(!problem.text().is_empty());
+    outer.append(&problem);
+    let save: Rc<dyn Fn(Option<String>)> = {
+        let (id, key) = (installed.id.clone(), shortcut.id.clone());
+        Rc::new(move |value: Option<String>| {
+            let (id, key) = (id.clone(), key.clone());
+            let _ = store::update(move |s| {
+                if let Some(p) = s.get_mut(&id) {
+                    p.shortcuts.insert(key, value);
+                }
+            });
+            glib::idle_add_local_once(|| super::manager().apply_shortcuts());
+        })
+    };
+    {
+        let (save, entry) = (Rc::clone(&save), entry.clone());
+        switch.connect_active_notify(move |s| save(s.is_active().then(|| entry.text().to_string())));
+    }
+    {
+        let (save, switch, problem) = (Rc::clone(&save), switch.clone(), problem.clone());
+        entry.connect_activate(move |e| {
+            let combo = e.text().trim().to_string();
+            if crate::plugin_host::manifest::is_combo(&combo) {
+                problem.set_visible(false);
+                switch.set_active(true);
+                save(Some(combo));
+            } else {
+                problem.set_text("Write it like Hyprland: SUPER + SHIFT + G, or F7.");
+                problem.set_visible(true);
+            }
+        });
+    }
+    outer.upcast()
 }
 
 /// A form for the plugin's declared settings. Each change is checked against

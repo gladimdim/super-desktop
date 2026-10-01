@@ -82,6 +82,11 @@ def main():
         "SUPER_DESKTOP_NO_BRIDGE": "1",
         "GDK_BACKEND": "broadway",
     })
+    # A bindings.lua of the user's own, which plugins must give back unchanged.
+    bindings = home / ".config/hypr/bindings.lua"
+    bindings.parent.mkdir(parents=True)
+    original_bindings = '-- my own binds\no.bind("SUPER + RETURN", "Terminal", "alacritty")\n'
+    bindings.write_text(original_bindings)
     display = 600 + os.getpid() % 300
     broadway = subprocess.Popen(["gtk4-broadwayd", "--address", "127.0.0.1", f":{display}"], env=env,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
@@ -121,6 +126,8 @@ def main():
         check(row is not None, "list shows it running")
         pid = row["state"]["pid"] if row else None
         check(row is not None and row["state"]["toolbarItems"] == 1, "its toolbar item is in the bar")
+        bound = wait_for(lambda: "super-desktop plugin run smoke smoke.open" in bindings.read_text())
+        check(bound is not None and bindings.read_text().startswith(original_bindings), "its global shortcut is bound after the user's own lines", bindings.read_text())
 
         check(cli("run", "smoke", "smoke.open").returncode == 0, "run a command over IPC")
         opened = wait_for(lambda: [e for e in events() if e.startswith("opened ")])
@@ -156,8 +163,15 @@ def main():
             ["python3", "-c", "import socket,sys;s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1]);s.sendall(b'plugin {\"op\":\"footprint\",\"id\":\"smoke\"}\\n');print(s.recv(65536).decode())", str(runtime / "super-desktop.sock")],
             capture_output=True, text=True).stdout)
         check(footprint.get("footprint") == [], "footprint is empty after deactivate", footprint)
+        check(wait_for(lambda: bindings.read_text() == original_bindings) is not None, "bindings.lua is byte for byte what it was", bindings.read_text())
 
         check(cli("activate", "smoke").returncode == 0 and wait_for(lambda: events().count("activated hello") >= 3) is not None, "it can be turned on again")
+        check(wait_for(lambda: "plugin run smoke" in bindings.read_text()) is not None, "on again: bound again")
+        # The safety switch works without the daemon too.
+        subprocess.run([str(BIN), "kill"], env=env, capture_output=True, timeout=10)
+        check(wait_for(lambda: not (runtime / "super-desktop.sock").exists() or daemon.poll() is not None, timeout=10) is not None, "daemon stopped")
+        check(cli("disable-all").returncode == 0, "disable-all without a daemon")
+        check(bindings.read_text() == original_bindings, "disable-all took the shortcut out of bindings.lua", bindings.read_text())
         check(cli("remove", "smoke", "--purge").returncode == 0, "remove --purge")
         check(not (home / ".local/state/super-desktop/plugins/smoke").exists(), "its data is deleted")
     finally:

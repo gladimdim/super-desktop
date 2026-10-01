@@ -594,6 +594,146 @@ fn first_string_literal(text: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+// ─── plugin shortcuts ─────────────────────────────────────────────────────────
+//
+// Global plugin shortcuts live in a block of their own, separate from the
+// show/hide block `install.sh` shares with this file. It is regenerated from
+// the active plugins and disappears with the last one, leaving the file as it
+// was. It never unbinds anything: a combination Hyprland already uses is
+// refused and reported, never taken over.
+
+pub const PLUGIN_BEGIN: &str = "-- >>> super-desktop plugins (managed by SUPER DESKTOP) >>>";
+pub const PLUGIN_END: &str = "-- <<< super-desktop plugins <<<";
+/// Every plugin bind's description starts with this; it marks them as ours.
+pub const PLUGIN_DESCRIPTION: &str = "Super Desktop plugin";
+
+/// One global plugin shortcut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginBind {
+    pub combo: String,
+    /// Shown by Hyprland (`hyprctl binds`): which plugin and what it does.
+    pub description: String,
+    /// `super-desktop plugin run <plugin> <command>`.
+    pub command: String,
+}
+
+/// A Lua string body: no quotes, backslashes or line breaks from a plugin
+/// name can end the string or the line.
+fn lua_safe(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .map(|c| if c == '"' || c == '\\' { '\'' } else { c })
+        .collect()
+}
+
+/// `existing` with the plugin block replaced by one for `binds`, or removed
+/// when there are none. Every other line, the show/hide block included, is
+/// kept as it is.
+pub fn rewrite_plugin_binds(existing: &str, binds: &[PluginBind]) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    let mut had_block = false;
+    for line in existing.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == PLUGIN_BEGIN {
+            inside = true;
+            had_block = true;
+            continue;
+        }
+        if trimmed == PLUGIN_END {
+            inside = false;
+            continue;
+        }
+        if !inside {
+            kept.push(line);
+        }
+    }
+    let mut out: String = kept.concat();
+    // The block is appended after one blank line; removing it takes that
+    // line back, so the file ends exactly as it did before.
+    if had_block && out.ends_with("\n\n") {
+        out.pop();
+    }
+    if binds.is_empty() {
+        return out;
+    }
+    if !out.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out.push_str(PLUGIN_BEGIN);
+    out.push('\n');
+    out.push_str("-- Plugin shortcuts: ⚙ Settings → Plugins. Rewritten on every change; edits inside this block are lost.\n");
+    for bind in binds {
+        out.push_str(&format!(
+            "o.bind(\"{}\", \"{}\", \"{}\", {BIND_RELEASE})\n",
+            lua_safe(&bind.combo),
+            lua_safe(&bind.description),
+            lua_safe(&bind.command)
+        ));
+    }
+    out.push_str(PLUGIN_END);
+    out.push('\n');
+    out
+}
+
+/// Which of `binds` Hyprland already uses for something that is not ours:
+/// (index, what holds it). Plugin binds of ours never count.
+pub fn plugin_bind_conflicts(dump: &str, binds: &[PluginBind]) -> Vec<(usize, String)> {
+    binds
+        .iter()
+        .enumerate()
+        .filter_map(|(index, bind)| {
+            conflicting_bind(dump, &bind.combo)
+                .filter(|holder| !holder.starts_with(PLUGIN_DESCRIPTION))
+                .map(|holder| (index, holder))
+        })
+        .collect()
+}
+
+/// Write the plugin block (only when it changed) and reload Hyprland.
+/// Returns the binds refused because Hyprland already uses their combination;
+/// those are not written.
+pub fn apply_plugin_binds_at(bindings_path: &Path, hyprctl_bin: &str, binds: &[PluginBind]) -> Result<Vec<(PluginBind, String)>, String> {
+    let dump = hyprctl_run(hyprctl_bin, &["binds"]).unwrap_or_default();
+    let refused = plugin_bind_conflicts(&dump, binds);
+    let accepted: Vec<PluginBind> = binds.iter().enumerate().filter(|(i, _)| !refused.iter().any(|(r, _)| r == i)).map(|(_, b)| b.clone()).collect();
+    let existing = fs::read_to_string(bindings_path).unwrap_or_default();
+    let updated = rewrite_plugin_binds(&existing, &accepted);
+    if updated != existing {
+        if updated.is_empty() && !bindings_path.exists() {
+            // Nothing to write and nothing was there.
+        } else {
+            write_atomic(bindings_path, &updated)?;
+            let _ = hyprctl_run(hyprctl_bin, &["reload"]);
+        }
+    }
+    Ok(refused.into_iter().map(|(i, holder)| (binds[i].clone(), holder)).collect())
+}
+
+pub fn apply_plugin_binds(binds: &[PluginBind]) -> Result<Vec<(PluginBind, String)>, String> {
+    apply_plugin_binds_at(&bindings_path(), "hyprctl", binds)
+}
+
+/// Lines of the plugin block now in `bindings.lua` (for footprint checks).
+pub fn plugin_bind_lines(lua: &str) -> Vec<String> {
+    let mut inside = false;
+    let mut lines = Vec::new();
+    for line in lua.lines() {
+        let trimmed = line.trim();
+        if trimmed == PLUGIN_BEGIN {
+            inside = true;
+        } else if trimmed == PLUGIN_END {
+            inside = false;
+        } else if inside && trimmed.starts_with("o.bind(") {
+            lines.push(trimmed.to_string());
+        }
+    }
+    lines
+}
+
 // ─── machine helpers ──────────────────────────────────────────────────────────
 
 /// Run `hyprctl`, returning trimmed stdout. `Err` carries whatever the tool
@@ -1091,5 +1231,82 @@ bindd
             updated,
             "a release-bind rewrite must be idempotent"
         );
+    }
+
+    fn plugin_bind(combo: &str, name: &str) -> PluginBind {
+        PluginBind {
+            combo: combo.into(),
+            description: format!("{PLUGIN_DESCRIPTION}: {name}"),
+            command: "super-desktop plugin run git-flush git-flush.open".into(),
+        }
+    }
+
+    #[test]
+    fn plugin_shortcuts_leave_the_file_exactly_as_it_was() {
+        let original = format!(
+            "-- my binds\no.bind(\"SUPER + RETURN\", \"Terminal\", \"uwsm app -- alacritty\")\n\n{}",
+            managed_block("SUPER + SHIFT + Q", Some(24))
+        );
+        let with = rewrite_plugin_binds(&original, &[plugin_bind("SUPER + SHIFT + G", "Git Flush")]);
+        assert!(with.starts_with(&original), "nothing before the block changes");
+        assert_eq!(plugin_bind_lines(&with).len(), 1);
+        assert!(with.contains(MANAGED_BEGIN) && with.contains("super-desktop toggle"), "the show/hide block stays");
+        // Replacing the block keeps one copy of it.
+        let twice = rewrite_plugin_binds(&with, &[plugin_bind("SUPER + SHIFT + G", "Git Flush"), plugin_bind("F7", "Other")]);
+        assert_eq!(twice.matches(PLUGIN_BEGIN).count(), 1);
+        assert_eq!(plugin_bind_lines(&twice).len(), 2);
+        // The last plugin gone: byte for byte the original file.
+        assert_eq!(rewrite_plugin_binds(&twice, &[]), original);
+        assert_eq!(rewrite_plugin_binds("", &[]), "");
+        let only = rewrite_plugin_binds("", &[plugin_bind("F7", "x")]);
+        assert_eq!(rewrite_plugin_binds(&only, &[]), "");
+        // A file without a trailing newline comes back without one.
+        let bare = "o.bind(\"SUPER + B\", \"Browser\", \"x\")";
+        assert_eq!(rewrite_plugin_binds(&rewrite_plugin_binds(bare, &[plugin_bind("F7", "x")]), &[]), format!("{bare}\n"));
+        // The show/hide rewrite keeps the plugin block.
+        let toggled = rewrite_bindings(&with, "SUPER + ALT + Q", None);
+        assert_eq!(plugin_bind_lines(&toggled).len(), 1);
+    }
+
+    #[test]
+    fn plugin_shortcut_names_cannot_break_the_lua() {
+        let lua = rewrite_plugin_binds("", &[plugin_bind("F7", "Evil\", os.execute(\"rm -rf ~\") --\n")]);
+        let line = &plugin_bind_lines(&lua)[0];
+        assert_eq!(line.matches('"').count(), 6, "{line}");
+        assert!(!line.contains("\\"));
+    }
+
+    #[test]
+    fn plugin_shortcuts_never_take_a_used_combination() {
+        let dir = std::env::temp_dir().join(format!("sd-plugin-binds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let hyprctl = dir.join("hyprctl");
+        let log = dir.join("calls");
+        fs::write(
+            &hyprctl,
+            format!(
+                "#!/bin/sh\necho \"$@\" >> {}\nif [ \"$1\" = binds ]; then printf 'bind\\n\\tmodmask: 65\\n\\tsubmap: \\n\\tkey: G\\n\\tdescription: Close window\\n\\nbind\\n\\tmodmask: 0\\n\\tsubmap: \\n\\tkey: F7\\n\\tdescription: {PLUGIN_DESCRIPTION}: Other\\n'; fi\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hyprctl, fs::Permissions::from_mode(0o755)).unwrap();
+        let bindings = dir.join("bindings.lua");
+        fs::write(&bindings, "-- mine\n").unwrap();
+        let refused = apply_plugin_binds_at(&bindings, hyprctl.to_str().unwrap(), &[plugin_bind("SUPER + SHIFT + G", "Git Flush"), plugin_bind("F7", "Other")]).unwrap();
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].1, "Close window");
+        let lua = fs::read_to_string(&bindings).unwrap();
+        assert_eq!(plugin_bind_lines(&lua).len(), 1, "only the free combination is bound; our own earlier bind is not a conflict");
+        assert!(!lua.contains("unbind"), "a plugin never unbinds anything");
+        assert_eq!(fs::read_to_string(&log).unwrap().matches("reload").count(), 1);
+        // Same set again: no write, no reload.
+        apply_plugin_binds_at(&bindings, hyprctl.to_str().unwrap(), &[plugin_bind("F7", "Other")]).unwrap();
+        assert_eq!(fs::read_to_string(&log).unwrap().matches("reload").count(), 1);
+        apply_plugin_binds_at(&bindings, hyprctl.to_str().unwrap(), &[]).unwrap();
+        assert_eq!(fs::read_to_string(&bindings).unwrap(), "-- mine\n");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

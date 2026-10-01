@@ -39,6 +39,7 @@ enum Job {
     Call { plugin: String, method: String, params: Value, reply: std::sync::mpsc::Sender<Result<Value, RpcError>> },
     Event { plugin: String, event: SessionEvent },
     Started { plugin: String, generation: u64, result: Result<Arc<Session>, String> },
+    BindsApplied { generation: u64, refused: Vec<(crate::shortcut::PluginBind, String)>, error: Option<String> },
 }
 
 /// The `Ui` the sessions see: posts jobs to the GTK main loop.
@@ -121,6 +122,12 @@ pub struct Manager {
     next_handle: Cell<u64>,
     /// Told when the set of plugins or their state changes (Settings page).
     listeners: RefCell<Vec<Rc<dyn Fn()>>>,
+    /// Bumped per bind update; only the newest result is kept.
+    binds_generation: Cell<u64>,
+    /// Shortcut id → why it is not active (taken, invalid), for Settings.
+    shortcut_problems: RefCell<BTreeMap<String, String>>,
+    /// Overlay-scope shortcuts: normalized combo → (plugin, command).
+    overlay_keys: RefCell<BTreeMap<String, (String, String)>>,
 }
 
 thread_local! {
@@ -142,6 +149,9 @@ pub fn manager() -> Rc<Manager> {
         overlay_shown: Cell::new(false),
         next_handle: Cell::new(1),
         listeners: RefCell::default(),
+        binds_generation: Cell::new(0),
+        shortcut_problems: RefCell::default(),
+        overlay_keys: RefCell::default(),
     });
     MANAGER.with(|m| m.replace(Some(Rc::clone(&manager))));
     let weak = Rc::downgrade(&manager);
@@ -197,7 +207,52 @@ impl Manager {
                 self.activate(&installed);
             }
         }
+        self.apply_shortcuts();
         self.changed();
+    }
+
+    /// Global shortcuts of every active plugin, as `bindings.lua` binds; the
+    /// user's overrides from `plugins.json` apply. Written on a worker thread
+    /// (it runs `hyprctl`), only when the block changes.
+    pub fn apply_shortcuts(self: &Rc<Self>) {
+        let store = store::Store::load();
+        let plugins: Vec<(String, Arc<Manifest>)> = self.plugins.borrow().iter().map(|(id, p)| (id.clone(), Arc::clone(&p.manifest))).collect();
+        let desired = crate::plugin_host::binds::desired(&plugins, &store);
+        let (binds, overlay, problems) = (desired.global, desired.overlay, desired.problems);
+        self.overlay_keys.replace(overlay);
+        self.shortcut_problems.replace(problems);
+        let generation = self.binds_generation.get() + 1;
+        self.binds_generation.set(generation);
+        let jobs = self.bridge.jobs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let _ = std::thread::Builder::new().name("plugin-binds".into()).spawn(move || {
+            let (refused, error) = match crate::shortcut::apply_plugin_binds(&binds) {
+                Ok(refused) => (refused, None),
+                Err(error) => (Vec::new(), Some(error)),
+            };
+            let _ = jobs.unbounded_send(Job::BindsApplied { generation, refused, error });
+        });
+    }
+
+    /// A key pressed in the overlay, as Hyprland spells it. `in_terminal`:
+    /// a terminal has focus, which keeps every combination without SUPER.
+    pub fn overlay_shortcut(self: &Rc<Self>, combo: &str, in_terminal: bool) -> bool {
+        let key = crate::plugin_host::binds::normalize(combo);
+        if in_terminal && !key.split(" + ").any(|part| part == "SUPER") {
+            return false;
+        }
+        let target = self.overlay_keys.borrow().get(&key).cloned();
+        match target {
+            Some((plugin, command)) => {
+                let _ = self.run_command(&plugin, &command, json!({"source": "shortcut"}));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Why a shortcut is not active, if it is not.
+    pub fn shortcut_problem(&self, shortcut: &str) -> Option<String> {
+        self.shortcut_problems.borrow().get(shortcut).cloned()
     }
 
     fn activate(self: &Rc<Self>, installed: &store::Installed) {
@@ -264,6 +319,7 @@ impl Manager {
             close_view_widgets(&open);
         }
         self.bar.remove_plugin(id);
+        self.apply_shortcuts();
         if let Some(session) = plugin.session {
             let _ = std::thread::Builder::new().name(format!("plugin-stop-{id}")).spawn(move || session.stop());
         }
@@ -281,6 +337,13 @@ impl Manager {
         if self.bar.button_count_of(id) > 0 {
             left.push("toolbar items".into());
         }
+        if self.overlay_keys.borrow().values().any(|(plugin, _)| plugin == id) {
+            left.push("overlay shortcuts".into());
+        }
+        let lua = std::fs::read_to_string(crate::shortcut::bindings_path()).unwrap_or_default();
+        if crate::shortcut::plugin_bind_lines(&lua).iter().any(|line| line.contains(&format!("plugin run {id} "))) {
+            left.push("global shortcuts in bindings.lua".into());
+        }
         left
     }
 
@@ -292,6 +355,28 @@ impl Manager {
             }
             Job::Started { plugin, generation, result } => self.started(&plugin, generation, result),
             Job::Event { plugin, event: SessionEvent::Exited } => self.crashed(&plugin),
+            Job::BindsApplied { generation, refused, error } => {
+                if generation != self.binds_generation.get() {
+                    return;
+                }
+                if let Some(error) = error {
+                    eprintln!("SUPER DESKTOP: plugin shortcuts not written: {error}");
+                }
+                for (bind, holder) in refused {
+                    let plugin = bind.command.split_whitespace().nth(3).unwrap_or_default().to_string();
+                    let shortcut = self
+                        .plugins
+                        .borrow()
+                        .get(&plugin)
+                        .and_then(|p| p.manifest.contributes.shortcuts.iter().find(|s| bind.command.ends_with(&format!(" {}", s.command))).map(|s| s.id.clone()));
+                    let why = format!("{} is used by Hyprland for \u{201c}{holder}\u{201d}; choose another in Settings → Plugins", bind.combo);
+                    api::append_log(&crate::plugin_host::log_file(&plugin), "warn", &format!("shortcut not bound: {why}"));
+                    if let Some(shortcut) = shortcut {
+                        self.shortcut_problems.borrow_mut().insert(shortcut, why);
+                    }
+                }
+                self.changed();
+            }
         }
     }
 
