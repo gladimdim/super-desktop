@@ -53,6 +53,7 @@ mod terminal_picker;
 mod terminal_clipboard;
 mod terminal_links;
 mod overlap_ghost;
+mod plugin_host;
 mod shortcut;
 mod sleep_lock;
 mod session_task;

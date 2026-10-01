@@ -1,0 +1,38 @@
+{
+  "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
+  "manifestVersion": 1,
+  "id": "hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "description": "Says hello from the top bar.",
+  "engines": {
+    "superDesktop": ">=1.2.0",
+    "pluginApi": "1"
+  },
+  "main": {
+    "command": [
+      "python3",
+      "main.py"
+    ]
+  },
+  "permissions": [
+    "ui.toolbar",
+    "ui.notify"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "hello.say",
+        "title": "Say hello"
+      }
+    ],
+    "toolbar": [
+      {
+        "id": "hello.button",
+        "icon": "👋",
+        "tooltip": "Say hello",
+        "command": "hello.say"
+      }
+    ]
+  }
+}

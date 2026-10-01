@@ -71,7 +71,7 @@ Answer host requests you cannot handle with `-32601`; any other failure with
 
 ## Methods the plugin calls
 
-Permissions are in brackets. Limits are the defaults; read the real ones from
+Each method names its permission. Limits are the defaults; read the real ones from
 `host.describe().limits`.
 
 ### `host.describe`
@@ -96,46 +96,47 @@ from the manifest; you rarely need `settings.set`.
 `null` deletes. Kept on deactivation; removed on uninstall unless the user
 keeps data. For larger files use `dataDir`.
 
-### `ui.open` / `ui.patch` / `ui.close` [ui.popup]
+### `ui.open` / `ui.patch` / `ui.close`
+Permission: `ui.popup`.
 `ui.open {view, model, anchor?}` → `{handle}`: shows a declared view with a
 node tree (`ui.md`). It shows the overlay if it was hidden. Opening an open
 view raises it and returns the same handle. `ui.patch {handle, ops}` updates
 nodes by id. `ui.close {handle}`.
 
-### `ui.notify` [ui.notify]
-`{title, body?, urgency?}`; at most 6 per minute.
+### `ui.notify`
+Permission: `ui.notify`. `{title, body?, urgency?}`; at most 6 per minute.
 
-### `workspace.cards` [cards.read]
-`{}` → `{screen: {w, h, top}, cards: [CardInfo]}`, where CardInfo is
+### `workspace.cards`
+Permission: `cards.read`. `{}` → `{screen: {w, h, top}, cards: [CardInfo]}`, where CardInfo is
 `{id, session, agent, folder, status, prompt, rect, icon, iconified, expanded, focused, local}`.
 `prompt` is the user's vetted prompt (never terminal output, never another
 plugin's title). Coordinates are logical pixels; cards live below `top`.
 
-### `card.*` [cards.control]
-`card.iconify {card, at?}`, `card.restore {card}`, `card.expand {card}`,
+### `card.*`
+Permission: `cards.control`. `card.iconify {card, at?}`, `card.restore {card}`, `card.expand {card}`,
 `card.collapse {card}`, `card.focus {card}`, `card.setRect {card, rect}` →
 `{rect}` (clamped like a drag, and saved like one), `card.close {card}` →
 `{closed}` (the user confirms in the built-in dialog). These are the same
 actions as the built-in buttons; their results stay after the plugin is off.
 
-### `terminal.text` [terminal.read] / `terminal.send` [terminal.write]
-`terminal.text {card, lines?}` → `{text}`: up to 200 visible lines.
+### `terminal.text` / `terminal.send`
+Permissions: `terminal.read` / `terminal.write`. `terminal.text {card, lines?}` → `{text}`: up to 200 visible lines.
 `terminal.send {card, text, enter?}` → `{}`: pastes into the session. Only
 with an explicit user action; never type into a harness on a timer.
 
-### `harness.launch` [harness.launch]
-`{agent, folder, prompt?}` → `{card}`. `agent` is a built-in key (`claude`,
+### `harness.launch`
+Permission: `harness.launch`. `{agent, folder, prompt?}` → `{card}`. `agent` is a built-in key (`claude`,
 `codex`, `opencode`, …), a custom launcher key, or your own
 `p.<plugin>.<id>`.
 
-### `harness.writeConfig` [harness.provide]
-`{path, content}` → `{}`. Writes a config file your harness needs, under
+### `harness.writeConfig`
+Permission: `harness.provide`. `{path, content}` → `{}`. Writes a config file your harness needs, under
 `$HOME` but outside `~/.config/super-desktop` and `~/.config/hypr`. The host
 records the previous content and restores it (or deletes the file) on
 deactivation. Never write such files yourself.
 
-### `llm.complete` [llm]
-`{prompt, system?, maxTokens?, json?, tier?}` → `{text, provider, model}`.
+### `llm.complete`
+Permission: `llm`. `{prompt, system?, maxTokens?, json?, tier?}` → `{text, provider, model}`.
 The user picks the provider once in Settings → Plugins → AI provider: a
 signed-in harness CLI (Claude Code, Codex, OpenCode, Gemini) run without
 tools, or an API key. You never see credentials. Prompt up to 64 KiB, 2 calls
@@ -146,8 +147,8 @@ at a time, 120 s timeout. `json: true` asks for a JSON document in `text`
 Rules: send only what the task needs; leave out secrets (`.env`, keys,
 tokens); tell the user in your README what is sent.
 
-### `title.set` / `title.clear` [ui.titles]
-`title.set {card, text?, chipsBefore?, chipsAfter?}` → `{}`.
+### `title.set` / `title.clear`
+Permission: `ui.titles`. `title.set {card, text?, chipsBefore?, chipsAfter?}` → `{}`.
 `text` replaces the title this PC draws (one line, ≤ 200 characters, `null`
 restores the built-in title). Chips: `{text ≤ 24, tone?, tooltip?}`, up to 3
 per side. The tooltip always shows the real prompt. Titles are display-only:

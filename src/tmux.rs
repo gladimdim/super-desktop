@@ -205,7 +205,7 @@ pub struct HarnessInfo {
 /// times per window build, and forking `which` costs tens of milliseconds on a
 /// loaded machine — that dominated the time between the shortcut and the
 /// overlay appearing.
-fn which(cmd: &str) -> Option<String> {
+pub(crate) fn which(cmd: &str) -> Option<String> {
     if cmd.is_empty() {
         return None;
     }

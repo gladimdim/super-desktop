@@ -1,0 +1,116 @@
+{
+  "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
+  "manifestVersion": 1,
+  "id": "git-flush",
+  "name": "Git Flush",
+  "version": "0.1.0",
+  "description": "Lists repositories with uncommitted changes; Flush all writes commit messages with your AI provider, then commits and pushes each current branch.",
+  "author": "SUPER DESKTOP examples",
+  "license": "MIT",
+  "engines": {
+    "superDesktop": ">=1.2.0",
+    "pluginApi": "1"
+  },
+  "main": {
+    "command": [
+      "python3",
+      "main.py"
+    ]
+  },
+  "activation": [
+    "onStartup"
+  ],
+  "permissions": [
+    "ui.toolbar",
+    "ui.popup",
+    "ui.notify",
+    "shortcuts.global",
+    "llm"
+  ],
+  "sandbox": {
+    "network": true,
+    "read": [
+      "~/.gitconfig",
+      "~/.config/git",
+      "~/.ssh",
+      "~/.config/gh",
+      "${env:SSH_AUTH_SOCK}"
+    ],
+    "write": [
+      "${settings.repositories}"
+    ],
+    "env": [
+      "SSH_AUTH_SOCK"
+    ]
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "git-flush.open",
+        "title": "Show repositories with changes",
+        "icon": "🌿"
+      }
+    ],
+    "shortcuts": [
+      {
+        "id": "git-flush.open-key",
+        "command": "git-flush.open",
+        "default": "SUPER + SHIFT + G",
+        "scope": "global"
+      }
+    ],
+    "toolbar": [
+      {
+        "id": "git-flush.button",
+        "icon": "🌿",
+        "label": "Git",
+        "tooltip": "Repositories with uncommitted changes",
+        "command": "git-flush.open"
+      }
+    ],
+    "views": [
+      {
+        "id": "git-flush.repos",
+        "title": "Git Flush",
+        "kind": "panel",
+        "width": 760,
+        "height": 560
+      }
+    ],
+    "settings": [
+      {
+        "key": "repositories",
+        "type": "paths",
+        "kind": "directory",
+        "title": "Repositories",
+        "description": "Git work trees to watch.",
+        "default": []
+      },
+      {
+        "key": "includeUntracked",
+        "type": "bool",
+        "title": "Include new files",
+        "default": true
+      },
+      {
+        "key": "skipReview",
+        "type": "bool",
+        "title": "Commit without reviewing messages",
+        "default": false
+      },
+      {
+        "key": "pollSeconds",
+        "type": "number",
+        "title": "Check every (seconds)",
+        "min": 15,
+        "max": 3600,
+        "default": 60
+      },
+      {
+        "key": "k",
+        "type": "list",
+        "title": "K"
+      }
+    ]
+  }
+}

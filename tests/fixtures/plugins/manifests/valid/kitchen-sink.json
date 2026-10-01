@@ -1,0 +1,273 @@
+{
+  "manifestVersion": 1,
+  "id": "kitchen-sink",
+  "name": "Kitchen Sink",
+  "version": "1.2.3-beta.1",
+  "description": "Uses every contribution point.",
+  "author": "tests",
+  "license": "MIT",
+  "repository": "https://github.com/example/kitchen-sink",
+  "engines": {
+    "superDesktop": ">=1.0.0 <3.0.0",
+    "pluginApi": "1"
+  },
+  "main": {
+    "command": [
+      "./bin/plugin"
+    ],
+    "env": {
+      "LOG_LEVEL": "debug"
+    }
+  },
+  "assets": {
+    "bin/plugin": {
+      "url": "https://github.com/example/kitchen-sink/releases/download/v1.2.3/plugin",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "arch": "x86_64"
+    }
+  },
+  "activation": [
+    "onStartup",
+    "onOverlayShown",
+    "onCommand:kitchen-sink.run"
+  ],
+  "permissions": [
+    "ui.toolbar",
+    "ui.cardButtons",
+    "ui.cardControls",
+    "ui.titles",
+    "ui.popup",
+    "ui.notify",
+    "shortcuts.global",
+    "shortcuts.overlay",
+    "cards.read",
+    "cards.control",
+    "terminal.read",
+    "terminal.write",
+    "harness.provide",
+    "harness.launch",
+    "layout.renderer",
+    "llm"
+  ],
+  "sandbox": {
+    "network": false,
+    "read": [
+      "~/notes",
+      "${settings.folders}",
+      "${env:SSH_AUTH_SOCK}"
+    ],
+    "write": [
+      "/tmp/kitchen"
+    ],
+    "env": [
+      "SSH_AUTH_SOCK"
+    ]
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "kitchen-sink.run",
+        "title": "Run",
+        "icon": "🧪"
+      },
+      {
+        "id": "kitchen-sink.left",
+        "title": "Left"
+      }
+    ],
+    "shortcuts": [
+      {
+        "id": "kitchen-sink.g",
+        "command": "kitchen-sink.run",
+        "default": "SUPER + ALT + K",
+        "scope": "global"
+      },
+      {
+        "id": "kitchen-sink.o",
+        "command": "kitchen-sink.run",
+        "default": "CTRL + K",
+        "scope": "overlay"
+      },
+      {
+        "id": "kitchen-sink.f",
+        "command": "kitchen-sink.run",
+        "default": "F9",
+        "scope": "global"
+      }
+    ],
+    "toolbar": [
+      {
+        "id": "kitchen-sink.btn",
+        "icon": "🧪",
+        "label": "Sink",
+        "tooltip": "Run",
+        "command": "kitchen-sink.run"
+      },
+      {
+        "id": "kitchen-sink.pop",
+        "icon": "📋",
+        "tooltip": "Open",
+        "view": "kitchen-sink.main"
+      }
+    ],
+    "toolbarHide": [
+      "brand",
+      "shortcutHint",
+      "launcher:codex"
+    ],
+    "cardButtons": [
+      {
+        "id": "kitchen-sink.cb",
+        "icon": "⭐",
+        "tooltip": "Star",
+        "command": "kitchen-sink.run",
+        "showInIcon": true,
+        "when": {
+          "agents": [
+            "claude"
+          ],
+          "status": [
+            "idle",
+            "waiting"
+          ],
+          "iconified": false
+        }
+      }
+    ],
+    "cardControls": {
+      "id": "kitchen-sink.controls",
+      "controls": [
+        "builtin:iconify",
+        {
+          "id": "kitchen-sink.l",
+          "icon": "◧",
+          "tooltip": "Left",
+          "command": "kitchen-sink.left"
+        },
+        "builtin:close"
+      ],
+      "iconControls": [
+        "builtin:restore"
+      ]
+    },
+    "titles": true,
+    "renderer": {
+      "id": "kitchen-sink.layout",
+      "wasm": "renderer.wasm"
+    },
+    "harnesses": [
+      {
+        "id": "acme",
+        "name": "Acme",
+        "glyph": "🦊",
+        "logo": "icons/acme.svg",
+        "binaries": [
+          "acme"
+        ],
+        "launch": {
+          "args": [
+            "--tui"
+          ]
+        },
+        "resume": [
+          "--resume",
+          "${session}"
+        ],
+        "adapter": {
+          "kind": "generic-report",
+          "setup": [
+            "--hooks",
+            "${plugin}/hooks.json"
+          ]
+        },
+        "status": {
+          "work": [
+            "Thinking"
+          ],
+          "shellFallback": true
+        },
+        "prompts": {
+          "injectedPrefixes": [
+            "<sys>"
+          ],
+          "placeholderTitles": [
+            "New"
+          ]
+        },
+        "completion": true
+      }
+    ],
+    "settings": [
+      {
+        "key": "name",
+        "type": "string",
+        "title": "Name",
+        "default": "x"
+      },
+      {
+        "key": "token",
+        "type": "secret",
+        "title": "Token"
+      },
+      {
+        "key": "on",
+        "type": "bool",
+        "title": "On",
+        "default": true
+      },
+      {
+        "key": "n",
+        "type": "number",
+        "title": "N",
+        "min": 1,
+        "max": 9,
+        "default": 3
+      },
+      {
+        "key": "mode",
+        "type": "enum",
+        "title": "Mode",
+        "values": [
+          "a",
+          "b"
+        ],
+        "default": "b"
+      },
+      {
+        "key": "file",
+        "type": "path",
+        "kind": "file",
+        "title": "File"
+      },
+      {
+        "key": "folders",
+        "type": "paths",
+        "kind": "directory",
+        "title": "Folders",
+        "default": [
+          "~/src"
+        ]
+      },
+      {
+        "key": "tint",
+        "type": "color",
+        "title": "Tint",
+        "default": "#aabbcc"
+      }
+    ],
+    "views": [
+      {
+        "id": "kitchen-sink.main",
+        "title": "Main",
+        "kind": "panel",
+        "width": 640,
+        "height": 480
+      },
+      {
+        "id": "kitchen-sink.pop2",
+        "title": "Pop",
+        "kind": "popover"
+      }
+    ]
+  }
+}
