@@ -9,6 +9,7 @@
 //! they need GTK they post a `Job` here and wait for the answer with a
 //! timeout. The GTK thread never waits on a plugin.
 pub mod cards;
+pub mod layout;
 pub mod settings_page;
 pub mod toolbar;
 pub mod view;
@@ -137,6 +138,11 @@ pub struct Manager {
     workspace: RefCell<Option<Rc<dyn cards::Workspace>>>,
     /// card id → plugin id → that plugin's title text and chips.
     titles: RefCell<BTreeMap<String, BTreeMap<String, cards::TitleState>>>,
+    /// The active window renderer, if a plugin provides one.
+    renderer: RefCell<Option<layout::Driver>>,
+    /// Cards gliding back to the built-in layout after a renderer stopped.
+    returning: RefCell<Option<layout::Return>>,
+    return_ticking: Cell<bool>,
 }
 
 thread_local! {
@@ -163,6 +169,9 @@ pub fn manager() -> Rc<Manager> {
         overlay_keys: RefCell::default(),
         workspace: RefCell::new(None),
         titles: RefCell::default(),
+        renderer: RefCell::new(None),
+        returning: RefCell::new(None),
+        return_ticking: Cell::new(false),
     });
     MANAGER.with(|m| m.replace(Some(Rc::clone(&manager))));
     let weak = Rc::downgrade(&manager);
@@ -300,6 +309,14 @@ impl Manager {
             },
         );
         self.decorate_all();
+        if let Some(renderer) = &self.plugins.borrow().get(&id).and_then(|p| p.manifest.contributes.renderer.clone()) {
+            if let Err(why) = self.start_renderer(&id, &installed.dir, &renderer.wasm) {
+                api::append_log(&crate::plugin_host::log_file(&id), "error", &format!("renderer not started: {why}"));
+                if let Some(p) = self.plugins.borrow_mut().get_mut(&id) {
+                    p.state = State::Failed(format!("renderer not started: {why}"));
+                }
+            }
+        }
         if starts_now {
             self.start(&id);
         }
@@ -335,6 +352,7 @@ impl Manager {
             close_view_widgets(&open);
         }
         self.bar.remove_plugin(id);
+        self.stop_renderer(id);
         self.forget_cards_of(id);
         self.apply_shortcuts();
         if let Some(session) = plugin.session {
@@ -747,6 +765,7 @@ impl Manager {
 
     pub fn overlay_shown(self: &Rc<Self>) {
         self.overlay_shown.set(true);
+        self.renderer_wake();
         let ids: Vec<(String, bool)> = self
             .plugins
             .borrow()

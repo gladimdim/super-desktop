@@ -3,7 +3,8 @@
 //! A card grows toward 70% of the screen width as its centre nears the
 //! screen's centre and shrinks as it moves out. In the edge bands it becomes
 //! an icon docked at the left or right edge. Dropping a card in an edge band
-//! saves it as an icon there, so turning the plugin off keeps it an icon.
+//! saves it as an icon there, so turning the plugin off keeps it an icon;
+//! dragging an icon out of the band and dropping it opens it again.
 //!
 //! Build: `cargo build --release --target wasm32-unknown-unknown`, then copy
 //! `target/wasm32-unknown-unknown/release/center_magnify.wasm` to `renderer.wasm`.
@@ -133,7 +134,8 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     let mut dock_left = [0usize; MAX_CARDS];
     let mut dock_right = [0usize; MAX_CARDS];
     let (mut nl, mut nr) = (0usize, 0usize);
-    let mut drop: Option<(u32, f32, f32)> = None;
+    // (card, x, y, to_icon)
+    let mut drop: Option<(u32, f32, f32, bool)> = None;
 
     for i in 0..n {
         let c = cards[i];
@@ -145,12 +147,16 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
         };
         let d = clampf(absf(cx - half) / half, 0.0, 1.0);
         let dragging = c.flags & FLAG_DRAGGING != 0;
+        // An icon dropped outside the edge bands opens, centred where it fell.
+        if c.flags & FLAG_DROPPED != 0 && iconified && d <= EDGE && drop.is_none() {
+            drop = Some((c.id, cx - c.saved.w / 2.0, cy - c.saved.h / 2.0, false));
+        }
         if (iconified || d > EDGE) && !dragging {
             mode[i] = MODE_ICON;
             if cx < half { dock_left[nl] = i; nl += 1 } else { dock_right[nr] = i; nr += 1 }
             if c.flags & FLAG_DROPPED != 0 && !iconified && drop.is_none() {
                 let x = if cx < half { GAP } else { sw - ICON - GAP };
-                drop = Some((c.id, x, clampf(cy - ICON / 2.0, top + GAP, sh - ICON - GAP)));
+                drop = Some((c.id, x, clampf(cy - ICON / 2.0, top + GAP, sh - ICON - GAP), true));
             }
             continue;
         }
@@ -244,11 +250,11 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     wr_u32(out, 4, ABI);
     wr_u32(out, 8, n as u32);
     wr_u32(out, 12, (animating as u32) | ((drop.is_some() as u32) << 1));
-    if let Some((id, x, y)) = drop {
+    if let Some((id, x, y, to_icon)) = drop {
         wr_u32(out, 16, id);
         wr_f32(out, 20, x);
         wr_f32(out, 24, y);
-        wr_u32(out, 28, 1);
+        wr_u32(out, 28, to_icon as u32);
     }
     let state_len = 4 + n * STATE_ENTRY;
     wr_u32(out, 32, state_len as u32);
@@ -423,6 +429,20 @@ mod tests {
         assert_eq!(rd_u32(&out, 16), 9);
         assert_eq!(rd_u32(&out, 28), 1);
         assert!((rd_f32(&out, 20) - (W - ICON - GAP)).abs() < 1.0);
+    }
+
+    #[test]
+    fn an_icon_dropped_in_the_middle_opens() {
+        let mut out = vec![0u8; OUT_CAP];
+        // Iconified, its icon spot dragged to the middle; saved open size 640×480.
+        let mut spec = In { cards: vec![(4, FLAG_ICONIFIED | FLAG_DROPPED, Rect { x: 900.0, y: 400.0, w: 640.0, h: 480.0 })], state: vec![], dt: 16.0 };
+        present(&frame(&spec), &mut out).unwrap();
+        assert_eq!(rd_u32(&out, 12) & 2, 2);
+        assert_eq!((rd_u32(&out, 16), rd_u32(&out, 28)), (4, 0), "open it, not keep it an icon");
+        // Without the drop it stays an icon.
+        spec.cards[0].1 = FLAG_ICONIFIED;
+        present(&frame(&spec), &mut out).unwrap();
+        assert_eq!(rd_u32(&out, 12) & 2, 0);
     }
 
     #[test]

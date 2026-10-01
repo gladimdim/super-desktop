@@ -1472,6 +1472,12 @@ impl SuperDesktopWindow {
             if !widget.has_css_class("dragging") {
                 widget.add_css_class("dragging");
             }
+            // A window renderer draws the dragged card itself, every frame:
+            // moving it here as well would make the two fight.
+            if crate::plugin_ui::layout::drawing() {
+                crate::plugin_ui::layout::wake();
+                return;
+            }
             let cx = x.clamp(10.0, (sw - 80) as f64);
             let cy = y.clamp(70.0, (sh - 60) as f64);
             drag_pending_update.borrow_mut().insert(widget, (cx, cy));
@@ -1507,6 +1513,7 @@ impl SuperDesktopWindow {
         let on_drag_end = move |widget: gtk4::Widget, data: &TerminalData| {
             widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
+            let rendered = crate::plugin_ui::layout::drawing();
             let mut final_data = data.clone();
             // The icon and the expanded card have separate remembered spots;
             // clamp and snap to whichever one this card is currently in.
@@ -1518,7 +1525,10 @@ impl SuperDesktopWindow {
                 final_data.y = final_data.y.clamp(70, sh - 60);
             }
             let (px, py) = displayed_pos(&final_data);
-            canvas_term_end.move_(&widget, px, py);
+            let dropped_id = final_data.id.clone();
+            if !rendered {
+                canvas_term_end.move_(&widget, px, py);
+            }
             let mut s = state_end.borrow_mut();
             // A colour picked on the card's dot becomes its folder's colour.
             let previous = s.terminals.iter().find(|t| t.session_name == final_data.session_name).cloned();
@@ -1535,6 +1545,10 @@ impl SuperDesktopWindow {
             // A card that just landed on another one buries it (and an iconify
             // or restore commit arrives through this same callback).
             ghosts_end.refresh();
+            // The renderer may turn the drop into an icon, or open an icon.
+            if rendered {
+                crate::plugin_ui::layout::dropped(&dropped_id);
+            }
         };
 
         let terminal_cards_toggle = Rc::clone(&term_cards);
@@ -1675,6 +1689,8 @@ impl SuperDesktopWindow {
                 }
             }
             raise_canvas_child(&canvas_raise, &hud_raise);
+            // Focus moved: a window renderer may draw the cards differently.
+            crate::plugin_ui::layout::wake();
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
             // already happened, so just skip the bookkeeping instead of
@@ -3134,5 +3150,19 @@ impl crate::plugin_ui::cards::Workspace for PluginWorkspace {
     fn command(&self, command: &crate::desktop_protocol::WorkspaceCommand) -> Result<Option<String>, &'static str> {
         let window = self.0.upgrade().ok_or("desktop_not_ready")?;
         window.apply_workspace_command(command)
+    }
+
+    fn canvas(&self) -> Option<Fixed> {
+        self.0.upgrade().map(|w| w.canvas.clone())
+    }
+
+    fn sliding(&self) -> bool {
+        self.0.upgrade().is_some_and(|w| w.slide.running.get())
+    }
+
+    fn refresh_ghosts(&self) {
+        if let Some(window) = self.0.upgrade() {
+            window.ghosts.refresh();
+        }
     }
 }

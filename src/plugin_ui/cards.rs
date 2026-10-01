@@ -28,6 +28,12 @@ pub trait Workspace {
     fn screen(&self) -> (i32, i32, i32);
     /// A workspace command, applied like a remote PC's.
     fn command(&self, command: &WorkspaceCommand) -> Result<Option<String>, &'static str>;
+    /// The canvas the cards are drawn on.
+    fn canvas(&self) -> Option<gtk4::Fixed>;
+    /// Whether the show/hide slide is moving the cards.
+    fn sliding(&self) -> bool;
+    /// Recompute the outlines of cards other cards cover.
+    fn refresh_ghosts(&self);
 }
 
 /// One plugin's contribution to a card's title.
@@ -130,6 +136,8 @@ impl Manager {
         chrome.compact_buttons.set_visible(chrome.compact_buttons.first_child().is_some());
         card.refit_compact();
         self.paint_title(card);
+        // A new or changed card: a window renderer draws it on the next frame.
+        self.renderer_wake();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -326,6 +334,8 @@ impl Manager {
                 info["controls"] = Value::Array(controls);
                 info["iconButtons"] = Value::Array(names(&chrome.compact_buttons));
                 info["iconControls"] = Value::Array(if chrome.compact_plugin_controls.is_visible() { names(&chrome.compact_plugin_controls) } else { vec![json!("builtin:restore"), json!("builtin:close")] });
+                // Where a window renderer draws it (null: the built-in layout).
+                info["drawn"] = card.presented().map_or(Value::Null, |p| json!({"x": p.rect.x, "y": p.rect.y, "w": p.rect.width, "h": p.rect.height, "icon": p.icon}));
                 info
             })
             .collect();
@@ -369,6 +379,16 @@ impl Manager {
         let mut left = Vec::new();
         if self.titles.borrow().values().any(|s| s.contains_key(plugin)) {
             left.push("card titles".into());
+        }
+        if self.renderer.borrow().as_ref().is_some_and(|d| d.plugin == plugin) {
+            left.push("window renderer".into());
+        }
+        if self.returning.borrow().is_none() {
+            if let Some(workspace) = self.workspace.borrow().clone() {
+                if workspace.cards().iter().any(|c| c.presented().is_some()) && self.renderer.borrow().is_none() {
+                    left.push("cards drawn by a renderer".into());
+                }
+            }
         }
         if let Some(workspace) = self.workspace.borrow().clone() {
             let tag = format!("({})", plugin_name_of(self, plugin));
@@ -446,6 +466,7 @@ impl Manager {
                 }
                 let id = card.data.borrow().id.clone();
                 self.workspace()?.command(&WorkspaceCommand::SetLayout { card_id: id, expected_revision: 0, layout }).map_err(refused)?;
+                self.renderer_wake();
                 let data = card.data.borrow();
                 Ok(json!({"rect": {"x": data.x, "y": data.y, "w": data.width, "h": data.height}}))
             }
@@ -555,7 +576,7 @@ fn refused(why: &'static str) -> RpcError {
 }
 
 /// A card's current layout, as the remote-command path takes it.
-fn layout_of(card: &MiniTerminalCard) -> CardLayout {
+pub(super) fn layout_of(card: &MiniTerminalCard) -> CardLayout {
     let data = card.data.borrow();
     CardLayout {
         x: data.x,

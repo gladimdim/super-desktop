@@ -566,6 +566,18 @@ pub struct MiniTerminalCard {
     last_status: Rc<RefCell<String>>,
     /// A plugin's replacement for the drawn title.
     plugin_title: Rc<RefCell<Option<String>>>,
+    /// Where a window renderer draws this card (`plugin_ui::layout`), if one
+    /// does. Never saved: the card's own data stays its saved layout.
+    presented: Rc<RefCell<Option<Presented>>>,
+    /// Drawn as an icon by a renderer, so the body drags like an icon's.
+    presented_icon: Rc<Cell<bool>>,
+}
+
+/// A renderer's drawing of a card: its rectangle on the canvas and its form.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Presented {
+    pub rect: crate::card_resize::Rect,
+    pub icon: bool,
 }
 
 /// The parts of a card's chrome plugins may fill. The built-in controls sit
@@ -1137,6 +1149,8 @@ impl MiniTerminalCard {
             last_prompt: Rc::new(RefCell::new(None)),
             last_status: Rc::new(RefCell::new("unknown".into())),
             plugin_title: Rc::new(RefCell::new(None)),
+            presented: Rc::new(RefCell::new(None)),
+            presented_icon: Rc::new(Cell::new(false)),
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -1408,6 +1422,7 @@ impl MiniTerminalCard {
         attach_move_drag(
             &card.header,
             &card.container,
+            Rc::clone(&card.presented_icon),
             Rc::clone(&card.data),
             Rc::clone(&card.expanded),
             Rc::clone(&card.visual_pos),
@@ -1419,6 +1434,7 @@ impl MiniTerminalCard {
         attach_move_drag(
             &card.container,
             &card.container,
+            Rc::clone(&card.presented_icon),
             Rc::clone(&card.data),
             Rc::clone(&card.expanded),
             Rc::clone(&card.visual_pos),
@@ -1550,6 +1566,72 @@ impl MiniTerminalCard {
         self.title_label.label().to_string()
     }
 
+    /// The size the card is laid out at for its full form: its own size, or
+    /// the size it opens at when it is saved as an icon.
+    fn full_size(&self) -> (i32, i32) {
+        let data = self.data.borrow();
+        if data.iconified {
+            (data.restored_width.max(1), data.restored_height.max(1))
+        } else {
+            (data.width.max(1), data.height.max(1))
+        }
+    }
+
+    /// Draw the card where a window renderer says, without changing its saved
+    /// layout. A full card keeps its own size (the terminal is not resized)
+    /// and is scaled to fit `rect`, centred in it; an icon is laid out as one.
+    pub fn present(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, opacity: f64) {
+        let previous = *self.presented.borrow();
+        let form_changed = previous.map(|p| p.icon) != Some(icon);
+        let vte_attached = self.vte.borrow().is_some();
+        if icon {
+            let side = rect.width.min(rect.height).max(1);
+            if form_changed || previous.is_some_and(|p| p.rect.width != side) {
+                self.container.set_size_request(side, side);
+                apply_layout(false, side, side, true, self.screen_w, &self.container, &self.header, &self.footer, &self.preview_label, &self.compact, vte_attached);
+            }
+            canvas.set_child_transform(&self.container, Some(&gtk4::gsk::Transform::new().translate(&gtk4::graphene::Point::new(rect.x as f32, rect.y as f32))));
+        } else {
+            let (w, h) = self.full_size();
+            if form_changed {
+                self.container.set_size_request(w, h);
+                apply_layout(false, w, h, false, self.screen_w, &self.container, &self.header, &self.footer, &self.preview_label, &self.compact, vte_attached);
+            }
+            let scale = (f64::from(rect.width) / f64::from(w)).min(f64::from(rect.height) / f64::from(h)).max(0.05);
+            let x = rect.x as f64 + (f64::from(rect.width) - f64::from(w) * scale) / 2.0;
+            let y = rect.y as f64 + (f64::from(rect.height) - f64::from(h) * scale) / 2.0;
+            canvas.set_child_transform(
+                &self.container,
+                Some(&gtk4::gsk::Transform::new().translate(&gtk4::graphene::Point::new(x as f32, y as f32)).scale(scale as f32, scale as f32)),
+            );
+        }
+        if (self.container.opacity() - opacity).abs() > 0.001 {
+            self.container.set_opacity(opacity);
+        }
+        self.presented_icon.set(icon);
+        *self.presented.borrow_mut() = Some(Presented { rect, icon });
+    }
+
+    /// Back to the card's own layout (the renderer stopped or skipped it).
+    pub fn unpresent(&self, canvas: &gtk4::Fixed) {
+        if self.presented.borrow_mut().take().is_none() {
+            return;
+        }
+        self.presented_icon.set(false);
+        let data = self.data.borrow().clone();
+        if !self.is_expanded() {
+            self.container.set_size_request(data.width, data.height);
+            let (x, y) = displayed_pos(&data);
+            canvas.move_(&self.container, x, y);
+        }
+        self.container.set_opacity(1.0);
+        self.apply_chrome();
+    }
+
+    pub fn presented(&self) -> Option<Presented> {
+        *self.presented.borrow()
+    }
+
     pub fn is_remote(&self) -> bool {
         self.source.is_remote()
     }
@@ -1649,6 +1731,12 @@ impl MiniTerminalCard {
     /// currently up: the 80% expanded card, the 128×128 icon, or the plain
     /// card. Shared by the slide animation and the overlap ghosts.
     pub fn canvas_rect(&self, screen_w: i32, screen_h: i32) -> crate::card_resize::Rect {
+        // What a renderer draws is what covers other cards.
+        if let Some(presented) = *self.presented.borrow() {
+            if !self.is_expanded() {
+                return presented.rect;
+            }
+        }
         let (width, height) = self.size(screen_w, screen_h);
         let (x, y) = if self.is_expanded() {
             let (x, y, _, _) = expanded_rect(screen_w, screen_h);
@@ -2717,9 +2805,11 @@ fn apply_layout(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn attach_move_drag<FUpdate, FEnd, FRaise>(
     source: &impl IsA<gtk4::Widget>,
     root: &Overlay,
+    presented_icon: Rc<Cell<bool>>,
     data: Rc<RefCell<TerminalData>>,
     expanded: Rc<RefCell<bool>>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
@@ -2733,6 +2823,7 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
     FRaise: Fn(gtk4::Widget) + 'static + ?Sized,
 {
     let drag = GestureDrag::new();
+    let (icon_begin, icon_update, icon_end) = (Rc::clone(&presented_icon), Rc::clone(&presented_icon), presented_icon);
     let start_pos = Rc::new(RefCell::new((0.0, 0.0)));
     let grab_offset: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
 
@@ -2744,10 +2835,10 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
     let root_weak_drag = root.downgrade();
     let on_raise_drag = Rc::clone(&on_raise);
     drag.connect_drag_begin(move |gesture, _, _| {
-        if iconified_only && !data_begin.borrow().iconified {
-            return;
-        }
-        if !iconified_only && data_begin.borrow().iconified {
+        // An icon drags by its body, whether saved as one or drawn as one by
+        // a window renderer; a card by its header.
+        let compact = data_begin.borrow().iconified || icon_begin.get();
+        if iconified_only != compact {
             return;
         }
         if let Some(r) = root_weak_drag.upgrade() {
@@ -2776,10 +2867,10 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
     let data_update = Rc::clone(&data);
     let expanded_update = Rc::clone(&expanded);
     drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-        if iconified_only && !data_update.borrow().iconified {
-            return;
-        }
-        if !iconified_only && data_update.borrow().iconified {
+        // An icon drags by its body, whether saved as one or drawn as one by
+        // a window renderer; a card by its header.
+        let compact = data_update.borrow().iconified || icon_update.get();
+        if iconified_only != compact {
             return;
         }
         if *expanded_update.borrow() {
@@ -2813,10 +2904,10 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
     let expanded_end = Rc::clone(&expanded);
     let on_end = Rc::clone(&on_drag_end);
     drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-        if iconified_only && !data_end.borrow().iconified {
-            return;
-        }
-        if !iconified_only && data_end.borrow().iconified {
+        // An icon drags by its body, whether saved as one or drawn as one by
+        // a window renderer; a card by its header.
+        let compact = data_end.borrow().iconified || icon_end.get();
+        if iconified_only != compact {
             return;
         }
         if *expanded_end.borrow() {

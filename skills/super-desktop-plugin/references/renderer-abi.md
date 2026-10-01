@@ -23,8 +23,16 @@ wasm32, with native unit tests). Start from it.
   into the canvas below the top bar, full cards to at least `min_w × min_h`,
   icons to 48–256 px squares. Every card stays at least partly visible and
   clickable. Opacity is clamped to 0.2–1.0.
-- **Show/hide slide:** the host applies its own slide offset on top of the
-  renderer's rectangles. Ignore phases 3 and 4 unless you want to.
+- **How a rectangle is drawn:** a full card keeps its own size (its
+  terminal is never resized, so it keeps its columns and rows) and is scaled
+  uniformly to fit the rectangle, centred in it. An icon is laid out as an
+  icon of side `min(width, height)`. Opacity is applied as given.
+- **What stays built-in:** an expanded card, and every card while the
+  show/hide slide runs (phases 3 and 4 are not sent by this build). Draw
+  order (`z`) is not applied by this build: cards keep their stacking order,
+  and the focused or dragged card is on top.
+- **Pointer:** while a card is dragged, `pointer` is the centre of its saved
+  rectangle and bit 0 of the flags is set; otherwise both are 0.
 - **Calls:** single-threaded, one call at a time, only while something moves
   (a drag, an unsettled animation, a layout change). When the output says
   `animating = 0`, the host stops calling until something changes.
@@ -118,7 +126,7 @@ Header, 48 bytes:
 | 16 | u32 | drop target: card id |
 | 20 | f32 | drop target: x |
 | 24 | f32 | drop target: y |
-| 28 | u32 | drop target: 1 = save as an icon at (x, y), 0 = save the open card at (x, y) |
+| 28 | u32 | drop target: 1 = save as an icon with its icon spot at (x, y); 0 = save as an open card at (x, y) (an icon is opened) |
 | 32 | u32 | state length (≤ 4096) |
 | 36 | 12 bytes | reserved |
 
@@ -141,7 +149,9 @@ Output length = 4144 + 32 × n.
 
 ### Drop target
 
-Only honoured for a card whose input had the *dropped* flag in the same frame.
+Only honoured for a card whose input had the *dropped* flag in the same frame
+(the frame right after the user let go; the host has already saved the drop
+where the pointer left it).
 It replaces where the host would save the drop. The host saves it through the
 same path as a user drag, so it survives turning the renderer off. Use it to
 make the drawn result and the saved layout agree (for example: dropped in the
@@ -162,7 +172,8 @@ edge band → saved as an icon at the edge).
   toolchains do not have them in `core`. Write `abs`, `clamp` and `smoothstep`
   yourself, and smooth with `alpha = dt / (tau + dt)` instead of `exp`.
 - Keep per-frame work linear or `n log n` in the card count; 128 cards must fit
-  in the budget. The example uses about 270 000 fuel for 128 cards; looking up
+  in the budget. The example takes about 0.1 ms per frame for 128 cards in an
+  optimized SUPER DESKTOP build. The example uses about 270 000 fuel for 128 cards; looking up
   each card's state with a linear scan instead of by slot pushes that past
   850 000.
 - Start a card that is new to your state at its saved rectangle so activation

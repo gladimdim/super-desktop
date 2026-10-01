@@ -37,7 +37,7 @@ pub const PERMISSIONS: [&str; 16] = [
 
 /// Contribution points this build draws. The others validate but are not
 /// active yet; `plugin describe` lists both so agents do not guess.
-pub const SUPPORTED_CONTRIBUTIONS: [&str; 8] = ["commands", "shortcuts", "toolbar", "cardButtons", "cardControls", "titles", "settings", "views"];
+pub const SUPPORTED_CONTRIBUTIONS: [&str; 9] = ["commands", "shortcuts", "toolbar", "cardButtons", "cardControls", "titles", "renderer", "settings", "views"];
 pub const ALL_CONTRIBUTIONS: [&str; 11] = [
     "commands",
     "shortcuts",
@@ -818,6 +818,9 @@ impl Checker {
                     if let Ok(bytes) = std::fs::read(dir.join(&renderer.wasm)) {
                         if !bytes.starts_with(b"\0asm") {
                             self.error(&format!("{path}.wasm"), "is not a WebAssembly module", "Build it for wasm32-unknown-unknown.", "references/renderer-abi.md");
+                        } else if let Err(why) = super::renderer::Renderer::load(&bytes, &std::env::temp_dir().join("sd-validate-renderer.log")) {
+                            // The same checks the desktop makes before drawing with it.
+                            self.error(&format!("{path}.wasm"), why, "Export memory, sd_abi_version, sd_input, sd_output and sd_present; import nothing but env.sd_log.", "references/renderer-abi.md#module-contract");
                         }
                     }
                 }

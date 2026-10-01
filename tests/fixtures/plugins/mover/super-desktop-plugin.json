@@ -1,0 +1,16 @@
+{
+  "manifestVersion": 1,
+  "id": "mover",
+  "name": "Mover",
+  "version": "0.1.0",
+  "description": "Test plugin: places or iconifies a card given in the command's arguments.",
+  "engines": { "superDesktop": ">=1.0.0", "pluginApi": "1" },
+  "main": { "command": ["python3", "main.py"] },
+  "permissions": ["cards.read", "cards.control"],
+  "contributes": {
+    "commands": [
+      { "id": "mover.place", "title": "Place a card" },
+      { "id": "mover.iconify", "title": "Iconify a card" }
+    ]
+  }
+}

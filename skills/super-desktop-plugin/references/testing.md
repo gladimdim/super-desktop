@@ -14,7 +14,7 @@ invisible host.
 | `super-desktop plugin test <dir> [scenario]` | Starts a headless host with a fake workspace, activates the plugin, plays the scenarios in `tests/*.json`, then deactivates it and checks that nothing is left behind. Only when `describe` lists `test`. |
 | `super-desktop plugin views <id> [--json]` | Every open view of the plugin and each node's state: `text`, `label`, `value`, `visible`, `enabled`. Read it instead of guessing what the panel shows. |
 | `super-desktop plugin interact <id> <node> <event> [value] [--view=<view>]` | Operates a node's real widget as a person would: `click` a button, `change` a checkbox/toggle (`true`), entry/textArea (`"text"`) or select (`"value"`), `submit` an entry. Hidden or disabled nodes refuse, as they would for a person. Text changes reach the plugin after 300 ms. |
-| `super-desktop plugin cards [--json]` | This PC's cards and what plugins did to them: the drawn and the published title, chips, plugin buttons, the controls shown (header and icon). |
+| `super-desktop plugin cards [--json]` | This PC's cards and what plugins did to them: the saved `rect`, where a renderer draws it (`drawn`, null for the built-in layout), the drawn and the published title, chips, plugin buttons, the controls shown (header and icon). |
 | `super-desktop plugin press <card> <control>` | Presses a card's plugin button or control by its contribution id, or a built-in one (`builtin:iconify`, `builtin:restore`, `builtin:expand`, `builtin:close`), through the real widget. A control not shown in the card's current form (header or icon) refuses. |
 | `super-desktop plugin link <dir>` | Installs the folder in place for real use (asks for consent once). |
 | `super-desktop plugin reload <id>` | Deactivate + activate after an edit. |
@@ -81,6 +81,10 @@ super-desktop plugin logs git-flush                         # host errors come w
   live in a temporary directory, never the user's.
 
 ## Renderers
+
+`plugin validate` loads the `.wasm` with the same checks the desktop makes
+(imports, exports, ABI version, buffers). On a real desktop, `plugin cards`
+shows where each card is drawn.
 
 Test the pure `present` function natively (`cargo test`) with frames built in
 the test, like `examples/center-magnify/src/lib.rs`: centre, edges, drop in
