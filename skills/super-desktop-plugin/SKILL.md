@@ -30,7 +30,10 @@ super-desktop plugin describe --json
 It prints the plugin API version, contribution points, permissions, limits and
 the schema paths. If the command is unknown, the installed SUPER DESKTOP has no
 plugin support: stop and tell the user to update (⚙ Settings → Updates).
-Never guess an API that `describe` does not list.
+Never guess an API that `describe` does not list: `contributionPoints.supported`,
+`methods.implemented` and `commands` say what this build really has. When
+`new` or `test` is not in `commands`, copy the closest example instead of
+scaffolding, and test with `plugin link`, `plugin run` and `plugin logs`.
 
 ## 1. Mental model
 

@@ -146,7 +146,7 @@ pub(crate) fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
     root
 }
 
-fn fit_top_bar(hud: &gtk4::Box, width: i32, brand: &Label, hint: &Label) {
+pub(crate) fn fit_top_bar(hud: &gtk4::Box, width: i32, brand: &Label, hint: &Label) {
     // An unmapped window has no allocation yet. Keep the initial monitor size
     // until the compositor supplies a positive logical width.
     if width <= 0 {
@@ -841,7 +841,18 @@ impl SuperDesktopWindow {
         brand_images
             .borrow_mut()
             .extend(harness_bar.brand_images());
-        hud.append(&top_bar_content(&hud_left, &harness_bar.group, &hud_right));
+        // Plugin toolbar items follow the launchers, inside the same scroller:
+        // never beside Arrange, Settings and Hide.
+        let plugin_bar = crate::plugin_ui::manager().toolbar();
+        let launch_row = gtk4::Box::new(Orientation::Horizontal, 10);
+        launch_row.set_halign(Align::Center);
+        launch_row.set_valign(Align::Center);
+        launch_row.append(&harness_bar.group);
+        if let Some(parent) = plugin_bar.group.parent().and_downcast::<gtk4::Box>() {
+            parent.remove(&plugin_bar.group);
+        }
+        launch_row.append(&plugin_bar.group);
+        hud.append(&top_bar_content(&hud_left, &launch_row, &hud_right));
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
         let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
@@ -898,6 +909,11 @@ impl SuperDesktopWindow {
         hud_right.append(&btn_close);
 
         hud_right.append(&hint);
+        // Plugin item labels hide on narrow displays together with the hint.
+        hint.connect_visible_notify({
+            let plugin_bar = Rc::clone(&plugin_bar);
+            move |hint| plugin_bar.set_compact(!hint.is_visible())
+        });
 
         // Layer-shell chooses the output. Its allocated logical width is the
         // authority, including after a monitor or scale change.
@@ -949,6 +965,15 @@ impl SuperDesktopWindow {
         // Files & links panels open as their own floating cards, under the
         // pairing dialogs.
         crate::asset_view::set_host(
+            &root_overlay,
+            Rc::new({
+                let state = Rc::clone(&win_rc.state);
+                move || top_bar_height(state.borrow().top_bar_size)
+            }),
+            &pairing_wizard.widget,
+        );
+        // Plugin panels open the same way, under the same dialogs.
+        crate::plugin_ui::manager().set_view_host(
             &root_overlay,
             Rc::new({
                 let state = Rc::clone(&win_rc.state);
@@ -2700,6 +2725,26 @@ mod tests {
                 button
             })
             .collect();
+        // Plugin items share the launchers' scroller (the production bar wraps
+        // the harness group and the plugin group in one row the same way).
+        let plugin_bar = crate::plugin_ui::toolbar::PluginBar::new(Rc::new(|_: &str, _: &str| {}));
+        for plugin in 0..4 {
+            for item in 0..4 {
+                plugin_bar.add(
+                    &format!("plugin-{plugin}"),
+                    std::path::Path::new("/tmp"),
+                    &crate::plugin_host::manifest::ToolbarItem {
+                        id: format!("plugin-{plugin}.item-{item}"),
+                        icon: "🧪".into(),
+                        label: Some(format!("Plugin item with a long label {item}")),
+                        tooltip: "t".into(),
+                        command: Some(format!("plugin-{plugin}.run")),
+                        view: None,
+                    },
+                );
+            }
+        }
+        launchers.append(&plugin_bar.group);
         let right = gtk4::Box::new(Orientation::Horizontal, 10);
         right.set_valign(Align::Center);
         let actions: Vec<_> = [
@@ -2718,6 +2763,10 @@ mod tests {
         .collect();
         let hint = Label::new(Some("[SUPER + SHIFT + Q]"));
         right.append(&hint);
+        hint.connect_visible_notify({
+            let plugin_bar = Rc::clone(&plugin_bar);
+            move |hint| plugin_bar.set_compact(!hint.is_visible())
+        });
         let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
         hud.append(&top_bar_content(&left, &launchers, &right));
@@ -2732,6 +2781,8 @@ mod tests {
             for (index, button) in launcher_buttons.iter().enumerate() {
                 button.set_visible(index < count);
             }
+            // Empty and full plugin groups alike.
+            plugin_bar.group.set_visible(count > 0);
             for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
                 paint_top_bar_size(&hud, size);
                 // Shrink, enlarge, then shrink again, as with output/scale changes.

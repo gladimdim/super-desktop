@@ -8,6 +8,7 @@
 //! GTK-free parts (manifest, store, process, api) are usable from the CLI and
 //! tests; the GTK parts live in `plugin_ui`.
 pub mod api;
+pub mod cli;
 pub mod llm;
 pub mod manifest;
 pub mod process;

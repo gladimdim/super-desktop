@@ -61,6 +61,7 @@ class Plugin:
         self._handlers["deactivate"] = self._deactivate
         self._handlers["command"] = self._command
         self._handlers["view.event"] = self._view_event
+        self._handlers["view.opened"] = self._view_opened
 
     # ---- registration -------------------------------------------------
     def on(self, method):
@@ -80,7 +81,11 @@ class Plugin:
         return register
 
     def view(self, view_id):
-        """fn(handle, node, event, value) for events from one declared view."""
+        """fn(handle, node, event, value) for events from one declared view.
+
+        Also called with node "root", event "open" (value: the anchor id) when the
+        host opened the view from a toolbar item: fill it with ui.patch.
+        """
 
         def register(fn):
             self._view_handlers[view_id] = fn
@@ -197,6 +202,12 @@ class Plugin:
             self.log(f"no handler for command {params.get('command')}", "warn")
             return
         fn(params.get("context") or {})
+
+    def _view_opened(self, params):
+        """A toolbar item that names a view was clicked: the handler gets event "open"."""
+        fn = self._view_handlers.get(params.get("view"))
+        if fn is not None:
+            fn(params.get("handle"), "root", "open", params.get("anchor"))
 
     def _view_event(self, params):
         fn = self._view_handlers.get(params.get("view"))

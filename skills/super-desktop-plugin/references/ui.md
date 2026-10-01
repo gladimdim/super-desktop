@@ -20,6 +20,12 @@ Normative schema: `schemas/ui.schema.json`.
 `ui.open {view, model}` → `{handle}`. Keep the handle; patch with it; forget it
 on `view.closed`.
 
+A toolbar item with `"view"` instead of `"command"` opens the view itself: the
+host shows a placeholder (a `column` with id `root` holding a `spinner`) and
+sends `view.opened {handle, view, anchor}`. Fill it with
+`ui.patch {handle, ops: [{"op": "replace", "id": "root", "node": {...}}]}`;
+your node's id can be `root` again.
+
 ## Nodes
 
 Every node has `type` and `id` (unique in the view, `[A-Za-z0-9_.:-]{1,64}`)

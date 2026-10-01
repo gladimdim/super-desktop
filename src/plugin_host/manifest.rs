@@ -37,7 +37,7 @@ pub const PERMISSIONS: [&str; 16] = [
 
 /// Contribution points this build draws. The others validate but are not
 /// active yet; `plugin describe` lists both so agents do not guess.
-pub const SUPPORTED_CONTRIBUTIONS: [&str; 6] = ["commands", "shortcuts", "toolbar", "toolbarHide", "settings", "views"];
+pub const SUPPORTED_CONTRIBUTIONS: [&str; 4] = ["commands", "toolbar", "settings", "views"];
 pub const ALL_CONTRIBUTIONS: [&str; 11] = [
     "commands",
     "shortcuts",

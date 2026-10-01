@@ -162,6 +162,7 @@ the first plugin (in the user's order) that sets text wins.
 | --- | --- | --- |
 | `command` | `{command, context: {source, card?, args?}}` | A declared command ran. `source`: shortcut, toolbar, cardButton, cardControl, cli, view. |
 | `view.event` | `{handle, view, node, event, value?}` | `click` (button), `change` (checkbox, toggle, entry after 300 ms idle, textArea, select), `submit` (Enter in entry). |
+| `view.opened` | `{handle, view, anchor?}` | The user clicked a toolbar item that names a view: the host opened it with a placeholder (`root` column with a spinner). Fill it with `ui.patch` (`replace` `root`). |
 | `view.closed` | `{handle}` | The view closed (user, Hide, or `ui.close`). Drop the handle. |
 | `settings.changed` | `{values}` | The user changed settings. |
 | `title.inputs` | `{cards: [{id, agent, folder, status, prefix, prompt, local}]}` | After activate and whenever a card's inputs change; answer with `title.set`. |
