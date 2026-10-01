@@ -13,6 +13,9 @@ pub struct Frame<'a> {
     pub rows: Option<u16>,
     pub ansi_only: bool,
     pub updated_at: &'a str,
+    /// The editor in the pane's foreground, if any. Omitted otherwise, so
+    /// frames without one are unchanged for older phones.
+    pub editor: Option<&'a crate::editor_actions::Detected>,
 }
 
 impl Frame<'_> {
@@ -25,6 +28,8 @@ impl Frame<'_> {
             // Keep the ordering of the earlier JSON object as well as its values.
             agent_type: &'a str,
             columns: Option<u16>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            editor: Option<&'a crate::editor_actions::Detected>,
             id: &'a str,
             label: &'a str,
             rows: Option<u16>,
@@ -59,6 +64,7 @@ impl Frame<'_> {
             tail_ansi: self.ansi,
             tail_format: self.ansi.map(|_| "ansi-sgr"),
             updated_at: self.updated_at,
+            editor: self.editor,
         };
         output.clear();
         // These fields cannot fail serialization and Vec's writer cannot fail.
@@ -79,6 +85,9 @@ mod tests {
             "tailFormat": frame.ansi.map(|_| "ansi-sgr"),
             "columns": frame.columns, "rows": frame.rows, "updatedAt": frame.updated_at,
         });
+        if let Some(editor) = frame.editor {
+            document["editor"] = serde_json::to_value(editor).unwrap();
+        }
         if !(frame.ansi_only && frame.ansi.is_some()) {
             document["tail"] =
                 serde_json::json!(frame.ansi.map(crate::terminal_text::strip_terminal_escapes));
@@ -101,7 +110,11 @@ mod tests {
             Some("\x1b]unterminated"),
         ] {
             for ansi_only in [false, true] {
-                for title in [None, Some(""), Some("User's \"prompt\"\n☃\\")] {
+                for (title, editor) in [
+                    (None, None),
+                    (Some(""), crate::editor_actions::detect("nvim", true, "")),
+                    (Some("User's \"prompt\"\n☃\\"), None),
+                ] {
                     for grid in [None, Some((80, 24)), Some((u16::MAX, u16::MAX))] {
                         let frame = Frame {
                             id: "sd_term_test",
@@ -116,6 +129,7 @@ mod tests {
                             rows: grid.map(|g| g.1),
                             ansi_only,
                             updated_at: "2026-09-27T00:00:00.000Z",
+                            editor: editor.as_ref(),
                         };
                         assert_eq!(frame.write_json(&mut output), reference(&frame).as_bytes());
                         let allocation = output.as_ptr();
@@ -128,6 +142,7 @@ mod tests {
                             tag_color: None,
                             columns: None,
                             rows: None,
+                            editor: None,
                             ..frame
                         };
                         assert_eq!(gone.write_json(&mut output), reference(&gone).as_bytes());

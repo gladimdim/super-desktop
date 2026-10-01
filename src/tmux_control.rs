@@ -267,6 +267,28 @@ impl Control {
         Ok(())
     }
 
+    /// Bytes typed into the pane exactly as given, without Return.
+    pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        self.command(&format!("send-keys -t {} -H {}", self.pane, hex_keys(bytes)))?;
+        Ok(())
+    }
+
+    /// Leave tmux's copy mode, so typed keys reach the program again.
+    pub fn cancel_copy_mode(&mut self) -> Result<(), String> {
+        self.command(&format!("send-keys -t {} -X cancel", self.pane)).map(|_| ())
+    }
+
+    /// This pane's `format` (tmux `#{…}` fields, no single quotes).
+    pub fn pane_format(&mut self, format: &str) -> Result<String, String> {
+        if format.contains('\'') || format.contains('\n') {
+            return Err("Invalid format".into());
+        }
+        self.command(&format!("display-message -p -t {} '{format}'", self.pane))
+    }
+
     pub fn capture(&mut self) -> Result<String, String> {
         self.command(&format!("capture-pane -p -e -S -300 -t {}", self.pane))
     }

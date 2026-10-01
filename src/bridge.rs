@@ -884,6 +884,60 @@ fn handle_keys(stream: &mut Connection, req: &Request, id: &str) {
     }
 }
 
+/// `POST /api/v1/harnesses/<id>/editor-action` — Save, Close, scroll and the
+/// other actions a stream frame's `editor` lists, typed in that editor's own
+/// keys. The body names the editor the phone saw; when the pane no longer runs
+/// it, nothing is typed (`editor_not_foreground`), so an answer meant for the
+/// editor never reaches a shell or a harness prompt.
+fn handle_editor_action(stream: &mut Connection, req: &Request, id: &str) {
+    use crate::editor_actions::{Action, Error};
+    if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
+        return;
+    }
+    if !crate::tmux::session_alive(id) {
+        return respond(stream, 404, "Not Found", &serde_json::json!({"status": "error", "error": "no_such_session"}));
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&req.body) else {
+        return respond(stream, 400, "Bad Request", &serde_json::json!({"status": "error", "error": "bad_json"}));
+    };
+    let parsed = body
+        .get("editor")
+        .and_then(|v| v.as_str())
+        .ok_or(Error::InvalidRequest)
+        .and_then(|editor| Action::parse(&body).map(|action| (editor, action)));
+    let result = parsed.and_then(|(editor, action)| {
+        let _input = crate::prompt_image::input_guard(id).map_err(Error::Tmux)?;
+        if !stream.still_authorized() {
+            return Err(Error::Tmux("device_revoked".into()));
+        }
+        let mut control = crate::tmux_control::Control::open(id).map_err(Error::Tmux)?;
+        crate::editor_actions::run(&mut control, editor, &action)
+    });
+    match result {
+        Ok(editor) => {
+            wake_terminal_streams(id);
+            respond(stream, 200, "OK", &serde_json::json!({"status": "ok", "editor": editor}))
+        }
+        Err(Error::NotForeground(foreground)) => respond(
+            stream,
+            409,
+            "Conflict",
+            &serde_json::json!({"status": "error", "error": "editor_not_foreground", "foreground": foreground}),
+        ),
+        Err(error @ (Error::InvalidRequest | Error::InvalidFileName | Error::UnsupportedAction)) => {
+            respond(stream, 400, "Bad Request", &serde_json::json!({"status": "error", "error": error.code()}))
+        }
+        Err(Error::Tmux(error)) => {
+            let (code, reason) = match error.as_str() {
+                "terminal_input_busy_try_again" => (409, "Conflict"),
+                "device_revoked" => (403, "Forbidden"),
+                _ => (500, "Internal Server Error"),
+            };
+            respond(stream, code, reason, &serde_json::json!({"status": "error", "error": error}))
+        }
+    }
+}
+
 /// `DELETE /api/v1/harnesses/<id>` — close one launcher-visible harness.
 fn handle_close_harness(stream: &mut Connection, req: &Request, id: &str) {
     if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
@@ -1178,6 +1232,7 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
                         };
                     }
                     ("POST", "keys") => return handle_keys(stream, req, id),
+                    ("POST", "editor-action") => return handle_editor_action(stream, req, id),
                     _ => {}
                 }
             }

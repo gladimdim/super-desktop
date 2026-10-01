@@ -74,6 +74,7 @@ def main():
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, headers={"Content-Length": "99999999"})[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/attachment-prompt", {})[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/attachment-prompt", {}, headers={"Content-Length": "99999999"})[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/editor-action", {"action": "save", "editor": "vim"}) == (401, {"status": "error", "error": "not_paired"})
             assert request("/api/v1/pair/invitation", {})[0] == 403
             assert request("/api/v1/pair", {"deviceName": "stranger"})[0] == 403
             assert request("/api/v1/ping", headers={"Origin": "https://untrusted.example"})[0] == 403
@@ -107,6 +108,9 @@ def main():
             status, harnesses = request("/api/v1/harnesses", token=token)
             assert status == 200 and set(harnesses) == {"protocolVersion", "timestamp", "harnesses", "usage", "theme"}
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
+            editor_action = "/api/v1/harnesses/sd_term_probe/editor-action"
+            assert request(editor_action, {"action": "save", "editor": "vim"}, token=token) == (404, {"status": "error", "error": "no_such_session"})
+            assert request(editor_action, {"action": "save", "editor": "vim"}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Content-Length": "99999999"})[0] == 413
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {"requestId": "a" * 32, "text": "hello", "imageBase64": "invalid"}, token=token)[0] == 409
             # Authorized image route accepts >16 KiB, but the general request limit stays unchanged.
@@ -153,6 +157,7 @@ def main():
             assert request("/api/v1/completions", {"sessions": []}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/attachment-prompt", {}, token=token)[0] == 401
+            assert request("/api/v1/harnesses/sd_term_probe/editor-action", {"action": "save", "editor": "vim"}, token=token)[0] == 401
             assert request("/api/v1/harnesses/sd_term_probe/assets/id/content", token=token)[0] == 401
             assert request("/api/v1/pair/poll", rid)[0] == 404
             while live.recv(65536):

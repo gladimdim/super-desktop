@@ -80,6 +80,7 @@ pub(super) struct Frame<'a> {
     pub grid: Option<TerminalSize>,
     pub ansi_only: bool,
     pub updated_at: &'a str,
+    pub editor: Option<&'a crate::editor_actions::Detected>,
 }
 
 /// One serialized stream frame. Without `ansi_only` the frame is unchanged
@@ -99,20 +100,24 @@ pub(super) fn frame_json<'out>(frame: &Frame, output: &'out mut Vec<u8>) -> &'ou
         rows: frame.grid.map(|grid| grid.rows),
         ansi_only: frame.ansi_only,
         updated_at: frame.updated_at,
+        editor: frame.editor,
     }
     .write_json(output)
 }
 
-/// Content of the last frame sent: status, label, title, styled tail, grid.
-type SentFrame = (&'static str, &'static str, Option<String>, Option<String>, Option<TerminalSize>);
+/// Content of the last frame sent: status, label, title, styled tail, grid, editor.
+type SentFrame = (&'static str, &'static str, Option<String>, Option<String>, Option<TerminalSize>, Option<Detected>);
 
-/// Status, title and (on request) grid over the control connection.
+use crate::editor_actions::Detected;
+
+/// Status, title, the editor in the foreground and (on request) grid over
+/// the control connection.
 fn query_status(
     control: &mut crate::tmux_control::Control,
     id: &str,
     agent: &str,
     screen: &mut dyn FnMut() -> Option<String>,
-) -> (SessionStatus, Option<String>) {
+) -> (SessionStatus, Option<String>, Option<Detected>) {
     match control.pane_snapshot().map(|snapshot| {
         match snapshot.lookup(id) {
             PaneLookup::Row(row) => {
@@ -120,9 +125,16 @@ fn query_status(
                 let status = crate::tmux::status_for_pane(id, agent, row, &|| metadata.clone(), screen);
                 let oc_id = (agent == "opencode").then(|| resolve_own_opencode_id(id, None)).flatten();
                 let title = crate::card_status::card_title(agent, metadata.as_ref(), oc_id.as_deref(), &status.pid);
-                Some((status, title))
+                // Only the pane keys are typed into: the active one, and not
+                // while tmux's copy mode has it.
+                let editor = row
+                    .stamp
+                    .as_ref()
+                    .filter(|_| !row.dead)
+                    .and_then(|stamp| crate::editor_actions::detect(&row.cmd, stamp.alternate, &row.pid));
+                Some((status, title, editor))
             }
-            PaneLookup::Missing => Some((crate::tmux::exited_status(agent), None)),
+            PaneLookup::Missing => Some((crate::tmux::exited_status(agent), None, None)),
             PaneLookup::Unknown => None,
         }
     }) {
@@ -132,7 +144,7 @@ fn query_status(
             let text = screen().unwrap_or_default();
             let status = inspect_status_with_screen(id, agent, &text);
             let title = session_title(id, agent, &status.pid);
-            (status, title)
+            (status, title, None)
         }
     }
 }
@@ -152,6 +164,7 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
     let mut seen = activity.snapshot();
     let mut status: Option<SessionStatus> = None;
     let mut title: Option<String> = None;
+    let mut editor: Option<Detected> = None;
     let mut grid: Option<TerminalSize> = None;
     let mut status_at = Instant::now();
     let mut grid_at = Instant::now();
@@ -184,10 +197,11 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
             || now.duration_since(status_at) >= STATUS_IDLE
         {
             let ansi = captured.as_deref().unwrap_or("");
-            let (fresh, fresh_title) =
+            let (fresh, fresh_title, fresh_editor) =
                 query_status(&mut control, id, &agent_type, &mut || Some(strip_terminal_escapes(ansi)));
             status = Some(fresh);
             title = fresh_title;
+            editor = fresh_editor;
             status_at = now;
             output_dirty = false;
         }
@@ -200,14 +214,19 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
         }
         let current_status = status.as_ref().expect("status is set above");
         let changed = match &sent {
-            Some((s, l, t, a, g)) => {
-                *s != current_status.status || *l != current_status.label || *t != title || *a != captured || *g != grid
+            Some((s, l, t, a, g, e)) => {
+                *s != current_status.status
+                    || *l != current_status.label
+                    || *t != title
+                    || *a != captured
+                    || *g != grid
+                    || *e != editor
             }
             None => true,
         };
         if changed || sent_at.elapsed() >= HEARTBEAT {
             if changed {
-                sent = Some((current_status.status, current_status.label, title.clone(), captured, grid));
+                sent = Some((current_status.status, current_status.label, title.clone(), captured, grid, editor.clone()));
             }
             let ansi = sent.as_ref().and_then(|s| s.3.as_deref());
             let text = frame_json(&Frame {
@@ -220,6 +239,7 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
                 grid,
                 ansi_only,
                 updated_at: &utc_now_iso(),
+                editor: sent.as_ref().and_then(|s| s.5.as_ref()),
             }, &mut output);
             // serde_json produces valid UTF-8: send its bytes as a text frame
             // without allocating a String or validating that output again.
@@ -288,6 +308,7 @@ mod tests {
             grid: Some(TerminalSize { columns: 80, rows: 24 }),
             ansi_only,
             updated_at: "2026-09-24T00:00:00.000Z",
+            editor: None,
         }, &mut Vec::new()))
         .unwrap()
     }
