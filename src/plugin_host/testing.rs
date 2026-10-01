@@ -164,7 +164,7 @@ fn apply(tree: &mut Value, op: &Value) -> Result<(), String> {
             None => return Err("the root cannot be removed; close the view".into()),
         },
         "append" => {
-            if !matches!(kind.as_str(), "column" | "row" | "list" | "scroll") {
+            if !matches!(kind.as_str(), "group" | "column" | "row" | "list" | "scroll") {
                 return Err(format!("`{id}` ({kind}) cannot have children"));
             }
             new_ids(tree, &op["node"], None)?;

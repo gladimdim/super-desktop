@@ -31,6 +31,8 @@ struct Node {
     image: Option<gtk4::Image>,
     scroll: Option<gtk4::ScrolledWindow>,
     markdown_holder: Option<gtk4::Box>,
+    /// A group's header: (box, title, subtitle).
+    heading: Option<(gtk4::Box, gtk4::Label, gtk4::Label)>,
     /// Set while the host itself changes a value, so no event echoes back.
     quiet: Rc<Cell<bool>>,
 }
@@ -231,6 +233,7 @@ impl Tree {
             image: None,
             scroll: None,
             markdown_holder: None,
+            heading: None,
             quiet: Rc::clone(&quiet),
         };
         let weak = Rc::downgrade(self);
@@ -243,6 +246,34 @@ impl Tree {
             }
         };
         match kind.as_str() {
+            "group" => {
+                let frame = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+                frame.add_css_class("plugin-group");
+                let head = gtk4::Box::new(gtk4::Orientation::Vertical, 2);
+                head.add_css_class("plugin-group-head");
+                let title = gtk4::Label::new(None);
+                title.add_css_class("plugin-group-title");
+                title.set_xalign(0.0);
+                title.set_wrap(true);
+                let subtitle = gtk4::Label::new(None);
+                subtitle.add_css_class("plugin-group-subtitle");
+                subtitle.set_xalign(0.0);
+                subtitle.set_wrap(true);
+                head.append(&title);
+                head.append(&subtitle);
+                head.set_visible(false);
+                let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+                frame.append(&head);
+                frame.append(&body);
+                node.widget = frame.upcast();
+                node.container = Some(body);
+                node.heading = Some((head, title, subtitle));
+            }
+            "spacer" => {
+                let spacer = gtk4::Box::new(gtk4::Orientation::Horizontal, 0);
+                spacer.set_hexpand(true);
+                node.widget = spacer.upcast();
+            }
             "column" | "row" | "list" => {
                 let orientation = if kind == "row" { gtk4::Orientation::Horizontal } else { gtk4::Orientation::Vertical };
                 let gap = props.get("gap").and_then(Value::as_i64).unwrap_or(if kind == "row" { 8 } else { 6 }) as i32;
@@ -415,6 +446,29 @@ impl Tree {
             node.widget.set_sensitive(enabled);
         }
         match node.kind.as_str() {
+            "group" => {
+                let (head, title, subtitle) = node.heading.as_ref().expect("group node");
+                if let Some(t) = text("title") {
+                    title.set_text(t);
+                    title.set_visible(!t.is_empty());
+                }
+                if let Some(t) = text("subtitle") {
+                    subtitle.set_text(t);
+                    subtitle.set_visible(!t.is_empty());
+                }
+                head.set_visible(!title.text().is_empty() || !subtitle.text().is_empty());
+                if let Some(tone) = text("tone") {
+                    for class in node.widget.css_classes() {
+                        if class.starts_with("plugin-tone-") {
+                            node.widget.remove_css_class(&class);
+                        }
+                    }
+                    node.widget.add_css_class(&format!("plugin-tone-{tone}"));
+                }
+                if let (Some(gap), Some(container)) = (props.get("gap").and_then(Value::as_i64), &node.container) {
+                    container.set_spacing(gap as i32);
+                }
+            }
             "column" | "row" | "list" => {
                 if let (Some(gap), Some(container)) = (props.get("gap").and_then(Value::as_i64), &node.container) {
                     container.set_spacing(gap as i32);
@@ -658,6 +712,58 @@ pub fn placeholder() -> Value {
 mod tests {
     use super::*;
 
+    /// Renders a view model in the real panel chrome to a PNG, with the real
+    /// stylesheet and the user's Omarchy theme, on the private Broadway
+    /// display: `SD_SCREENSHOT_MODEL=model.json SD_SCREENSHOT_OUT=out.png
+    /// cargo test plugin_view_screenshot -- --nocapture`. Does nothing without
+    /// those variables.
+    #[test]
+    fn plugin_view_screenshot() {
+        if std::env::var_os("SD_SCREENSHOT_MODEL").is_none() {
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::view::tests::plugin_view_screenshot_inner");
+    }
+
+    #[test]
+    fn plugin_view_screenshot_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let (Some(model), Some(out)) = (std::env::var_os("SD_SCREENSHOT_MODEL"), std::env::var_os("SD_SCREENSHOT_OUT")) else { return };
+        let (width, height) = std::env::var("SD_SCREENSHOT_SIZE")
+            .ok()
+            .and_then(|s| s.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or((760, 560));
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let model: Value = serde_json::from_str(&std::fs::read_to_string(model).unwrap()).unwrap();
+        crate::plugin_host::ui_model::check_tree(&model).expect("a valid model");
+        let tree = Tree::new(std::path::Path::new("/tmp"), Rc::new(|_, _, _| {}));
+        tree.set_model(&model);
+        let chrome = chrome("Flusher", "Flusher", &tree);
+        let window = gtk4::Window::new();
+        window.add_css_class("super-desktop");
+        window.set_default_size(width, height);
+        window.set_child(Some(&chrome.widget));
+        window.present();
+        let until = std::time::Instant::now() + Duration::from_millis(600);
+        while std::time::Instant::now() < until {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let paintable = gtk4::WidgetPaintable::new(Some(&chrome.widget));
+        let snapshot = gtk4::Snapshot::new();
+        let (w, h) = (chrome.widget.width() as f64, chrome.widget.height() as f64);
+        paintable.snapshot(&snapshot, w, h);
+        let node = snapshot.to_node().expect("something was drawn");
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None::<&gtk4::gdk::Surface>).unwrap();
+        let texture = renderer.render_texture(&node, None);
+        texture.save_to_png(out).unwrap();
+        renderer.unrealize();
+    }
+
     #[test]
     fn plugin_view_builds_patches_and_reports() {
         crate::gtk_test::run_in_child_process("plugin_ui::view::tests::plugin_view_inner");
@@ -716,5 +822,19 @@ mod tests {
         assert!(tree.interact("go", "click", &Value::Null).unwrap_err().contains("disabled"));
         tree.patch(&[json!({"op": "remove", "id": "rows"})]).unwrap();
         assert!(!tree.nodes.borrow().contains_key("row-1"), "removing a container forgets its children");
+
+        // Groups: a header that shows only with a title, a tone class, children.
+        tree.patch(&[json!({"op": "append", "id": "root", "node": {"type": "group", "id": "g", "tone": "warning", "children": [
+            {"type": "row", "id": "g-row", "children": [{"type": "label", "id": "g-label", "text": "x"}, {"type": "spacer", "id": "g-space"}]}
+        ]}})])
+        .unwrap();
+        let nodes = tree.nodes.borrow().clone();
+        let group = &nodes["g"];
+        assert!(group.widget.has_css_class("plugin-group") && group.widget.has_css_class("plugin-tone-warning"));
+        assert!(!group.heading.as_ref().unwrap().0.is_visible(), "no title, no header");
+        assert!(nodes["g-space"].widget.hexpands());
+        tree.patch(&[json!({"op": "set", "id": "g", "props": {"title": "Repos", "tone": "error"}})]).unwrap();
+        assert!(group.heading.as_ref().unwrap().0.is_visible());
+        assert!(group.widget.has_css_class("plugin-tone-error") && !group.widget.has_css_class("plugin-tone-warning"));
     }
 }

@@ -11,8 +11,8 @@ pub const MAX_TEXT: usize = 64 * 1024;
 pub const MAX_OPS: usize = 500;
 const DOCS: &str = "references/ui.md#nodes";
 
-pub const TYPES: [&str; 18] = [
-    "column", "row", "scroll", "list", "label", "markdown", "code", "badge", "icon", "button", "toggle", "checkbox", "entry",
+pub const TYPES: [&str; 20] = [
+    "group", "column", "row", "scroll", "list", "spacer", "label", "markdown", "code", "badge", "icon", "button", "toggle", "checkbox", "entry",
     "textArea", "select", "progress", "spinner", "separator",
 ];
 
@@ -52,7 +52,7 @@ fn check_node(node: &Value, path: &str, ids: &mut BTreeSet<String>, count: &mut 
     let path = format!("{path}[{id}]");
     check_props(kind, object, &path, false)?;
     if let Some(children) = object.get("children") {
-        if !matches!(kind, "column" | "row" | "list" | "scroll") {
+        if !matches!(kind, "group" | "column" | "row" | "list" | "scroll") {
             return Err(err(&path, format!("`{kind}` cannot have children")));
         }
         let children = children.as_array().ok_or_else(|| err(&path, "children is an array"))?;
@@ -102,6 +102,12 @@ pub fn check_props(kind: &str, props: &serde_json::Map<String, Value>, path: &st
     };
     boolean("visible", false)?;
     match kind {
+        "group" => {
+            text("title", 120, false)?;
+            text("subtitle", 300, false)?;
+            one_of("tone", &["neutral", "accent", "success", "warning", "error"])?;
+            int("gap", 0, 32)
+        }
         "column" | "row" | "list" => int("gap", 0, 32),
         "scroll" => int("maxHeight", 40, 1200),
         "label" => {

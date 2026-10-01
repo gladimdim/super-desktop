@@ -722,6 +722,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
     }
 
+    /// Settings → Plugins with a real plugin, rendered to a PNG on the private
+    /// display: `SD_SCREENSHOT_PLUGIN=<plugin dir> SD_SCREENSHOT_OUT=out.png
+    /// cargo test plugin_settings_screenshot -- --nocapture`.
+    #[test]
+    fn plugin_settings_screenshot() {
+        if std::env::var_os("SD_SCREENSHOT_PLUGIN").is_none() {
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::settings_page::tests::plugin_settings_screenshot_inner");
+    }
+
+    #[test]
+    fn plugin_settings_screenshot_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let (Some(plugin), Some(out)) = (std::env::var_os("SD_SCREENSHOT_PLUGIN"), std::env::var_os("SD_SCREENSHOT_OUT")) else { return };
+        let plugin = std::path::PathBuf::from(plugin);
+        // The real theme is read before HOME moves to a scratch folder.
+        gtk4::init().unwrap();
+        if std::env::var_os("SD_SCREENSHOT_DARK").is_some() {
+            // What an Omarchy desktop sets (Adwaita-dark); Broadway starts light.
+            gtk4::Settings::default().unwrap().set_gtk_application_prefer_dark_theme(true);
+        }
+        crate::styles::apply_styles();
+        let home = std::env::temp_dir().join(format!("sd-settings-shot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join("Github/super-desktop")).unwrap();
+        std::fs::create_dir_all(home.join("Github/website")).unwrap();
+        // SAFETY: single-threaded child process.
+        unsafe { std::env::set_var("HOME", &home) };
+        let manifest = crate::plugin_host::manifest::load_dir(&plugin).manifest.unwrap();
+        store::update(|s| {
+            s.plugins.push(store::Installed {
+                id: manifest.id.clone(),
+                dir: plugin.clone(),
+                source: store::Source::Linked { path: plugin.clone() },
+                version: manifest.version.clone(),
+                active: true,
+                granted: manifest.permissions.clone(),
+                shortcuts: Default::default(),
+                extra: Default::default(),
+            })
+        })
+        .unwrap();
+        store::set_setting(&manifest, "folders", serde_json::json!([home.join("Github").display().to_string()])).unwrap();
+        let page = build();
+        let root: gtk4::Widget = page.widget.clone().upcast();
+        if let Some(add) = find::<gtk4::Button>(&root).into_iter().find(|b| b.label().as_deref() == Some("Add folder…")) {
+            add.emit_clicked();
+            if let Some(entry) = find::<gtk4::Box>(&root).into_iter().find(|b| b.has_css_class("plugin-path-browser")).and_then(|b| find::<gtk4::Entry>(&b.upcast()).into_iter().next()) {
+                entry.set_text("~/Github");
+                entry.emit_activate();
+            }
+        }
+        let scroll = gtk4::ScrolledWindow::new();
+        scroll.set_child(Some(&page.widget));
+        scroll.add_css_class("harness-page");
+        let window = gtk4::Window::new();
+        window.add_css_class("super-desktop");
+        window.set_default_size(820, 1000);
+        let card = gtk4::Box::new(Orientation::Vertical, 0);
+        card.add_css_class("mini-terminal");
+        card.add_css_class("harness-panel");
+        scroll.set_vexpand(true);
+        card.append(&scroll);
+        window.set_child(Some(&card));
+        window.present();
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(600) || (card.width() == 0 && start.elapsed() < std::time::Duration::from_secs(5)) {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let paintable = gtk4::WidgetPaintable::new(Some(&card));
+        let node = loop {
+            let snapshot = gtk4::Snapshot::new();
+            paintable.snapshot(&snapshot, card.width() as f64, card.height() as f64);
+            if let Some(node) = snapshot.to_node() {
+                break node;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(8), "nothing was drawn");
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None::<&gtk4::gdk::Surface>).unwrap();
+        renderer.render_texture(&node, None).save_to_png(out).unwrap();
+        renderer.unrealize();
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
     #[test]
     fn plugin_settings_paths_are_listed_and_expanded() {
         let dir = std::env::temp_dir().join(format!("sd-list-dir-{}", std::process::id()));

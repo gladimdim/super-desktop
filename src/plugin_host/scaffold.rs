@@ -157,10 +157,23 @@ state = {{"clicks": 0, "handle": None}}
 
 
 def model(greeting):
-    return {{"type": "column", "id": "root", "gap": 10, "children": [
-        {{"type": "label", "id": "message", "text": greeting, "style": "title"}},
-        {{"type": "label", "id": "count", "text": "Not clicked yet", "style": "muted"}},
-        {{"type": "button", "id": "again", "label": "Click me", "tone": "primary"}},
+    # Groups, a spacer before the actions, one primary button: see the skill's
+    # references/ui.md ("Look"). Colours come from the user's Omarchy theme.
+    return {{"type": "column", "id": "root", "gap": 12, "children": [
+        {{"type": "group", "id": "header", "tone": "accent", "children": [
+            {{"type": "row", "id": "top", "gap": 10, "children": [
+                {{"type": "label", "id": "message", "text": greeting, "style": "title"}},
+                {{"type": "spacer", "id": "top-space"}},
+                {{"type": "badge", "id": "status", "text": "ready", "tone": "success"}},
+            ]}},
+        ]}},
+        {{"type": "group", "id": "body", "title": "Clicks", "subtitle": "Press the button; the count updates in place.", "children": [
+            {{"type": "row", "id": "actions", "gap": 10, "children": [
+                {{"type": "label", "id": "count", "text": "Not clicked yet", "style": "muted"}},
+                {{"type": "spacer", "id": "actions-space"}},
+                {{"type": "button", "id": "again", "label": "Click me", "tone": "primary"}},
+            ]}},
+        ]}},
     ]}}
 
 

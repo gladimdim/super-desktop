@@ -179,17 +179,21 @@ def row(i, repo):
         where += f" → {repo['upstream']}"
     counts = f"{repo['changed']} changed, {repo['untracked']} new"
     status = repo["blocked"] or ""
-    return {"type": "column", "id": f"repo:{i}", "gap": 4, "children": [
+    group = {"type": "group", "id": f"repo:{i}", "gap": 4, "children": [
         {"type": "row", "id": f"head:{i}", "gap": 8, "children": [
             {"type": "checkbox", "id": f"sel:{i}", "value": not repo["blocked"], "enabled": not repo["blocked"],
              "label": repo["name"]},
-            {"type": "label", "id": f"where:{i}", "text": where, "style": "muted"},
-            {"type": "badge", "id": f"count:{i}", "text": counts[:24]},
+            {"type": "spacer", "id": f"space:{i}"},
+            {"type": "badge", "id": f"count:{i}", "text": counts[:24], "tone": "warning"},
         ]},
+        {"type": "label", "id": f"where:{i}", "text": where, "style": "mono"},
         {"type": "label", "id": f"status:{i}", "text": status, "style": "error" if repo["blocked"] else "muted",
          "visible": bool(status)},
         {"type": "textArea", "id": f"msg:{i}", "value": "", "rows": 4, "visible": False},
     ]}
+    if repo["blocked"]:
+        group["tone"] = "error"
+    return group
 
 
 def model(repos):
@@ -199,11 +203,14 @@ def model(repos):
     return {"type": "column", "id": "root", "gap": 12, "children": [
         {"type": "scroll", "id": "rows-scroll", "maxHeight": 440, "children": [
             {"type": "list", "id": "rows", "gap": 10, "children": rows}]},
-        {"type": "row", "id": "actions", "gap": 8, "children": [
-            {"type": "button", "id": "refresh", "label": "Refresh"},
-            {"type": "button", "id": "flush", "label": "Flush all", "tone": "primary", "enabled": bool(repos)},
-            {"type": "button", "id": "commit", "label": "Commit & push", "tone": "danger", "visible": False},
-            {"type": "spinner", "id": "busy", "visible": False},
+        {"type": "group", "id": "footer", "children": [
+            {"type": "row", "id": "actions", "gap": 8, "children": [
+                {"type": "button", "id": "refresh", "label": "Refresh", "icon": "⟳"},
+                {"type": "spinner", "id": "busy", "visible": False},
+                {"type": "spacer", "id": "actions-space"},
+                {"type": "button", "id": "commit", "label": "Commit & push", "tone": "danger", "visible": False},
+                {"type": "button", "id": "flush", "label": "Flush all", "tone": "primary", "enabled": bool(repos)},
+            ]},
         ]},
     ]}
 

@@ -10,7 +10,226 @@ thread_local! {
 pub fn generate_css(theme: &OmarchyTheme) -> String {
     let mut css = theme_css(theme);
     css.push_str(&icon_radius_css());
+    css.push_str(&plugin_css(theme));
     css
+}
+
+/// Plugin panels, buttons, badges and chips (`plugin_ui::view`), the plugin
+/// toolbar items and card chrome, and Settings → Plugins. Every colour comes
+/// from the Omarchy theme: plugins never choose colours.
+fn plugin_css(theme: &OmarchyTheme) -> String {
+    let rgba = OmarchyTheme::hex_to_rgba;
+    let tones = [
+        ("accent", theme.accent.clone(), theme.accent.clone()),
+        ("success", theme.green.clone(), theme.bright_green.clone()),
+        ("warning", theme.yellow.clone(), theme.bright_yellow.clone()),
+        ("error", theme.red.clone(), theme.bright_red.clone()),
+    ];
+    let mut toned = String::new();
+    for (tone, base, bright) in &tones {
+        toned.push_str(&format!(
+            r#"
+.plugin-group.plugin-tone-{tone} {{
+    border-color: {border};
+    box-shadow: inset 3px 0 {bright};
+    background-color: {wash};
+}}
+.plugin-badge.plugin-tone-{tone}, .plugin-chip.plugin-tone-{tone} {{
+    background-color: {chip};
+    color: {bright};
+    border-color: {chip_border};
+}}
+"#,
+            border = rgba(base, 0.45),
+            wash = rgba(base, 0.06),
+            chip = rgba(base, 0.16),
+            chip_border = rgba(base, 0.35),
+        ));
+    }
+    format!(
+        r#"
+/* ================= Plugins ================= */
+.plugin-view {{
+    color: {foreground};
+    font-family: {font};
+}}
+.plugin-text-title {{ font-size: 15px; font-weight: 800; color: {bright_foreground}; letter-spacing: 0.2px; }}
+.plugin-text-muted {{ color: {muted_text}; font-size: 12px; }}
+.plugin-text-mono, .plugin-code {{ font-family: monospace; font-size: 12px; }}
+.plugin-text-mono {{ color: {muted_text}; }}
+.plugin-text-error {{ color: {bright_red}; }}
+.plugin-text-success {{ color: {bright_green}; }}
+
+.plugin-group {{
+    background-color: {group_bg};
+    border: 1px solid {group_border};
+    border-radius: 12px;
+    padding: 12px 14px;
+}}
+.plugin-group-title {{ font-weight: 800; font-size: 13px; color: {bright_foreground}; }}
+.plugin-group-subtitle {{ color: {muted_text}; font-size: 12px; }}
+.plugin-group-head {{ margin-bottom: 2px; }}
+
+.plugin-badge, .plugin-chip {{
+    background-color: {chip_bg};
+    color: {foreground};
+    border: 1px solid {chip_border};
+    border-radius: 9999px;
+    padding: 1px 9px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+button.plugin-button {{
+    background-image: none;
+    background-color: {btn_bg};
+    color: {light_foreground};
+    border: 1px solid {btn_border};
+    border-radius: 8px;
+    padding: 3px 12px;
+    min-height: 26px;
+    font-weight: 600;
+    box-shadow: none;
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}}
+button.plugin-button:hover {{ background-color: {btn_hover}; border-color: {accent}; color: {bright_foreground}; }}
+button.plugin-button:active {{ background-color: {badge_bg}; }}
+button.plugin-button:disabled {{ opacity: 0.45; }}
+button.plugin-button-primary {{
+    background-color: {accent};
+    border-color: {accent};
+    color: {on_accent};
+    font-weight: 800;
+}}
+button.plugin-button-primary:hover {{ background-color: {accent_hover}; color: {on_accent}; border-color: {accent}; }}
+button.plugin-button-danger {{
+    background-color: {danger_bg};
+    border-color: {danger_border};
+    color: {bright_red};
+}}
+button.plugin-button-danger:hover {{ background-color: {danger_hover}; color: {bright_red}; border-color: {bright_red}; }}
+
+.plugin-code {{
+    background-color: {code_bg};
+    border: 1px solid {group_border};
+    border-radius: 8px;
+    padding: 8px 10px;
+    color: {foreground};
+}}
+.plugin-view entry, .plugin-view textview, .plugin-path-browser entry {{
+    background-color: {code_bg};
+    color: {foreground};
+    border: 1px solid {group_border};
+    border-radius: 8px;
+}}
+.plugin-view entry:focus-within, .plugin-path-browser entry:focus-within {{ border-color: {accent}; }}
+.plugin-view textview text {{ background-color: transparent; color: {foreground}; }}
+.plugin-view frame {{ border: none; }}
+.plugin-view checkbutton {{ font-weight: 700; color: {bright_foreground}; }}
+.plugin-view checkbutton check {{
+    border-radius: 5px;
+    border: 1px solid {btn_border};
+    background-color: {code_bg};
+    min-width: 16px;
+    min-height: 16px;
+}}
+.plugin-view checkbutton check:checked {{ background-color: {accent}; border-color: {accent}; color: {on_accent}; }}
+.plugin-view switch:checked {{ background-color: {accent}; }}
+.plugin-view progressbar trough {{ background-color: {chip_bg}; border-radius: 9999px; min-height: 6px; }}
+.plugin-view progressbar progress {{ background-color: {accent}; border-radius: 9999px; min-height: 6px; }}
+.plugin-view separator {{ background-color: {group_border}; }}
+.plugin-view scrolledwindow {{ background: transparent; }}
+
+/* Toolbar items and card chrome contributed by plugins */
+.plugin-items .plugin-badge {{
+    background-color: {accent};
+    color: {on_accent};
+    border-color: {accent};
+    padding: 0 6px;
+    font-size: 10px;
+}}
+.plugin-chips .plugin-chip {{ padding: 0 7px; font-size: 10px; }}
+button.plugin-card-btn {{ padding: 0 6px; }}
+
+/* Settings → Plugins */
+.plugin-settings-card, .plugin-path-browser {{
+    background-color: {group_bg};
+    border: 1px solid {group_border};
+    border-radius: 12px;
+    padding: 12px 14px;
+}}
+.plugin-settings-card {{ padding: 14px 16px; }}
+.plugin-settings-card button, .plugin-path-browser button, .plugin-settings-card dropdown > button {{
+    background-image: none;
+    background-color: {btn_bg};
+    color: {light_foreground};
+    border: 1px solid {btn_border};
+    border-radius: 8px;
+    box-shadow: none;
+    min-height: 24px;
+}}
+.plugin-settings-card button:hover, .plugin-path-browser button:hover {{ background-color: {btn_hover}; border-color: {accent}; color: {bright_foreground}; }}
+.plugin-settings-card button:disabled, .plugin-path-browser button:disabled {{ opacity: 0.45; }}
+.plugin-settings-card button.launcher-btn-primary, .plugin-path-browser button.launcher-btn-primary {{
+    background-color: {accent};
+    border-color: {accent};
+    color: {on_accent};
+    font-weight: 800;
+}}
+.plugin-settings-card button.term-btn {{ background-color: transparent; border-color: transparent; padding: 0 6px; }}
+.plugin-settings-card button.term-btn:hover {{ color: {bright_red}; border-color: transparent; }}
+.plugin-path-browser button.flat {{
+    background-color: transparent;
+    border-color: transparent;
+    border-radius: 6px;
+    padding: 3px 8px;
+    color: {foreground};
+}}
+.plugin-path-browser button.flat:hover {{ background-color: {badge_bg}; color: {bright_foreground}; border-color: transparent; }}
+.plugin-settings-card entry, .plugin-settings-card passwordentry {{
+    background-image: none;
+    background-color: {code_bg};
+    color: {foreground};
+    border: 1px solid {group_border};
+    border-radius: 8px;
+    box-shadow: none;
+}}
+.plugin-settings-card entry:focus-within {{ border-color: {accent}; }}
+.plugin-settings-card switch {{ background-image: none; background-color: {chip_bg}; border: 1px solid {chip_border}; }}
+.plugin-settings-card switch:checked {{ background-color: {accent}; border-color: {accent}; }}
+.plugin-settings-card switch slider {{ background-image: none; background-color: {bright_foreground}; box-shadow: none; }}
+.plugin-settings-card switch:checked slider {{ background-color: {on_accent}; }}
+.plugin-settings-form {{
+    border-top: 1px solid {group_border};
+    padding-top: 10px;
+    margin-top: 4px;
+}}
+.plugin-setting-title {{ font-weight: 700; color: {bright_foreground}; }}
+.plugin-confirm {{ padding: 6px; }}
+{toned}"#,
+        foreground = theme.foreground,
+        bright_foreground = theme.bright_foreground,
+        light_foreground = theme.light_foreground,
+        muted_text = theme.rgba_fg(0.62),
+        font = theme.font_family,
+        accent = theme.accent,
+        accent_hover = theme.rgba_accent(0.85),
+        on_accent = theme.darker_background,
+        badge_bg = theme.rgba_accent(0.15),
+        bright_red = theme.bright_red,
+        bright_green = theme.bright_green,
+        group_bg = theme.rgba_lighter_bg(0.45),
+        group_border = theme.rgba_muted(0.32),
+        chip_bg = theme.rgba_muted(0.22),
+        chip_border = theme.rgba_muted(0.35),
+        btn_bg = theme.rgba_lighter_bg(0.85),
+        btn_border = theme.rgba_muted(0.40),
+        btn_hover = theme.rgba_muted(0.45),
+        danger_bg = rgba(&theme.red, 0.14),
+        danger_border = rgba(&theme.red, 0.45),
+        danger_hover = rgba(&theme.red, 0.26),
+        code_bg = theme.rgba_darker_bg(0.55),
+    )
 }
 
 /// One class per corner radius an iconified card can have, since GTK takes a

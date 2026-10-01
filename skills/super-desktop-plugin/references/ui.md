@@ -35,6 +35,7 @@ and may have `visible`.
 
 | Type | Props | Events |
 | --- | --- | --- |
+| `group` | `title`, `subtitle`, `tone` (`neutral`, `accent`, `success`, `warning`, `error`), `gap`, `children` | |
 | `column`, `row` | `gap` (0–32), `children` | |
 | `scroll` | `maxHeight`, `children` | |
 | `list` | `gap`, `children` (rows separated by the theme) | |
@@ -50,6 +51,7 @@ and may have `visible`.
 | `select` | `value`, `options: [{value, label}]` | `change` |
 | `progress` | `value` (0–1, or `null` for indeterminate) | |
 | `spinner` | | |
+| `spacer` | (takes the free space in a row: what follows goes to the right) | |
 | `separator` | | |
 
 Limits: 2000 nodes per view, 500 children per node, 64 KiB of text per node.
@@ -73,6 +75,22 @@ focus and text the user is typing. A `set` changes only the props it names
 node is complete and needs its required props. An op naming a node the view
 does not have fails the whole patch with an error saying which op. A value the user is editing is not
 overwritten by `set` on the same prop while the field has focus.
+
+## Look
+
+Views are drawn with the active Omarchy theme and follow theme switches; a
+plugin never chooses colours. Use the structure to get a clean, modern panel:
+
+- **Group what belongs together.** A `group` is a bordered panel (title and
+  subtitle optional). Give the one that needs attention a `tone`: `accent`
+  for the main area, `warning` / `error` for problems, `success` for done.
+- **One row per item, actions at the end:** `row` → content, `spacer`,
+  buttons. Use `badge`s for short facts (a branch, a count) instead of long
+  sentences.
+- **One primary button per view** (`tone: "primary"`); `danger` for actions
+  that destroy or publish; plain buttons for the rest.
+- Text styles: `title` for headings, `muted` for secondary text, `mono` for
+  paths and ids, `code` blocks for command output and file lists.
 
 ## Patterns
 
