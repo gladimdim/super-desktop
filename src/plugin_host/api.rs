@@ -77,6 +77,8 @@ pub fn limits() -> Value {
         "viewNodes": super::ui_model::MAX_NODES,
         "patchOps": super::ui_model::MAX_OPS,
         "inFlightRequests": MAX_IN_FLIGHT,
+        "rendererParams": super::manifest::MAX_RENDERER_PARAMS,
+        "rendererFuel": super::renderer::FUEL,
     })
 }
 

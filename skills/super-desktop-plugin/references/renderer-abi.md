@@ -85,7 +85,7 @@ Header, 64 bytes:
 | 48 | u32 | focused card id, 0 for none |
 | 52 | u32 | card count `n`, at most 128 (more cards: the built-in renderer is used) |
 | 56 | u32 | state length (≤ 4096) |
-| 60 | u32 | reserved |
+| 60 | u32 | params count `p` (0–16; 0 unless the manifest lists `renderer.params`) |
 
 State, 4096 bytes at offset 64: exactly the bytes the previous output
 returned as state (empty on the first call, after a restart, and after
@@ -111,7 +111,10 @@ Cards, `n` records of 64 bytes at offset 4160:
 | 52 | f32 | minimum height for a full card |
 | 56 | 8 bytes | reserved |
 
-Input length = 4160 + 64 × n.
+Params, `p` f32 values right after the cards (offset 4160 + 64 × n): the
+settings named in `renderer.params`, in that order. See [Params](#params).
+
+Input length = 4160 + 64 × n + 4 × p.
 
 ### Output frame
 
@@ -147,6 +150,22 @@ Cards, `n` records of 32 bytes at offset 4144, one per input card, any order:
 
 Output length = 4144 + 32 × n.
 
+### Params
+
+A manifest's `renderer.params` lists up to 16 setting keys of type `number`
+or `bool`. Every frame carries their current values (the user's, else the
+default) as f32 after the cards; a bool is 1 or 0. A change in Settings →
+Plugins reaches the next frame and wakes the renderer. Settings that are all
+params need no process.
+
+- Declare a range (`min`, `max`) and a `default` for each number setting, and
+  still check the values in the renderer: fall back to your default when a
+  value is missing (`p` smaller than you expect, as on an older host) or out
+  of range.
+- With params, the input buffer must hold them too: at least
+  12 352 + 4 × 16 bytes is safe for every manifest. `sd_present` must accept
+  an input length up to that.
+
 ### Drop target
 
 Only honoured for a card whose input had the *dropped* flag in the same frame
@@ -177,6 +196,11 @@ edge band → saved as an icon at the edge).
   each card's state with a linear scan instead of by slot pushes that past
   850 000.
 - Start a card that is new to your state at its saved rectangle so activation
-  animates from the built-in layout instead of jumping.
+  animates from the built-in layout instead of jumping. The first frame after
+  activation or a toggle has `dt = 0`: treat it as one ordinary frame step,
+  or the cards jump.
+- Give users a way to switch the effect off without turning the plugin off:
+  a command with `"action": "renderer.toggle"` (manifest.md#commands) on a
+  toolbar item and a shortcut.
 - Treat the dragged card specially: keep it under the pointer, and animate only
   its size.

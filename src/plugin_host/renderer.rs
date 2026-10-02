@@ -16,6 +16,8 @@ pub const ABI: u32 = 1;
 pub const FUEL: u64 = 1_000_000;
 pub const MAX_CARDS: usize = 128;
 pub const STATE_CAP: usize = 4096;
+/// Settings passed after the cards (`renderer.params`), one f32 each.
+pub const MAX_PARAMS: usize = crate::plugin_host::manifest::MAX_RENDERER_PARAMS;
 const IN_HEADER: usize = 64;
 const IN_CARD: usize = 64;
 const IN_CARDS_AT: usize = IN_HEADER + STATE_CAP;
@@ -72,6 +74,8 @@ pub struct Frame {
     pub pointer_down: bool,
     pub focused: u32,
     pub cards: Vec<CardIn>,
+    /// The plugin's `renderer.params` settings, in manifest order.
+    pub params: Vec<f64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -120,12 +124,29 @@ pub struct Renderer {
     failures: VecDeque<Instant>,
     /// Set once the renderer failed too often; it draws nothing after that.
     pub off: Option<String>,
+    /// Fuel the last successful frame used (`plugin test` reports it).
+    pub last_fuel: u64,
 }
 
 impl std::fmt::Debug for Renderer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Renderer").field("off", &self.off).finish_non_exhaustive()
     }
+}
+
+/// A renderer's `params`: its number and bool settings as numbers (a bool is
+/// 1 or 0), in manifest order, from the saved settings or their defaults.
+pub fn params_of(manifest: &super::manifest::Manifest) -> Vec<f64> {
+    let Some(spec) = &manifest.contributes.renderer else { return Vec::new() };
+    let values = super::store::settings(manifest);
+    spec.params
+        .iter()
+        .map(|key| match values.get(key) {
+            Some(serde_json::Value::Bool(on)) => f64::from(u8::from(*on)),
+            Some(value) => value.as_f64().unwrap_or(0.0),
+            None => 0.0,
+        })
+        .collect()
 }
 
 /// FNV-1a 32-bit, the ABI's agent hash.
@@ -136,6 +157,12 @@ pub fn agent_hash(agent: &str) -> u32 {
 impl Renderer {
     /// Load and check a module: imports, exports, ABI version, buffers.
     pub fn load(wasm: &[u8], log: &Path) -> Result<Renderer, String> {
+        Self::load_with_params(wasm, log, 0)
+    }
+
+    /// `load` for a renderer that gets `params` settings after the cards: its
+    /// input buffer must hold them too.
+    pub fn load_with_params(wasm: &[u8], log: &Path, params: usize) -> Result<Renderer, String> {
         let mut config = Config::default();
         config.consume_fuel(true);
         let engine = Engine::new(&config);
@@ -167,10 +194,10 @@ impl Renderer {
         let input_at = input.call(&mut store, ()).map_err(|e| format!("sd_input: {e}"))? as u32 as usize;
         let output_at = output.call(&mut store, ()).map_err(|e| format!("sd_output: {e}"))? as u32 as usize;
         let size = memory.data(&store).len();
-        if input_at + IN_CARDS_AT + MAX_CARDS * IN_CARD > size || output_at + OUT_CARDS_AT + MAX_CARDS * OUT_CARD > size {
+        if input_at + IN_CARDS_AT + MAX_CARDS * IN_CARD + 4 * params > size || output_at + OUT_CARDS_AT + MAX_CARDS * OUT_CARD > size {
             return Err("sd_input/sd_output buffers do not fit in memory".into());
         }
-        Ok(Renderer { store, memory, present, input_at, output_at, state: Vec::new(), failures: VecDeque::new(), off: None })
+        Ok(Renderer { store, memory, present, input_at, output_at, state: Vec::new(), failures: VecDeque::new(), off: None, last_fuel: 0 })
     }
 
     /// One frame. `Err` means "draw the built-in layout this frame"; after
@@ -203,6 +230,7 @@ impl Renderer {
         self.memory.write(&mut self.store, self.input_at, &input).map_err(|e| e.to_string())?;
         self.store.set_fuel(FUEL).map_err(|e| e.to_string())?;
         let len = self.present.call(&mut self.store, input.len() as i32).map_err(|e| format!("sd_present: {e}"))?;
+        self.last_fuel = FUEL - self.store.get_fuel().unwrap_or(0);
         if len < 0 {
             return Err(format!("sd_present returned {len}"));
         }
@@ -256,7 +284,8 @@ fn get_f32(b: &[u8], at: usize) -> f64 {
 
 /// The input frame, byte for byte as in renderer-abi.md.
 pub fn encode(frame: &Frame, state: &[u8]) -> Vec<u8> {
-    let mut b = vec![0u8; IN_CARDS_AT + frame.cards.len() * IN_CARD];
+    let params = &frame.params[..frame.params.len().min(MAX_PARAMS)];
+    let mut b = vec![0u8; IN_CARDS_AT + frame.cards.len() * IN_CARD + 4 * params.len()];
     put_u32(&mut b, 0, IN_MAGIC);
     put_u32(&mut b, 4, ABI);
     put_f32(&mut b, 8, frame.screen_w);
@@ -272,6 +301,7 @@ pub fn encode(frame: &Frame, state: &[u8]) -> Vec<u8> {
     put_u32(&mut b, 52, frame.cards.len() as u32);
     let state = &state[..state.len().min(STATE_CAP)];
     put_u32(&mut b, 56, state.len() as u32);
+    put_u32(&mut b, 60, params.len() as u32);
     b[IN_HEADER..IN_HEADER + state.len()].copy_from_slice(state);
     for (i, card) in frame.cards.iter().enumerate() {
         let at = IN_CARDS_AT + i * IN_CARD;
@@ -289,6 +319,10 @@ pub fn encode(frame: &Frame, state: &[u8]) -> Vec<u8> {
         put_u32(&mut b, at + 44, card.z);
         put_f32(&mut b, at + 48, card.min_w);
         put_f32(&mut b, at + 52, card.min_h);
+    }
+    let params_at = IN_CARDS_AT + frame.cards.len() * IN_CARD;
+    for (i, value) in params.iter().enumerate() {
+        put_f32(&mut b, params_at + 4 * i, if value.is_finite() { *value } else { 0.0 });
     }
     b
 }
@@ -452,6 +486,21 @@ mod tests {
         // Returning nothing useful (0 bytes) is refused, not drawn.
         let mut empty = Renderer::load(&module(&[0x41, 0x00], false), &log).unwrap();
         assert!(empty.present(&frame()).unwrap_err().contains("bytes"));
+    }
+
+    #[test]
+    fn plugin_renderer_params_follow_the_cards() {
+        let mut f = frame();
+        let n = f.cards.len();
+        let plain = encode(&f, &[]);
+        assert_eq!((plain.len(), get_u32(&plain, 60)), (IN_CARDS_AT + n * IN_CARD, 0), "no params: the ABI 1 frame as before");
+        f.params = vec![70.0, 1.0, f64::NAN];
+        let b = encode(&f, &[]);
+        assert_eq!(get_u32(&b, 60), 3);
+        assert_eq!(b.len(), IN_CARDS_AT + n * IN_CARD + 12);
+        let at = IN_CARDS_AT + n * IN_CARD;
+        assert_eq!((get_f32(&b, at), get_f32(&b, at + 4), get_f32(&b, at + 8)), (70.0, 1.0, 0.0));
+        assert_eq!(b[64..IN_CARDS_AT + n * IN_CARD], plain[64..], "state and cards unchanged");
     }
 
     #[test]

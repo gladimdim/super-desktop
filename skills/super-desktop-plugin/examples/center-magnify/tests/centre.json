@@ -1,0 +1,30 @@
+{
+  "description": "A card at the horizontal centre is drawn 70% of the screen wide, focused or not.",
+  "renderer": {
+    "screen": {
+      "width": 1920,
+      "height": 1080,
+      "top": 46
+    },
+    "cards": [
+      {
+        "id": 1,
+        "x": 640,
+        "y": 300,
+        "width": 640,
+        "height": 300
+      }
+    ],
+    "expect": [
+      {
+        "settled": true
+      },
+      {
+        "card": 1,
+        "mode": "full",
+        "width": 1344,
+        "centerX": 960
+      }
+    ]
+  }
+}

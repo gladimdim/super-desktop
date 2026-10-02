@@ -1,10 +1,16 @@
 //! Center Magnify: a SUPER DESKTOP window renderer (renderer ABI 1).
 //!
-//! A card grows toward 70% of the screen width as its centre nears the
-//! screen's centre and shrinks as it moves out. In the edge bands it becomes
-//! an icon docked at the left or right edge. Dropping a card in an edge band
-//! saves it as an icon there, so turning the plugin off keeps it an icon;
-//! dragging an icon out of the band and dropping it opens it again.
+//! The closer a card's centre is to the horizontal centre of the screen, the
+//! larger it is drawn: up to 70% of the screen width (the `maxWidth`
+//! setting). Moving it toward a side shrinks it smoothly down to `minWidth`,
+//! and in the edge bands (`edgeBand`) it becomes an icon docked at the left
+//! or right edge. Dropping a card in an edge band saves it as an icon there,
+//! so turning the plugin off keeps it an icon; dragging an icon toward the
+//! centre grows it back into a card, and dropping it there opens it.
+//!
+//! Settings arrive as `params` after the cards, in the manifest's
+//! `renderer.params` order: maxWidth %, minWidth %, edgeBand %, iconSize px,
+//! smoothing ms. Missing or out-of-range values fall back to the defaults.
 //!
 //! Build: `cargo build --release --target wasm32-unknown-unknown`, then copy
 //! `target/wasm32-unknown-unknown/release/center_magnify.wasm` to `renderer.wasm`.
@@ -19,7 +25,9 @@ pub const STATE_CAP: usize = 4096;
 pub const IN_HEADER: usize = 64;
 pub const IN_CARD: usize = 64;
 pub const IN_CARDS_AT: usize = IN_HEADER + STATE_CAP;
-pub const IN_CAP: usize = IN_CARDS_AT + MAX_CARDS * IN_CARD;
+pub const MAX_PARAMS: usize = 16;
+/// Room for 128 cards and the 16 params that may follow them.
+pub const IN_CAP: usize = IN_CARDS_AT + MAX_CARDS * IN_CARD + 4 * MAX_PARAMS;
 pub const OUT_HEADER: usize = 48;
 pub const OUT_CARD: usize = 32;
 pub const OUT_CARDS_AT: usize = OUT_HEADER + STATE_CAP;
@@ -33,14 +41,46 @@ pub const FLAG_DROPPED: u32 = 1 << 5;
 pub const MODE_FULL: u32 = 0;
 pub const MODE_ICON: u32 = 1;
 
-const EDGE: f32 = 0.88; // |distance from centre| / half width beyond which a card is an icon
-const FOCUSED_MAX: f32 = 0.70; // width fraction for the focused card at the centre
-const OTHER_MAX: f32 = 0.45;
-const MIN_FRACTION: f32 = 0.20;
-const ICON: f32 = 72.0;
 const GAP: f32 = 8.0;
-const TAU_MS: f32 = 90.0; // smoothing time constant
 const STATE_ENTRY: usize = 20; // id + x, y, w, h
+/// The first frame (dt 0, as after turning on) still animates: one frame step.
+const FIRST_DT_MS: f32 = 16.0;
+
+/// The settings, from the frame's params (renderer-abi.md, "Params").
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tuning {
+    /// Width fraction of a card at the centre.
+    pub max: f32,
+    /// Width fraction of a card just inside the edge band.
+    pub min: f32,
+    /// |distance from centre| / half width beyond which a card is an icon.
+    pub edge: f32,
+    /// Icon side in px.
+    pub icon: f32,
+    /// Smoothing time constant in ms; 0 jumps.
+    pub tau: f32,
+}
+
+impl Default for Tuning {
+    fn default() -> Self {
+        Tuning { max: 0.70, min: 0.22, edge: 0.88, icon: 72.0, tau: 90.0 }
+    }
+}
+
+impl Tuning {
+    /// `params[i]` when present and within `lo..=hi`, else the default.
+    pub fn from_params(params: &[f32]) -> Tuning {
+        let d = Tuning::default();
+        let get = |i: usize, lo: f32, hi: f32, default: f32| match params.get(i) {
+            Some(v) if v.is_finite() && *v >= lo && *v <= hi => *v,
+            _ => default,
+        };
+        let max = get(0, 20.0, 95.0, d.max * 100.0) / 100.0;
+        let min = (get(1, 5.0, 60.0, d.min * 100.0) / 100.0).min(max);
+        let edge = 1.0 - get(2, 2.0, 40.0, (1.0 - d.edge) * 100.0) / 100.0;
+        Tuning { max, min, edge, icon: get(3, 48.0, 160.0, d.icon), tau: get(4, 0.0, 1000.0, d.tau) }
+    }
+}
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Rect {
@@ -101,6 +141,7 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     }
     let (sw, sh, top) = (rd_f32(input, 8), rd_f32(input, 12), rd_f32(input, 16));
     let dt = clampf(rd_f32(input, 32), 0.0, 100.0);
+    let dt = if dt <= 0.0 { FIRST_DT_MS } else { dt };
     let n = rd_u32(input, 52) as usize;
     if n > MAX_CARDS {
         return Err(ERR_COUNT);
@@ -110,6 +151,15 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     }
     let state_len = (rd_u32(input, 56) as usize).min(STATE_CAP);
     let state = &input[IN_HEADER..IN_HEADER + state_len];
+    // Params follow the cards (a host without them sends none).
+    let mut params = [0f32; MAX_PARAMS];
+    let params_at = IN_CARDS_AT + n * IN_CARD;
+    let count = (rd_u32(input, 60) as usize).min(MAX_PARAMS).min(input.len().saturating_sub(params_at) / 4);
+    for (i, p) in params.iter_mut().enumerate().take(count) {
+        *p = f32::from_bits(rd_u32(input, params_at + 4 * i));
+    }
+    let t = Tuning::from_params(&params[..count]);
+    let (edge, icon) = (t.edge, t.icon);
 
     let mut cards = [Card::default(); MAX_CARDS];
     for (i, card) in cards.iter_mut().enumerate().take(n) {
@@ -141,33 +191,32 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
         let c = cards[i];
         let iconified = c.flags & FLAG_ICONIFIED != 0;
         let (cx, cy) = if iconified {
-            (c.icon_x + ICON / 2.0, c.icon_y + ICON / 2.0)
+            (c.icon_x + icon / 2.0, c.icon_y + icon / 2.0)
         } else {
             (c.saved.x + c.saved.w / 2.0, c.saved.y + c.saved.h / 2.0)
         };
         let d = clampf(absf(cx - half) / half, 0.0, 1.0);
         let dragging = c.flags & FLAG_DRAGGING != 0;
         // An icon dropped outside the edge bands opens, centred where it fell.
-        if c.flags & FLAG_DROPPED != 0 && iconified && d <= EDGE && drop.is_none() {
+        if c.flags & FLAG_DROPPED != 0 && iconified && d <= edge && drop.is_none() {
             drop = Some((c.id, cx - c.saved.w / 2.0, cy - c.saved.h / 2.0, false));
         }
-        if (iconified || d > EDGE) && !dragging {
+        if (iconified || d > edge) && !dragging {
             mode[i] = MODE_ICON;
             if cx < half { dock_left[nl] = i; nl += 1 } else { dock_right[nr] = i; nr += 1 }
             if c.flags & FLAG_DROPPED != 0 && !iconified && drop.is_none() {
-                let x = if cx < half { GAP } else { sw - ICON - GAP };
-                drop = Some((c.id, x, clampf(cy - ICON / 2.0, top + GAP, sh - ICON - GAP), true));
+                let x = if cx < half { GAP } else { sw - icon - GAP };
+                drop = Some((c.id, x, clampf(cy - icon / 2.0, top + GAP, sh - icon - GAP), true));
             }
             continue;
         }
-        if d > EDGE {
+        if d > edge {
             // Being dragged through an edge band: preview as an icon under the pointer.
             mode[i] = MODE_ICON;
-            target[i] = Rect { x: cx - ICON / 2.0, y: cy - ICON / 2.0, w: ICON, h: ICON };
+            target[i] = Rect { x: cx - icon / 2.0, y: cy - icon / 2.0, w: icon, h: icon };
             continue;
         }
-        let max = if c.flags & FLAG_FOCUSED != 0 { FOCUSED_MAX } else { OTHER_MAX };
-        let scale = max + (MIN_FRACTION - max) * smoothstep(0.0, EDGE, d);
+        let scale = t.max + (t.min - t.max) * smoothstep(0.0, edge, d);
         let ratio = clampf(if c.saved.h > 1.0 { c.saved.w / c.saved.h } else { 1.4 }, 0.5, 2.5);
         let mut w = scale * sw;
         let mut h = w / ratio;
@@ -199,14 +248,14 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
             }
         }
         for (k, &i) in list.iter().enumerate().take(count) {
-            let x = if left { GAP } else { sw - ICON - GAP };
-            let y = clampf(top + GAP + k as f32 * (ICON + GAP), top, sh - ICON);
-            target[i] = Rect { x, y, w: ICON, h: ICON };
+            let x = if left { GAP } else { sw - icon - GAP };
+            let y = clampf(top + GAP + k as f32 * (icon + GAP), top, sh - icon);
+            target[i] = Rect { x, y, w: icon, h: icon };
         }
     }
 
     // Smooth from the previous frame toward the targets.
-    let alpha = if dt <= 0.0 { 1.0 } else { dt / (TAU_MS + dt) };
+    let alpha = if t.tau <= 0.0 { 1.0 } else { dt / (t.tau + dt) };
     let prev_count = if state.len() >= 4 { (rd_u32(state, 0) as usize).min((STATE_CAP - 4) / STATE_ENTRY) } else { 0 };
     let entry = |k: usize, id: u32| -> Option<Rect> {
         let at = 4 + k * STATE_ENTRY;
@@ -224,21 +273,21 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     let mut drawn = [Rect::default(); MAX_CARDS];
     for i in 0..n {
         let c = cards[i];
-        let t = target[i];
+        let goal = target[i];
         let from = previous(i, c.id).unwrap_or(if c.flags & FLAG_ICONIFIED != 0 {
-            Rect { x: c.icon_x, y: c.icon_y, w: ICON, h: ICON }
+            Rect { x: c.icon_x, y: c.icon_y, w: icon, h: icon }
         } else {
             c.saved
         });
         let follow = c.flags & FLAG_DRAGGING != 0; // the dragged card stays under the pointer
         let mix = |a: f32, b: f32, k: f32| a + (b - a) * k;
         let r = Rect {
-            x: if follow { t.x } else { mix(from.x, t.x, alpha) },
-            y: if follow { t.y } else { mix(from.y, t.y, alpha) },
-            w: mix(from.w, t.w, alpha),
-            h: mix(from.h, t.h, alpha),
+            x: if follow { goal.x } else { mix(from.x, goal.x, alpha) },
+            y: if follow { goal.y } else { mix(from.y, goal.y, alpha) },
+            w: mix(from.w, goal.w, alpha),
+            h: mix(from.h, goal.h, alpha),
         };
-        if absf(r.x - t.x) + absf(r.y - t.y) + absf(r.w - t.w) + absf(r.h - t.h) > 0.5 {
+        if absf(r.x - goal.x) + absf(r.y - goal.y) + absf(r.w - goal.w) + absf(r.h - goal.h) > 0.5 {
             animating = true;
         }
         drawn[i] = r;
@@ -331,15 +380,17 @@ mod tests {
     const W: f32 = 1920.0;
     const H: f32 = 1080.0;
     const TOP: f32 = 46.0;
+    const ICON: f32 = 72.0; // the default icon size
 
     struct In {
         cards: Vec<(u32, u32, Rect)>,
         state: Vec<u8>,
         dt: f32,
+        params: Vec<f32>,
     }
 
     fn frame(spec: &In) -> Vec<u8> {
-        let mut b = vec![0u8; IN_CARDS_AT + spec.cards.len() * IN_CARD];
+        let mut b = vec![0u8; IN_CARDS_AT + spec.cards.len() * IN_CARD + 4 * spec.params.len()];
         wr_u32(&mut b, 0, IN_MAGIC);
         wr_u32(&mut b, 4, ABI);
         wr_f32(&mut b, 8, W);
@@ -348,6 +399,10 @@ mod tests {
         wr_f32(&mut b, 32, spec.dt);
         wr_u32(&mut b, 52, spec.cards.len() as u32);
         wr_u32(&mut b, 56, spec.state.len() as u32);
+        wr_u32(&mut b, 60, spec.params.len() as u32);
+        for (i, p) in spec.params.iter().enumerate() {
+            wr_f32(&mut b, IN_CARDS_AT + spec.cards.len() * IN_CARD + 4 * i, *p);
+        }
         b[IN_HEADER..IN_HEADER + spec.state.len()].copy_from_slice(&spec.state);
         for (i, (id, flags, r)) in spec.cards.iter().enumerate() {
             let at = IN_CARDS_AT + i * IN_CARD;
@@ -377,10 +432,14 @@ mod tests {
     }
 
     fn settle(cards: Vec<(u32, u32, Rect)>) -> Vec<u8> {
+        settle_with(cards, vec![])
+    }
+
+    fn settle_with(cards: Vec<(u32, u32, Rect)>, params: Vec<f32>) -> Vec<u8> {
         let mut out = vec![0u8; OUT_CAP];
         let mut state = Vec::new();
         for _ in 0..200 {
-            present(&frame(&In { cards: cards.clone(), state: state.clone(), dt: 16.0 }), &mut out).unwrap();
+            present(&frame(&In { cards: cards.clone(), state: state.clone(), dt: 16.0, params: params.clone() }), &mut out).unwrap();
             state = state_of(&out);
         }
         out
@@ -391,12 +450,48 @@ mod tests {
     }
 
     #[test]
-    fn focused_card_at_centre_is_seventy_percent_wide() {
-        let out = settle(vec![(7, FLAG_FOCUSED, centred(640.0, 480.0))]);
-        let (id, r, mode) = card_out(&out, 0);
-        assert_eq!((id, mode), (7, MODE_FULL));
-        assert!((r.w - 0.70 * W).abs() < 2.0 || r.h >= (H - TOP) * 0.92 - 1.0, "{r:?}");
-        assert!(r.x >= 0.0 && r.x + r.w <= W + 0.5 && r.y >= TOP);
+    fn a_card_at_the_centre_is_seventy_percent_wide() {
+        // Focused or not: size follows the distance from the centre only.
+        for flags in [0, FLAG_FOCUSED] {
+            let out = settle(vec![(7, flags, centred(640.0, 300.0))]);
+            let (id, r, mode) = card_out(&out, 0);
+            assert_eq!((id, mode), (7, MODE_FULL));
+            assert!((r.w - 0.70 * W).abs() < 2.0, "{r:?}");
+            assert!(r.x >= 0.0 && r.x + r.w <= W + 0.5 && r.y >= TOP);
+        }
+    }
+
+    #[test]
+    fn size_falls_steadily_toward_the_sides() {
+        let mut last = f32::MAX;
+        for x in [960.0, 1150.0, 1350.0, 1550.0, 1700.0] {
+            let w = card_out(&settle(vec![(1, 0, Rect { x: x - 320.0, y: 400.0, w: 640.0, h: 300.0 })]), 0).1.w;
+            assert!(w < last, "{x}: {w} after {last}");
+            last = w;
+        }
+    }
+
+    #[test]
+    fn settings_change_the_sizes() {
+        let card = vec![(1, 0, centred(640.0, 300.0))];
+        let half = card_out(&settle_with(card.clone(), vec![50.0]), 0).1;
+        assert!((half.w - 0.50 * W).abs() < 2.0, "maxWidth 50: {half:?}");
+        // A wide edge band (40%) turns a card 77% of the way out into an icon.
+        let out_there = vec![(1, 0, Rect { x: 1700.0 - 320.0, y: 400.0, w: 640.0, h: 300.0 })];
+        assert_eq!(card_out(&settle_with(out_there.clone(), vec![]), 0).2, MODE_FULL);
+        assert_eq!(card_out(&settle_with(out_there, vec![70.0, 22.0, 40.0]), 0).2, MODE_ICON);
+        // Icon size, and out-of-range values fall back to the defaults.
+        let icon = card_out(&settle_with(vec![(2, FLAG_ICONIFIED, Rect { x: 10.0, y: 300.0, w: 72.0, h: 72.0 })], vec![70.0, 22.0, 12.0, 96.0]), 0).1;
+        assert!((icon.w - 96.0).abs() < 1.0, "{icon:?}");
+        assert_eq!(Tuning::from_params(&[500.0, f32::NAN, -1.0, 9999.0, -5.0]), Tuning::default());
+    }
+
+    #[test]
+    fn an_icon_dragged_to_the_centre_grows_into_a_card() {
+        let dragged = vec![(3, FLAG_ICONIFIED | FLAG_DRAGGING, Rect { x: 900.0, y: 400.0, w: 640.0, h: 300.0 })];
+        let (_, r, mode) = card_out(&settle(dragged), 0);
+        assert_eq!(mode, MODE_FULL);
+        assert!(r.w > 0.6 * W, "{r:?}");
     }
 
     #[test]
@@ -423,7 +518,7 @@ mod tests {
     #[test]
     fn drop_in_edge_band_asks_to_save_an_icon() {
         let mut out = vec![0u8; OUT_CAP];
-        let spec = In { cards: vec![(9, FLAG_DROPPED, Rect { x: 1800.0, y: 500.0, w: 200.0, h: 150.0 })], state: vec![], dt: 16.0 };
+        let spec = In { cards: vec![(9, FLAG_DROPPED, Rect { x: 1800.0, y: 500.0, w: 200.0, h: 150.0 })], state: vec![], dt: 16.0, params: vec![] };
         present(&frame(&spec), &mut out).unwrap();
         assert_eq!(rd_u32(&out, 12) & 2, 2);
         assert_eq!(rd_u32(&out, 16), 9);
@@ -435,7 +530,7 @@ mod tests {
     fn an_icon_dropped_in_the_middle_opens() {
         let mut out = vec![0u8; OUT_CAP];
         // Iconified, its icon spot dragged to the middle; saved open size 640×480.
-        let mut spec = In { cards: vec![(4, FLAG_ICONIFIED | FLAG_DROPPED, Rect { x: 900.0, y: 400.0, w: 640.0, h: 480.0 })], state: vec![], dt: 16.0 };
+        let mut spec = In { cards: vec![(4, FLAG_ICONIFIED | FLAG_DROPPED, Rect { x: 900.0, y: 400.0, w: 640.0, h: 480.0 })], state: vec![], dt: 16.0, params: vec![] };
         present(&frame(&spec), &mut out).unwrap();
         assert_eq!(rd_u32(&out, 12) & 2, 2);
         assert_eq!((rd_u32(&out, 16), rd_u32(&out, 28)), (4, 0), "open it, not keep it an icon");
@@ -446,9 +541,28 @@ mod tests {
     }
 
     #[test]
+    fn turning_on_animates_from_the_saved_layout() {
+        let mut out = vec![0u8; OUT_CAP];
+        let spec = In { cards: vec![(1, 0, centred(640.0, 300.0))], state: vec![], dt: 0.0, params: vec![] };
+        present(&frame(&spec), &mut out).unwrap();
+        assert_eq!(rd_u32(&out, 12) & 1, 1, "the first frame (dt 0) does not jump");
+        assert!(card_out(&out, 0).1.w < 0.5 * W);
+    }
+
+    #[test]
+    fn room_for_128_cards_and_16_params() {
+        let mut out = vec![0u8; OUT_CAP];
+        let cards = (1..=128).map(|i| (i, 0, Rect { x: (i * 13) as f32, y: 300.0, w: 640.0, h: 300.0 })).collect();
+        let spec = In { cards, state: vec![], dt: 16.0, params: vec![70.0; MAX_PARAMS] };
+        let input = frame(&spec);
+        assert_eq!(input.len(), IN_CAP);
+        assert!(present(&input, &mut out).is_ok());
+    }
+
+    #[test]
     fn animates_then_settles() {
         let mut out = vec![0u8; OUT_CAP];
-        let spec = In { cards: vec![(1, FLAG_FOCUSED, centred(640.0, 480.0))], state: vec![], dt: 16.0 };
+        let spec = In { cards: vec![(1, FLAG_FOCUSED, centred(640.0, 480.0))], state: vec![], dt: 16.0, params: vec![] };
         present(&frame(&spec), &mut out).unwrap();
         assert_eq!(rd_u32(&out, 12) & 1, 1, "first frame starts from the saved rect");
         let out = settle(spec.cards);
@@ -462,7 +576,7 @@ mod tests {
         let settled = settle(vec![a, b]);
         let before = card_out(&settled, 0).1;
         let mut out = vec![0u8; OUT_CAP];
-        present(&frame(&In { cards: vec![b, a], state: state_of(&settled), dt: 16.0 }), &mut out).unwrap();
+        present(&frame(&In { cards: vec![b, a], state: state_of(&settled), dt: 16.0, params: vec![] }), &mut out).unwrap();
         let (id, after, _) = card_out(&out, 1);
         assert_eq!(id, 1);
         assert!((after.w - before.w).abs() < 1.0, "no jump: {before:?} -> {after:?}");
@@ -471,10 +585,10 @@ mod tests {
     #[test]
     fn rejects_bad_frames() {
         let mut out = vec![0u8; OUT_CAP];
-        let mut bad = frame(&In { cards: vec![], state: vec![], dt: 16.0 });
+        let mut bad = frame(&In { cards: vec![], state: vec![], dt: 16.0, params: vec![] });
         bad[0] = 0;
         assert_eq!(present(&bad, &mut out), Err(ERR_HEADER));
-        let mut many = frame(&In { cards: vec![], state: vec![], dt: 16.0 });
+        let mut many = frame(&In { cards: vec![], state: vec![], dt: 16.0, params: vec![] });
         wr_u32(&mut many, 52, 999);
         assert_eq!(present(&many, &mut out), Err(ERR_COUNT));
         assert_eq!(present(&[0u8; 8], &mut out), Err(ERR_LENGTH));
@@ -483,7 +597,7 @@ mod tests {
     #[test]
     fn garbage_numbers_stay_finite() {
         let mut out = vec![0u8; OUT_CAP];
-        let spec = In { cards: vec![(1, 0, Rect { x: f32::NAN, y: f32::INFINITY, w: -5.0, h: 0.0 })], state: vec![], dt: f32::NAN };
+        let spec = In { cards: vec![(1, 0, Rect { x: f32::NAN, y: f32::INFINITY, w: -5.0, h: 0.0 })], state: vec![], dt: f32::NAN, params: vec![] };
         present(&frame(&spec), &mut out).unwrap();
         let r = card_out(&out, 0).1;
         assert!(r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite());

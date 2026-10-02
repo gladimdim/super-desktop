@@ -1,0 +1,59 @@
+{
+  "description": "Cards shrink the further their centre is from the centre of the screen.",
+  "renderer": {
+    "screen": {
+      "width": 1920,
+      "height": 1080,
+      "top": 46
+    },
+    "cards": [
+      {
+        "id": 1,
+        "x": 830,
+        "y": 100,
+        "width": 640,
+        "height": 300
+      },
+      {
+        "id": 2,
+        "x": 1030,
+        "y": 420,
+        "width": 640,
+        "height": 300
+      },
+      {
+        "id": 3,
+        "x": 1230,
+        "y": 740,
+        "width": 640,
+        "height": 300
+      }
+    ],
+    "expect": [
+      {
+        "card": 1,
+        "mode": "full",
+        "width": {
+          "min": 1200,
+          "max": 1344
+        }
+      },
+      {
+        "card": 2,
+        "mode": "full",
+        "width": {
+          "min": 700,
+          "max": 1199
+        }
+      },
+      {
+        "card": 3,
+        "mode": "full",
+        "width": {
+          "min": 423,
+          "max": 699
+        }
+      }
+    ]
+  }
+}

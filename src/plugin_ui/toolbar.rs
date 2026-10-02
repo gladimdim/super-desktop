@@ -135,6 +135,23 @@ impl PluginBar {
         true
     }
 
+    /// Draw an item as pressed (on) or not: a toolbar toggle such as a
+    /// `renderer.toggle` command.
+    pub fn set_pressed(&self, plugin: &str, item: &str, pressed: bool) {
+        for i in self.items.borrow().iter().filter(|i| i.plugin == plugin && i.id == item) {
+            if pressed {
+                i.button.add_css_class("plugin-item-on");
+            } else {
+                i.button.remove_css_class("plugin-item-on");
+            }
+        }
+    }
+
+    /// The plugin's items drawn pressed (`plugin status` reports them).
+    pub fn pressed_of(&self, plugin: &str) -> Vec<String> {
+        self.items.borrow().iter().filter(|i| i.plugin == plugin && i.button.has_css_class("plugin-item-on")).map(|i| i.id.clone()).collect()
+    }
+
     /// A plugin that stopped working: its items stay, disabled, saying why.
     pub fn set_failed(&self, plugin: &str, reason: Option<&str>) {
         for item in self.items.borrow().iter().filter(|i| i.plugin == plugin) {

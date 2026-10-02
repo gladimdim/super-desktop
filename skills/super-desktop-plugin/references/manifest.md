@@ -74,20 +74,34 @@ emoji or a relative `.svg`/`.png` (at most 256 KiB).
 
 | Key | Kind | Shape | Notes |
 | --- | --- | --- | --- |
-| `commands` | additive | `[{id, title, icon?}]` | Everything clickable runs a command; also `super-desktop plugin run <plugin> <command> [json]`. |
+| `commands` | additive | `[{id, title, icon?, action?}]` | Everything clickable runs a command; also `super-desktop plugin run <plugin> <command> [json]`. A command with an `action` is carried out by the host; see [Commands](#commands). |
 | `shortcuts` | additive | `[{id, command, default, scope}]` | `default` in Hyprland spelling: `"SUPER + SHIFT + G"`, or `"F7"`. `global` becomes a Hyprland bind in a block of `bindings.lua` the host owns (it needs Hyprland's config folder); it never unbinds anything, so a combination Hyprland already uses (the show/hide key included) is refused and the user is told. `overlay` works while SUPER DESKTOP has focus; when a terminal has focus only combinations with SUPER reach the plugin, so CTRL/ALT keys stay the shell's. Two plugins asking for one combination: the first keeps it. The user can turn off or rebind each shortcut in Settings → Plugins. At most 8. |
 | `toolbar` | additive | `[{id, icon, tooltip, label?, command \| view}]` | Placed after the harness launchers, inside the scrolling part of the bar. Labels hide on narrow screens. At most 4. Update label/badge/visibility at run time with `contrib.update`. |
 | `toolbarHide` | additive | `["brand", "shortcutHint", "newNote", "usage", "launcher:<key>"]` | Arrange, Settings, Hide and the PC selector cannot be hidden. |
 | `cardButtons` | additive | `[{id, icon, tooltip, command, showInIcon?, when?}]` | Local cards only. `when: {agents, status, iconified}` filters cards. At most 2. The command's context carries the card. |
 | `cardControls` | exclusive | `{id, controls, iconControls?}` | Replaces the window buttons on local cards (`iconControls`: on the icon form; without it the icon keeps restore and close). Entries are `builtin:iconify`, `builtin:restore`, `builtin:expand`, `builtin:close` (each exactly like the card's own button) or `{id, icon, tooltip, command}`; 1–6 each. A right-click on the card's header or icon bar always offers the built-in actions. Turning on a second plugin with card controls is refused until the first is off. |
 | `titles` | additive | `true` | The plugin sets titles with `title.set`; needs `activation: ["onStartup"]`. |
-| `renderer` | exclusive | `{id, wasm}` | A WASM module; see `renderer-abi.md`. |
+| `renderer` | exclusive | `{id, wasm, params?}` | A WASM module; see `renderer-abi.md`. `params`: up to 16 keys of `number` or `bool` settings the renderer gets every frame ([Params](renderer-abi.md#params)). |
 | `harnesses` | additive | `[{…}]` | See `harnesses.md`. At most 4. |
 | `settings` | additive | `[{key, type, title, description?, default?, min?, max?, values?, kind?}]` | Types: `string`, `secret`, `bool`, `number`, `enum` (needs `values`), `path`/`paths` (needs `kind`: `file` or `directory`), `color`. The host draws and stores the page; read values with `settings.get`, get told of changes by `settings.changed`. |
 | `views` | additive | `[{id, title, kind, width?, height?}]` | `panel` (movable card) or `popover` (anchored to a toolbar item or card button). Filled with `ui.open`. At most 8. |
 
 **Exclusive** means one active plugin at a time; activating a second asks the
 user which to keep.
+
+## Commands
+
+A command without `action` is sent to the plugin's process as a `command`
+notification. A command with `action` is carried out by the host and needs
+no process:
+
+| `action` | Needs | Does |
+| --- | --- | --- |
+| `renderer.toggle` | `contributes.renderer` | Turns this plugin's renderer off (cards glide back to the saved layout) or on again. The plugin stays on. The choice is remembered across restarts and reloads. A toolbar item that runs it is drawn pressed while the renderer draws, and Settings → Plugins says when it is off. |
+
+Toolbar items, shortcuts and `plugin run` reach it like any command. A
+renderer plugin with a toggle, a toolbar item, a shortcut and settings that
+are all `renderer.params` has no process at all; see `examples/center-magnify`.
 
 ## Rules the validator adds to the schema
 
@@ -96,11 +110,15 @@ user which to keep.
    control is declared in `commands`; every `view` is declared in `views`.
 3. Every contribution and host method used has its permission, and no
    permission is listed that nothing uses (warning).
-4. `titles: true` requires `onStartup`. `main` is required unless the plugin
-   only has `renderer` and/or `harnesses` with `adapter.kind: "none"`.
+4. `titles: true` requires `onStartup`. `main` is required when there is a
+   command without `action`, a view, `titles`, or a setting that is not in
+   `renderer.params`.
 5. Every relative path exists, stays inside the repository after resolving
    symlinks, and is not a directory. Icons ≤ 256 KiB; `renderer.wasm` ≤ 4 MiB
    and passes the ABI checks in `renderer-abi.md`.
 6. Settings keys are unique; defaults match their type and range.
 7. `engines.superDesktop` is a valid range that includes at least one
    released version.
+8. A command `action` is a known one and has what it needs (`renderer.toggle`:
+   a renderer). Each `renderer.params` entry names a `number` or `bool`
+   setting, once; at most 16.

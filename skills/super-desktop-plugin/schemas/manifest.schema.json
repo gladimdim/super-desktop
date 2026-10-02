@@ -120,7 +120,11 @@
             "properties": {
               "id": { "$ref": "#/$defs/contributionId" },
               "title": { "type": "string", "minLength": 1, "maxLength": 64 },
-              "icon": { "$ref": "#/$defs/icon" }
+              "icon": { "$ref": "#/$defs/icon" },
+              "action": {
+                "description": "A command the host carries out itself, with no process. renderer.toggle turns this plugin's renderer on or off (remembered; the plugin stays on). Needs contributes.renderer.",
+                "enum": ["renderer.toggle"]
+              }
             }
           }
         },
@@ -209,7 +213,14 @@
           "required": ["id", "wasm"],
           "properties": {
             "id": { "$ref": "#/$defs/contributionId" },
-            "wasm": { "$ref": "#/$defs/relativePath" }
+            "wasm": { "$ref": "#/$defs/relativePath" },
+            "params": {
+              "description": "Keys of number or bool settings passed to the renderer every frame, in this order, as f32 after the cards (bool: 1 or 0). See renderer-abi.md#params.",
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,47}$" }
+            }
           }
         },
         "harnesses": {

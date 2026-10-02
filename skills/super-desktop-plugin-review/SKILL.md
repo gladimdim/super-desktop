@@ -89,7 +89,12 @@ Mark each item **pass**, **fail** (with file:line) or **n/a**.
 - [ ] Output card count equals input; numbers finite; dragged card follows the
       pointer; `animating` goes to 0 when settled.
 - [ ] Per-frame work is linear (or n log n) in the card count; 128 cards stay
-      within budget in `plugin test`.
+      within budget in `plugin test` (its `renderer` conformance run passes).
+- [ ] Every `renderer.params` value is range-checked in the renderer, with a
+      default for a missing or out-of-range value; the input buffer holds
+      128 cards and 16 params.
+- [ ] The first frame (`dt` 0) animates instead of jumping; the effect can be
+      turned off without turning the plugin off (`renderer.toggle`).
 
 **Release**
 - [ ] Tag `v<version>` matches the manifest; release notes list permission,

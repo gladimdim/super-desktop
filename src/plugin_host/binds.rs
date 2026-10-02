@@ -100,7 +100,7 @@ mod tests {
         // The user turns aaa's off: bbb's takes the combination.
         store.plugins.push(crate::plugin_host::store::Installed {
             id: "aaa".into(), dir: "/x".into(), source: crate::plugin_host::store::Source::Linked { path: "/x".into() },
-            version: "0.1.0".into(), active: true, granted: vec![], shortcuts: [("aaa.g".to_string(), None)].into(), extra: Default::default(),
+            version: "0.1.0".into(), active: true, granted: vec![], shortcuts: [("aaa.g".to_string(), None)].into(), renderer_off: false, extra: Default::default(),
         });
         let d = desired(&[("aaa".into(), a), ("bbb".into(), b)], &store);
         assert_eq!(d.global.len(), 1);

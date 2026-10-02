@@ -143,6 +143,8 @@ pub struct Manager {
     /// Cards gliding back to the built-in layout after a renderer stopped.
     returning: RefCell<Option<layout::Return>>,
     return_ticking: Cell<bool>,
+    /// When the last renderer or return frame ran (the frame watchdog).
+    frame_at: Cell<Option<std::time::Instant>>,
 }
 
 thread_local! {
@@ -172,6 +174,7 @@ pub fn manager() -> Rc<Manager> {
         renderer: RefCell::new(None),
         returning: RefCell::new(None),
         return_ticking: Cell::new(false),
+        frame_at: Cell::new(None),
     });
     MANAGER.with(|m| m.replace(Some(Rc::clone(&manager))));
     let weak = Rc::downgrade(&manager);
@@ -309,16 +312,70 @@ impl Manager {
             },
         );
         self.decorate_all();
-        if let Some(renderer) = &self.plugins.borrow().get(&id).and_then(|p| p.manifest.contributes.renderer.clone()) {
-            if let Err(why) = self.start_renderer(&id, &installed.dir, &renderer.wasm) {
+        let with_renderer = self.plugins.borrow().get(&id).filter(|p| p.manifest.contributes.renderer.is_some()).map(|p| Arc::clone(&p.manifest));
+        // A renderer the user switched off (`renderer.toggle`) stays off.
+        if let Some(manifest) = with_renderer.filter(|_| !installed.renderer_off) {
+            if let Err(why) = self.start_renderer(&id, &installed.dir, &manifest) {
                 api::append_log(&crate::plugin_host::log_file(&id), "error", &format!("renderer not started: {why}"));
                 if let Some(p) = self.plugins.borrow_mut().get_mut(&id) {
                     p.state = State::Failed(format!("renderer not started: {why}"));
                 }
             }
         }
+        self.sync_toggles(&id);
         if starts_now {
             self.start(&id);
+        }
+    }
+
+    /// Toolbar items whose command toggles the renderer are drawn pressed
+    /// while it draws.
+    pub(super) fn sync_toggles(&self, id: &str) {
+        let Some(manifest) = self.manifest(id) else { return };
+        let on = self.renderer_running(id);
+        for item in &manifest.contributes.toolbar {
+            let toggles = item.command.as_deref().is_some_and(|command| {
+                manifest.contributes.commands.iter().any(|c| c.id == command && c.action.as_deref() == Some("renderer.toggle"))
+            });
+            if toggles {
+                self.bar.set_pressed(id, &item.id, on);
+            }
+        }
+    }
+
+    /// A command the host carries out itself (`manifest::COMMAND_ACTIONS`).
+    fn run_action(self: &Rc<Self>, id: &str, action: &str) -> Result<(), String> {
+        match action {
+            "renderer.toggle" => {
+                let (manifest, dir) = {
+                    let plugins = self.plugins.borrow();
+                    let plugin = plugins.get(id).ok_or_else(|| format!("plugin `{id}` is not on"))?;
+                    (Arc::clone(&plugin.manifest), plugin.dir.clone())
+                };
+                let turning_off = self.renderer_running(id);
+                if turning_off {
+                    self.stop_renderer(id);
+                } else {
+                    self.start_renderer(id, &dir, &manifest)?;
+                    // It may have been turned off after failing; it gets a fresh start.
+                    if let Some(p) = self.plugins.borrow_mut().get_mut(id) {
+                        if matches!(&p.state, State::Failed(why) if why.starts_with("renderer")) {
+                            p.state = State::Idle;
+                        }
+                    }
+                }
+                store::update(|s| {
+                    if let Some(p) = s.get_mut(id) {
+                        p.renderer_off = turning_off;
+                    }
+                })
+                .map_err(|e| e.to_string())?;
+                api::append_log(&crate::plugin_host::log_file(id), "info", if turning_off { "renderer turned off" } else { "renderer turned on" });
+                self.sync_toggles(id);
+                self.changed();
+                Ok(())
+            }
+            other => Err(format!("unknown action `{other}`")),
         }
     }
 
@@ -513,6 +570,12 @@ impl Manager {
 
     /// Run a declared command. Starts the plugin first if needed.
     pub fn run_command(self: &Rc<Self>, id: &str, command: &str, context: Value) -> Result<(), String> {
+        let action = self
+            .manifest(id)
+            .and_then(|m| m.contributes.commands.iter().find(|c| c.id == command).and_then(|c| c.action.clone()));
+        if let Some(action) = action {
+            return self.run_action(id, &action);
+        }
         let message = json!({"command": command, "context": context});
         let state = {
             let mut plugins = self.plugins.borrow_mut();
@@ -816,9 +879,12 @@ impl Manager {
     }
 
     /// Settings changed from the Settings page.
-    pub fn settings_changed(&self, id: &str) {
+    pub fn settings_changed(self: &Rc<Self>, id: &str) {
         if let (Some(session), Some(manifest)) = (self.session(id), self.manifest(id)) {
             session.notify("settings.changed", json!({"values": store::settings(&manifest)}));
+        }
+        if let Some(manifest) = self.manifest(id) {
+            self.refresh_renderer_params(id, &manifest);
         }
     }
 
@@ -836,6 +902,8 @@ impl Manager {
                         "pid": p.session.as_ref().map(|s| s.process.pid),
                         "views": p.views.len(),
                         "toolbarItems": self.bar.button_count_of(id),
+                        "toolbarPressed": self.bar.pressed_of(id),
+                        "renderer": p.manifest.contributes.renderer.as_ref().map(|_| if self.renderer_running(id) { "on" } else { "off" }),
                         "error": failed,
                     }),
                 )

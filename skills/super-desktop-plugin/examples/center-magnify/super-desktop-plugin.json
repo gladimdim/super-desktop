@@ -4,12 +4,100 @@
   "id": "center-magnify",
   "name": "Center Magnify",
   "version": "0.1.0",
-  "description": "Cards grow toward 70% of the screen near the centre and become icons docked at the left and right edges.",
+  "description": "Cards grow up to 70% of the screen width near the centre, shrink toward the sides and become icons at the left and right edges.",
   "author": "SUPER DESKTOP examples",
   "license": "MIT",
-  "engines": { "superDesktop": ">=1.2.0", "pluginApi": "1" },
-  "permissions": ["layout.renderer"],
+  "engines": {
+    "superDesktop": ">=1.2.0",
+    "pluginApi": "1"
+  },
+  "permissions": [
+    "layout.renderer",
+    "ui.toolbar",
+    "shortcuts.overlay"
+  ],
   "contributes": {
-    "renderer": { "id": "center-magnify.renderer", "wasm": "renderer.wasm" }
+    "renderer": {
+      "id": "center-magnify.renderer",
+      "wasm": "renderer.wasm",
+      "params": [
+        "maxWidth",
+        "minWidth",
+        "edgeBand",
+        "iconSize",
+        "smoothing"
+      ]
+    },
+    "commands": [
+      {
+        "id": "center-magnify.toggle",
+        "title": "Turn Center Magnify on or off",
+        "icon": "🔍",
+        "action": "renderer.toggle"
+      }
+    ],
+    "toolbar": [
+      {
+        "id": "center-magnify.button",
+        "icon": "🔍",
+        "label": "Magnify",
+        "tooltip": "Center Magnify on/off (SUPER + ALT + M)",
+        "command": "center-magnify.toggle"
+      }
+    ],
+    "shortcuts": [
+      {
+        "id": "center-magnify.toggle-key",
+        "command": "center-magnify.toggle",
+        "default": "SUPER + ALT + M",
+        "scope": "overlay"
+      }
+    ],
+    "settings": [
+      {
+        "key": "maxWidth",
+        "type": "number",
+        "title": "Width at the centre (% of the screen)",
+        "description": "How wide a card is drawn when its centre is at the centre of the screen.",
+        "min": 20,
+        "max": 95,
+        "default": 70
+      },
+      {
+        "key": "minWidth",
+        "type": "number",
+        "title": "Width near the edges (% of the screen)",
+        "description": "How wide a card is drawn just before it turns into an icon.",
+        "min": 5,
+        "max": 60,
+        "default": 22
+      },
+      {
+        "key": "edgeBand",
+        "type": "number",
+        "title": "Icon band at each side (% of half the screen)",
+        "description": "A card whose centre is this close to the left or right edge becomes an icon.",
+        "min": 2,
+        "max": 40,
+        "default": 12
+      },
+      {
+        "key": "iconSize",
+        "type": "number",
+        "title": "Icon size (px)",
+        "min": 48,
+        "max": 160,
+        "default": 72
+      },
+      {
+        "key": "smoothing",
+        "type": "number",
+        "title": "Animation smoothing (ms)",
+        "description": "Higher is softer and slower; 0 jumps.",
+        "min": 0,
+        "max": 1000,
+        "default": 90
+      }
+    ]
   }
 }

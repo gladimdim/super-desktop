@@ -1,0 +1,39 @@
+{
+  "description": "At the left and right edges cards become icons docked at that edge.",
+  "renderer": {
+    "screen": {
+      "width": 1920,
+      "height": 1080,
+      "top": 46
+    },
+    "cards": [
+      {
+        "id": 1,
+        "x": -250,
+        "y": 300,
+        "width": 640,
+        "height": 300
+      },
+      {
+        "id": 2,
+        "x": 1750,
+        "y": 500,
+        "width": 640,
+        "height": 300
+      }
+    ],
+    "expect": [
+      {
+        "card": 1,
+        "mode": "icon",
+        "x": 8,
+        "width": 72
+      },
+      {
+        "card": 2,
+        "mode": "icon",
+        "x": 1840
+      }
+    ]
+  }
+}

@@ -13,6 +13,7 @@ pub mod cli;
 pub mod llm;
 pub mod manifest;
 pub mod process;
+pub mod render_test;
 pub mod renderer;
 pub mod rpc;
 pub mod scaffold;

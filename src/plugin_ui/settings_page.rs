@@ -117,6 +117,14 @@ fn plugin_card(installed: &store::Installed) -> gtk4::Widget {
         (None, true) => "On, but not running: see `super-desktop plugin logs`".to_string(),
         (None, false) => "Off".to_string(),
     };
+    // A renderer the user switched off with its toggle stays off until toggled.
+    let state = match &loaded {
+        Ok(m) if m.contributes.renderer.is_some() && live.is_some() && !super::manager().renderer_running(&installed.id) => {
+            let how = m.contributes.commands.iter().find(|c| c.action.as_deref() == Some("renderer.toggle")).map_or(String::new(), |c| format!(" Turn it on with “{}”.", c.title));
+            format!("{state}, effect off.{how}")
+        }
+        _ => state,
+    };
     let summary = match &loaded {
         Ok(m) => format!("{} — {state}", m.description),
         Err(why) => format!("Manifest problem: {why}"),
@@ -660,6 +668,7 @@ mod tests {
                 active: false,
                 granted: vec!["llm".into()],
                 shortcuts: Default::default(),
+                renderer_off: false,
                 extra: Default::default(),
             })
         })
@@ -763,6 +772,7 @@ mod tests {
                 active: true,
                 granted: manifest.permissions.clone(),
                 shortcuts: Default::default(),
+                renderer_off: false,
                 extra: Default::default(),
             })
         })

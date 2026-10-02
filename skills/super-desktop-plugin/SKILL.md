@@ -126,7 +126,10 @@ Breaking any of these fails validation, testing or review.
 9. **The toolbar must fit.** At most 4 toolbar items with short labels; they
    scroll with the launchers. Never assume a screen width.
 10. **Renderers stay inside the ABI.** No imports beyond `env.sd_log`, fixed
-    buffers, finite numbers, same card count out as in, linear work per card.
+    buffers (room for 128 cards and 16 params), finite numbers, same card
+    count out as in, linear work per card. Give the effect a
+    `renderer.toggle` command (toolbar item and shortcut) and its tuning as
+    `renderer.params` settings; then the plugin needs no process.
 11. **Stay compatible.** Never rename the plugin id, setting keys or harness
     ids after publishing. Ignore unknown fields. Check
     `host.describe().methods` for optional features.
@@ -147,7 +150,7 @@ Breaking any of these fails validation, testing or review.
 | `llm.complete` | 64 KiB prompt, 2 concurrent, 120 s |
 | Notifications | 6 per minute |
 | View | 2000 nodes, 500 ops per patch |
-| Renderer | 1 000 000 fuel per frame, 128 cards, 4 KiB state, 3 failures in 10 s turn it off |
+| Renderer | 1 000 000 fuel per frame, 128 cards, 16 params, 4 KiB state, 3 failures in 10 s turn it off |
 
 ## 6. Files in this skill
 
@@ -167,7 +170,7 @@ Breaking any of these fails validation, testing or review.
 | `sdk/python/sd_plugin.py` | Python runtime: copy next to `main.py`. |
 | `examples/git-flush/` | Process plugin: toolbar badge, global shortcut, panel, settings, LLM, review-then-act. |
 | `examples/window-controls/` | Process plugin: `cardControls` with snap-left/right and to-edge icon. |
-| `examples/center-magnify/` | Rust WASM renderer with native tests and `build.sh`. |
+| `examples/center-magnify/` | Rust WASM renderer with settings (params), a toolbar/shortcut toggle and no process; native tests, renderer scenarios and `build.sh`. |
 
 ## 7. Minimal process plugin
 

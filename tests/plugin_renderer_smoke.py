@@ -123,6 +123,35 @@ def main():
         saved_after = {cid: (c["rect"], c["icon"], c["iconified"]) for cid, c in cards()[1].items()}
         check(saved_after == saved_before, "the saved layout is unchanged", (saved_before, saved_after))
         check(json.dumps(published(), sort_keys=True) == published_before and len(published()) == 2, "the layout other devices get is unchanged")
+        status = box.status("center-magnify") or {}
+        check(status.get("renderer") == "on" and status.get("toolbarPressed") == ["center-magnify.button"], "its toolbar toggle is drawn on", status)
+
+        # The toggle (toolbar button, shortcut or `plugin run`): the plugin stays
+        # on, cards go back to the built-in layout, and the choice is remembered.
+        check(box.cli("run", "center-magnify", "center-magnify.toggle").returncode == 0, "toggle the effect off")
+        check(wait_for(lambda: all(c["drawn"] is None for c in cards()[1].values()), timeout=5) is not None, "cards are back on the built-in layout")
+        status = box.status("center-magnify") or {}
+        check(status.get("renderer") == "off" and status.get("toolbarPressed") == [] and status.get("state") != "failed", "the plugin is on, its effect off, the button not pressed", status)
+        stored = json.loads((box.home / ".config/super-desktop/plugins.json").read_text())
+        entry = next(p for p in stored["plugins"] if p["id"] == "center-magnify")
+        check(entry.get("rendererOff") is True and entry.get("active") is True, "the choice is saved", entry)
+        check(box.cli("reload", "center-magnify").returncode == 0 and (box.status("center-magnify") or {}).get("renderer") == "off", "it stays off after a reload")
+        check(box.cli("run", "center-magnify", "center-magnify.toggle").returncode == 0, "toggle the effect on")
+        check(wait_for(lambda: all(c["drawn"] for c in cards()[1].values()), timeout=5) is not None, "the renderer draws again")
+        check((box.status("center-magnify") or {}).get("toolbarPressed") == ["center-magnify.button"], "the button is pressed again")
+
+        # Settings reach the renderer as params: 50% at the centre instead of 70%
+        # (Broadway is 1024 px wide; 40% would be under the smallest card size).
+        box.cli("run", "mover", "mover.place", json.dumps({"card": first, "rect": {"x": screen["w"] // 2 - 320, "y": 100, "w": 640, "h": 300}}))
+        wide = wait_for(lambda: abs(cards()[1][first]["drawn"]["w"] - 0.70 * screen["w"]) < 3 and cards()[1][first]["drawn"], timeout=5)
+        check(wide is not None, "a card at the centre is 70% of the screen wide", cards()[1][first])
+        settings = box.home / ".config/super-desktop/plugins/center-magnify/settings.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps({"maxWidth": 50}))
+        box.cli("reload", "center-magnify")
+        narrow = wait_for(lambda: abs(cards()[1][first]["drawn"]["w"] - 0.50 * screen["w"]) < 3 and cards()[1][first]["drawn"], timeout=5)
+        check(narrow is not None, "with maxWidth 50 it is 50% wide", cards()[1][first])
+
         # Moving a card while the renderer draws: it redraws around the new spot.
         box.cli("run", "mover", "mover.place", json.dumps({"card": first, "rect": {"x": 10, "y": 100, "w": 640, "h": 480}}))
         moved = wait_for(lambda: cards()[1][first]["rect"]["x"] <= 16 and cards()[1][first]["drawn"]["x"] < 200 and cards()[1][first])

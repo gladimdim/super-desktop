@@ -93,9 +93,48 @@ shows where each card is drawn.
 
 Test the pure `present` function natively (`cargo test`) with frames built in
 the test, like `examples/center-magnify/src/lib.rs`: centre, edges, drop in
-an edge band, many cards, NaN/garbage input, convergence over frames. Then
-`super-desktop plugin test` loads the `.wasm`, checks the exports and the
-budget with 128 cards, and replays a drag.
+an edge band, many cards, NaN/garbage input, convergence over frames.
+
+`super-desktop plugin test` then runs the built `.wasm` in the desktop's
+interpreter, with its budget and output checks, and no display:
+
+- **`renderer`**, run for every renderer plugin (a `tests/` folder is not
+  needed): 0, 1, 8 and 128 cards on 1920×1080, 1024×768 and 3840×2160 with
+  the default settings, then a drag across the screen and a drop. Every frame
+  must succeed and every layout must settle (`animating` 0) within 600
+  frames. It reports the frames and the most fuel used.
+- **Renderer scenarios**: a `tests/<name>.json` with a `"renderer"` object.
+  Frames run 16 ms apart, from a fresh start, until the layout settles (or
+  `frames` times), then each `expect` is checked:
+
+```json
+{
+  "description": "A card at the centre is drawn 70% of the screen wide.",
+  "settings": { "maxWidth": 70 },
+  "renderer": {
+    "screen": { "width": 1920, "height": 1080, "top": 46 },
+    "cards": [
+      { "id": 1, "x": 640, "y": 300, "width": 640, "height": 300, "focused": true },
+      { "id": 2, "x": 1700, "y": 400, "width": 640, "height": 300, "dropped": true }
+    ],
+    "expect": [
+      { "settled": true },
+      { "card": 1, "mode": "full", "width": 1344, "centerX": { "min": 950, "max": 970 } },
+      { "card": 2, "mode": "icon" },
+      { "dropTarget": { "card": 2, "toIcon": true, "x": 1840 } }
+    ]
+  }
+}
+```
+
+Cards take `id`, `x`, `y`, `width`, `height` (the saved rectangle),
+`iconified`, `iconX`, `iconY`, `focused`, `dragging`, `expanded`, `agent`, and
+`dropped` (set on the first frame only, as on the desktop). An expectation
+names a `card` with `mode` (`full`/`icon`) and any of `x`, `y`, `width`,
+`height`, `centerX`, `centerY`, `opacity` (a number is ±1, or
+`{"min", "max"}`), or is `{"settled": bool}`, `{"dropTarget": {card, toIcon?,
+x?, y?}}` or `{"noDropTarget": true}`. `settings` apply to the scenario's
+params. `--only renderer` runs just the conformance run.
 
 ## Before publishing
 

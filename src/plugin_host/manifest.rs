@@ -164,7 +164,18 @@ pub struct Command {
     pub title: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// A command the host carries out itself, with no process
+    /// (`COMMAND_ACTIONS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
 }
+
+/// Host-handled command actions. `renderer.toggle` turns the plugin's own
+/// renderer on or off (remembered across restarts) without turning the plugin off.
+pub const COMMAND_ACTIONS: [&str; 1] = ["renderer.toggle"];
+
+/// At most this many settings are passed to a renderer as `params`.
+pub const MAX_RENDERER_PARAMS: usize = 16;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -228,6 +239,10 @@ pub struct CardControls {
 pub struct Renderer {
     pub id: String,
     pub wasm: String,
+    /// Setting keys (number or bool) passed to the renderer each frame, in
+    /// this order, as f32 (renderer-abi.md, "Params").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub params: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -361,9 +376,15 @@ impl Manifest {
     }
 
     /// Whether anything needs the process component.
+    /// Host-handled commands (`action`) and settings that only a renderer
+    /// reads (`renderer.params`) need none.
     pub fn needs_process(&self) -> bool {
         let c = &self.contributes;
-        !c.commands.is_empty() || !c.views.is_empty() || c.titles.is_some() || !c.settings.is_empty()
+        let params: &[String] = c.renderer.as_ref().map_or(&[], |r| &r.params);
+        c.commands.iter().any(|c| c.action.is_none())
+            || !c.views.is_empty()
+            || c.titles.is_some()
+            || c.settings.iter().any(|s| !params.contains(&s.key))
     }
 }
 
@@ -589,7 +610,12 @@ impl Checker {
         const DOCS: &str = "references/manifest.md#top-level-fields";
         let Some(main) = &m.main else {
             if m.needs_process() {
-                self.error("main", "commands, views, titles and settings need a process component", "Add \"main\": {\"command\": [\"python3\", \"main.py\"]}.", DOCS);
+                self.error(
+                    "main",
+                    "commands, views, titles and settings need a process component",
+                    "Add \"main\": {\"command\": [\"python3\", \"main.py\"]}. Only commands with an `action` and settings listed in renderer.params work without one.",
+                    DOCS,
+                );
             }
             return;
         };
@@ -694,6 +720,13 @@ impl Checker {
             self.len(&format!("{path}.title"), &command.title, 1, 64);
             if let Some(icon) = &command.icon {
                 self.icon(&format!("{path}.icon"), icon, dir);
+            }
+            if let Some(action) = &command.action {
+                if !COMMAND_ACTIONS.contains(&action.as_str()) {
+                    self.error(&format!("{path}.action"), format!("unknown action `{action}`"), format!("Use one of: {}.", COMMAND_ACTIONS.join(", ")), "references/manifest.md#commands");
+                } else if action == "renderer.toggle" && c.renderer.is_none() {
+                    self.error(&format!("{path}.action"), "renderer.toggle needs contributes.renderer", "Add a renderer, or remove the action.", "references/manifest.md#commands");
+                }
             }
         }
 
@@ -818,11 +851,31 @@ impl Checker {
                     if let Ok(bytes) = std::fs::read(dir.join(&renderer.wasm)) {
                         if !bytes.starts_with(b"\0asm") {
                             self.error(&format!("{path}.wasm"), "is not a WebAssembly module", "Build it for wasm32-unknown-unknown.", "references/renderer-abi.md");
-                        } else if let Err(why) = super::renderer::Renderer::load(&bytes, &std::env::temp_dir().join("sd-validate-renderer.log")) {
+                        } else if let Err(why) = super::renderer::Renderer::load_with_params(&bytes, &std::env::temp_dir().join("sd-validate-renderer.log"), renderer.params.len()) {
                             // The same checks the desktop makes before drawing with it.
                             self.error(&format!("{path}.wasm"), why, "Export memory, sd_abi_version, sd_input, sd_output and sd_present; import nothing but env.sd_log.", "references/renderer-abi.md#module-contract");
                         }
                     }
+                }
+            }
+            if renderer.params.len() > MAX_RENDERER_PARAMS {
+                self.error(&format!("{path}.params"), format!("at most {MAX_RENDERER_PARAMS} params"), "Pass fewer settings.", "references/renderer-abi.md#params");
+            }
+            let mut param_keys = BTreeSet::new();
+            for (i, key) in renderer.params.iter().enumerate() {
+                let at = format!("{path}.params[{i}]");
+                if !param_keys.insert(key.as_str()) {
+                    self.error(&at, format!("`{key}` is listed twice"), "List each setting once.", "references/renderer-abi.md#params");
+                }
+                match c.settings.iter().find(|s| s.key == *key) {
+                    None => self.error(&at, format!("`{key}` is not a setting"), format!("Declare {{\"key\": \"{key}\", \"type\": \"number\", …}} in contributes.settings."), "references/renderer-abi.md#params"),
+                    Some(s) if !matches!(s.kind.as_str(), "number" | "bool") => self.error(
+                        &at,
+                        format!("`{key}` is a {} setting; a renderer gets only number and bool settings", s.kind),
+                        "Use a number or bool setting.",
+                        "references/renderer-abi.md#params",
+                    ),
+                    Some(_) => {}
                 }
             }
             needed.insert("layout.renderer", path);
@@ -1152,6 +1205,45 @@ mod tests {
         let loaded = load_dir(&examples().join("center-magnify"));
         let errors: Vec<_> = loaded.report.errors.iter().map(|e| e.path.as_str()).collect();
         assert!(errors.iter().all(|p| *p == "contributes.renderer.wasm"), "{:#?}", loaded.report.errors);
+    }
+
+    #[test]
+    fn plugin_spec_renderer_toggle_and_params() {
+        let base: Value = serde_json::from_str(&std::fs::read_to_string(examples().join("center-magnify").join(FILE_NAME)).unwrap()).unwrap();
+        let with = |edit: &dyn Fn(&mut Value)| {
+            let mut value = base.clone();
+            edit(&mut value);
+            let loaded = validate_text(&value.to_string(), None);
+            (loaded.report.errors.iter().map(|e| format!("{}: {}", e.path, e.message)).collect::<Vec<_>>().join(" | "), loaded.manifest)
+        };
+        // As shipped: no process, a host-handled toggle, five settings as params.
+        let (errors, manifest) = with(&|_| {});
+        assert!(errors.is_empty(), "{errors}");
+        let manifest = manifest.unwrap();
+        assert!(manifest.main.is_none() && !manifest.needs_process());
+        assert_eq!(manifest.contributes.renderer.as_ref().unwrap().params.len(), 5);
+        // A setting no renderer reads, or a command without an action, needs a process.
+        let (errors, _) = with(&|m| m["contributes"]["renderer"]["params"].as_array_mut().unwrap().pop().map(|_| ()).unwrap());
+        assert!(errors.contains("main: commands, views, titles and settings need a process component"), "{errors}");
+        let (errors, _) = with(&|m| m["contributes"]["commands"][0].as_object_mut().unwrap().remove("action").map(|_| ()).unwrap());
+        assert!(errors.contains("need a process component"), "{errors}");
+        // Unknown actions; a toggle with no renderer.
+        let (errors, _) = with(&|m| m["contributes"]["commands"][0]["action"] = "renderer.explode".into());
+        assert!(errors.contains("unknown action `renderer.explode`"), "{errors}");
+        let (errors, _) = with(&|m| {
+            m["contributes"].as_object_mut().unwrap().remove("renderer");
+            m["contributes"].as_object_mut().unwrap().remove("settings");
+        });
+        assert!(errors.contains("renderer.toggle needs contributes.renderer"), "{errors}");
+        // Params name number or bool settings, once each, at most 16.
+        let (errors, _) = with(&|m| m["contributes"]["renderer"]["params"][0] = "nope".into());
+        assert!(errors.contains("`nope` is not a setting"), "{errors}");
+        let (errors, _) = with(&|m| m["contributes"]["renderer"]["params"][1] = "maxWidth".into());
+        assert!(errors.contains("listed twice"), "{errors}");
+        let (errors, _) = with(&|m| m["contributes"]["settings"][0]["type"] = "string".into());
+        assert!(errors.contains("a renderer gets only number and bool settings"), "{errors}");
+        let (errors, _) = with(&|m| m["contributes"]["renderer"]["params"] = serde_json::json!(vec!["maxWidth"; 17]));
+        assert!(errors.contains("at most 16 params"), "{errors}");
     }
 
     #[test]

@@ -135,6 +135,8 @@ pub fn describe_value() -> Value {
             "notYetSupported": manifest::ALL_CONTRIBUTIONS.iter().filter(|c| !manifest::SUPPORTED_CONTRIBUTIONS.contains(c)).collect::<Vec<_>>(),
         },
         "permissions": manifest::PERMISSIONS,
+        "commandActions": manifest::COMMAND_ACTIONS,
+        "rendererAbi": super::renderer::ABI,
         "methods": {
             "implemented": super::api::IMPLEMENTED,
             "notYetImplemented": contract.host.keys().filter(|m| !super::api::IMPLEMENTED.contains(&m.as_str())).collect::<Vec<_>>(),
@@ -257,6 +259,7 @@ fn link(dir: &Path, yes: bool) -> Result<(), String> {
             active: false,
             granted: manifest.permissions.clone(),
             shortcuts: Default::default(),
+            renderer_off: false,
             extra: Default::default(),
         };
         match s.get_mut(&manifest.id) {

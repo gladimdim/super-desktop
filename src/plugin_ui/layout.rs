@@ -22,6 +22,10 @@ use std::time::{Duration, Instant};
 
 /// How long cards take to go back to the built-in layout.
 const RETURN: Duration = Duration::from_millis(200);
+/// Without a frame for this long while something moves, a timer draws the
+/// next one: a frame clock can stop ticking (a compositor pausing a hidden
+/// surface, a display with no client attached) and the animation must finish.
+const FRAME_WATCHDOG: Duration = Duration::from_millis(40);
 
 pub struct Driver {
     pub plugin: String,
@@ -32,7 +36,12 @@ pub struct Driver {
     started: Instant,
     last: Option<Instant>,
     dropped: HashSet<String>,
+    /// The plugin's `renderer.params` settings, read when it starts and when
+    /// its settings change.
+    params: Vec<f64>,
 }
+
+
 
 /// Cards on their way back to the built-in layout after a renderer stopped.
 pub struct Return {
@@ -67,9 +76,11 @@ fn built_in_rect(card: &MiniTerminalCard) -> (Rect, bool) {
 impl Manager {
     /// Load a plugin's renderer. Only one at a time (activation refuses a
     /// second provider).
-    pub(super) fn start_renderer(self: &Rc<Self>, plugin: &str, dir: &std::path::Path, wasm: &str) -> Result<(), String> {
+    pub(super) fn start_renderer(self: &Rc<Self>, plugin: &str, dir: &std::path::Path, manifest: &crate::plugin_host::manifest::Manifest) -> Result<(), String> {
+        let spec = manifest.contributes.renderer.as_ref().ok_or("the plugin has no renderer")?;
+        let wasm = &spec.wasm;
         let bytes = std::fs::read(dir.join(wasm)).map_err(|e| format!("cannot read {wasm}: {e} (build it first)"))?;
-        let renderer = Renderer::load(&bytes, &crate::plugin_host::log_file(plugin))?;
+        let renderer = Renderer::load_with_params(&bytes, &crate::plugin_host::log_file(plugin), spec.params.len())?;
         api::append_log(&crate::plugin_host::log_file(plugin), "info", "renderer loaded");
         self.renderer.replace(Some(Driver {
             plugin: plugin.to_string(),
@@ -80,9 +91,23 @@ impl Manager {
             started: Instant::now(),
             last: None,
             dropped: HashSet::new(),
+            params: renderer::params_of(manifest),
         }));
         self.renderer_wake();
         Ok(())
+    }
+
+    /// Whether this plugin's renderer is the one drawing (or ready to draw).
+    pub fn renderer_running(&self, plugin: &str) -> bool {
+        self.renderer.borrow().as_ref().is_some_and(|d| d.plugin == plugin && d.renderer.off.is_none())
+    }
+
+    /// The plugin's settings changed: pass the new params on the next frame.
+    pub(super) fn refresh_renderer_params(self: &Rc<Self>, plugin: &str, manifest: &crate::plugin_host::manifest::Manifest) {
+        if let Some(driver) = self.renderer.borrow_mut().as_mut().filter(|d| d.plugin == plugin) {
+            driver.params = renderer::params_of(manifest);
+        }
+        self.renderer_wake();
     }
 
     /// Stop drawing: cards glide back to the built-in layout.
@@ -128,15 +153,41 @@ impl Manager {
             self.stop_ticking();
             return;
         };
+        self.frame_at.set(Some(Instant::now()));
         canvas.add_tick_callback(|_, _| {
             let manager = manager();
-            if manager.frame() {
+            if !manager.ticking() {
+                return glib::ControlFlow::Break;
+            }
+            if manager.timed_frame() {
                 glib::ControlFlow::Continue
             } else {
                 manager.stop_ticking();
                 glib::ControlFlow::Break
             }
         });
+        glib::timeout_add_local(FRAME_WATCHDOG, || {
+            let manager = manager();
+            if !manager.ticking() {
+                return glib::ControlFlow::Break;
+            }
+            let stalled = manager.frame_at.get().is_none_or(|at| at.elapsed() >= FRAME_WATCHDOG);
+            if stalled && !manager.timed_frame() {
+                manager.stop_ticking();
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
+    /// Whether frames are wanted (the tick callback and the watchdog run).
+    fn ticking(&self) -> bool {
+        self.renderer.borrow().as_ref().is_some_and(|d| d.ticking) || self.return_ticking.get()
+    }
+
+    fn timed_frame(self: &Rc<Self>) -> bool {
+        self.frame_at.set(Some(Instant::now()));
+        self.frame()
     }
 
     fn stop_ticking(&self) {
@@ -180,6 +231,7 @@ impl Manager {
             top: f64::from(top),
             time_ms: now.duration_since(driver.started).as_secs_f64() * 1000.0,
             dt_ms: dt.min(100.0),
+            params: driver.params.clone(),
             ..Frame::default()
         };
         let mut drawn: Vec<(u32, Rc<MiniTerminalCard>)> = Vec::new();
@@ -284,6 +336,7 @@ impl Manager {
                     if let Some(p) = self.plugins.borrow_mut().get_mut(&plugin) {
                         p.state = State::Failed(format!("renderer {off}"));
                     }
+                    self.sync_toggles(&plugin);
                     self.changed();
                     return false;
                 }
@@ -315,7 +368,9 @@ impl Manager {
         workspace.refresh_ghosts();
         if t >= 1.0 {
             self.returning.replace(None);
-            return false;
+            // A renderer started meanwhile (turned back on, reloaded) takes
+            // over on the next frame instead of waiting for a change.
+            return self.renderer.borrow().is_some();
         }
         true
     }

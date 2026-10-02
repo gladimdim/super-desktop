@@ -149,6 +149,14 @@ button.plugin-button-danger:hover {{ background-color: {danger_hover}; color: {b
     font-size: 10px;
 }}
 .plugin-chips .plugin-chip {{ padding: 0 7px; font-size: 10px; }}
+/* A toolbar toggle that is on (a renderer.toggle command) */
+.plugin-items button.plugin-item-on {{
+    background-image: none;
+    background-color: {badge_bg};
+    border-color: {accent};
+    color: {accent};
+    box-shadow: inset 0 -2px {accent};
+}}
 button.plugin-card-btn {{ padding: 0 6px; }}
 
 /* Settings → Plugins */

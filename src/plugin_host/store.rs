@@ -49,6 +49,10 @@ pub struct Installed {
     /// The user's own key for a shortcut id, or `null` to turn it off.
     #[serde(default)]
     pub shortcuts: BTreeMap<String, Option<String>>,
+    /// The user turned the plugin's renderer off (a `renderer.toggle`
+    /// command) while the plugin stays on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub renderer_off: bool,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }

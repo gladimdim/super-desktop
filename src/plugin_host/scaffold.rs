@@ -6,6 +6,11 @@ use std::path::{Path, PathBuf};
 const SDK: &str = include_str!("../../skills/super-desktop-plugin/sdk/python/sd_plugin.py");
 const RENDERER_LIB: &str = include_str!("../../skills/super-desktop-plugin/examples/center-magnify/src/lib.rs");
 const RENDERER_BUILD: &str = include_str!("../../skills/super-desktop-plugin/examples/center-magnify/build.sh");
+const RENDERER_MANIFEST: &str = include_str!("../../skills/super-desktop-plugin/examples/center-magnify/super-desktop-plugin.json");
+const RENDERER_TESTS: [(&str, &str); 2] = [
+    ("centre.json", include_str!("../../skills/super-desktop-plugin/examples/center-magnify/tests/centre.json")),
+    ("edges-become-icons.json", include_str!("../../skills/super-desktop-plugin/examples/center-magnify/tests/edges-become-icons.json")),
+];
 const SKILL_URL: &str = "https://github.com/gladimdim/super-desktop/tree/master/skills/super-desktop-plugin";
 
 fn title(id: &str) -> String {
@@ -46,6 +51,9 @@ pub fn create(id: &str, kind: &str, dir: &Path) -> Result<(), String> {
             files.push((dir.join("Cargo.toml"), cargo_toml(id), false));
             files.push((dir.join("src/lib.rs"), RENDERER_LIB.replace("Center Magnify", &title(id)), false));
             files.push((dir.join("build.sh"), RENDERER_BUILD.replace("center_magnify", &id.replace('-', "_")), true));
+            for (name, text) in RENDERER_TESTS {
+                files.push((dir.join("tests").join(name), text.into(), false));
+            }
         }
     }
     for (path, text, executable) in files {
@@ -119,14 +127,19 @@ fn copy_dir(from: &Path, to: &Path, skip: &[&str]) -> std::io::Result<()> {
 fn manifest(id: &str, kind: &str) -> String {
     let name = title(id);
     let value = if kind == "renderer" {
-        serde_json::json!({
-            "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
-            "manifestVersion": 1, "id": id, "name": name, "version": "0.1.0",
-            "description": "Decides where and how big cards are drawn.",
-            "engines": {"superDesktop": format!(">={}", crate::updates::running()), "pluginApi": "1"},
-            "permissions": ["layout.renderer"],
-            "contributes": {"renderer": {"id": format!("{id}.renderer"), "wasm": "renderer.wasm"}}
-        })
+        // The example's manifest under the new id: renderer, settings as
+        // params, and a toolbar/shortcut toggle, with no process.
+        let text = RENDERER_MANIFEST.replace("center-magnify.", &format!("{id}.")).replace("Center Magnify", &name);
+        let mut value: serde_json::Value = serde_json::from_str(&text).expect("the example manifest is JSON");
+        value["id"] = id.into();
+        value["name"] = name.clone().into();
+        value["version"] = "0.1.0".into();
+        value["description"] = "Decides where and how big cards are drawn.".into();
+        value["engines"]["superDesktop"] = format!(">={}", crate::updates::running()).into();
+        if let Some(fields) = value.as_object_mut() {
+            fields.remove("author");
+        }
+        value
     } else {
         serde_json::json!({
             "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",

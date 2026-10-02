@@ -243,6 +243,9 @@ pub fn run_scenario(dir: &Path, manifest: &Arc<Manifest>, path: &Path) -> Outcom
 fn run_inner(dir: &Path, manifest: &Arc<Manifest>, path: &Path, lines: &mut Vec<String>) -> Result<(), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let raw: Value = serde_json::from_str(&text).map_err(|e| format!("{}: not JSON: {e}", path.display()))?;
+    if super::render_test::is_renderer_scenario(&raw) {
+        return super::render_test::scenario(dir, manifest, &raw, lines);
+    }
     // `${fixture}` is a fresh copy of tests/fixtures/ for this scenario.
     let scratch = std::env::temp_dir().join(format!("sd-plugin-test-{}-{}", std::process::id(), nanos()));
     let fixtures = scratch.join("fixtures");
@@ -454,17 +457,25 @@ fn run_all_inner(dir: &Path, only: Option<&str>) -> Result<Vec<Outcome>, String>
         Some(m) if loaded.report.ok => Arc::new(m),
         _ => return Err("the manifest is not valid (run plugin validate)".into()),
     };
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir.join("tests"))
-        .map_err(|_| format!("no tests/ folder in {}", dir.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter(|p| only.is_none_or(|name| p.file_stem().is_some_and(|s| s == name)))
-        .collect();
+    let has_renderer = manifest.contributes.renderer.is_some();
+    let mut files: Vec<PathBuf> = match std::fs::read_dir(dir.join("tests")) {
+        Ok(entries) => entries.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+        Err(_) if has_renderer => Vec::new(),
+        Err(_) => return Err(format!("no tests/ folder in {}", dir.display())),
+    };
+    files.retain(|p| p.extension().is_some_and(|x| x == "json") && only.is_none_or(|name| p.file_stem().is_some_and(|s| s == name)));
     files.sort();
-    if files.is_empty() {
+    // Every renderer gets the built-in conformance run first.
+    let conformance = has_renderer && only.is_none_or(|name| name == "renderer");
+    if files.is_empty() && !conformance {
         return Err("no scenarios: add tests/<name>.json (see references/testing.md#scenarios)".into());
     }
-    Ok(files.iter().map(|f| run_scenario(dir, &manifest, f)).collect())
+    let mut outcomes = Vec::new();
+    if conformance {
+        outcomes.push(super::render_test::conformance(dir, &manifest));
+    }
+    outcomes.extend(files.iter().map(|f| run_scenario(dir, &manifest, f)));
+    Ok(outcomes)
 }
 
 #[cfg(test)]
