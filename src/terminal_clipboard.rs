@@ -3,7 +3,11 @@
 //! The shortcuts are Omarchy's terminal ones: Ctrl+Shift+C/V, and
 //! Ctrl+Insert/Shift+Insert, which Omarchy's Super+C/Super+V send to a
 //! terminal. Super+V sends Ctrl+V instead when the window under the overlay is
-//! not a terminal, so a harness card pastes text on Ctrl+V too.
+//! not a terminal, so a harness card pastes text on Ctrl+V too, and a shell
+//! card does when that Ctrl+V comes from Super+V.
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gtk4::{gdk, glib, prelude::*};
 use vte4::prelude::*;
 
@@ -68,6 +72,34 @@ fn shortcut_key(key: gdk::Key, same_key: impl FnOnce() -> Vec<gdk::Key>) -> gdk:
         .unwrap_or(key)
 }
 
+/// Which physical modifier keys the terminal saw go down. Omarchy's Super+V
+/// sends Ctrl+V with Super still physically held and no Control key pressed,
+/// which tells it apart from a Ctrl+V typed for Vim or the shell.
+#[derive(Default)]
+struct HeldKeys {
+    control: Cell<bool>,
+    super_: Cell<bool>,
+}
+
+impl HeldKeys {
+    fn update(&self, key: gdk::Key, pressed: bool) {
+        match key {
+            gdk::Key::Control_L | gdk::Key::Control_R => self.control.set(pressed),
+            gdk::Key::Super_L | gdk::Key::Super_R => self.super_.set(pressed),
+            _ => {}
+        }
+    }
+
+    fn clear(&self) {
+        self.control.set(false);
+        self.super_.set(false);
+    }
+
+    fn super_v(&self) -> bool {
+        self.super_.get() && !self.control.get()
+    }
+}
+
 fn has_text(formats: &gdk::ContentFormats) -> bool {
     formats.contains_type(String::static_type())
         || [
@@ -84,11 +116,15 @@ fn has_text(formats: &gdk::ContentFormats) -> bool {
 pub fn install(terminal: &vte4::Terminal, paste_on_control_v: bool) -> gtk4::EventControllerKey {
     let keys = gtk4::EventControllerKey::new();
     keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    let held = Rc::new(HeldKeys::default());
     let weak = terminal.downgrade();
+    let pressed = held.clone();
     keys.connect_key_pressed(move |_, key, keycode, modifiers| {
         let Some(terminal) = weak.upgrade() else {
             return glib::Propagation::Proceed;
         };
+        let held = &pressed;
+        held.update(key, true);
         let key = shortcut_key(key, || {
             terminal
                 .display()
@@ -103,6 +139,7 @@ pub fn install(terminal: &vte4::Terminal, paste_on_control_v: bool) -> gtk4::Eve
         // selections. Check formats only: never read or replace the clipboard
         // on key routing.
         let text_available = || has_text(&terminal.clipboard().formats());
+        let paste_on_control_v = paste_on_control_v || held.super_v();
         let Some(action) = action(key, modifiers, paste_on_control_v, text_available) else {
             return glib::Propagation::Proceed;
         };
@@ -119,6 +156,12 @@ pub fn install(terminal: &vte4::Terminal, paste_on_control_v: bool) -> gtk4::Eve
         }
         glib::Propagation::Stop
     });
+    let released = held.clone();
+    keys.connect_key_released(move |_, key, _, _| released.update(key, false));
+    // A release that lands elsewhere must not leave Super stuck down.
+    let focus = gtk4::EventControllerFocus::new();
+    focus.connect_leave(move |_| held.clear());
+    terminal.add_controller(focus);
     terminal.add_controller(keys.clone());
     keys
 }
@@ -200,6 +243,26 @@ mod tests {
         ])));
     }
 
+    /// Omarchy's Super+V over a browser sends a shell card Ctrl+V while Super
+    /// is still held. A Ctrl+V typed with the Control key stays the program's.
+    #[test]
+    fn clipboard_super_v_pastes_in_shell_cards() {
+        let held = HeldKeys::default();
+        assert!(!held.super_v());
+        held.update(gdk::Key::Super_L, true);
+        assert!(held.super_v());
+        held.update(gdk::Key::Control_L, true);
+        assert!(!held.super_v(), "a real Ctrl+V while Super is held");
+        held.update(gdk::Key::Control_L, false);
+        held.update(gdk::Key::v, false);
+        assert!(held.super_v());
+        held.update(gdk::Key::Super_L, false);
+        assert!(!held.super_v());
+        held.update(gdk::Key::Super_R, true);
+        held.clear();
+        assert!(!held.super_v(), "focus loss forgets held keys");
+    }
+
     /// With the Ukrainian layout active the V key arrives as м, and with Shift
     /// as М. It still pastes, like GTK's own shortcuts.
     #[test]
@@ -263,6 +326,9 @@ mod tests {
         };
         let press = |keys: &gtk4::EventControllerKey, key: gdk::Key, modifiers: gdk::ModifierType| {
             keys.emit_by_name::<bool>("key-pressed", &[&key, &0u32, &modifiers])
+        };
+        let release = |keys: &gtk4::EventControllerKey, key: gdk::Key| {
+            keys.emit_by_name::<()>("key-released", &[&key, &0u32, &gdk::ModifierType::empty()])
         };
         let shortcut =
             |key| press(&keys, key, gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK);
@@ -356,6 +422,12 @@ mod tests {
         clipboard.set_text("not pasted by ctrl+v");
         assert!(!press(&shell_keys, gdk::Key::v, gdk::ModifierType::CONTROL_MASK));
         assert!(press(&shell_keys, gdk::Key::Insert, gdk::ModifierType::SHIFT_MASK));
+        // Omarchy's Super+V over a browser: Ctrl+V with Super physically held.
+        assert!(!press(&shell_keys, gdk::Key::Super_L, gdk::ModifierType::empty()));
+        assert!(press(&shell_keys, gdk::Key::v, gdk::ModifierType::CONTROL_MASK));
+        release(&shell_keys, gdk::Key::v);
+        release(&shell_keys, gdk::Key::Super_L);
+        assert!(!press(&shell_keys, gdk::Key::v, gdk::ModifierType::CONTROL_MASK));
         window.close();
     }
 }
