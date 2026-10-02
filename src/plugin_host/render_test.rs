@@ -269,7 +269,11 @@ fn check(expect: &Value, run: &Run) -> Result<(), String> {
         let out = run.last.cards.iter().find(|c| u64::from(c.id) == card).ok_or(format!("card {card} is not in the output"))?;
         let r = out.rect;
         if let Some(mode) = expect.get("mode").and_then(Value::as_str) {
-            let actual = if out.mode == Mode::Icon { "icon" } else { "full" };
+            let actual = match out.mode {
+                Mode::Icon => "icon",
+                Mode::Full => "full",
+                Mode::Resized => "resized",
+            };
             if mode != actual {
                 return Err(format!("card {card} is drawn as {actual} at {:.0},{:.0} {:.0}×{:.0}", r.x, r.y, r.w, r.h));
             }

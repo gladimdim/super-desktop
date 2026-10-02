@@ -1202,14 +1202,14 @@ mod tests {
             assert!(loaded.report.ok, "{name}: {:#?}", loaded.report.errors);
         }
         // The renderer example ships its source; renderer.wasm is built by build.sh.
-        let loaded = load_dir(&examples().join("center-magnify"));
+        let loaded = load_dir(&examples().join("gravity-wm"));
         let errors: Vec<_> = loaded.report.errors.iter().map(|e| e.path.as_str()).collect();
         assert!(errors.iter().all(|p| *p == "contributes.renderer.wasm"), "{:#?}", loaded.report.errors);
     }
 
     #[test]
     fn plugin_spec_renderer_toggle_and_params() {
-        let base: Value = serde_json::from_str(&std::fs::read_to_string(examples().join("center-magnify").join(FILE_NAME)).unwrap()).unwrap();
+        let base: Value = serde_json::from_str(&std::fs::read_to_string(examples().join("gravity-wm").join(FILE_NAME)).unwrap()).unwrap();
         let with = |edit: &dyn Fn(&mut Value)| {
             let mut value = base.clone();
             edit(&mut value);

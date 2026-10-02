@@ -1,10 +1,10 @@
 {
   "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
   "manifestVersion": 1,
-  "id": "center-magnify",
-  "name": "Center Magnify",
-  "version": "0.1.0",
-  "description": "Cards grow up to 70% of the screen width near the centre, shrink toward the sides and become icons at the left and right edges.",
+  "id": "gravity-wm",
+  "name": "Gravity WM",
+  "version": "0.2.0",
+  "description": "Cards grow toward the horizontal centre, up to 70% of the screen width with more rows and columns, shrink toward the sides and become icons at the edges.",
   "author": "SUPER DESKTOP examples",
   "license": "MIT",
   "engines": {
@@ -18,7 +18,7 @@
   ],
   "contributes": {
     "renderer": {
-      "id": "center-magnify.renderer",
+      "id": "gravity-wm.renderer",
       "wasm": "renderer.wasm",
       "params": [
         "maxWidth",
@@ -30,25 +30,25 @@
     },
     "commands": [
       {
-        "id": "center-magnify.toggle",
-        "title": "Turn Center Magnify on or off",
-        "icon": "🔍",
+        "id": "gravity-wm.toggle",
+        "title": "Turn Gravity WM on or off",
+        "icon": "🪐",
         "action": "renderer.toggle"
       }
     ],
     "toolbar": [
       {
-        "id": "center-magnify.button",
-        "icon": "🔍",
-        "label": "Magnify",
-        "tooltip": "Center Magnify on/off (SUPER + ALT + M)",
-        "command": "center-magnify.toggle"
+        "id": "gravity-wm.button",
+        "icon": "🪐",
+        "label": "Gravity",
+        "tooltip": "Gravity WM on/off (SUPER + ALT + M)",
+        "command": "gravity-wm.toggle"
       }
     ],
     "shortcuts": [
       {
-        "id": "center-magnify.toggle-key",
-        "command": "center-magnify.toggle",
+        "id": "gravity-wm.toggle-key",
+        "command": "gravity-wm.toggle",
         "default": "SUPER + ALT + M",
         "scope": "overlay"
       }
@@ -58,7 +58,7 @@
         "key": "maxWidth",
         "type": "number",
         "title": "Width at the centre (% of the screen)",
-        "description": "How wide a card is drawn when its centre is at the centre of the screen.",
+        "description": "How wide a card is at the centre of the screen. Its height grows with it, and the terminal gets the extra columns and rows.",
         "min": 20,
         "max": 95,
         "default": 70

@@ -32,7 +32,7 @@
     "expect": [
       {
         "card": 1,
-        "mode": "full",
+        "mode": "resized",
         "width": {
           "min": 1200,
           "max": 1344
@@ -40,7 +40,7 @@
       },
       {
         "card": 2,
-        "mode": "full",
+        "mode": "resized",
         "width": {
           "min": 700,
           "max": 1199
@@ -48,7 +48,7 @@
       },
       {
         "card": 3,
-        "mode": "full",
+        "mode": "resized",
         "width": {
           "min": 423,
           "max": 699

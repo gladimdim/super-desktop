@@ -131,7 +131,7 @@ LLMs follow them, so they are the public contract of the plugin API.
   contribution points. Never remove, rename or retype anything, tighten
   validation, or change a limit downward within API 1. A breaking change is
   API 2 and needs the user's agreement first.
-- Keep the examples working: `skills/super-desktop-plugin/examples/center-magnify/build.sh`
+- Keep the examples working: `skills/super-desktop-plugin/examples/gravity-wm/build.sh`
   must pass, and each example manifest must validate against the schema.
   Keep each example's `sd_plugin.py` identical to `sdk/python/sd_plugin.py`.
 - Every host error carries `data.hint` and `data.docs` (a `references/` file

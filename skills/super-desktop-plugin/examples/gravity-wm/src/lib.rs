@@ -1,19 +1,22 @@
-//! Center Magnify: a SUPER DESKTOP window renderer (renderer ABI 1).
+//! Gravity WM: a SUPER DESKTOP window renderer (renderer ABI 1).
 //!
 //! The closer a card's centre is to the horizontal centre of the screen, the
-//! larger it is drawn: up to 70% of the screen width (the `maxWidth`
-//! setting). Moving it toward a side shrinks it smoothly down to `minWidth`,
-//! and in the edge bands (`edgeBand`) it becomes an icon docked at the left
-//! or right edge. Dropping a card in an edge band saves it as an icon there,
-//! so turning the plugin off keeps it an icon; dragging an icon toward the
-//! centre grows it back into a card, and dropping it there opens it.
+//! larger the card: up to 70% of the screen width (the `maxWidth` setting),
+//! with its height growing in proportion. Cards are really resized, not
+//! zoomed: they are drawn in mode 2 (`MODE_RESIZED`), so once the layout
+//! settles the terminal gets the extra columns and rows. Moving a card toward
+//! a side shrinks it smoothly down to `minWidth`, and in the edge bands
+//! (`edgeBand`) it becomes an icon docked at the left or right edge.
+//! Dropping a card in an edge band saves it as an icon there, so turning the
+//! plugin off keeps it an icon; dragging an icon toward the centre grows it
+//! back into a card, and dropping it there opens it.
 //!
 //! Settings arrive as `params` after the cards, in the manifest's
 //! `renderer.params` order: maxWidth %, minWidth %, edgeBand %, iconSize px,
 //! smoothing ms. Missing or out-of-range values fall back to the defaults.
 //!
 //! Build: `cargo build --release --target wasm32-unknown-unknown`, then copy
-//! `target/wasm32-unknown-unknown/release/center_magnify.wasm` to `renderer.wasm`.
+//! `target/wasm32-unknown-unknown/release/gravity_wm.wasm` to `renderer.wasm`.
 //! The byte layout is documented in `references/renderer-abi.md`.
 #![cfg_attr(target_arch = "wasm32", no_std)]
 
@@ -38,8 +41,11 @@ pub const FLAG_EXPANDED: u32 = 1 << 1;
 pub const FLAG_DRAGGING: u32 = 1 << 2;
 pub const FLAG_FOCUSED: u32 = 1 << 3;
 pub const FLAG_DROPPED: u32 = 1 << 5;
-pub const MODE_FULL: u32 = 0;
+pub const MODE_FULL: u32 = 0; // kept at its own size, scaled to the rectangle
 pub const MODE_ICON: u32 = 1;
+/// Laid out at the rectangle's size once the layout settles (more columns
+/// and rows); a host without mode 2 draws it like MODE_FULL.
+pub const MODE_RESIZED: u32 = 2;
 
 const GAP: f32 = 8.0;
 const STATE_ENTRY: usize = 20; // id + x, y, w, h
@@ -180,7 +186,7 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
     let half = (sw / 2.0).max(1.0);
     let avail = (sh - top).max(1.0);
     let mut target = [Rect::default(); MAX_CARDS];
-    let mut mode = [MODE_FULL; MAX_CARDS];
+    let mut mode = [MODE_RESIZED; MAX_CARDS];
     let mut dock_left = [0usize; MAX_CARDS];
     let mut dock_right = [0usize; MAX_CARDS];
     let (mut nl, mut nr) = (0usize, 0usize);
@@ -218,12 +224,10 @@ pub fn present(input: &[u8], out: &mut [u8]) -> Result<usize, i32> {
         }
         let scale = t.max + (t.min - t.max) * smoothstep(0.0, edge, d);
         let ratio = clampf(if c.saved.h > 1.0 { c.saved.w / c.saved.h } else { 1.4 }, 0.5, 2.5);
+        // The terminal reflows into its new size, so the width is kept and
+        // only the height stops at the free space.
         let mut w = scale * sw;
-        let mut h = w / ratio;
-        if h > avail * 0.92 {
-            h = avail * 0.92;
-            w = h * ratio;
-        }
+        let mut h = (w / ratio).min(avail * 0.92);
         w = w.max(c.min_w);
         h = h.max(c.min_h);
         target[i] = Rect {
@@ -455,10 +459,18 @@ mod tests {
         for flags in [0, FLAG_FOCUSED] {
             let out = settle(vec![(7, flags, centred(640.0, 300.0))]);
             let (id, r, mode) = card_out(&out, 0);
-            assert_eq!((id, mode), (7, MODE_FULL));
+            assert_eq!((id, mode), (7, MODE_RESIZED));
             assert!((r.w - 0.70 * W).abs() < 2.0, "{r:?}");
             assert!(r.x >= 0.0 && r.x + r.w <= W + 0.5 && r.y >= TOP);
         }
+    }
+
+    #[test]
+    fn a_tall_card_keeps_its_width_and_stops_at_the_free_height() {
+        let (_, r, mode) = card_out(&settle(vec![(1, 0, centred(640.0, 600.0))]), 0);
+        assert_eq!(mode, MODE_RESIZED, "really resized, not zoomed");
+        assert!((r.w - 0.70 * W).abs() < 2.0, "{r:?}");
+        assert!((r.h - (H - TOP) * 0.92).abs() < 2.0, "{r:?}");
     }
 
     #[test]
@@ -478,7 +490,7 @@ mod tests {
         assert!((half.w - 0.50 * W).abs() < 2.0, "maxWidth 50: {half:?}");
         // A wide edge band (40%) turns a card 77% of the way out into an icon.
         let out_there = vec![(1, 0, Rect { x: 1700.0 - 320.0, y: 400.0, w: 640.0, h: 300.0 })];
-        assert_eq!(card_out(&settle_with(out_there.clone(), vec![]), 0).2, MODE_FULL);
+        assert_eq!(card_out(&settle_with(out_there.clone(), vec![]), 0).2, MODE_RESIZED);
         assert_eq!(card_out(&settle_with(out_there, vec![70.0, 22.0, 40.0]), 0).2, MODE_ICON);
         // Icon size, and out-of-range values fall back to the defaults.
         let icon = card_out(&settle_with(vec![(2, FLAG_ICONIFIED, Rect { x: 10.0, y: 300.0, w: 72.0, h: 72.0 })], vec![70.0, 22.0, 12.0, 96.0]), 0).1;
@@ -490,7 +502,7 @@ mod tests {
     fn an_icon_dragged_to_the_centre_grows_into_a_card() {
         let dragged = vec![(3, FLAG_ICONIFIED | FLAG_DRAGGING, Rect { x: 900.0, y: 400.0, w: 640.0, h: 300.0 })];
         let (_, r, mode) = card_out(&settle(dragged), 0);
-        assert_eq!(mode, MODE_FULL);
+        assert_eq!(mode, MODE_RESIZED);
         assert!(r.w > 0.6 * W, "{r:?}");
     }
 

@@ -129,7 +129,9 @@ Breaking any of these fails validation, testing or review.
     buffers (room for 128 cards and 16 params), finite numbers, same card
     count out as in, linear work per card. Give the effect a
     `renderer.toggle` command (toolbar item and shortcut) and its tuning as
-    `renderer.params` settings; then the plugin needs no process.
+    `renderer.params` settings; then the plugin needs no process. Use
+    output mode 2 when a card should really get more room (more terminal
+    columns and rows), mode 0 for a zoom.
 11. **Stay compatible.** Never rename the plugin id, setting keys or harness
     ids after publishing. Ignore unknown fields. Check
     `host.describe().methods` for optional features.
@@ -170,7 +172,7 @@ Breaking any of these fails validation, testing or review.
 | `sdk/python/sd_plugin.py` | Python runtime: copy next to `main.py`. |
 | `examples/git-flush/` | Process plugin: toolbar badge, global shortcut, panel, settings, LLM, review-then-act. |
 | `examples/window-controls/` | Process plugin: `cardControls` with snap-left/right and to-edge icon. |
-| `examples/center-magnify/` | Rust WASM renderer with settings (params), a toolbar/shortcut toggle and no process; native tests, renderer scenarios and `build.sh`. |
+| `examples/gravity-wm/` | Rust WASM renderer with settings (params), a toolbar/shortcut toggle and no process; native tests, renderer scenarios and `build.sh`. |
 
 ## 7. Minimal process plugin
 

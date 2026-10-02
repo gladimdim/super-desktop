@@ -337,7 +337,9 @@ impl Manager {
                 info["iconButtons"] = Value::Array(names(&chrome.compact_buttons));
                 info["iconControls"] = Value::Array(if chrome.compact_plugin_controls.is_visible() { names(&chrome.compact_plugin_controls) } else { vec![json!("builtin:restore"), json!("builtin:close")] });
                 // Where a window renderer draws it (null: the built-in layout).
-                info["drawn"] = card.presented().map_or(Value::Null, |p| json!({"x": p.rect.x, "y": p.rect.y, "w": p.rect.width, "h": p.rect.height, "icon": p.icon}));
+                info["drawn"] = card.presented().map_or(Value::Null, |p| {
+                    json!({"x": p.rect.x, "y": p.rect.y, "w": p.rect.width, "h": p.rect.height, "icon": p.icon, "laidOut": p.sized.map(|(w, h)| json!({"w": w, "h": h}))})
+                });
                 info
             })
             .collect();

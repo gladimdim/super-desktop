@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
   "manifestVersion": 1,
-  "id": "center-magnify",
-  "name": "Center Magnify",
+  "id": "gravity-wm",
+  "name": "Gravity WM",
   "version": "0.1.0",
   "description": "Cards grow toward 70% of the screen near the centre and become icons docked at the left and right edges.",
   "author": "SUPER DESKTOP examples",
@@ -10,6 +10,6 @@
   "engines": { "superDesktop": ">=1.2.0", "pluginApi": "1" },
   "permissions": ["layout.renderer"],
   "contributes": {
-    "renderer": { "id": "center-magnify.renderer", "wasm": "renderer.wasm" }
+    "renderer": { "id": "gravity-wm.renderer", "wasm": "renderer.wasm" }
   }
 }

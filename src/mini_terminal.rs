@@ -578,6 +578,9 @@ pub struct MiniTerminalCard {
 pub struct Presented {
     pub rect: crate::card_resize::Rect,
     pub icon: bool,
+    /// The size a resizing renderer laid the card out at (more columns and
+    /// rows), or `None` while it keeps its own size and is only scaled.
+    pub sized: Option<(i32, i32)>,
 }
 
 /// The parts of a card's chrome plugins may fill. The built-in controls sit
@@ -1581,10 +1584,25 @@ impl MiniTerminalCard {
     /// layout. A full card keeps its own size (the terminal is not resized)
     /// and is scaled to fit `rect`, centred in it; an icon is laid out as one.
     pub fn present(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, opacity: f64) {
+        self.present_as(canvas, rect, icon, false, false, opacity);
+    }
+
+    /// Like `present`, but a full card is laid out at the rectangle's size
+    /// (its terminal gets more or fewer columns and rows) once `settled`;
+    /// while the layout still moves it is scaled from the size it has, so the
+    /// terminal is not resized on every frame. The saved layout is untouched.
+    pub fn present_resized(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, settled: bool, opacity: f64) {
+        self.present_as(canvas, rect, false, true, settled, opacity);
+    }
+
+    fn present_as(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, resize: bool, settled: bool, opacity: f64) {
         let previous = *self.presented.borrow();
+        let previous_sized = previous.and_then(|p| p.sized);
+        let mut sized = previous_sized;
         let form_changed = previous.map(|p| p.icon) != Some(icon);
         let vte_attached = self.vte.borrow().is_some();
         if icon {
+            sized = None;
             let side = rect.width.min(rect.height).max(1);
             if form_changed || previous.is_some_and(|p| p.rect.width != side) {
                 self.container.set_size_request(side, side);
@@ -1592,8 +1610,13 @@ impl MiniTerminalCard {
             }
             canvas.set_child_transform(&self.container, Some(&gtk4::gsk::Transform::new().translate(&gtk4::graphene::Point::new(rect.x as f32, rect.y as f32))));
         } else {
-            let (w, h) = self.full_size();
-            if form_changed {
+            if !resize {
+                sized = None;
+            } else if settled {
+                sized = Some((rect.width.max(1), rect.height.max(1)));
+            }
+            let (w, h) = sized.unwrap_or_else(|| self.full_size());
+            if form_changed || sized != previous_sized {
                 self.container.set_size_request(w, h);
                 apply_layout(false, w, h, false, self.screen_w, &self.container, &self.header, &self.footer, &self.preview_label, &self.compact, vte_attached);
             }
@@ -1609,7 +1632,7 @@ impl MiniTerminalCard {
             self.container.set_opacity(opacity);
         }
         self.presented_icon.set(icon);
-        *self.presented.borrow_mut() = Some(Presented { rect, icon });
+        *self.presented.borrow_mut() = Some(Presented { rect, icon, sized });
     }
 
     /// Back to the card's own layout (the renderer stopped or skipped it).

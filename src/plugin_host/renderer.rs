@@ -80,8 +80,13 @@ pub struct Frame {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Mode {
+    /// 0: the card keeps its own size and is scaled to the rectangle.
     Full,
+    /// 1: an icon.
     Icon,
+    /// 2: the card is laid out at the rectangle's size (more columns and
+    /// rows) once the layout settles; scaled while it moves.
+    Resized,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -347,7 +352,11 @@ pub fn decode(b: &[u8], frame: &Frame) -> Result<(Output, Vec<u8>), String> {
         if cards.iter().any(|c: &CardOut| c.id == id) {
             return Err(format!("card {id} appears twice in the output"));
         }
-        let mode = if get_u32(b, at + 20) == 1 { Mode::Icon } else { Mode::Full };
+        let mode = match get_u32(b, at + 20) {
+            1 => Mode::Icon,
+            2 => Mode::Resized,
+            _ => Mode::Full,
+        };
         let mut rect = Rect { x: get_f32(b, at + 4), y: get_f32(b, at + 8), w: get_f32(b, at + 12), h: get_f32(b, at + 16) };
         let fallback = input.saved;
         for (value, default) in [(&mut rect.x, fallback.x), (&mut rect.y, fallback.y), (&mut rect.w, fallback.w), (&mut rect.h, fallback.h)] {
@@ -361,7 +370,7 @@ pub fn decode(b: &[u8], frame: &Frame) -> Result<(Output, Vec<u8>), String> {
                 rect.w = side;
                 rect.h = side;
             }
-            Mode::Full => {
+            Mode::Full | Mode::Resized => {
                 rect.w = rect.w.max(input.min_w.max(1.0));
                 rect.h = rect.h.max(input.min_h.max(1.0));
             }
@@ -538,8 +547,8 @@ mod tests {
     #[test]
     #[ignore]
     fn plugin_renderer_frame_time() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples/center-magnify/renderer.wasm");
-        let wasm = std::fs::read(&path).expect("build center-magnify first");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples/gravity-wm/renderer.wasm");
+        let wasm = std::fs::read(&path).expect("build gravity-wm first");
         let mut renderer = Renderer::load(&wasm, &std::env::temp_dir().join("sd-renderer-bench.log")).unwrap();
         let mut f = frame();
         f.dt_ms = 16.0;
@@ -562,14 +571,14 @@ mod tests {
             renderer.present(&f).unwrap();
         }
         let per_frame = started.elapsed() / frames;
-        eprintln!("center-magnify, 128 cards: {per_frame:?} per frame");
+        eprintln!("gravity-wm, 128 cards: {per_frame:?} per frame");
         assert!(per_frame < Duration::from_millis(4), "{per_frame:?}");
     }
 
     /// The real example renderer, when it has been built (`build.sh`).
     #[test]
-    fn plugin_renderer_runs_center_magnify_when_built() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples/center-magnify/renderer.wasm");
+    fn plugin_renderer_runs_gravity_wm_when_built() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples/gravity-wm/renderer.wasm");
         let Ok(wasm) = std::fs::read(&path) else {
             eprintln!("skipping: {} is not built", path.display());
             return;
@@ -586,6 +595,7 @@ mod tests {
         }
         let out = last.unwrap();
         assert!(!out.animating);
-        assert!(out.cards[0].rect.w > 1000.0, "the focused centre card is magnified: {:?}", out.cards[0]);
+        assert!(out.cards[0].rect.w > 1000.0, "the centre card is larger: {:?}", out.cards[0]);
+        assert_eq!(out.cards[0].mode, Mode::Resized, "and really resized, not zoomed");
     }
 }

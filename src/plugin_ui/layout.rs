@@ -295,10 +295,15 @@ impl Manager {
         drop(driver_ref);
         match result {
             Ok(output) => {
+                // Terminals are resized only once nothing moves: not on every frame.
+                let settled = !output.animating && !dragging;
                 for out in &output.cards {
                     if let Some((_, card)) = drawn.iter().find(|(id, _)| *id == out.id) {
                         let rect = Rect { x: out.rect.x, y: out.rect.y, width: out.rect.w.round() as i32, height: out.rect.h.round() as i32 };
-                        card.present(&canvas, rect, out.mode == Mode::Icon, out.opacity);
+                        match out.mode {
+                            Mode::Resized => card.present_resized(&canvas, rect, settled, out.opacity),
+                            mode => card.present(&canvas, rect, mode == Mode::Icon, out.opacity),
+                        }
                     }
                 }
                 if let Some(drop) = output.drop {

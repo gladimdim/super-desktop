@@ -101,7 +101,7 @@ no process:
 
 Toolbar items, shortcuts and `plugin run` reach it like any command. A
 renderer plugin with a toggle, a toolbar item, a shortcut and settings that
-are all `renderer.params` has no process at all; see `examples/center-magnify`.
+are all `renderer.params` has no process at all; see `examples/gravity-wm`.
 
 ## Rules the validator adds to the schema
 

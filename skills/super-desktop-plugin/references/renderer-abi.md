@@ -5,7 +5,7 @@ drawn, on every frame. It is a WebAssembly module (`wasm32`, MVP features)
 that the host runs in-process with `wasmi`. It cannot do I/O, cannot allocate
 from the host and cannot run past its budget.
 
-Working example: `examples/center-magnify/src/lib.rs` (Rust, `no_std` on
+Working example: `examples/gravity-wm/src/lib.rs` (Rust, `no_std` on
 wasm32, with native unit tests). Start from it.
 
 ## What the host guarantees and enforces
@@ -23,10 +23,20 @@ wasm32, with native unit tests). Start from it.
   into the canvas below the top bar, full cards to at least `min_w × min_h`,
   icons to 48–256 px squares. Every card stays at least partly visible and
   clickable. Opacity is clamped to 0.2–1.0.
-- **How a rectangle is drawn:** a full card keeps its own size (its
-  terminal is never resized, so it keeps its columns and rows) and is scaled
-  uniformly to fit the rectangle, centred in it. An icon is laid out as an
-  icon of side `min(width, height)`. Opacity is applied as given.
+- **How a rectangle is drawn**, by the card's output mode:
+  - **0, full (scaled):** the card keeps its own size (its terminal keeps
+    its columns and rows) and is scaled uniformly to fit the rectangle,
+    centred in it. A zoom.
+  - **2, full (resized):** the card is really resized to the rectangle: once
+    the layout settles (`animating` 0 and no drag), it is laid out at the
+    rectangle's width and height, so its terminal gets more or fewer columns
+    and rows. While the layout moves it is scaled from the size it has, so
+    the terminal (and the program in it) is not resized on every frame. The
+    saved layout is still untouched: turning the renderer off gives the card
+    its saved size back. A host older than mode 2 draws it like mode 0.
+  - **1, icon:** laid out as an icon of side `min(width, height)`.
+
+  Opacity is applied as given.
 - **What stays built-in:** an expanded card, and every card while the
   show/hide slide runs (phases 3 and 4 are not sent by this build). Draw
   order (`z`) is not applied by this build: cards keep their stacking order,
@@ -144,7 +154,7 @@ Cards, `n` records of 32 bytes at offset 4144, one per input card, any order:
 | 8 | f32 | y |
 | 12 | f32 | width |
 | 16 | f32 | height |
-| 20 | u32 | mode: 0 full card, 1 icon (drawn as a square of `min(width, height)`) |
+| 20 | u32 | mode: 0 full card scaled to the rectangle, 1 icon (drawn as a square of `min(width, height)`), 2 full card resized to the rectangle (see "How a rectangle is drawn") |
 | 24 | f32 | opacity |
 | 28 | u32 | draw order: higher draws on top; ties keep the input stacking order |
 

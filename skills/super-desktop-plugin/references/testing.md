@@ -92,7 +92,7 @@ super-desktop plugin logs git-flush                         # host errors come w
 shows where each card is drawn.
 
 Test the pure `present` function natively (`cargo test`) with frames built in
-the test, like `examples/center-magnify/src/lib.rs`: centre, edges, drop in
+the test, like `examples/gravity-wm/src/lib.rs`: centre, edges, drop in
 an edge band, many cards, NaN/garbage input, convergence over frames.
 
 `super-desktop plugin test` then runs the built `.wasm` in the desktop's
@@ -109,7 +109,7 @@ interpreter, with its budget and output checks, and no display:
 
 ```json
 {
-  "description": "A card at the centre is drawn 70% of the screen wide.",
+  "description": "A card at the centre is resized to 70% of the screen width.",
   "settings": { "maxWidth": 70 },
   "renderer": {
     "screen": { "width": 1920, "height": 1080, "top": 46 },
@@ -119,7 +119,7 @@ interpreter, with its budget and output checks, and no display:
     ],
     "expect": [
       { "settled": true },
-      { "card": 1, "mode": "full", "width": 1344, "centerX": { "min": 950, "max": 970 } },
+      { "card": 1, "mode": "resized", "width": 1344, "centerX": { "min": 950, "max": 970 } },
       { "card": 2, "mode": "icon" },
       { "dropTarget": { "card": 2, "toIcon": true, "x": 1840 } }
     ]
@@ -130,7 +130,8 @@ interpreter, with its budget and output checks, and no display:
 Cards take `id`, `x`, `y`, `width`, `height` (the saved rectangle),
 `iconified`, `iconX`, `iconY`, `focused`, `dragging`, `expanded`, `agent`, and
 `dropped` (set on the first frame only, as on the desktop). An expectation
-names a `card` with `mode` (`full`/`icon`) and any of `x`, `y`, `width`,
+names a `card` with `mode` (`full`, `resized` or `icon`: output modes 0, 2
+and 1) and any of `x`, `y`, `width`,
 `height`, `centerX`, `centerY`, `opacity` (a number is ±1, or
 `{"min", "max"}`), or is `{"settled": bool}`, `{"dropTarget": {card, toIcon?,
 x?, y?}}` or `{"noDropTarget": true}`. `settings` apply to the scenario's

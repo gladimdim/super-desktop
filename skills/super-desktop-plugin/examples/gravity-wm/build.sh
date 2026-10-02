@@ -5,7 +5,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 cargo test --quiet
 cargo build --quiet --release --target wasm32-unknown-unknown
-cp target/wasm32-unknown-unknown/release/center_magnify.wasm renderer.wasm
+cp target/wasm32-unknown-unknown/release/gravity_wm.wasm renderer.wasm
 sha256sum renderer.wasm
 # SUPER_DESKTOP picks another build, e.g. target/debug/super-desktop of a checkout.
 SD="${SUPER_DESKTOP:-super-desktop}"
