@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your phone — SUPER DESKTOP</title>
+<meta name="description" content="Step by step: pair the SUPER DESKTOP app on Android with SUPER DESKTOP on your Linux PC, over your Wi-Fi or Tailscale, with screenshots of every screen.">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131722;
+    --panel2: #1a2030;
+    --text: #e6e9f0;
+    --muted: #9aa3b5;
+    --accent: #22d3ee;
+    --accent2: #a78bfa;
+    --border: #262e42;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    background: radial-gradient(1200px 600px at 50% -10%, #16202f 0%, var(--bg) 60%) fixed, var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 20px 80px; }
+  a { color: var(--accent); }
+  a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
+  .back { display: inline-block; margin-top: 24px; text-decoration: none; font-size: 15px; }
+  header.hero { text-align: center; padding: 32px 20px 8px; }
+  .bolt { font-size: 56px; }
+  h1 { font-size: 42px; margin: 8px 0 8px; letter-spacing: -1px; }
+  h1 .grad {
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .tagline { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0 auto; }
+  section { margin-top: 56px; scroll-margin-top: 24px; }
+  h2 { font-size: 28px; letter-spacing: -0.5px; margin-bottom: 6px; }
+  h3 { font-size: 19px; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin-top: 0; }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
+    font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
+    background: rgba(34, 211, 238, 0.12); color: var(--accent);
+    border: 1px solid rgba(34, 211, 238, 0.35); vertical-align: middle;
+  }
+  .pill.pc { background: rgba(167, 139, 250, 0.12); color: var(--accent2); border-color: rgba(167, 139, 250, 0.35); }
+  .kbd {
+    display: inline-block; padding: 1px 9px; border-radius: 7px;
+    background: var(--panel2); border: 1px solid var(--border);
+    border-bottom-width: 3px; font-family: ui-monospace, monospace; font-size: 14px;
+  }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 18px;
+  }
+  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
+  .card h3 { font-size: 17px; }
+  .note {
+    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+    border-radius: 10px; padding: 14px 18px; margin-top: 16px; font-size: 15px; color: var(--muted);
+  }
+  .note strong { color: var(--text); }
+  .note.warn { border-left-color: #fbbf24; }
+  .toc { display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: center; margin-top: 20px; font-size: 15px; }
+
+  /* A step: the words, then what each device shows. */
+  .step {
+    display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 18px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 24px; margin-top: 20px;
+  }
+  .step .num {
+    width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
+    font-weight: 800; font-size: 20px; color: #06121a;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+  }
+  .step ol, .step ul { color: var(--muted); padding-left: 22px; margin: 10px 0 0; }
+  .step li { margin-bottom: 6px; }
+  .step li strong, .step p strong { color: var(--text); }
+  .step p { color: var(--muted); margin: 8px 0 0; }
+  .shots { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; align-items: flex-start; }
+  .shots figure { margin: 0; }
+  .shots .desk { flex: 1 1 420px; max-width: 560px; }
+  .shots .phone { flex: 0 1 260px; max-width: 280px; }
+  .shots a { display: block; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #070a10; }
+  .shots .phone a { border-radius: 22px; }
+  .shots img { display: block; width: 100%; height: auto; }
+  figcaption { padding: 8px 2px 0; color: var(--muted); font-size: 13.5px; }
+  figcaption .pill { font-size: 10.5px; margin-right: 4px; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 15px; }
+  th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-top: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.4px; }
+  td { color: var(--muted); }
+  td:first-child { color: var(--text); width: 38%; }
+  td code, li code, p code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; color: var(--text); word-break: break-word; }
+  .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; }
+  .table-wrap table { margin: 0; }
+  .table-wrap tr:first-child th { border-top: none; }
+
+  footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
+  footer a { color: var(--accent); }
+  @media (max-width: 600px) {
+    .wrap { padding: 0 16px 48px; }
+    h1 { font-size: 32px; }
+    .tagline { font-size: 17px; }
+    h2 { font-size: 24px; }
+    section { margin-top: 36px; }
+    .step { grid-template-columns: minmax(0, 1fr); padding: 18px; }
+    .step .num { margin-bottom: 10px; }
+    .shots .phone { flex-basis: 100%; max-width: 300px; }
+    td:first-child { width: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <a class="back" href="./">← SUPER DESKTOP</a>
+
+  <header class="hero">
+    <div class="bolt" aria-hidden="true">📱</div>
+    <h1>Connect your <span class="grad">phone</span></h1>
+    <p class="tagline">Pair the SUPER DESKTOP app on Android with SUPER DESKTOP on your Linux PC. It takes about a minute, and you do it once: your phone then reaches your PC's sessions directly, over your own Wi-Fi or Tailscale, encrypted, with no accounts.</p>
+    <nav class="toc" aria-label="On this page">
+      <a href="#before">Before you start</a>
+      <a href="#steps">Pair in five steps</a>
+      <a href="#away">Away from home</a>
+      <a href="#manage">Manage and revoke</a>
+      <a href="#trouble">Troubleshooting</a>
+    </nav>
+  </header>
+
+  <main>
+
+  <section id="before">
+    <h2>Before you start</h2>
+    <div class="grid">
+      <div class="card"><h3>🖥️ SUPER DESKTOP on your PC</h3><p>Installed and running on your Omarchy / Hyprland PC. New here? <a href="./#install">Install it first</a>.</p></div>
+      <div class="card"><h3>📱 The app on your phone</h3><p>The SUPER DESKTOP app for Android, installed on the phone you want to pair.</p></div>
+      <div class="card"><h3>📶 One network</h3><p>Phone and PC on the same Wi-Fi, or both signed in to the same <a href="https://tailscale.com">Tailscale</a> network.</p></div>
+    </div>
+    <div class="note"><strong>iPhone:</strong> the iOS app is in development and is not released yet. It pairs the same way; this guide will cover it once it is available.</div>
+  </section>
+
+  <section id="steps">
+    <h2>Pair in five steps</h2>
+    <p class="sub">Steps marked <span class="pill pc">PC</span> happen on your computer, <span class="pill">Phone</span> on your phone. Click any screenshot to see it full size.</p>
+
+    <!-- Step 1 -->
+    <div class="step">
+      <div class="num" aria-hidden="true">1</div>
+      <div>
+        <h3><span class="pill pc">PC</span> Open a pairing invitation</h3>
+        <ol>
+          <li>Press <span class="kbd">Super</span> + <span class="kbd">Shift</span> + <span class="kbd">Q</span> to show SUPER DESKTOP, then click <strong>⚙ Settings</strong> at the right of the top bar.</li>
+          <li>Choose <strong>Connections</strong>, then <strong>Add a device</strong>, then <strong>Pair a phone</strong>.</li>
+          <li>The page checks three things and shows a green tick for each: <strong>Secure bridge</strong> (it starts the encrypted connection point, port 8759), <strong>Firewall</strong> and <strong>Network</strong>. If the firewall check asks, press <strong>Allow</strong> and enter your password once; that opens port 8759/tcp.</li>
+          <li>A QR code appears under <strong>Invitation</strong>. Keep this page open for the next step.</li>
+        </ol>
+        <p>The invitation works <strong>once</strong>, for <strong>five minutes</strong>. If it runs out, press <strong>Create a new invitation</strong>.</p>
+        <div class="shots">
+          <figure class="desk">
+            <a href="screenshots/connect/connections.webp"><img src="screenshots/connect/connections.webp" width="718" height="719" loading="lazy" alt="SUPER DESKTOP Settings, Connections page: This computer is online with a Stop button, followed by Add a device, PCs, Phones and other devices, Rejected devices, and Network and firewall."></a>
+            <figcaption><span class="pill pc">PC</span> Settings → <strong>Connections</strong>.</figcaption>
+          </figure>
+          <figure class="desk">
+            <a href="screenshots/connect/add-device.webp"><img src="screenshots/connect/add-device.webp" width="718" height="719" loading="lazy" alt="The Add a device page with three choices: Pair a phone, Share this PC with another PC, and View another PC from here."></a>
+            <figcaption><span class="pill pc">PC</span> <strong>Add a device</strong> → <strong>Pair a phone</strong>.</figcaption>
+          </figure>
+          <figure class="desk">
+            <a href="screenshots/connect/pair-phone.webp"><img src="screenshots/connect/pair-phone.webp" width="718" height="719" loading="lazy" alt="The Pair a phone page: Secure bridge running on port 8759, firewall port open and network ready, each with a green tick, then the Invitation with a QR code, a link with a Copy link button, an Expires in 4:57 timer, and Waiting for the phone to scan the code."></a>
+            <figcaption><span class="pill pc">PC</span> The invitation: a QR code, a link to copy, and a five-minute timer. Addresses are blurred in these screenshots.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 2 -->
+    <div class="step">
+      <div class="num" aria-hidden="true">2</div>
+      <div>
+        <h3><span class="pill">Phone</span> Scan the code</h3>
+        <ol>
+          <li>Open the SUPER DESKTOP app. On a fresh install it opens <strong>Connections</strong> by itself; otherwise tap the <strong>Settings</strong> gear, then <strong>Connections</strong>.</li>
+          <li>Tap <strong>Add connection</strong>, then <strong>Scan pairing QR</strong>, and point the camera at the code on your PC. Allow camera access if Android asks.</li>
+          <li>The app asks <strong>Pair with this computer?</strong> Tap <strong>Continue</strong>: the invitation is from your own PC.</li>
+        </ol>
+        <p>No camera handy? On the PC press <strong>Copy link</strong>, get the link to your phone, and choose <strong>Paste invitation</strong> instead. <strong>Nearby computers</strong> lists PCs on your Wi-Fi, and <strong>Enter address manually</strong> takes the address shown on the PC; both then ask for the invitation too, so the phone knows it is talking to your PC.</p>
+        <div class="shots">
+          <figure class="phone">
+            <a href="screenshots/connect/phone-confirm.webp"><img src="screenshots/connect/phone-confirm.webp" width="640" height="900" loading="lazy" alt="The Android app's Connections page with Add connection and Set up your computer, under a dialog titled Pair with this computer? that says to continue only if the invitation came from your own SUPER DESKTOP computer, with Cancel and Continue buttons."></a>
+            <figcaption><span class="pill">Phone</span> After scanning: tap <strong>Continue</strong>.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 3 -->
+    <div class="step">
+      <div class="num" aria-hidden="true">3</div>
+      <div>
+        <h3><span class="pill">Phone</span> Request approval</h3>
+        <p>The app checks the connection and shows your PC's name and address under <strong>Step 2 of 3 · Pair</strong>. Tap <strong>Request approval</strong>.</p>
+        <p>The phone now shows a six-digit <strong>verification code</strong> and waits up to two minutes for your PC.</p>
+        <div class="shots">
+          <figure class="phone">
+            <a href="screenshots/connect/phone-request.webp"><img src="screenshots/connect/phone-request.webp" width="640" height="900" loading="lazy" alt="Add connection, Step 2 of 3, Pair: Request desktop approval, with the PC's name and its address blurred, a Connection address row, and a green Request approval button."></a>
+            <figcaption><span class="pill">Phone</span> Tap <strong>Request approval</strong>.</figcaption>
+          </figure>
+          <figure class="phone">
+            <a href="screenshots/connect/phone-code.webp"><img src="screenshots/connect/phone-code.webp" width="640" height="900" loading="lazy" alt="Step 2 of 3 after requesting: Verification code 627979, instructions to approve on the PC only if this code matches, Waiting up to 2 minutes, and a button reading Waiting for desktop approval."></a>
+            <figcaption><span class="pill">Phone</span> Your verification code.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 4 -->
+    <div class="step">
+      <div class="num" aria-hidden="true">4</div>
+      <div>
+        <h3><span class="pill pc">PC</span> Compare the codes and approve</h3>
+        <p>On the PC a <strong>Connection request</strong> panel opens with your phone's name and a verification code. If SUPER DESKTOP is hidden, a notification <strong>SUPER DESKTOP: connection request</strong> appears instead: click it, or press <strong>Review request</strong> on the Pair a phone page.</p>
+        <ul>
+          <li>The codes match (the PC groups the digits, <code>627 979</code>; the phone shows <code>627979</code>)? Press <strong>Approve</strong>.</li>
+          <li>They don't, or you don't recognise the device? Press <strong>Reject</strong>. A rejected device is blocked and can't ask again until you remove it from Settings → Connections → <strong>Rejected devices</strong>.</li>
+        </ul>
+        <div class="shots">
+          <figure class="desk">
+            <a href="screenshots/connect/request.webp"><img src="screenshots/connect/request.webp" width="737" height="458" loading="lazy" alt="The Connection request panel: an Android device, Xiaomi 2602BPC18G, wants to use this PC's workspace and harnesses; its network address blurred, identity is the name reported by the device, not verified, expires in 1:59; verification code 627 979; Reject and Approve buttons."></a>
+            <figcaption><span class="pill pc">PC</span> The same code as the phone: <strong>Approve</strong>.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step 5 -->
+    <div class="step">
+      <div class="num" aria-hidden="true">5</div>
+      <div>
+        <h3>Done</h3>
+        <p>The phone says <strong>You’re connected</strong>. Tap <strong>Back to Main View</strong>: your PC's harnesses appear in the list, with live terminals you can read and type into. The PC is saved on the phone, so you never pair it again unless you remove it.</p>
+        <div class="shots">
+          <figure class="phone">
+            <a href="screenshots/connect/phone-connected.webp"><img src="screenshots/connect/phone-connected.webp" width="640" height="900" loading="lazy" alt="Add connection, Step 3 of 3, Complete: You're connected, the PC is ready and its harnesses will now appear, with Back to Main View and View connections buttons."></a>
+            <figcaption><span class="pill">Phone</span> Connected.</figcaption>
+          </figure>
+          <figure class="desk">
+            <a href="screenshots/connect/approved.webp"><img src="screenshots/connect/approved.webp" width="737" height="260" loading="lazy" alt="The PC's Connection request panel after approving: a green tick and Xiaomi 2602BPC18G can now connect, with a note that its access can be revoked in Settings, Connections, Phones and other devices, and a Done button."></a>
+            <figcaption><span class="pill pc">PC</span> Approved.</figcaption>
+          </figure>
+        </div>
+      </div>
+    </div>
+
+    <div class="note warn">A paired phone can <strong>operate</strong> your terminals, not just watch them. Only approve phones you own and trust, and revoke any phone you no longer use.</div>
+  </section>
+
+  <section id="away">
+    <h2>Away from home: Tailscale</h2>
+    <p class="sub">Nearby discovery and the invitation's address work on your own Wi-Fi. To reach your PC from anywhere, use <a href="https://tailscale.com">Tailscale</a>.</p>
+    <ol class="steps" style="color:var(--muted);padding-left:22px">
+      <li>Install Tailscale on the PC and on the phone, and sign both in to the same network.</li>
+      <li>Pair as above. The Pair a phone page shows the PC's Tailscale address next to its network address.</li>
+      <li>On the phone, open Settings → Connections, tap your PC's menu and choose <strong>Addresses</strong>, then pick its Tailscale address, marked <strong>recommended</strong>.</li>
+    </ol>
+  </section>
+
+  <section id="manage">
+    <h2>Manage and revoke</h2>
+    <div class="grid">
+      <div class="card"><h3>On the PC</h3><p>Settings → Connections → <strong>Phones &amp; other devices</strong> lists every phone with access, whether it is active, and until when. <strong>Revoke</strong> cuts a phone off at once.</p></div>
+      <div class="card"><h3>On the phone</h3><p>Settings → Connections → your PC's menu: <strong>Check connection</strong>, <strong>Addresses</strong>, <strong>Pair again</strong> or <strong>Remove connection</strong>. Removing it on the phone does <strong>not</strong> revoke the phone on the PC; revoke it there.</p></div>
+      <div class="card"><h3>Rejected by mistake?</h3><p>Settings → Connections → <strong>Rejected devices</strong> on the PC: <strong>Remove</strong> the phone, then pair again.</p></div>
+    </div>
+  </section>
+
+  <section id="trouble">
+    <h2>Troubleshooting</h2>
+    <p class="sub">The phone shows what went wrong under the pairing step. Find the message:</p>
+    <div class="table-wrap">
+      <table>
+        <tr><th>The phone says</th><th>What to do</th></tr>
+        <tr><td><code>No bridge answered at …</code></td><td>The phone can't reach the PC. Check both are on the same Wi-Fi (or Tailscale), that Settings → Connections shows <strong>This computer</strong> as online (press <strong>Start bridge</strong> if not), and that the Pair a phone page's <strong>Firewall</strong> check is green.</td></tr>
+        <tr><td><code>Pairing failed: scan_fresh_desktop_pairing_qr</code></td><td>The invitation was already used or is older than five minutes. On the PC press <strong>Create a new invitation</strong> and scan again.</td></tr>
+        <tr><td><code>Pairing failed: Approval expired. Request access again.</code></td><td>Nobody approved within two minutes. Tap <strong>Request approval</strong> again and approve on the PC.</td></tr>
+        <tr><td><code>Pairing failed: The computer denied this request.</code></td><td>The request was rejected on the PC. Remove the phone from <strong>Rejected devices</strong> there, then pair again.</td></tr>
+        <tr><td><code>Pairing failed: pairing_blocked</code></td><td>This phone was rejected earlier. On the PC: Settings → Connections → <strong>Rejected devices</strong> → <strong>Remove</strong>.</td></tr>
+        <tr><td><code>Pairing failed: pairing_request_already_pending_or_rate_limited</code></td><td>A request from this phone is still waiting or was just decided. Wait two minutes, then request again.</td></tr>
+        <tr><td><code>Pairing failed: Update SUPER DESKTOP on the computer for secure pairing.</code></td><td>The PC runs an old version. Update it in Settings → <strong>Updates</strong>, then pair.</td></tr>
+        <tr><td><strong>Nearby computers</strong> finds nothing</td><td>Discovery needs the same Wi-Fi and may be blocked on guest or office networks. Use <strong>Scan pairing QR</strong>, or <strong>Enter address manually</strong> with the address the PC shows under <strong>Network</strong>.</td></tr>
+      </table>
+    </div>
+    <div class="note">Still stuck? Open an issue on <a href="https://github.com/gladimdim/super-desktop/issues">GitHub</a> with the message you see.</div>
+  </section>
+
+  </main>
+
+  <footer>
+    <a href="./">SUPER DESKTOP</a> · <a href="./#phone">Phone linking</a> · <a href="privacy.html">Privacy policy</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a>
+  </footer>
+
+</div>
+</body>
+</html>

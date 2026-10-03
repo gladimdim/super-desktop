@@ -91,6 +91,40 @@ pub mod gtk_test {
     /// variable that could reach the real Wayland/X session. Set
     /// `SD_GTK_TESTS_ON_DESKTOP=1` to run them on the desktop on purpose. Without
     /// `gtk4-broadwayd` the GTK test is skipped rather than shown on screen.
+    /// Save what `widget` draws as a PNG (the website's screenshots). Waits
+    /// until it has been laid out and drawn.
+    pub fn save_png(widget: &impl gtk4::prelude::IsA<gtk4::Widget>, path: &std::path::Path) {
+        use gtk4::prelude::*;
+        let widget = widget.as_ref();
+        let start = std::time::Instant::now();
+        let paintable = gtk4::WidgetPaintable::new(Some(widget));
+        let node = loop {
+            while gtk4::glib::MainContext::default().iteration(false) {}
+            if widget.width() > 0 {
+                let snapshot = gtk4::Snapshot::new();
+                paintable.snapshot(&snapshot, f64::from(widget.width()), f64::from(widget.height()));
+                if let Some(node) = snapshot.to_node() {
+                    break node;
+                }
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(8), "nothing was drawn for {}", path.display());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None::<&gtk4::gdk::Surface>).unwrap();
+        renderer.render_texture(&node, None).save_to_png(path).unwrap();
+        renderer.unrealize();
+    }
+
+    /// Run the main loop for `ms` milliseconds.
+    pub fn pump(ms: u64) {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+        while std::time::Instant::now() < until {
+            while gtk4::glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     pub fn run_in_child_process(inner_test: &str) {
         assert!(
             !is_child(),
