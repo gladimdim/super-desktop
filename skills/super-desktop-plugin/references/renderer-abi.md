@@ -31,7 +31,9 @@ wasm32, with native unit tests). Start from it.
     the layout settles (`animating` 0 and no drag), it is laid out at the
     rectangle's width and height, so its terminal gets more or fewer columns
     and rows. While the layout moves it is scaled from the size it has, so
-    the terminal (and the program in it) is not resized on every frame. The
+    the terminal (and the program in it) is not resized on every frame; a
+    card being dragged is laid out at its new size as it goes, at most every
+    100 ms and for a change of 6 px or more, and exactly when it settles. The
     saved layout is still untouched: turning the renderer off gives the card
     its saved size back. A host older than mode 2 draws it like mode 0.
   - **1, icon:** laid out as an icon of side `min(width, height)`.

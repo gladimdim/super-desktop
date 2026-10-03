@@ -569,8 +569,40 @@ pub struct MiniTerminalCard {
     /// Where a window renderer draws this card (`plugin_ui::layout`), if one
     /// does. Never saved: the card's own data stays its saved layout.
     presented: Rc<RefCell<Option<Presented>>>,
+    /// When a resizing renderer last laid the card out at a new size.
+    relaid_at: Cell<Option<std::time::Instant>>,
     /// Drawn as an icon by a renderer, so the body drags like an icon's.
     presented_icon: Rc<Cell<bool>>,
+}
+
+/// When a resizing renderer's card is laid out at its drawn size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Relayout {
+    /// Only scaled (still moving).
+    Never,
+    /// Now (the layout settled).
+    Now,
+    /// Every `LIVE_RELAYOUT` at most (the card is being dragged).
+    Live,
+}
+
+/// While a card is dragged, its terminal is resized at most this often…
+pub const LIVE_RELAYOUT: std::time::Duration = std::time::Duration::from_millis(100);
+/// …and only when its size changed by at least this many pixels.
+const LIVE_RELAYOUT_PX: i32 = 6;
+
+/// Whether a resizing renderer's card should be laid out at `target` now,
+/// given the size it has and how long ago it was last laid out.
+fn relayout_due(relayout: Relayout, current: (i32, i32), target: (i32, i32), since_last: Option<std::time::Duration>) -> bool {
+    match relayout {
+        Relayout::Never => false,
+        Relayout::Now => true,
+        // A small change waits for the next one: no resize per pixel.
+        Relayout::Live => {
+            let changed = (current.0 - target.0).abs() >= LIVE_RELAYOUT_PX || (current.1 - target.1).abs() >= LIVE_RELAYOUT_PX;
+            changed && since_last.is_none_or(|elapsed| elapsed >= LIVE_RELAYOUT)
+        }
+    }
 }
 
 /// A renderer's drawing of a card: its rectangle on the canvas and its form.
@@ -1153,6 +1185,7 @@ impl MiniTerminalCard {
             last_status: Rc::new(RefCell::new("unknown".into())),
             plugin_title: Rc::new(RefCell::new(None)),
             presented: Rc::new(RefCell::new(None)),
+            relaid_at: Cell::new(None),
             presented_icon: Rc::new(Cell::new(false)),
         };
 
@@ -1584,18 +1617,20 @@ impl MiniTerminalCard {
     /// layout. A full card keeps its own size (the terminal is not resized)
     /// and is scaled to fit `rect`, centred in it; an icon is laid out as one.
     pub fn present(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, opacity: f64) {
-        self.present_as(canvas, rect, icon, false, false, opacity);
+        self.present_as(canvas, rect, icon, false, Relayout::Never, opacity);
     }
 
     /// Like `present`, but a full card is laid out at the rectangle's size
-    /// (its terminal gets more or fewer columns and rows) once `settled`;
-    /// while the layout still moves it is scaled from the size it has, so the
-    /// terminal is not resized on every frame. The saved layout is untouched.
-    pub fn present_resized(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, settled: bool, opacity: f64) {
-        self.present_as(canvas, rect, false, true, settled, opacity);
+    /// (its terminal gets more or fewer columns and rows): at once when
+    /// `Relayout::Now` (the layout settled), at most every
+    /// `LIVE_RELAYOUT` while `Relayout::Live` (the card is being dragged), and
+    /// in between it is scaled from the size it has, so the terminal is not
+    /// resized on every frame. The saved layout is untouched.
+    pub fn present_resized(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, relayout: Relayout, opacity: f64) {
+        self.present_as(canvas, rect, false, true, relayout, opacity);
     }
 
-    fn present_as(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, resize: bool, settled: bool, opacity: f64) {
+    fn present_as(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, resize: bool, relayout: Relayout, opacity: f64) {
         let previous = *self.presented.borrow();
         let previous_sized = previous.and_then(|p| p.sized);
         let mut sized = previous_sized;
@@ -1610,10 +1645,13 @@ impl MiniTerminalCard {
             }
             canvas.set_child_transform(&self.container, Some(&gtk4::gsk::Transform::new().translate(&gtk4::graphene::Point::new(rect.x as f32, rect.y as f32))));
         } else {
+            let target = (rect.width.max(1), rect.height.max(1));
+            let due = relayout_due(relayout, sized.unwrap_or_else(|| self.full_size()), target, self.relaid_at.get().map(|at| at.elapsed()));
             if !resize {
                 sized = None;
-            } else if settled {
-                sized = Some((rect.width.max(1), rect.height.max(1)));
+            } else if due && sized != Some(target) {
+                sized = Some(target);
+                self.relaid_at.set(Some(std::time::Instant::now()));
             }
             let (w, h) = sized.unwrap_or_else(|| self.full_size());
             if form_changed || sized != previous_sized {
@@ -2960,6 +2998,22 @@ fn attach_move_drag<FUpdate, FEnd, FRaise>(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn plugin_renderer_relayout_is_throttled_while_dragging() {
+        use std::time::Duration;
+        let (w, h) = (640, 480);
+        // Settled: always; still moving and not dragged: never.
+        assert!(relayout_due(Relayout::Now, (w, h), (w + 1, h), Some(Duration::ZERO)));
+        assert!(!relayout_due(Relayout::Never, (w, h), (w * 2, h * 2), None));
+        // Dragged: a real change, once the interval passed (or the first time).
+        assert!(relayout_due(Relayout::Live, (w, h), (w + 200, h + 150), None));
+        assert!(relayout_due(Relayout::Live, (w, h), (w + 200, h + 150), Some(LIVE_RELAYOUT)));
+        assert!(!relayout_due(Relayout::Live, (w, h), (w + 200, h + 150), Some(LIVE_RELAYOUT / 2)), "at most every LIVE_RELAYOUT");
+        assert!(!relayout_due(Relayout::Live, (w, h), (w + 3, h - 3), Some(LIVE_RELAYOUT * 10)), "not for a few pixels");
+        assert!(relayout_due(Relayout::Live, (w, h), (w, h - LIVE_RELAYOUT_PX), Some(LIVE_RELAYOUT * 10)));
+    }
+
     use super::*;
 
     #[test]

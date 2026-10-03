@@ -11,7 +11,7 @@
 use super::{manager, Manager, State};
 use crate::card_resize::Rect;
 use crate::desktop_protocol::WorkspaceCommand;
-use crate::mini_terminal::MiniTerminalCard;
+use crate::mini_terminal::{MiniTerminalCard, Relayout};
 use crate::plugin_host::api;
 use crate::plugin_host::renderer::{self, CardIn, Frame, Mode, Renderer};
 use gtk4::glib;
@@ -295,13 +295,23 @@ impl Manager {
         drop(driver_ref);
         match result {
             Ok(output) => {
-                // Terminals are resized only once nothing moves: not on every frame.
+                // Terminals are resized once nothing moves, and a dragged
+                // card's a few times a second: never on every frame.
                 let settled = !output.animating && !dragging;
                 for out in &output.cards {
                     if let Some((_, card)) = drawn.iter().find(|(id, _)| *id == out.id) {
                         let rect = Rect { x: out.rect.x, y: out.rect.y, width: out.rect.w.round() as i32, height: out.rect.h.round() as i32 };
                         match out.mode {
-                            Mode::Resized => card.present_resized(&canvas, rect, settled, out.opacity),
+                            Mode::Resized => {
+                                let relayout = if settled {
+                                    Relayout::Now
+                                } else if card.is_being_dragged() {
+                                    Relayout::Live
+                                } else {
+                                    Relayout::Never
+                                };
+                                card.present_resized(&canvas, rect, relayout, out.opacity)
+                            }
                             mode => card.present(&canvas, rect, mode == Mode::Icon, out.opacity),
                         }
                     }
