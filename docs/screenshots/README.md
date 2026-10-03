@@ -59,7 +59,7 @@ Android phone (the released SUPER DESKTOP app) with SUPER DESKTOP on Linux.
   opt-in tests `harness_settings::tests::pairing_screenshots` and
   `pairing_request_ui::tests::pairing_request_screenshots`, against a
   disposable bridge with its own state directory.
-- `phone-confirm.webp`, `phone-request.webp`, `phone-code.webp`,
+- `phone-add.webp`, `phone-confirm.webp`, `phone-request.webp`, `phone-code.webp`,
   `phone-connected.webp`: `adb exec-out screencap` from a 1280 × 2772 phone,
   cropped below the status bar to 1280 × 1800 and scaled to 640 × 900.
 
