@@ -65,6 +65,7 @@ mod theme;
 mod tmux;
 mod tmux_clipboard;
 mod tmux_control;
+mod phone_viewport;
 mod terminal_transport;
 mod usage;
 mod window;

@@ -2959,7 +2959,13 @@ mod tests {
 
     #[test]
     fn test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes() {
-        let _ = gtk4::init();
+        crate::gtk_test::run_in_child_process("window::tests::focused_terminal_stacking_inner");
+    }
+
+    #[test]
+    fn focused_terminal_stacking_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
         let canvas = Fixed::new();
 
         // Create terminal container 1 (icon/mini terminal)

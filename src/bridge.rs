@@ -730,6 +730,12 @@ const STREAM_MAX_SECS: u64 = 1800;
 /// is still there — including a Ping, which is answered so picky clients stay
 /// happy. A read timeout just means "nothing to read".
 fn ws_client_alive(stream: &mut Connection) -> bool {
+    ws_client_message(stream, |_| {})
+}
+
+/// The normal streams discard text; an opted-in terminal stream may handle
+/// viewport requests. Existing ping, close and partial-frame handling is shared.
+fn ws_client_message(stream: &mut Connection, mut on_text: impl FnMut(&str)) -> bool {
     // Usually nothing is waiting: ask the socket rather than read with a 1 ms
     // timeout, which sleeps a whole kernel tick before every capture. A hang-up
     // polls as readable (EOF) and, like buffered plaintext, takes the path below.
@@ -753,6 +759,7 @@ fn ws_client_alive(stream: &mut Connection) -> bool {
     match crate::ws::read_frame(stream) {
         Ok(None) | Ok(Some(crate::ws::Frame::Close)) => false,
         Ok(Some(crate::ws::Frame::Ping(payload))) => crate::ws::write_pong(stream, &payload).is_ok(),
+        Ok(Some(crate::ws::Frame::Text(text))) => { on_text(&text); true },
         Ok(Some(_)) => true,
         Err(_) => false,
     }
@@ -1222,7 +1229,7 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
                             return;
                         }
                         return match ws_upgrade(stream, req) {
-                            true => terminal_stream::stream(stream, id, terminal_stream::ansi_only(&req.query)),
+                            true => terminal_stream::stream(stream, id, terminal_stream::ansi_only(&req.query), terminal_stream::viewport_requested(&req.query)),
                             false => respond(
                                 stream,
                                 400,

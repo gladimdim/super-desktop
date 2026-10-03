@@ -16,6 +16,8 @@ pub struct Frame<'a> {
     /// The editor in the pane's foreground, if any. Omitted otherwise, so
     /// frames without one are unchanged for older phones.
     pub editor: Option<&'a crate::editor_actions::Detected>,
+    /// Present only on streams that explicitly requested phone viewport sizing.
+    pub viewport: Option<&'a crate::phone_viewport::Info>,
 }
 
 impl Frame<'_> {
@@ -42,6 +44,8 @@ impl Frame<'_> {
             tail_ansi: Option<&'a str>,
             tail_format: Option<&'a str>,
             updated_at: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            viewport: Option<&'a crate::phone_viewport::Info>,
         }
 
         let include_plain = !(self.ansi_only && self.ansi.is_some());
@@ -65,6 +69,7 @@ impl Frame<'_> {
             tail_format: self.ansi.map(|_| "ansi-sgr"),
             updated_at: self.updated_at,
             editor: self.editor,
+            viewport: self.viewport,
         };
         output.clear();
         // These fields cannot fail serialization and Vec's writer cannot fail.
@@ -130,6 +135,7 @@ mod tests {
                             ansi_only,
                             updated_at: "2026-09-27T00:00:00.000Z",
                             editor: editor.as_ref(),
+                            viewport: None,
                         };
                         assert_eq!(frame.write_json(&mut output), reference(&frame).as_bytes());
                         let allocation = output.as_ptr();
@@ -143,6 +149,7 @@ mod tests {
                             columns: None,
                             rows: None,
                             editor: None,
+                            viewport: None,
                             ..frame
                         };
                         assert_eq!(gone.write_json(&mut output), reference(&gone).as_bytes());
