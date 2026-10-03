@@ -91,6 +91,7 @@ PC you connect to each other.
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
+| `v1.1.21` | 3 |
 | `v1.1.17` | 3 |
 
 Look up your phone app's version in Android's **App info** for SUPER DESKTOP.
