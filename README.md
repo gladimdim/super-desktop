@@ -7,6 +7,12 @@
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 > Press `SUPER + SHIFT + Q` — notes and AI terminals slide in from the screen edges. Press it again — everything disappears and your normal desktop is completely clean. All sessions keep running in background tmux.
 
+![SUPER DESKTOP open above a browser: Claude Code and Codex terminal cards with status badges, and the top bar with the folder field and harness launchers](docs/screenshots/readme-overlay.webp)
+
+<p align="center">
+  <img src="docs/screenshots/desktop-toggle.gif" width="720" alt="SUPER + SHIFT + Q brings the terminal cards into view over a browser, and the same shortcut hides them again">
+</p>
+
 ---
 
 ## 👤 For humans
@@ -97,6 +103,9 @@ notes say your phone app needs it.
 
 SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy workspace:
 
+![The top bar: the This PC selector, the working directory field, New note, the Claude, Codex, OpenCode, Grok and Shell launchers, and Arrange, Settings and Hide on the right](docs/screenshots/readme-toolbar.webp)
+
+
 - **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize from any edge or corner, and group color tags.
 - **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize from any edge or corner with a ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged. Each project folder gets its own label color: a new harness takes the color of its folder, so Claude and Codex working in the same folder match, and a new folder gets a color no other folder uses yet. Pick another color on any card's dot and later harnesses in that folder use it. Drop a card on another one and the buried terminal keeps a **dotted ghost outline** of itself — it disappears only while you are working in that terminal or in the card that covers it, so a stacked desk never hides a session you forgot about.
 - **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable.
@@ -109,6 +118,11 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
 - **🔌 Phone bridge (optional)** — encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Connections*. A background supervisor checks every five seconds and recovers the bridge after three consecutive failed checks, even with the overlay hidden or screen locked. Stop pauses recovery until Start (or the next daemon launch). Failed starts are retried, and `bridge.previous.log` preserves the previous run beside `bridge.log`. To stay reachable while unattended on external power, enable *Settings → Sleep lock*; recovery cannot run while the PC is suspended. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
 - **🖥 Other PCs** — pair two PCs and open the other one's workspace from the top-left **This PC** selector: its consoles stream live and every action runs on that PC. See [Use another PC's harnesses](#use-another-pcs-harnesses).
+
+The overlay takes its colors from the active Omarchy theme and follows a theme
+change without restarting:
+
+![The same workspace in the Catppuccin Latte, Rose Pine, Everforest and Gruvbox Omarchy themes](docs/screenshots/readme-themes.webp)
 
 ### Use another PC's harnesses
 
