@@ -190,7 +190,9 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
         version: 1,
         request_hash: hash,
         card_id: match &request.command {
-            control::Command::Move { id, .. } | control::Command::Resize { id, .. } => id.clone(),
+            control::Command::Move { id, .. }
+            | control::Command::Resize { id, .. }
+            | control::Command::Close { id, .. } => id.clone(),
             _ => format!("sd_term_cli_{random}"),
         },
         reply: None,

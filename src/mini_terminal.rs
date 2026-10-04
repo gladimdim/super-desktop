@@ -1922,6 +1922,17 @@ impl MiniTerminalCard {
         );
     }
 
+    pub(crate) fn cli_session_task(&self) -> Arc<crate::session_task::SessionTask> {
+        Arc::clone(&self.session_task)
+    }
+
+    /// Cancel attachment/preparation without scheduling a name-based kill.
+    /// The CLI worker already holds the preparation lock and owns destruction.
+    pub(crate) fn detach_for_cli_close(&self) {
+        self.session_task.close();
+        self.detach_vte();
+    }
+
     pub fn close_session(&self) {
         if let Some(session) = &self.remote {
             // The host owns the session: this card only stops reading it.
@@ -2665,6 +2676,28 @@ mod tests {
             agent_session_id: None,
             workspace_dir: None,
         }
+    }
+
+    #[test]
+    fn cli_close_detaches_without_legacy_cleanup() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_close_detach_inner");
+    }
+
+    #[test]
+    fn cli_close_detach_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let card = MiniTerminalCard::new(
+            term_data(true), |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        );
+        card.open_with_bare_terminal(480, 320);
+        let task = card.cli_session_task();
+        let before = std::time::Instant::now();
+        assert_eq!(task.with_idle_until(before + Duration::from_secs(1), || card.detach_for_cli_close()), Some(()));
+        assert!(task.is_closed());
+        assert!(card.vte.borrow().is_none());
+        assert!(!task.prepare(|| panic!("closed card must not restart")));
     }
 
     #[test]

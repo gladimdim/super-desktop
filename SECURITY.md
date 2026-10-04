@@ -16,7 +16,7 @@ Client errors never unlink sockets or start another daemon.
 Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
 Connections have three-second I/O deadlines, with at most eight workers.
 The API exposes status, capabilities, saved card metadata, launcher discovery,
-launching, mutation receipts, card movement/resizing and explicit terminal capture. Inventory omits
+launching, mutation receipts, guarded closing, card movement/resizing and explicit terminal capture. Inventory omits
 prompts and terminal output; `terminal capture` can reveal sensitive text,
 including credentials and prompts. Notes and launch arguments are not exposed.
 Paths and labels can still be private. JSON output escapes terminal
@@ -45,7 +45,7 @@ require `--allow-download`. These are per-request acknowledgements, not
 restrictions on an executable's own behavior, startup files or network access.
 Launches require an absolute existing directory and never submit a prompt.
 
-Before a structured launch, move or resize the daemon durably records the
+Before a structured launch, move, resize or close the daemon durably records the
 request ID, a hash of its parameters and a target or reserved card ID in an
 owner-only state directory.
 Receipts and the journal lock have mode 0600; symlink paths are refused.
@@ -65,6 +65,24 @@ or resized; minimized cards cannot be resized. Bounds adjustments require
 `--clamp`. A move can raise a card and a resize can naturally change its VTE grid;
 neither command starts a harness or explicitly focuses it. Receipts include
 historical geometry and target IDs, and replay never overwrites later edits.
+
+Structured close requires the current card epoch/revision and live pane identity.
+The worker serializes against pending preparation; GTK rechecks the exact card
+and widget before canceling attachment and removing it. Tmux destruction uses an
+exact session ID behind checks of session/pane IDs, PIDs, name, single unlinked
+window/pane and a random per-operation session marker. A second process-identity
+probe follows marker installation, and a restarted server cannot inherit the
+marker. There is no prefix matching or name-based cleanup fallback. Missing
+panes, foreign names, active geometry gestures and ambiguous/shared layouts are refused. A harmless marker
+may remain after refusal. Owner-controlled hooks and direct tmux commands are
+outside these guards; this is not a same-user sandbox.
+
+Close interrupts work. Card removal and tmux destruction are not atomic: an
+unknown outcome can leave a running session without its card. Inspect the
+original request receipt before recovery; never retry under a new ID or kill a
+replacement by name. Success confirms session destruction and saved card
+removal, not the exit of every descendant process. Historical close receipts
+never execute again against a recreated session.
 
 ## Transport and identity
 

@@ -2145,6 +2145,59 @@ impl SuperDesktopWindow {
         Reply::success(id, data)
     }
 
+    /// The close worker owns destruction; GTK only validates and removes the
+    /// exact card. This path deliberately does not call close_session().
+    pub(crate) fn cli_close(&self, model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request, action: crate::control_close::Action) -> crate::control_close::UiResult
+    {
+        use crate::control::{Command, Reply};
+        use crate::control_close::{Action, Target};
+        let fail = |code, message| Reply::failure(&request.request_id, code, message);
+        let Command::Close { id, expect_epoch, expect_revision, .. } = &request.command else {
+            return Err(fail("invalid_request", "Expected terminal close."));
+        };
+        let snapshot = self.desktop_snapshot(model).map_err(|_| fail("unavailable", "Local workspace is unavailable."))?;
+        let current = snapshot.cards.iter().find(|card| card.card_id == *id)
+            .ok_or_else(|| fail("not_found", "No local terminal card has that ID."))?;
+        if expect_epoch != &snapshot.epoch || expect_revision != &crate::control_geometry::revision(&snapshot, current) {
+            return Err(fail("conflict", "The card changed or the daemon restarted. Read terminal geometry again."));
+        }
+        let card = self.any_terminal_card(id).map_err(|_| fail("not_found", "No local terminal widget has that ID."))?;
+        let data = card.data.borrow().clone();
+        if snapshot.cards.iter().filter(|other| other.card_id == *id).count() != 1
+            || snapshot.cards.iter().filter(|other| other.session_name == data.session_name).count() != 1
+            || current.session_name != data.session_name || card.cli_session_task().is_closed()
+        {
+            return Err(fail("conflict", "The card-to-session mapping changed, is ambiguous, or is closing."));
+        }
+        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+            return Err(fail("conflict", "A local geometry gesture is in progress; the card was not closed."));
+        }
+        match action {
+            Action::Inspect => Ok(Some(Target { data, task: card.cli_session_task() })),
+            Action::Remove(expected) => {
+                if data.id != expected.data.id || data.session_name != expected.data.session_name
+                    || data.created_at != expected.data.created_at
+                    || !std::sync::Arc::ptr_eq(&card.cli_session_task(), &expected.task) {
+                    return Err(fail("conflict", "The terminal card was replaced before close."));
+                }
+                card.detach_for_cli_close();
+                self.terminal_cards.borrow_mut().retain(|other| other.data.borrow().id != *id);
+                self.drag_pending.borrow_mut().remove(card.container.upcast_ref::<gtk4::Widget>());
+                self.canvas.remove(&card.container);
+                let snapshot = {
+                    let mut state = self.state.borrow_mut();
+                    state.terminals.retain(|other| other.id != *id);
+                    crate::state::normalize_terminal_order(&mut state);
+                    state.clone()
+                };
+                crate::state::save_state_async(snapshot);
+                self.ghosts.refresh();
+                Ok(None)
+            }
+        }
+    }
+
     pub fn item_counts(&self) -> (usize, usize) {
         (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
     }

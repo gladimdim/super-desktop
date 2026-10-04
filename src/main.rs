@@ -4,6 +4,7 @@ mod control_journal;
 mod control_launch;
 mod control_terminal;
 mod control_geometry;
+mod control_close;
 mod control_service;
 mod brand;
 mod assets;
@@ -629,6 +630,7 @@ fn run_daemon(start_visible: bool) {
     let (control_tx, mut control_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
     let (adopt_tx, mut adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
     let (geometry_tx, mut geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
+    let (close_tx, mut close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
     match control::Server::bind(&runtime_dir()) {
         Ok(server) => {
             let _ = thread::Builder::new()
@@ -647,6 +649,13 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 id,
                             );
+                        }
+                        if matches!(request.command, control::Command::Close { .. }) {
+                            return control_close::execute(&control_journal::root(), &request, deadline, |action| {
+                                let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action, responder, deadline }).map_err(|_| ())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
+                            });
                         }
                         if matches!(request.command, control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. }) {
                             return control_geometry::dispatch(&control_journal::root(), &request, deadline, |request| {
@@ -721,6 +730,20 @@ fn run_daemon(start_visible: bool) {
         }
         Err(error) => eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}"),
     }
+    let close_context = Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query) = close_rx.next().await {
+            let result = if std::time::Instant::now() >= query.deadline {
+                Err(control::Reply::failure(&query.request.request_id, "timeout", "Close expired before card removal."))
+            } else if let Some(window) = live_window(&close_context) {
+                let model = Rc::clone(&close_context.borrow().local_workspace);
+                window.cli_close(&model, &query.request, query.action)
+            } else {
+                Err(control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready."))
+            };
+            let _ = query.responder.send(result);
+        }
+    });
     let geometry_context = Rc::clone(&context);
     glib::MainContext::default().spawn_local(async move {
         while let Some(query) = geometry_rx.next().await {

@@ -46,6 +46,7 @@
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
 <li><a href="#card-geometry-movement-and-resizing">Card geometry, movement and resizing</a></li>
 <li><a href="#launching-and-permission-choices">Launching and permission choices</a></li>
+<li><a href="#guarded-terminal-closing">Guarded terminal closing</a></li>
 <li><a href="#request-receipts-and-uncertain-outcomes">Request receipts and uncertain outcomes</a></li>
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
 <li><a href="#legacy-and-remote-commands">Legacy and remote commands</a></li>
@@ -58,14 +59,14 @@
 </nav></details>
 <main><h1 id="super-desktop-cli-reference">SUPER DESKTOP CLI reference</h1>
 <p>Use the CLI to discover harnesses, inspect terminal cards, launch configured
-agents, create shell terminals, read their screen or retained history, and inspect
-mutation receipts, and move or resize cards. Existing commands
-also control overlay visibility, notes, terminal closing, themes and paired PCs.
+agents, create shell terminals, read their screen or retained history, move or
+resize cards, close exact sessions, and inspect mutation receipts. Existing
+commands also control overlay visibility, notes, themes and paired PCs.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 <code>--help</code> and <code>capabilities</code> before automating them.</p>
-<p><strong>Current coverage:</strong> the structured local CLI supports discovery, creation and
-terminal observation and card geometry. It does not provide local terminal input,
+<p><strong>Current coverage:</strong> the structured local CLI supports discovery, creation,
+terminal observation, card geometry and guarded closing. It does not provide local terminal input,
 attachment or direct terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy <code>peer-*</code> commands.
 There is no claim of complete CLI parity with every graphical action.</p>
@@ -77,7 +78,7 @@ There is no claim of complete CLI parity with every graphical action.</p>
    it is not a formal JSON Schema for request or result validation.</li>
 <li>Read <code>super-desktop capabilities --format json</code> for the running daemon's
    methods and limits. Do not infer support from the version number alone.</li>
-<li>Check <code>super-desktop app status --format json</code>. Launch and geometry commands need <code>data.ready</code>.</li>
+<li>Check <code>super-desktop app status --format json</code>. Launch, geometry and close commands need <code>data.ready</code>.</li>
 <li>Select exact harness and card IDs from returned data. A harness ID identifies
    a launcher type; a card ID identifies a saved terminal. Never select by list
    position or guess an ID from a title. <code>sessionName</code> is a separate field used
@@ -150,6 +151,11 @@ override, global request ID option or remote target is accepted here.</p>
 <td><code>terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]</code></td>
 <td>Change a normal card’s outer and restored size</td>
 <td><code>terminal.resize</code></td>
+</tr>
+<tr>
+<td><code>terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID</code></td>
+<td>Remove the exact card and close its guarded tmux session</td>
+<td><code>terminal.close</code></td>
 </tr>
 <tr>
 <td><code>terminal runtime ID</code></td>
@@ -329,11 +335,57 @@ terminal cards.</p>
 <code>launchDirectory</code>, <code>state: "created"</code> and <code>readiness: "not_observed"</code>. It means
 the card was added and saved. It does not prove authentication, readiness,
 completion, continued process liveness or that the card still exists later.</p>
+<h2 id="guarded-terminal-closing">Guarded terminal closing</h2>
+<p><code>terminal close</code> is destructive: it removes a card and kills its observed tmux
+session, interrupting work in that terminal. Select the exact ID from
+<code>terminal list</code>, then read both <code>terminal geometry</code> and <code>terminal runtime</code>.
+Pass the geometry <code>epoch</code>/<code>revision</code> and runtime <code>paneIdentity</code> unchanged:</p>
+<pre><code class="language-bash">set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+runtime=$(super-desktop terminal runtime &quot;$card_id&quot; --format json)
+geometry=$(super-desktop terminal geometry &quot;$card_id&quot; --format json)
+pane_identity=$(jq -er '.data.paneIdentity' &lt;&lt;&lt;&quot;$runtime&quot;)
+epoch=$(jq -er '.data.epoch' &lt;&lt;&lt;&quot;$geometry&quot;)
+revision=$(jq -er '.data.revision' &lt;&lt;&lt;&quot;$geometry&quot;)
+request_id=&quot;close-$(cat /proc/sys/kernel/random/uuid)&quot;
+super-desktop terminal close &quot;$card_id&quot; \
+  --expect-epoch &quot;$epoch&quot; --expect-revision &quot;$revision&quot; \
+  --expect-pane-identity &quot;$pane_identity&quot; --request-id &quot;$request_id&quot; --format json
+</code></pre>
+<p>The daemon rechecks the card on GTK immediately before removal, including its
+revision and widget identity. It serializes against terminal preparation and
+cancels queued attachment so the removed card cannot recreate its session.
+The tmux guard checks the exact numeric session/pane IDs, server and pane PIDs,
+saved session name, and a per-operation marker before killing. The marker is
+written to that session before a second process-identity probe; a replacement
+server cannot inherit it. The command does not select a session by prefix, use
+the active terminal, or fall back to legacy <code>close-term</code>.</p>
+<p>Closing supports normal, minimized and expanded cards with exactly one pane in
+one window, unlinked from other sessions. Retained exited panes are supported.
+Missing panes, foreign session names, shared windows, changed mappings, active
+geometry gestures or stale identities are refused. A stale card/pane returns <code>conflict</code> (exit 5); inspect
+again and decide whether closing is still wanted. A missing pane cannot be
+removed with this command; use the existing UI for stale-card cleanup.</p>
+<p>A successful reply includes <code>id</code>, <code>sessionName</code>, <code>sessionId</code>, <code>paneIdentity</code>,
+<code>cardRemoved: true</code>, <code>sessionClosed: true</code>, <code>outcome: "closed"</code> and
+<code>processExitObserved: false</code>. It confirms tmux accepted destruction of that
+session and the card removal was saved. It does not verify that every detached
+child process exited. The result is historical: a later session with the same
+name is a separate target and is never closed by replaying this request ID.</p>
+<p>Card removal and session destruction are separate operations. An unknown result
+can mean that the card was removed but its session still runs. A refused or
+interrupted attempt can leave a harmless <code>@super_desktop_cli_close</code> marker on
+the session. Neither a missing card nor a timeout proves the session stopped.
+Retain the original request ID, inspect its receipt, and stop automatic retries
+if the outcome remains unknown. Do not recover by issuing a new close ID or
+killing a same-name replacement. Other owner-controlled tmux commands and hooks
+remain outside the CLI's control; these guards are not a sandbox against the
+same OS user.</p>
 <h2 id="request-receipts-and-uncertain-outcomes">Request receipts and uncertain outcomes</h2>
 <pre><code class="language-bash">super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 </code></pre>
-<p>The daemon records intent before a launch, move or resize. Reusing the same ID
+<p>The daemon records intent before a launch, move, resize or close. Reusing the same ID
 with the identical payload returns the recorded result without applying it again,
 including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
@@ -350,7 +402,8 @@ error or an unknown outcome. A pending receipt has <code>state: "unknown"</code>
    <code>cardId</code> to match a card if present. For geometry, also read <code>terminal geometry</code>.</li>
 <li>If the result is still unknown, stop automated retries and report that
    uncertainty. Neither a missing receipt nor a missing card proves that a
-   process did not start: receipt storage or card adoption can fail.</li>
+   process did not start or that a close finished: receipt storage, card adoption
+   or session destruction can fail.</li>
 </ol>
 <p>Receipts survive daemon restarts under
 <code>${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop/cli-requests</code>. They contain
@@ -358,7 +411,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches, moves and resizes, not legacy
+killed or relaunched. These receipts cover structured launches, moves, resizes and closes, not legacy
 commands or every future restoration of a saved card.</p>
 <h2 id="json-and-exit-statuses">JSON and exit statuses</h2>
 <p>Structured live replies contain <code>schemaVersion</code>, <code>requestId</code>, <code>target</code>, <code>ok</code>
@@ -429,7 +482,8 @@ daemon or a typed refusal: inspect the actual response. <code>add-term</code> an
 <code>harness launch</code> or <code>terminal create</code> for structured local automation.</p>
 <p><code>harnesses</code> lists running harness instances and can include private prompts and
 usage. <code>harness list</code> lists configured launcher types. <code>close-term SESSION</code>
-kills that exact session and removes its card. <code>kill</code> stops the application
+kills the named session and removes its card; prefer structured <code>terminal close</code>
+for identity checks and durable receipts. <code>kill</code> stops the application
 daemon while leaving tmux sessions running. Never infer either target from a
 display name.</p>
 <p>Paired PCs use <code>peer-list</code>, <code>peer-add</code>, <code>peer-workspace</code>, <code>peer-events</code>,
@@ -459,6 +513,11 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Close an exact terminal card and its observed session</td>
+</tr>
 <tr>
 <td><code>terminal geometry ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>

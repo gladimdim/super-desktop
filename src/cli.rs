@@ -33,6 +33,7 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("terminal close", "Close an exact terminal card and its observed session", "terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text|json] [--target local]", "Destructive: cancels pending preparation, removes the card and kills its exact guarded tmux session. May interrupt running work. No name-based fallback or automatic retry; descendants are not individually verified", "Ready local daemon; exact card ID; epoch/revision from terminal geometry and paneIdentity from terminal runtime; one unlinked pane/window; unique durable request ID. Missing sessions must be handled through existing UI", "Versioned envelope with id, sessionName, sessionId, paneIdentity, cardRemoved, sessionClosed, outcome=closed and processExitObserved=false. Unknown may mean card removed while session still runs. Inspect request ID before any recovery; exits 0/2/3/4/5/6/7/8", "super-desktop terminal close CARD_ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity PANE_IDENTITY --request-id close-001 --format json", false),
     command!("terminal geometry", "Inspect current card geometry and its revision", "terminal geometry ID [--format text|json] [--target local]", "Read-only; reports logical output bounds and saved/expanded/minimized mode; no terminal text", "Compatible ready local daemon; exact saved card ID", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; exits 0/2/3/4/5/6/7/8", "super-desktop terminal geometry CARD_ID --format json", false),
     command!("terminal move", "Move a terminal card within the logical display", "terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text|json] [--target local]", "Moves and raises the card; moves minimized icons separately; refuses expanded cards; does not focus or launch", "Compatible ready local daemon; exact saved card ID; epoch and opaque revision from terminal geometry; explicit --clamp permits adjustment", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; requested, clamped and outcome; durable receipt; timeout may mean unknown; exits 0/2/3/4/5/6/7/8", "super-desktop terminal move CARD_ID --x 80 --y 100 --expect-epoch EPOCH --expect-revision REVISION --request-id geometry-1 --format json", false),
     command!("terminal resize", "Resize a normal terminal card in logical pixels", "terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text|json] [--target local]", "Persists outer and restored card dimensions; refuses expanded/minimized cards; does not focus or launch; VTE may naturally refit its cell grid", "Compatible ready local daemon; exact saved card ID; epoch and opaque revision from terminal geometry; explicit --clamp permits adjustment", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; requested, clamped and outcome; durable receipt; timeout may mean unknown; exits 0/2/3/4/5/6/7/8", "super-desktop terminal resize CARD_ID --width 640 --height 480 --expect-epoch EPOCH --expect-revision REVISION --request-id geometry-1 --format json", false),
@@ -112,6 +113,7 @@ Observe a card's live cell grid: super-desktop terminal runtime CARD_ID --format
 Read its screen (may contain secrets): super-desktop terminal capture CARD_ID --screen --format json\n\
 Read layout before moving/resizing: super-desktop terminal geometry CARD_ID --format json\n\
 Move/resize require --expect-epoch, --expect-revision and --request-id; bounds adjust only with --clamp.\n\
+Closing also requires --expect-pane-identity from terminal runtime; it interrupts work. Unknown close outcomes may leave a running session without a card.\n\
 Inspect running instances with private prompt metadata: super-desktop harnesses\n\
 Inspect saved PCs: super-desktop peer-list\n\n\
 Help, schema, completion and version work without a daemon or display.\n\
@@ -419,7 +421,13 @@ fn live(args: &[String]) -> Output {
         let flag = word.split('=').next().unwrap_or(word);
         if matches!(
             flag,
-            "--x" | "--y" | "--width" | "--height" | "--expect-epoch" | "--expect-revision"
+            "--x"
+                | "--y"
+                | "--width"
+                | "--height"
+                | "--expect-epoch"
+                | "--expect-revision"
+                | "--expect-pane-identity"
         ) {
             let value = if let Some((_, value)) = word.split_once('=') {
                 Some(value)
@@ -559,38 +567,44 @@ fn live(args: &[String]) -> Output {
     let moving = matches!(words.as_slice(), ["terminal", "move", _]);
     let resizing = matches!(words.as_slice(), ["terminal", "resize", _]);
     let changing_geometry = moving || resizing;
-    if !changing_geometry && (!geometry_options.is_empty() || clamp) {
+    let closing = matches!(words.as_slice(), ["terminal", "close", _]);
+    let guarded = changing_geometry || closing;
+    if (!guarded && !geometry_options.is_empty()) || (!changing_geometry && clamp) {
         return fail(
             "invalid_arguments",
-            "Geometry options are only for terminal move/resize.",
+            "Guard options are for move/resize/close; --clamp is only for move/resize.",
         );
     }
-    if !launching && !changing_geometry && request_id.is_some() {
+    if !launching && !guarded && request_id.is_some() {
         return fail(
             "invalid_arguments",
             "--request-id is only for mutation commands.",
         );
     }
-    if (launching || changing_geometry)
-        && !request_id.is_some_and(|id| valid_id(id) && id.len() <= 64)
-    {
+    if (launching || guarded) && !request_id.is_some_and(|id| valid_id(id) && id.len() <= 64) {
         return fail(
             "invalid_arguments",
             "Mutation requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
         );
     }
-    if changing_geometry {
-        let expected = if moving {
-            ["--x", "--y", "--expect-epoch", "--expect-revision"]
+    if guarded {
+        let expected: &[&str] = if closing {
+            &[
+                "--expect-epoch",
+                "--expect-revision",
+                "--expect-pane-identity",
+            ]
+        } else if moving {
+            &["--x", "--y", "--expect-epoch", "--expect-revision"]
         } else {
-            ["--width", "--height", "--expect-epoch", "--expect-revision"]
+            &["--width", "--height", "--expect-epoch", "--expect-revision"]
         };
         if geometry_options.len() != expected.len()
             || expected
                 .iter()
                 .any(|flag| !geometry_options.contains_key(flag))
         {
-            return fail("invalid_arguments", "Use both coordinates or both dimensions, plus --expect-epoch and --expect-revision from terminal geometry.");
+            return fail("invalid_arguments", "Move/resize require both coordinates/dimensions. All guarded operations require epoch/revision from terminal geometry; close also requires pane identity from terminal runtime.");
         }
         if !valid_id(geometry_options["--expect-epoch"])
             || geometry_options["--expect-epoch"].len() > 64
@@ -604,10 +618,23 @@ fn live(args: &[String]) -> Output {
                 "Use the epoch and opaque revision returned by terminal geometry.",
             );
         }
-        for flag in if moving {
-            ["--x", "--y"]
+        if closing
+            && (geometry_options["--expect-pane-identity"].len() != 64
+                || !geometry_options["--expect-pane-identity"]
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit()))
+        {
+            return fail(
+                "invalid_arguments",
+                "Copy paneIdentity from terminal runtime.",
+            );
+        }
+        for flag in if closing {
+            [].as_slice()
+        } else if moving {
+            ["--x", "--y"].as_slice()
         } else {
-            ["--width", "--height"]
+            ["--width", "--height"].as_slice()
         } {
             let value = geometry_options[flag];
             let Some(number) = value
@@ -660,6 +687,12 @@ fn live(args: &[String]) -> Output {
         }
     }
     let command = match words.as_slice() {
+        ["terminal", "close", id] if !all && valid_id(id) => Command::Close {
+            id: (*id).into(),
+            expect_epoch: geometry_options["--expect-epoch"].into(),
+            expect_revision: geometry_options["--expect-revision"].into(),
+            expect_pane_identity: geometry_options["--expect-pane-identity"].into(),
+        },
         ["terminal", "geometry", id] if !all && valid_id(id) => {
             Command::Geometry { id: (*id).into() }
         }
@@ -727,6 +760,7 @@ fn live(args: &[String]) -> Output {
     let required_method = match &request.command {
         Command::Launch { .. } => Some("harness.launch"),
         Command::InspectRequest { .. } => Some("request.inspect"),
+        Command::Close { .. } => Some("terminal.close"),
         Command::Geometry { .. } => Some("terminal.geometry"),
         Command::Move { .. } => Some("terminal.move"),
         Command::Resize { .. } => Some("terminal.resize"),

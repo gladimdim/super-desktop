@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_CAPTURE: usize = 65_536;
 const MAX_INVENTORY: usize = 262_144;
 const FORMAT: &str = "#{session_name}\t#{session_id}\t#{pane_id}\t#{pane_pid}\t#{pane_dead}\t#{pane_width}\t#{pane_height}\t#{history_size}\t#{alternate_on}\t#{pid}";
-type Failure = (&'static str, &'static str);
+pub(crate) type Failure = (&'static str, &'static str);
 const UNAVAILABLE: Failure = (
     "unavailable",
     "Terminal observation is unavailable; no empty capture was substituted.",
@@ -31,14 +31,18 @@ impl Drop for Reap {
     }
 }
 
-struct Output {
-    bytes: Vec<u8>,
-    limited: bool,
+pub(crate) struct Output {
+    pub bytes: Vec<u8>,
+    pub limited: bool,
 }
 
 /// Drain a nonblocking pipe with a hard allocation limit and absolute deadline.
 /// Never wait on a child while its stdout can fill, and never leave it behind.
-fn read_process(mut command: Process, limit: usize, deadline: Instant) -> Result<Output, Failure> {
+pub(crate) fn read_process(
+    mut command: Process,
+    limit: usize,
+    deadline: Instant,
+) -> Result<Output, Failure> {
     if Instant::now() >= deadline {
         return Err(TIMEOUT);
     }
@@ -109,17 +113,17 @@ fn tmux(args: &[&str], limit: usize, deadline: Instant) -> Result<Output, Failur
 }
 
 #[derive(Debug, PartialEq)]
-struct Pane {
-    session_id: String,
-    pane_id: String,
-    pid: u32,
-    dead: bool,
+pub(crate) struct Pane {
+    pub session_id: String,
+    pub pane_id: String,
+    pub pid: u32,
+    pub dead: bool,
     columns: u32,
     rows: u32,
     history: u32,
     alternate: bool,
-    server_pid: u32,
-    identity: String,
+    pub server_pid: u32,
+    pub identity: String,
     observed_at_ms: u128,
 }
 
@@ -145,7 +149,7 @@ fn process_start(pid: u32) -> Result<String, Failure> {
     Ok(start.into())
 }
 
-fn probe(session: &str, deadline: Instant) -> Result<Pane, Failure> {
+pub(crate) fn probe(session: &str, deadline: Instant) -> Result<Pane, Failure> {
     // Filter exact names ourselves. A tmux target prefix, active window, or
     // user-created second pane must never silently choose a different target.
     let output = tmux(&["list-panes", "-a", "-F", FORMAT], MAX_INVENTORY, deadline)?;

@@ -29,6 +29,7 @@ pub const METHODS: &[&str] = &[
     "terminal.geometry",
     "terminal.move",
     "terminal.resize",
+    "terminal.close",
     "harness.list",
     "harness.inspect",
     "harness.launch",
@@ -82,6 +83,16 @@ pub enum Command {
         #[serde(rename = "expectRevision")]
         expect_revision: String,
     },
+    #[serde(rename = "terminal.close")]
+    Close {
+        id: String,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+        #[serde(rename = "expectPaneIdentity")]
+        expect_pane_identity: String,
+    },
     #[serde(rename = "harness.list")]
     Harnesses { all: bool },
     #[serde(rename = "harness.inspect")]
@@ -103,7 +114,7 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Launch { .. } | Self::Move { .. } | Self::Resize { .. }
+            Self::Launch { .. } | Self::Move { .. } | Self::Resize { .. } | Self::Close { .. }
         )
     }
 }
@@ -196,6 +207,7 @@ pub fn capabilities() -> Value {
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
         "delegatedAccess": false, "remoteTargets": false,
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
+        "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
         "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
 }
@@ -810,6 +822,30 @@ mod tests {
             clamp: false,
             expect_epoch: "epoch".into(),
             expect_revision: "revision".into(),
+        })
+        .unwrap();
+        let reply = request_at(&runtime.0, &request);
+        assert_eq!(reply.exit_code(), 7);
+        assert_eq!(reply.error.unwrap().outcome, "unknown");
+        worker.join().unwrap();
+        let absent = request_at(&runtime.0, &request);
+        assert_eq!(absent.error.unwrap().outcome, "not_applied");
+    }
+
+    #[test]
+    fn cli_close_lost_reply_is_unknown_and_never_replayed() {
+        let runtime = Runtime::new();
+        let server = Server::bind(&runtime.0).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.listener.accept().unwrap();
+            read_frame(&mut stream, MAX_REQUEST, Instant::now() + DEADLINE).unwrap();
+            // The daemon may have applied the request. Drop without a reply.
+        });
+        let request = new_request(Command::Close {
+            id: "sd_term_test".into(),
+            expect_epoch: "epoch".into(),
+            expect_revision: "a".repeat(64),
+            expect_pane_identity: "b".repeat(64),
         })
         .unwrap();
         let reply = request_at(&runtime.0, &request);

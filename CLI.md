@@ -1,15 +1,15 @@
 # SUPER DESKTOP CLI reference
 
 Use the CLI to discover harnesses, inspect terminal cards, launch configured
-agents, create shell terminals, read their screen or retained history, and inspect
-mutation receipts, and move or resize cards. Existing commands
-also control overlay visibility, notes, terminal closing, themes and paired PCs.
+agents, create shell terminals, read their screen or retained history, move or
+resize cards, close exact sessions, and inspect mutation receipts. Existing
+commands also control overlay visibility, notes, themes and paired PCs.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 `--help` and `capabilities` before automating them.
 
-**Current coverage:** the structured local CLI supports discovery, creation and
-terminal observation and card geometry. It does not provide local terminal input,
+**Current coverage:** the structured local CLI supports discovery, creation,
+terminal observation, card geometry and guarded closing. It does not provide local terminal input,
 attachment or direct terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
@@ -22,7 +22,7 @@ There is no claim of complete CLI parity with every graphical action.
    it is not a formal JSON Schema for request or result validation.
 3. Read `super-desktop capabilities --format json` for the running daemon's
    methods and limits. Do not infer support from the version number alone.
-4. Check `super-desktop app status --format json`. Launch and geometry commands need `data.ready`.
+4. Check `super-desktop app status --format json`. Launch, geometry and close commands need `data.ready`.
 5. Select exact harness and card IDs from returned data. A harness ID identifies
    a launcher type; a card ID identifies a saved terminal. Never select by list
    position or guess an ID from a title. `sessionName` is a separate field used
@@ -67,6 +67,7 @@ override, global request ID option or remote target is accepted here.
 | `terminal geometry ID` | Current logical geometry, bounds, epoch and revision | `terminal.geometry` |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Move and raise a normal card or minimized icon | `terminal.move` |
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Change a normal card’s outer and restored size | `terminal.resize` |
+| `terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID` | Remove the exact card and close its guarded tmux session | `terminal.close` |
 | `terminal runtime ID` | Live pane identity, process status and cell grid | `terminal.runtime` |
 | `terminal capture ID [--screen \| --history [--lines N]]` | Plain screen text or bounded retained history plus screen | `terminal.capture` |
 | `harness list [--all]` | Available launcher types; include missing types with `--all` | `harness.list` |
@@ -241,6 +242,60 @@ A successful launch's `data` contains `id`, `sessionName`, `harnessId`,
 the card was added and saved. It does not prove authentication, readiness,
 completion, continued process liveness or that the card still exists later.
 
+## Guarded terminal closing
+
+`terminal close` is destructive: it removes a card and kills its observed tmux
+session, interrupting work in that terminal. Select the exact ID from
+`terminal list`, then read both `terminal geometry` and `terminal runtime`.
+Pass the geometry `epoch`/`revision` and runtime `paneIdentity` unchanged:
+
+```bash
+set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+runtime=$(super-desktop terminal runtime "$card_id" --format json)
+geometry=$(super-desktop terminal geometry "$card_id" --format json)
+pane_identity=$(jq -er '.data.paneIdentity' <<<"$runtime")
+epoch=$(jq -er '.data.epoch' <<<"$geometry")
+revision=$(jq -er '.data.revision' <<<"$geometry")
+request_id="close-$(cat /proc/sys/kernel/random/uuid)"
+super-desktop terminal close "$card_id" \
+  --expect-epoch "$epoch" --expect-revision "$revision" \
+  --expect-pane-identity "$pane_identity" --request-id "$request_id" --format json
+```
+
+The daemon rechecks the card on GTK immediately before removal, including its
+revision and widget identity. It serializes against terminal preparation and
+cancels queued attachment so the removed card cannot recreate its session.
+The tmux guard checks the exact numeric session/pane IDs, server and pane PIDs,
+saved session name, and a per-operation marker before killing. The marker is
+written to that session before a second process-identity probe; a replacement
+server cannot inherit it. The command does not select a session by prefix, use
+the active terminal, or fall back to legacy `close-term`.
+
+Closing supports normal, minimized and expanded cards with exactly one pane in
+one window, unlinked from other sessions. Retained exited panes are supported.
+Missing panes, foreign session names, shared windows, changed mappings, active
+geometry gestures or stale identities are refused. A stale card/pane returns `conflict` (exit 5); inspect
+again and decide whether closing is still wanted. A missing pane cannot be
+removed with this command; use the existing UI for stale-card cleanup.
+
+A successful reply includes `id`, `sessionName`, `sessionId`, `paneIdentity`,
+`cardRemoved: true`, `sessionClosed: true`, `outcome: "closed"` and
+`processExitObserved: false`. It confirms tmux accepted destruction of that
+session and the card removal was saved. It does not verify that every detached
+child process exited. The result is historical: a later session with the same
+name is a separate target and is never closed by replaying this request ID.
+
+Card removal and session destruction are separate operations. An unknown result
+can mean that the card was removed but its session still runs. A refused or
+interrupted attempt can leave a harmless `@super_desktop_cli_close` marker on
+the session. Neither a missing card nor a timeout proves the session stopped.
+Retain the original request ID, inspect its receipt, and stop automatic retries
+if the outcome remains unknown. Do not recover by issuing a new close ID or
+killing a same-name replacement. Other owner-controlled tmux commands and hooks
+remain outside the CLI's control; these guards are not a sandbox against the
+same OS user.
+
 ## Request receipts and uncertain outcomes
 
 ```bash
@@ -248,7 +303,7 @@ super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 ```
 
-The daemon records intent before a launch, move or resize. Reusing the same ID
+The daemon records intent before a launch, move, resize or close. Reusing the same ID
 with the identical payload returns the recorded result without applying it again,
 including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
@@ -267,7 +322,8 @@ After a lost reply, timeout, incomplete receipt or unknown outcome:
    `cardId` to match a card if present. For geometry, also read `terminal geometry`.
 3. If the result is still unknown, stop automated retries and report that
    uncertainty. Neither a missing receipt nor a missing card proves that a
-   process did not start: receipt storage or card adoption can fail.
+   process did not start or that a close finished: receipt storage, card adoption
+   or session destruction can fail.
 
 Receipts survive daemon restarts under
 `${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop/cli-requests`. They contain
@@ -275,7 +331,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches, moves and resizes, not legacy
+killed or relaunched. These receipts cover structured launches, moves, resizes and closes, not legacy
 commands or every future restoration of a saved card.
 
 ## JSON and exit statuses
@@ -324,7 +380,8 @@ daemon or a typed refusal: inspect the actual response. `add-term` and
 
 `harnesses` lists running harness instances and can include private prompts and
 usage. `harness list` lists configured launcher types. `close-term SESSION`
-kills that exact session and removes its card. `kill` stops the application
+kills the named session and removes its card; prefer structured `terminal close`
+for identity checks and durable receipts. `kill` stops the application
 daemon while leaving tmux sessions running. Never infer either target from a
 display name.
 
@@ -354,6 +411,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Close an exact terminal card and its observed session |
 | `terminal geometry ID [--format text\|json] [--target local]` | Structured local | Inspect current card geometry and its revision |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Move a terminal card within the logical display |
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Resize a normal terminal card in logical pixels |
