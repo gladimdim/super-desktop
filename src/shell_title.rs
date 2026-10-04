@@ -158,6 +158,15 @@ mod tests {
                     std::thread::sleep(Duration::from_millis(25));
                 }
             }
+            fn wait_foreground(&self, expected: &str) {
+                let pid = self.run(&["display-message", "-p", "-t", "test", "#{pane_pid}"])
+                    .parse().unwrap();
+                let deadline = Instant::now() + Duration::from_secs(4);
+                while foreground_command(pid).as_deref() != Some(expected) {
+                    assert!(Instant::now() < deadline, "foreground task {expected:?} did not start");
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
         }
         impl Drop for Server {
             fn drop(&mut self) {
@@ -196,6 +205,7 @@ mod tests {
         server.run(&["send-keys", "-t", "test", "-l", task]);
         server.run(&["send-keys", "-t", "test", "Enter"]);
         server.wait_title(task);
+        server.wait_foreground("cat");
         server.run(&[
             "send-keys",
             "-t",
@@ -208,6 +218,9 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         server.run(&["send-keys", "-t", "test", "Up", "Enter"]);
         server.wait_title(task);
+        // This title is identical to the previous turn's. It cannot prove
+        // that history replay has started; wait before interrupting the task.
+        server.wait_foreground("cat");
         server.run(&["send-keys", "-t", "test", "C-c"]);
         std::thread::sleep(Duration::from_millis(100));
         server.run(&["send-keys", "-t", "test", "printf 'next command'", "Enter"]);
@@ -215,6 +228,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         server.run(&["send-keys", "-t", "test", "Up", "Up", "Enter"]);
         server.wait_title(task);
+        server.wait_foreground("cat");
         server.run(&["send-keys", "-t", "test", "C-c"]);
         std::thread::sleep(Duration::from_millis(100));
         server.run(&["send-keys", "-t", "test", "slee", "Tab", "30", "Enter"]);
