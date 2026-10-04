@@ -461,7 +461,9 @@ mod tests {
         // executables to test package and argument policy without downloads.
         let bin = root.join("tools ; quoted");
         std::fs::create_dir(&bin).unwrap();
-        std::os::unix::fs::symlink("/bin/true", bin.join("npx")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(bin.join("npx"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(bin.join("npx"), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::os::unix::fs::symlink("/bin/sh", bin.join("bash")).unwrap();
         let old_path = std::env::var_os("PATH").unwrap();
         std::env::set_var("PATH", &bin);

@@ -744,12 +744,16 @@ mod tests {
 
     /// A shell in a private tmux server, in a fresh directory.
     fn shell(name: &str) -> (TestPane, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("sd-editor-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let namespace = format!("sd-editor-{}-{}-{name}", std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let dir = std::env::temp_dir().join(&namespace);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut pane = TestPane { server: format!("sd-editor-{}-{name}", std::process::id()), target: "t".into() };
-        pane.tmux(&["new-session", "-d", "-s", "t", "-x", "100", "-y", "30", "-c", dir.to_str().unwrap(), &format!("env -i PATH=/usr/bin:/bin TERM=xterm-256color HOME={} sh", dir.display())]);
-        pane.wait("the shell", |p| p.state().is_ok_and(|s| s.command == "sh"));
+        let mut pane = TestPane { server: namespace, target: "t".into() };
+        pane.tmux(&["new-session", "-d", "-s", "t", "-x", "100", "-y", "30", "-c", dir.to_str().unwrap(), &format!("env -i PATH={} TERM=xterm-256color HOME={} sh",
+            crate::launch_args::quote(&std::env::var("PATH").unwrap()),
+            crate::launch_args::quote(dir.to_str().unwrap()))]);
+        pane.wait("the shell", |p| p.state().is_ok_and(|s| matches!(s.command.as_str(), "sh" | "bash")));
         (pane, dir)
     }
 
@@ -761,7 +765,7 @@ mod tests {
     }
 
     fn back_at_shell(pane: &mut TestPane) {
-        pane.wait("the shell again", |p| p.state().is_ok_and(|s| s.command == "sh" && !s.alternate));
+        pane.wait("the shell again", |p| p.state().is_ok_and(|s| matches!(s.command.as_str(), "sh" | "bash") && !s.alternate));
     }
 
     #[test]
@@ -799,7 +803,8 @@ mod tests {
             assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "hellosaved\n");
             assert_eq!(std::fs::read_to_string(dir.join("new file.txt")).unwrap(), "new\n");
             // Once the editor is gone, nothing is typed into the shell.
-            assert_eq!(run(&mut pane, "vim", &Action::DiscardQuit), Err(Error::NotForeground("sh".into())));
+            let shell_command = pane.state().unwrap().command;
+            assert_eq!(run(&mut pane, "vim", &Action::DiscardQuit), Err(Error::NotForeground(shell_command)));
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
@@ -834,6 +839,13 @@ mod tests {
     fn editor_actions_drive_real_nano() {
         if !installed("nano") {
             eprintln!("SKIPPED: nano is not installed");
+            return;
+        }
+        if crate::tmux::which("nano")
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path.file_name().is_some_and(|name| name == "pico"))
+        {
+            eprintln!("SKIPPED: nano resolves to Pico, not GNU nano");
             return;
         }
         let (mut pane, dir) = shell("nano");
@@ -876,7 +888,9 @@ mod tests {
         pane.type_bytes(b"new").unwrap();
         assert_eq!(run(&mut pane, "emacs", &Action::SaveQuit), Ok("emacs"));
         back_at_shell(&mut pane);
-        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "new");
+        let saved = std::fs::read_to_string(dir.join("b.txt")).unwrap();
+        // Emacs builds differ in the default final-newline policy for text mode.
+        assert!(matches!(saved.as_str(), "new" | "new\n"), "unexpected saved text: {saved:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

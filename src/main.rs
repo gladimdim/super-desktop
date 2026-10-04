@@ -1511,10 +1511,9 @@ mod ipc_tests {
         // 1. Nothing at the path at all.
         assert!(matches!(ipc_request_at(&sock_path, "status"), Ipc::NoDaemon));
 
-        // 2. Leftover file from a daemon that is gone: the connect fails, the
-        //    file is cleared (so a freshly spawned daemon can bind) and the
-        //    caller is told to start one.
-        fs::write(&sock_path, b"").expect("write stale socket file");
+        // 2. A real socket left after its listener exits. A regular file has
+        // different connect errors on Darwin and is not a stale daemon socket.
+        drop(UnixListener::bind(&sock_path).expect("bind stale daemon socket"));
         assert!(matches!(ipc_request_at(&sock_path, "status"), Ipc::NoDaemon));
         assert!(!sock_path.exists(), "a stale socket file must be removed");
 

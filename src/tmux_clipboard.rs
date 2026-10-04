@@ -289,32 +289,44 @@ mod tests {
         }
     }
 
-    /// A real mouse drag through an attached client (via `script`, which gives
-    /// tmux a terminal), the way a card's VTE sends it.
+    /// A real mouse drag through a client on a private PTY, like a card's VTE.
     fn drag_first_line(server: &Server, session: &str) {
-        use std::io::Write;
-        let attach = format!("tmux -L {} attach -t ={session}", server.socket);
-        let mut client = Command::new("script")
-            .args(["-qfec", &attach, "/dev/null"])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
+        use std::io::{Read, Write};
+        use std::process::Stdio;
+        struct Client(std::process::Child);
+        impl Drop for Client {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let (mut master, slave) = crate::platform::pty::open(80, 24).unwrap();
+        let mut command = server.cmd();
+        command.args(["attach", "-t", &format!("={session}")])
+            .env_remove("TMUX").env_remove("TMUX_PANE")
             .env("TERM", "xterm-256color")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("script(1) is needed for the mouse test");
-        let stdin = client.stdin.as_mut().unwrap();
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::from(slave)).stderr(Stdio::null());
+        crate::platform::pty::configure_child_session(&mut command);
+        let client = Client(command.spawn().expect("attach private tmux client"));
+        let mut output = master.try_clone().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while matches!(output.read(&mut buffer), Ok(n) if n > 0) {}
+        });
         std::thread::sleep(Duration::from_millis(800));
         for event in ["\x1b[<0;1;1M", "\x1b[<32;6;1M", "\x1b[<32;12;1M", "\x1b[<0;12;1m"] {
-            stdin.write_all(event.as_bytes()).unwrap();
-            stdin.flush().unwrap();
+            master.write_all(event.as_bytes()).unwrap();
+            master.flush().unwrap();
             std::thread::sleep(Duration::from_millis(120));
         }
         std::thread::sleep(Duration::from_millis(800));
         let _ = server.cmd().args(["detach-client", "-s", &format!("={session}")]).output();
-        let _ = client.kill();
-        let _ = client.wait();
+        drop(client);
+        // Command keeps its configured slave handles until it is dropped.
+        drop(command);
+        drop(master);
+        reader.join().unwrap();
     }
 
     #[test]

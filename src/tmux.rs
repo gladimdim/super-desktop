@@ -2320,14 +2320,15 @@ mod tests {
         run("PRAGMA journal_mode=WAL; CREATE TABLE session(id TEXT, title TEXT); INSERT INTO session VALUES('a','First');");
         let runs = || SQLITE_RUNS.with(|runs| runs.get());
         let sql = "SELECT title FROM session WHERE id = 'a';";
-        // The first reader of a closed WAL database recreates its (empty) WAL,
-        // which changes the stamp; opencode itself keeps the WAL open.
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
+        // Some SQLite builds create a WAL on the first read; others do not.
+        // Warm both cases before asserting that stable reads start no process.
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
         let before = runs();
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
-        assert_eq!(runs() - before, 1, "an unchanged database must be answered from memory");
+        assert_eq!(runs() - before, 0, "an unchanged database must be answered from memory");
         let before = runs();
         // A write (through the WAL or a checkpoint) must be seen.
         run("UPDATE session SET title = 'Renamed' WHERE id = 'a';");
@@ -2677,7 +2678,7 @@ mod tests {
         let sess = "test_sd_session_state_probe";
         let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", sess, "-c", "/tmp", "/usr/bin/bash"])
+            .args(["new-session", "-d", "-s", sess, "-c", "/tmp", "/bin/bash"])
             .output();
 
         assert_eq!(session_state("test_sd_session_state_missing"), None);
@@ -3402,7 +3403,7 @@ mod tests {
         if !has_tmux {
             return;
         }
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let (sess, _cmd) = create_session("shell", Some("/bin/bash"), None);
         let _cleanup = SessionCleanup(vec![sess.clone()]);
         let grid = pane_grid(&sess).expect("an owned pane has a grid");
         // It is the pane's own size — the width its captured text is rendered
@@ -3453,7 +3454,7 @@ mod tests {
         };
 
         // 1. A new card runs in the folder from the top bar.
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), Some(&dir_s));
+        let (sess, _cmd) = create_session("shell", Some("/bin/bash"), Some(&dir_s));
         let mut cleanup = SessionCleanup(vec![sess.clone()]);
         assert_eq!(
             pane_dir(&sess).as_deref(),
@@ -3467,7 +3468,7 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &sess])
             .output();
-        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None, Some(&dir_s));
+        ensure_session_with_agent_id(&sess, "shell", Some("/bin/bash"), None, Some(&dir_s));
         assert_eq!(
             pane_dir(&sess).as_deref(),
             Some(dir_s.as_str()),
@@ -3475,7 +3476,7 @@ mod tests {
         );
 
         // 3. With nothing configured the old behaviour stands: $HOME.
-        let (sess_home, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let (sess_home, _cmd) = create_session("shell", Some("/bin/bash"), None);
         cleanup.0.push(sess_home.clone());
         let home_s = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let home_s = std::fs::canonicalize(&home_s)
@@ -3520,7 +3521,7 @@ mod tests {
         let probe = "test_sd_detach_on_destroy_probe";
         let mut cleanup = SessionCleanup(vec![probe.to_string()]);
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", probe, "-c", "/tmp", "/usr/bin/bash"])
+            .args(["new-session", "-d", "-s", probe, "-c", "/tmp", "/bin/bash"])
             .output();
         let global_before = show_option(&["-gv", "detach-on-destroy"]);
         assert!(
@@ -3539,7 +3540,7 @@ mod tests {
             return;
         }
 
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let (sess, _cmd) = create_session("shell", Some("/bin/bash"), None);
         cleanup.0.push(sess.clone());
         assert_eq!(
             session_detach_on_destroy(&sess),
@@ -3558,7 +3559,7 @@ mod tests {
             .args(["set-option", "-t", &sess, "detach-on-destroy", "off"])
             .output();
         assert_eq!(session_detach_on_destroy(&sess), "off");
-        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None, None);
+        ensure_session_with_agent_id(&sess, "shell", Some("/bin/bash"), None, None);
         assert_eq!(
             session_detach_on_destroy(&sess),
             "on",
