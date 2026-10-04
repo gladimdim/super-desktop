@@ -102,7 +102,8 @@ mobile terminal output and Linux performance notes.
 - Public files (README, SECURITY.md, the website, code comments, test
   docstrings, commit messages) must not link to or quote those notes, or
   describe unreleased plans. Describe shipped, user-facing behavior only.
-- This repository's Markdown is limited to README.md, SECURITY.md, these
+- This repository's Markdown is limited to README.md, CLI.md (the public command
+  reference), SECURITY.md, these
   instructions, `assets/logos/` attribution and licenses, and
   `docs/screenshots/README.md`.
 - If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
