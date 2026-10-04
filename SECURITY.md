@@ -4,6 +4,86 @@ The bridge is a remote terminal capability. An approved phone can operate the
 desktop user's SUPER DESKTOP terminals; it is not a read-only dashboard or a
 sandbox. Do not approve unknown devices or publish pairing invitations.
 
+## Local CLI control
+
+Local CLI inventory, terminal observation, geometry and structured launches use a separate Unix socket at
+`$XDG_RUNTIME_DIR/super-desktop/control-v1.sock`, with a 0700 directory and
+0600 socket. Both ends check the peer UID. Unsafe paths, symlinks and insecure
+permissions are refused. A lifecycle lock protects the listener, and only an
+owned, unchanged socket that refuses connections can be removed as stale.
+Client errors never unlink sockets or start another daemon.
+
+Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
+Connections have three-second I/O deadlines, with at most eight workers.
+The API exposes status, capabilities, saved card metadata, launcher discovery,
+launching, mutation receipts, guarded closing, card movement/resizing and explicit terminal capture. Inventory omits
+prompts and terminal output; `terminal capture` can reveal sensitive text,
+including credentials and prompts. Notes and launch arguments are not exposed.
+Paths and labels can still be private. JSON output escapes terminal
+control characters. This endpoint is independent of the existing bridge IPC.
+
+Access belongs to the desktop owner, including agents running as that user.
+It is not a sandbox or a delegated permission system: same-user programs may
+also access the existing IPC, tmux, and the user's files. Launcher discovery
+does not execute a launcher, verify its authentication, or establish that its
+permission settings are safe.
+
+`terminal runtime` and `terminal capture` require an exact saved local card and
+one pane across its tmux session. The daemon rechecks the live card mapping and
+pane/server identity before returning data, withholding content on detected
+replacement, closure, alternate-screen transition or grid change. Observations
+are not atomic with ongoing output. Capture is bounded to 64 KiB and at most
+2000 requested history rows plus the screen, with explicit truncation fields.
+It strips terminal escapes and control characters, never requests raw ANSI,
+and does not attach a client, send input, clear history or resize the pane.
+Output remains untrusted data even after control sequences are stripped.
+
+Structured launches use configured executables and arguments. Recognized
+permission-bypass flags, argument overrides saved in Settings, and custom
+launchers require `--allow-unsafe-harness`; built-in package-runner fallbacks
+require `--allow-download`. These are per-request acknowledgements, not
+restrictions on an executable's own behavior, startup files or network access.
+Launches require an absolute existing directory and never submit a prompt.
+
+Before a structured launch, move, resize or close the daemon durably records the
+request ID, a hash of its parameters and a target or reserved card ID in an
+owner-only state directory.
+Receipts and the journal lock have mode 0600; symlink paths are refused.
+Saved results can include launch directories and geometry, so receipts are private data.
+Matching IDs return the recorded result; changed payloads conflict; incomplete
+or unreadable receipts are never replayed. The journal holds up to 4096 entries
+without automatic pruning. Removing it removes duplicate protection. A timeout
+or lost connection after sending a mutation means an unknown outcome: inspect
+the request and terminal inventory before taking further action. Unknown may
+include a launched process whose card could not be added. No automatic cleanup
+kills such a process, and a receipt does not establish ongoing process liveness.
+
+Moves and resizes require the epoch and opaque revision from a current geometry
+read. The daemon validates them on the GTK thread against the current card and
+logical output, and refuses an active gesture. Expanded cards cannot be moved
+or resized; minimized cards cannot be resized. Bounds adjustments require
+`--clamp`. A move can raise a card and a resize can naturally change its VTE grid;
+neither command starts a harness or explicitly focuses it. Receipts include
+historical geometry and target IDs, and replay never overwrites later edits.
+
+Structured close requires the current card epoch/revision and live pane identity.
+The worker serializes against pending preparation; GTK rechecks the exact card
+and widget before canceling attachment and removing it. Tmux destruction uses an
+exact session ID behind checks of session/pane IDs, PIDs, name, single unlinked
+window/pane and a random per-operation session marker. A second process-identity
+probe follows marker installation, and a restarted server cannot inherit the
+marker. There is no prefix matching or name-based cleanup fallback. Missing
+panes, foreign names, active geometry gestures and ambiguous/shared layouts are refused. A harmless marker
+may remain after refusal. Owner-controlled hooks and direct tmux commands are
+outside these guards; this is not a same-user sandbox.
+
+Close interrupts work. Card removal and tmux destruction are not atomic: an
+unknown outcome can leave a running session without its card. Inspect the
+original request receipt before recovery; never retry under a new ID or kill a
+replacement by name. Success confirms session destruction and saved card
+removal, not the exit of every descendant process. Historical close receipts
+never execute again against a recreated session.
+
 ## Transport and identity
 
 Port 8759 accepts TLS 1.2/1.3 HTTPS and WSS only, on LAN, Ethernet, or Tailscale.

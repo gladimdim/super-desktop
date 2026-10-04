@@ -329,7 +329,10 @@ impl HarnessBar {
     fn paint_sensitivity(&self) {
         let ready = self.ready.get() && !self.busy.get();
         for (_, button) in self.buttons.borrow().iter() {
-            button.set_sensitive(ready && button.is_visible());
+            // Use the offered button's own visibility. An overlay/workspace
+            // can be hidden during a refresh or launch completion; including
+            // its ancestors would leave these buttons disabled on reopening.
+            button.set_sensitive(ready && button.get_visible());
         }
     }
 
@@ -469,6 +472,52 @@ mod tests {
     #[test]
     fn a_remote_bar_offers_exactly_what_the_host_offers() {
         crate::gtk_test::run_in_child_process("harness_bar::tests::bar_inner");
+    }
+
+    #[test]
+    fn toolbar_launchers_remain_enabled_after_hidden_refresh() {
+        crate::gtk_test::run_in_child_process("harness_bar::tests::toolbar_hidden_refresh_inner");
+    }
+
+    #[test]
+    fn toolbar_hidden_refresh_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let bar = HarnessBar::new(Rc::new(|_| {}), Rc::new(|_, _| false));
+        let parent = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        parent.append(&bar.group);
+        let state = HarnessState {
+            keys: vec!["shell".into(), "claude".into(), "custom-test".into()],
+            custom: vec![CustomButton {
+                id: "custom-test".into(), name: "My CLI".into(), icon: "💻".into(),
+            }],
+            ready: true,
+        };
+        for _ in 0..3 {
+            // Theme refreshes and remote snapshots can arrive while the
+            // overlay or workspace containing the launchers is hidden.
+            parent.set_visible(false);
+            bar.apply(&state);
+            parent.set_visible(true);
+            for key in &state.keys {
+                assert!(bar.sensitive(key), "{key} stayed disabled after showing its parent");
+            }
+            assert!(!bar.sensitive("codex"), "an unoffered launcher stays disabled");
+
+            bar.set_busy(true);
+            assert!(!bar.sensitive("shell"));
+            parent.set_visible(false);
+            bar.set_busy(false);
+            parent.set_visible(true);
+            assert!(bar.sensitive("shell"), "a hidden launch completion must restore sensitivity");
+
+            parent.set_visible(false);
+            bar.apply(&HarnessState { ready: false, ..state.clone() });
+            parent.set_visible(true);
+            assert!(!bar.sensitive("shell"), "an unavailable target stays disabled");
+        }
     }
 
     #[test]

@@ -2155,6 +2155,84 @@ pub fn build_harness_settings_panel(
 mod tests {
     use super::*;
 
+    /// The website's "connect your phone" screenshots of Settings →
+    /// Connections → Add a device → Pair a phone, drawn by the real Settings
+    /// card on the private display. Opt-in, and only against a disposable
+    /// bridge: run `harness-bridge` with its own SUPER_DESKTOP_BRIDGE_STATE_DIR
+    /// first (opening Pair a phone starts the bridge, which must find that one
+    /// running), then `SD_PAIRING_SHOTS=<dir> cargo test pairing_screenshots`.
+    #[test]
+    fn pairing_screenshots() {
+        if std::env::var_os("SD_PAIRING_SHOTS").is_none() {
+            return;
+        }
+        crate::gtk_test::run_in_child_process("harness_settings::tests::pairing_screenshots_inner");
+    }
+
+    #[test]
+    fn pairing_screenshots_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let Some(out) = std::env::var_os("SD_PAIRING_SHOTS").map(std::path::PathBuf::from) else { return };
+        assert!(std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").is_some(), "only against a disposable bridge state dir");
+        assert!(crate::bridge::bridge_running(crate::bridge::BRIDGE_PORT), "start the disposable bridge first");
+        gtk4::init().unwrap();
+        gtk4::Settings::default().unwrap().set_gtk_application_prefer_dark_theme(true);
+        crate::styles::apply_styles();
+        let panel = build_harness_settings_panel(
+            Rc::new(RefCell::new(AppState::default())),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        let window = gtk4::Window::new();
+        window.add_css_class("super-desktop");
+        window.set_default_size(720, 760);
+        window.set_child(Some(&panel.widget));
+        window.present();
+        crate::gtk_test::pump(800);
+
+        fn labelled(w: &gtk4::Widget, text: &str) -> Option<Button> {
+            if let Some(button) = w.downcast_ref::<Button>() {
+                let mut stack = vec![w.clone()];
+                while let Some(node) = stack.pop() {
+                    if node.downcast_ref::<Label>().is_some_and(|l| l.text() == text) || button.label().as_deref() == Some(text) {
+                        return Some(button.clone());
+                    }
+                    let mut child = node.first_child();
+                    while let Some(c) = child {
+                        stack.push(c.clone());
+                        child = c.next_sibling();
+                    }
+                }
+            }
+            let mut child = w.first_child();
+            while let Some(c) = child {
+                if c.is_visible() && c.is_child_visible() {
+                    if let Some(found) = labelled(&c, text) {
+                        return Some(found);
+                    }
+                }
+                child = c.next_sibling();
+            }
+            None
+        }
+        let root: gtk4::Widget = panel.widget.clone().upcast();
+        crate::gtk_test::save_png(&panel.widget, &out.join("desktop-settings.png"));
+        for (entry, file, wait) in [
+            ("Connections", "desktop-connections.png", 1500),
+            ("Add a device", "desktop-add-device.png", 600),
+            ("Pair a phone", "desktop-pair-phone.png", 3000),
+        ] {
+            labelled(&root, entry).unwrap_or_else(|| panic!("no `{entry}` button")).emit_clicked();
+            crate::gtk_test::pump(wait);
+            crate::gtk_test::save_png(&panel.widget, &out.join(file));
+        }
+    }
+
     #[test]
     fn lazy_panel_builds_only_on_open_and_reopens_after_close() {
         if !crate::gtk_test::is_child() {

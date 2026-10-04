@@ -205,7 +205,7 @@ pub struct HarnessInfo {
 /// times per window build, and forking `which` costs tens of milliseconds on a
 /// loaded machine — that dominated the time between the shortcut and the
 /// overlay appearing.
-fn which(cmd: &str) -> Option<String> {
+pub(crate) fn which(cmd: &str) -> Option<String> {
     if cmd.is_empty() {
         return None;
     }
@@ -572,6 +572,13 @@ fn pin_client_exit(session_name: &str) {
 pub struct SessionInventory(std::sync::OnceLock<Option<std::collections::HashMap<String, bool>>>);
 
 impl SessionInventory {
+    // The CLI has already created and pinned this session. Do not execute a
+    // second launcher if it exits before the first VTE attachment.
+    pub(crate) fn cli_created(session: &str) -> Self {
+        let entries = std::collections::HashMap::from([(session.to_string(), true)]);
+        Self(std::sync::OnceLock::from(Some(entries)))
+    }
+
     fn state(&self, session_name: &str) -> Option<bool> {
         self.0.get_or_init(read_session_inventory).as_ref()?.get(session_name).copied()
     }

@@ -70,6 +70,10 @@ pub(super) fn ansi_only(query: &str) -> bool {
     })
 }
 
+pub(super) fn viewport_requested(query: &str) -> bool {
+    query.split('&').any(|pair| matches!(pair, "viewport=1" | "viewport=true"))
+}
+
 pub(super) struct Frame<'a> {
     pub id: &'a str,
     pub agent_type: &'a str,
@@ -81,6 +85,7 @@ pub(super) struct Frame<'a> {
     pub ansi_only: bool,
     pub updated_at: &'a str,
     pub editor: Option<&'a crate::editor_actions::Detected>,
+    pub viewport: Option<&'a crate::phone_viewport::Info>,
 }
 
 /// One serialized stream frame. Without `ansi_only` the frame is unchanged
@@ -101,6 +106,7 @@ pub(super) fn frame_json<'out>(frame: &Frame, output: &'out mut Vec<u8>) -> &'ou
         ansi_only: frame.ansi_only,
         updated_at: frame.updated_at,
         editor: frame.editor,
+        viewport: frame.viewport,
     }
     .write_json(output)
 }
@@ -151,7 +157,7 @@ fn query_status(
 
 /// Push changed terminal snapshots; the first frame doubles as the "attached"
 /// signal, and the stream ends after an `EXITED` frame.
-pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
+pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool, fit_viewport: bool) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
     let deadline = Instant::now() + Duration::from_secs(STREAM_MAX_SECS);
@@ -177,10 +183,17 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
     let mut throttle_from = Instant::now();
     let mut input_probe = false;
     let mut output = Vec::new();
+    let mut viewport = fit_viewport.then(crate::phone_viewport::Lease::new);
+    let mut sent_viewport = None;
     while Instant::now() < deadline {
-        if !ws_client_alive(stream) {
+        // Check revocation before allowing a resize, just as for typed input.
+        if !stream.still_authorized() { return; }
+        if !ws_client_message(stream, |text| {
+            if let Some(viewport) = &mut viewport { viewport.on_message(text, id); }
+        }) {
             return;
         }
+        if let Some(viewport) = &mut viewport { viewport.expire(Instant::now()); }
         let captured = control.capture().ok();
         let alive = captured.is_some();
         let now = Instant::now();
@@ -224,7 +237,8 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
             }
             None => true,
         };
-        if changed || sent_at.elapsed() >= HEARTBEAT {
+        let viewport_info = viewport.as_ref().map(|v| &v.info);
+        if changed || viewport_info != sent_viewport.as_ref() || sent_at.elapsed() >= HEARTBEAT {
             if changed {
                 sent = Some((current_status.status, current_status.label, title.clone(), captured, grid, editor.clone()));
             }
@@ -240,6 +254,7 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
                 ansi_only,
                 updated_at: &utc_now_iso(),
                 editor: sent.as_ref().and_then(|s| s.5.as_ref()),
+                viewport: viewport_info,
             }, &mut output);
             // serde_json produces valid UTF-8: send its bytes as a text frame
             // without allocating a String or validating that output again.
@@ -247,6 +262,7 @@ pub(super) fn stream(stream: &mut Connection, id: &str, ansi_only: bool) {
                 return;
             }
             sent_at = Instant::now();
+            sent_viewport = viewport_info.cloned();
         }
         if !alive {
             let _ = crate::ws::write_close(stream, 1000, "session ended");
@@ -309,6 +325,7 @@ mod tests {
             ansi_only,
             updated_at: "2026-09-24T00:00:00.000Z",
             editor: None,
+            viewport: None,
         }, &mut Vec::new()))
         .unwrap()
     }
@@ -344,6 +361,19 @@ mod tests {
         assert!(!ansi_only(""));
         assert!(!ansi_only("ansiOnly=0"));
         assert!(!ansi_only("ansiOnlyX=1"));
+    }
+
+    #[test]
+    fn viewport_requires_explicit_opt_in_and_old_frames_are_unchanged() {
+        for query in ["viewport=1", "ansiOnly=1&viewport=true"] {
+            assert!(viewport_requested(query));
+        }
+        for query in ["", "viewport=0", "viewport=2", "viewportX=1"] {
+            assert!(!viewport_requested(query));
+        }
+        for ansi_only in [false, true] {
+            assert!(frame(Some("hello"), ansi_only).get("viewport").is_none());
+        }
     }
 
     #[test]
@@ -398,7 +428,7 @@ mod tests {
         let server_id = id.clone();
         let server = std::thread::spawn(move || {
             let (socket, _) = listener.accept().unwrap();
-            stream(&mut Connection::plain(socket), &server_id, true);
+            stream(&mut Connection::plain(socket), &server_id, true, false);
         });
         let first = read_text_frame(&mut client).expect("attached frame");
         assert_eq!(first["id"], id.as_str());

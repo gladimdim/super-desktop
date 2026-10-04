@@ -1672,8 +1672,8 @@ impl MiniTerminalCard {
         self.remote.as_ref()
     }
 
-    /// The workspace this card is bounded by changed size: a remote view
-    /// switched between Fit and 100%, zoomed, or was resized.
+    /// The workspace changed size: the local overlay changed output/scale,
+    /// or a remote view switched between Fit and 100%, zoomed, or resized.
     pub fn set_workspace_size(&self, width: i32, height: i32) {
         self.workspace.set((width.max(1), height.max(1)));
     }
@@ -1920,6 +1920,17 @@ impl MiniTerminalCard {
             &self.fit,
             &self.font_fit,
         );
+    }
+
+    pub(crate) fn cli_session_task(&self) -> Arc<crate::session_task::SessionTask> {
+        Arc::clone(&self.session_task)
+    }
+
+    /// Cancel attachment/preparation without scheduling a name-based kill.
+    /// The CLI worker already holds the preparation lock and owns destruction.
+    pub(crate) fn detach_for_cli_close(&self) {
+        self.session_task.close();
+        self.detach_vte();
     }
 
     pub fn close_session(&self) {
@@ -2667,6 +2678,55 @@ mod tests {
             agent_session_id: None,
             workspace_dir: None,
         }
+    }
+
+    #[test]
+    fn cli_close_detaches_without_legacy_cleanup() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_close_detach_inner");
+    }
+
+    #[test]
+    fn cli_close_detach_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let card = MiniTerminalCard::new(
+            term_data(true), |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        );
+        card.open_with_bare_terminal(480, 320);
+        let task = card.cli_session_task();
+        let before = std::time::Instant::now();
+        assert_eq!(task.with_idle_until(before + Duration::from_secs(1), || card.detach_for_cli_close()), Some(()));
+        assert!(task.is_closed());
+        assert!(card.vte.borrow().is_none());
+        assert!(!task.prepare(|| panic!("closed card must not restart")));
+    }
+
+    #[test]
+    fn cli_geometry_commit_uses_card_callback() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_geometry_commit_inner");
+    }
+
+    #[test]
+    fn cli_geometry_commit_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let saved = Rc::new(RefCell::new(None));
+        let capture = Rc::clone(&saved);
+        let card = MiniTerminalCard::new(
+            term_data(true), |_, _, _| {}, move |_, data| { *capture.borrow_mut() = Some(data.clone()); },
+            |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        );
+        card.open_with_bare_terminal(480, 320);
+        assert!(card.apply_geometry(crate::card_resize::Rect { x: 40.0, y: 90.0, width: 640, height: 480 }));
+        let data = saved.borrow();
+        let data = data.as_ref().expect("geometry must reach persistence callback");
+        assert_eq!((data.x, data.y, data.width, data.height), (40, 90, 640, 480));
+        assert_eq!((data.restored_width, data.restored_height), (640, 480));
+        assert!(!data.iconified);
+        assert_eq!((card.container.width_request(), card.container.height_request()), (640, 480));
+        assert!(!card.vte.borrow().as_ref().unwrap().has_focus());
     }
 
     #[test]

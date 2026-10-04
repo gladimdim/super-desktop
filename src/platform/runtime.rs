@@ -35,7 +35,10 @@ fn default_directory() -> PathBuf {
         "could not read the macOS user temporary directory"
     );
     bytes.truncate(written - 1);
-    PathBuf::from(std::ffi::OsString::from_vec(bytes))
+    let directory = PathBuf::from(std::ffi::OsString::from_vec(bytes));
+    // The OS-provided path can use /var -> /private/var. Resolve that trusted
+    // default so owner-only control can reject symlinks in explicit paths.
+    directory.canonicalize().unwrap_or(directory)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

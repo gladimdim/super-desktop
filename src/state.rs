@@ -454,6 +454,11 @@ pub fn save_state_async(state: AppState) {
     crate::workspace_model::notify_changed();
 }
 
+/// Wait for queued state writes and report failures to mutation callers.
+pub(crate) fn flush_state_saves_checked() -> Result<(), String> {
+    STATE_WRITER.get().map_or(Ok(()), |writer| writer.flush())
+}
+
 /// Only used at shutdown and by the synchronous initialization path.
 pub fn flush_state_saves() {
     if let Some(writer) = STATE_WRITER.get() {

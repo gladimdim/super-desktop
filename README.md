@@ -7,6 +7,12 @@
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 > Press `SUPER + SHIFT + Q` — notes and AI terminals slide in from the screen edges. Press it again — everything disappears and your normal desktop is completely clean. All sessions keep running in background tmux.
 
+![SUPER DESKTOP open above a browser: Claude Code and Codex terminal cards with status badges, and the top bar with the folder field and harness launchers](docs/screenshots/readme-overlay.webp)
+
+<p align="center">
+  <img src="docs/screenshots/desktop-toggle.gif" width="720" alt="SUPER + SHIFT + Q brings the terminal cards into view over a browser, and the same shortcut hides them again">
+</p>
+
 ---
 
 ## 👤 For humans
@@ -85,6 +91,7 @@ PC you connect to each other.
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
+| `v1.1.21` | 3 |
 | `v1.1.17` | 3 |
 
 Look up your phone app's version in Android's **App info** for SUPER DESKTOP.
@@ -97,11 +104,15 @@ notes say your phone app needs it.
 
 SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy workspace:
 
+![The top bar: the This PC selector, the working directory field, New note, the Claude, Codex, OpenCode, Grok and Shell launchers, and Arrange, Settings and Hide on the right](docs/screenshots/readme-toolbar.webp)
+
+
 - **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize from any edge or corner, and group color tags.
 - **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize from any edge or corner with a ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged. Each project folder gets its own label color: a new harness takes the color of its folder, so Claude and Codex working in the same folder match, and a new folder gets a color no other folder uses yet. Pick another color on any card's dot and later harnesses in that folder use it. Drop a card on another one and the buried terminal keeps a **dotted ghost outline** of itself — it disappears only while you are working in that terminal or in the card that covers it, so a stacked desk never hides a session you forgot about.
 - **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
 - **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
+- **⌨️ CLI control for agents** — discover available harnesses, inspect terminal cards, live cell grids and bounded terminal output, move and resize cards with revision checks, close exact sessions with identity guards, create shells and launch configured agents through commands with built-in help and JSON output. Explicit unsafe/download choices and durable request receipts make mutations inspectable. See the [CLI reference](CLI.md) for supported commands and limits.
 - **🔢 Keyboard terminal picker** — hold **Alt for 30 ms** to dim terminal output and show dotted borders with centered digits. Press **Alt+0 … Alt+9** to raise and focus that terminal immediately, even before the preview appears; compact cards restore first. Each terminal gets the first free digit when created or restored (starting at **0**), and keeps it while open. Closing a card frees its digit without renumbering the others. Up to ten terminals per local or remote PC view get shortcuts; extra cards remain mouse-accessible. Release Alt or press Escape to dismiss. Assignments are rebuilt when cards are restored after restarting the app.
 - **⌨ Your own shortcut** — `SUPER + SHIFT + Q` out of the box. Open ⚙ Settings, click **Record**, press any combination you like — `SUPER`/`CTRL`/`ALT` plus a key, or an `F1`–`F12` key on its own: it is captured, remembered in `state.json` and written into Hyprland's config (plus its `code:` form, so a layout switch does not break it).
 - **⚙ Movable settings** — drag the ⚙ Settings card by its header, like a terminal card, to see what is under it, and drag its edges to resize it. It opens at 1024×768, stays on screen below the top bar, and comes back where and how big you left it.
@@ -109,6 +120,11 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
 - **🔌 Phone bridge (optional)** — encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Connections*. A background supervisor checks every five seconds and recovers the bridge after three consecutive failed checks, even with the overlay hidden or screen locked. Stop pauses recovery until Start (or the next daemon launch). Failed starts are retried, and `bridge.previous.log` preserves the previous run beside `bridge.log`. To stay reachable while unattended on external power, enable *Settings → Sleep lock*; recovery cannot run while the PC is suspended. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
 - **🖥 Other PCs** — pair two PCs and open the other one's workspace from the top-left **This PC** selector: its consoles stream live and every action runs on that PC. See [Use another PC's harnesses](#use-another-pcs-harnesses).
+
+The overlay takes its colors from the active Omarchy theme and follows a theme
+change without restarting:
+
+![The same workspace in the Catppuccin Latte, Rose Pine, Everforest and Gruvbox Omarchy themes](docs/screenshots/readme-themes.webp)
 
 ### Use another PC's harnesses
 
@@ -390,7 +406,95 @@ its history into scrollback.
 
 ### CLI quick reference
 
+Read the **[complete CLI reference for people and AI agents](CLI.md)**, also
+available as a [web guide](https://superdesktop.dmytrogladkyi.com/cli.html).
+It covers every public command, exact ID selection, JSON results, permission
+choices, exit statuses and handling uncertain launch outcomes.
+
+Current structured local commands cover discovery, creation and terminal
+observation. Local input and resizing commands are not available; saved card
+geometry and live terminal dimensions can be inspected. Remote operations use the separate legacy `peer-*` commands.
+
+Start with `super-desktop --help` or `super-desktop help agents`. Each listed
+command accepts `--help` for its effects, requirements, output and an example.
+`super-desktop schema --format json` prints the compiled command catalog;
+`super-desktop schema COMMAND` selects one entry. These discovery commands,
+`--version`, and `completion bash` work without a daemon or display. Unknown
+commands exit with status 2 without contacting the daemon.
+
+The owner-only local API provides read-only inspection without opening the
+overlay or starting a daemon:
+
 ```bash
+super-desktop capabilities --format json
+super-desktop app status --format json
+super-desktop terminal list --format json
+super-desktop terminal inspect CARD_ID --format json
+super-desktop terminal geometry CARD_ID --format json
+super-desktop terminal runtime CARD_ID --format json
+super-desktop terminal capture CARD_ID --screen --format json
+super-desktop harness list --all --format json
+super-desktop harness inspect claude --format json
+```
+
+`terminal list` describes saved cards, launch folders and saved geometry in
+logical pixels; it does not claim the terminal process is alive. `harness list`
+lists available launcher types; `--all` includes missing ones with a reason.
+Detection uses the daemon's environment and does not run or install a harness.
+Launch arguments are redacted, package-runner fallbacks are identified, and
+detected permission-bypass flags are reported without claiming a verified
+security policy. These commands support only `--target local`.
+
+`terminal runtime` observes the pane's running/exited status and columns/rows.
+`terminal capture` reads plain screen text; `--history --lines 200` adds bounded
+retained scrollback. Capture can contain secrets. It never attaches, sends input
+or resizes the pane. Check its truncation fields: the 64 KiB byte limit keeps the
+oldest prefix of the selected region, and alternate-screen history may be
+unavailable. Changed or ambiguous pane targets are refused without returning text.
+
+Create a shell card or launch a configured harness without opening the overlay:
+
+```bash
+super-desktop terminal create --cwd "$PWD" --request-id shell-001 --format json
+super-desktop harness launch claude --cwd "$PWD" --request-id task-001 --allow-unsafe-harness --format json
+super-desktop request inspect task-001 --format json
+```
+
+Launches require an absolute existing directory and an explicit request ID
+(1–64 ASCII letters, digits, `_` or `-`). Recognized permission-bypass defaults,
+changed launcher arguments and custom launchers require `--allow-unsafe-harness`.
+Built-in package-runner fallbacks also require `--allow-download`. These choices
+accept the saved launcher configuration; they do not sandbox it or block its
+own network activity. No initial prompt or argument overrides are supported.
+
+Reuse an ID only with exactly the same request: its recorded result is returned
+without launching again, including after a daemon restart. Changed requests
+under the same ID fail with a conflict. Receipts persist under
+`${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop/cli-requests`, with a limit
+of 4096 and no automatic pruning. Deleting receipts loses duplicate protection.
+After an unknown outcome, inspect the receipt and terminal inventory; do not
+retry with a new ID. A launch may have started even if adopting its card failed.
+Recorded success means the card was added and saved, not that the harness is
+ready, authenticated, still running, or that the card still exists.
+
+JSON responses have `schemaVersion`, `requestId`, `target`, `ok`, and either
+`data` or `error`. Exit codes are 0 for success, 2 for invalid arguments, 3 for
+an absent ID, 4 for unsafe access or a required opt-in, 5 for a request conflict,
+6 for unavailable or unsupported control, 7 for a timeout or unknown outcome,
+and 8 for an invalid response or output
+failure. A daemon without the local API returns an unavailable error; it is
+never restarted automatically. `capabilities` describes the running server;
+`schema` is the compiled client's command metadata catalog.
+
+The catalog marks existing commands as `legacy`: their output and exit codes
+are preserved. Inspect their responses before assuming a mutation succeeded,
+and check the target before retrying an uncertain operation. `harnesses` lists
+running instances, not available launcher types. Terminal input and launcher
+commands have the local user's authority; they are not an agent sandbox.
+
+```bash
+super-desktop help agents
+super-desktop schema --format json
 super-desktop toggle          # show / hide
 super-desktop status          # visible? how many notes / terminals
 super-desktop add-note "Buy milk"

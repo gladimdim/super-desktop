@@ -165,6 +165,7 @@ fn bind_top_bar_width(
     window: &impl IsA<gtk4::Window>,
     brand: &Label,
     hint: &Label,
+    on_allocate: Rc<dyn Fn(i32, i32)>,
 ) {
     // The compositor's allocation is authoritative, never the canvas extents.
     //
@@ -185,6 +186,9 @@ fn bind_top_bar_width(
         Rc::new(move || {
             if let (Some(window), Some(hud)) = (window.upgrade(), hud.upgrade()) {
                 fit_top_bar(&hud, window.width(), &brand, &hint);
+                if window.width() > 0 && window.height() > 0 {
+                    on_allocate(window.width(), window.height());
+                }
             }
         })
     };
@@ -349,7 +353,25 @@ pub struct SuperDesktopWindow {
     settings_layout: RefCell<Option<Rc<crate::floating_panel::MovablePanel>>>,
 }
 
+/// Use compositor-allocated logical pixels; monitor zero is only a startup fallback.
+fn allocated_workspace_size(window: &impl IsA<gtk4::Window>, fallback: (i32, i32)) -> (i32, i32) {
+    let window = window.as_ref();
+    if window.width() > 0 && window.height() > 0 {
+        (window.width(), window.height())
+    } else {
+        fallback
+    }
+}
+
 impl SuperDesktopWindow {
+    fn screen_width(&self) -> i32 {
+        allocated_workspace_size(&self.window, (self.screen_width, self.screen_height)).0
+    }
+
+    fn screen_height(&self) -> i32 {
+        allocated_workspace_size(&self.window, (self.screen_width, self.screen_height)).1
+    }
+
     /// `hot_inside` is the daemon's shared "pointer is in the top-left corner
     /// zone" flag: this window is full-screen and therefore sees every pointer
     /// move while it is visible, which is the half of the hot-corner gesture the
@@ -901,7 +923,21 @@ impl SuperDesktopWindow {
 
         // Layer-shell chooses the output. Its allocated logical width is the
         // authority, including after a monitor or scale change.
-        bind_top_bar_width(&hud, &win_rc.window, &brand, &hint);
+        bind_top_bar_width(&hud, &win_rc.window, &brand, &hint, Rc::new({
+            let owner = Rc::downgrade(&win_rc);
+            let previous = Cell::new((0, 0));
+            move |width, height| {
+                if previous.replace((width, height)) == (width, height) {
+                    return;
+                }
+                if let Some(owner) = owner.upgrade() {
+                    let cards = owner.terminal_cards.borrow().clone();
+                    for card in cards {
+                        card.set_workspace_size(width, height);
+                    }
+                }
+            }
+        }));
 
         // On the canvas, not an Overlay child: Fixed.move_ translates the
         // full-width dock as one widget, same as the cards.
@@ -1150,18 +1186,20 @@ impl SuperDesktopWindow {
 
         let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
-        let sw = self.screen_width;
-        let sh = self.screen_height;
+        let sw = self.screen_width();
+        let sh = self.screen_height();
 
         let canvas_for_tick = canvas.clone();
+        let drag_window = self.window.downgrade();
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
+            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
             // Perf: .dragging disables hover transitions/shadows (see CSS)
             // so the note paints cheaply while it moves at 120Hz.
             if !widget.has_css_class("dragging") {
                 widget.add_css_class("dragging");
             }
-            let cx = x.clamp(10.0, (sw - 80) as f64);
-            let cy = y.clamp(70.0, (sh - 60) as f64);
+            let cx = x.clamp(10.0, (sw - 80).max(10) as f64);
+            let cy = y.clamp(70.0, (sh - 60).max(70) as f64);
             drag_pending_update.borrow_mut().insert(widget, (cx, cy));
 
             if !*drag_tick_active.borrow() {
@@ -1187,12 +1225,14 @@ impl SuperDesktopWindow {
         let canvas_note_end = canvas.clone();
         let drag_pending_note_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
+        let drag_window = self.window.downgrade();
         let on_drag_end = move |widget: gtk4::Widget, data: &NoteData| {
+            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
             widget.remove_css_class("dragging");
             drag_pending_note_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
-            final_data.x = final_data.x.clamp(10, sw - 80);
-            final_data.y = final_data.y.clamp(70, sh - 60);
+            final_data.x = final_data.x.clamp(10, (sw - 80).max(10));
+            final_data.y = final_data.y.clamp(70, (sh - 60).max(70));
             canvas_note_end.move_(&widget, final_data.x as f64, final_data.y as f64);
             let mut s = state_end.borrow_mut();
             if let Some(n) = s.notes.iter_mut().find(|n| n.id == final_data.id) {
@@ -1368,13 +1408,13 @@ impl SuperDesktopWindow {
 
         // Default size for a new harness: 640x480, clamped to the screen.
         let (def_w, def_h) =
-            clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, self.screen_width, self.screen_height);
+            clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, self.screen_width(), self.screen_height());
         // Center on screen; cascade slightly so stacked harnesses don't overlap exactly.
         let cascade = (idx as i32 % 5) * 32;
-        let cx = ((self.screen_width - def_w) / 2 + cascade)
-            .clamp(10, (self.screen_width - def_w - 10).max(10));
-        let cy = ((self.screen_height - def_h) / 2 + cascade)
-            .clamp(70, (self.screen_height - def_h - 10).max(70));
+        let cx = ((self.screen_width() - def_w) / 2 + cascade)
+            .clamp(10, (self.screen_width() - def_w - 10).max(10));
+        let cy = ((self.screen_height() - def_h) / 2 + cascade)
+            .clamp(70, (self.screen_height() - def_h - 10).max(70));
 
         let nx = x.unwrap_or(cx);
         let ny = y.unwrap_or(cy);
@@ -1407,6 +1447,52 @@ impl SuperDesktopWindow {
         sess
     }
 
+    /// Adopt an already launched CLI session without mapping or focusing the overlay.
+    pub(crate) fn adopt_cli_terminal(&self, mut data: TerminalData) -> Result<(), ()> {
+        {
+            let state = self.state.borrow();
+            if state.terminals.len() >= crate::workspace_model::MAX_DESKTOP_CARDS
+                || state
+                    .terminals
+                    .iter()
+                    .any(|t| t.id == data.id || t.session_name == data.session_name)
+            {
+                return Err(());
+            }
+        }
+        let (width, height) = clamp_card_size(
+            NEW_TERM_WIDTH,
+            NEW_TERM_HEIGHT,
+            self.screen_width(),
+            self.screen_height(),
+        );
+        let cascade = (self.terminal_cards.borrow().len() as i32 % 5) * 32;
+        data.x = ((self.screen_width() - width) / 2 + cascade)
+            .clamp(10, (self.screen_width() - width - 10).max(10));
+        data.y = ((self.screen_height() - height) / 2 + cascade)
+            .clamp(70, (self.screen_height() - height - 10).max(70));
+        data.width = width;
+        data.height = height;
+        data.restored_width = width;
+        data.restored_height = height;
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(directory) = &data.workspace_dir {
+                crate::state::remember_workspace_dir(&mut state, directory);
+                data.tag = crate::folder_colors::tag_for_new_card(&state, directory);
+                crate::folder_colors::remember(&mut state, directory, data.tag);
+            }
+            state.terminals.push(data.clone());
+            crate::state::normalize_terminal_order(&mut state);
+            crate::state::save_state_async(state.clone());
+        }
+        let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::cli_created(
+            &data.session_name,
+        ));
+        self.spawn_terminal_widget(data, false, Some(inventory), None);
+        Ok(())
+    }
+
     fn spawn_terminal_widget(
         &self,
         term_data: TerminalData,
@@ -1423,19 +1509,21 @@ impl SuperDesktopWindow {
 
         let drag_pending_update = Rc::clone(&self.drag_pending);
         let drag_tick_active = Rc::clone(&self.drag_tick_active);
-        let sw = self.screen_width;
-        let sh = self.screen_height;
+        let sw = self.screen_width();
+        let sh = self.screen_height();
 
         let canvas_for_tick = canvas.clone();
         let ghosts_drag = Rc::clone(&ghosts);
+        let drag_window = self.window.downgrade();
         let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
+            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
             // Perf: .dragging disables hover transitions/shadows (see CSS)
             // so the card paints cheaply while it moves at 120Hz.
             if !widget.has_css_class("dragging") {
                 widget.add_css_class("dragging");
             }
-            let cx = x.clamp(10.0, (sw - 80) as f64);
-            let cy = y.clamp(70.0, (sh - 60) as f64);
+            let cx = x.clamp(10.0, (sw - 80).max(10) as f64);
+            let cy = y.clamp(70.0, (sh - 60).max(70) as f64);
             drag_pending_update.borrow_mut().insert(widget, (cx, cy));
 
             if !*drag_tick_active.borrow() {
@@ -1466,18 +1554,20 @@ impl SuperDesktopWindow {
         let drag_pending_term_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
         let ghosts_end = Rc::clone(&ghosts);
+        let drag_window = self.window.downgrade();
         let on_drag_end = move |widget: gtk4::Widget, data: &TerminalData| {
+            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
             widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
             // The icon and the expanded card have separate remembered spots;
             // clamp and snap to whichever one this card is currently in.
             if final_data.iconified {
-                final_data.icon_x = Some(final_data.icon_x.unwrap_or(final_data.x).clamp(10, sw - 80));
-                final_data.icon_y = Some(final_data.icon_y.unwrap_or(final_data.y).clamp(70, sh - 60));
+                final_data.icon_x = Some(final_data.icon_x.unwrap_or(final_data.x).clamp(10, (sw - 80).max(10)));
+                final_data.icon_y = Some(final_data.icon_y.unwrap_or(final_data.y).clamp(70, (sh - 60).max(70)));
             } else {
-                final_data.x = final_data.x.clamp(10, sw - 80);
-                final_data.y = final_data.y.clamp(70, sh - 60);
+                final_data.x = final_data.x.clamp(10, (sw - 80).max(10));
+                final_data.y = final_data.y.clamp(70, (sh - 60).max(70));
             }
             let (px, py) = displayed_pos(&final_data);
             canvas_term_end.move_(&widget, px, py);
@@ -1753,7 +1843,7 @@ impl SuperDesktopWindow {
         for note in notes.iter() {
             let w = note.data.borrow().width as f64;
             let h = note.data.borrow().height as f64;
-            if curr_y + h > (self.screen_height - 60) as f64 {
+            if curr_y + h > (self.screen_height() - 60) as f64 {
                 col_x += w + gap;
                 curr_y = start_y;
             }
@@ -1764,13 +1854,13 @@ impl SuperDesktopWindow {
         }
 
         // Terminals right
-        let mut col_right = (self.screen_width - 30) as f64;
+        let mut col_right = (self.screen_width() - 30) as f64;
         let mut curr_y = start_y;
         let mut col_width = 0.0;
         for term in terms.iter() {
             let w = term.data.borrow().width as f64;
             let h = term.data.borrow().height as f64;
-            if curr_y + h > (self.screen_height - 60) as f64 && curr_y > start_y {
+            if curr_y + h > (self.screen_height() - 60) as f64 && curr_y > start_y {
                 col_right -= col_width + gap;
                 curr_y = start_y;
                 col_width = 0.0;
@@ -1857,7 +1947,7 @@ impl SuperDesktopWindow {
         let mut trajectories = self.anim_trajectories.borrow_mut();
         trajectories.retain(|widget, _| widget.parent().is_some());
         for (widget, x, y, width, offset) in self.machine_view.slide_cards() {
-            let (sx, sy) = card_slide_offscreen(x + offset, y, width, self.screen_width as f64);
+            let (sx, sy) = card_slide_offscreen(x + offset, y, width, self.screen_width() as f64);
             trajectories.insert(
                 widget,
                 Trajectory {
@@ -1886,17 +1976,17 @@ impl SuperDesktopWindow {
             let tx = note.data.borrow().x as f64;
             let ty = note.data.borrow().y as f64;
             let w = note.data.borrow().width as f64;
-            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width as f64);
+            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width() as f64);
             trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
         for term in terms.iter() {
-            let (tx, ty, w, _) = terminal_slide_geom(term, self.screen_width, self.screen_height);
-            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width as f64);
+            let (tx, ty, w, _) = terminal_slide_geom(term, self.screen_width(), self.screen_height());
+            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width() as f64);
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
 
         let (hw, hh) = hud_measured_size(&self.hud);
-        let (tx, ty, sx, sy) = hud_slide_pose(hw, hh, self.screen_width as f64);
+        let (tx, ty, sx, sy) = hud_slide_pose(hw, hh, self.screen_width() as f64);
         trajs.insert(self.hud.clone().upcast(), Trajectory { sx, sy, tx, ty });
         raise_canvas_child(&self.canvas, &self.hud);
     }
@@ -1994,11 +2084,119 @@ impl SuperDesktopWindow {
         // Export the same logical canvas used by local placement/animation.
         // Do not export animated widget coordinates during slide-in/out.
         let canvas = crate::desktop_protocol::Canvas {
-            x: 0, y: 0, width: self.screen_width as u32, height: self.screen_height as u32,
+            x: 0, y: 0, width: self.screen_width() as u32, height: self.screen_height() as u32,
             scale: self.window.scale_factor() as f64,
             top_inset: top_bar_height(self.state.borrow().top_bar_size) as u32,
         };
         model.snapshot(canvas, &presentation)
+    }
+
+    /// Local CLI geometry uses the live card and output on this GTK turn.
+    /// It never sends a bridge command, starts a session, or presents the overlay.
+    pub fn cli_geometry(&self, model: &crate::workspace_model::LocalWorkspace, request: &crate::control::Request) -> crate::control::Reply {
+        use crate::control::{Command, Reply};
+        use crate::control_geometry as geometry;
+        let id = &request.request_id;
+        let card_id = geometry::card_id(&request.command);
+        let snapshot = match self.desktop_snapshot(model) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Reply::failure(id, "unavailable", "Local geometry is unavailable."),
+        };
+        let Some(current) = snapshot.cards.iter().find(|card| card.card_id == card_id) else {
+            return Reply::failure(id, "not_found", "No local terminal card has that ID.");
+        };
+        if matches!(request.command, Command::Geometry { .. }) {
+            return Reply::success(id, geometry::describe(&snapshot, current));
+        }
+        let prepared = match geometry::prepare(request, &snapshot, current) {
+            Ok(prepared) => prepared,
+            Err(reply) => return reply,
+        };
+        let card = match self.any_terminal_card(card_id) {
+            Ok(card) => card,
+            Err(_) => return Reply::failure(id, "not_found", "No local terminal widget has that ID."),
+        };
+        if snapshot.cards.iter().filter(|other| other.session_name == current.session_name).count() != 1
+            || card.data.borrow().session_name != current.session_name
+        {
+            return Reply::failure(id, "conflict", "The card-to-session mapping is ambiguous or changed.");
+        }
+        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+            return Reply::failure(id, "conflict", "A local geometry gesture is in progress.");
+        }
+        let applied = match request.command {
+            Command::Move { .. } => self.move_terminal_card(card_id, prepared.rect.x as i32, prepared.rect.y as i32).is_ok(),
+            Command::Resize { .. } => card.apply_geometry(prepared.rect),
+            _ => false,
+        };
+        if !applied {
+            return Reply::unknown(id);
+        }
+        let after = match self.desktop_snapshot(model) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Reply::unknown(id),
+        };
+        let Some(current) = after.cards.iter().find(|card| card.card_id == card_id) else {
+            return Reply::unknown(id);
+        };
+        let mut data = geometry::describe(&after, current);
+        data["requested"] = prepared.requested;
+        data["clamped"] = serde_json::json!(prepared.clamped);
+        data["outcome"] = serde_json::json!("applied");
+        Reply::success(id, data)
+    }
+
+    /// The close worker owns destruction; GTK only validates and removes the
+    /// exact card. This path deliberately does not call close_session().
+    pub(crate) fn cli_close(&self, model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request, action: crate::control_close::Action) -> crate::control_close::UiResult
+    {
+        use crate::control::{Command, Reply};
+        use crate::control_close::{Action, Target};
+        let fail = |code, message| Reply::failure(&request.request_id, code, message);
+        let Command::Close { id, expect_epoch, expect_revision, .. } = &request.command else {
+            return Err(fail("invalid_request", "Expected terminal close."));
+        };
+        let snapshot = self.desktop_snapshot(model).map_err(|_| fail("unavailable", "Local workspace is unavailable."))?;
+        let current = snapshot.cards.iter().find(|card| card.card_id == *id)
+            .ok_or_else(|| fail("not_found", "No local terminal card has that ID."))?;
+        if expect_epoch != &snapshot.epoch || expect_revision != &crate::control_geometry::revision(&snapshot, current) {
+            return Err(fail("conflict", "The card changed or the daemon restarted. Read terminal geometry again."));
+        }
+        let card = self.any_terminal_card(id).map_err(|_| fail("not_found", "No local terminal widget has that ID."))?;
+        let data = card.data.borrow().clone();
+        if snapshot.cards.iter().filter(|other| other.card_id == *id).count() != 1
+            || snapshot.cards.iter().filter(|other| other.session_name == data.session_name).count() != 1
+            || current.session_name != data.session_name || card.cli_session_task().is_closed()
+        {
+            return Err(fail("conflict", "The card-to-session mapping changed, is ambiguous, or is closing."));
+        }
+        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+            return Err(fail("conflict", "A local geometry gesture is in progress; the card was not closed."));
+        }
+        match action {
+            Action::Inspect => Ok(Some(Target { data, task: card.cli_session_task() })),
+            Action::Remove(expected) => {
+                if data.id != expected.data.id || data.session_name != expected.data.session_name
+                    || data.created_at != expected.data.created_at
+                    || !std::sync::Arc::ptr_eq(&card.cli_session_task(), &expected.task) {
+                    return Err(fail("conflict", "The terminal card was replaced before close."));
+                }
+                card.detach_for_cli_close();
+                self.terminal_cards.borrow_mut().retain(|other| other.data.borrow().id != *id);
+                self.drag_pending.borrow_mut().remove(card.container.upcast_ref::<gtk4::Widget>());
+                self.canvas.remove(&card.container);
+                let snapshot = {
+                    let mut state = self.state.borrow_mut();
+                    state.terminals.retain(|other| other.id != *id);
+                    crate::state::normalize_terminal_order(&mut state);
+                    state.clone()
+                };
+                crate::state::save_state_async(snapshot);
+                self.ghosts.refresh();
+                Ok(None)
+            }
+        }
     }
 
     pub fn item_counts(&self) -> (usize, usize) {
@@ -2037,8 +2235,8 @@ impl SuperDesktopWindow {
     pub fn move_terminal_card(&self, card_id: &str, x: i32, y: i32) -> Result<(), &'static str> {
         let card = self.terminal_card(card_id)?;
         let (x, y) = crate::remote_workspace::clamp_card_origin(
-            self.screen_width.max(0) as u32,
-            self.screen_height.max(0) as u32,
+            self.screen_width().max(0) as u32,
+            self.screen_height().max(0) as u32,
             x,
             y,
         );
@@ -2195,8 +2393,8 @@ impl SuperDesktopWindow {
                     self.canvas.move_(&other.container, px, py);
                 }
             }
-            card.expand(self.screen_width, self.screen_height);
-            let (x, y, _, _) = expanded_rect(self.screen_width, self.screen_height);
+            card.expand(self.screen_width(), self.screen_height());
+            let (x, y, _, _) = expanded_rect(self.screen_width(), self.screen_height());
             self.canvas.remove(&card.container);
             self.canvas.put(&card.container, x, y);
         } else {
@@ -2230,8 +2428,8 @@ impl SuperDesktopWindow {
         let (width, height) = clamp_card_size(
             layout.width as i32,
             layout.height as i32,
-            self.screen_width,
-            self.screen_height,
+            self.screen_width(),
+            self.screen_height(),
         );
         let current = {
             let data = card.data.borrow();
@@ -2239,8 +2437,8 @@ impl SuperDesktopWindow {
                 clamp_card_size(
                     data.width,
                     data.height,
-                    self.screen_width,
-                    self.screen_height,
+                    self.screen_width(),
+                    self.screen_height(),
                 ),
                 data.iconified,
             )
@@ -2672,6 +2870,50 @@ mod tests {
     }
 
     #[test]
+    fn workspace_bounds_follow_output_allocation() {
+        crate::gtk_test::run_in_child_process("window::tests::workspace_bounds_follow_output_allocation_inner");
+    }
+
+    #[test]
+    fn workspace_bounds_follow_output_allocation_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let window = gtk4::Window::new();
+        window.set_resizable(false);
+        let canvas = Fixed::new();
+        let hud = gtk4::Box::new(Orientation::Horizontal, 0);
+        canvas.put(&hud, 0.0, 0.0);
+        let offscreen = Label::new(Some("saved card"));
+        canvas.put(&offscreen, 4000.0, 2000.0);
+        window.set_child(Some(&desktop_overlay(&canvas)));
+        let observed = Rc::new(Cell::new((0, 0)));
+        bind_top_bar_width(&hud, &window, &Label::new(None), &Label::new(None), Rc::new({
+            let observed = Rc::clone(&observed);
+            move |w, h| observed.set((w, h))
+        }));
+        let fallback = (320, 240);
+        assert_eq!(allocated_workspace_size(&window, fallback), fallback);
+        for size in [(480, 360), (960, 700), (600, 400), (960, 700), (480, 360)] {
+            window.set_default_size(size.0, size.1);
+            window.present();
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while observed.get() != size && std::time::Instant::now() < deadline {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(observed.get(), size, "production allocation callback must follow both dimensions");
+            assert_eq!(allocated_workspace_size(&window, fallback), size);
+            assert_eq!(hud.width_request(), size.0);
+            let limits = crate::mini_terminal::workspace_limits(observed.get(), 1.0);
+            assert_eq!(limits.right, f64::from(size.0 - 10));
+            assert_eq!(limits.bottom, f64::from(size.1 - 10));
+        }
+        window.close();
+    }
+
+    #[test]
     fn toolbar_controls_stay_on_screen() {
         crate::gtk_test::run_in_child_process_needing_large_screen("window::tests::toolbar_controls_inner");
     }
@@ -2783,7 +3025,7 @@ mod tests {
         window.set_default_size(1024, 600);
         window.set_resizable(false);
         window.set_child(Some(&root));
-        bind_top_bar_width(&hud, &window, &brand, &hint);
+        bind_top_bar_width(&hud, &window, &brand, &hint, Rc::new(|_, _| {}));
         window.present();
         let check_mapped = |width: i32| {
             let until = std::time::Instant::now() + Duration::from_secs(3);
@@ -2957,11 +3199,13 @@ mod tests {
 
     #[test]
     fn test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes() {
-        if !crate::gtk_test::is_child() {
-            crate::gtk_test::run_in_child_process("window::tests::test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes");
-            return;
-        }
-        let _ = gtk4::init();
+        crate::gtk_test::run_in_child_process("window::tests::focused_terminal_stacking_inner");
+    }
+
+    #[test]
+    fn focused_terminal_stacking_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
         let canvas = Fixed::new();
 
         // Create terminal container 1 (icon/mini terminal)

@@ -143,6 +143,7 @@
     <div class="cta">
       <a class="btn primary" href="#install">Install</a>
       <a class="btn ghost" href="#features">Main features</a>
+      <a class="btn ghost" href="cli.html">CLI reference</a>
       <a class="btn ghost" href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </div>
     <p><a class="pill news-link" href="#ios">Android app available · iPhone in development →</a></p>
@@ -219,6 +220,7 @@
       <div class="card"><h3>📖 Built for foldables</h3><p>Unfold for two live terminals side by side next to your harness list, with layouts that follow every fold and resize. On Android today, coming to iPhone.</p></div>
       <div class="card"><h3>🖥️ All your PCs, connected</h3><p>Pair as many PCs as you like. Each one can open any other's workspace, to watch and type into its sessions as if you were there.</p></div>
       <div class="card"><h3>🔒 No accounts, no servers</h3><p>Your PCs and phones talk directly over your own network or Tailscale, encrypted and pinned to each device. Nothing to sign up for, no cloud in between.</p></div>
+      <div class="card"><h3>⌨️ CLI control for agents</h3><p>List harnesses, inspect terminal cards, live sizes and bounded output, move and resize cards, close exact sessions, create shell terminals, and launch configured agents. Built-in help and JSON results let other agents discover how to use it. <a href="cli.html">Read the CLI reference →</a></p></div>
       <div class="card"><h3>⚡ Native and fast</h3><p>Rust, GTK4 and tmux: no Electron, no web views. The workspace is there the moment you press the shortcut, and your agents keep running while it is hidden.</p></div>
       <div class="card wide"><h3>🤖 Use any harness</h3><p>Every coding agent installed on the PC gets a one-click launcher.</p>
         <div class="harness-row">
@@ -243,6 +245,24 @@
       </div>
       <div class="card"><h3>🧩 Bring your own harness</h3><p>Any other command-line agent: add it in ⚙ Settings → Harness launchers → <strong>Add a harness</strong>, and it gets the same launcher and live terminal card as the built-in ones.</p></div>
     </div>
+  </section>
+
+  <section id="cli">
+    <h2>CLI control for people and AI agents</h2>
+    <p class="sub">Discover commands from the terminal, choose a configured harness, and launch it in an explicit working directory. Built-in help explains each command's effects and requirements.</p>
+    <div class="grid">
+      <div class="card"><h3>Discover before acting</h3><p>Read command help, inspect the command catalog, and query the running desktop's capabilities. List available harnesses, inspect saved cards and live cell grids, and capture screen text or bounded scrollback using exact card IDs.</p></div>
+      <div class="card"><h3>Launch with explicit choices</h3><p>Create a shell or launch a harness without opening the overlay. Permission-bypass configurations and built-in download fallbacks require explicit opt-in.</p></div>
+      <div class="card"><h3>Track each change</h3><p>JSON responses and durable request receipts let an agent inspect an uncertain result. Reusing the same request ID and payload does not repeat a launch, move, resize or close.</p></div>
+      <div class="card"><h3>Move and resize safely</h3><p>Read logical display bounds, move cards and resize their outer dimensions. Revision checks reject stale edits; bounds adjustments require explicit opt-in.</p></div>
+      <div class="card"><h3>Close the intended session</h3><p>Close a terminal using its exact card and live pane identities. Stale targets are refused, and durable receipts prevent a repeated request from closing a replacement session.</p></div>
+    </div>
+    <pre><code>super-desktop help agents
+super-desktop capabilities --format json
+super-desktop harness list --all --format json
+super-desktop terminal list --format json</code></pre>
+    <p class="note"><strong>Current coverage:</strong> structured local discovery, creation, terminal observation, card movement/resizing and guarded closing, plus existing overlay, note, theme and paired-PC commands. Local terminal input and direct cell-grid resizing commands are not available. Captured output can contain sensitive data. Launchers run with the desktop owner's authority.</p>
+    <p><a class="btn ghost" href="cli.html">Complete CLI reference →</a> <a class="btn ghost" href="https://raw.githubusercontent.com/gladimdim/super-desktop/master/CLI.md">Plain Markdown for agents</a></p>
   </section>
 
   <section id="remote">
@@ -275,6 +295,7 @@
       <div class="card"><h3>🔒 Pair once, revoke anytime</h3><p>Pair by scanning a QR code and confirming the matching code on your desktop. Access can be taken away from any phone whenever you like.</p></div>
     </div>
     <div class="note">A paired phone can <strong>operate</strong> your terminals, not just watch them — so only pair devices you trust, and remove any phone you no longer use.</div>
+    <p style="margin-top:20px"><a class="btn ghost" href="connect.html">📱 Step by step: connect your phone →</a></p>
   </section>
 
   <section id="ios" class="news" aria-labelledby="ios-heading">
@@ -311,7 +332,7 @@
   <footer>
     Built in Rust (GTK4 · LayerShell · VTE · tmux) for Omarchy &amp; Hyprland.<br>
     Local overlay · remote PC-to-PC sessions · phone linking.<br>
-    <a href="https://github.com/gladimdim/super-desktop#readme">README</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a> · <a href="privacy.html">Privacy policy</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a><br>
+    <a href="https://github.com/gladimdim/super-desktop#readme">README</a> · <a href="connect.html">Connect your phone</a> · <a href="cli.html">CLI reference</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a> · <a href="privacy.html">Privacy policy</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a><br>
     MIT-style open source — issues and PRs welcome.
   </footer>
 

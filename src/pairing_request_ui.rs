@@ -761,6 +761,66 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
 
+    /// The website's screenshots of a phone's connection request and its
+    /// approval, from a disposable bridge (see
+    /// `harness_settings::tests::pairing_screenshots`): opt-in with
+    /// SD_PAIRING_SHOTS, it waits for a request, saves the panel, approves it
+    /// and saves the result.
+    #[test]
+    fn pairing_request_screenshots() {
+        if std::env::var_os("SD_PAIRING_SHOTS").is_none() {
+            return;
+        }
+        crate::gtk_test::run_in_child_process("pairing_request_ui::tests::pairing_request_screenshots_inner");
+    }
+
+    #[test]
+    fn pairing_request_screenshots_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let Some(out) = std::env::var_os("SD_PAIRING_SHOTS").map(std::path::PathBuf::from) else { return };
+        assert!(std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").is_some(), "only against a disposable bridge state dir");
+        gtk4::init().unwrap();
+        gtk4::Settings::default().unwrap().set_gtk_application_prefer_dark_theme(true);
+        crate::styles::apply_styles();
+        let panel = PairingRequestPanel::new();
+        // Page slides run on the frame clock, which the private display may
+        // not drive: show each page at once so the capture is that page.
+        panel.pages.set_transition_type(gtk4::StackTransitionType::None);
+        let window = gtk4::Window::new();
+        window.add_css_class("super-desktop");
+        window.set_default_size(620, 640);
+        window.set_child(Some(&panel.widget));
+        window.present();
+        panel.open();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while panel.view.get() != View::Request {
+            crate::gtk_test::pump(200);
+            if panel.view.get() == View::Empty {
+                panel.open();
+            }
+            assert!(Instant::now() < deadline, "no connection request arrived");
+        }
+        crate::gtk_test::pump(400);
+        crate::gtk_test::save_png(&panel.widget, &out.join("desktop-request.png"));
+        // SD_PAIRING_APPROVE_AFTER: wait for this file first, so the phone's
+        // own code screen can be captured while the request still waits.
+        if let Some(go) = std::env::var_os("SD_PAIRING_APPROVE_AFTER") {
+            while !std::path::Path::new(&go).exists() {
+                crate::gtk_test::pump(200);
+                assert!(Instant::now() < deadline, "no go-ahead to approve");
+            }
+        }
+        panel.decide(true);
+        while panel.view.get() != View::Result {
+            crate::gtk_test::pump(100);
+            assert!(Instant::now() < deadline, "the request was not approved");
+        }
+        crate::gtk_test::pump(400);
+        crate::gtk_test::save_png(&panel.widget, &out.join("desktop-approved.png"));
+    }
+
     #[test]
     fn requests_parse_defensively_and_codes_read_in_two_groups() {
         let full = Request::parse(&json!({"requestId":"r","deviceName":"Laptop","deviceType":"pc",

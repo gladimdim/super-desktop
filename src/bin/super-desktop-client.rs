@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::os::unix::{net::UnixStream, process::CommandExt};
 use std::path::Path;
 use std::time::Duration;
-use super_desktop::{harness_record, platform};
+use super_desktop::{cli, harness_record, platform};
 
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
     let stream = match UnixStream::connect(path) {
@@ -39,6 +39,9 @@ fn exchange(mut stream: UnixStream, command: &str) -> std::io::Result<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::run(&args) {
+        std::process::exit(code);
+    }
     let action = args.first().map(String::as_str).unwrap_or("toggle");
     if action == "harness-event" {
         harness_record::record(args.get(1).map(String::as_str).unwrap_or(""));

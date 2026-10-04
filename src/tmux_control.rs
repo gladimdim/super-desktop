@@ -1,5 +1,6 @@
-//! A private control client for a phone terminal. It never resizes the desktop
-//! pane, and closes only its own client when the phone disconnects.
+//! Private control clients for a phone terminal. Ordinary watchers and input
+//! clients never resize; an explicitly requested phone viewport may participate
+//! in tmux sizing. Closing a client never closes its terminal session.
 //!
 //! A *watching* client (`open_watching`) also receives tmux's `%output`
 //! notifications. Their payload is never kept: the reader thread only bumps an
@@ -170,9 +171,12 @@ impl Control {
     }
 
     fn spawn(session: &str, activity: Option<Arc<Activity>>) -> Result<Self, String> {
+        Self::spawn_with_command(session, activity, Command::new("tmux"))
+    }
+
+    fn spawn_with_command(session: &str, activity: Option<Arc<Activity>>, mut command: Command) -> Result<Self, String> {
         let flags = if activity.is_some() { "ignore-size" } else { "ignore-size,no-output" };
-        let mut child = Command::new("tmux")
-            .args([
+        let mut child = command.args([
                 "-C",
                 "attach-session",
                 "-f",
@@ -205,6 +209,30 @@ impl Control {
         }
         client.pane = pane.to_string();
         Ok(client)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_for_test(session: &str, command: Command) -> Result<Self, String> {
+        Self::spawn_with_command(session, None, command)
+    }
+
+    /// Do not override a user's sizing policy or resize other panes/windows.
+    pub fn phone_viewport_available(&mut self) -> Result<bool, String> {
+        self.safe_session().ok_or("Invalid session")?;
+        self.pane_format("#{window-size} #{window_panes} #{session_windows}")
+            .map(|layout| layout.trim() == "latest 1 1")
+    }
+
+    /// Control-mode sizes describe the pane grid (no tmux status-line offset).
+    /// Dropping this client returns sizing to the remaining clients, even if
+    /// the bridge process crashes. Never sets persistent window options.
+    pub fn set_phone_viewport(&mut self, columns: u16, rows: u16) -> Result<(), String> {
+        if !(20..=500).contains(&columns) || !(5..=300).contains(&rows) {
+            return Err("invalid_viewport".into());
+        }
+        self.command("refresh-client -f !ignore-size")?;
+        self.command(&format!("refresh-client -C {columns}x{rows}"))?;
+        Ok(())
     }
 
     fn response(&mut self) -> Result<String, String> {

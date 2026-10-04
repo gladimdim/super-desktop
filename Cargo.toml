@@ -1,6 +1,6 @@
 [package]
 name = "super-desktop"
-version = "1.1.20"
+version = "1.1.21"
 edition = "2021"
 default-run = "super-desktop"
 authors = ["gladimdim"]
@@ -22,6 +22,14 @@ required-features = ["desktop"]
 [[bin]]
 name = "super-desktop-client"
 path = "src/bin/super-desktop-client.rs"
+
+[[test]]
+name = "cli_offline"
+required-features = ["desktop"]
+
+[[test]]
+name = "cli_control"
+required-features = ["desktop"]
 
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_18"], optional = true }

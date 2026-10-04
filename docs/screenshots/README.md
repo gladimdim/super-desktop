@@ -16,6 +16,20 @@ The captures were encoded as WebP at quality 88 without resizing. Full-size
 images are linked from the page; the terminal detail expands inline. Update
 HTML dimensions, alt text, and captions when replacing them.
 
+## README images
+
+- `readme-overlay.webp`: 1920 × 1080 fullscreen capture of the overlay in the
+  Tokyo Night theme, above Chrome showing the GitHub repository.
+- `readme-themes.webp`: 1944 × 1104 grid of the same workspace in Catppuccin
+  Latte, Rose Pine, Everforest and Gruvbox, each scaled to 960 × 540 and
+  labeled with the theme name (Noto Sans Bold).
+- `readme-toolbar.webp`: the top 1920 × 58 strip of the Tokyo Night capture.
+
+Captured on 2026-10-03 with `grim` on the author's 1920 × 1080 laptop display
+(scale 1) while the overlay showed real Claude Code and Codex sessions,
+switching themes with `omarchy-theme-set` between captures. WebP at quality
+88 (92 for the toolbar). The README also embeds `desktop-toggle.gif`.
+
 ## Workspace reveal demo
 
 - `desktop-toggle.gif`: a 7.8-second, 1440 × 602 loop at 15 fps. Chrome shows
@@ -47,3 +61,24 @@ bridge (`scripts/mock-bridge/`), so the harnesses and output are sample data.
 Each screenshot was clipped with the device type's framebuffer mask, placed in a
 drawn bezel modeled on the Simulator's `phone15` chrome with a soft shadow on a
 transparent background, then scaled to 1600 × 1175 PNG.
+
+## Connect your phone guide (`connect/`)
+
+Screenshots for `connect.html`, taken on 2026-10-03 during a real pairing of an
+Android phone (the released SUPER DESKTOP app) with SUPER DESKTOP on Linux.
+
+- `connections.webp`, `add-device.webp`, `pair-phone.webp`,
+  `request.webp`, `approved.webp`: the real Settings card and connection
+  request panel, drawn on a private Broadway display (Tokyo Night theme) by the
+  opt-in tests `harness_settings::tests::pairing_screenshots` and
+  `pairing_request_ui::tests::pairing_request_screenshots`, against a
+  disposable bridge with its own state directory.
+- `phone-add.webp`, `phone-confirm.webp`, `phone-request.webp`, `phone-code.webp`,
+  `phone-connected.webp`: `adb exec-out screencap` from a 1280 × 2772 phone,
+  cropped below the status bar to 1280 × 1800 and scaled to 640 × 900.
+
+The phone reached the disposable bridge through `adb reverse`, then over
+Tailscale. IP addresses, and the names of other saved computers, were blurred
+after OCR (tesseract) located them. The verification code is the one that
+pairing really used; the invitation in the QR code has expired and its bridge
+no longer exists. All images are WebP at quality 90–92.
