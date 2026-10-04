@@ -1672,8 +1672,8 @@ impl MiniTerminalCard {
         self.remote.as_ref()
     }
 
-    /// The workspace this card is bounded by changed size: a remote view
-    /// switched between Fit and 100%, zoomed, or was resized.
+    /// The workspace changed size: the local overlay changed output/scale,
+    /// or a remote view switched between Fit and 100%, zoomed, or resized.
     pub fn set_workspace_size(&self, width: i32, height: i32) {
         self.workspace.set((width.max(1), height.max(1)));
     }
