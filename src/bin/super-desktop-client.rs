@@ -15,6 +15,9 @@ mod terminal_text;
 mod harness_record;
 #[path = "../cli.rs"]
 mod cli;
+#[allow(dead_code)]
+#[path = "../control.rs"]
+mod control;
 
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
     let mut stream = match UnixStream::connect(path) {
@@ -45,7 +48,7 @@ fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(code) = cli::run_offline(&args) {
+    if let Some(code) = cli::run(&args) {
         std::process::exit(code);
     }
     let action = args.first().map(String::as_str).unwrap_or("toggle");

@@ -4,6 +4,28 @@ The bridge is a remote terminal capability. An approved phone can operate the
 desktop user's SUPER DESKTOP terminals; it is not a read-only dashboard or a
 sandbox. Do not approve unknown devices or publish pairing invitations.
 
+## Local CLI control
+
+Read-only CLI inventory uses a separate Unix socket at
+`$XDG_RUNTIME_DIR/super-desktop/control-v1.sock`, with a 0700 directory and
+0600 socket. Both ends check the peer UID. Unsafe paths, symlinks and insecure
+permissions are refused. A lifecycle lock protects the listener, and only an
+owned, unchanged socket that refuses connections can be removed as stale.
+Client errors never unlink sockets or start another daemon.
+
+Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
+Connections have three-second I/O deadlines, with at most eight workers.
+The API exposes status, capabilities, saved card metadata and launcher
+discovery; it does not expose prompts, terminal output, notes or launch
+arguments. Paths and labels can still be private. JSON output escapes terminal
+control characters. This endpoint is independent of the existing bridge IPC.
+
+Access belongs to the desktop owner, including agents running as that user.
+It is not a sandbox or a delegated permission system: same-user programs may
+also access the existing IPC, tmux, and the user's files. Launcher discovery
+does not execute a launcher, verify its authentication, or establish that its
+permission settings are safe.
+
 ## Transport and identity
 
 Port 8759 accepts TLS 1.2/1.3 HTTPS and WSS only, on LAN, Ethernet, or Tailscale.

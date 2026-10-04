@@ -1,5 +1,5 @@
-//! Offline command discovery shared by the installed client and the application.
-//! Descriptions cover commands this build accepts; no daemon is contacted here.
+//! Command discovery and owner-only read commands shared by both entry points.
+//! Offline discovery never contacts a daemon.
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -33,8 +33,14 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
-    command!("help", "Show command help or the agent guide", "help [COMMAND|agents]", "None; offline", "None", "Plain text", "super-desktop help agents", false),
-    command!("schema", "Print the compiled command catalog as JSON", "schema [COMMAND] [--format json]", "None; offline", "None", "JSON envelope: schemaVersion, ok, data.commands", "super-desktop schema --format json", false),
+    command!("capabilities", "Query the running local control service", "capabilities [--format text|json] [--target local]", "Read-only; never starts a daemon", "Compatible local daemon and private owner socket", "Versioned envelope with supported methods, access and limits; exits 0/2/4/6/7/8", "super-desktop capabilities --format json", false),
+    command!("app status", "Inspect local daemon readiness and counts", "app status [--format text|json] [--target local]", "Read-only; never opens the overlay", "Compatible local daemon and private owner socket", "Versioned envelope with ready, visible, notesCount, terminalsCount; exits 0/2/4/6/7/8", "super-desktop app status --format json", false),
+    command!("terminal list", "List local saved terminal cards", "terminal list [--format text|json] [--target local]", "Reads IDs, harness types, launch directories and saved logical-pixel geometry; no prompts or output", "Compatible local daemon; runtime liveness is not observed", "Versioned envelope containing terminals, inventory and runtimeObserved; exits 0/2/4/6/7/8", "super-desktop terminal list --format json", false),
+    command!("terminal inspect", "Inspect one local saved terminal card", "terminal inspect ID [--format text|json] [--target local]", "Read-only; exact card ID required; geometry describes saved card bounds, not live terminal cells", "Compatible local daemon; runtime liveness is not observed", "Versioned envelope with card metadata; exits 0/2/3/4/6/7/8", "super-desktop terminal inspect CARD_ID --format json", false),
+    command!("harness list", "List available launcher types on the daemon's PC", "harness list [--all] [--format text|json] [--target local]", "Detects executables without running or installing them; --all includes unavailable types; arguments are redacted", "Compatible local daemon; availability does not prove authentication or safe permissions", "Versioned envelope containing harnesses, availability reasons and mayDownload; exits 0/2/4/6/7/8", "super-desktop harness list --all --format json", false),
+    command!("harness inspect", "Inspect one configured launcher type", "harness inspect ID [--format text|json] [--target local]", "Read-only; reports detected permission-bypass flags, not a verified security policy", "Compatible local daemon; exact built-in or custom launcher ID", "Versioned envelope with launcher metadata; exits 0/2/3/4/6/7/8", "super-desktop harness inspect claude --format json", false),
+    command!("help", "Show command help or the agent guide", "help [COMMAND ...|agents]", "None; offline", "None", "Plain text", "super-desktop help agents", false),
+    command!("schema", "Print the compiled command catalog as JSON", "schema [COMMAND ...] [--format json]", "None; offline", "None", "JSON envelope: schemaVersion, ok, data.commands", "super-desktop schema --format json", false),
     command!("completion", "Generate Bash completion from the command catalog", "completion bash", "Writes shell code to stdout; does not install it", "None", "Bash source", "super-desktop completion bash > /tmp/super-desktop.bash", false),
     command!("version", "Print this executable's version", "version", "None; offline", "None", "Plain text version", "super-desktop --version", false),
     command!("status", "Show overlay visibility and card counts", "status", "Reads local daemon state", "Running local daemon; legacy output when absent", "Legacy human-readable status", "super-desktop status", true),
@@ -91,7 +97,10 @@ fn lookup(name: &str) -> Option<&'static CommandSpec> {
 const AGENT_GUIDE: &str = "SUPER DESKTOP agent guide\n\n\
 Discover syntax: super-desktop --help; super-desktop help COMMAND\n\
 Discover compiled commands: super-desktop schema --format json\n\
-Inspect running instances: super-desktop harnesses\n\
+Inspect local control support: super-desktop capabilities --format json\n\
+Inspect available launchers: super-desktop harness list --format json\n\
+Inspect saved terminal cards: super-desktop terminal list --format json\n\
+Inspect running instances with private prompt metadata: super-desktop harnesses\n\
 Inspect saved PCs: super-desktop peer-list\n\n\
 Help, schema, completion and version work without a daemon or display.\n\
 The catalog describes this executable, not a connected daemon's capabilities.\n\
@@ -137,7 +146,7 @@ fn help(command: Option<&str>) -> Output {
             Some(spec) => Output::text(format!(
                 "{}\n\nUsage: super-desktop {}\n\nEffects: {}\nRequires: {}\nOutput: {}\nCompatibility: {}\n\nExample:\n  {}\n",
                 spec.summary, spec.usage, spec.effects, spec.requirements, spec.output,
-                if spec.legacy { "legacy behavior and exit codes are preserved" } else { "offline; exit 0 on success, 2 on usage error, 8 on output failure" }, spec.example)),
+                if spec.legacy { "legacy behavior and exit codes are preserved" } else { "see Output for live command exit codes; offline discovery exits 0/2/8" }, spec.example)),
             None => Output::usage("Unknown help topic."),
         };
     }
@@ -150,7 +159,7 @@ fn help(command: Option<&str>) -> Output {
 }
 
 fn schema(args: &[String]) -> Output {
-    let mut name = None;
+    let mut words = Vec::new();
     let mut format = false;
     let mut i = 0;
     while i < args.len() {
@@ -163,16 +172,17 @@ fn schema(args: &[String]) -> Output {
                 format = true;
                 i += 1;
             }
-            value if !value.starts_with('-') && name.is_none() => {
-                name = Some(value);
+            value if !value.starts_with('-') => {
+                words.push(value);
                 i += 1;
             }
-            _ => return schema_error("Usage: super-desktop schema [COMMAND] [--format json]"),
+            _ => return schema_error("Usage: super-desktop schema [COMMAND ...] [--format json]"),
         }
     }
-    let commands: Vec<_> = match name {
-        None => COMMANDS.iter().collect(),
-        Some(name) => match lookup(name) {
+    let name = words.join(" ");
+    let commands: Vec<_> = match name.as_str() {
+        "" => COMMANDS.iter().collect(),
+        name => match lookup(name) {
             Some(spec) => vec![spec],
             None => {
                 return schema_error(
@@ -212,8 +222,11 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     if INTERNAL.contains(&action) {
         return None;
     }
-    if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
-        return Some(help(Some(action)));
+    if args.len() >= 2 && matches!(args.last().map(String::as_str), Some("--help" | "-h")) {
+        let path = args[..args.len() - 1].join(" ");
+        if args.len() == 2 || matches!(action, "app" | "terminal" | "harness") {
+            return Some(group_or_help(&path));
+        }
     }
     if matches!(action, "--help" | "-h") {
         return Some(if args.len() == 1 {
@@ -230,10 +243,10 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
         });
     }
     if action == "help" {
-        return Some(if args.len() <= 2 {
-            help(args.get(1).map(String::as_str))
+        return Some(if args.len() == 1 {
+            help(None)
         } else {
-            Output::usage("Usage: super-desktop help [COMMAND|agents]")
+            group_or_help(&args[1..].join(" "))
         });
     }
     if action == "schema" {
@@ -241,16 +254,17 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
     if action == "completion" {
         return Some(if args.len() == 2 && args[1] == "bash" {
-            let names = COMMANDS
-                .iter()
-                .map(|spec| spec.name)
-                .chain(ALIASES.iter().map(|(alias, _)| *alias))
-                .collect::<Vec<_>>()
-                .join(" ");
-            Output::text(format!("_super_desktop_complete() {{\n  local words='{names}'\n  COMPREPLY=()\n  if (( COMP_CWORD == 1 )) || [[ ${{COMP_WORDS[1]}} == help || ${{COMP_WORDS[1]}} == schema ]]; then\n    mapfile -t COMPREPLY < <(compgen -W \"$words\" -- \"${{COMP_WORDS[COMP_CWORD]}}\")\n  else\n    mapfile -t COMPREPLY < <(compgen -W '--help' -- \"${{COMP_WORDS[COMP_CWORD]}}\")\n  fi\n}}\ncomplete -F _super_desktop_complete super-desktop\n"))
+            Output::text(bash_completion())
         } else {
             Output::usage("Usage: super-desktop completion bash")
         });
+    }
+    if matches!(action, "app" | "terminal" | "harness") {
+        return if args.len() == 1 {
+            Some(group_or_help(action))
+        } else {
+            None
+        };
     }
     if lookup(action).is_some() {
         None
@@ -259,8 +273,16 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
 }
 
-pub fn run_offline(args: &[String]) -> Option<i32> {
-    dispatch(args).map(|output| {
+pub fn run(args: &[String]) -> Option<i32> {
+    let offline = dispatch(args);
+    let output = offline.or_else(|| {
+        matches!(
+            args.first().map(String::as_str),
+            Some("app" | "terminal" | "harness" | "capabilities")
+        )
+        .then(|| live(args))
+    });
+    output.map(|output| {
         if io::stdout()
             .lock()
             .write_all(output.stdout.as_bytes())
@@ -295,7 +317,14 @@ mod tests {
         let mut names = std::collections::HashSet::new();
         for spec in COMMANDS {
             assert!(names.insert(spec.name));
-            let out = dispatch(&args(&[spec.name, "--help"])).unwrap();
+            let out = dispatch(&args(
+                &spec
+                    .name
+                    .split_whitespace()
+                    .chain(std::iter::once("--help"))
+                    .collect::<Vec<_>>(),
+            ))
+            .unwrap();
             assert_eq!(out.code, 0, "{}", spec.name);
             assert!(out.stdout.contains(spec.example));
         }
@@ -331,4 +360,177 @@ mod tests {
             assert!(!out.stderr.contains('\x1b'));
         }
     }
+}
+
+fn group_or_help(path: &str) -> Output {
+    if matches!(path, "app" | "terminal" | "harness") {
+        let prefix = format!("{path} ");
+        let mut text = format!("Usage: super-desktop {path} COMMAND\n\n");
+        for spec in COMMANDS
+            .iter()
+            .filter(|spec| spec.name.starts_with(&prefix))
+        {
+            text.push_str(&format!("  {}  {}\n", spec.name, spec.summary));
+        }
+        text.push_str("\nUse help followed by the full command path for details.\n");
+        Output::text(text)
+    } else {
+        help(Some(path))
+    }
+}
+
+fn live(args: &[String]) -> Output {
+    use crate::control::{self, Command, Reply};
+    let json_output = args
+        .windows(2)
+        .any(|a| a[0] == "--format" && a[1] == "json")
+        || args.iter().any(|a| a == "--format=json");
+    let fail =
+        |code: &str, message: &str| render_reply(Reply::failure("", code, message), json_output);
+    let mut words = Vec::new();
+    let mut all = false;
+    let mut seen_format = false;
+    let mut seen_target = false;
+    let mut index = 0;
+    while index < args.len() {
+        let word = args[index].as_str();
+        if word == "--all" && !all {
+            all = true;
+            index += 1;
+            continue;
+        }
+        if word == "--format"
+            || word.starts_with("--format=")
+            || word == "--target"
+            || word.starts_with("--target=")
+        {
+            let (flag, value) = if let Some((flag, value)) = word.split_once('=') {
+                (flag, Some(value))
+            } else {
+                index += 1;
+                (word, args.get(index).map(String::as_str))
+            };
+            let Some(value) = value else {
+                return fail("invalid_arguments", "Missing option value.");
+            };
+            if flag == "--format" {
+                if seen_format || !matches!(value, "text" | "json") {
+                    return fail(
+                        "invalid_arguments",
+                        "Use --format text or --format json once.",
+                    );
+                }
+                seen_format = true;
+            } else {
+                if seen_target {
+                    return fail("invalid_arguments", "Use --target once.");
+                }
+                if value != "local" {
+                    return fail("unsupported_target", "This command supports --target local only; no local fallback was attempted.");
+                }
+                seen_target = true;
+            }
+        } else if word.starts_with('-') {
+            return fail(
+                "invalid_arguments",
+                "Unknown option. Use this command's --help.",
+            );
+        } else {
+            words.push(word);
+        }
+        index += 1;
+    }
+    let command = match words.as_slice() {
+        ["capabilities"] if !all => Command::Capabilities {},
+        ["app", "status"] if !all => Command::Status {},
+        ["terminal", "list"] if !all => Command::Terminals {},
+        ["terminal", "inspect", id] if !all && valid_id(id) => {
+            Command::Terminal { id: (*id).into() }
+        }
+        ["harness", "list"] => Command::Harnesses { all },
+        ["harness", "inspect", id] if !all && valid_id(id) => Command::Harness { id: (*id).into() },
+        _ => {
+            return fail(
+                "invalid_arguments",
+                "Invalid command or arguments. Use --help for accepted syntax.",
+            )
+        }
+    };
+    let request = match control::new_request(command) {
+        Ok(request) => request,
+        Err(_) => return fail("unavailable", "OS randomness is unavailable."),
+    };
+    render_reply(
+        control::request_at(&control::runtime_dir(), &request),
+        json_output,
+    )
+}
+
+fn valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+fn render_reply(reply: crate::control::Reply, json_output: bool) -> Output {
+    let code = reply.exit_code();
+    // Escape C1 controls too: JSON itself only requires escaping U+0000..001F.
+    let safe = |text: String| {
+        text.chars()
+            .map(|c| {
+                if c.is_control() && !matches!(c, '\n' | '\t') {
+                    format!("\\u{:04x}", c as u32)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect::<String>()
+    };
+    if json_output {
+        Output {
+            code,
+            stdout: format!("{}\n", safe(serde_json::to_string_pretty(&reply).unwrap())),
+            stderr: String::new(),
+        }
+    } else if reply.ok {
+        Output {
+            code,
+            stdout: format!(
+                "{}\n",
+                safe(serde_json::to_string_pretty(&reply.data).unwrap())
+            ),
+            stderr: String::new(),
+        }
+    } else {
+        let error = reply.error.unwrap();
+        Output {
+            code,
+            stdout: String::new(),
+            stderr: safe(format!("{}: {}\n", error.code, error.message)),
+        }
+    }
+}
+
+fn bash_completion() -> String {
+    let mut groups = std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+    for name in COMMANDS
+        .iter()
+        .map(|c| c.name)
+        .chain(ALIASES.iter().map(|(alias, _)| *alias))
+    {
+        let (root, child) = name.split_once(' ').unwrap_or((name, ""));
+        groups.entry("").or_default().insert(root);
+        if !child.is_empty() {
+            groups.entry(root).or_default().insert(child);
+        }
+    }
+    let mut script = String::from("_super_desktop_complete() {\n  local start=1 prefix='' words='' i\n  COMPREPLY=()\n  if [[ ${COMP_WORDS[1]} == help || ${COMP_WORDS[1]} == schema ]]; then start=2; fi\n  for ((i=start; i<COMP_CWORD; i++)); do\n    prefix+=${prefix:+ }${COMP_WORDS[i]}\n  done\n  case \"$prefix\" in\n");
+    for (prefix, words) in groups {
+        let words = words.into_iter().collect::<Vec<_>>().join(" ");
+        script.push_str(&format!("    '{prefix}') words='{words}' ;;\n"));
+    }
+    script.push_str("    *) words='--help' ;;\n  esac\n  mapfile -t COMPREPLY < <(compgen -W \"$words\" -- \"${COMP_WORDS[COMP_CWORD]}\")\n}\ncomplete -F _super_desktop_complete super-desktop\n");
+    script
 }

@@ -1,4 +1,6 @@
 mod cli;
+mod control;
+mod control_service;
 mod brand;
 mod assets;
 mod asset_history;
@@ -384,7 +386,7 @@ struct AppContext {
 
 fn main() {
     let cli_args: Vec<String> = env::args().skip(1).collect();
-    if let Some(code) = cli::run_offline(&cli_args) {
+    if let Some(code) = cli::run(&cli_args) {
         std::process::exit(code);
     }
     // Before anything else, and before any thread exists: layer-shell is
@@ -619,6 +621,40 @@ fn run_daemon(start_visible: bool) {
     });
     start_ipc_thread(ipc_tx);
     startup::mark("IPC listening");
+    // Independent owner-only CLI endpoint. Legacy bridge IPC remains unchanged.
+    let (control_tx, mut control_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
+    match control::Server::bind(&runtime_dir()) {
+        Ok(server) => {
+            let _ = thread::Builder::new().name("sd-control".into()).spawn(move || {
+                server.run(move |request, deadline| {
+                    if matches!(request.command, control::Command::Capabilities {}) {
+                        return control::Reply::success(&request.request_id, control::capabilities());
+                    }
+                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                    if control_tx.clone().try_send(control_service::Query { responder, deadline }).is_err() {
+                        return control::Reply::failure(&request.request_id, "busy", "Local inventory is busy.");
+                    }
+                    let wait = deadline.saturating_duration_since(std::time::Instant::now());
+                    match response.recv_timeout(wait) {
+                        Ok(snapshot) => control_service::answer(request, snapshot),
+                        Err(_) => control::Reply::failure(&request.request_id, "timeout", "Local inventory timed out."),
+                    }
+                });
+            });
+        }
+        Err(error) => eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}"),
+    }
+    let control_context = Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query) = control_rx.next().await {
+            if std::time::Instant::now() >= query.deadline { continue; }
+            let ctx = control_context.borrow();
+            let state = ctx.local_workspace.state().borrow().clone();
+            let _ = query.responder.send(control_service::Snapshot {
+                state, visible: ctx.shown, ready: ctx.window.is_some(),
+            });
+        }
+    });
     // A start that finishes an update from Settings → Updates says how it went.
     let _ = thread::Builder::new()
         .name("super-desktop-update-notice".to_string())

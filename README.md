@@ -412,6 +412,34 @@ command accepts `--help` for its effects, requirements, output and an example.
 `--version`, and `completion bash` work without a daemon or display. Unknown
 commands exit with status 2 without contacting the daemon.
 
+The owner-only local API provides read-only discovery without opening the
+overlay or starting a daemon:
+
+```bash
+super-desktop capabilities --format json
+super-desktop app status --format json
+super-desktop terminal list --format json
+super-desktop terminal inspect CARD_ID --format json
+super-desktop harness list --all --format json
+super-desktop harness inspect claude --format json
+```
+
+`terminal list` describes saved cards, launch folders and saved geometry in
+logical pixels; it does not claim the terminal process is alive. `harness list`
+lists available launcher types; `--all` includes missing ones with a reason.
+Detection uses the daemon's environment and does not run or install a harness.
+Launch arguments are redacted, package-runner fallbacks are identified, and
+detected permission-bypass flags are reported without claiming a verified
+security policy. These commands support only `--target local`.
+
+JSON responses have `schemaVersion`, `requestId`, `target`, `ok`, and either
+`data` or `error`. Exit codes are 0 for success, 2 for invalid arguments, 3 for
+an absent ID, 4 for an unsafe socket or denied access, 6 for unavailable or
+unsupported control, 7 for a timeout, and 8 for an invalid response or output
+failure. A daemon without the local API returns an unavailable error; it is
+never restarted automatically. `capabilities` describes the running server;
+`schema` is the compiled client's command metadata catalog.
+
 The catalog marks existing commands as `legacy`: their output and exit codes
 are preserved. Inspect their responses before assuming a mutation succeeded,
 and check the target before retrying an uncertain operation. `harnesses` lists
