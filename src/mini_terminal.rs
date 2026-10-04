@@ -2262,8 +2262,10 @@ pub fn apply_vte_colors(term: &VteTerminal, theme: &crate::theme::OmarchyTheme) 
 }
 
 fn remove_vte(vte: &Rc<RefCell<Option<VteTerminal>>>, preview_box: &gtk4::Box) {
-    if let Some(term) = vte.borrow_mut().take() {
+    let term = vte.borrow_mut().take();
+    if let Some(term) = term {
         preview_box.remove(&term);
+        crate::desktop_shell::terminal_removed(preview_box);
     }
 }
 

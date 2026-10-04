@@ -1573,7 +1573,9 @@ separator.launcher-sep {{
     font-size: 11px;
 }}
 "#,
-        win_bg = theme.rgba_darker_bg(0.72),
+        // The Mac overlay uses an opaque native window: a translucent root
+        // can leave black/stale regions when terminal surfaces disappear.
+        win_bg = theme.rgba_darker_bg(if cfg!(target_os = "macos") { 1.0 } else { 0.72 }),
         hud_bg = theme.rgba_dark_bg(0.92),
         hud_border = theme.rgba_accent(0.18),
         hud_glow = theme.rgba_accent(0.2),
@@ -1707,6 +1709,20 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[test]
+    fn workspace_background_matches_native_compositing_mode() {
+        // GTK and AppKit must agree about whether the root can expose the desktop.
+        for mode in ["dark", "light"] {
+            let mut theme = OmarchyTheme::default();
+            theme.mode = mode.into();
+            let css = generate_css(&theme);
+            let root = css.split("window.super-desktop-window {").nth(1).unwrap()
+                .split('}').next().unwrap();
+            let alpha = if cfg!(target_os = "macos") { 1.0 } else { 0.72 };
+            assert!(root.contains(&theme.rgba_darker_bg(alpha)));
+        }
+    }
 
     #[test]
     fn test_generated_css_parses_without_errors() {

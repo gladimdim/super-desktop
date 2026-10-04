@@ -1,3 +1,8 @@
+mod desktop_shell;
+#[cfg(target_os = "macos")]
+mod macos_shortcut;
+#[cfg(target_os = "macos")]
+mod macos_diagnostics;
 mod brand;
 mod assets;
 mod asset_history;
@@ -13,10 +18,9 @@ mod floating_panel;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;
-mod harness_record;
 mod hidden_pause;
 mod preload;
-mod terminal_text;
+use super_desktop::{harness_record, platform, session_task, terminal_text};
 mod terminal_frame;
 mod asset_pdf;
 mod asset_view;
@@ -55,7 +59,6 @@ mod terminal_links;
 mod overlap_ghost;
 mod shortcut;
 mod sleep_lock;
-mod session_task;
 mod state;
 mod startup;
 mod sticky_note;
@@ -194,6 +197,7 @@ pub mod gtk_test {
                 .stderr(std::process::Stdio::null());
             unsafe {
                 server.pre_exec(|| {
+                    #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
                     Ok(())
                 });
@@ -238,9 +242,7 @@ use styles::apply_styles;
 use window::SuperDesktopWindow;
 
 fn runtime_dir() -> PathBuf {
-    env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
+    platform::runtime::directory()
 }
 
 fn get_socket_path() -> PathBuf {
@@ -251,7 +253,7 @@ fn get_socket_path() -> PathBuf {
 /// `XDG_RUNTIME_DIR`, which is process-wide (and would leak into any child
 /// process a test spawns, including GTK ones).
 fn socket_path_in(runtime_dir: &std::path::Path) -> PathBuf {
-    runtime_dir.join("super-desktop.sock")
+    platform::runtime::socket_path_in(runtime_dir)
 }
 
 /// Outcome of talking to the daemon over the Unix socket.
@@ -276,17 +278,31 @@ fn ipc_request(cmd: &str) -> Ipc {
 }
 
 fn ipc_request_at(sock_path: &std::path::Path, cmd: &str) -> Ipc {
-    if !sock_path.exists() {
-        return Ipc::NoDaemon;
-    }
+    ipc_request_with(sock_path, cmd, true, |path| UnixStream::connect(path))
+}
 
-    let mut stream = match UnixStream::connect(sock_path) {
+fn ipc_request_with(
+    sock_path: &std::path::Path,
+    cmd: &str,
+    remove_stale_socket: bool,
+    connect: impl FnOnce(&std::path::Path) -> std::io::Result<UnixStream>,
+) -> Ipc {
+    let mut stream = match connect(sock_path) {
         Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ipc::NoDaemon,
         // Connection refused: the file is a leftover from a daemon that is
         // gone. Clear it so the daemon we start can bind cleanly.
-        Err(_) => {
-            let _ = fs::remove_file(sock_path);
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            if remove_stale_socket {
+                let _ = fs::remove_file(sock_path);
+            }
             return Ipc::NoDaemon;
+        }
+        // A sandbox denial or transient error says nothing about liveness.
+        // Unlinking here makes the live daemon's ownership watcher exit.
+        Err(e) => {
+            eprintln!("SUPER DESKTOP: cannot connect to {}: {e}", sock_path.display());
+            return Ipc::Stalled;
         }
     };
 
@@ -350,14 +366,23 @@ fn main() {
     // Before anything else, and before any thread exists: layer-shell is
     // already mapped into this process, and must not leak into tmux, card
     // shells/agents, the bridge or any helper subprocess.
+    #[cfg(target_os = "macos")]
+    platform::environment::prepare();
     preload::strip_from_process_env();
     startup::mark("process entry");
-    // First thing: release builds abort on panic and the daemon's stderr goes
-    // to /dev/null, so without this a crash leaves no readable trace.
-    crashlog::install_panic_hook();
 
     let args: Vec<String> = env::args().collect();
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
+
+    #[cfg(target_os = "macos")]
+    if action == "diagnose" {
+        macos_diagnostics::print();
+        return;
+    }
+
+    // First thing: release builds abort on panic and the daemon's stderr goes
+    // to /dev/null, so without this a crash leaves no readable trace.
+    crashlog::install_panic_hook();
 
     if action == "harness-event" {
         harness_record::record(args.get(2).map(String::as_str).unwrap_or(""));
@@ -468,6 +493,13 @@ fn main() {
 
     // Daemon not running -> spawn it
     if action == "toggle" || action == "show" || action == "pairing-review" {
+        // LaunchServices owns the no-argument app process. Keep that process
+        // alive so reopening the app and its native shortcut reach the UI.
+        #[cfg(target_os = "macos")]
+        if args.len() == 1 {
+            run_daemon(true);
+            return;
+        }
         // A clicked pairing notification must still end at the approval panel.
         let first = if action == "pairing-review" { "pairing-review" } else { "show" };
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
@@ -519,7 +551,10 @@ fn run_daemon(start_visible: bool) {
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     // Before any card is restored: restores resolve through these too.
     launch_args::install(&initial_state.harness_args);
-    let _ = gtk4::init();
+    if let Err(error) = gtk4::init() {
+        eprintln!("SUPER DESKTOP cannot initialize its display: {error}");
+        return;
+    }
     startup::mark("GTK initialized");
 
     let app = Application::builder()
@@ -529,6 +564,7 @@ fn run_daemon(start_visible: bool) {
 
     let _ = app.register(gtk4::gio::Cancellable::NONE);
     std::mem::forget(app.hold());
+    #[cfg(target_os = "linux")]
     ensure_omarchy_theme_hook();
     apply_styles();
     startup::mark("theme and styles ready");
@@ -543,9 +579,27 @@ fn run_daemon(start_visible: bool) {
     // Older installs bound the shortcut on press (which repeats while held).
     // Upgrade in place to a release-bind so a held key is one toggle, not a
     // strobe, and a second tap during the slide-in can reverse immediately.
+    #[cfg(target_os = "linux")]
     shortcut::ensure_release_toggle();
 
     let (ipc_tx, mut ipc_rx) = futures_channel::mpsc::unbounded::<IpcMessage>();
+
+    #[cfg(target_os = "macos")]
+    {
+        let ctx = Rc::clone(&context);
+        let application = app.clone();
+        let quit_ctx = Rc::clone(&context);
+        let quit_app = app.clone();
+        let combo = shortcut::current_combo(context.borrow().local_workspace.state().borrow().toggle_shortcut.as_deref());
+        if let Err(error) = macos_shortcut::install(&combo,
+            move || { toggle_window(&ctx, &application); },
+            move || { handle_ipc_command("quit", &quit_ctx, &quit_app); }) {
+            eprintln!("SUPER DESKTOP shortcut: {error}");
+            crashlog::note(&format!("shortcut registration failed: {error}"));
+        } else {
+            crashlog::note(&format!("shortcut registered: {combo}"));
+        }
+    }
 
     let ctx_activate = Rc::clone(&context);
     let app_clone = app.clone();
@@ -572,12 +626,12 @@ fn run_daemon(start_visible: bool) {
 
     // After the socket bind: a duplicate daemon exits inside `start_ipc_thread`
     // (see its liveness probe) and must not look like a run in the crash log.
+    start_ipc_thread(ipc_tx);
     crashlog::note_start(if start_visible {
         "daemon (visible)"
     } else {
         "daemon"
     });
-    start_ipc_thread(ipc_tx);
     startup::mark("IPC listening");
     // A start that finishes an update from Settings → Updates says how it went.
     let _ = thread::Builder::new()
@@ -638,6 +692,7 @@ fn run_daemon(start_visible: bool) {
     state::flush_state_saves();
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_omarchy_theme_hook() {
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let hook_dir = PathBuf::from(&home).join(".config/omarchy/hooks/theme-set.d");
@@ -687,9 +742,10 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     let local_state = ctx.borrow().local_workspace.state();
     let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside, local_state);
 
-    win.window.present();
-    win.start_slide_in();
-    ctx.borrow_mut().window = Some(win);
+    // First launch needs the same native screen sizing, focus and input setup
+    // as a window restored from the hidden state.
+    ctx.borrow_mut().window = Some(Rc::clone(&win));
+    win.show_again();
     ctx.borrow_mut().shown = true;
     true
 }
@@ -830,6 +886,7 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
             // Without the socket this process would still open an overlay
             // window that nothing can control — leave instead.
             eprintln!("Failed to bind IPC socket: {e}");
+            crashlog::note(&format!("cannot bind control socket {}: {e}", sock_path.display()));
             std::process::exit(1);
         }
     };
@@ -1215,6 +1272,31 @@ mod ipc_tests {
     /// The three outcomes decide whether the caller starts a daemon, and only
     /// `NoDaemon` may. Getting this wrong is what left a second daemon holding
     /// the socket while the first one's overlay stayed on screen.
+    #[test]
+    fn ipc_denied_or_transient_connections_preserve_the_daemon_socket() {
+        let dir = private_runtime_dir("denied");
+        let socket = socket_path_in(&dir);
+        for errno in [libc::EPERM, libc::EACCES, libc::ETIMEDOUT, libc::EAGAIN, libc::EIO] {
+            fs::write(&socket, b"live daemon socket sentinel").unwrap();
+            let reply = ipc_request_with(&socket, "status", true, |_| {
+                Err(std::io::Error::from_raw_os_error(errno))
+            });
+            assert!(matches!(reply, Ipc::Stalled), "errno {errno} must not start a duplicate");
+            assert_eq!(fs::read(&socket).unwrap(), b"live daemon socket sentinel");
+        }
+        let reply = ipc_request_with(&socket, "status", false, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ECONNREFUSED))
+        });
+        assert!(matches!(reply, Ipc::NoDaemon));
+        assert!(socket.exists(), "diagnostics must preserve even a stale socket");
+        let reply = ipc_request_with(&socket, "status", true, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ECONNREFUSED))
+        });
+        assert!(matches!(reply, Ipc::NoDaemon));
+        assert!(!socket.exists(), "a confirmed stale socket may be removed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn test_ipc_outcomes_never_report_a_live_daemon_as_absent() {
         let dir = private_runtime_dir("outcomes");

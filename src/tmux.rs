@@ -661,37 +661,16 @@ pub fn session_exists(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Generate a tmux session name that cannot collide with a live session.
-///
-/// The old scheme (`millis % 1_000_000`) wrapped every ~16 minutes AND
-/// collided when two cards were created within the same millisecond: the
-/// second `tmux new-session -d -s <dup>` silently failed and the new card
-/// attached to the OLD session, so Ctrl+C / output in one card leaked into
-/// the other. Full millis + pid + random suffix + existence check fixes it.
+/// Generate a session name distinct from concurrent calls, even when the
+/// clock does not advance. Keep checking tmux for names left by older processes.
 pub fn unique_session_name() -> String {
     for _ in 0..20 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        // Cheap randomness without new deps: nanos + pid mix.
-        let nano = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let rand = (nano ^ (std::process::id() << 8)) % 46656;
-        let candidate = format!("sd_term_{now}_{rand:04x}");
+        let candidate = super_desktop::session_id::candidate();
         if !session_exists(&candidate) {
             return candidate;
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    // Practically unreachable fallback.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("sd_term_{now}_{}", std::process::id())
+    super_desktop::session_id::candidate()
 }
 
 pub fn kill_session(session_name: &str) {
@@ -840,12 +819,14 @@ pub fn preview_from_screen(screen: &str, lines: usize) -> String {
     tail.join("\n")
 }
 
+#[cfg(target_os = "linux")]
 fn get_proc_comm(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{}/comm", pid))
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 fn get_direct_children(pid: u32) -> Vec<u32> {
     let task_path = format!("/proc/{}/task/{}/children", pid, pid);
     if let Ok(content) = std::fs::read_to_string(&task_path) {
@@ -856,6 +837,12 @@ fn get_direct_children(pid: u32) -> Vec<u32> {
     }
     Vec::new()
 }
+
+#[cfg(target_os = "macos")]
+fn get_proc_comm(pid: u32) -> String { crate::platform::process::name(pid).unwrap_or_default() }
+
+#[cfg(target_os = "macos")]
+fn get_direct_children(pid: u32) -> Vec<u32> { crate::platform::process::children(pid) }
 
 /// Compare the shell's process group with the terminal's foreground group.
 /// Background jobs and persistent helpers are not evidence of a busy prompt.
@@ -1105,7 +1092,7 @@ pub fn status_for_pane(
     }
 
     let p_num = pid.parse::<u32>().unwrap_or(0);
-    if p_num != 0 && !std::path::Path::new(&format!("/proc/{}", p_num)).exists() {
+    if p_num != 0 && !crate::platform::process::exists(p_num) {
         return SessionStatus { status: "EXITED", label: "○ EXITED", pid, cmd, cwd };
     }
 
@@ -1148,8 +1135,11 @@ pub fn status_for_pane(
 
     let is_shell_cmd = matches!(cmd.as_str(), "bash" | "zsh" | "fish" | "sh");
     if is_shell_agent {
+        #[cfg(target_os = "linux")]
         let foreground = std::fs::read_to_string(format!("/proc/{p_num}/stat"))
             .map(|stat| foreground_job_from_stat(&stat)).unwrap_or(false);
+        #[cfg(target_os = "macos")]
+        let foreground = crate::platform::process::has_foreground_job(p_num);
         let busy = foreground || (!is_shell_cmd && !cmd.is_empty());
         return SessionStatus {
             status: if busy { "WORKING" } else { "IDLE" },

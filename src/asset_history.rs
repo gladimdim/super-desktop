@@ -17,18 +17,32 @@ struct Record {
 
 fn open_at(dir: &File, name: &str, flags: i32) -> std::io::Result<File> {
     let name = std::ffi::CString::new(name)?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    let mut retries = 0;
+    loop {
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            return Ok(unsafe { File::from_raw_fd(fd) });
+        }
+        let error = std::io::Error::last_os_error();
+        // Darwin can return ENOENT when concurrent O_CREAT calls race to
+        // create the lock file. Retry the same descriptor-relative operation;
+        // never drop O_NOFOLLOW or retry ordinary missing-file reads.
+        if cfg!(target_os = "macos") && flags & libc::O_CREAT != 0
+            && error.kind() == std::io::ErrorKind::NotFound && retries < 3
+        {
+            retries += 1;
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        return Err(error);
     }
-    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn private(file: &File, directory: bool) -> std::io::Result<()> {

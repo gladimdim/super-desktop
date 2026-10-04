@@ -1275,6 +1275,13 @@ pub fn build_harness_settings_panel(
     sleep_row.append(&sleep_toggle);
     sleep_body.append(&sleep_row);
     let sleep_help = Label::new(Some("Keeps this PC and its bridge awake while SUPER DESKTOP is running on mains or charger power, including with a laptop lid closed. Normal sleep behavior returns on battery. The screen can still turn off and lock. Turn this off before manually suspending."));
+    #[cfg(target_os = "macos")]
+    {
+        sleep_toggle.set_active(false);
+        sleep_toggle.set_sensitive(false);
+        sleep_toggle.set_tooltip_text(Some("Stay-awake support is unavailable in this macOS build"));
+        sleep_help.set_label("macOS currently manages sleep normally. Stay-awake support is unavailable in this build.");
+    }
     sleep_help.set_wrap(true);
     sleep_help.set_xalign(0.0);
     sleep_help.add_css_class("launcher-hint");

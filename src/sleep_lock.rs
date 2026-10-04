@@ -164,6 +164,13 @@ struct Runtime {
 }
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
+#[cfg(target_os = "macos")]
+pub fn status() -> String { "Stay-awake support is unavailable in this macOS build.".into() }
+
+#[cfg(target_os = "macos")]
+pub fn set_enabled(_: bool) {}
+
+#[cfg(target_os = "linux")]
 pub fn status() -> String {
     RUNTIME
         .get()
@@ -171,6 +178,7 @@ pub fn status() -> String {
         .unwrap_or_else(|| "Off — normal sleep behavior.".into())
 }
 
+#[cfg(target_os = "linux")]
 pub fn set_enabled(enabled: bool) {
     let runtime = RUNTIME.get_or_init(|| {
         let (updates, receiver) = mpsc::channel();

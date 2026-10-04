@@ -477,7 +477,9 @@ mod tests {
                 crate::tmux::unique_session_name()
             ));
             std::fs::create_dir(&path).unwrap();
-            Self(path)
+            // Production resolves the workspace before the no-symlink walk.
+            // macOS's temporary directory commonly starts with /var -> /private/var.
+            Self(std::fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for Fixture {

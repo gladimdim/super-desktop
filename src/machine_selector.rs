@@ -584,7 +584,7 @@ impl MachineView {
                 view.dismiss();
             }
         });
-        use gtk4_layer_shell::{KeyboardMode, LayerShell};
+        use crate::desktop_shell::{KeyboardMode, LayerShell};
         for button in [&self.local_button, &self.remote_button] {
             let popover = button.popover().unwrap();
             let previous = Rc::new(Cell::new(KeyboardMode::OnDemand));
@@ -1184,7 +1184,7 @@ mod tests {
         if !crate::gtk_test::is_child() {
             return;
         }
-        use gtk4_layer_shell::{KeyboardMode, Layer, LayerShell};
+        use crate::desktop_shell::{KeyboardMode, Layer, LayerShell};
         gtk4::init().unwrap();
         let directory = std::env::temp_dir().join(format!("sd-popup-{}", std::process::id()));
         std::env::set_var("SUPER_DESKTOP_PEERS_STATE_DIR", &directory);

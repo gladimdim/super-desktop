@@ -5,7 +5,7 @@ use gtk4::{
     Align, Application, ApplicationWindow, Button, EventControllerFocus, EventControllerKey,
     EventControllerMotion, Fixed, Image, Label, Orientation, Overlay, Popover, PositionType,
 };
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use crate::desktop_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -1538,6 +1538,7 @@ impl SuperDesktopWindow {
 
             card.close_session();
             canvas_del.remove(&card.container);
+            crate::desktop_shell::terminal_removed(&canvas_del);
             let mut s = state_del.borrow_mut();
             s.terminals.retain(|t| t.session_name != sess);
             crate::state::normalize_terminal_order(&mut s);
@@ -2016,6 +2017,7 @@ impl SuperDesktopWindow {
 
         card.close_session();
         self.canvas.remove(&card.container);
+        crate::desktop_shell::terminal_removed(&self.canvas);
         let mut s = self.state.borrow_mut();
         s.terminals.retain(|t| t.session_name != sess);
         crate::state::normalize_terminal_order(&mut s);
@@ -2343,6 +2345,7 @@ impl SuperDesktopWindow {
         self.show_token.set(self.show_token.get().wrapping_add(1));
         self.reclaim_input();
         self.set_terminal_gpu_mapped(true);
+        crate::desktop_shell::before_present(&self.window);
         self.window.present();
         self.window.set_visible(true);
         // Re-assert keyboard interactivity: typing in a card flips it to
@@ -2430,22 +2433,17 @@ impl SuperDesktopWindow {
     /// The unmap waits for the slide-out (up to `HIDE_FALLBACK`), and until
     /// then a full-screen surface that still takes input swallows the keys
     /// and clicks meant for the window underneath (with a card expanded, the
-    /// keyboard is even `Exclusive`). An empty input region lets clicks
+    /// keyboard is even `Exclusive`). The window-system adapter lets clicks
     /// through; `reclaim_input` undoes both on the next show.
     fn release_input(&self) {
         INPUT_RELEASED.with(|released| released.set(true));
         set_overlay_keyboard_mode(&self.window, KeyboardMode::None);
-        if let Some(surface) = self.window.surface() {
-            surface.set_input_region(Some(&gtk4::cairo::Region::create()));
-        }
+        crate::desktop_shell::set_pointer_input(&self.window, false);
     }
 
     fn reclaim_input(&self) {
         INPUT_RELEASED.with(|released| released.set(false));
-        if let Some(surface) = self.window.surface() {
-            // `None` is the whole surface, GTK's default.
-            surface.set_input_region(None);
-        }
+        crate::desktop_shell::set_pointer_input(&self.window, true);
     }
 
     /// Hide VTE widgets so hide/unmap does not composite live GPU terminals.
@@ -2959,6 +2957,10 @@ mod tests {
 
     #[test]
     fn test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("window::tests::test_focused_terminal_rendered_above_any_other_icon_and_sticky_notes");
+            return;
+        }
         let _ = gtk4::init();
         let canvas = Fixed::new();
 

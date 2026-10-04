@@ -98,8 +98,7 @@ const ROLLOUT_REWALK: std::time::Duration = std::time::Duration::from_secs(5);
 const ROLLOUT_NEGATIVE: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn process_start(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    Some(stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.to_owned())
+    crate::platform::process::start_time(pid)
 }
 
 /// Find only the nearest CLI's own open rollout, never "latest file in cwd".

@@ -8,7 +8,7 @@ use crate::{
     peer_pairing::{self, Event, Session},
 };
 use gtk4::{glib, prelude::*};
-use gtk4_layer_shell::KeyboardMode;
+use crate::desktop_shell::KeyboardMode;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,

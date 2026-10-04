@@ -2,20 +2,12 @@
 //! a timed-out toggle may already have been applied by the daemon.
 use std::io::{Read, Write};
 use std::os::unix::{net::UnixStream, process::CommandExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
-
-// Agent hooks call `harness-event` once per tool call: handle it here, without
-// loading GTK, using the same recording code as the application.
-#[allow(dead_code)]
-#[path = "../terminal_text.rs"]
-mod terminal_text;
-#[allow(dead_code)]
-#[path = "../harness_record.rs"]
-mod harness_record;
+use super_desktop::{harness_record, platform};
 
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
-    let mut stream = match UnixStream::connect(path) {
+    let stream = match UnixStream::connect(path) {
         Ok(stream) => stream,
         Err(e)
             if matches!(
@@ -27,6 +19,10 @@ fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
         }
         Err(e) => return Err(e),
     };
+    exchange(stream, command).map(Some)
+}
+
+fn exchange(mut stream: UnixStream, command: &str) -> std::io::Result<String> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.write_all(format!("{command}\n").as_bytes())?;
@@ -38,7 +34,7 @@ fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
             "empty daemon response",
         ));
     }
-    Ok(Some(reply))
+    Ok(reply)
 }
 
 fn main() {
@@ -49,10 +45,7 @@ fn main() {
         return;
     }
     if args.len() <= 1 && matches!(action, "toggle" | "show" | "hide" | "status" | "kill") {
-        let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })));
-        match request(&runtime.join("super-desktop.sock"), action) {
+        match request(&platform::runtime::socket_path(), action) {
             Ok(Some(reply)) => {
                 if action == "kill" {
                     println!("SUPER DESKTOP: {}", reply.trim());
@@ -86,18 +79,21 @@ fn main() {
     let exe = std::env::current_exe().expect("client executable path");
     let mut command = std::process::Command::new(exe.with_file_name("super-desktop"));
     command.args(args);
-    let library = "/usr/lib/libgtk4-layer-shell.so";
-    if Path::new(library).exists() {
-        let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
-        if !preload.split([':', ' ']).any(|item| item == library) {
-            command.env(
-                "LD_PRELOAD",
-                if preload.is_empty() {
-                    library.to_string()
-                } else {
-                    format!("{library}:{preload}")
-                },
-            );
+    #[cfg(target_os = "linux")]
+    {
+        let library = "/usr/lib/libgtk4-layer-shell.so";
+        if Path::new(library).exists() {
+            let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
+            if !preload.split([':', ' ']).any(|item| item == library) {
+                command.env(
+                    "LD_PRELOAD",
+                    if preload.is_empty() {
+                        library.to_string()
+                    } else {
+                        format!("{library}:{preload}")
+                    },
+                );
+            }
         }
     }
     eprintln!(
@@ -110,7 +106,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
 
     #[test]
     fn missing_socket_is_safe_to_delegate() {
@@ -124,16 +119,29 @@ mod tests {
 
     #[test]
     fn connected_empty_reply_is_not_safe_to_replay() {
-        let path = std::env::temp_dir().join(format!("sd-client-{}.sock", std::process::id()));
-        let listener = UnixListener::bind(&path).unwrap();
+        let (client, mut server) = UnixStream::pair().unwrap();
         let worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut buf = [0; 64];
-            let n = stream.read(&mut buf).unwrap();
-            assert_eq!(&buf[..n], b"toggle\n");
+            let mut buf = [0; 7];
+            server.read_exact(&mut buf).unwrap();
+            assert_eq!(&buf, b"toggle\n");
         });
-        assert!(request(&path, "toggle").is_err());
+        assert_eq!(
+            exchange(client, "toggle").unwrap_err().kind(),
+            std::io::ErrorKind::UnexpectedEof
+        );
         worker.join().unwrap();
-        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn connected_reply_is_returned_without_replaying_the_command() {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut buf = [0; 7];
+            server.read_exact(&mut buf).unwrap();
+            assert_eq!(&buf, b"status\n");
+            server.write_all(b"{\"visible\":true}").unwrap();
+        });
+        assert_eq!(exchange(client, "status").unwrap(), "{\"visible\":true}");
+        worker.join().unwrap();
     }
 }

@@ -1,7 +1,7 @@
 //! Server-side PTY attachment for the desktop byte transport.
 //!
 //! An authenticated remote viewer gets one existing session attached on a
-//! private Linux PTY. This object only attaches an existing session, never
+//! private PTY. This object only attaches an existing session, never
 //! creates a harness or resizes the host pane. Dropping it reaps exactly its
 //! tmux client, not the tmux server/session.
 #![allow(dead_code)] // The WSS adapter and its tests use this module.
@@ -9,8 +9,7 @@
 use crate::desktop_protocol::TerminalSize;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd};
-use std::os::unix::process::CommandExt;
+use std::os::fd::AsRawFd;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
@@ -117,16 +116,7 @@ impl PtyAttachment {
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));
-        // Only async-signal-safe syscalls after fork. std::process has already
-        // mapped the slave onto fd 0 before executing this hook.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        crate::platform::pty::configure_child_session(&mut command);
         let child = command.spawn()?;
         Ok(Self {
             master,
@@ -274,32 +264,7 @@ fn winsize(size: TerminalSize) -> libc::winsize {
 }
 
 fn open_pty(size: TerminalSize) -> io::Result<(File, File)> {
-    // Linux TIOCGPTPEER opens the slave directly from the master. CLOEXEC is
-    // atomic on both opens so another worker's concurrent spawn cannot inherit
-    // a descriptor between openpty() and a later fcntl().
-    let fd = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let master = unsafe { File::from_raw_fd(fd) };
-    if unsafe { libc::grantpt(fd) } < 0 || unsafe { libc::unlockpt(fd) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let slave = unsafe {
-        libc::ioctl(
-            fd,
-            libc::TIOCGPTPEER,
-            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
-        )
-    };
-    if slave < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let slave = unsafe { File::from_raw_fd(slave) };
-    if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &winsize(size)) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok((master, slave))
+    crate::platform::pty::open(size.columns, size.rows)
 }
 
 #[cfg(test)]

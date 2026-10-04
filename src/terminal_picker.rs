@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn wayland_alt_events_inner() {
         if !crate::gtk_test::is_child() { return; }
-        use gtk4_layer_shell::{LayerShell, KeyboardMode, Layer};
+        use crate::desktop_shell::{LayerShell, KeyboardMode, Layer};
         gtk4::init().unwrap();
         let window = gtk4::ApplicationWindow::builder().build();
         window.init_layer_shell();

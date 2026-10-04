@@ -34,6 +34,14 @@ fn action(
             | gdk::ModifierType::SUPER_MASK
             | gdk::ModifierType::HYPER_MASK
             | gdk::ModifierType::META_MASK);
+    #[cfg(target_os = "macos")]
+    if modifiers == gdk::ModifierType::META_MASK || modifiers == gdk::ModifierType::SUPER_MASK {
+        match key {
+            gdk::Key::c | gdk::Key::C => return Some(Action::Copy),
+            gdk::Key::v | gdk::Key::V => return Some(Action::Paste),
+            _ => {},
+        }
+    }
     let control = gdk::ModifierType::CONTROL_MASK;
     let shift = gdk::ModifierType::SHIFT_MASK;
     match key {
@@ -174,6 +182,16 @@ mod tests {
         rc::Rc,
         time::{Duration, Instant},
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clipboard_command_keys_copy_and_paste_without_taking_control_c() {
+        for command in [gdk::ModifierType::META_MASK, gdk::ModifierType::SUPER_MASK] {
+            assert_eq!(action(gdk::Key::c, command, false, || true), Some(Action::Copy));
+            assert_eq!(action(gdk::Key::v, command, false, || true), Some(Action::Paste));
+        }
+        assert_eq!(action(gdk::Key::c, gdk::ModifierType::CONTROL_MASK, false, || true), None);
+    }
 
     #[test]
     fn clipboard_shortcuts_preserve_terminal_control_keys() {

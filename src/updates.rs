@@ -189,6 +189,9 @@ impl Status {
 
 /// Check the clone this daemon runs from.
 pub fn check() -> Result<Status, String> {
+    #[cfg(target_os = "macos")]
+    { Err("Updates are unavailable for this macOS development build.".into()) }
+    #[cfg(target_os = "linux")]
     check_clone(&this_clone()?, running())
 }
 

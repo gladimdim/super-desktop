@@ -1,0 +1,24 @@
+name: Shared Rust core
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup toolchain install stable --profile minimal
+      - name: Test shared services and control client
+        run: cargo +stable test --locked --no-default-features
+      - name: Build control client
+        run: cargo +stable build --locked --no-default-features --bin super-desktop-client

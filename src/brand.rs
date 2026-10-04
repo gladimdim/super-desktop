@@ -90,6 +90,8 @@ fn asset_path(name: &str) -> Option<PathBuf> {
 /// folder of the repo checkout relative to the executable
 /// (`<repo>/target/{release,debug}/super-desktop`).
 pub fn find_logos_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = bundle_asset("logos") { return Some(path); }
     if let Some(home) = std::env::var_os("HOME") {
         let p = PathBuf::from(home).join(".config/super-desktop/assets/logos");
         if p.is_dir() {
@@ -120,6 +122,8 @@ pub fn logo_path(agent: &str, light_theme: bool) -> Option<PathBuf> {
 /// Same resolution order as [`find_logos_dir`]: installed copy first, then the
 /// repo checkout relative to the executable.
 pub fn find_icons_root() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = bundle_asset("icons") { return Some(path); }
     if let Some(home) = std::env::var_os("HOME") {
         let p = PathBuf::from(home).join(".config/super-desktop/assets/icons");
         if p.join("hicolor").is_dir() {
@@ -139,6 +143,13 @@ pub fn find_icons_root() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_asset(kind: &str) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let path = executable.parent()?.parent()?.join("Resources/assets").join(kind);
+    path.is_dir().then_some(path)
 }
 
 #[cfg(test)]

@@ -210,12 +210,12 @@ fn current_with(
 /// pipelined request stay buffered in the connection.
 fn peer_hung_up(stream: &mut Connection) -> bool {
     let Some(fd) = stream.raw_fd() else { return true };
-    let mut poll = libc::pollfd { fd, events: libc::POLLIN | libc::POLLRDHUP, revents: 0 };
+    let mut poll = libc::pollfd { fd, events: crate::platform::poll::READ_EVENTS, revents: 0 };
     let ready = unsafe { libc::poll(&mut poll, 1, 0) };
     if ready < 0 {
         return std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted;
     }
-    if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL | libc::POLLRDHUP) != 0 {
+    if poll.revents & crate::platform::poll::CLOSED_EVENTS != 0 {
         return true;
     }
     if poll.revents & libc::POLLIN == 0 {
@@ -239,7 +239,7 @@ fn hung_up_before(stream: &mut Connection, until: Instant) -> bool {
         if left.is_zero() {
             return false;
         }
-        let mut poll = libc::pollfd { fd, events: libc::POLLIN | libc::POLLRDHUP, revents: 0 };
+        let mut poll = libc::pollfd { fd, events: crate::platform::poll::READ_EVENTS, revents: 0 };
         let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
         if unsafe { libc::poll(&mut poll, 1, ms) } == 0 {
             continue;

@@ -2249,11 +2249,19 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         // whole test and only its listening state changes: releasing it let a
         // parallel test's `bind(0)` take it, which made this test flaky.
         use std::os::fd::{FromRawFd, OwnedFd, AsRawFd};
-        let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        #[cfg(target_os = "linux")]
+        let flags = libc::SOCK_STREAM | libc::SOCK_CLOEXEC;
+        #[cfg(target_os = "macos")]
+        let flags = libc::SOCK_STREAM;
+        let fd = unsafe { libc::socket(libc::AF_INET, flags, 0) };
         assert!(fd >= 0);
+        #[cfg(target_os = "macos")]
+        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
         let socket = unsafe { OwnedFd::from_raw_fd(fd) };
         let mut address: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         address.sin_family = libc::AF_INET as libc::sa_family_t;
+        #[cfg(target_os = "macos")]
+        { address.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8; }
         address.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
         let size = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
         assert_eq!(unsafe { libc::bind(socket.as_raw_fd(), (&address as *const libc::sockaddr_in).cast(), size) }, 0);

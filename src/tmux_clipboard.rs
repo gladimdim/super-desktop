@@ -22,6 +22,11 @@
 
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+const CLIPBOARD_COMMAND: &str = "wl-copy";
+#[cfg(target_os = "macos")]
+const CLIPBOARD_COMMAND: &str = "/usr/bin/pbcopy";
+
 const SESSION_PREFIX: &str = "sd_term_";
 const CONDITION: &str = "#{m:sd_term_*,#{session_name}}";
 const COPY: &str = "copy-pipe-and-cancel";
@@ -153,14 +158,14 @@ pub fn install_session(session: &str) {
     }
     let bin = crate::tmux::tmux_bin();
     let base = [bin.as_str()];
-    install_bindings_on(&base, "wl-copy");
-    install_pane_hook_on(&base, session, &pane_hook_with("wl-copy"));
+    install_bindings_on(&base, CLIPBOARD_COMMAND);
+    install_pane_hook_on(&base, session, &pane_hook_with(CLIPBOARD_COMMAND));
 }
 
 /// Daemon start: cover cards whose sessions outlived the previous daemon.
 pub fn install_existing_sessions() {
     let bin = crate::tmux::tmux_bin();
-    install_existing_sessions_on(&[bin.as_str()], "wl-copy");
+    install_existing_sessions_on(&[bin.as_str()], CLIPBOARD_COMMAND);
 }
 
 /// One `list-sessions`, one `list-keys` (plus a `bind-key` per binding not
