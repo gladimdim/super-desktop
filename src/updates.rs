@@ -88,6 +88,9 @@ pub fn this_clone() -> Result<PathBuf, String> {
     // A binary replaced on disk while running reads as "<path> (deleted)".
     let exe = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
     let exe = Path::new(&exe).canonicalize().unwrap_or_else(|_| PathBuf::from(&exe));
+    if exe == Path::new("/usr/lib/super-desktop/super-desktop") {
+        return Err("SUPER DESKTOP is managed by your package manager. Update it with Omarchy's system update (omarchy update), then restart SUPER DESKTOP or log out and back in.".into());
+    }
     clone_of(&exe).ok_or_else(|| {
         format!(
             "SUPER DESKTOP runs from {}, not from a clone's target/release, so it cannot update itself. Run the installer again.",

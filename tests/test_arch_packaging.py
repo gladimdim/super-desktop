@@ -1,0 +1,113 @@
+import contextlib
+import io
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SETUP = runpy.run_path(str(ROOT / "packaging/arch/super-desktop-setup"))
+PACKAGE = runpy.run_path(str(ROOT / "scripts/package-arch.py"))
+
+
+class DesktopSetupTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.home = Path(self.temp.name)
+        self.hypr = self.home / ".config/hypr"
+        self.hypr.mkdir(parents=True)
+        (self.hypr / "hyprland.lua").write_text('-- user configuration\n')
+
+    def configure(self, migrate=False):
+        with contextlib.redirect_stdout(io.StringIO()):
+            SETUP["configure"](self.home, migrate)
+
+    def snapshot(self):
+        return {str(p.relative_to(self.home)): p.read_bytes() for p in self.home.rglob("*") if p.is_file()}
+
+    def test_fresh_setup_is_idempotent_and_backs_up_configuration(self):
+        self.configure()
+        first = self.snapshot()
+        self.configure()
+        self.assertEqual(first, self.snapshot())
+        self.assertIn("super-desktop toggle", (self.hypr / "bindings.lua").read_text())
+        self.assertEqual((self.hypr / "hyprland.lua.before-package").read_text(), '-- user configuration\n')
+        hook = self.home / ".config/omarchy/hooks/theme-set.d/super-desktop"
+        self.assertTrue(os.access(hook, os.X_OK))
+
+    def test_custom_shortcut_and_hook_survive_setup(self):
+        shortcut = 'o.bind("SUPER + A", "Custom", "super-desktop toggle")\n'
+        (self.hypr / "bindings.lua").write_text(shortcut)
+        hook = self.home / ".config/omarchy/hooks/theme-set.d/super-desktop"
+        hook.parent.mkdir(parents=True)
+        hook.write_text("custom hook\n")
+        self.configure()
+        self.assertEqual((self.hypr / "bindings.lua").read_text(), shortcut)
+        self.assertEqual(hook.read_text(), "custom hook\n")
+
+    def test_migration_requires_flag_then_preserves_original_symlink(self):
+        launcher = self.home / ".local/bin/super-desktop"
+        launcher.parent.mkdir(parents=True)
+        original = "/missing/source/target/release/super-desktop-client"
+        launcher.symlink_to(original)
+        desktop = self.home / ".local/share/applications/super-desktop.desktop"
+        desktop.parent.mkdir(parents=True)
+        desktop.write_text("[Desktop Entry]\nExec=/old/.local/bin/super-desktop toggle\n")
+        before = self.snapshot()
+        with self.assertRaisesRegex(ValueError, "--migrate"):
+            self.configure()
+        self.assertEqual(before, self.snapshot())
+        self.configure(migrate=True)
+        self.assertEqual(os.readlink(launcher), "/usr/bin/super-desktop")
+        self.assertEqual(os.readlink(launcher.with_name("super-desktop.before-package")), original)
+        self.assertFalse(desktop.exists())
+        self.assertTrue(desktop.with_name("super-desktop.desktop.before-package").is_file())
+        self.configure(migrate=True)
+
+    def test_custom_launcher_is_never_overwritten(self):
+        launcher = self.home / ".local/bin/super-desktop"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text("my custom launcher")
+        with self.assertRaisesRegex(ValueError, "Custom launcher"):
+            self.configure(migrate=True)
+        self.assertEqual(launcher.read_text(), "my custom launcher")
+
+
+class PackageTests(unittest.TestCase):
+    def test_undeclared_license_blocks_distribution(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "Cargo.toml").write_text('[package]\nversion="1.2.3"\n')
+            with self.assertRaisesRegex(ValueError, "license"):
+                PACKAGE["release_metadata"](root)
+
+    def test_stage_keeps_client_and_application_siblings(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "source"
+            for relative in ("LICENSE", "super-desktop.desktop", "packaging/arch/super-desktop-setup", "assets/logos/LICENSES.md", "assets/logos/ATTRIBUTION.md", "assets/icons/hicolor/test.svg", "bin/super-desktop", "bin/super-desktop-client"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n")
+            staged = Path(temp) / "staged"
+            PACKAGE["stage"](root, root / "bin", staged)
+            launcher = staged / "usr/bin/super-desktop"
+            self.assertEqual(launcher.resolve(), staged / "usr/lib/super-desktop/super-desktop-client")
+            self.assertTrue(launcher.resolve().with_name("super-desktop").is_file())
+            self.assertTrue(os.access(launcher, os.X_OK))
+            self.assertTrue((staged / "usr/share/super-desktop/assets/icons/hicolor/test.svg").is_file())
+            self.assertFalse((staged / "home").exists())
+
+    def test_recipe_pins_release_and_checksum(self):
+        text = PACKAGE["recipe"]("1.2.3", "MIT", "a" * 64, ["gtk4>=4.18", "tmux"])
+        self.assertIn("pkgver=1.2.3", text)
+        self.assertIn("releases/download/v$pkgver/", text)
+        self.assertIn("a" * 64, text)
+        self.assertNotIn("SKIP", text)
+        subprocess.run(["bash", "-n"], input=text, text=True, check=True)
+
+
+if __name__ == "__main__":
+    unittest.main()

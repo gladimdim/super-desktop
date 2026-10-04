@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Configure a packaged SUPER DESKTOP for the invoking Omarchy user."""
+import argparse
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+SHORTCUT = '''
+-- >>> super-desktop shortcut (managed by the overlay settings) >>>
+-- Set in the overlay: ⚙ Settings → Keyboard shortcut.
+-- Rewritten there on every change; edits inside this block are lost.
+hl.unbind("SUPER + SHIFT + Q")
+o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle", { release = true })
+hl.unbind("SUPER + SHIFT + code:24")
+o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle", { release = true })
+-- <<< super-desktop shortcut <<<
+'''
+LAYER = '\nhl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })\n'
+HOOK = '#!/bin/sh\n[ ! -x /usr/bin/super-desktop ] || /usr/bin/super-desktop reload-theme >/dev/null 2>&1 || true\n'
+
+
+def read(path):
+    return path.read_text() if path.exists() else ""
+
+
+def backup(path):
+    destination = path.with_name(path.name + ".before-package")
+    number = 0
+    while destination.exists() or destination.is_symlink():
+        number += 1
+        destination = path.with_name(path.name + f".before-package.{number}")
+    if path.is_symlink():
+        destination.symlink_to(os.readlink(path))
+    else:
+        shutil.copy2(path, destination)
+    print(f"Backup: {destination}")
+
+
+def write(path, content):
+    if read(path) == content:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() or path.is_symlink():
+        backup(path)
+    path.write_text(content)
+
+
+def configure(home, migrate=False):
+    # Match the paths used by the application and the existing installer.
+    config = home / ".config"
+    hypr = config / "hypr"
+    if not (hypr / "hyprland.lua").is_file():
+        raise ValueError("This setup requires Omarchy's Lua Hyprland configuration (~/.config/hypr/hyprland.lua).")
+    launcher = home / ".local/bin/super-desktop"
+    desktop = home / ".local/share/applications/super-desktop.desktop"
+    old_launcher = (launcher.exists() or launcher.is_symlink()) and not (
+        launcher.is_symlink() and os.readlink(launcher) == "/usr/bin/super-desktop"
+    )
+    if old_launcher:
+        if not migrate:
+            raise ValueError("A per-user launcher shadows the package. Run /usr/bin/super-desktop-setup --migrate.")
+        known = ("/target/release/super-desktop-client", "/target/release/super-desktop", "/bin/super-desktop")
+        if not launcher.is_symlink() or not str(launcher.resolve()).endswith(known):
+            raise ValueError(f"Custom launcher left untouched: {launcher}. Move it aside yourself before setup.")
+    if desktop.exists() and not migrate:
+        raise ValueError("A per-user desktop entry shadows the package. Run /usr/bin/super-desktop-setup --migrate.")
+    if desktop.exists() and not any(
+        line.startswith("Exec=") and "super-desktop" in line for line in read(desktop).splitlines()
+    ):
+        raise ValueError(f"Custom desktop entry left untouched: {desktop}")
+
+    if old_launcher:
+        backup(launcher)
+        launcher.unlink()
+        launcher.symlink_to("/usr/bin/super-desktop")
+    if desktop.exists():
+        backup(desktop)
+        desktop.unlink()  # The package's /usr/share/applications entry is now visible.
+
+    bindings = hypr / "bindings.lua"
+    existing = read(bindings)
+    if "super-desktop toggle" not in existing and "super-desktop shortcut" not in existing:
+        write(bindings, existing + SHORTCUT)
+        print("Added SUPER + SHIFT + Q (replaces any previous binding on that key).")
+    autostart = hypr / "autostart.lua"
+    if "super-desktop daemon" not in existing + read(autostart):
+        write(autostart, read(autostart) + '\n-- SUPER DESKTOP\no.exec_on_start("super-desktop daemon")\n')
+    main = hypr / "hyprland.lua"
+    if "super-desktop" not in read(main):
+        write(main, read(main) + LAYER)
+    hook = config / "omarchy/hooks/theme-set.d/super-desktop"
+    if not hook.exists():
+        write(hook, HOOK)
+        hook.chmod(0o755)
+    print("Setup complete. Existing shortcuts and theme hooks were preserved.")
+    print("Restart the overlay: /usr/bin/super-desktop kill && /usr/bin/super-desktop toggle")
+    print("Update with: omarchy update")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--migrate", action="store_true", help="back up and replace an install.sh launcher and desktop entry")
+    args = parser.parse_args()
+    if os.geteuid() == 0:
+        parser.error("Run as your normal desktop user, without sudo.")
+    try:
+        configure(Path.home(), args.migrate)
+        if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and shutil.which("hyprctl"):
+            subprocess.run(["hyprctl", "reload"], check=True)
+            result = subprocess.run(["hyprctl", "configerrors"], check=True, capture_output=True, text=True)
+            if result.stdout.strip().lower() not in ("", "ok"):
+                raise ValueError(f"Hyprland reports configuration errors:\n{result.stdout}")
+        else:
+            print("Log out and back in to apply the desktop configuration.")
+    except (ValueError, OSError, subprocess.CalledProcessError) as error:
+        print(f"Setup failed: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

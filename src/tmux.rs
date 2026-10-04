@@ -1388,6 +1388,18 @@ pub fn capture_pane_history(session_name: &str) -> Option<String> {
     capture_pane(session_name, false, 300)
 }
 
+/// Join terminal soft wraps for desktop file discovery, without changing captures
+/// used for display, status, links or the phone bridge.
+pub fn capture_file_references(session_name: &str) -> Option<String> {
+    capture_file_references_with(Command::new("tmux"), session_name)
+}
+
+fn capture_file_references_with(mut command: Command, session_name: &str) -> Option<String> {
+    let output = command.args(["capture-pane", "-p", "-J", "-t", session_name, "-S", "-300"])
+        .output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 /// Visible rows only: the status fallback for screen-based agents.
 pub fn capture_visible_screen(session_name: &str) -> Option<String> {
     let output = Command::new("tmux")
@@ -3743,6 +3755,36 @@ mod tests {
             kept,
             [("sd_term_a".to_string(), CaptureKind::Card), ("sd_term_a".to_string(), CaptureKind::Visible)]
         );
+    }
+
+    #[test]
+    fn file_references_capture_joins_real_terminal_soft_wraps() {
+        let socket = format!("sd-files-{}", unique_session_name());
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["-L", &self.0, "kill-server"]).output();
+            }
+        }
+        let _cleanup = Cleanup(socket.clone());
+        let made = Command::new("tmux").args([
+            "-L", &socket, "-f", "/dev/null", "new-session", "-d", "-x", "35", "-y", "10", "-s", "files",
+            "printf '%s\\n' 'Created image (game/assets/art/menu/prisoners_at_dawn_v1.png).'; sleep 30",
+        ]).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let start = std::time::Instant::now();
+        loop {
+            let mut command = Command::new("tmux");
+            command.args(["-L", &socket]);
+            let text = capture_file_references_with(command, "files").unwrap();
+            if text.contains("prisoners_at_dawn_v1.png") {
+                let paths = crate::asset_references::candidates(&text, |p| p.ends_with(".png"));
+                assert!(paths.contains(&"game/assets/art/menu/prisoners_at_dawn_v1.png".into()), "{paths:?}");
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(3), "{text}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// What reuse relies on, against a real tmux server: an idle pane's row

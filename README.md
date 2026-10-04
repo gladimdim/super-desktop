@@ -61,6 +61,33 @@ and leaves its git state alone; update it with `git pull && ./rebuild.sh`.
 Running the one-line command later updates the clone your install runs from,
 as long as it has no local changes.
 
+### Package installations
+
+An Arch package installation uses `/usr/bin/super-desktop` and keeps the
+application files under `/usr/lib/super-desktop` and `/usr/share/super-desktop`.
+Configure your Omarchy shortcut, autostart and theme hook as your normal user:
+
+```bash
+super-desktop-setup
+```
+
+For an existing `install.sh` installation, use
+`/usr/bin/super-desktop-setup --migrate`. It backs up the old per-user launcher
+and desktop entry, routes the launcher to the package, and preserves existing
+shortcuts, notes, settings and source checkouts. Custom launcher scripts require
+manual migration. Setup requires Omarchy's Lua Hyprland configuration.
+
+Update package installations through **Omarchy's system update** (`omarchy
+update`). Restart the overlay afterwards, or log out and back in:
+
+```bash
+/usr/bin/super-desktop kill && /usr/bin/super-desktop toggle
+```
+
+Running harnesses remain in tmux while the overlay restarts. Package installation
+and removal do not change per-user configuration; removing a package leaves its
+shortcut, autostart and theme hook for you to remove if no longer needed.
+
 ### Installing a specific version
 
 The phone app and the PC talk over a protocol that must match, so if your

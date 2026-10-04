@@ -1,0 +1,114 @@
+name: Arch release package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag (vX.Y.Z)
+        required: true
+        type: string
+      publish:
+        description: Attach artifacts to the existing release and publish to AUR if enabled
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install build and runtime dependencies
+        run: pacman -Syu --noconfirm --needed git rust python gtk4 gtk4-layer-shell vte4 tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build, test and package as an unprivileged user
+        shell: bash
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          runuser -u builder -- bash scripts/build-arch-release.sh "$RELEASE_TAG" /tmp/sd-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-release
+          include-hidden-files: true
+          path: |
+            /tmp/sd-release/*.tar.gz
+            /tmp/sd-release/*.pkg.tar.zst
+            /tmp/sd-release/SHA256SUMS
+            /tmp/sd-release/aur/PKGBUILD
+            /tmp/sd-release/aur/.SRCINFO
+            /tmp/sd-release/aur/super-desktop-bin.install
+
+  release-assets:
+    needs: build
+    if: github.event_name == 'release' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-release
+          path: package
+      - name: Attach binaries to the existing stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
+          # No --clobber: published binary assets are immutable.
+          gh release upload "$RELEASE_TAG" package/*.tar.gz package/*.pkg.tar.zst package/SHA256SUMS
+
+  aur:
+    needs: release-assets
+    if: vars.AUR_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      AUR_COMMIT_NAME: ${{ vars.AUR_COMMIT_NAME }}
+      AUR_COMMIT_EMAIL: ${{ vars.AUR_COMMIT_EMAIL }}
+    steps:
+      - run: pacman -Syu --noconfirm --needed git openssh
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-release
+          path: /tmp/sd-release
+      - name: Publish the AUR recipe
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_KNOWN_HOSTS: ${{ secrets.AUR_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          useradd -m publisher
+          install -d -m 700 -o publisher -g publisher /home/publisher/.ssh
+          test -n "$AUR_SSH_PRIVATE_KEY"
+          test -n "$AUR_KNOWN_HOSTS"
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /home/publisher/.ssh/id_ed25519
+          printf '%s\n' "$AUR_KNOWN_HOSTS" > /home/publisher/.ssh/known_hosts
+          chmod 600 /home/publisher/.ssh/*
+          chown -R publisher:publisher /home/publisher/.ssh /tmp/sd-release
+          trap 'rm -rf /home/publisher/.ssh' EXIT
+          unset AUR_SSH_PRIVATE_KEY AUR_KNOWN_HOSTS
+          runuser -u publisher -- env AUR_COMMIT_NAME="$AUR_COMMIT_NAME" AUR_COMMIT_EMAIL="$AUR_COMMIT_EMAIL" GIT_SSH_COMMAND='ssh -o BatchMode=yes -o StrictHostKeyChecking=yes' bash scripts/publish-aur.sh /tmp/sd-release/aur
