@@ -19,6 +19,7 @@ enum Preview {
     /// The whole file, so it can be edited and saved back.
     Markdown(String),
     Images(Vec<Frame>),
+    Audio(Vec<u8>),
 }
 
 fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
@@ -70,6 +71,41 @@ fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
         iter.advance(now);
     }
     Ok(result)
+}
+
+fn audio_preview(bytes: Vec<u8>) -> gtk4::Box {
+    let bytes = glib::Bytes::from_owned(bytes);
+    let media = gtk4::MediaFile::new();
+    let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    let message = gtk4::Label::new(Some("Press Play to listen."));
+    message.set_wrap(true);
+    let update = |media: &gtk4::MediaFile, label: &gtk4::Label| {
+        if let Some(error) = media.error() {
+            label.set_text(&format!("Audio playback unavailable: {error}"));
+        } else {
+            label.set_text("Press Play to listen.");
+        }
+    };
+    update(&media, &message);
+    media.connect_error_notify({
+        let message = message.downgrade();
+        move |media| { if let Some(label) = message.upgrade() { update(media, &label); } }
+    });
+    panel.append(&message);
+    panel.append(&gtk4::MediaControls::new(Some(&media)));
+    // Removing the preview, closing Files or hiding the overlay stops playback.
+    panel.connect_map({
+        let media = media.clone();
+        move |_| {
+            let stream = gio::MemoryInputStream::from_bytes(&bytes);
+            media.set_input_stream(Some(&stream));
+        }
+    });
+    panel.connect_unmap(move |_| {
+        media.pause();
+        media.clear();
+    });
+    panel
 }
 
 fn text_view(text: &str) -> gtk4::TextView {
@@ -419,6 +455,7 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
         Rc::new(move |asset, page| {
             generation.set(generation.get() + 1);
             let ticket = generation.get();
+            clear(&content);
             status.set_text("Loading preview…");
             let content = content.clone();
             let bar = bar.clone();
@@ -432,7 +469,7 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
                 let reader = session.clone();
                 let result = gio::spawn_blocking(move || {
                     let _permit = crate::assets::Transfer::acquire().ok_or("Preview busy")?;
-                    let (meta, bytes) = crate::assets::read(&reader, &id)?;
+                    let (meta, bytes) = crate::assets::read_desktop(&reader, &id)?;
                     if meta.kind == "text" || meta.kind == "markdown" {
                         let text = String::from_utf8(bytes).map_err(|_| "Invalid UTF-8")?;
                         Ok::<_, String>(if meta.kind == "markdown" {
@@ -440,6 +477,8 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
                         } else {
                             Preview::Text(preview_text(&text))
                         })
+                    } else if meta.kind == "audio" {
+                        Ok(Preview::Audio(bytes))
                     } else {
                         let bytes = if meta.kind == "pdf" {
                             crate::asset_pdf::page(bytes, page)?
@@ -468,6 +507,7 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
                         ));
                         match preview {
                             Preview::Text(text) => content.append(&text_view(&text)),
+                            Preview::Audio(bytes) => content.append(&audio_preview(bytes)),
                             Preview::Markdown(text) => {
                                 let preview = MarkdownPreview { content: &content, bar: &bar, status: &status, edits: &edits };
                                 preview.show(&session, asset.clone(), text, (Rc::clone(&generation), ticket));
@@ -577,6 +617,7 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
             bar.set_visible(false);
             edits.dirty.set(false);
             selected.borrow_mut().take();
+            clear(&content);
             status.set_text("Finding referenced files and links…");
             let session = session.clone();
             let generation = Rc::clone(&generation);
@@ -590,7 +631,7 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
             glib::MainContext::default().spawn_local(async move {
                 let result = gio::spawn_blocking(move || {
                     let urls = links(&crate::tmux::capture_pane_history(&session).unwrap_or_default());
-                    (urls, crate::assets::list(&session, explicit.as_deref()))
+                    (urls, crate::assets::list_desktop(&session, explicit.as_deref()))
                 }).await;
                 if generation.get() != ticket { return; }
                 clear(&content);
@@ -600,7 +641,7 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
                         match files {
                             Ok(items) => {
                                 status.set_text(&format!("{} files · {} links. Choose a file to preview; Refresh returns to this list.", items.len(), urls.len()));
-                                for (kind, title) in [("markdown", "Markdown"), ("image", "Images"), ("pdf", "PDFs"), ("text", "Text / code")] {
+                                for (kind, title) in [("markdown", "Markdown"), ("image", "Images"), ("audio", "Audio"), ("pdf", "PDFs"), ("text", "Text / code")] {
                                     let files: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
                                     if files.is_empty() { continue; }
                                     let rows = group(&content, title, files.len(), &collapsed);
@@ -836,6 +877,41 @@ mod tests {
     }
 
     #[test]
+    fn audio_preview_is_explicit_and_releases_media_with_its_panel() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process(
+                "asset_view::tests::audio_preview_is_explicit_and_releases_media_with_its_panel",
+            );
+            return;
+        }
+        gtk4::init().unwrap();
+        let panel = audio_preview(b"RIFF\0\0\0\0WAVE".to_vec());
+        let controls = panel.last_child().unwrap().downcast::<gtk4::MediaControls>().unwrap();
+        let media = controls.media_stream().unwrap();
+        assert!(!media.is_playing());
+        let file = media.clone().downcast::<gtk4::MediaFile>().unwrap();
+        let window = gtk4::Window::new();
+        window.set_child(Some(&panel));
+        window.present();
+        crate::gtk_test::pump(50);
+        assert!(file.input_stream().is_some());
+        window.set_child(gtk4::Widget::NONE);
+        assert!(!media.is_playing());
+        assert!(file.input_stream().is_none());
+        window.set_child(Some(&panel));
+        crate::gtk_test::pump(50);
+        assert!(file.input_stream().is_some());
+        assert!(!media.is_playing());
+        window.set_child(gtk4::Widget::NONE);
+        window.close();
+        drop(controls);
+        drop(media);
+        drop(panel);
+        crate::gtk_test::pump(50);
+        assert!(file.input_stream().is_none());
+    }
+
+    #[test]
     fn drawer_is_lazy_and_uses_no_terminal_input() {
         if !crate::gtk_test::is_child() {
             crate::gtk_test::run_in_child_process(
@@ -857,7 +933,7 @@ mod tests {
         assert_eq!(drawer.generation.get(), 0);
         let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         let collapsed: Collapsed = Rc::new(RefCell::new(HashSet::new()));
-        for title in ["Links", "Markdown", "Images", "PDFs", "Text / code"] {
+        for title in ["Links", "Markdown", "Images", "Audio", "PDFs", "Text / code"] {
             let rows = group(&content, title, 2, &collapsed);
             rows.append(&gtk4::Label::new(Some("Reference")));
             let panel = content.last_child().unwrap().downcast::<gtk4::Expander>().unwrap();

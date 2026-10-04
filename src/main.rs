@@ -12,6 +12,7 @@ mod control_close;
 mod control_service;
 mod brand;
 mod assets;
+mod asset_references;
 mod asset_history;
 mod completion;
 mod custom_harness;
