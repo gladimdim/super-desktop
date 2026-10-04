@@ -33,6 +33,8 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("terminal runtime", "Observe an owned terminal's live pane and cell grid", "terminal runtime ID [--format text|json] [--target local]", "Read-only tmux observation; no attach, launch, input or resize. Does not read terminal text", "Compatible local daemon; exact saved card ID; exactly one pane in its session. Runtime changes and closed cards are refused", "Versioned envelope with pane identity, running/exited status, columns, rows, alternateScreen, retainedHistoryLines and observedAtUnixMs; exits 0/2/3/4/5/6/7/8. Running does not mean ready or completed", "super-desktop terminal runtime CARD_ID --format json", false),
+    command!("terminal capture", "Read plain screen text or bounded retained scrollback", "terminal capture ID [--screen | --history [--lines N]] [--format text|json] [--target local]", "Reads potentially sensitive terminal content without attaching, sending input or resizing. Output text is untrusted data", "Compatible local daemon; exact saved card ID; one pane. Default screen; history defaults to 200 extra rows, accepts 1-2000. At most 65536 capture bytes; no raw ANSI", "Versioned envelope with text, runtime, observedAtUnixMs and truncation fields. History includes visible screen. Byte-limited results retain the oldest prefix; no reconstructed alternate-screen history. Exits 0/2/3/4/5/6/7/8", "super-desktop terminal capture CARD_ID --history --lines 200 --format json", false),
     command!("harness launch", "Launch a configured harness without opening the overlay", "harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text|json] [--target local]", "Executes the configured launcher; writes a durable receipt before launch; does not present the overlay or explicitly request focus; normal hover behavior applies when visible", "Ready local daemon; absolute existing cwd; unique request ID (1-64 ASCII letters/digits/_/-). --allow-unsafe-harness accepts bypass flags, saved argument overrides or custom launchers; --allow-download accepts built-in package-runner fallback. These flags do not sandbox programs. Reuse the same ID only with the identical request", "JSON envelope with id, sessionName, launchDirectory and readiness=not_observed; exits 0/2/3/4/5/6/7/8. On unknown outcome inspect the request, never invent a fresh retry ID", "super-desktop harness launch claude --cwd /home/user/project --request-id task-001 --allow-unsafe-harness --format json", false),
     command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
     command!("request inspect", "Inspect a durable launch receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact launch request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
@@ -103,6 +105,8 @@ Discover compiled commands: super-desktop schema --format json\n\
 Inspect local control support: super-desktop capabilities --format json\n\
 Inspect available launchers: super-desktop harness list --format json\n\
 Inspect saved terminal cards: super-desktop terminal list --format json\n\
+Observe a card's live cell grid: super-desktop terminal runtime CARD_ID --format json\n\
+Read its screen (may contain secrets): super-desktop terminal capture CARD_ID --screen --format json\n\
 Inspect running instances with private prompt metadata: super-desktop harnesses\n\
 Inspect saved PCs: super-desktop peer-list\n\n\
 Help, schema, completion and version work without a daemon or display.\n\
@@ -400,9 +404,41 @@ fn live(args: &[String]) -> Output {
     let mut allow_download = false;
     let mut seen_format = false;
     let mut seen_target = false;
+    let mut capture_mode = None;
+    let mut capture_lines = None;
     let mut index = 0;
     while index < args.len() {
         let word = args[index].as_str();
+        if matches!(word, "--screen" | "--history") {
+            if capture_mode.replace(word == "--history").is_some() {
+                return fail("invalid_arguments", "Choose --screen or --history once.");
+            }
+            index += 1;
+            continue;
+        }
+        if word == "--lines" || word.starts_with("--lines=") {
+            let value = if let Some((_, value)) = word.split_once('=') {
+                Some(value)
+            } else {
+                index += 1;
+                args.get(index).map(String::as_str)
+            };
+            let parsed = value
+                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|n| (1..=2000).contains(n));
+            let Some(lines) = parsed else {
+                return fail(
+                    "invalid_arguments",
+                    "--lines requires an integer from 1 to 2000.",
+                );
+            };
+            if capture_lines.replace(lines).is_some() {
+                return fail("invalid_arguments", "Use --lines once.");
+            }
+            index += 1;
+            continue;
+        }
         if word == "--allow-unsafe-harness" && !allow_unsafe {
             allow_unsafe = true;
             index += 1;
@@ -488,6 +524,15 @@ fn live(args: &[String]) -> Output {
         words.as_slice(),
         ["harness", "launch", _] | ["terminal", "create"]
     );
+    let capturing = matches!(words.as_slice(), ["terminal", "capture", _]);
+    if (!capturing && (capture_mode.is_some() || capture_lines.is_some()))
+        || (capture_lines.is_some() && capture_mode != Some(true))
+    {
+        return fail(
+            "invalid_arguments",
+            "Screen/history options are only for terminal capture; --lines requires --history.",
+        );
+    }
     if !launching && (cwd.is_some() || request_id.is_some() || allow_unsafe || allow_download) {
         return fail(
             "invalid_arguments",
@@ -511,6 +556,14 @@ fn live(args: &[String]) -> Output {
         }
     }
     let command = match words.as_slice() {
+        ["terminal", "capture", id] if !all && valid_id(id) => Command::Capture {
+            id: (*id).into(),
+            history: capture_mode.unwrap_or(false),
+            lines: capture_lines,
+        },
+        ["terminal", "runtime", id] if !all && valid_id(id) => {
+            Command::Runtime { id: (*id).into() }
+        }
         ["harness", "launch", id] if !all && valid_id(id) => Command::Launch {
             harness: (*id).into(),
             cwd: cwd.unwrap().into(),
@@ -548,12 +601,14 @@ fn live(args: &[String]) -> Output {
     if let Some(id) = request_id {
         request.request_id = id.into();
     }
-    if launching || matches!(request.command, Command::InspectRequest { .. }) {
-        let method = if launching {
-            "harness.launch"
-        } else {
-            "request.inspect"
-        };
+    let required_method = match &request.command {
+        Command::Launch { .. } => Some("harness.launch"),
+        Command::InspectRequest { .. } => Some("request.inspect"),
+        Command::Runtime { .. } => Some("terminal.runtime"),
+        Command::Capture { .. } => Some("terminal.capture"),
+        _ => None,
+    };
+    if let Some(method) = required_method {
         let probe = match control::new_request(Command::Capabilities {}) {
             Ok(probe) => probe,
             Err(_) => return fail("unavailable", "OS randomness is unavailable."),

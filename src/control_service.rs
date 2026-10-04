@@ -28,11 +28,14 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
-        Command::Launch { .. } | Command::InspectRequest { .. } => {
+        Command::Launch { .. }
+        | Command::InspectRequest { .. }
+        | Command::Runtime { .. }
+        | Command::Capture { .. } => {
             return Reply::failure(
                 id,
                 "invalid_request",
-                "This request requires the launch dispatcher.",
+                "This request requires a dedicated dispatcher.",
             )
         }
         Command::Capabilities {} => control::capabilities(),

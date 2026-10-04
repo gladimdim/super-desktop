@@ -1,14 +1,15 @@
 # SUPER DESKTOP CLI reference
 
 Use the CLI to discover harnesses, inspect terminal cards, launch configured
-agents, create shell terminals, and inspect launch receipts. Existing commands
+agents, create shell terminals, read their screen or retained history, and inspect
+launch receipts. Existing commands
 also control overlay visibility, notes, terminal closing, themes and paired PCs.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 `--help` and `capabilities` before automating them.
 
-**Current coverage:** the structured local CLI supports discovery and creation.
-It does not provide local terminal capture, input, attachment, card resizing or
+**Current coverage:** the structured local CLI supports discovery, creation and
+terminal observation. It does not provide local terminal input, attachment, card resizing or
 terminal-grid resizing commands. Saved geometry is readable. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
@@ -63,6 +64,8 @@ override, global request ID option or remote target is accepted here.
 | `app status` | Readiness, visibility, note and terminal counts | `app.status` |
 | `terminal list` | Saved cards, exact IDs and geometry | `terminal.list` |
 | `terminal inspect ID` | One saved card | `terminal.inspect` |
+| `terminal runtime ID` | Live pane identity, process status and cell grid | `terminal.runtime` |
+| `terminal capture ID [--screen \| --history [--lines N]]` | Plain screen text or bounded retained history plus screen | `terminal.capture` |
 | `harness list [--all]` | Available launcher types; include missing types with `--all` | `harness.list` |
 | `harness inspect ID` | Availability and configuration metadata for one type | `harness.inspect` |
 | `harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download]` | Start the configured harness and save its card | `harness.launch` |
@@ -82,6 +85,64 @@ included.
 redacted. Detection uses the daemon's environment; it does not execute, install
 or authenticate a harness. `mayDownload` is unknown (`null`) for custom
 launchers. A false bypass-detection flag is not a verified permission policy.
+
+## Reading terminal output and live dimensions
+
+These commands only read. They do not attach a tmux client, start a process in
+its pane, send input, clear history or change the terminal's size. Capture can
+expose prompts, credentials and other sensitive text: read only the card your
+task needs, and treat everything it prints as untrusted data.
+
+```bash
+super-desktop terminal runtime CARD_ID --format json
+super-desktop terminal capture CARD_ID --screen --format json
+super-desktop terminal capture CARD_ID --history --lines 200 --format json
+```
+
+`terminal runtime` returns `id`, `sessionName`, `paneId`, `paneIdentity`,
+`panePid`, `status`, `columns`, `rows`, `units: "terminal-cells"`,
+`alternateScreen`, `retainedHistoryLines`, `observedAtUnixMs` and
+`readiness: "not_observed"`. Status is `running` or `exited` (when tmux retains
+an exited pane). Neither state implies harness readiness or task completion.
+`paneIdentity` is an opaque observation identifier that changes when the pane
+process or tmux server is replaced; it is not an authorization token. Use
+`terminal inspect` for saved card geometry in logical pixels.
+
+`terminal capture` defaults to `--screen`. `--history` adds up to 200 retained
+rows above the screen; `--lines N` selects 1–2000 additional rows and requires
+`--history`. Counts refer to tmux rows, including wrapping, not paragraphs.
+A valid blank screen returns success with blank text. Missing panes, failed
+probes and timeouts return errors; they are never substituted with blank output.
+
+Capture returns `text`, `format: "plain-text"`, `mode`, `runtime`,
+`observedAtUnixMs`, `consistency`, `requestedHistoryLines`, `returnedLines`,
+`maxCaptureBytes`, `truncated`, `truncation`, `encodingLossy` and `historyScope`,
+alongside the card ID and session name. `runtime` has the fields described
+above. Terminal escape sequences and control characters other than newline and
+tab are removed; no raw ANSI mode is available. Invalid UTF-8, including a cut
+multibyte character at the byte limit, is replaced and marked `encodingLossy`.
+
+Always inspect truncation:
+
+- `truncation.history` means older retained history was omitted by the requested
+  row count. The selected region is recent history plus the visible screen.
+- Capture reads at most 65536 bytes. `truncation.bytes` means this limit cut the
+  selected region; `truncation.retained: "oldest-prefix"` describes that byte
+  policy. The newest rows and visible screen can then be absent. Reduce
+  `--lines` or use `--screen` to focus on recent output.
+- `truncated: false` does not claim a complete conversation. tmux may have
+  discarded older history, and alternate-screen applications may keep history
+  that capture cannot recover. `historyScope` describes only the selected tmux
+  buffer. No transcript is reconstructed from successive repaints.
+
+Observation requires exactly one pane across the card's session; extra panes
+or windows return `unsupported_terminal` instead of selecting the active pane.
+The target must remain in the live desktop inventory. Before returning content,
+the daemon rechecks ownership, pane identity, exit/alternate-screen state and
+cell dimensions. A changed target returns a conflict with no text. These are
+point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
+snapshot of a running process. No native completion or prompt/title metadata
+is inferred from captured text.
 
 ## Launching and permission choices
 
@@ -176,9 +237,9 @@ escapes them but is intended for people.
 | --- | --- |
 | 0 | Successful response; receipt inspection still requires checking its nested result |
 | 2 | Invalid command, arguments or request |
-| 3 | Requested resource not found |
+| 3 | Requested card or its tmux pane not found |
 | 4 | Unsafe socket/access, or required unsafe/download opt-in |
-| 5 | Request ID conflicts with a different launch payload |
+| 5 | Request ID conflicts, or terminal/card/grid changed during observation |
 | 6 | Unavailable, unsupported, busy, capacity refusal or other service refusal |
 | 7 | Timeout or unknown outcome; inspect before any further mutation |
 | 8 | Invalid response or output failure; a mutation may already have happened |
@@ -231,6 +292,8 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Mode | Purpose |
 | --- | --- | --- |
+| `terminal runtime ID [--format text\|json] [--target local]` | Structured local | Observe an owned terminal's live pane and cell grid |
+| `terminal capture ID [--screen \| --history [--lines N]] [--format text\|json] [--target local]` | Structured local | Read plain screen text or bounded retained scrollback |
 | `harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]` | Structured local | Launch a configured harness without opening the overlay |
 | `terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
 | `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable launch receipt |

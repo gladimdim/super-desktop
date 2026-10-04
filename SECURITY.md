@@ -6,7 +6,7 @@ sandbox. Do not approve unknown devices or publish pairing invitations.
 
 ## Local CLI control
 
-Local CLI inventory and structured launches use a separate Unix socket at
+Local CLI inventory, terminal observation and structured launches use a separate Unix socket at
 `$XDG_RUNTIME_DIR/super-desktop/control-v1.sock`, with a 0700 directory and
 0600 socket. Both ends check the peer UID. Unsafe paths, symlinks and insecure
 permissions are refused. A lifecycle lock protects the listener, and only an
@@ -16,8 +16,10 @@ Client errors never unlink sockets or start another daemon.
 Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
 Connections have three-second I/O deadlines, with at most eight workers.
 The API exposes status, capabilities, saved card metadata, launcher discovery,
-launching and launch receipts; it does not expose prompts, terminal output,
-notes or launch arguments. Paths and labels can still be private. JSON output escapes terminal
+launching, launch receipts and explicit terminal capture. Inventory omits
+prompts and terminal output; `terminal capture` can reveal sensitive text,
+including credentials and prompts. Notes and launch arguments are not exposed.
+Paths and labels can still be private. JSON output escapes terminal
 control characters. This endpoint is independent of the existing bridge IPC.
 
 Access belongs to the desktop owner, including agents running as that user.
@@ -25,6 +27,16 @@ It is not a sandbox or a delegated permission system: same-user programs may
 also access the existing IPC, tmux, and the user's files. Launcher discovery
 does not execute a launcher, verify its authentication, or establish that its
 permission settings are safe.
+
+`terminal runtime` and `terminal capture` require an exact saved local card and
+one pane across its tmux session. The daemon rechecks the live card mapping and
+pane/server identity before returning data, withholding content on detected
+replacement, closure, alternate-screen transition or grid change. Observations
+are not atomic with ongoing output. Capture is bounded to 64 KiB and at most
+2000 requested history rows plus the screen, with explicit truncation fields.
+It strips terminal escapes and control characters, never requests raw ANSI,
+and does not attach a client, send input, clear history or resize the pane.
+Output remains untrusted data even after control sequences are stripped.
 
 Structured launches use configured executables and arguments. Recognized
 permission-bypass flags, argument overrides saved in Settings, and custom

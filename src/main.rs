@@ -2,6 +2,7 @@ mod cli;
 mod control;
 mod control_journal;
 mod control_launch;
+mod control_terminal;
 mod control_service;
 mod brand;
 mod assets;
@@ -688,6 +689,16 @@ fn run_daemon(start_visible: bool) {
                                             .map_err(|_| ())?
                                     },
                                 )
+                            }
+                            Ok(snapshot) if matches!(request.command, control::Command::Runtime { .. } | control::Command::Capture { .. }) => {
+                                control_terminal::execute(&request, &snapshot.state, deadline, |card| {
+                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                    control_tx.clone().try_send(control_service::Query { responder, deadline }).map_err(|_| ())?;
+                                    let current = response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())?;
+                                    Ok(current.state.terminals.iter().any(|candidate|
+                                        candidate.id == card.id && candidate.session_name == card.session_name
+                                        && candidate.created_at == card.created_at))
+                                })
                             }
                             Ok(snapshot) => control_service::answer(request, snapshot),
                             Err(_) => control::Reply::failure(

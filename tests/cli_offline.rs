@@ -24,6 +24,8 @@ fn cli_offline_entry_points_never_connect_or_start_the_application() {
             (vec!["harness", "launch", "--help"], 0),
             (vec!["request", "inspect", "--help"], 0),
             (vec!["terminal", "--help"], 0),
+            (vec!["terminal", "runtime", "--help"], 0),
+            (vec!["terminal", "capture", "--help"], 0),
             (vec!["help", "terminal", "inspect"], 0),
             (vec!["schema", "harness", "list"], 0),
             (vec!["--version"], 0),

@@ -112,7 +112,7 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
 - **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
-- **⌨️ CLI control for agents** — discover available harnesses, inspect terminal cards and their saved sizes, create shells and launch configured agents through commands with built-in help and JSON output. Explicit unsafe/download choices and durable request receipts make launch behavior inspectable. See the [CLI reference](CLI.md) for supported commands and limits.
+- **⌨️ CLI control for agents** — discover available harnesses, inspect terminal cards, live cell grids and bounded terminal output, create shells and launch configured agents through commands with built-in help and JSON output. Explicit unsafe/download choices and durable request receipts make launch behavior inspectable. See the [CLI reference](CLI.md) for supported commands and limits.
 - **🔢 Keyboard terminal picker** — hold **Alt for 30 ms** to dim terminal output and show dotted borders with centered digits. Press **Alt+0 … Alt+9** to raise and focus that terminal immediately, even before the preview appears; compact cards restore first. Each terminal gets the first free digit when created or restored (starting at **0**), and keeps it while open. Closing a card frees its digit without renumbering the others. Up to ten terminals per local or remote PC view get shortcuts; extra cards remain mouse-accessible. Release Alt or press Escape to dismiss. Assignments are rebuilt when cards are restored after restarting the app.
 - **⌨ Your own shortcut** — `SUPER + SHIFT + Q` out of the box. Open ⚙ Settings, click **Record**, press any combination you like — `SUPER`/`CTRL`/`ALT` plus a key, or an `F1`–`F12` key on its own: it is captured, remembered in `state.json` and written into Hyprland's config (plus its `code:` form, so a layout switch does not break it).
 - **⚙ Movable settings** — drag the ⚙ Settings card by its header, like a terminal card, to see what is under it, and drag its edges to resize it. It opens at 1024×768, stays on screen below the top bar, and comes back where and how big you left it.
@@ -411,9 +411,9 @@ available as a [web guide](https://superdesktop.dmytrogladkyi.com/cli.html).
 It covers every public command, exact ID selection, JSON results, permission
 choices, exit statuses and handling uncertain launch outcomes.
 
-Current structured local commands cover discovery and creation. Local terminal
-input, capture and resizing commands are not available; terminal geometry can
-be inspected. Remote operations use the separate legacy `peer-*` commands.
+Current structured local commands cover discovery, creation and terminal
+observation. Local input and resizing commands are not available; saved card
+geometry and live terminal dimensions can be inspected. Remote operations use the separate legacy `peer-*` commands.
 
 Start with `super-desktop --help` or `super-desktop help agents`. Each listed
 command accepts `--help` for its effects, requirements, output and an example.
@@ -422,7 +422,7 @@ command accepts `--help` for its effects, requirements, output and an example.
 `--version`, and `completion bash` work without a daemon or display. Unknown
 commands exit with status 2 without contacting the daemon.
 
-The owner-only local API provides read-only discovery without opening the
+The owner-only local API provides read-only inspection without opening the
 overlay or starting a daemon:
 
 ```bash
@@ -430,6 +430,8 @@ super-desktop capabilities --format json
 super-desktop app status --format json
 super-desktop terminal list --format json
 super-desktop terminal inspect CARD_ID --format json
+super-desktop terminal runtime CARD_ID --format json
+super-desktop terminal capture CARD_ID --screen --format json
 super-desktop harness list --all --format json
 super-desktop harness inspect claude --format json
 ```
@@ -441,6 +443,13 @@ Detection uses the daemon's environment and does not run or install a harness.
 Launch arguments are redacted, package-runner fallbacks are identified, and
 detected permission-bypass flags are reported without claiming a verified
 security policy. These commands support only `--target local`.
+
+`terminal runtime` observes the pane's running/exited status and columns/rows.
+`terminal capture` reads plain screen text; `--history --lines 200` adds bounded
+retained scrollback. Capture can contain secrets. It never attaches, sends input
+or resizes the pane. Check its truncation fields: the 64 KiB byte limit keeps the
+oldest prefix of the selected region, and alternate-screen history may be
+unavailable. Changed or ambiguous pane targets are refused without returning text.
 
 Create a shell card or launch a configured harness without opening the overlay:
 

@@ -24,6 +24,8 @@ pub const METHODS: &[&str] = &[
     "capabilities",
     "terminal.list",
     "terminal.inspect",
+    "terminal.runtime",
+    "terminal.capture",
     "harness.list",
     "harness.inspect",
     "harness.launch",
@@ -41,6 +43,16 @@ pub enum Command {
     Terminals {},
     #[serde(rename = "terminal.inspect")]
     Terminal { id: String },
+    #[serde(rename = "terminal.runtime")]
+    Runtime { id: String },
+    #[serde(rename = "terminal.capture")]
+    Capture {
+        id: String,
+        #[serde(default)]
+        history: bool,
+        #[serde(default)]
+        lines: Option<u32>,
+    },
     #[serde(rename = "harness.list")]
     Harnesses { all: bool },
     #[serde(rename = "harness.inspect")]
@@ -124,7 +136,7 @@ impl Reply {
         }
         match self.error.as_ref().map(|e| e.code.as_str()) {
             Some("invalid_arguments" | "invalid_request") => 2,
-            Some("not_found") => 3,
+            Some("not_found" | "terminal_not_running") => 3,
             Some(
                 "permission_denied"
                 | "unsafe_socket"
@@ -145,6 +157,7 @@ pub fn capabilities() -> Value {
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
         "delegatedAccess": false, "remoteTargets": false,
+        "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
 }
 

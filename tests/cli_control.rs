@@ -17,11 +17,13 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Launch { .. } | control::Command::InspectRequest { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
+            control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
+            control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}"}),
             control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
             control::Command::InspectRequest { id } => serde_json::json!({"id":id}),
             control::Command::Capabilities {} => control::capabilities(),
@@ -82,6 +84,30 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
         for (args, expected) in [
+            (vec!["terminal", "runtime", "card-1"], 0),
+            (vec!["terminal", "capture", "card-1"], 0),
+            (
+                vec!["terminal", "capture", "card-1", "--history", "--lines=37"],
+                0,
+            ),
+            (vec!["terminal", "capture", "card-1", "--screen"], 0),
+            (
+                vec!["terminal", "capture", "card-1", "--screen", "--history"],
+                2,
+            ),
+            (vec!["terminal", "capture", "card-1", "--lines", "37"], 2),
+            (
+                vec!["terminal", "capture", "card-1", "--history", "--lines=0"],
+                2,
+            ),
+            (
+                vec!["terminal", "capture", "card-1", "--history", "--lines=2001"],
+                2,
+            ),
+            (vec!["terminal", "capture", "card-1", "--raw"], 2),
+            (vec!["terminal", "capture", "card-1", "--request-id=x"], 2),
+            (vec!["terminal", "runtime", "card-1", "--history"], 2),
+            (vec!["terminal", "list", "--screen"], 2),
             (
                 vec![
                     "harness",
@@ -168,6 +194,10 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(data["ok"], expected == 0, "{data}");
             assert_eq!(data["target"], "local");
+            if args == ["terminal", "capture", "card-1", "--history", "--lines=37"] {
+                assert_eq!(data["data"]["history"], true);
+                assert_eq!(data["data"]["lines"], 37);
+            }
             if args.starts_with(&["harness", "launch"]) && expected == 0 {
                 assert_eq!(data["requestId"], "launch-001");
                 assert_eq!(data["data"]["cwd"], "/tmp/project with spaces");
@@ -198,6 +228,8 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 "older-001",
             ],
             vec!["request", "inspect", "older-001"],
+            vec!["terminal", "runtime", "card-1"],
+            vec!["terminal", "capture", "card-1"],
         ] {
             let output = Command::new(executable)
                 .args(args)
