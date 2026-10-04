@@ -405,7 +405,22 @@ its history into scrollback.
 
 ### CLI quick reference
 
+Start with `super-desktop --help` or `super-desktop help agents`. Each listed
+command accepts `--help` for its effects, requirements, output and an example.
+`super-desktop schema --format json` prints the compiled command catalog;
+`super-desktop schema COMMAND` selects one entry. These discovery commands,
+`--version`, and `completion bash` work without a daemon or display. Unknown
+commands exit with status 2 without contacting the daemon.
+
+The catalog marks existing commands as `legacy`: their output and exit codes
+are preserved. Inspect their responses before assuming a mutation succeeded,
+and check the target before retrying an uncertain operation. `harnesses` lists
+running instances, not available launcher types. Terminal input and launcher
+commands have the local user's authority; they are not an agent sandbox.
+
 ```bash
+super-desktop help agents
+super-desktop schema --format json
 super-desktop toggle          # show / hide
 super-desktop status          # visible? how many notes / terminals
 super-desktop add-note "Buy milk"

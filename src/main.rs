@@ -1,3 +1,4 @@
+mod cli;
 mod brand;
 mod assets;
 mod asset_history;
@@ -382,6 +383,10 @@ struct AppContext {
 }
 
 fn main() {
+    let cli_args: Vec<String> = env::args().skip(1).collect();
+    if let Some(code) = cli::run_offline(&cli_args) {
+        std::process::exit(code);
+    }
     // Before anything else, and before any thread exists: layer-shell is
     // already mapped into this process, and must not leak into tmux, card
     // shells/agents, the bridge or any helper subprocess.

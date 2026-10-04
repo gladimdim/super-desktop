@@ -13,6 +13,8 @@ mod terminal_text;
 #[allow(dead_code)]
 #[path = "../harness_record.rs"]
 mod harness_record;
+#[path = "../cli.rs"]
+mod cli;
 
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
     let mut stream = match UnixStream::connect(path) {
@@ -43,6 +45,9 @@ fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = cli::run_offline(&args) {
+        std::process::exit(code);
+    }
     let action = args.first().map(String::as_str).unwrap_or("toggle");
     if action == "harness-event" {
         harness_record::record(args.get(1).map(String::as_str).unwrap_or(""));
