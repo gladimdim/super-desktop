@@ -432,10 +432,36 @@ Launch arguments are redacted, package-runner fallbacks are identified, and
 detected permission-bypass flags are reported without claiming a verified
 security policy. These commands support only `--target local`.
 
+Create a shell card or launch a configured harness without opening the overlay:
+
+```bash
+super-desktop terminal create --cwd "$PWD" --request-id shell-001 --format json
+super-desktop harness launch claude --cwd "$PWD" --request-id task-001 --allow-unsafe-harness --format json
+super-desktop request inspect task-001 --format json
+```
+
+Launches require an absolute existing directory and an explicit request ID
+(1–64 ASCII letters, digits, `_` or `-`). Recognized permission-bypass defaults,
+changed launcher arguments and custom launchers require `--allow-unsafe-harness`.
+Built-in package-runner fallbacks also require `--allow-download`. These choices
+accept the saved launcher configuration; they do not sandbox it or block its
+own network activity. No initial prompt or argument overrides are supported.
+
+Reuse an ID only with exactly the same request: its recorded result is returned
+without launching again, including after a daemon restart. Changed requests
+under the same ID fail with a conflict. Receipts persist under
+`${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop/cli-requests`, with a limit
+of 4096 and no automatic pruning. Deleting receipts loses duplicate protection.
+After an unknown outcome, inspect the receipt and terminal inventory; do not
+retry with a new ID. A launch may have started even if adopting its card failed.
+Recorded success means the card was added and saved, not that the harness is
+ready, authenticated, still running, or that the card still exists.
+
 JSON responses have `schemaVersion`, `requestId`, `target`, `ok`, and either
 `data` or `error`. Exit codes are 0 for success, 2 for invalid arguments, 3 for
-an absent ID, 4 for an unsafe socket or denied access, 6 for unavailable or
-unsupported control, 7 for a timeout, and 8 for an invalid response or output
+an absent ID, 4 for unsafe access or a required opt-in, 5 for a request conflict,
+6 for unavailable or unsupported control, 7 for a timeout or unknown outcome,
+and 8 for an invalid response or output
 failure. A daemon without the local API returns an unavailable error; it is
 never restarted automatically. `capabilities` describes the running server;
 `schema` is the compiled client's command metadata catalog.

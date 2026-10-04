@@ -12,6 +12,12 @@ pub struct Snapshot {
     pub ready: bool,
 }
 
+pub struct Adoption {
+    pub data: crate::state::TerminalData,
+    pub responder: std::sync::mpsc::SyncSender<Result<(), ()>>,
+    pub deadline: Instant,
+}
+
 pub struct Query {
     pub responder: std::sync::mpsc::SyncSender<Snapshot>,
     pub deadline: Instant,
@@ -22,6 +28,13 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
+        Command::Launch { .. } | Command::InspectRequest { .. } => {
+            return Reply::failure(
+                id,
+                "invalid_request",
+                "This request requires the launch dispatcher.",
+            )
+        }
         Command::Capabilities {} => control::capabilities(),
         Command::Status {} => {
             json!({"serverVersion":env!("CARGO_PKG_VERSION"), "controlVersion":control::VERSION,
@@ -108,7 +121,7 @@ fn harnesses(state: &AppState) -> Vec<Value> {
     result
 }
 
-fn permission_bypass(arguments: &[String]) -> bool {
+pub(crate) fn permission_bypass(arguments: &[String]) -> bool {
     arguments.iter().any(|arg| {
         matches!(
             arg.split('=').next().unwrap_or(""),

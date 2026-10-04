@@ -6,7 +6,7 @@ sandbox. Do not approve unknown devices or publish pairing invitations.
 
 ## Local CLI control
 
-Read-only CLI inventory uses a separate Unix socket at
+Local CLI inventory and structured launches use a separate Unix socket at
 `$XDG_RUNTIME_DIR/super-desktop/control-v1.sock`, with a 0700 directory and
 0600 socket. Both ends check the peer UID. Unsafe paths, symlinks and insecure
 permissions are refused. A lifecycle lock protects the listener, and only an
@@ -15,9 +15,9 @@ Client errors never unlink sockets or start another daemon.
 
 Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
 Connections have three-second I/O deadlines, with at most eight workers.
-The API exposes status, capabilities, saved card metadata and launcher
-discovery; it does not expose prompts, terminal output, notes or launch
-arguments. Paths and labels can still be private. JSON output escapes terminal
+The API exposes status, capabilities, saved card metadata, launcher discovery,
+launching and launch receipts; it does not expose prompts, terminal output,
+notes or launch arguments. Paths and labels can still be private. JSON output escapes terminal
 control characters. This endpoint is independent of the existing bridge IPC.
 
 Access belongs to the desktop owner, including agents running as that user.
@@ -25,6 +25,25 @@ It is not a sandbox or a delegated permission system: same-user programs may
 also access the existing IPC, tmux, and the user's files. Launcher discovery
 does not execute a launcher, verify its authentication, or establish that its
 permission settings are safe.
+
+Structured launches use configured executables and arguments. Recognized
+permission-bypass flags, argument overrides saved in Settings, and custom
+launchers require `--allow-unsafe-harness`; built-in package-runner fallbacks
+require `--allow-download`. These are per-request acknowledgements, not
+restrictions on an executable's own behavior, startup files or network access.
+Launches require an absolute existing directory and never submit a prompt.
+
+Before starting a launcher the daemon durably records the request ID, a hash
+of its parameters and a reserved card ID in an owner-only state directory.
+Receipts and the journal lock have mode 0600; symlink paths are refused.
+The saved result includes its launch directory, so receipts are private data.
+Matching IDs return the recorded result; changed payloads conflict; incomplete
+or unreadable receipts are never replayed. The journal holds up to 4096 entries
+without automatic pruning. Removing it removes duplicate protection. A timeout
+or lost connection after sending a launch means an unknown outcome: inspect
+the request and terminal inventory before taking further action. Unknown may
+include a launched process whose card could not be added. No automatic cleanup
+kills such a process, and a receipt does not establish ongoing process liveness.
 
 ## Transport and identity
 

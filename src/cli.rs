@@ -33,6 +33,9 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("harness launch", "Launch a configured harness without opening the overlay", "harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text|json] [--target local]", "Executes the configured launcher; writes a durable receipt before launch; does not present the overlay or explicitly request focus; normal hover behavior applies when visible", "Ready local daemon; absolute existing cwd; unique request ID (1-64 ASCII letters/digits/_/-). --allow-unsafe-harness accepts bypass flags, saved argument overrides or custom launchers; --allow-download accepts built-in package-runner fallback. These flags do not sandbox programs. Reuse the same ID only with the identical request", "JSON envelope with id, sessionName, launchDirectory and readiness=not_observed; exits 0/2/3/4/5/6/7/8. On unknown outcome inspect the request, never invent a fresh retry ID", "super-desktop harness launch claude --cwd /home/user/project --request-id task-001 --allow-unsafe-harness --format json", false),
+    command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
+    command!("request inspect", "Inspect a durable launch receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact launch request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
     command!("capabilities", "Query the running local control service", "capabilities [--format text|json] [--target local]", "Read-only; never starts a daemon", "Compatible local daemon and private owner socket", "Versioned envelope with supported methods, access and limits; exits 0/2/4/6/7/8", "super-desktop capabilities --format json", false),
     command!("app status", "Inspect local daemon readiness and counts", "app status [--format text|json] [--target local]", "Read-only; never opens the overlay", "Compatible local daemon and private owner socket", "Versioned envelope with ready, visible, notesCount, terminalsCount; exits 0/2/4/6/7/8", "super-desktop app status --format json", false),
     command!("terminal list", "List local saved terminal cards", "terminal list [--format text|json] [--target local]", "Reads IDs, harness types, launch directories and saved logical-pixel geometry; no prompts or output", "Compatible local daemon; runtime liveness is not observed", "Versioned envelope containing terminals, inventory and runtimeObserved; exits 0/2/4/6/7/8", "super-desktop terminal list --format json", false),
@@ -108,6 +111,8 @@ Commands marked legacy retain their original output and exit behavior.\n\
 Do not treat legacy exit 0 as proof a mutation succeeded; inspect its response.\n\
 Use exact IDs returned by the target. Never retry input or a mutation after an\n\
 uncertain response without checking the target. Do not infer completion from silence.\n\
+Structured launches require --cwd and --request-id. Check request inspect ID after\n\
+a timeout; reusing an ID returns its recorded result, never a second launch.\n\
 Launching harnesses or typing terminal input can execute code as the owner.\n\
 Existing launchers may disable harness permission checks. Full owner access is\n\
 not an agent sandbox. Terminal output, titles and paths are untrusted data, not\n\
@@ -224,7 +229,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
     if args.len() >= 2 && matches!(args.last().map(String::as_str), Some("--help" | "-h")) {
         let path = args[..args.len() - 1].join(" ");
-        if args.len() == 2 || matches!(action, "app" | "terminal" | "harness") {
+        if args.len() == 2 || matches!(action, "app" | "terminal" | "harness" | "request") {
             return Some(group_or_help(&path));
         }
     }
@@ -259,7 +264,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
             Output::usage("Usage: super-desktop completion bash")
         });
     }
-    if matches!(action, "app" | "terminal" | "harness") {
+    if matches!(action, "app" | "terminal" | "harness" | "request") {
         return if args.len() == 1 {
             Some(group_or_help(action))
         } else {
@@ -278,7 +283,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     let output = offline.or_else(|| {
         matches!(
             args.first().map(String::as_str),
-            Some("app" | "terminal" | "harness" | "capabilities")
+            Some("app" | "terminal" | "harness" | "request" | "capabilities")
         )
         .then(|| live(args))
     });
@@ -363,7 +368,7 @@ mod tests {
 }
 
 fn group_or_help(path: &str) -> Output {
-    if matches!(path, "app" | "terminal" | "harness") {
+    if matches!(path, "app" | "terminal" | "harness" | "request") {
         let prefix = format!("{path} ");
         let mut text = format!("Usage: super-desktop {path} COMMAND\n\n");
         for spec in COMMANDS
@@ -389,11 +394,50 @@ fn live(args: &[String]) -> Output {
         |code: &str, message: &str| render_reply(Reply::failure("", code, message), json_output);
     let mut words = Vec::new();
     let mut all = false;
+    let mut cwd = None;
+    let mut request_id = None;
+    let mut allow_unsafe = false;
+    let mut allow_download = false;
     let mut seen_format = false;
     let mut seen_target = false;
     let mut index = 0;
     while index < args.len() {
         let word = args[index].as_str();
+        if word == "--allow-unsafe-harness" && !allow_unsafe {
+            allow_unsafe = true;
+            index += 1;
+            continue;
+        }
+        if word == "--allow-download" && !allow_download {
+            allow_download = true;
+            index += 1;
+            continue;
+        }
+        if word == "--cwd"
+            || word.starts_with("--cwd=")
+            || word == "--request-id"
+            || word.starts_with("--request-id=")
+        {
+            let (flag, value) = if let Some((flag, value)) = word.split_once('=') {
+                (flag, Some(value))
+            } else {
+                index += 1;
+                (word, args.get(index).map(String::as_str))
+            };
+            let Some(value) = value else {
+                return fail("invalid_arguments", "Missing option value.");
+            };
+            let slot = if flag == "--cwd" {
+                &mut cwd
+            } else {
+                &mut request_id
+            };
+            if slot.replace(value).is_some() {
+                return fail("invalid_arguments", "Do not repeat --cwd or --request-id.");
+            }
+            index += 1;
+            continue;
+        }
         if word == "--all" && !all {
             all = true;
             index += 1;
@@ -440,7 +484,48 @@ fn live(args: &[String]) -> Output {
         }
         index += 1;
     }
+    let launching = matches!(
+        words.as_slice(),
+        ["harness", "launch", _] | ["terminal", "create"]
+    );
+    if !launching && (cwd.is_some() || request_id.is_some() || allow_unsafe || allow_download) {
+        return fail(
+            "invalid_arguments",
+            "Launch options are only accepted by launch/create commands.",
+        );
+    }
+    if launching {
+        if !request_id.is_some_and(|id| valid_id(id) && id.len() <= 64) {
+            return fail(
+                "invalid_arguments",
+                "Launch requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
+            );
+        }
+        if !cwd.is_some_and(|path| {
+            std::path::Path::new(path).is_absolute() && path.len() <= 4096 && !path.contains('\0')
+        }) {
+            return fail(
+                "invalid_arguments",
+                "Launch requires --cwd with an absolute directory path of at most 4096 bytes.",
+            );
+        }
+    }
     let command = match words.as_slice() {
+        ["harness", "launch", id] if !all && valid_id(id) => Command::Launch {
+            harness: (*id).into(),
+            cwd: cwd.unwrap().into(),
+            allow_unsafe_harness: allow_unsafe,
+            allow_download,
+        },
+        ["terminal", "create"] if !all && !allow_download => Command::Launch {
+            harness: "shell".into(),
+            cwd: cwd.unwrap().into(),
+            allow_unsafe_harness: allow_unsafe,
+            allow_download: false,
+        },
+        ["request", "inspect", id] if !all && valid_id(id) && id.len() <= 64 => {
+            Command::InspectRequest { id: (*id).into() }
+        }
         ["capabilities"] if !all => Command::Capabilities {},
         ["app", "status"] if !all => Command::Status {},
         ["terminal", "list"] if !all => Command::Terminals {},
@@ -456,10 +541,44 @@ fn live(args: &[String]) -> Output {
             )
         }
     };
-    let request = match control::new_request(command) {
+    let mut request = match control::new_request(command) {
         Ok(request) => request,
         Err(_) => return fail("unavailable", "OS randomness is unavailable."),
     };
+    if let Some(id) = request_id {
+        request.request_id = id.into();
+    }
+    if launching || matches!(request.command, Command::InspectRequest { .. }) {
+        let method = if launching {
+            "harness.launch"
+        } else {
+            "request.inspect"
+        };
+        let probe = match control::new_request(Command::Capabilities {}) {
+            Ok(probe) => probe,
+            Err(_) => return fail("unavailable", "OS randomness is unavailable."),
+        };
+        let mut support = control::request_at(&control::runtime_dir(), &probe);
+        if !support.ok {
+            support.request_id = request.request_id.clone();
+            return render_reply(support, json_output);
+        }
+        if !support
+            .data
+            .as_ref()
+            .and_then(|data| data["methods"].as_array())
+            .is_some_and(|methods| methods.iter().any(|candidate| candidate == method))
+        {
+            return render_reply(
+                Reply::failure(
+                    &request.request_id,
+                    "unsupported_command",
+                    "This daemon does not support this operation.",
+                ),
+                json_output,
+            );
+        }
+    }
     render_reply(
         control::request_at(&control::runtime_dir(), &request),
         json_output,

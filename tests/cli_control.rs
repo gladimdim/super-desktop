@@ -13,8 +13,17 @@ fn control_daemon_fixture() {
         return;
     };
     let server = control::Server::bind(Path::new(&runtime)).unwrap();
-    server.run(|request, _| {
+    server.run(move |request, _| {
+        if Path::new(&runtime).join("older-daemon").exists() {
+            match &request.command {
+                control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
+                control::Command::Launch { .. } | control::Command::InspectRequest { .. } => panic!("client sent an unsupported operation"),
+                _ => {}
+            }
+        }
         let data = match &request.command {
+            control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
+            control::Command::InspectRequest { id } => serde_json::json!({"id":id}),
             control::Command::Capabilities {} => control::capabilities(),
             control::Command::Status {} => serde_json::json!({"visible":false,"ready":true}),
             control::Command::Terminals {} => serde_json::json!({"terminals":[]}),
@@ -73,6 +82,56 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
         for (args, expected) in [
+            (
+                vec![
+                    "harness",
+                    "launch",
+                    "shell",
+                    "--cwd",
+                    "/tmp/project with spaces",
+                    "--request-id",
+                    "launch-001",
+                    "--allow-unsafe-harness",
+                    "--allow-download",
+                ],
+                0,
+            ),
+            (
+                vec![
+                    "terminal",
+                    "create",
+                    "--cwd=/tmp/project with spaces",
+                    "--request-id=shell-001",
+                ],
+                0,
+            ),
+            (vec!["request", "inspect", "launch-001"], 0),
+            (vec!["terminal", "create", "--cwd", "/tmp"], 2),
+            (
+                vec![
+                    "terminal",
+                    "create",
+                    "--cwd",
+                    "relative",
+                    "--request-id",
+                    "bad-cwd",
+                ],
+                2,
+            ),
+            (vec!["terminal", "list", "--allow-unsafe-harness"], 2),
+            (
+                vec![
+                    "terminal",
+                    "create",
+                    "--cwd",
+                    "/tmp",
+                    "--request-id",
+                    "same",
+                    "--request-id",
+                    "same",
+                ],
+                2,
+            ),
             (vec!["capabilities"], 0),
             (vec!["app", "status"], 0),
             (vec!["terminal", "list"], 0),
@@ -109,9 +168,46 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(data["ok"], expected == 0, "{data}");
             assert_eq!(data["target"], "local");
+            if args.starts_with(&["harness", "launch"]) && expected == 0 {
+                assert_eq!(data["requestId"], "launch-001");
+                assert_eq!(data["data"]["cwd"], "/tmp/project with spaces");
+                assert_eq!(data["data"]["allowUnsafeHarness"], true);
+                assert_eq!(data["data"]["allowDownload"], true);
+            }
+            if args.starts_with(&["terminal", "create"]) && expected == 0 {
+                assert_eq!(data["requestId"], "shell-001");
+                assert_eq!(data["data"]["harness"], "shell");
+            }
             if args == ["harness", "list", "--all"] {
                 assert_eq!(data["data"]["all"], true);
             }
+        }
+    }
+    std::fs::write(fixture.root.join("older-daemon"), "").unwrap();
+    for executable in [
+        env!("CARGO_BIN_EXE_super-desktop-client"),
+        env!("CARGO_BIN_EXE_super-desktop"),
+    ] {
+        for args in [
+            vec![
+                "terminal",
+                "create",
+                "--cwd",
+                "/tmp",
+                "--request-id",
+                "older-001",
+            ],
+            vec!["request", "inspect", "older-001"],
+        ] {
+            let output = Command::new(executable)
+                .args(args)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(6));
+            let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(reply["error"]["code"], "unsupported_command");
         }
     }
     // Idle clients occupy only the bounded worker pool; excess connections are

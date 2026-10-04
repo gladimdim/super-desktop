@@ -1407,6 +1407,52 @@ impl SuperDesktopWindow {
         sess
     }
 
+    /// Adopt an already launched CLI session without mapping or focusing the overlay.
+    pub(crate) fn adopt_cli_terminal(&self, mut data: TerminalData) -> Result<(), ()> {
+        {
+            let state = self.state.borrow();
+            if state.terminals.len() >= crate::workspace_model::MAX_DESKTOP_CARDS
+                || state
+                    .terminals
+                    .iter()
+                    .any(|t| t.id == data.id || t.session_name == data.session_name)
+            {
+                return Err(());
+            }
+        }
+        let (width, height) = clamp_card_size(
+            NEW_TERM_WIDTH,
+            NEW_TERM_HEIGHT,
+            self.screen_width,
+            self.screen_height,
+        );
+        let cascade = (self.terminal_cards.borrow().len() as i32 % 5) * 32;
+        data.x = ((self.screen_width - width) / 2 + cascade)
+            .clamp(10, (self.screen_width - width - 10).max(10));
+        data.y = ((self.screen_height - height) / 2 + cascade)
+            .clamp(70, (self.screen_height - height - 10).max(70));
+        data.width = width;
+        data.height = height;
+        data.restored_width = width;
+        data.restored_height = height;
+        {
+            let mut state = self.state.borrow_mut();
+            if let Some(directory) = &data.workspace_dir {
+                crate::state::remember_workspace_dir(&mut state, directory);
+                data.tag = crate::folder_colors::tag_for_new_card(&state, directory);
+                crate::folder_colors::remember(&mut state, directory, data.tag);
+            }
+            state.terminals.push(data.clone());
+            crate::state::normalize_terminal_order(&mut state);
+            crate::state::save_state_async(state.clone());
+        }
+        let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::cli_created(
+            &data.session_name,
+        ));
+        self.spawn_terminal_widget(data, false, Some(inventory), None);
+        Ok(())
+    }
+
     fn spawn_terminal_widget(
         &self,
         term_data: TerminalData,

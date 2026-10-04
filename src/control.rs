@@ -26,6 +26,8 @@ pub const METHODS: &[&str] = &[
     "terminal.inspect",
     "harness.list",
     "harness.inspect",
+    "harness.launch",
+    "request.inspect",
 ];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,6 +45,17 @@ pub enum Command {
     Harnesses { all: bool },
     #[serde(rename = "harness.inspect")]
     Harness { id: String },
+    #[serde(rename = "harness.launch")]
+    Launch {
+        harness: String,
+        cwd: String,
+        #[serde(default, rename = "allowUnsafeHarness")]
+        allow_unsafe_harness: bool,
+        #[serde(default, rename = "allowDownload")]
+        allow_download: bool,
+    },
+    #[serde(rename = "request.inspect")]
+    InspectRequest { id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -53,7 +66,7 @@ pub struct Request {
     pub command: Command,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Reply {
     pub schema_version: u32,
@@ -66,7 +79,7 @@ pub struct Reply {
     pub error: Option<Error>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Error {
     pub code: String,
     pub message: String,
@@ -100,6 +113,11 @@ impl Reply {
             }),
         }
     }
+    pub fn unknown(id: &str) -> Self {
+        let mut reply = Self::failure(id, "unknown_outcome", "Launch outcome is unknown. Inspect this request ID and terminal inventory; do not launch with a new ID to retry.");
+        reply.error.as_mut().unwrap().outcome = "unknown".into();
+        reply
+    }
     pub fn exit_code(&self) -> i32 {
         if self.ok {
             return 0;
@@ -107,8 +125,14 @@ impl Reply {
         match self.error.as_ref().map(|e| e.code.as_str()) {
             Some("invalid_arguments" | "invalid_request") => 2,
             Some("not_found") => 3,
-            Some("permission_denied" | "unsafe_socket") => 4,
-            Some("timeout") => 7,
+            Some(
+                "permission_denied"
+                | "unsafe_socket"
+                | "unsafe_harness"
+                | "download_requires_opt_in",
+            ) => 4,
+            Some("conflict") => 5,
+            Some("timeout" | "unknown_outcome") => 7,
             Some("output_failed" | "invalid_response") => 8,
             _ => 6,
         }
@@ -117,10 +141,11 @@ impl Reply {
 
 pub fn capabilities() -> Value {
     json!({"controlVersion": VERSION, "serverVersion": env!("CARGO_PKG_VERSION"),
-        "target": "local", "access": "owner", "readOnly": true, "methods": METHODS,
+        "target": "local", "access": "owner", "readOnly": false, "methods": METHODS,
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
-        "delegatedAccess": false, "remoteTargets": false})
+        "delegatedAccess": false, "remoteTargets": false,
+        "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
 }
 
 pub fn runtime_dir() -> PathBuf {
@@ -136,7 +161,7 @@ fn denied() -> io::Error {
     )
 }
 
-fn private_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn private_dir(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(denied());
     }
@@ -159,7 +184,7 @@ fn private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn private_file(path: &Path, socket: bool) -> io::Result<fs::Metadata> {
+pub(crate) fn private_file(path: &Path, socket: bool) -> io::Result<fs::Metadata> {
     let m = fs::symlink_metadata(path)?;
     if m.uid() != unsafe { libc::geteuid() }
         || m.mode() & 0o777 != 0o600
@@ -416,6 +441,12 @@ impl Drop for Server {
         {
             let _ = fs::remove_file(&self.path);
         }
+        // A concurrent fork may briefly retain this open-file description
+        // until exec closes it. Explicit unlock prevents a false stale-owner
+        // refusal after our listener has already shut down.
+        unsafe {
+            libc::flock(self._lock.as_raw_fd(), libc::LOCK_UN);
+        }
     }
 }
 
@@ -467,8 +498,12 @@ pub fn serve_connection(mut stream: UnixStream, handler: impl FnOnce(Request, In
 }
 
 pub fn request_at(runtime: &Path, request: &Request) -> Reply {
-    match exchange(runtime, request) {
+    let mut attempted = false;
+    match exchange(runtime, request, &mut attempted) {
         Ok(reply) => reply,
+        Err(_) if attempted && matches!(request.command, Command::Launch { .. }) => {
+            Reply::unknown(&request.request_id)
+        }
         Err(e) => {
             let (code, message) = match e.kind() {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ("unavailable", "Local control is unavailable. Start a compatible SUPER DESKTOP daemon; this command never starts one."),
@@ -481,7 +516,7 @@ pub fn request_at(runtime: &Path, request: &Request) -> Reply {
     }
 }
 
-fn exchange(runtime: &Path, request: &Request) -> io::Result<Reply> {
+fn exchange(runtime: &Path, request: &Request, attempted: &mut bool) -> io::Result<Reply> {
     private_dir(runtime)?;
     let directory = runtime.join("super-desktop");
     private_dir(&directory)?;
@@ -491,6 +526,7 @@ fn exchange(runtime: &Path, request: &Request) -> io::Result<Reply> {
     let mut stream = connect_bounded(&path, deadline)?;
     check_peer(&stream)?;
     let body = serde_json::to_vec(request)?;
+    *attempted = true;
     write_frame(&mut stream, &body, MAX_REQUEST, deadline)?;
     let body = read_frame(&mut stream, MAX_REPLY, deadline)?;
     let reply: Reply = serde_json::from_slice(&body)?;
@@ -682,6 +718,30 @@ mod tests {
             8
         );
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn cli_launch_lost_reply_is_unknown_and_never_replayed() {
+        let runtime = Runtime::new();
+        let server = Server::bind(&runtime.0).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.listener.accept().unwrap();
+            read_frame(&mut stream, MAX_REQUEST, Instant::now() + DEADLINE).unwrap();
+            // The daemon may have applied the request. Drop without a reply.
+        });
+        let request = new_request(Command::Launch {
+            harness: "shell".into(),
+            cwd: "/tmp".into(),
+            allow_unsafe_harness: false,
+            allow_download: false,
+        })
+        .unwrap();
+        let reply = request_at(&runtime.0, &request);
+        assert_eq!(reply.exit_code(), 7);
+        assert_eq!(reply.error.unwrap().outcome, "unknown");
+        worker.join().unwrap();
+        let absent = request_at(&runtime.0, &request);
+        assert_eq!(absent.error.unwrap().outcome, "not_applied");
     }
 
     #[test]
