@@ -1,4 +1,4 @@
-//! Durable launch receipts. An interrupted request is never re-executed.
+//! Durable mutation receipts. An interrupted request is never re-executed.
 use crate::control::{self, Reply, Request};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -126,7 +126,7 @@ fn lock(root: &Path) -> io::Result<Lock> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "launch journal busy",
+            "mutation journal busy",
         ));
     }
     Ok(Lock(file))
@@ -134,14 +134,14 @@ fn lock(root: &Path) -> io::Result<Lock> {
 
 fn journal_error(id: &str, _error: io::Error) -> Reply {
     // A competing execution or unreadable receipt may represent an earlier
-    // launch. Refusing this connection cannot establish its original outcome.
+    // mutation. Refusing this connection cannot establish its original outcome.
     let mut reply = Reply::unknown(id);
-    reply.error.as_mut().unwrap().message = "The private launch journal is busy, unavailable or invalid. No new launch was attempted; an earlier outcome cannot be established. Inspect this ID; do not retry with a new ID.".into();
+    reply.error.as_mut().unwrap().message = "The private mutation journal is busy, unavailable or invalid. No new mutation was attempted; an earlier outcome cannot be established. Inspect this ID; do not retry with a new ID.".into();
     reply
 }
 
-/// Serializes launches across threads/processes and saves intent before any
-/// launcher side effect. There is deliberately no automatic pruning of IDs.
+/// Serializes mutations across threads/processes and saves intent before any
+/// side effect. There is deliberately no automatic pruning of IDs.
 pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply) -> Reply {
     let id = &request.request_id;
     let _lock = match lock(root) {
@@ -161,7 +161,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
             return Reply::failure(
                 id,
                 "conflict",
-                "This request ID already describes a different launch.",
+                "This request ID already describes a different mutation.",
             )
         }
         Ok(Some(entry)) => return entry.reply.unwrap_or_else(|| Reply::unknown(id)),
@@ -177,7 +177,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
         return Reply::failure(
             id,
             "journal_full",
-            "Launch journal is full. Existing IDs remain inspectable; no new launch was attempted.",
+            "Mutation journal is full. Existing IDs remain inspectable; no new mutation was attempted.",
         );
     }
     // Fresh random identity, recorded before launch. A request replay never
@@ -189,7 +189,10 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
     let mut entry = Entry {
         version: 1,
         request_hash: hash,
-        card_id: format!("sd_term_cli_{random}"),
+        card_id: match &request.command {
+            control::Command::Move { id, .. } | control::Command::Resize { id, .. } => id.clone(),
+            _ => format!("sd_term_cli_{random}"),
+        },
         reply: None,
     };
     let durable = write_new(&path, &entry).and_then(|()| File::open(root)?.sync_all());
@@ -216,7 +219,7 @@ pub fn inspect(root: &Path, request_id: &str, id: &str) -> Reply {
         Err(_) => return Reply::failure(request_id, "invalid_arguments", "Invalid request ID."),
     };
     if !root.exists() {
-        return Reply::failure(request_id, "not_found", "No launch receipt has that ID.");
+        return Reply::failure(request_id, "not_found", "No mutation receipt has that ID.");
     }
     if let Err(e) = control::private_dir(root) {
         return journal_error(request_id, e);
@@ -228,7 +231,7 @@ pub fn inspect(root: &Path, request_id: &str, id: &str) -> Reply {
             "state":if entry.reply.is_some() {"recorded"} else {"unknown"},
             "result":entry.reply.unwrap_or_else(|| Reply::unknown(id))}),
         ),
-        Ok(None) => Reply::failure(request_id, "not_found", "No launch receipt has that ID."),
+        Ok(None) => Reply::failure(request_id, "not_found", "No mutation receipt has that ID."),
         Err(e) => journal_error(request_id, e),
     }
 }

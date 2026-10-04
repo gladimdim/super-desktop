@@ -2090,6 +2090,61 @@ impl SuperDesktopWindow {
         model.snapshot(canvas, &presentation)
     }
 
+    /// Local CLI geometry uses the live card and output on this GTK turn.
+    /// It never sends a bridge command, starts a session, or presents the overlay.
+    pub fn cli_geometry(&self, model: &crate::workspace_model::LocalWorkspace, request: &crate::control::Request) -> crate::control::Reply {
+        use crate::control::{Command, Reply};
+        use crate::control_geometry as geometry;
+        let id = &request.request_id;
+        let card_id = geometry::card_id(&request.command);
+        let snapshot = match self.desktop_snapshot(model) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Reply::failure(id, "unavailable", "Local geometry is unavailable."),
+        };
+        let Some(current) = snapshot.cards.iter().find(|card| card.card_id == card_id) else {
+            return Reply::failure(id, "not_found", "No local terminal card has that ID.");
+        };
+        if matches!(request.command, Command::Geometry { .. }) {
+            return Reply::success(id, geometry::describe(&snapshot, current));
+        }
+        let prepared = match geometry::prepare(request, &snapshot, current) {
+            Ok(prepared) => prepared,
+            Err(reply) => return reply,
+        };
+        let card = match self.any_terminal_card(card_id) {
+            Ok(card) => card,
+            Err(_) => return Reply::failure(id, "not_found", "No local terminal widget has that ID."),
+        };
+        if snapshot.cards.iter().filter(|other| other.session_name == current.session_name).count() != 1
+            || card.data.borrow().session_name != current.session_name
+        {
+            return Reply::failure(id, "conflict", "The card-to-session mapping is ambiguous or changed.");
+        }
+        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+            return Reply::failure(id, "conflict", "A local geometry gesture is in progress.");
+        }
+        let applied = match request.command {
+            Command::Move { .. } => self.move_terminal_card(card_id, prepared.rect.x as i32, prepared.rect.y as i32).is_ok(),
+            Command::Resize { .. } => card.apply_geometry(prepared.rect),
+            _ => false,
+        };
+        if !applied {
+            return Reply::unknown(id);
+        }
+        let after = match self.desktop_snapshot(model) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Reply::unknown(id),
+        };
+        let Some(current) = after.cards.iter().find(|card| card.card_id == card_id) else {
+            return Reply::unknown(id);
+        };
+        let mut data = geometry::describe(&after, current);
+        data["requested"] = prepared.requested;
+        data["clamped"] = serde_json::json!(prepared.clamped);
+        data["outcome"] = serde_json::json!("applied");
+        Reply::success(id, data)
+    }
+
     pub fn item_counts(&self) -> (usize, usize) {
         (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
     }

@@ -44,6 +44,7 @@
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
+<li><a href="#card-geometry-movement-and-resizing">Card geometry, movement and resizing</a></li>
 <li><a href="#launching-and-permission-choices">Launching and permission choices</a></li>
 <li><a href="#request-receipts-and-uncertain-outcomes">Request receipts and uncertain outcomes</a></li>
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
@@ -58,14 +59,14 @@
 <main><h1 id="super-desktop-cli-reference">SUPER DESKTOP CLI reference</h1>
 <p>Use the CLI to discover harnesses, inspect terminal cards, launch configured
 agents, create shell terminals, read their screen or retained history, and inspect
-launch receipts. Existing commands
+mutation receipts, and move or resize cards. Existing commands
 also control overlay visibility, notes, terminal closing, themes and paired PCs.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 <code>--help</code> and <code>capabilities</code> before automating them.</p>
 <p><strong>Current coverage:</strong> the structured local CLI supports discovery, creation and
-terminal observation. It does not provide local terminal input, attachment, card resizing or
-terminal-grid resizing commands. Saved geometry is readable. Remote terminal
+terminal observation and card geometry. It does not provide local terminal input,
+attachment or direct terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy <code>peer-*</code> commands.
 There is no claim of complete CLI parity with every graphical action.</p>
 <h2 id="start-here-for-agents">Start here for agents</h2>
@@ -76,7 +77,7 @@ There is no claim of complete CLI parity with every graphical action.</p>
    it is not a formal JSON Schema for request or result validation.</li>
 <li>Read <code>super-desktop capabilities --format json</code> for the running daemon's
    methods and limits. Do not infer support from the version number alone.</li>
-<li>Check <code>super-desktop app status --format json</code>. A launch needs <code>data.ready</code>.</li>
+<li>Check <code>super-desktop app status --format json</code>. Launch and geometry commands need <code>data.ready</code>.</li>
 <li>Select exact harness and card IDs from returned data. A harness ID identifies
    a launcher type; a card ID identifies a saved terminal. Never select by list
    position or guess an ID from a title. <code>sessionName</code> is a separate field used
@@ -136,6 +137,21 @@ override, global request ID option or remote target is accepted here.</p>
 <td><code>terminal.inspect</code></td>
 </tr>
 <tr>
+<td><code>terminal geometry ID</code></td>
+<td>Current logical geometry, bounds, epoch and revision</td>
+<td><code>terminal.geometry</code></td>
+</tr>
+<tr>
+<td><code>terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]</code></td>
+<td>Move and raise a normal card or minimized icon</td>
+<td><code>terminal.move</code></td>
+</tr>
+<tr>
+<td><code>terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]</code></td>
+<td>Change a normal card’s outer and restored size</td>
+<td><code>terminal.resize</code></td>
+</tr>
+<tr>
 <td><code>terminal runtime ID</code></td>
 <td>Live pane identity, process status and cell grid</td>
 <td><code>terminal.runtime</code></td>
@@ -167,7 +183,7 @@ override, global request ID option or remote target is accepted here.</p>
 </tr>
 <tr>
 <td><code>request inspect ID</code></td>
-<td>Read a historical launch receipt</td>
+<td>Read a historical mutation receipt</td>
 <td><code>request.inspect</code></td>
 </tr>
 </tbody>
@@ -234,6 +250,55 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (<code>consistency: "checked-before-and-after"</code>), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.</p>
+<h2 id="card-geometry-movement-and-resizing">Card geometry, movement and resizing</h2>
+<p><code>terminal geometry CARD_ID --format json</code> reads the current local card without
+showing the overlay. It returns <code>epoch</code>, an opaque <code>revision</code>, <code>mode</code>, <code>rect</code>,
+<code>saved</code>, <code>canvas</code> (including logical width, height and display scale), and <code>limits</code>.
+Coordinates and dimensions are <strong>logical pixels</strong>, describing the card’s outer
+rectangle. Expanded rectangles are transient; normal and minimized positions
+are saved separately. The canvas comes from the current local workspace, never
+from card extents. This read contains no prompt or terminal output.</p>
+<p>Read before each mutation. Copy <code>epoch</code> and <code>revision</code> unchanged into
+<code>--expect-epoch</code> and <code>--expect-revision</code>, and supply a unique <code>--request-id</code> for
+that operation. This Bash example uses <code>jq</code>; set <code>card_id</code> to an exact ID from
+<code>terminal list</code>:</p>
+<pre><code class="language-bash">set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+geometry=$(super-desktop terminal geometry &quot;$card_id&quot; --format json)
+epoch=$(jq -er '.data.epoch' &lt;&lt;&lt;&quot;$geometry&quot;)
+revision=$(jq -er '.data.revision' &lt;&lt;&lt;&quot;$geometry&quot;)
+request_id=&quot;resize-$(cat /proc/sys/kernel/random/uuid)&quot;
+super-desktop terminal resize &quot;$card_id&quot; --width 640 --height 480 \
+  --expect-epoch &quot;$epoch&quot; --expect-revision &quot;$revision&quot; \
+  --request-id &quot;$request_id&quot; --format json
+</code></pre>
+<p>For a move, use <code>terminal move "$card_id" --x 80 --y 100</code> with the same
+required flags, using a fresh geometry read and a new operation ID. Move also
+raises the card. Neither move nor resize launches a session, shows the overlay,
+or explicitly requests keyboard focus; normal pointer-hover behavior still applies.</p>
+<p>The daemon checks the current card and display again on the GTK thread before
+applying the operation. A changed card revision, output bounds/scale, daemon
+restart, or active drag/resize gesture returns <code>conflict</code> (exit 5). Other cards
+can continue changing independently. On conflict, read again and decide whether
+the operation is still wanted; do not automatically overwrite another edit.
+A revision is a comparison token, not a number to increment or parse.</p>
+<p>Bounds are strict by default: the whole card must fit inside the output with
+10-pixel side/bottom margins and space for the toolbar. Normal resizing respects
+the UI minimum size and its maximum 70% width / 75% height. The current geometry
+reports the exact bounds. <code>--clamp</code> explicitly permits adjustment of size and/or
+position to fit; the reply reports <code>requested</code>, final <code>rect</code>, <code>clamped</code>, a new
+<code>revision</code> and <code>outcome: "applied"</code>. Without it, an out-of-bounds request returns
+<code>out_of_bounds</code> (exit 6) without changing the card. Coordinates accept integers
+from -32768 to 32768; dimensions from 1 to 32768, before display validation.</p>
+<p>Expanded cards refuse moves and resizes; minimized cards allow icon movement
+but refuse resizing. Restore/collapse through the existing UI first. Resizing
+updates both the normal and restored dimensions. It can cause VTE to refit the
+session naturally; it does not request a fixed terminal cell grid. Geometry
+returns <code>gridObserved: false</code>: use <code>terminal runtime</code> afterward for a fresh
+columns/rows observation. A hidden card may refit only when shown.</p>
+<p>Moves and resizes share the durable request journal with launches. Inspect
+<code>request inspect "$request_id"</code> after an uncertain response. A recorded success
+is historical and does not prove that nobody moved the card afterward.</p>
 <h2 id="launching-and-permission-choices">Launching and permission choices</h2>
 <p>For a new, explicitly intended operation, choose a unique ID and retain it with
 the exact request. The examples below are mutations: run them only when you
@@ -268,21 +333,21 @@ completion, continued process liveness or that the card still exists later.</p>
 <pre><code class="language-bash">super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 </code></pre>
-<p>The daemon records intent before starting a launcher. Reusing the same ID with
-the identical payload returns the recorded result without launching again,
-including after a daemon restart. Changing any launch parameter under that ID
+<p>The daemon records intent before a launch, move or resize. Reusing the same ID
+with the identical payload returns the recorded result without applying it again,
+including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
 refused request requires a new ID for that changed operation.</p>
 <p><code>request inspect</code> returns <code>data.id</code>, <code>data.cardId</code>, <code>data.state</code> and <code>data.result</code>.
-The outer <code>ok: true</code> means the receipt was read, not that the launch succeeded.
+The outer <code>ok: true</code> means the receipt was read, not that the mutation succeeded.
 Inspect the nested <code>data.result.ok</code> and <code>data.result.error.outcome</code> as well.
 <code>state: "recorded"</code> means a result was stored; that result can itself be an
 error or an unknown outcome. A pending receipt has <code>state: "unknown"</code>.</p>
 <p>After a lost reply, timeout, incomplete receipt or unknown outcome:</p>
 <ol>
 <li>Retain the original ID and payload. Do not generate a new ID to retry it.</li>
-<li>Inspect that request ID and the terminal inventory. Use its reserved
-   <code>cardId</code> to match a card if present.</li>
+<li>Inspect that request ID and the terminal inventory. Use its target or reserved
+   <code>cardId</code> to match a card if present. For geometry, also read <code>terminal geometry</code>.</li>
 <li>If the result is still unknown, stop automated retries and report that
    uncertainty. Neither a missing receipt nor a missing card proves that a
    process did not start: receipt storage or card adoption can fail.</li>
@@ -293,7 +358,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches only, not legacy
+killed or relaunched. These receipts cover structured launches, moves and resizes, not legacy
 commands or every future restoration of a saved card.</p>
 <h2 id="json-and-exit-statuses">JSON and exit statuses</h2>
 <p>Structured live replies contain <code>schemaVersion</code>, <code>requestId</code>, <code>target</code>, <code>ok</code>
@@ -301,7 +366,7 @@ and either <code>data</code> or <code>error</code>. An illustrative successful s
 <pre><code class="language-json">{&quot;schemaVersion&quot;:1,&quot;requestId&quot;:&quot;example-status&quot;,&quot;target&quot;:&quot;local&quot;,&quot;ok&quot;:true,&quot;data&quot;:{&quot;controlVersion&quot;:1,&quot;serverVersion&quot;:&quot;1.1.21&quot;,&quot;ready&quot;:true,&quot;visible&quot;:false,&quot;notesCount&quot;:0,&quot;terminalsCount&quot;:2}}
 </code></pre>
 <p>Errors contain <code>code</code>, <code>message</code>, <code>retryable</code> and <code>outcome</code>. Treat codes and
-outcomes as machine data; do not branch on message text. A launch transport
+outcomes as machine data; do not branch on message text. A mutation transport
 failure after sending the request reports <code>outcome: "unknown"</code>. An error with
 <code>outcome: "not_applied"</code> describes that attempt and must not be used to erase
 uncertainty about a previous request. Current errors do not authorize an
@@ -333,7 +398,7 @@ escapes them but is intended for people.</p>
 </tr>
 <tr>
 <td>5</td>
-<td>Request ID conflicts, or terminal/card/grid changed during observation</td>
+<td>Request ID or geometry revision conflicts, or terminal/card/grid changed during observation</td>
 </tr>
 <tr>
 <td>6</td>
@@ -358,7 +423,7 @@ owner's authority; there is no delegated agent permission system. See
 <h2 id="legacy-and-remote-commands">Legacy and remote commands</h2>
 <p>Commands marked <code>legacy</code> in the catalog retain their existing output and exit
 behavior. They do not accept the structured commands' common options or use
-their launch receipt guarantees. In particular, exit 0 may accompany an absent
+their mutation receipt guarantees. In particular, exit 0 may accompany an absent
 daemon or a typed refusal: inspect the actual response. <code>add-term</code> and
 <code>add-term-in</code> use the existing launcher behavior and show the overlay; prefer
 <code>harness launch</code> or <code>terminal create</code> for structured local automation.</p>
@@ -389,11 +454,26 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <thead>
 <tr>
 <th>Syntax after <code>super-desktop</code></th>
-<th>Mode</th>
+<th>Interface</th>
 <th>Purpose</th>
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>terminal geometry ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect current card geometry and its revision</td>
+</tr>
+<tr>
+<td><code>terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Move a terminal card within the logical display</td>
+</tr>
+<tr>
+<td><code>terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Resize a normal terminal card in logical pixels</td>
+</tr>
 <tr>
 <td><code>terminal runtime ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
@@ -417,7 +497,7 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <tr>
 <td><code>request inspect ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
-<td>Inspect a durable launch receipt</td>
+<td>Inspect a durable mutation receipt</td>
 </tr>
 <tr>
 <td><code>capabilities [--format text\|json] [--target local]</code></td>

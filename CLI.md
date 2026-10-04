@@ -2,15 +2,15 @@
 
 Use the CLI to discover harnesses, inspect terminal cards, launch configured
 agents, create shell terminals, read their screen or retained history, and inspect
-launch receipts. Existing commands
+mutation receipts, and move or resize cards. Existing commands
 also control overlay visibility, notes, terminal closing, themes and paired PCs.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 `--help` and `capabilities` before automating them.
 
 **Current coverage:** the structured local CLI supports discovery, creation and
-terminal observation. It does not provide local terminal input, attachment, card resizing or
-terminal-grid resizing commands. Saved geometry is readable. Remote terminal
+terminal observation and card geometry. It does not provide local terminal input,
+attachment or direct terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
 
@@ -22,7 +22,7 @@ There is no claim of complete CLI parity with every graphical action.
    it is not a formal JSON Schema for request or result validation.
 3. Read `super-desktop capabilities --format json` for the running daemon's
    methods and limits. Do not infer support from the version number alone.
-4. Check `super-desktop app status --format json`. A launch needs `data.ready`.
+4. Check `super-desktop app status --format json`. Launch and geometry commands need `data.ready`.
 5. Select exact harness and card IDs from returned data. A harness ID identifies
    a launcher type; a card ID identifies a saved terminal. Never select by list
    position or guess an ID from a title. `sessionName` is a separate field used
@@ -64,13 +64,16 @@ override, global request ID option or remote target is accepted here.
 | `app status` | Readiness, visibility, note and terminal counts | `app.status` |
 | `terminal list` | Saved cards, exact IDs and geometry | `terminal.list` |
 | `terminal inspect ID` | One saved card | `terminal.inspect` |
+| `terminal geometry ID` | Current logical geometry, bounds, epoch and revision | `terminal.geometry` |
+| `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Move and raise a normal card or minimized icon | `terminal.move` |
+| `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Change a normal card’s outer and restored size | `terminal.resize` |
 | `terminal runtime ID` | Live pane identity, process status and cell grid | `terminal.runtime` |
 | `terminal capture ID [--screen \| --history [--lines N]]` | Plain screen text or bounded retained history plus screen | `terminal.capture` |
 | `harness list [--all]` | Available launcher types; include missing types with `--all` | `harness.list` |
 | `harness inspect ID` | Availability and configuration metadata for one type | `harness.inspect` |
 | `harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download]` | Start the configured harness and save its card | `harness.launch` |
 | `terminal create --cwd PATH --request-id ID [--allow-unsafe-harness]` | Same launch operation with harness `shell` | `harness.launch` |
-| `request inspect ID` | Read a historical launch receipt | `request.inspect` |
+| `request inspect ID` | Read a historical mutation receipt | `request.inspect` |
 
 `terminal list` returns `data.terminals`, `inventory: "saved-cards"` and
 `runtimeObserved: false`. Each card includes `id`, `sessionName`, `harnessId`,
@@ -144,6 +147,65 @@ point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
 
+## Card geometry, movement and resizing
+
+`terminal geometry CARD_ID --format json` reads the current local card without
+showing the overlay. It returns `epoch`, an opaque `revision`, `mode`, `rect`,
+`saved`, `canvas` (including logical width, height and display scale), and `limits`.
+Coordinates and dimensions are **logical pixels**, describing the card’s outer
+rectangle. Expanded rectangles are transient; normal and minimized positions
+are saved separately. The canvas comes from the current local workspace, never
+from card extents. This read contains no prompt or terminal output.
+
+Read before each mutation. Copy `epoch` and `revision` unchanged into
+`--expect-epoch` and `--expect-revision`, and supply a unique `--request-id` for
+that operation. This Bash example uses `jq`; set `card_id` to an exact ID from
+`terminal list`:
+
+```bash
+set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+geometry=$(super-desktop terminal geometry "$card_id" --format json)
+epoch=$(jq -er '.data.epoch' <<<"$geometry")
+revision=$(jq -er '.data.revision' <<<"$geometry")
+request_id="resize-$(cat /proc/sys/kernel/random/uuid)"
+super-desktop terminal resize "$card_id" --width 640 --height 480 \
+  --expect-epoch "$epoch" --expect-revision "$revision" \
+  --request-id "$request_id" --format json
+```
+
+For a move, use `terminal move "$card_id" --x 80 --y 100` with the same
+required flags, using a fresh geometry read and a new operation ID. Move also
+raises the card. Neither move nor resize launches a session, shows the overlay,
+or explicitly requests keyboard focus; normal pointer-hover behavior still applies.
+
+The daemon checks the current card and display again on the GTK thread before
+applying the operation. A changed card revision, output bounds/scale, daemon
+restart, or active drag/resize gesture returns `conflict` (exit 5). Other cards
+can continue changing independently. On conflict, read again and decide whether
+the operation is still wanted; do not automatically overwrite another edit.
+A revision is a comparison token, not a number to increment or parse.
+
+Bounds are strict by default: the whole card must fit inside the output with
+10-pixel side/bottom margins and space for the toolbar. Normal resizing respects
+the UI minimum size and its maximum 70% width / 75% height. The current geometry
+reports the exact bounds. `--clamp` explicitly permits adjustment of size and/or
+position to fit; the reply reports `requested`, final `rect`, `clamped`, a new
+`revision` and `outcome: "applied"`. Without it, an out-of-bounds request returns
+`out_of_bounds` (exit 6) without changing the card. Coordinates accept integers
+from -32768 to 32768; dimensions from 1 to 32768, before display validation.
+
+Expanded cards refuse moves and resizes; minimized cards allow icon movement
+but refuse resizing. Restore/collapse through the existing UI first. Resizing
+updates both the normal and restored dimensions. It can cause VTE to refit the
+session naturally; it does not request a fixed terminal cell grid. Geometry
+returns `gridObserved: false`: use `terminal runtime` afterward for a fresh
+columns/rows observation. A hidden card may refit only when shown.
+
+Moves and resizes share the durable request journal with launches. Inspect
+`request inspect "$request_id"` after an uncertain response. A recorded success
+is historical and does not prove that nobody moved the card afterward.
+
 ## Launching and permission choices
 
 For a new, explicitly intended operation, choose a unique ID and retain it with
@@ -186,14 +248,14 @@ super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 ```
 
-The daemon records intent before starting a launcher. Reusing the same ID with
-the identical payload returns the recorded result without launching again,
-including after a daemon restart. Changing any launch parameter under that ID
+The daemon records intent before a launch, move or resize. Reusing the same ID
+with the identical payload returns the recorded result without applying it again,
+including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
 refused request requires a new ID for that changed operation.
 
 `request inspect` returns `data.id`, `data.cardId`, `data.state` and `data.result`.
-The outer `ok: true` means the receipt was read, not that the launch succeeded.
+The outer `ok: true` means the receipt was read, not that the mutation succeeded.
 Inspect the nested `data.result.ok` and `data.result.error.outcome` as well.
 `state: "recorded"` means a result was stored; that result can itself be an
 error or an unknown outcome. A pending receipt has `state: "unknown"`.
@@ -201,8 +263,8 @@ error or an unknown outcome. A pending receipt has `state: "unknown"`.
 After a lost reply, timeout, incomplete receipt or unknown outcome:
 
 1. Retain the original ID and payload. Do not generate a new ID to retry it.
-2. Inspect that request ID and the terminal inventory. Use its reserved
-   `cardId` to match a card if present.
+2. Inspect that request ID and the terminal inventory. Use its target or reserved
+   `cardId` to match a card if present. For geometry, also read `terminal geometry`.
 3. If the result is still unknown, stop automated retries and report that
    uncertainty. Neither a missing receipt nor a missing card proves that a
    process did not start: receipt storage or card adoption can fail.
@@ -213,7 +275,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches only, not legacy
+killed or relaunched. These receipts cover structured launches, moves and resizes, not legacy
 commands or every future restoration of a saved card.
 
 ## JSON and exit statuses
@@ -226,7 +288,7 @@ and either `data` or `error`. An illustrative successful status reply:
 ```
 
 Errors contain `code`, `message`, `retryable` and `outcome`. Treat codes and
-outcomes as machine data; do not branch on message text. A launch transport
+outcomes as machine data; do not branch on message text. A mutation transport
 failure after sending the request reports `outcome: "unknown"`. An error with
 `outcome: "not_applied"` describes that attempt and must not be used to erase
 uncertainty about a previous request. Current errors do not authorize an
@@ -239,7 +301,7 @@ escapes them but is intended for people.
 | 2 | Invalid command, arguments or request |
 | 3 | Requested card or its tmux pane not found |
 | 4 | Unsafe socket/access, or required unsafe/download opt-in |
-| 5 | Request ID conflicts, or terminal/card/grid changed during observation |
+| 5 | Request ID or geometry revision conflicts, or terminal/card/grid changed during observation |
 | 6 | Unavailable, unsupported, busy, capacity refusal or other service refusal |
 | 7 | Timeout or unknown outcome; inspect before any further mutation |
 | 8 | Invalid response or output failure; a mutation may already have happened |
@@ -255,7 +317,7 @@ owner's authority; there is no delegated agent permission system. See
 
 Commands marked `legacy` in the catalog retain their existing output and exit
 behavior. They do not accept the structured commands' common options or use
-their launch receipt guarantees. In particular, exit 0 may accompany an absent
+their mutation receipt guarantees. In particular, exit 0 may accompany an absent
 daemon or a typed refusal: inspect the actual response. `add-term` and
 `add-term-in` use the existing launcher behavior and show the overlay; prefer
 `harness launch` or `terminal create` for structured local automation.
@@ -290,13 +352,16 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 `quit` → `kill`; `refresh-theme` and `theme-reload` → `reload-theme`.
 `--version` is the offline form of `version`.
 
-| Syntax after `super-desktop` | Mode | Purpose |
+| Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal geometry ID [--format text\|json] [--target local]` | Structured local | Inspect current card geometry and its revision |
+| `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Move a terminal card within the logical display |
+| `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Resize a normal terminal card in logical pixels |
 | `terminal runtime ID [--format text\|json] [--target local]` | Structured local | Observe an owned terminal's live pane and cell grid |
 | `terminal capture ID [--screen \| --history [--lines N]] [--format text\|json] [--target local]` | Structured local | Read plain screen text or bounded retained scrollback |
 | `harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]` | Structured local | Launch a configured harness without opening the overlay |
 | `terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
-| `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable launch receipt |
+| `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable mutation receipt |
 | `capabilities [--format text\|json] [--target local]` | Structured local | Query the running local control service |
 | `app status [--format text\|json] [--target local]` | Structured local | Inspect local daemon readiness and counts |
 | `terminal list [--format text\|json] [--target local]` | Structured local | List local saved terminal cards |

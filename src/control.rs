@@ -26,6 +26,9 @@ pub const METHODS: &[&str] = &[
     "terminal.inspect",
     "terminal.runtime",
     "terminal.capture",
+    "terminal.geometry",
+    "terminal.move",
+    "terminal.resize",
     "harness.list",
     "harness.inspect",
     "harness.launch",
@@ -53,6 +56,32 @@ pub enum Command {
         #[serde(default)]
         lines: Option<u32>,
     },
+    #[serde(rename = "terminal.geometry")]
+    Geometry { id: String },
+    #[serde(rename = "terminal.move")]
+    Move {
+        id: String,
+        x: i32,
+        y: i32,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
+    #[serde(rename = "terminal.resize")]
+    Resize {
+        id: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
     #[serde(rename = "harness.list")]
     Harnesses { all: bool },
     #[serde(rename = "harness.inspect")]
@@ -68,6 +97,15 @@ pub enum Command {
     },
     #[serde(rename = "request.inspect")]
     InspectRequest { id: String },
+}
+
+impl Command {
+    pub fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::Launch { .. } | Self::Move { .. } | Self::Resize { .. }
+        )
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -126,7 +164,7 @@ impl Reply {
         }
     }
     pub fn unknown(id: &str) -> Self {
-        let mut reply = Self::failure(id, "unknown_outcome", "Launch outcome is unknown. Inspect this request ID and terminal inventory; do not launch with a new ID to retry.");
+        let mut reply = Self::failure(id, "unknown_outcome", "Mutation outcome is unknown. Inspect this request ID and current terminal state; do not retry with a new ID.");
         reply.error.as_mut().unwrap().outcome = "unknown".into();
         reply
     }
@@ -158,6 +196,7 @@ pub fn capabilities() -> Value {
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
         "delegatedAccess": false, "remoteTargets": false,
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
+        "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
         "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
 }
 
@@ -514,9 +553,7 @@ pub fn request_at(runtime: &Path, request: &Request) -> Reply {
     let mut attempted = false;
     match exchange(runtime, request, &mut attempted) {
         Ok(reply) => reply,
-        Err(_) if attempted && matches!(request.command, Command::Launch { .. }) => {
-            Reply::unknown(&request.request_id)
-        }
+        Err(_) if attempted && request.command.is_mutation() => Reply::unknown(&request.request_id),
         Err(e) => {
             let (code, message) = match e.kind() {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ("unavailable", "Local control is unavailable. Start a compatible SUPER DESKTOP daemon; this command never starts one."),
@@ -747,6 +784,32 @@ mod tests {
             cwd: "/tmp".into(),
             allow_unsafe_harness: false,
             allow_download: false,
+        })
+        .unwrap();
+        let reply = request_at(&runtime.0, &request);
+        assert_eq!(reply.exit_code(), 7);
+        assert_eq!(reply.error.unwrap().outcome, "unknown");
+        worker.join().unwrap();
+        let absent = request_at(&runtime.0, &request);
+        assert_eq!(absent.error.unwrap().outcome, "not_applied");
+    }
+
+    #[test]
+    fn cli_geometry_lost_reply_is_unknown_and_never_replayed() {
+        let runtime = Runtime::new();
+        let server = Server::bind(&runtime.0).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.listener.accept().unwrap();
+            read_frame(&mut stream, MAX_REQUEST, Instant::now() + DEADLINE).unwrap();
+            // The daemon may have applied the request. Drop without a reply.
+        });
+        let request = new_request(Command::Move {
+            id: "sd_term_test".into(),
+            x: 80,
+            y: 100,
+            clamp: false,
+            expect_epoch: "epoch".into(),
+            expect_revision: "revision".into(),
         })
         .unwrap();
         let reply = request_at(&runtime.0, &request);

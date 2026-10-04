@@ -17,11 +17,12 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
+            control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}"}),
             control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
@@ -83,7 +84,113 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         env!("CARGO_BIN_EXE_super-desktop-client"),
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
+        let revision = "a".repeat(64);
+        let geometry = [
+            "terminal",
+            "move",
+            "card-1",
+            "--x",
+            "-20",
+            "--y=100",
+            "--clamp",
+            "--expect-epoch",
+            "epoch-1",
+            "--expect-revision",
+            &revision,
+            "--request-id",
+            "move-001",
+        ];
+        let output = Command::new(executable)
+            .args(geometry)
+            .arg("--format=json")
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["data"]["x"], -20);
+        assert_eq!(reply["data"]["clamp"], true);
+        assert_eq!(reply["data"]["expectRevision"], revision);
+        assert_eq!(reply["requestId"], "move-001");
+        for bad in [
+            vec!["--x=80"],
+            vec!["--width=640"],
+            vec!["--all"],
+            vec!["--screen"],
+            vec!["--clamp"],
+            vec!["--cwd=/tmp"],
+        ] {
+            let output = Command::new(executable)
+                .args(geometry)
+                .args(bad)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2));
+        }
+        for (index, value) in [
+            (4, "-32769"),
+            (4, "1.5"),
+            (4, "+1"),
+            (10, "bad-revision"),
+            (8, "bad epoch"),
+            (12, "bad id"),
+        ] {
+            let mut bad = geometry.to_vec();
+            bad[index] = value;
+            let output = Command::new(executable)
+                .args(bad)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(2));
+        }
+        let output = Command::new(executable)
+            .args([
+                "terminal",
+                "resize",
+                "card-1",
+                "--width",
+                "640",
+                "--height",
+                "480",
+                "--expect-epoch",
+                "epoch-1",
+                "--expect-revision",
+                &revision,
+                "--request-id",
+                "resize-001",
+                "--format=json",
+            ])
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(reply["data"]["width"], 640);
+        assert_eq!(reply["data"]["height"], 480);
+        assert_eq!(reply["data"]["clamp"], false);
         for (args, expected) in [
+            (vec!["terminal", "geometry", "card-1"], 0),
+            (vec!["terminal", "geometry", "card-1", "--clamp"], 2),
+            (vec!["terminal", "move", "card-1", "--x=80", "--y=100"], 2),
+            (
+                vec![
+                    "terminal",
+                    "resize",
+                    "card-1",
+                    "--width=640",
+                    "--height=480",
+                ],
+                2,
+            ),
             (vec!["terminal", "runtime", "card-1"], 0),
             (vec!["terminal", "capture", "card-1"], 0),
             (
@@ -228,6 +335,8 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 "older-001",
             ],
             vec!["request", "inspect", "older-001"],
+            vec!["terminal", "geometry", "card-1"],
+            vec!["terminal", "move", "card-1", "--x=80", "--y=100", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-move"],
             vec!["terminal", "runtime", "card-1"],
             vec!["terminal", "capture", "card-1"],
         ] {

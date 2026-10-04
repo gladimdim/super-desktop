@@ -6,7 +6,7 @@ sandbox. Do not approve unknown devices or publish pairing invitations.
 
 ## Local CLI control
 
-Local CLI inventory, terminal observation and structured launches use a separate Unix socket at
+Local CLI inventory, terminal observation, geometry and structured launches use a separate Unix socket at
 `$XDG_RUNTIME_DIR/super-desktop/control-v1.sock`, with a 0700 directory and
 0600 socket. Both ends check the peer UID. Unsafe paths, symlinks and insecure
 permissions are refused. A lifecycle lock protects the listener, and only an
@@ -16,7 +16,7 @@ Client errors never unlink sockets or start another daemon.
 Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
 Connections have three-second I/O deadlines, with at most eight workers.
 The API exposes status, capabilities, saved card metadata, launcher discovery,
-launching, launch receipts and explicit terminal capture. Inventory omits
+launching, mutation receipts, card movement/resizing and explicit terminal capture. Inventory omits
 prompts and terminal output; `terminal capture` can reveal sensitive text,
 including credentials and prompts. Notes and launch arguments are not exposed.
 Paths and labels can still be private. JSON output escapes terminal
@@ -45,17 +45,26 @@ require `--allow-download`. These are per-request acknowledgements, not
 restrictions on an executable's own behavior, startup files or network access.
 Launches require an absolute existing directory and never submit a prompt.
 
-Before starting a launcher the daemon durably records the request ID, a hash
-of its parameters and a reserved card ID in an owner-only state directory.
+Before a structured launch, move or resize the daemon durably records the
+request ID, a hash of its parameters and a target or reserved card ID in an
+owner-only state directory.
 Receipts and the journal lock have mode 0600; symlink paths are refused.
-The saved result includes its launch directory, so receipts are private data.
+Saved results can include launch directories and geometry, so receipts are private data.
 Matching IDs return the recorded result; changed payloads conflict; incomplete
 or unreadable receipts are never replayed. The journal holds up to 4096 entries
 without automatic pruning. Removing it removes duplicate protection. A timeout
-or lost connection after sending a launch means an unknown outcome: inspect
+or lost connection after sending a mutation means an unknown outcome: inspect
 the request and terminal inventory before taking further action. Unknown may
 include a launched process whose card could not be added. No automatic cleanup
 kills such a process, and a receipt does not establish ongoing process liveness.
+
+Moves and resizes require the epoch and opaque revision from a current geometry
+read. The daemon validates them on the GTK thread against the current card and
+logical output, and refuses an active gesture. Expanded cards cannot be moved
+or resized; minimized cards cannot be resized. Bounds adjustments require
+`--clamp`. A move can raise a card and a resize can naturally change its VTE grid;
+neither command starts a harness or explicitly focuses it. Receipts include
+historical geometry and target IDs, and replay never overwrites later edits.
 
 ## Transport and identity
 

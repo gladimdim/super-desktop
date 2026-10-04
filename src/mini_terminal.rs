@@ -2668,6 +2668,33 @@ mod tests {
     }
 
     #[test]
+    fn cli_geometry_commit_uses_card_callback() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_geometry_commit_inner");
+    }
+
+    #[test]
+    fn cli_geometry_commit_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let saved = Rc::new(RefCell::new(None));
+        let capture = Rc::clone(&saved);
+        let card = MiniTerminalCard::new(
+            term_data(true), |_, _, _| {}, move |_, data| { *capture.borrow_mut() = Some(data.clone()); },
+            |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        );
+        card.open_with_bare_terminal(480, 320);
+        assert!(card.apply_geometry(crate::card_resize::Rect { x: 40.0, y: 90.0, width: 640, height: 480 }));
+        let data = saved.borrow();
+        let data = data.as_ref().expect("geometry must reach persistence callback");
+        assert_eq!((data.x, data.y, data.width, data.height), (40, 90, 640, 480));
+        assert_eq!((data.restored_width, data.restored_height), (640, 480));
+        assert!(!data.iconified);
+        assert_eq!((card.container.width_request(), card.container.height_request()), (640, 480));
+        assert!(!card.vte.borrow().as_ref().unwrap().has_focus());
+    }
+
+    #[test]
     fn test_icon_keeps_its_own_position() {
         // A card that was never minimized draws at the card position.
         let mut d = term_data(false);

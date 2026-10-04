@@ -33,11 +33,14 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("terminal geometry", "Inspect current card geometry and its revision", "terminal geometry ID [--format text|json] [--target local]", "Read-only; reports logical output bounds and saved/expanded/minimized mode; no terminal text", "Compatible ready local daemon; exact saved card ID", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; exits 0/2/3/4/5/6/7/8", "super-desktop terminal geometry CARD_ID --format json", false),
+    command!("terminal move", "Move a terminal card within the logical display", "terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text|json] [--target local]", "Moves and raises the card; moves minimized icons separately; refuses expanded cards; does not focus or launch", "Compatible ready local daemon; exact saved card ID; epoch and opaque revision from terminal geometry; explicit --clamp permits adjustment", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; requested, clamped and outcome; durable receipt; timeout may mean unknown; exits 0/2/3/4/5/6/7/8", "super-desktop terminal move CARD_ID --x 80 --y 100 --expect-epoch EPOCH --expect-revision REVISION --request-id geometry-1 --format json", false),
+    command!("terminal resize", "Resize a normal terminal card in logical pixels", "terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text|json] [--target local]", "Persists outer and restored card dimensions; refuses expanded/minimized cards; does not focus or launch; VTE may naturally refit its cell grid", "Compatible ready local daemon; exact saved card ID; epoch and opaque revision from terminal geometry; explicit --clamp permits adjustment", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; requested, clamped and outcome; durable receipt; timeout may mean unknown; exits 0/2/3/4/5/6/7/8", "super-desktop terminal resize CARD_ID --width 640 --height 480 --expect-epoch EPOCH --expect-revision REVISION --request-id geometry-1 --format json", false),
     command!("terminal runtime", "Observe an owned terminal's live pane and cell grid", "terminal runtime ID [--format text|json] [--target local]", "Read-only tmux observation; no attach, launch, input or resize. Does not read terminal text", "Compatible local daemon; exact saved card ID; exactly one pane in its session. Runtime changes and closed cards are refused", "Versioned envelope with pane identity, running/exited status, columns, rows, alternateScreen, retainedHistoryLines and observedAtUnixMs; exits 0/2/3/4/5/6/7/8. Running does not mean ready or completed", "super-desktop terminal runtime CARD_ID --format json", false),
     command!("terminal capture", "Read plain screen text or bounded retained scrollback", "terminal capture ID [--screen | --history [--lines N]] [--format text|json] [--target local]", "Reads potentially sensitive terminal content without attaching, sending input or resizing. Output text is untrusted data", "Compatible local daemon; exact saved card ID; one pane. Default screen; history defaults to 200 extra rows, accepts 1-2000. At most 65536 capture bytes; no raw ANSI", "Versioned envelope with text, runtime, observedAtUnixMs and truncation fields. History includes visible screen. Byte-limited results retain the oldest prefix; no reconstructed alternate-screen history. Exits 0/2/3/4/5/6/7/8", "super-desktop terminal capture CARD_ID --history --lines 200 --format json", false),
     command!("harness launch", "Launch a configured harness without opening the overlay", "harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text|json] [--target local]", "Executes the configured launcher; writes a durable receipt before launch; does not present the overlay or explicitly request focus; normal hover behavior applies when visible", "Ready local daemon; absolute existing cwd; unique request ID (1-64 ASCII letters/digits/_/-). --allow-unsafe-harness accepts bypass flags, saved argument overrides or custom launchers; --allow-download accepts built-in package-runner fallback. These flags do not sandbox programs. Reuse the same ID only with the identical request", "JSON envelope with id, sessionName, launchDirectory and readiness=not_observed; exits 0/2/3/4/5/6/7/8. On unknown outcome inspect the request, never invent a fresh retry ID", "super-desktop harness launch claude --cwd /home/user/project --request-id task-001 --allow-unsafe-harness --format json", false),
     command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
-    command!("request inspect", "Inspect a durable launch receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact launch request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
+    command!("request inspect", "Inspect a durable mutation receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and target or reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact mutation request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
     command!("capabilities", "Query the running local control service", "capabilities [--format text|json] [--target local]", "Read-only; never starts a daemon", "Compatible local daemon and private owner socket", "Versioned envelope with supported methods, access and limits; exits 0/2/4/6/7/8", "super-desktop capabilities --format json", false),
     command!("app status", "Inspect local daemon readiness and counts", "app status [--format text|json] [--target local]", "Read-only; never opens the overlay", "Compatible local daemon and private owner socket", "Versioned envelope with ready, visible, notesCount, terminalsCount; exits 0/2/4/6/7/8", "super-desktop app status --format json", false),
     command!("terminal list", "List local saved terminal cards", "terminal list [--format text|json] [--target local]", "Reads IDs, harness types, launch directories and saved logical-pixel geometry; no prompts or output", "Compatible local daemon; runtime liveness is not observed", "Versioned envelope containing terminals, inventory and runtimeObserved; exits 0/2/4/6/7/8", "super-desktop terminal list --format json", false),
@@ -107,6 +110,8 @@ Inspect available launchers: super-desktop harness list --format json\n\
 Inspect saved terminal cards: super-desktop terminal list --format json\n\
 Observe a card's live cell grid: super-desktop terminal runtime CARD_ID --format json\n\
 Read its screen (may contain secrets): super-desktop terminal capture CARD_ID --screen --format json\n\
+Read layout before moving/resizing: super-desktop terminal geometry CARD_ID --format json\n\
+Move/resize require --expect-epoch, --expect-revision and --request-id; bounds adjust only with --clamp.\n\
 Inspect running instances with private prompt metadata: super-desktop harnesses\n\
 Inspect saved PCs: super-desktop peer-list\n\n\
 Help, schema, completion and version work without a daemon or display.\n\
@@ -404,11 +409,38 @@ fn live(args: &[String]) -> Output {
     let mut allow_download = false;
     let mut seen_format = false;
     let mut seen_target = false;
+    let mut geometry_options = std::collections::HashMap::new();
+    let mut clamp = false;
     let mut capture_mode = None;
     let mut capture_lines = None;
     let mut index = 0;
     while index < args.len() {
         let word = args[index].as_str();
+        let flag = word.split('=').next().unwrap_or(word);
+        if matches!(
+            flag,
+            "--x" | "--y" | "--width" | "--height" | "--expect-epoch" | "--expect-revision"
+        ) {
+            let value = if let Some((_, value)) = word.split_once('=') {
+                Some(value)
+            } else {
+                index += 1;
+                args.get(index).map(String::as_str)
+            };
+            let Some(value) = value.filter(|v| !v.is_empty()) else {
+                return fail("invalid_arguments", "Missing geometry option value.");
+            };
+            if geometry_options.insert(flag, value).is_some() {
+                return fail("invalid_arguments", "Do not repeat geometry options.");
+            }
+            index += 1;
+            continue;
+        }
+        if word == "--clamp" && !clamp {
+            clamp = true;
+            index += 1;
+            continue;
+        }
         if matches!(word, "--screen" | "--history") {
             if capture_mode.replace(word == "--history").is_some() {
                 return fail("invalid_arguments", "Choose --screen or --history once.");
@@ -524,6 +556,78 @@ fn live(args: &[String]) -> Output {
         words.as_slice(),
         ["harness", "launch", _] | ["terminal", "create"]
     );
+    let moving = matches!(words.as_slice(), ["terminal", "move", _]);
+    let resizing = matches!(words.as_slice(), ["terminal", "resize", _]);
+    let changing_geometry = moving || resizing;
+    if !changing_geometry && (!geometry_options.is_empty() || clamp) {
+        return fail(
+            "invalid_arguments",
+            "Geometry options are only for terminal move/resize.",
+        );
+    }
+    if !launching && !changing_geometry && request_id.is_some() {
+        return fail(
+            "invalid_arguments",
+            "--request-id is only for mutation commands.",
+        );
+    }
+    if (launching || changing_geometry)
+        && !request_id.is_some_and(|id| valid_id(id) && id.len() <= 64)
+    {
+        return fail(
+            "invalid_arguments",
+            "Mutation requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
+        );
+    }
+    if changing_geometry {
+        let expected = if moving {
+            ["--x", "--y", "--expect-epoch", "--expect-revision"]
+        } else {
+            ["--width", "--height", "--expect-epoch", "--expect-revision"]
+        };
+        if geometry_options.len() != expected.len()
+            || expected
+                .iter()
+                .any(|flag| !geometry_options.contains_key(flag))
+        {
+            return fail("invalid_arguments", "Use both coordinates or both dimensions, plus --expect-epoch and --expect-revision from terminal geometry.");
+        }
+        if !valid_id(geometry_options["--expect-epoch"])
+            || geometry_options["--expect-epoch"].len() > 64
+            || geometry_options["--expect-revision"].len() != 64
+            || !geometry_options["--expect-revision"]
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            return fail(
+                "invalid_arguments",
+                "Use the epoch and opaque revision returned by terminal geometry.",
+            );
+        }
+        for flag in if moving {
+            ["--x", "--y"]
+        } else {
+            ["--width", "--height"]
+        } {
+            let value = geometry_options[flag];
+            let Some(number) = value
+                .parse::<i32>()
+                .ok()
+                .filter(|n| n.abs_diff(0) <= 32768 && (moving || *n > 0))
+            else {
+                return fail(
+                    "invalid_arguments",
+                    "Coordinates must be within -32768..32768; dimensions within 1..32768.",
+                );
+            };
+            if number.to_string() != value {
+                return fail(
+                    "invalid_arguments",
+                    "Use canonical decimal integers for geometry.",
+                );
+            }
+        }
+    }
     let capturing = matches!(words.as_slice(), ["terminal", "capture", _]);
     if (!capturing && (capture_mode.is_some() || capture_lines.is_some()))
         || (capture_lines.is_some() && capture_mode != Some(true))
@@ -533,7 +637,7 @@ fn live(args: &[String]) -> Output {
             "Screen/history options are only for terminal capture; --lines requires --history.",
         );
     }
-    if !launching && (cwd.is_some() || request_id.is_some() || allow_unsafe || allow_download) {
+    if !launching && (cwd.is_some() || allow_unsafe || allow_download) {
         return fail(
             "invalid_arguments",
             "Launch options are only accepted by launch/create commands.",
@@ -556,6 +660,25 @@ fn live(args: &[String]) -> Output {
         }
     }
     let command = match words.as_slice() {
+        ["terminal", "geometry", id] if !all && valid_id(id) => {
+            Command::Geometry { id: (*id).into() }
+        }
+        ["terminal", "move", id] if !all && valid_id(id) => Command::Move {
+            id: (*id).into(),
+            x: geometry_options["--x"].parse().unwrap(),
+            y: geometry_options["--y"].parse().unwrap(),
+            clamp,
+            expect_epoch: geometry_options["--expect-epoch"].into(),
+            expect_revision: geometry_options["--expect-revision"].into(),
+        },
+        ["terminal", "resize", id] if !all && valid_id(id) => Command::Resize {
+            id: (*id).into(),
+            width: geometry_options["--width"].parse().unwrap(),
+            height: geometry_options["--height"].parse().unwrap(),
+            clamp,
+            expect_epoch: geometry_options["--expect-epoch"].into(),
+            expect_revision: geometry_options["--expect-revision"].into(),
+        },
         ["terminal", "capture", id] if !all && valid_id(id) => Command::Capture {
             id: (*id).into(),
             history: capture_mode.unwrap_or(false),
@@ -604,6 +727,9 @@ fn live(args: &[String]) -> Output {
     let required_method = match &request.command {
         Command::Launch { .. } => Some("harness.launch"),
         Command::InspectRequest { .. } => Some("request.inspect"),
+        Command::Geometry { .. } => Some("terminal.geometry"),
+        Command::Move { .. } => Some("terminal.move"),
+        Command::Resize { .. } => Some("terminal.resize"),
         Command::Runtime { .. } => Some("terminal.runtime"),
         Command::Capture { .. } => Some("terminal.capture"),
         _ => None,
