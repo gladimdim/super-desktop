@@ -16,6 +16,7 @@ pub struct StickyNote {
     pub data: Rc<RefCell<NoteData>>,
     #[cfg_attr(not(test), allow(dead_code))]
     pub text_view: TextView,
+    pending_save: Rc<RefCell<Option<glib::SourceId>>>,
 }
 
 /// CSS class on every note's root widget.
@@ -41,6 +42,18 @@ pub fn note_has_focus(widget: &impl IsA<gtk4::Widget>) -> bool {
 }
 
 impl StickyNote {
+    /// Stop an old widget's delayed editor callback before local CLI replacement.
+    pub(crate) fn cancel_pending_save(&self) {
+        if let Some(source) = self.pending_save.borrow_mut().take() { source.remove(); }
+    }
+
+    pub(crate) fn live_data(&self) -> NoteData {
+        let mut data = self.data.borrow().clone();
+        let buffer = self.text_view.buffer();
+        data.text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false).to_string();
+        data
+    }
+
     pub fn new<FDragUpdate, FDragEnd, FDelete, FChange, FRaise, FResizeGhost, FResizeEnd>(
         mut note_data: NoteData,
         on_drag_update: FDragUpdate,
@@ -156,6 +169,7 @@ impl StickyNote {
         // Perf: never touch buffer contents on the keystroke path itself.
         // Just restart a 300ms trailing timer; the full O(n) text copy
         // happens once the user pauses, inside the timer callback.
+        let pending_save = Rc::clone(&timer_id);
         buffer.connect_changed(move |_| {
             if let Some(source) = timer_id.borrow_mut().take() {
                 source.remove();
@@ -333,7 +347,7 @@ impl StickyNote {
             on_commit,
         );
 
-        Self { container, data, text_view }
+        Self { container, data, text_view, pending_save }
     }
 }
 

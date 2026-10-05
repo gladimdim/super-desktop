@@ -8,3 +8,5 @@ pub mod cli;
 pub mod control;
 
 mod cli_extended;
+
+mod cli_workspace;

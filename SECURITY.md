@@ -18,7 +18,7 @@ Connections have three-second I/O deadlines, with at most eight workers.
 The API exposes status, capabilities, saved card metadata, launcher discovery,
 launching, mutation receipts, guarded closing, card movement/resizing and explicit terminal capture. Inventory omits
 prompts and terminal output; `terminal capture` can reveal sensitive text,
-including credentials and prompts. Notes and launch arguments are not exposed.
+including credentials and prompts. Note text is exposed only by explicit `note inspect`; launch arguments remain redacted in inventory.
 Paths and labels can still be private. JSON output escapes terminal
 control characters. This endpoint is independent of the existing bridge IPC.
 
@@ -43,6 +43,14 @@ possible gaps and finite time/output limits. It pins the pane identity. Native
 status and wait use existing attributable harness metadata, without deriving
 completion from screen text or silence. A changed completion ID does not prove
 which submitted input completed. Neither operation attaches or resizes a client.
+
+Workspace and note edits share the durable mutation journal. Their revision
+covers the workspace, current display and live note buffers, including edits
+waiting for autosave. Focused or gesturing notes are refused. Note text is
+bounded on write and omitted from receipts; inspect is an explicit content read.
+Layout imports accept only typed IDs/modes/rectangles, validate all entries
+before movement, and cannot create sessions or import commands. Operations can
+still have unknown outcomes after application if transport or persistence fails.
 
 Structured launches use configured executables and arguments. Recognized
 permission-bypass flags, argument overrides saved in Settings, and custom

@@ -44,6 +44,7 @@
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
+<li><a href="#notes-and-workspace-layouts">Notes and workspace layouts</a></li>
 <li><a href="#native-status-finite-waits-and-sampled-output">Native status, finite waits and sampled output</a></li>
 <li><a href="#card-geometry-movement-and-resizing">Card geometry, movement and resizing</a></li>
 <li><a href="#guarded-terminal-input">Guarded terminal input</a></li>
@@ -70,7 +71,7 @@ Your installed client and running daemon may support fewer commands: check
 <code>--help</code> and <code>capabilities</code> before automating them.</p>
 <p><strong>Current coverage:</strong> the structured local CLI supports discovery, creation,
 terminal observation, guarded text/key input and prompt delivery, card geometry,
-card modes and guarded closing. It does not provide local attachment or direct
+card modes, guarded closing, notes and workspace layouts. It does not provide local attachment or direct
 terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy <code>peer-*</code> commands.
 There is no claim of complete CLI parity with every graphical action.</p>
@@ -300,6 +301,42 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (<code>consistency: "checked-before-and-after"</code>), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.</p>
+<h2 id="notes-and-workspace-layouts">Notes and workspace layouts</h2>
+<p><code>workspace inspect</code> returns the selected launch directory, logical canvas,
+counts, epoch and workspace revision. <code>workspace folders</code> reads remembered
+choices; <code>workspace set /absolute/path</code> selects an existing directory for future
+launches. Running sessions keep their directories.</p>
+<p><code>note list</code> returns metadata without text; <code>note inspect ID</code> includes the live
+editor text, even before autosave. <code>note create</code> and <code>note update ID</code> read literal
+UTF-8 with exactly one of <code>--stdin</code> or <code>--file PATH</code>: at most 4096 bytes, allowing
+newline/tab and empty text. Create defaults to x=80, y=140, width=260, height=200,
+tag=0; each has an explicit option. <code>note delete ID</code> removes the note and its
+text. <code>note move ID --x X --y Y</code>, <code>note resize ID --width W --height H</code> and
+<code>note tag set ID 0..8</code> update geometry and grouping. Note edits replace and raise
+the note widget; focused/dragged/resizing notes are refused. Rectangles must fit
+the current logical display, below the toolbar, with ten-pixel edges. Minimum
+note size is 180×120; maximum is 70% of display width and 75% of height. There is
+no implicit clamping, and CLI creation is limited to 256 notes.</p>
+<p>Every mutation above requires <code>--expect-epoch EPOCH --expect-revision REVISION
+--request-id ID</code>. Take the guards from workspace or note reads. The revision is
+workspace-wide: other edits, live note typing, mode changes and display changes
+can invalidate it. A stale request fails before application. Receipts omit note
+text; an uncertain mutation must be reconciled using its request ID.</p>
+<p><code>workspace layout export --format json</code> returns <code>data.layout</code>: a version 1
+object containing items with <code>kind</code>, <code>id</code>, <code>mode</code>, <code>x</code>, <code>y</code>, <code>width</code>, <code>height</code>.
+It excludes note text, prompts and launch commands. Pass that object to
+<code>workspace layout validate --file layout.json</code> or <code>workspace layout apply
+--file layout.json</code>; apply requires the same mutation guards. Imports accept
+at most 12000 bytes and 64 items, reject unknown fields and duplicate IDs, and
+resolve exact current cards. All entries validate before any movement. Apply
+changes only listed rectangles, preserves card modes, and refuses expanded
+cards; minimized cards can move but cannot resize. Terminal resizing can
+naturally refit the VTE grid. Validation does not reserve a revision.</p>
+<p><code>workspace arrange</code> uses the same guards and packs cards by kind and ID into
+rows within current bounds, preserving sizes. It refuses an overflowing layout
+instead of placing cards off-screen. These commands never launch terminals or
+show the overlay. Successful edits are persisted; a transport or persistence
+failure can leave an unknown outcome, so inspect the receipt and current state.</p>
 <h2 id="native-status-finite-waits-and-sampled-output">Native status, finite waits and sampled output</h2>
 <p><code>terminal status ID --format json</code> returns the observed pane identity, lifecycle,
 native metadata availability and completion evidence. Shells and unsupported
@@ -672,6 +709,81 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>workspace layout export [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect or apply bounded local card layouts</td>
+</tr>
+<tr>
+<td><code>workspace layout validate (--stdin \| --file PATH) [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect or apply bounded local card layouts</td>
+</tr>
+<tr>
+<td><code>workspace layout apply (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect or apply bounded local card layouts</td>
+</tr>
+<tr>
+<td><code>workspace arrange --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect or apply bounded local card layouts</td>
+</tr>
+<tr>
+<td><code>workspace inspect [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect local workspace and revision</td>
+</tr>
+<tr>
+<td><code>workspace folders [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>List selected and remembered folders</td>
+</tr>
+<tr>
+<td><code>workspace set PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Select a folder for future launches</td>
+</tr>
+<tr>
+<td><code>note list [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>List note metadata without text</td>
+</tr>
+<tr>
+<td><code>note inspect ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Read an exact note including text</td>
+</tr>
+<tr>
+<td><code>note create (--stdin \| --file PATH) [--x X] [--y Y] [--width W] [--height H] [--tag 0..8] --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Create a note from literal UTF-8 input</td>
+</tr>
+<tr>
+<td><code>note update ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Replace an exact note text</td>
+</tr>
+<tr>
+<td><code>note delete ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Delete an exact sticky note</td>
+</tr>
+<tr>
+<td><code>note move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Move a note within current logical bounds</td>
+</tr>
+<tr>
+<td><code>note resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Resize a note within current logical bounds</td>
+</tr>
+<tr>
+<td><code>note tag set ID TAG --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Set a note color tag</td>
+</tr>
 <tr>
 <td><code>terminal status ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>

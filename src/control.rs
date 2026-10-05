@@ -37,6 +37,8 @@ pub const METHODS: &[&str] = &[
     "harness.inspect",
     "harness.launch",
     "request.inspect",
+    "workspace.read",
+    "workspace.edit",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,10 +118,63 @@ impl InputData {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layout {
+    pub version: u32,
+    pub items: Vec<LayoutItem>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutItem {
+    pub kind: String,
+    pub id: String,
+    pub mode: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum WorkspaceQuery {
+    Inspect,
+    Layout,
+    ValidateLayout { layout: Layout },
+    Folders,
+    Notes,
+    Note { id: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum WorkspaceEdit {
+    NoteCreate { text: String, x: i32, y: i32, width: i32, height: i32, tag: u8 },
+    NoteUpdate { id: String, text: String },
+    NoteDelete { id: String },
+    NoteMove { id: String, x: i32, y: i32 },
+    NoteResize { id: String, width: i32, height: i32 },
+    NoteTag { id: String, tag: u8 },
+    Folder { path: String },
+    Arrange,
+    Layout { layout: Layout },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
     #[serde(rename = "app.status")]
     Status {},
+    #[serde(rename = "workspace.read")]
+    Workspace { query: WorkspaceQuery },
+    #[serde(rename = "workspace.edit")]
+    WorkspaceEdit {
+        edit: WorkspaceEdit,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
     #[serde(rename = "capabilities")]
     Capabilities {},
     #[serde(rename = "terminal.list")]
@@ -215,7 +270,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Input { .. }
+            Self::WorkspaceEdit { .. }
+                | Self::Input { .. }
                 | Self::Mode { .. }
                 | Self::Launch { .. }
                 | Self::Move { .. }
@@ -310,6 +366,7 @@ pub fn capabilities() -> Value {
     json!({"controlVersion": VERSION, "serverVersion": env!("CARGO_PKG_VERSION"),
         "target": "local", "access": "owner", "readOnly": false, "methods": METHODS,
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
+        "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
         "delegatedAccess": false, "remoteTargets": false,
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},

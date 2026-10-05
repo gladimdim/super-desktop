@@ -15,12 +15,12 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
-            control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
+            control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Lifecycle { id } => serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"nativeMetadataObserved":id=="completed-card","lifecycle":if id=="completed-card" {"completed"} else {"unknown"},"completion":{"supported":id=="completed-card","state":if id=="completed-card" {"completed"} else {"unknown"},"completionId":if id=="completed-card" {Some("b".repeat(64))} else {None}}}),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}","runtime":{"paneIdentity":"a".repeat(64),"columns":120,"rows":35},"truncated":false}),
@@ -85,6 +85,30 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
         let revision = "a".repeat(64);
+        let note_file=fixture.root.join("note-input.txt");
+        std::fs::write(&note_file,"line one\nПривіт\t$(literal)").unwrap();
+        let layout_file=fixture.root.join("layout.json");
+        std::fs::write(&layout_file,r#"{"version":1,"items":[]}"#).unwrap();
+        for args in [
+            vec!["workspace","layout","export"],
+            vec!["workspace","layout","validate","--file",layout_file.to_str().unwrap()],
+            vec!["workspace","layout","apply","--file",layout_file.to_str().unwrap(),"--request-id","layout","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["workspace","arrange","--request-id","arrange","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["workspace","inspect"],vec!["workspace","folders"],vec!["note","list"],vec!["note","inspect","note-1"],
+            vec!["note","create","--file",note_file.to_str().unwrap(),"--request-id","note-create","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["note","update","note-1","--file",note_file.to_str().unwrap(),"--request-id","note-update","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["note","move","note-1","--x","80","--y","140","--request-id","note-move","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["note","resize","note-1","--width","260","--height","200","--request-id","note-resize","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["note","tag","set","note-1","3","--request-id","note-tag","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["note","delete","note-1","--request-id","note-delete","--expect-epoch","epoch","--expect-revision",&revision],
+            vec!["workspace","set","/tmp","--request-id","workspace-set","--expect-epoch","epoch","--expect-revision",&revision],
+        ] {
+            let output=Command::new(executable).args(&args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();
+            assert!(output.status.success(),"{args:?}: {:?}",output);
+            let value:serde_json::Value=serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["ok"],true);
+            if args[1]=="create" || args[1]=="update" { assert_eq!(value["data"]["edit"]["text"],"line one\nПривіт\t$(literal)"); }
+        }
         for action in ["minimize", "restore", "expand", "collapse"] {
             let args = [
                 "terminal",

@@ -2091,6 +2091,152 @@ impl SuperDesktopWindow {
         model.snapshot(canvas, &presentation)
     }
 
+    /// Read actual note buffers, including edits waiting for autosave.
+    fn cli_live_state(&self) -> AppState {
+        let mut state = self.state.borrow().clone();
+        state.notes = self.note_cards.borrow().iter().map(|note| note.live_data()).collect();
+        state
+    }
+
+    fn cli_layout_ready(&self, layout: &crate::control::Layout) -> Result<(), &'static str> {
+        if self.slide.running.get() {return Err("Workspace animation is in progress.");}
+        for item in &layout.items {
+            if item.kind=="note" {
+                let cards:Vec<_>=self.note_cards.borrow().iter().filter(|n|n.data.borrow().id==item.id).cloned().collect();
+                if cards.len()!=1 || cards[0].text_view.has_focus() || cards[0].container.has_css_class("dragging") || cards[0].container.has_css_class("resizing") {return Err("A note is missing, ambiguous or being edited.");}
+            } else {
+                let cards:Vec<_>=self.terminal_cards.borrow().iter().filter(|n|n.data.borrow().id==item.id).cloned().collect();
+                if cards.len()!=1 || cards[0].is_being_dragged() || cards[0].container.has_css_class("term-resizing") {return Err("A terminal is missing, ambiguous or being moved.");}
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cli_workspace(&self, model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request) -> crate::control::Reply
+    {
+        use crate::control::{Command, Reply, WorkspaceEdit as Edit, WorkspaceQuery as Query};
+        use crate::control_workspace as workspace;
+        use serde_json::json;
+        let fail = |code, message| Reply::failure(&request.request_id, code, message);
+        let snapshot = match self.desktop_snapshot(model) {
+            Ok(s) => s, Err(_) => return fail("unavailable", "Local workspace is unavailable."),
+        };
+        let state = self.cli_live_state();
+        let envelope = |state: &AppState| json!({"epoch":snapshot.epoch,"revision":workspace::revision(state,&snapshot),
+            "revisionScope":"workspace","units":"logical-pixels","canvas":snapshot.canvas});
+        if let Command::Workspace { query } = &request.command {
+            let mut data = envelope(&state);
+            match query {
+                Query::Inspect => { data["workspace"] = json!(crate::state::effective_workspace_dir(&state));
+                    data["notesCount"] = json!(state.notes.len()); data["terminalsCount"] = json!(state.terminals.len()); },
+                Query::Folders => data["folders"] = self.workspace_choices(),
+                Query::Layout => data["layout"] = json!(crate::control_workspace::export(&state,&snapshot)),
+                Query::ValidateLayout {layout} => {
+                    if let Err(message)=crate::control_workspace::validate_layout(layout,&state,&snapshot) { return fail("invalid_arguments",message); }
+                    if let Err(message)=self.cli_layout_ready(layout) { return fail("conflict",message); }
+                    data["valid"]=json!(true); data["layout"]=json!(layout);
+                },
+                Query::Notes => data["notes"] = json!(state.notes.iter().map(|n| workspace::note(n,false)).collect::<Vec<_>>()),
+                Query::Note { id } => {
+                    let matches:Vec<_> = state.notes.iter().filter(|n| n.id == *id).collect();
+                    if matches.len()!=1 { return fail("not_found","No unique local note has that ID."); }
+                    data["note"] = workspace::note(matches[0],true);
+                },
+            }
+            return Reply::success(&request.request_id,data);
+        }
+        if let Err(reply) = workspace::check(request,&state,&snapshot,&snapshot.epoch) { return reply; }
+        if self.slide.running.get() { return fail("conflict","A workspace animation is in progress."); }
+        let Command::WorkspaceEdit {edit,..} = &request.command else { unreachable!() };
+        let mut result = json!({});
+        if matches!(edit,Edit::Layout {..}|Edit::Arrange) {
+            let layout=match edit {
+                Edit::Layout {layout} => layout.clone(),
+                _ => match workspace::arrange(&state,&snapshot) {Ok(v)=>v,Err(message)=>return fail("out_of_bounds",message)},
+            };
+            if let Err(message)=workspace::validate_layout(&layout,&state,&snapshot) { return fail("invalid_arguments",message); }
+            if let Err(message)=self.cli_layout_ready(&layout) { return fail("conflict",message); }
+            for item in &layout.items {
+                if item.kind=="note" {
+                    let note=self.note_cards.borrow().iter().find(|n| n.data.borrow().id==item.id).cloned().unwrap();
+                    {let mut data=note.data.borrow_mut();data.x=item.x;data.y=item.y;data.width=item.width;data.height=item.height;}
+                    note.container.set_size_request(item.width,item.height);
+                    self.canvas.move_(&note.container,item.x as f64,item.y as f64);
+                    if let Some(data)=self.state.borrow_mut().notes.iter_mut().find(|n|n.id==item.id) {*data=note.live_data();}
+                } else {
+                    let card=self.any_terminal_card(&item.id).unwrap();
+                    let applied=if item.mode=="minimized" {self.move_terminal_card(&item.id,item.x,item.y).is_ok()} else {
+                        card.apply_geometry(crate::card_resize::Rect {x:item.x as f64,y:item.y as f64,width:item.width,height:item.height})
+                    };
+                    if !applied {return Reply::unknown(&request.request_id);}
+                }
+            }
+            self.ghosts.refresh();
+            result["layout"]=json!(layout);
+        } else if let Edit::Folder { path } = edit {
+            if !std::path::Path::new(path).is_absolute() || path.len()>4096 || path.chars().any(char::is_control) {
+                return fail("invalid_arguments","Use an absolute existing folder path without control characters.");
+            }
+            let Some(directory) = crate::state::clean_dir(path) else { return fail("invalid_arguments","Folder does not exist."); };
+            { let mut state = self.state.borrow_mut(); state.workspace_dir=Some(directory.clone()); crate::state::remember_workspace_dir(&mut state,&directory); }
+            self.ws_bar.show_folder(&directory);
+            result["workspace"] = json!(directory);
+        } else {
+            let (id, mut updated, old) = match edit {
+                Edit::NoteCreate { text,x,y,width,height,tag } => {
+                    if state.notes.len()>=256 { return fail("limit_exceeded","At most 256 notes can be created through the CLI."); }
+                    let id=format!("note_cli_{}",request.request_id);
+                    if state.notes.iter().any(|n| n.id==id) { return fail("conflict","Reserved note ID already exists."); }
+                    (id.clone(),Some(NoteData {id,text:text.clone(),x:*x,y:*y,width:*width,height:*height,tag:*tag,
+                        color:"omarchy".into(),updated_at:0.0}),None)
+                },
+                Edit::NoteUpdate {id,..} | Edit::NoteDelete {id} | Edit::NoteMove {id,..} | Edit::NoteResize {id,..} | Edit::NoteTag {id,..} => {
+                    let cards:Vec<_>=self.note_cards.borrow().iter().filter(|n| n.data.borrow().id==*id).cloned().collect();
+                    if cards.len()!=1 { return fail("not_found","No unique local note has that ID."); }
+                    let card=Rc::clone(&cards[0]);
+                    if card.text_view.has_focus() || card.container.has_css_class("dragging") || card.container.has_css_class("resizing") {
+                        return fail("conflict","The note is being edited or moved on the desktop.");
+                    }
+                    let mut note=card.live_data();
+                    match edit {
+                        Edit::NoteUpdate {text,..} => note.text=text.clone(),
+                        Edit::NoteMove {x,y,..} => {note.x=*x; note.y=*y;},
+                        Edit::NoteResize {width,height,..} => {note.width=*width;note.height=*height;},
+                        Edit::NoteTag {tag,..} => note.tag=*tag,
+                        _ => {}
+                    }
+                    (id.clone(), if matches!(edit,Edit::NoteDelete {..}) {None} else {Some(note)},Some(card))
+                },
+                _ => unreachable!()
+            };
+            if let Some(note) = &mut updated {
+                if let Err(message)=workspace::validate_note(note,&snapshot.canvas,true) {
+                    return fail("invalid_arguments",message);
+                }
+                note.updated_at=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+            }
+            if let Some(old)=old {
+                old.cancel_pending_save();
+                self.note_cards.borrow_mut().retain(|n| n.data.borrow().id!=id);
+                self.drag_pending.borrow_mut().remove(old.container.upcast_ref::<gtk4::Widget>());
+                self.canvas.remove(&old.container);
+            }
+            self.state.borrow_mut().notes.retain(|n| n.id!=id);
+            if let Some(note)=updated {
+                result["note"] = workspace::note(&note,false);
+                self.state.borrow_mut().notes.push(note.clone());
+                self.spawn_note_widget(note,false);
+            }
+            result["id"] = json!(id);
+            result["deleted"] = json!(matches!(edit,Edit::NoteDelete {..}));
+        }
+        crate::state::save_state_async(self.state.borrow().clone());
+        let mut data=envelope(&self.cli_live_state());
+        data["result"]=result; data["outcome"]=json!("applied");
+        Reply::success(&request.request_id,data)
+    }
+
     /// Local CLI geometry uses the live card and output on this GTK turn.
     /// It never sends a bridge command, starts a session, or presents the overlay.
     pub fn cli_geometry(&self, model: &crate::workspace_model::LocalWorkspace, request: &crate::control::Request) -> crate::control::Reply {
@@ -2853,6 +2999,87 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cli_notes_preserve_live_text_and_guard_edits() {
+        crate::gtk_test::run_in_child_process("window::tests::cli_notes_inner");
+    }
+
+    #[test]
+    fn cli_notes_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        use crate::control::{Command, Request, WorkspaceQuery as Query, WorkspaceEdit as Edit};
+        let root=std::env::temp_dir().join(format!("sd-notes-window-{}",std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME","XDG_CONFIG_HOME","XDG_STATE_HOME","XDG_CACHE_HOME","TMUX_TMPDIR"] { std::env::set_var(name,&root); }
+        std::env::remove_var("TMUX"); std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app=gtk4::Application::new(Some("com.superdesktop.CliNotesTest"),gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state=AppState::default(); state.notes.clear();
+        let model=crate::workspace_model::LocalWorkspace::new(state);
+        let window=SuperDesktopWindow::new(&app,||{},Rc::new(crate::hotcorner::Zone::default()),model.state());
+        let read=|query| window.cli_workspace(&model,&Request {control_version:1,request_id:"read".into(),command:Command::Workspace {query}});
+        let prepare=|edit,id:&str| {
+            let data=read(Query::Inspect).data.unwrap();
+            Request {control_version:1,request_id:id.into(),command:Command::WorkspaceEdit {edit,
+                expect_epoch:data["epoch"].as_str().unwrap().into(),expect_revision:data["revision"].as_str().unwrap().into()}}
+        };
+        let create=prepare(Edit::NoteCreate {text:"one\nПривіт\t$(literal)".into(),x:80,y:140,width:260,height:200,tag:3},"create");
+        let journal=root.join("receipts");
+        let apply=|request:&Request| crate::control_geometry::dispatch(&journal,request,std::time::Instant::now()+Duration::from_secs(3),|r|Ok(window.cli_workspace(&model,r)));
+        assert!(apply(&create).ok);
+        assert!(apply(&create).ok,"duplicate returns receipt");
+        assert_eq!(window.note_cards.borrow().len(),1);
+        assert!(!read(Query::Notes).data.unwrap()["notes"][0].as_object().unwrap().contains_key("text"));
+        let note_id="note_cli_create".to_string();
+        assert_eq!(read(Query::Note {id:note_id.clone()}).data.unwrap()["note"]["text"],"one\nПривіт\t$(literal)");
+        let stale=prepare(Edit::NoteUpdate {id:note_id.clone(),text:"overwrite".into()},"stale");
+        let old=Rc::clone(&window.note_cards.borrow()[0]);
+        old.text_view.buffer().set_text("unsaved desktop edit");
+        assert_eq!(window.cli_workspace(&model,&stale).exit_code(),5,"pending autosave must invalidate revision");
+        assert_eq!(read(Query::Note {id:note_id.clone()}).data.unwrap()["note"]["text"],"unsaved desktop edit");
+        let update=prepare(Edit::NoteUpdate {id:note_id.clone(),text:"replacement\n".into()},"update");
+        old.container.add_css_class("resizing");
+        assert_eq!(window.cli_workspace(&model,&update).exit_code(),5);
+        old.container.remove_css_class("resizing");
+        assert!(apply(&update).ok);
+        // Keep the retired widget alive past its former debounce deadline.
+        let deadline=std::time::Instant::now()+Duration::from_millis(400);
+        while std::time::Instant::now()<deadline { while glib::MainContext::default().iteration(false) {} std::thread::sleep(Duration::from_millis(10)); }
+        assert_eq!(model.state().borrow().notes[0].text,"replacement\n");
+        for (edit,id) in [(Edit::NoteMove {id:note_id.clone(),x:100,y:160},"move"),
+            (Edit::NoteResize {id:note_id.clone(),width:300,height:220},"resize"),
+            (Edit::NoteTag {id:note_id.clone(),tag:8},"tag")] {
+            let reply=apply(&prepare(edit,id)); assert!(reply.ok,"{reply:?}");
+        }
+        let bad=prepare(Edit::NoteMove {id:note_id.clone(),x:i32::MAX,y:160},"bad");
+        assert_eq!(apply(&bad).exit_code(),2);
+        assert_eq!(model.state().borrow().notes[0].x,100);
+        assert_eq!(model.state().borrow().notes[0].tag,8);
+        let exported=read(Query::Layout).data.unwrap()["layout"].clone();
+        let mut layout:crate::control::Layout=serde_json::from_value(exported).unwrap();
+        layout.items[0].x=120;
+        assert!(read(Query::ValidateLayout {layout:layout.clone()}).ok);
+        layout.items.push(crate::control::LayoutItem {kind:"note".into(),id:"missing".into(),mode:"normal".into(),x:20,y:140,width:260,height:200});
+        assert!(!apply(&prepare(Edit::Layout {layout:layout.clone()},"invalid-layout")).ok);
+        assert_eq!(model.state().borrow().notes[0].x,100,"invalid later item must not move earlier item");
+        layout.items.pop();
+        assert!(apply(&prepare(Edit::Layout {layout},"layout")).ok);
+        assert_eq!(model.state().borrow().notes[0].x,120);
+        assert!(apply(&prepare(Edit::Arrange,"arrange")).ok);
+        assert_eq!(model.state().borrow().notes[0].x,10);
+        assert!(!window.window.is_visible());
+        crate::state::flush_state_saves_checked().unwrap();
+        assert_eq!(crate::state::load_state().notes[0].text,"replacement\n");
+        assert!(apply(&prepare(Edit::NoteDelete {id:note_id.clone()},"delete")).ok);
+        assert_eq!(read(Query::Note {id:note_id}).exit_code(),3);
+        assert_eq!(window.note_cards.borrow().len(),0);
+        assert!(crate::state::load_state().notes.is_empty());
+        window.window.close(); drop(old);
+        crate::state::flush_state_saves_checked().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cli_mode_handler_checks_live_widgets_and_persists_layout() {
         crate::gtk_test::run_in_child_process("window::tests::cli_mode_handler_inner");
     }
@@ -2913,7 +3140,8 @@ mod tests {
         assert_eq!(persisted.terminals[0].restored_width, 480);
         assert_eq!(persisted.terminals[0].icon_x, Some(300));
         window.window.close();
-        std::fs::remove_dir_all(root).unwrap();
+        crate::state::flush_state_saves_checked().unwrap();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -10,7 +10,7 @@ Your installed client and running daemon may support fewer commands: check
 
 **Current coverage:** the structured local CLI supports discovery, creation,
 terminal observation, guarded text/key input and prompt delivery, card geometry,
-card modes and guarded closing. It does not provide local attachment or direct
+card modes, guarded closing, notes and workspace layouts. It does not provide local attachment or direct
 terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
@@ -156,6 +156,48 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
+
+## Notes and workspace layouts
+
+`workspace inspect` returns the selected launch directory, logical canvas,
+counts, epoch and workspace revision. `workspace folders` reads remembered
+choices; `workspace set /absolute/path` selects an existing directory for future
+launches. Running sessions keep their directories.
+
+`note list` returns metadata without text; `note inspect ID` includes the live
+editor text, even before autosave. `note create` and `note update ID` read literal
+UTF-8 with exactly one of `--stdin` or `--file PATH`: at most 4096 bytes, allowing
+newline/tab and empty text. Create defaults to x=80, y=140, width=260, height=200,
+tag=0; each has an explicit option. `note delete ID` removes the note and its
+text. `note move ID --x X --y Y`, `note resize ID --width W --height H` and
+`note tag set ID 0..8` update geometry and grouping. Note edits replace and raise
+the note widget; focused/dragged/resizing notes are refused. Rectangles must fit
+the current logical display, below the toolbar, with ten-pixel edges. Minimum
+note size is 180×120; maximum is 70% of display width and 75% of height. There is
+no implicit clamping, and CLI creation is limited to 256 notes.
+
+Every mutation above requires `--expect-epoch EPOCH --expect-revision REVISION
+--request-id ID`. Take the guards from workspace or note reads. The revision is
+workspace-wide: other edits, live note typing, mode changes and display changes
+can invalidate it. A stale request fails before application. Receipts omit note
+text; an uncertain mutation must be reconciled using its request ID.
+
+`workspace layout export --format json` returns `data.layout`: a version 1
+object containing items with `kind`, `id`, `mode`, `x`, `y`, `width`, `height`.
+It excludes note text, prompts and launch commands. Pass that object to
+`workspace layout validate --file layout.json` or `workspace layout apply
+--file layout.json`; apply requires the same mutation guards. Imports accept
+at most 12000 bytes and 64 items, reject unknown fields and duplicate IDs, and
+resolve exact current cards. All entries validate before any movement. Apply
+changes only listed rectangles, preserves card modes, and refuses expanded
+cards; minimized cards can move but cannot resize. Terminal resizing can
+naturally refit the VTE grid. Validation does not reserve a revision.
+
+`workspace arrange` uses the same guards and packs cards by kind and ID into
+rows within current bounds, preserving sizes. It refuses an overflowing layout
+instead of placing cards off-screen. These commands never launch terminals or
+show the overlay. Successful edits are persisted; a transport or persistence
+failure can leave an unknown outcome, so inspect the receipt and current state.
 
 ## Native status, finite waits and sampled output
 
@@ -550,6 +592,21 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `workspace layout export [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
+| `workspace layout validate (--stdin \| --file PATH) [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
+| `workspace layout apply (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
+| `workspace arrange --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
+| `workspace inspect [--format text\|json] [--target local]` | Structured local | Inspect local workspace and revision |
+| `workspace folders [--format text\|json] [--target local]` | Structured local | List selected and remembered folders |
+| `workspace set PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Select a folder for future launches |
+| `note list [--format text\|json] [--target local]` | Structured local | List note metadata without text |
+| `note inspect ID [--format text\|json] [--target local]` | Structured local | Read an exact note including text |
+| `note create (--stdin \| --file PATH) [--x X] [--y Y] [--width W] [--height H] [--tag 0..8] --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Create a note from literal UTF-8 input |
+| `note update ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Replace an exact note text |
+| `note delete ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Delete an exact sticky note |
+| `note move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Move a note within current logical bounds |
+| `note resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Resize a note within current logical bounds |
+| `note tag set ID TAG --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Set a note color tag |
 | `terminal status ID [--format text\|json] [--target local]` | Structured local | Observe native lifecycle and completion evidence |
 | `terminal wait ID --until completed\|exited\|working\|idle\|error\|waiting --expect-pane-identity IDENTITY [--after COMPLETION_ID\|none] [--timeout 30s] [--format text\|json] [--target local]` | Structured local | Wait for an observed terminal condition |
 | `terminal follow ID [--seconds 10] [--interval-ms 500] [--expect-pane-identity IDENTITY] [--format jsonl] [--target local]` | Structured local | Follow bounded plain-text screen snapshots |
