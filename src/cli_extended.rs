@@ -584,3 +584,57 @@ pub(crate) fn stream(args: &[String]) -> Option<i32> {
         );
     }
 }
+
+pub(crate) fn card(args: &[String]) -> Option<Output> {
+    use crate::control::CardAction;
+    if args.first().map(String::as_str) != Some("terminal")
+        || !matches!(
+            args.get(1).map(String::as_str),
+            Some("focus" | "raise" | "tag")
+        )
+    {
+        return None;
+    }
+    let build = || -> Result<(Command, Options), &'static str> {
+        let options = Options::parse(args, &["--expect-epoch", "--expect-revision"], &[])?;
+        let words: Vec<_> = options.words.iter().map(String::as_str).collect();
+        let (id, action) = match words.as_slice() {
+            ["terminal", "focus", id] => (*id, CardAction::Focus),
+            ["terminal", "raise", id] => (*id, CardAction::Raise),
+            ["terminal", "tag", "set", id, value] => (
+                *id,
+                CardAction::Tag {
+                    value: value
+                        .parse::<u8>()
+                        .ok()
+                        .filter(|v| *v <= 8)
+                        .ok_or("Tag must be 0..8.")?,
+                },
+            ),
+            _ => return Err("Use terminal focus/raise ID, or terminal tag set ID VALUE."),
+        };
+        let epoch = options.required("--expect-epoch")?;
+        let revision = options.required("--expect-revision")?;
+        if !valid_id(id, 128) || !valid_id(&epoch, 64) || !opaque(&revision) {
+            return Err("Use exact card ID and epoch/revision from terminal geometry.");
+        }
+        Ok((
+            Command::CardAction {
+                id: id.into(),
+                action,
+                expect_epoch: epoch,
+                expect_revision: revision,
+            },
+            options,
+        ))
+    };
+    Some(match build() {
+        Ok((command, options)) => {
+            render_reply(send(command, &options, "terminal.card"), options.json)
+        }
+        Err(message) => render_reply(
+            Reply::failure("", "invalid_arguments", message),
+            json_requested(args),
+        ),
+    })
+}

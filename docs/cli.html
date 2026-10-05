@@ -44,6 +44,7 @@
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
+<li><a href="#card-stacking-focus-and-tags">Card stacking, focus and tags</a></li>
 <li><a href="#terminal-file-references">Terminal file references</a></li>
 <li><a href="#settings-and-launcher-configuration">Settings and launcher configuration</a></li>
 <li><a href="#notes-and-workspace-layouts">Notes and workspace layouts</a></li>
@@ -303,6 +304,16 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (<code>consistency: "checked-before-and-after"</code>), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.</p>
+<h2 id="card-stacking-focus-and-tags">Card stacking, focus and tags</h2>
+<p><code>terminal raise ID</code>, <code>terminal focus ID</code> and <code>terminal tag set ID 0..8</code>
+require epoch/revision from terminal geometry and a unique request ID. Raise
+persists stacking order without showing the overlay. Focus requires the local
+workspace already visible, a restored card and closed dialogs; it raises the
+card and requests GTK focus without launching or attaching. The result does
+not claim compositor-level focus. Use <code>show</code> and <code>terminal restore</code> first when
+needed. Tag updates both card forms and remembers the folder color for future
+launches, matching the graphical picker. Gestures and workspace animations
+cause a conflict instead of being interrupted.</p>
 <h2 id="terminal-file-references">Terminal file references</h2>
 <p><code>terminal files list ID</code> samples the screen and up to 300 retained lines,
 combines supported paths with remembered references, and returns a bounded
@@ -776,6 +787,21 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>terminal focus ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Focus an attached local terminal</td>
+</tr>
+<tr>
+<td><code>terminal raise ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Raise one local card</td>
+</tr>
+<tr>
+<td><code>terminal tag set ID VALUE --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Set a terminal color tag</td>
+</tr>
 <tr>
 <td><code>terminal files list ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>

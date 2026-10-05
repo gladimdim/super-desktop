@@ -2258,9 +2258,42 @@ impl SuperDesktopWindow {
         Reply::success(&request.request_id,data)
     }
 
+    fn cli_card_action(&self,model:&crate::workspace_model::LocalWorkspace,request:&crate::control::Request)->crate::control::Reply {
+        use crate::control::{CardAction,Command,Reply};
+        let fail=|code,message|Reply::failure(&request.request_id,code,message);
+        let Command::CardAction {id,action,expect_epoch,expect_revision}=&request.command else {return fail("invalid_request","Expected a card action.");};
+        let snapshot=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return fail("unavailable","Workspace unavailable.")};
+        let Some(current)=snapshot.cards.iter().find(|c|c.card_id==*id)else{return fail("not_found","No local card has that ID.");};
+        if expect_epoch!=&snapshot.epoch||expect_revision!=&crate::control_geometry::revision(&snapshot,current){return fail("conflict","Card or display changed; read terminal geometry again.");}
+        let card=match self.any_terminal_card(id){Ok(c)=>c,Err(_)=>return fail("not_found","Card widget is unavailable.")};
+        if card.is_being_dragged()||card.container.has_css_class("term-resizing")||self.slide.running.get(){return fail("conflict","A local gesture or animation is in progress.");}
+        if snapshot.cards.iter().filter(|c|c.card_id==*id||c.session_name==current.session_name).count()!=1{return fail("conflict","Card identity is ambiguous.");}
+        match action {
+            CardAction::Raise=>card.cli_raise(),
+            CardAction::Focus=>{
+                if !self.window.is_visible()||self.machine_view.is_remote()||current.layout.iconified && !current.expanded||self.overlay_panels.iter().any(|p|p.is_visible())||self.pairing_requests.is_open()||self.pairing_wizard.is_open(){return fail("invalid_state","Focus requires a visible local workspace, restored card and closed dialogs. Use show and terminal restore first.");}
+                if !card.cli_focus(){return Reply::unknown(&request.request_id);}
+            },
+            CardAction::Tag {value}=>{
+                if *value>8{return fail("invalid_arguments","Tag must be 0..8.");}
+                let before=card.data.borrow().clone();card.cli_set_tag(*value);let after=card.data.borrow().clone();
+                let mut state=self.state.borrow_mut();crate::folder_colors::note_card_saved(&mut state,Some(&before),&after);
+                if let Some(saved)=state.terminals.iter_mut().find(|c|c.id==*id){saved.tag=*value;}
+                let saved=state.clone();drop(state);crate::state::save_state_async(saved);
+            },
+        }
+        let after=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return Reply::unknown(&request.request_id)};
+        let Some(current)=after.cards.iter().find(|c|c.card_id==*id)else{return Reply::unknown(&request.request_id)};
+        let mut data=crate::control_geometry::describe(&after,current);
+        data["tag"]=serde_json::json!(card.data.borrow().tag);data["action"]=serde_json::json!(action);data["outcome"]=serde_json::json!("applied");
+        data["compositorFocusObserved"]=serde_json::json!(false);
+        Reply::success(&request.request_id,data)
+    }
+
     /// Local CLI geometry uses the live card and output on this GTK turn.
     /// It never sends a bridge command, starts a session, or presents the overlay.
     pub fn cli_geometry(&self, model: &crate::workspace_model::LocalWorkspace, request: &crate::control::Request) -> crate::control::Reply {
+        if matches!(request.command,crate::control::Command::CardAction {..}) {return self.cli_card_action(model,request);}
         use crate::control::{Command, Reply};
         use crate::control_geometry as geometry;
         let id = &request.request_id;
@@ -3189,6 +3222,11 @@ mod tests {
             assert_eq!(data["mode"], mode);
             assert_eq!(data["changed"], true);
         }
+        let action=|action| {let snapshot=window.desktop_snapshot(&model).unwrap();Request {control_version:1,request_id:"card-action".into(),command:Command::CardAction {id:"sd_term_mode".into(),action,expect_epoch:snapshot.epoch.clone(),expect_revision:crate::control_geometry::revision(&snapshot,&snapshot.cards[0])}}};
+        let tagged=window.cli_geometry(&model,&action(crate::control::CardAction::Tag {value:7}));assert!(tagged.ok,"{tagged:?}");
+        assert_eq!(model.state().borrow().terminals[0].tag,7);
+        assert!(window.cli_geometry(&model,&action(crate::control::CardAction::Raise)).ok);
+        assert_eq!(window.cli_geometry(&model,&action(crate::control::CardAction::Focus)).exit_code(),6,"hidden workspace must not take focus");
         assert!(!window.window.is_visible());
         crate::state::flush_state_saves_checked().unwrap();
         let persisted = crate::state::load_state();

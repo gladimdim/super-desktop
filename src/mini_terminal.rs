@@ -538,6 +538,7 @@ pub struct MiniTerminalCard {
     iconify_action: CardAction,
     restore_action: CardAction,
     cli_mode_change: Rc<Cell<bool>>,
+    cli_tag_buttons: Rc<RefCell<Vec<glib::WeakRef<Button>>>>,
     geometry_commit: GeometryAction,
 }
 
@@ -1040,6 +1041,7 @@ impl MiniTerminalCard {
             iconify_action: Rc::new(RefCell::new(None)),
             restore_action: Rc::new(RefCell::new(None)),
             cli_mode_change: Rc::new(Cell::new(false)),
+            cli_tag_buttons: Rc::clone(&tag_sync),
             geometry_commit: Rc::new(RefCell::new(None)),
         };
 
@@ -1610,6 +1612,16 @@ impl MiniTerminalCard {
                 true
             }
         }
+    }
+
+    pub(crate) fn cli_raise(&self) { (self.on_raise)(self.container.clone().upcast()); }
+    pub(crate) fn cli_focus(&self) -> bool {
+        self.cli_raise();
+        self.vte.borrow().as_ref().is_some_and(|vte| vte.grab_focus())
+    }
+    pub(crate) fn cli_set_tag(&self,tag:u8) {
+        self.data.borrow_mut().tag=tag;
+        for button in self.cli_tag_buttons.borrow().iter().filter_map(|b|b.upgrade()) {crate::tag::apply_tag(&button,tag);}
     }
 
     /// Apply a geometry commit exactly like a local resize gesture: stored

@@ -32,6 +32,7 @@ pub const METHODS: &[&str] = &[
     "terminal.resize",
     "terminal.close",
     "terminal.mode",
+    "terminal.card",
     "terminal.input",
     "harness.list",
     "harness.inspect",
@@ -53,6 +54,10 @@ pub enum ModeAction {
     Expand,
     Collapse,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum CardAction { Focus, Raise, Tag { value:u8 } }
 
 pub const MAX_INPUT: usize = 4096;
 
@@ -213,6 +218,14 @@ pub enum FilesEdit {
 pub enum Command {
     #[serde(rename = "app.status")]
     Status {},
+    #[serde(rename="terminal.card")]
+    CardAction {
+        id:String, action:CardAction,
+        #[serde(rename="expectEpoch")]
+        expect_epoch:String,
+        #[serde(rename="expectRevision")]
+        expect_revision:String,
+    },
     #[serde(rename="terminal.files.read")]
     Files { id: String, query: FilesQuery },
     #[serde(rename="terminal.files.edit")]
@@ -338,7 +351,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::FilesEdit { .. }
+            Self::CardAction { .. }
+                | Self::FilesEdit { .. }
                 | Self::PreferencesEdit { .. }
                 | Self::WorkspaceEdit { .. }
                 | Self::Input { .. }
@@ -1006,7 +1020,9 @@ mod tests {
     struct Runtime(PathBuf);
     impl Runtime {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!(
+            // macOS TMPDIR can exceed the Unix socket path limit once the
+            // runtime directory and socket filename are appended.
+            let p = Path::new("/tmp").join(format!(
                 "sd-control-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)

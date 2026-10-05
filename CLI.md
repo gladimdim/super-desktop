@@ -157,6 +157,18 @@ point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
 
+## Card stacking, focus and tags
+
+`terminal raise ID`, `terminal focus ID` and `terminal tag set ID 0..8`
+require epoch/revision from terminal geometry and a unique request ID. Raise
+persists stacking order without showing the overlay. Focus requires the local
+workspace already visible, a restored card and closed dialogs; it raises the
+card and requests GTK focus without launching or attaching. The result does
+not claim compositor-level focus. Use `show` and `terminal restore` first when
+needed. Tag updates both card forms and remembers the folder color for future
+launches, matching the graphical picker. Gestures and workspace animations
+cause a conflict instead of being interrupted.
+
 ## Terminal file references
 
 `terminal files list ID` samples the screen and up to 300 retained lines,
@@ -667,6 +679,9 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal focus ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Focus an attached local terminal |
+| `terminal raise ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Raise one local card |
+| `terminal tag set ID VALUE --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Set a terminal color tag |
 | `terminal files list ID [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
 | `terminal files add ID PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
 | `terminal files read ID ASSET_ID [--offset BYTES \| --output NEW_PATH] [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
