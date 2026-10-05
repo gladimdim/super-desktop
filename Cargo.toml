@@ -11,7 +11,7 @@ default = ["desktop"]
 desktop = [
     "dep:gtk4", "dep:gtk4-layer-shell", "dep:vte4", "dep:shlex", "dep:chrono",
     "dep:futures-channel", "dep:futures-util", "dep:rustls", "dep:rcgen",
-    "dep:qrcode", "dep:reqwest", "dep:base64", "dep:tungstenite", "dep:pulldown-cmark",
+    "dep:qrcode", "dep:reqwest", "dep:tungstenite", "dep:pulldown-cmark",
 ]
 
 [[bin]]
@@ -46,7 +46,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "crypt
 sha2 = "0.10"
 qrcode = { version = "0.14", default-features = false, optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls-no-provider"], optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = "0.22"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"], optional = true }
 pulldown-cmark = { version = "0.13.4", default-features = false, optional = true }
 
