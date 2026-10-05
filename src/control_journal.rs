@@ -157,6 +157,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
                     | control::WorkspaceEdit::NoteTag { id, .. },
                 ..
             } => id.clone(),
+            control::Command::UpdatesCheck {} | control::Command::UpdatesInstall {..} => "updates".into(),
             control::Command::WorkspaceEdit { .. } => "workspace".into(),
             control::Command::PreferencesEdit { .. } | control::Command::Shortcut {..} => "settings".into(),
             control::Command::Forget {id,..}

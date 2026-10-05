@@ -112,6 +112,14 @@ identity to disappear; restart never resends an uncertain shutdown. Startup is
 explicit, logs to a new0600 file, and does not imply desktop readiness. No bridge
 route or existing IPC contract is changed.
 
+Update checks run explicit background jobs and never install. Installation
+requires an unconsumed successful check, exact reviewed version/commit and an
+explicit acknowledgement. The worker rechecks the branch, tracked changes and
+upstream commit, and merges the immutable commit before invoking the existing
+rebuild script. Pinned/detached installs are refused. Queue receipts survive;
+job progress does not survive daemon replacement, and failures may leave the
+source clone fast-forwarded. Job replies omit credentials and raw process errors.
+
 Audit list/export expose only local receipt metadata, with bounded pages and
 revision checks; full results require request inspect. Exports create a new
 0600 file and retain partial output on failure. Resource events are finite

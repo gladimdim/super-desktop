@@ -7,7 +7,20 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 
 pub(crate) fn run(args:&[String])->Option<Output> {
-    if !matches!(args.first()?.as_str(),"audit"|"access"|"doctor") {return None;}
+    if !matches!(args.first()?.as_str(),"updates"|"audit"|"access"|"doctor") {return None;}
+    if args[0]=="updates" {
+        let build=||->Result<Output,&'static str>{
+            let o=Options::parse(args,&["--check","--expect-version","--expect-commit"],&["--allow-install"])?;
+            let (command,method)=match o.words.iter().map(String::as_str).collect::<Vec<_>>().as_slice(){
+                ["updates","check"] if o.flags.is_empty()&&o.values.keys().all(|k|matches!(k.as_str(),"--request-id"|"--format"|"--target"))=>(Command::UpdatesCheck {},"updates.check"),
+                ["updates","status",id] if o.flags.is_empty()&&o.values.keys().all(|k|matches!(k.as_str(),"--format"|"--target"))=>(Command::UpdatesStatus {id:(*id).into()},"updates.status"),
+                ["updates","install"]=>{let version=o.required("--expect-version")?;let commit=o.required("--expect-commit")?;if commit.len()!=40||!commit.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Copy the full commit from updates status.");}(Command::UpdatesInstall {check_id:o.required("--check")?,expect_version:version,expect_commit:commit,allow_install:o.flags.contains("--allow-install")},"updates.install")},
+                _=>return Err("Use updates check/status/install; read --help."),
+            };
+            Ok(render_reply(send(command,&o,method),o.json))
+        };
+        return Some(build().unwrap_or_else(|m|render_reply(Reply::failure("","invalid_arguments",m),json_requested(args))));
+    }
     let build=||->Result<Output,&'static str>{
         let options=Options::parse(args,&["--after","--limit","--expect-revision","--output"],&[])?;
         if options.values.contains_key("--request-id"){return Err("Read-only administration does not accept request IDs.");}

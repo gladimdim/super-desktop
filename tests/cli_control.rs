@@ -20,6 +20,7 @@ fn control_daemon_fixture() {
             }
         }
         let data = match &request.command {
+            control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Forget {..}|control::Command::Relaunch {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Shortcut {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Audit {..}=>serde_json::json!({"entries":[{"id":"example","state":"recorded"}],"revision":"a".repeat(64),"nextCursor":null}),
@@ -371,6 +372,10 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             if action=="forget"{args.push("--preserve-session");}else{args.extend(["--expect-pane-identity",&revision,"--allow-unsafe-harness"]);}
             if action=="resume"{args.extend(["--native-session","12345678-1234-1234-1234-123456789abc"]);}
             let out=Command::new(executable).args(args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
+        }
+        let commit="a".repeat(40);
+        for args in [vec!["updates","check","--request-id","check"],vec!["updates","status","check"],vec!["updates","install","--check","check","--expect-version","1.2.0","--expect-commit",&commit,"--allow-install","--request-id","install"]] {
+            let out=Command::new(executable).args(args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
         }
         let one_shot=fixture.root.join("one-shot.json");std::fs::write(&one_shot,r#"["literal ; $(touch NEVER)",""]"#).unwrap();
         let launch_args=["harness","launch","claude","--cwd","/tmp","--request-id","one-shot","--args-file",one_shot.to_str().unwrap(),"--format=json"];

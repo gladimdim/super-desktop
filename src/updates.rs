@@ -290,6 +290,24 @@ pub fn start_update(status: &Status, paths: &Paths) -> Result<Child, String> {
     start_rebuild(&status.dir, status.latest, paths)
 }
 
+/// Local CLI installation pins the reviewed commit instead of a moving ref.
+/// Pinned installs remain pinned; switching branches belongs to the existing UI.
+pub fn cli_commit(status:&Status)->Result<String,String>{
+    let commit=run(&status.dir,&["rev-parse","--verify",&format!("{}^{{commit}}",status.upstream)])?;
+    if commit.len()!=40||!commit.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Invalid upstream commit".into());}Ok(commit)
+}
+pub fn start_cli_update(status:&Status,commit:&str,paths:&Paths)->Result<Child,String>{
+    if status.pinned.is_some(){return Err("This install is pinned; switch to latest explicitly in Settings first.".into());}
+    if !status.available(){return Err("No newer released version is available.".into());}
+    if run(&status.dir,&["symbolic-ref","--quiet","HEAD"]).is_err()||run(&status.dir,&["rev-parse","--abbrev-ref","--symbolic-full-name","@{upstream}"])?!=status.upstream{return Err("The installed branch changed; check again.".into());}
+    if cli_commit(status)?!=commit{return Err("The upstream changed; check again.".into());}
+    if let Some(reason)=blocker(&status.dir,&status.upstream){return Err(reason);}
+    let version=run(&status.dir,&["show",&format!("{commit}:Cargo.toml")])?;
+    if manifest_version(&version)!=Some(status.latest){return Err("Checked version changed.".into());}
+    run(&status.dir,&["merge","--ff-only","--quiet",commit])?;
+    start_rebuild(&status.dir,status.latest,paths)
+}
+
 /// Start `<dir>/rebuild.sh` in a session of its own, so replacing this daemon
 /// does not take the rebuild down with it. Its output goes to `paths.log`.
 pub fn start_rebuild(dir: &Path, target: Version, paths: &Paths) -> Result<Child, String> {
@@ -545,6 +563,16 @@ mod tests {
         assert_eq!(std::fs::read_to_string(installed.join("built")).unwrap().trim(), "built");
         assert!(std::fs::read_to_string(&paths.log).unwrap().contains("building"));
         assert!(!check_clone(&installed, Version(1, 1, 2)).unwrap().available());
+    }
+
+    #[test]
+    fn cli_update_installs_only_the_reviewed_commit_and_refuses_moved_refs() {
+        let scratch=Scratch::new("cli-pinned-commit");let (author,installed)=repositories(&scratch);let current=Version(1,1,0);
+        publish(&author,"1.1.1","Reviewed release");let checked=check_clone(&installed,current).unwrap();let commit=cli_commit(&checked).unwrap();
+        let paths=Paths {log:scratch.0.join("state/update.log"),pending:scratch.0.join("state/update-pending")};
+        publish(&author,"1.1.2","Later release");let latest=check_clone(&installed,current).unwrap();assert!(start_cli_update(&checked,&commit,&paths).is_err());assert!(!installed.join("built").exists());
+        let commit=cli_commit(&latest).unwrap();let mut child=start_cli_update(&latest,&commit,&paths).unwrap();assert!(child.wait().unwrap().success());assert_eq!(test_git(&installed,&["rev-parse","HEAD"]),commit);
+        test_git(&installed,&["checkout","--quiet","--detach","HEAD"]);assert!(start_cli_update(&latest,&commit,&paths).is_err());
     }
 
     #[test]

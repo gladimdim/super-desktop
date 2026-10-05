@@ -15,6 +15,7 @@ mod control_viewport;
 mod control_attach;
 mod control_shortcut;
 mod control_relaunch;
+mod control_updates;
 mod control_workspace;
 mod control_service;
 mod brand;
@@ -705,6 +706,9 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 control::capabilities(),
                             );
+                        }
+                        if matches!(request.command,control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}) {
+                            return control_updates::execute(&control_journal::root(),&request);
                         }
                         if matches!(request.command,control::Command::Forget {..}|control::Command::Relaunch {..}) {
                             return control_relaunch::execute(&control_journal::root(),&request,deadline,|action|{

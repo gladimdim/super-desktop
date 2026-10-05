@@ -771,6 +771,9 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal resume ID --native-session NATIVE_ID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Replace a terminal with an explicit native conversation |
 | `settings shortcut preview --combo COMBO [--format text\|json] [--target local]` | Structured local | Preview a managed Hyprland shortcut change |
 | `settings shortcut apply --combo COMBO --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Apply a reviewed shortcut preview |
+| `updates check --request-id ID [--format text\|json] [--target local]` | Structured local | Queue a source-install update check |
+| `updates status ID [--format text\|json] [--target local]` | Structured local | Inspect an update job |
+| `updates install --check CHECK_ID --expect-version VERSION --expect-commit COMMIT --allow-install --request-id ID [--format text\|json] [--target local]` | Structured local | Install the reviewed update commit explicitly |
 | `audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text\|json] [--target local]` | Structured local | List private mutation receipt metadata |
 | `audit export --output PATH [--format text\|json] [--target local]` | Structured local | Export a stable receipt metadata inventory |
 | `access list [--format text\|json] [--target local]` | Structured local | Inspect local control ownership |
@@ -814,6 +817,27 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Update jobs
+
+`updates check --request-id ID` queues a source-install check, including an
+upstream fetch, without installing. Poll `updates status ID` until `checked` or
+`failed`. A completed check reports the release version, exact commit, changes
+and blockers. Only one CLI update job runs at a time; up to 32 jobs are retained
+for the daemon's lifetime.
+
+To install, pass the check ID, its exact version and commit, `--allow-install`
+and a fresh request ID to `updates install`. The worker rechecks the branch,
+tracked-tree cleanliness and reviewed commit, then fast-forwards to that commit
+and invokes the existing rebuild script. It refuses pinned/detached installs;
+use Settings to explicitly switch a pinned install to latest first.
+
+Queue receipts are durable; job progress is not. A successful rebuild replaces
+the daemon, so the job may disappear: inspect `app status` and its running
+version, along with the original request receipt. `installer_exited` alone does
+not confirm installation. Failure can leave the clone fast-forwarded; inspect
+the existing private update log before another explicit check/install. These
+commands never run automatically as dependencies of other CLI operations.
 
 ## Application lifecycle
 

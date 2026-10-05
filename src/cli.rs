@@ -104,6 +104,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!("terminal resume", "Replace a terminal with an explicit native conversation", "terminal resume ID --native-session NATIVE_ID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text|json] [--target local]", "Closes the exact old session, then launches direct Claude/Codex/OpenCode with the supplied native ID; never chooses latest; no initial prompt", "Claude/Codex UUID or OpenCode ses_ ID; direct saved launcher without an existing resume selector; existing guarded pane", "Replacement receipt, nativeSessionRequested and nativeResumeObserved=false; harness may still refuse the conversation", "super-desktop terminal resume CARD --native-session UUID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id resume-1", false),
     command!("settings shortcut preview", "Preview a managed Hyprland shortcut change", "settings shortcut preview --combo COMBO [--format text|json] [--target local]", "Reads current bindings and runtime conflicts; returns exact before/after contents, preview hash and state guards; no writes", "Linux Hyprland; owned existing bindings.lua up to128KiB; named key with SUPER/CTRL/ALT/SHIFT or standalone F1-F12", "Preview, epoch, revision and conflict description; preview may contain private config text", "super-desktop settings shortcut preview --combo 'SUPER + CTRL + F8' --format json", false),
     command!("settings shortcut apply", "Apply a reviewed shortcut preview", "settings shortcut apply --combo COMBO --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text|json] [--target local]", "Rechecks file, runtime bindings and state; creates a private backup, atomically writes managed block, reloads and checks configerrors; validation failure attempts guarded rollback", "Fresh exact preview; closed Settings; Linux Hyprland; explicit request ID", "Applied result and backup, or validation failure with rollback status; unknown outcomes require inspection; no physical-keycode binding", "super-desktop settings shortcut apply --combo 'SUPER + CTRL + F8' --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id shortcut-1 --format json", false),
+    command!("updates check", "Queue a source-install update check", "updates check --request-id ID [--format text|json] [--target local]", "Fetches the installed clone upstream in a worker; never installs; durable queue receipt", "Source-installed Linux daemon; one running job, up to32 jobs per daemon lifetime", "Queued jobId; read updates status ID for reviewed version/commit and blockers", "super-desktop updates check --request-id check-1 --format json", false),
+    command!("updates status", "Inspect an update job", "updates status ID [--format text|json] [--target local]", "Reads daemon-lifetime job state; job loss does not establish installation failure", "Exact returned job ID; request inspect retains its durable queue receipt", "checking/checked/installing/installer_exited/failed; installationConfirmed=false; after replacement inspect app status version", "super-desktop updates status check-1 --format json", false),
+    command!("updates install", "Install the reviewed update commit explicitly", "updates install --check CHECK_ID --expect-version VERSION --expect-commit COMMIT --allow-install --request-id ID [--format text|json] [--target local]", "Rechecks source clone and exact commit, fast-forwards and starts existing rebuild script; can replace daemon; never runs as a dependency of another command", "Completed unconsumed check, newer version, clean tracked tree and normal upstream branch; pinned installs require explicit switching through Settings first", "Durable queued receipt with reviewed version/commit; inspect job and running version; errors may leave clone fast-forwarded", "super-desktop updates install --check check-1 --expect-version 1.2.0 --expect-commit COMMIT --allow-install --request-id install-1 --format json", false),
     command!("audit list", "List private mutation receipt metadata", "audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text|json] [--target local]", "Reads metadata only, sorted by request ID; no prompt, result contents or credentials", "Owner daemon; returned revision guards pagination", "Envelope with entries, total, revision and nextCursor; historical receipts do not establish current state", "super-desktop audit list --format json", false),
     command!("audit export", "Export a stable receipt metadata inventory", "audit export --output PATH [--format text|json] [--target local]", "Creates a new 0600 JSONL file, never overwrites; partial file retained on failure", "Owner daemon; explicit new destination; up to 4096 receipts", "Envelope with output, count and revision; no receipt result payloads", "super-desktop audit export --output /tmp/receipts.jsonl --format json", false),
     command!("access list", "Inspect local control ownership", "access list [--format text|json] [--target local]", "Read-only; exposes no bridge credentials", "Owner daemon; same-user callers are not sandboxed", "Owner UID, socket modes and delegationSupported=false; no grant or revoke facility", "super-desktop access list --format json", false),
@@ -316,7 +319,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
     if args.len() >= 2 && matches!(args.last().map(String::as_str), Some("--help" | "-h")) {
         let path = args[..args.len() - 1].join(" ");
-        if args.len() == 2 || action == "theme" || matches!(action, "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
+        if args.len() == 2 || action == "theme" || matches!(action, "updates" | "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
             return Some(group_or_help(&path));
         }
     }
@@ -351,7 +354,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
             Output::usage("Usage: super-desktop completion bash")
         });
     }
-    if matches!(action, "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
+    if matches!(action, "updates" | "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
         return if args.len() == 1 {
             Some(group_or_help(action))
         } else {
@@ -379,7 +382,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     let output = offline.or_else(|| {
         (args.first().is_some_and(|a| a=="theme") && args.len()>1 || matches!(
             args.first().map(String::as_str),
-            Some("audit" | "access" | "doctor" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage" | "capabilities")
+            Some("updates" | "audit" | "access" | "doctor" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage" | "capabilities")
         ))
         .then(|| live(args))
     });

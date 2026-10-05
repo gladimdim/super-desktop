@@ -23,6 +23,9 @@ pub const METHODS: &[&str] = &[
     "app.status",
     "audit.list",
     "access.list",
+    "updates.check",
+    "updates.install",
+    "updates.status",
     "capabilities",
     "terminal.list",
     "terminal.inspect",
@@ -240,6 +243,12 @@ pub enum FilesEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="updates.check")]
+    UpdatesCheck {},
+    #[serde(rename="updates.install")]
+    UpdatesInstall {#[serde(rename="checkId")] check_id:String,#[serde(rename="expectVersion")] expect_version:String,#[serde(rename="expectCommit")] expect_commit:String,#[serde(rename="allowInstall")] allow_install:bool},
+    #[serde(rename="updates.status")]
+    UpdatesStatus {id:String},
     #[serde(rename="terminal.forget")]
     Forget {id:String,#[serde(rename="expectEpoch")] expect_epoch:String,#[serde(rename="expectRevision")] expect_revision:String},
     #[serde(rename="terminal.relaunch")]
@@ -411,7 +420,7 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
+            Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
                 | Self::Attach { .. }
                 | Self::Viewport { .. }
                 | Self::CardAction { .. }
