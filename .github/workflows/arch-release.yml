@@ -30,8 +30,13 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - name: Install build and runtime dependencies
-        run: pacman -Syu --noconfirm --needed git rust python gtk4 gtk4-layer-shell vte4 tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
+      - name: Install build and runtime dependencies from Omarchy stable
+        shell: bash
+        run: |
+          printf '%s\n' 'Server = https://stable-mirror.omarchy.org/$repo/os/$arch' > /etc/pacman.d/mirrorlist
+          # Fully align the disposable rolling image with the stable snapshot,
+          # including downgrades, before compiling or recording ABI floors.
+          pacman -Syyuu --noconfirm --needed git rust python gtk4 gtk4-layer-shell vte4 tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
@@ -54,6 +59,7 @@ jobs:
             /tmp/sd-release/aur/PKGBUILD
             /tmp/sd-release/aur/.SRCINFO
             /tmp/sd-release/aur/super-desktop-bin.install
+            /tmp/sd-release/omarchy/
 
   release-assets:
     needs: build

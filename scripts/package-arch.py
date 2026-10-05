@@ -10,10 +10,8 @@ import subprocess
 import tarfile
 import tempfile
 import tomllib
-import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
-PREPARE_SOURCES = runpy.run_path(str(ROOT / "scripts/arch_sources.py"))["prepare_sources"]
 LIBRARIES = ("glibc", "gcc-libs", "glib2", "gtk4", "gtk4-layer-shell", "vte4", "cairo", "pango", "gdk-pixbuf2", "graphene")
 RUNTIME = ("bash", "coreutils", "python", "tmux", "wl-clipboard", "libnotify", "sqlite", "avahi", "bubblewrap", "poppler")
 
@@ -69,9 +67,10 @@ def stage(root, binaries, destination, sources=None):
         notice.write_text(f"Corresponding source, vendored Rust dependencies and build instructions:\n{source_url}\n")
 
 
-def recipe(version, license_id, checksum, dependencies):
+def recipe(version, license_id, checksum, dependencies, *, omarchy=False):
     quote = shlex.quote
     deps = " ".join(quote(value) for value in dependencies)
+    suffix = "_x86_64" if omarchy else ""
     return f'''# Maintained from the SUPER DESKTOP release artifacts.
 pkgname=super-desktop-bin
 pkgver={version}
@@ -86,8 +85,8 @@ provides=("super-desktop=$pkgver")
 conflicts=('super-desktop' 'super-desktop-git')
 options=('!strip' '!debug')
 install=super-desktop-bin.install
-source=("super-desktop-$pkgver-linux-x86_64.tar.gz::$url/releases/download/v$pkgver/super-desktop-$pkgver-linux-x86_64.tar.gz")
-sha256sums=('{checksum}')
+source{suffix}=("super-desktop-$pkgver-linux-x86_64.tar.gz::$url/releases/download/v$pkgver/super-desktop-$pkgver-linux-x86_64.tar.gz")
+sha256sums{suffix}=('{checksum}')
 
 package() {{
     cp -a "$srcdir/usr" "$pkgdir/"
@@ -95,14 +94,37 @@ package() {{
 '''
 
 
+def write_recipes(root, output, version, license_id, checksum, dependencies):
+    for omarchy, directory in (
+        (False, output / "aur"),
+        (True, output / "omarchy/pkgbuilds/super-desktop-bin"),
+    ):
+        directory.mkdir(parents=True)
+        (directory / "PKGBUILD").write_text(
+            recipe(version, license_id, checksum, dependencies, omarchy=omarchy)
+        )
+        shutil.copyfile(root / "packaging/arch/super-desktop-bin.install", directory / "super-desktop-bin.install")
+        srcinfo = subprocess.check_output(["makepkg", "--printsrcinfo"], cwd=directory, text=True)
+        (directory / ".SRCINFO").write_text(srcinfo)
+        if omarchy:
+            (directory / ".omarchy").mkdir()
+            shutil.copyfile(root / "packaging/omarchy/package.json", directory / ".omarchy/package.json")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary-dir", type=Path, default=ROOT / "target/release")
+    parser.add_argument("--source-dir", type=Path, required=True, help="Exported source used to build both binaries")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--release-tag", required=True)
     args = parser.parse_args()
     version, license_id = release_metadata(ROOT)
     check_release(ROOT, args.release_tag, version)
+    if release_metadata(args.source_dir) != (version, license_id):
+        parser.error("Exported source version/license must match the release checkout")
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    if f"Commit: {commit}\n" not in (args.source_dir / "BUILDING").read_text():
+        parser.error("Exported source must come from this release commit")
     if subprocess.check_output(["uname", "-m"], text=True).strip() != "x86_64":
         parser.error("This package is built for x86_64 only")
     # Use the build machine's library versions as conservative ABI floors.
@@ -118,27 +140,23 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"super-desktop-{version}-linux-x86_64.tar.gz"
     source_archive = output / f"super-desktop-{version}-source.tar.gz"
-    if archive.exists() or source_archive.exists() or (output / "aur").exists():
+    if archive.exists() or source_archive.exists() or (output / "aur").exists() or (output / "omarchy").exists():
         parser.error("Output already contains a package; use a fresh output directory")
     with tempfile.TemporaryDirectory() as temp:
-        sources = Path(temp) / f"super-desktop-{version}-source"
-        PREPARE_SOURCES(ROOT, sources)
+        sources = args.source_dir.resolve()
+        if (sources / "target").exists() or (sources / ".git").exists():
+            parser.error("Keep build output and git metadata outside the exported source")
         with tarfile.open(source_archive, "w:gz") as tar:
-            tar.add(sources, arcname=sources.name, filter=normalize_owner)
+            tar.add(sources, arcname=f"super-desktop-{version}-source", filter=normalize_owner)
         staged = Path(temp) / "staged"
-        stage(ROOT, args.binary_dir, staged, sources)
+        stage(sources, args.binary_dir, staged, sources)
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(staged / "usr", arcname="usr", filter=normalize_owner)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     source_checksum = hashlib.sha256(source_archive.read_bytes()).hexdigest()
     (output / "SHA256SUMS").write_text(f"{checksum}  {archive.name}\n{source_checksum}  {source_archive.name}\n")
-    aur = output / "aur"
-    aur.mkdir()
-    (aur / "PKGBUILD").write_text(recipe(version, license_id, checksum, dependencies))
-    shutil.copyfile(ROOT / "packaging/arch/super-desktop-bin.install", aur / "super-desktop-bin.install")
-    srcinfo = subprocess.check_output(["makepkg", "--printsrcinfo"], cwd=aur, text=True)
-    (aur / ".SRCINFO").write_text(srcinfo)
-    print(f"Prepared {archive} and {aur}; nothing uploaded.")
+    write_recipes(ROOT, output, version, license_id, checksum, dependencies)
+    print(f"Prepared {archive}, {output / 'aur'} and {output / 'omarchy'}; nothing uploaded.")
 
 
 def normalize_owner(info):

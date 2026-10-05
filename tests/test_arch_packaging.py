@@ -8,11 +8,14 @@ import runpy
 import subprocess
 import tempfile
 import unittest
+import shutil
+import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = runpy.run_path(str(ROOT / "packaging/arch/super-desktop-setup"))
 PACKAGE = runpy.run_path(str(ROOT / "scripts/package-arch.py"))
 SOURCES = runpy.run_path(str(ROOT / "scripts/arch_sources.py"))
+ASSETS = runpy.run_path(str(ROOT / "scripts/arch_assets.py"))
 
 
 class DesktopSetupTests(unittest.TestCase):
@@ -80,6 +83,33 @@ class DesktopSetupTests(unittest.TestCase):
 
 
 class PackageTests(unittest.TestCase):
+    def test_exported_artwork_replaces_restricted_marks_and_removes_stale_assets(self):
+        original = json.loads((ROOT / "assets/logos/harness-logos.json").read_text())
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / "assets/logos"
+            shutil.copytree(ROOT / "assets/logos", directory)
+            ASSETS["prepare_assets"](root)
+            packaged = json.loads((directory / "harness-logos.json").read_text())
+            self.assertEqual(set(packaged), set(original))
+            for key, entry in packaged.items():
+                for name, digest in entry["files"].items():
+                    data = (directory / name).read_bytes()
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
+                    if key in ASSETS["INITIALS"]:
+                        ET.fromstring(data)
+                        self.assertNotEqual(data, (ROOT / "assets/logos" / name).read_bytes())
+                if key not in ASSETS["INITIALS"]:
+                    self.assertEqual(entry, original[key])
+            self.assertFalse((directory / "anthropic-black.svg").exists())
+            self.assertFalse((directory / "google.svg").exists())
+            snapshot = {p.name: p.read_bytes() for p in directory.iterdir()}
+            ASSETS["prepare_assets"](root)
+            self.assertEqual(snapshot, {p.name: p.read_bytes() for p in directory.iterdir()})
+            (root / ".git").mkdir()
+            with self.assertRaisesRegex(ValueError, "exported source"):
+                ASSETS["prepare_assets"](root)
+
     def test_undeclared_license_blocks_distribution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -110,6 +140,23 @@ class PackageTests(unittest.TestCase):
         self.assertIn("a" * 64, text)
         self.assertNotIn("SKIP", text)
         subprocess.run(["bash", "-n"], input=text, text=True, check=True)
+
+    def test_omarchy_upstream_metadata_matches_makepkg_source_and_checksum_arrays(self):
+        metadata = json.loads((ROOT / "packaging/omarchy/package.json").read_text())
+        upstream = metadata["upstream"]
+        version, checksum = "1.2.3", "a" * 64
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "PKGBUILD"
+            path.write_text(PACKAGE["recipe"](version, "GPL-3.0-only", checksum, ["gtk4>=4.18"], omarchy=True))
+            values = subprocess.check_output([
+                "bash", "-c", 'source "$1"; printf "%s\\n" "${source_x86_64[@]}" "${sha256sums_x86_64[@]}" "${depends[@]}"',
+                "bash", str(path),
+            ], text=True).splitlines()
+        asset = upstream["assets"]["x86_64"].format(pkgver=version)
+        self.assertEqual(values[0], f"{asset}::https://github.com/{upstream['github']}/releases/download/v{version}/{asset}")
+        self.assertEqual(values[1:], [checksum, "gtk4>=4.18"])
+        self.assertEqual(upstream["checksums"], "SHA256SUMS")
+        self.assertEqual(metadata["source"], "local")
 
     def test_dependency_notices_preserve_nested_notices_and_reject_unreviewed_terms(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -1,0 +1,13 @@
+{
+  "source": "local",
+  "release_ring": "fast",
+  "min_release_age": "24h",
+  "upstream": {
+    "github": "gladimdim/super-desktop",
+    "latest_only": true,
+    "checksums": "SHA256SUMS",
+    "assets": {
+      "x86_64": "super-desktop-{pkgver}-linux-x86_64.tar.gz"
+    }
+  }
+}

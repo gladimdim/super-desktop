@@ -7,6 +7,9 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import runpy
+
+PREPARE_ASSETS = runpy.run_path(str(Path(__file__).with_name("arch_assets.py")))["prepare_assets"]
 
 
 # Reviewed Linux dependency declarations. New terms require review before shipping.
@@ -64,10 +67,13 @@ def prepare_sources(root, destination):
     """Use committed source and Cargo's checksum-verified, locked dependencies."""
     destination.mkdir(parents=True)
     with tempfile.TemporaryFile() as archive:
-        subprocess.run(["git", "archive", "HEAD"], cwd=root, stdout=archive, check=True)
+        # Website media is not a build input and contains screenshots of vendor
+        # marks. Export build inputs and text documentation only.
+        subprocess.run(["git", "archive", "HEAD", ".", ":(exclude)docs", ":(exclude)scripts/trailer"], cwd=root, stdout=archive, check=True)
         archive.seek(0)
         with tarfile.open(fileobj=archive) as tar:
             tar.extractall(destination, filter="data")
+    PREPARE_ASSETS(destination)
     config = subprocess.check_output(
         ["cargo", "vendor", "--locked", "--versioned-dirs", str(destination / "vendor")],
         cwd=root, text=True,
@@ -93,6 +99,7 @@ def prepare_sources(root, destination):
         "Build without downloading Rust dependencies:\n"
         "  cargo build --release --locked --offline --bins\n"
         "Cargo dependencies are included in vendor/ with their original license terms.\n"
+        "Package-specific neutral artwork is recorded in assets/logos/ATTRIBUTION.md.\n"
         "The system compiler and dynamically linked system libraries are installed separately.\n"
         "See README.md for runtime dependencies, configuration and installation.\n"
     )
@@ -106,3 +113,13 @@ def prepare_sources(root, destination):
         raise ValueError("Rust standard-library notices missing from the compiler installation")
     shutil.copyfile(copyright_file, destination / "RUST_LIBRARY_COPYRIGHT.html")
     return inventory
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if args.output.exists():
+        parser.error("Use a fresh source output directory")
+    prepare_sources(Path(__file__).resolve().parents[1], args.output)
