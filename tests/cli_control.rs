@@ -20,6 +20,7 @@ fn control_daemon_fixture() {
             }
         }
         let data = match &request.command {
+            control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Forget {..}|control::Command::Relaunch {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Shortcut {..}=>serde_json::to_value(&request.command).unwrap(),
@@ -357,6 +358,9 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         for arguments in [vec!["audit","list"],vec!["access","list"],vec!["doctor"]] {
             let out=Command::new(executable).args(arguments).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
         }
+        let doctor=Command::new(executable).arg("doctor").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();
+        assert!(doctor.status.success());
+        assert!(String::from_utf8(doctor.stdout).unwrap().contains("clientVersion"),"Bare doctor must execute, not print help");
         let export=fixture.root.join(format!("audit-{}.jsonl",Path::new(executable).file_name().unwrap().to_string_lossy()));
         let export_args=["audit","export","--output",export.to_str().unwrap(),"--format=json"];
         assert!(Command::new(executable).args(export_args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap().status.success());
@@ -375,6 +379,10 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         }
         let commit="a".repeat(40);
         for args in [vec!["updates","check","--request-id","check"],vec!["updates","status","check"],vec!["updates","install","--check","check","--expect-version","1.2.0","--expect-commit",&commit,"--allow-install","--request-id","install"]] {
+            let out=Command::new(executable).args(args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
+        }
+        let peer_id="a".repeat(32);let peer_file=fixture.root.join("peer-command.json");std::fs::write(&peer_file,r#"{"requestId":"remote","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","expectedEpoch":"epoch","command":{"type":"closeTerminal","cardId":"card","expectedRevision":1}}"#).unwrap();
+        for args in [vec!["peer","list"],vec!["peer","inspect",&peer_id],vec!["peer","workspace",&peer_id],vec!["peer","forget",&peer_id,"--request-id","peer-forget"],vec!["peer","command",&peer_id,"--file",peer_file.to_str().unwrap(),"--allow-peer-mutation","--request-id","remote"]] {
             let out=Command::new(executable).args(args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
         }
         let one_shot=fixture.root.join("one-shot.json");std::fs::write(&one_shot,r#"["literal ; $(touch NEVER)",""]"#).unwrap();

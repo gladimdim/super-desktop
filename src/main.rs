@@ -16,6 +16,9 @@ mod control_attach;
 mod control_shortcut;
 mod control_relaunch;
 mod control_updates;
+mod control_peer;
+#[cfg(test)]
+mod control_acceptance;
 mod control_workspace;
 mod control_service;
 mod brand;
@@ -706,6 +709,9 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 control::capabilities(),
                             );
+                        }
+                        if matches!(request.command,control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}) {
+                            return control_peer::execute(&control_journal::root(),&request,deadline);
                         }
                         if matches!(request.command,control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}) {
                             return control_updates::execute(&control_journal::root(),&request);

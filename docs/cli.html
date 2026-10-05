@@ -59,6 +59,7 @@
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
 <li><a href="#legacy-and-remote-commands">Legacy and remote commands</a></li>
 <li><a href="#complete-public-command-syntax">Complete public command syntax</a></li>
+<li><a href="#structured-peer-wrappers">Structured peer wrappers</a></li>
 <li><a href="#update-jobs">Update jobs</a></li>
 <li><a href="#application-lifecycle">Application lifecycle</a></li>
 <li><a href="#terminal-replacement-and-card-removal">Terminal replacement and card removal</a></li>
@@ -74,18 +75,18 @@
 </div>
 </nav></details>
 <main><h1 id="super-desktop-cli-reference">SUPER DESKTOP CLI reference</h1>
-<p>Use the CLI to discover harnesses, inspect terminal cards, launch configured
-agents, create shell terminals, read their screen or retained history, move or
-resize cards, minimize/restore/expand/collapse cards, close exact sessions, and inspect mutation receipts. Existing
-commands also control overlay visibility, notes, themes and paired PCs.
+<p>Use the CLI to manage application lifecycle, harnesses, terminal cards, notes,
+workspace layouts, launcher settings, terminal files, update jobs and saved peers.
+Commands include guarded terminal input, bounded attachments and output streams,
+card geometry, temporary grid leases and durable mutation receipts.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 <code>--help</code> and <code>capabilities</code> before automating them.</p>
-<p><strong>Current coverage:</strong> the structured local CLI supports discovery, creation,
-terminal observation, guarded text/key input and prompt delivery, card geometry,
-card modes, guarded closing, notes and workspace layouts. Temporary terminal-grid leases and bounded read-only or interactive attachments are available. Remote terminal
-streaming and workspace operations use the separate legacy <code>peer-*</code> commands.
-There is no claim of complete CLI parity with every graphical action.</p>
+<p>The structured CLI uses an owner-only local socket. Explicit <code>peer</code> commands
+wrap existing pinned PC connections; remote streams use the legacy <code>peer-*</code>
+commands. Pairing and inbound connection administration remain available in
+Settings. Native image confirmation, per-submission completion correlation and
+delegated agent permissions are not supported.</p>
 <h2 id="start-here-for-agents">Start here for agents</h2>
 <ol>
 <li>Read <code>super-desktop help agents</code> and the relevant command's <code>--help</code>.</li>
@@ -121,7 +122,8 @@ without a display or daemon. Structured reads never start a missing daemon. Use 
 <p>Every command in this section accepts <code>--format text|json</code> (default <code>text</code>) and
 <code>--target local</code> (the only supported target). Both <code>--flag VALUE</code> and
 <code>--flag=VALUE</code> work for value options. Use options on the command, not before
-the command name. Unknown flags and repeated options fail. Only <code>terminal follow</code> emits JSONL; <code>terminal wait</code> accepts a bounded timeout.
+the command name. Unknown flags and repeated options fail. <code>terminal follow</code>, <code>events</code> and the default <code>terminal attach</code> emit JSONL;
+<code>terminal wait</code> accepts a bounded timeout.
 No global request ID option or remote target is accepted here.</p>
 <div class="table-scroll" tabindex="0" role="region" aria-label="Reference table"><table>
 <thead>
@@ -747,7 +749,7 @@ escapes them but is intended for people.</p>
 </tr>
 <tr>
 <td>4</td>
-<td>Unsafe socket/access, or required unsafe/download opt-in</td>
+<td>Access denied, unsafe socket, or missing required mutation opt-in</td>
 </tr>
 <tr>
 <td>5</td>
@@ -763,7 +765,7 @@ escapes them but is intended for people.</p>
 </tr>
 <tr>
 <td>8</td>
-<td>Invalid response or output failure; a mutation may already have happened</td>
+<td>Invalid response, output/configuration failure or failed operation; a mutation may already have happened</td>
 </tr>
 </tbody>
 </table></div>
@@ -1169,6 +1171,31 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td>Apply a reviewed shortcut preview</td>
 </tr>
 <tr>
+<td><code>peer list [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>List saved outgoing peers without credentials</td>
+</tr>
+<tr>
+<td><code>peer inspect ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect one saved peer</td>
+</tr>
+<tr>
+<td><code>peer workspace ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Read a verified remote workspace</td>
+</tr>
+<tr>
+<td><code>peer command ID (--stdin \| --file PATH) --allow-peer-mutation --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Send an existing typed command to an exact peer</td>
+</tr>
+<tr>
+<td><code>peer forget ID --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Forget an outgoing peer locally</td>
+</tr>
+<tr>
 <td><code>updates check --request-id ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Queue a source-install update check</td>
@@ -1400,6 +1427,31 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </tbody>
 </table></div>
+<h2 id="structured-peer-wrappers">Structured peer wrappers</h2>
+<pre><code class="language-bash">super-desktop peer list --format json
+super-desktop peer inspect MACHINE_ID --format json
+super-desktop peer workspace MACHINE_ID --format json
+super-desktop peer command MACHINE_ID --file command.json \
+  --allow-peer-mutation --request-id remote-edit-001 --format json
+super-desktop peer forget MACHINE_ID --request-id forget-001 --format json
+</code></pre>
+<p>Copy the exact machine ID from <code>peer list</code>. List and inspect read the local
+outgoing peer store without exposing bearer tokens or certificate fingerprints;
+they do not prove that the peer is online. Workspace reads use the existing
+pinned connection, peer identity check and capability negotiation.</p>
+<p>A command file (or <code>--stdin</code>) contains the existing PC <code>CommandRequest</code> JSON
+envelope, including <code>requestId</code>, <code>machineId</code>, <code>expectedEpoch</code> and <code>command</code>.
+The IDs must match the CLI arguments. Copy epoch and revision guards from the
+remote workspace; input is limited to 8 KiB. The existing remote command's
+validation and permissions still apply. The result nests the remote reply under
+<code>data.reply</code>. A transport failure after dispatch can leave an unknown outcome;
+inspect the local receipt and remote workspace before further mutations.</p>
+<p>Forget removes this owner's saved outgoing connection. It does not revoke the
+remote credential, kill remote sessions or disconnect other viewers. Use the
+host's Settings to revoke access. All these wrappers target the local daemon
+and explicitly name a peer; none falls back to local workspace operations.
+<code>--target peer:ID</code> is not supported. Remote attachment and event streaming retain
+the existing <code>peer-attach</code> and <code>peer-events</code> interfaces.</p>
 <h2 id="update-jobs">Update jobs</h2>
 <p><code>updates check --request-id ID</code> queues a source-install check, including an
 upstream fetch, without installing. Poll <code>updates status ID</code> until <code>checked</code> or

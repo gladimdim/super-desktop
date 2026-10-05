@@ -1,18 +1,18 @@
 # SUPER DESKTOP CLI reference
 
-Use the CLI to discover harnesses, inspect terminal cards, launch configured
-agents, create shell terminals, read their screen or retained history, move or
-resize cards, minimize/restore/expand/collapse cards, close exact sessions, and inspect mutation receipts. Existing
-commands also control overlay visibility, notes, themes and paired PCs.
+Use the CLI to manage application lifecycle, harnesses, terminal cards, notes,
+workspace layouts, launcher settings, terminal files, update jobs and saved peers.
+Commands include guarded terminal input, bounded attachments and output streams,
+card geometry, temporary grid leases and durable mutation receipts.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 `--help` and `capabilities` before automating them.
 
-**Current coverage:** the structured local CLI supports discovery, creation,
-terminal observation, guarded text/key input and prompt delivery, card geometry,
-card modes, guarded closing, notes and workspace layouts. Temporary terminal-grid leases and bounded read-only or interactive attachments are available. Remote terminal
-streaming and workspace operations use the separate legacy `peer-*` commands.
-There is no claim of complete CLI parity with every graphical action.
+The structured CLI uses an owner-only local socket. Explicit `peer` commands
+wrap existing pinned PC connections; remote streams use the legacy `peer-*`
+commands. Pairing and inbound connection administration remain available in
+Settings. Native image confirmation, per-submission completion correlation and
+delegated agent permissions are not supported.
 
 ## Start here for agents
 
@@ -54,7 +54,8 @@ without a display or daemon. Structured reads never start a missing daemon. Use 
 Every command in this section accepts `--format text|json` (default `text`) and
 `--target local` (the only supported target). Both `--flag VALUE` and
 `--flag=VALUE` work for value options. Use options on the command, not before
-the command name. Unknown flags and repeated options fail. Only `terminal follow` emits JSONL; `terminal wait` accepts a bounded timeout.
+the command name. Unknown flags and repeated options fail. `terminal follow`, `events` and the default `terminal attach` emit JSONL;
+`terminal wait` accepts a bounded timeout.
 No global request ID option or remote target is accepted here.
 
 | Command | Result or effect | Capability method |
@@ -645,11 +646,11 @@ escapes them but is intended for people.
 | 0 | Successful response; receipt inspection still requires checking its nested result |
 | 2 | Invalid command, arguments or request |
 | 3 | Requested card or its tmux pane not found |
-| 4 | Unsafe socket/access, or required unsafe/download opt-in |
+| 4 | Access denied, unsafe socket, or missing required mutation opt-in |
 | 5 | Request ID or geometry revision conflicts, or terminal/card/grid changed during observation |
 | 6 | Unavailable, unsupported, busy, capacity refusal or other service refusal |
 | 7 | Timeout or unknown outcome; inspect before any further mutation |
-| 8 | Invalid response or output failure; a mutation may already have happened |
+| 8 | Invalid response, output/configuration failure or failed operation; a mutation may already have happened |
 
 The local owner socket checks peer UID and private path permissions. Requests
 and responses are bounded to 16 KiB and 1 MiB, with eight workers and a
@@ -771,6 +772,11 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal resume ID --native-session NATIVE_ID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Replace a terminal with an explicit native conversation |
 | `settings shortcut preview --combo COMBO [--format text\|json] [--target local]` | Structured local | Preview a managed Hyprland shortcut change |
 | `settings shortcut apply --combo COMBO --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Apply a reviewed shortcut preview |
+| `peer list [--format text\|json] [--target local]` | Structured local | List saved outgoing peers without credentials |
+| `peer inspect ID [--format text\|json] [--target local]` | Structured local | Inspect one saved peer |
+| `peer workspace ID [--format text\|json] [--target local]` | Structured local | Read a verified remote workspace |
+| `peer command ID (--stdin \| --file PATH) --allow-peer-mutation --request-id ID [--format text\|json] [--target local]` | Structured local | Send an existing typed command to an exact peer |
+| `peer forget ID --request-id ID [--format text\|json] [--target local]` | Structured local | Forget an outgoing peer locally |
 | `updates check --request-id ID [--format text\|json] [--target local]` | Structured local | Queue a source-install update check |
 | `updates status ID [--format text\|json] [--target local]` | Structured local | Inspect an update job |
 | `updates install --check CHECK_ID --expect-version VERSION --expect-commit COMMIT --allow-install --request-id ID [--format text\|json] [--target local]` | Structured local | Install the reviewed update commit explicitly |
@@ -817,6 +823,37 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Structured peer wrappers
+
+```bash
+super-desktop peer list --format json
+super-desktop peer inspect MACHINE_ID --format json
+super-desktop peer workspace MACHINE_ID --format json
+super-desktop peer command MACHINE_ID --file command.json \
+  --allow-peer-mutation --request-id remote-edit-001 --format json
+super-desktop peer forget MACHINE_ID --request-id forget-001 --format json
+```
+
+Copy the exact machine ID from `peer list`. List and inspect read the local
+outgoing peer store without exposing bearer tokens or certificate fingerprints;
+they do not prove that the peer is online. Workspace reads use the existing
+pinned connection, peer identity check and capability negotiation.
+
+A command file (or `--stdin`) contains the existing PC `CommandRequest` JSON
+envelope, including `requestId`, `machineId`, `expectedEpoch` and `command`.
+The IDs must match the CLI arguments. Copy epoch and revision guards from the
+remote workspace; input is limited to 8 KiB. The existing remote command's
+validation and permissions still apply. The result nests the remote reply under
+`data.reply`. A transport failure after dispatch can leave an unknown outcome;
+inspect the local receipt and remote workspace before further mutations.
+
+Forget removes this owner's saved outgoing connection. It does not revoke the
+remote credential, kill remote sessions or disconnect other viewers. Use the
+host's Settings to revoke access. All these wrappers target the local daemon
+and explicitly name a peer; none falls back to local workspace operations.
+`--target peer:ID` is not supported. Remote attachment and event streaming retain
+the existing `peer-attach` and `peer-events` interfaces.
 
 ## Update jobs
 

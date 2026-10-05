@@ -23,6 +23,9 @@ pub const METHODS: &[&str] = &[
     "app.status",
     "audit.list",
     "access.list",
+    "peer.read",
+    "peer.command",
+    "peer.forget",
     "updates.check",
     "updates.install",
     "updates.status",
@@ -243,6 +246,12 @@ pub enum FilesEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="peer.read")]
+    PeerRead {id:Option<String>,query:String},
+    #[serde(rename="peer.command")]
+    PeerCommand {id:String,document:Value,#[serde(rename="allowMutation")] allow_mutation:bool},
+    #[serde(rename="peer.forget")]
+    PeerForget {id:String},
     #[serde(rename="updates.check")]
     UpdatesCheck {},
     #[serde(rename="updates.install")]
@@ -420,7 +429,7 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
+            Self::PeerCommand {..} | Self::PeerForget {..} | Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
                 | Self::Attach { .. }
                 | Self::Viewport { .. }
                 | Self::CardAction { .. }
@@ -506,13 +515,14 @@ impl Reply {
             Some("not_found" | "terminal_not_running") => 3,
             Some(
                 "permission_denied"
+                | "denied"
                 | "unsafe_socket"
                 | "unsafe_harness"
                 | "download_requires_opt_in",
             ) => 4,
             Some("conflict") => 5,
             Some("timeout" | "unknown_outcome") => 7,
-            Some("output_failed" | "invalid_response") => 8,
+            Some("output_failed" | "invalid_response" | "operation_failed" | "configuration_error") => 8,
             _ => 6,
         }
     }
@@ -528,7 +538,7 @@ pub fn capabilities() -> Value {
         "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
         "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
-        "delegatedAccess": false, "remoteTargets": false,
+        "delegatedAccess": false, "remoteTargets": false, "peerWrappers":{"reads":["list","inspect","workspace"],"mutations":["command","forget"],"wire":"existing-pinned-peer-protocol","localFallback":false},
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
         "promptAttachments":{"maxFiles":4,"maxBytes":16777216,"delivery":"path-references","nativeImageConfirmation":false,"source":"checked-cli-assets","privateCopies":true},
@@ -1091,6 +1101,12 @@ pub fn new_request(command: Command) -> io::Result<Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn administration_errors_preserve_documented_exit_categories() {
+        for (code, expected) in [("denied",4),("operation_failed",8),("configuration_error",8),("unknown_outcome",7),("conflict",5)] {
+            assert_eq!(Reply::failure("test",code,"test").exit_code(),expected, "{code}");
+        }
+    }
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     struct Runtime(PathBuf);
     impl Runtime {
