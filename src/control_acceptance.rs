@@ -4,6 +4,14 @@ use serde_json::{json, Value};
 use std::process::Command as Process;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+fn assert_output_contract<T: serde::de::DeserializeOwned>(name: &str, value: &Value) {
+    serde_json::from_value::<T>(value.clone()).unwrap_or_else(|error| panic!("{name}: {error}"));
+    if let Some(root)=std::env::var_os("SD_CLI_SCHEMA_FIXTURES") {
+        let path=std::path::Path::new(&root).join(format!("{name}.json"));
+        std::fs::write(path,serde_json::to_vec(value).unwrap()).unwrap();
+    }
+}
+
 #[test]
 fn actual_cli_workflow_uses_production_workers_without_a_desktop() {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -172,10 +180,12 @@ fn actual_cli_workflow_uses_production_workers_without_a_desktop() {
         let id = launched.1["data"]["id"].as_str().unwrap();
         let runtime = call(&["terminal", "runtime", id]);
         assert_eq!(runtime.0, 0);
+        assert_output_contract::<super_desktop::control_output::Envelope<super_desktop::control_output::Runtime>>("runtime", &runtime.1);
         let pane = runtime.1["data"]["paneIdentity"].as_str().unwrap();
         let until = Instant::now() + Duration::from_secs(3);
         loop {
             let capture = call(&["terminal", "capture", id]);
+            assert_output_contract::<super_desktop::control_output::Envelope<super_desktop::control_output::Capture>>("capture", &capture.1);
             if capture.1["data"]["text"]
                 .as_str()
                 .is_some_and(|s| s.contains("READY"))
@@ -184,6 +194,12 @@ fn actual_cli_workflow_uses_production_workers_without_a_desktop() {
             }
             assert!(Instant::now() < until);
             std::thread::sleep(Duration::from_millis(10));
+        }
+        let follow=Process::new(binaries.join(bin)).args(["terminal","follow",id,"--seconds","1","--format=jsonl"]).output().unwrap();
+        assert!(follow.status.success());
+        for line in String::from_utf8(follow.stdout).unwrap().lines() {
+            let value:Value=serde_json::from_str(line).unwrap();
+            assert_output_contract::<super_desktop::control_output::FollowLine>(&format!("follow-{}",value["type"].as_str().unwrap()),&value);
         }
         let input = root.join("input");
         std::fs::write(&input, "CLI acceptance literal ✓").unwrap();
@@ -208,6 +224,7 @@ fn actual_cli_workflow_uses_production_workers_without_a_desktop() {
         let until = Instant::now() + Duration::from_secs(3);
         loop {
             let capture = call(&["terminal", "capture", id]);
+            assert_output_contract::<super_desktop::control_output::Envelope<super_desktop::control_output::Capture>>("capture", &capture.1);
             if capture.1["data"]["text"]
                 .as_str()
                 .is_some_and(|s| s.contains("CLI acceptance literal"))
@@ -495,6 +512,7 @@ fn configured_launch_from_both_binaries_delivers_one_prompt_to_an_isolated_stub(
             .output()
             .unwrap();
         assert!(composer.status.success());
+        assert_output_contract::<super_desktop::control_output::Envelope<super_desktop::control_output::Composer>>("composer", &serde_json::from_slice(&composer.stdout).unwrap());
         assert_eq!(
             serde_json::from_slice::<Value>(&composer.stdout).unwrap()["data"]["ready"],
             true

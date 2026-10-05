@@ -43,6 +43,7 @@
 <li><a href="#super-desktop-cli-reference">SUPER DESKTOP CLI reference</a><ul>
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
+<li><a href="#discovering-terminal-output-formats">Discovering terminal output formats</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
 <li><a href="#temporary-terminal-grid-leases">Temporary terminal grid leases</a></li>
 <li><a href="#card-stacking-focus-and-tags">Card stacking, focus and tags</a></li>
@@ -92,7 +93,10 @@ delegated agent permissions are not supported.</p>
 <li>Read <code>super-desktop help agents</code> and the relevant command's <code>--help</code>.</li>
 <li>Read <code>super-desktop schema --format json</code> for the client's command catalog.
    It contains usage, effects, requirements, output, examples and <code>legacy</code> flags;
-   it also includes formal <code>wireSchemas.request</code> and <code>wireSchemas.replyEnvelope</code> schemas. Result data and semantic/runtime checks remain command-specific.</li>
+   it also includes formal <code>wireSchemas.request</code> and <code>wireSchemas.replyEnvelope</code> schemas.
+   <code>responseSchemas</code> describes runtime, capture, composer and follow outputs;
+   <code>responseSchemaCoverage</code> lists the exact coverage. Other result schemas remain
+   unavailable. Semantic/runtime checks still apply.</li>
 <li>Read <code>super-desktop capabilities --format json</code> for the running daemon's
    methods and limits. Do not infer support from the version number alone.</li>
 <li>Check <code>super-desktop app status --format json</code>. Launch, geometry, mode and close commands need <code>data.ready</code>.</li>
@@ -263,6 +267,20 @@ included.</p>
 redacted. Detection uses the daemon's environment; it does not execute, install
 or authenticate a harness. <code>mayDownload</code> is unknown (<code>null</code>) for custom
 launchers. A false bypass-detection flag is not a verified permission policy.</p>
+<h2 id="discovering-terminal-output-formats">Discovering terminal output formats</h2>
+<p>Inspect an output contract without a running daemon or terminal:</p>
+<pre><code class="language-bash">super-desktop schema terminal follow --format json
+</code></pre>
+<p><code>data.responseSchemas["terminal follow"]</code> is a JSON Schema for <strong>each individual
+JSONL line</strong>, including snapshot, end and error variants. Its snapshot has screen
+text at <code>/data/text</code>. <code>data.automation["terminal follow"]</code> provides that JSON
+Pointer and the discriminator/end/error paths directly, plus the fact that
+snapshots replace the previous screen and do not establish task completion.</p>
+<p><code>schema terminal runtime</code>, <code>schema terminal capture</code> and <code>schema terminal composer</code>
+also provide output schemas, covering their complete JSON response envelopes.
+Referenced types are under each schema's <code>$defs</code>. Inspect <code>responseSchemaCoverage</code>
+for the supported command list; missing schemas are not implicit guarantees.
+The schema comes from the compiled client, so check daemon capabilities as well.</p>
 <h2 id="reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</h2>
 <p>These commands only read. They do not attach a tmux client, start a process in
 its pane, send input, clear history or change the terminal's size. Capture can

@@ -19,7 +19,10 @@ delegated agent permissions are not supported.
 1. Read `super-desktop help agents` and the relevant command's `--help`.
 2. Read `super-desktop schema --format json` for the client's command catalog.
    It contains usage, effects, requirements, output, examples and `legacy` flags;
-   it also includes formal `wireSchemas.request` and `wireSchemas.replyEnvelope` schemas. Result data and semantic/runtime checks remain command-specific.
+   it also includes formal `wireSchemas.request` and `wireSchemas.replyEnvelope` schemas.
+   `responseSchemas` describes runtime, capture, composer and follow outputs;
+   `responseSchemaCoverage` lists the exact coverage. Other result schemas remain
+   unavailable. Semantic/runtime checks still apply.
 3. Read `super-desktop capabilities --format json` for the running daemon's
    methods and limits. Do not infer support from the version number alone.
 4. Check `super-desktop app status --format json`. Launch, geometry, mode and close commands need `data.ready`.
@@ -97,6 +100,26 @@ included.
 redacted. Detection uses the daemon's environment; it does not execute, install
 or authenticate a harness. `mayDownload` is unknown (`null`) for custom
 launchers. A false bypass-detection flag is not a verified permission policy.
+
+## Discovering terminal output formats
+
+Inspect an output contract without a running daemon or terminal:
+
+```bash
+super-desktop schema terminal follow --format json
+```
+
+`data.responseSchemas["terminal follow"]` is a JSON Schema for **each individual
+JSONL line**, including snapshot, end and error variants. Its snapshot has screen
+text at `/data/text`. `data.automation["terminal follow"]` provides that JSON
+Pointer and the discriminator/end/error paths directly, plus the fact that
+snapshots replace the previous screen and do not establish task completion.
+
+`schema terminal runtime`, `schema terminal capture` and `schema terminal composer`
+also provide output schemas, covering their complete JSON response envelopes.
+Referenced types are under each schema's `$defs`. Inspect `responseSchemaCoverage`
+for the supported command list; missing schemas are not implicit guarantees.
+The schema comes from the compiled client, so check daemon capabilities as well.
 
 ## Reading terminal output and live dimensions
 

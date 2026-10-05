@@ -28,6 +28,7 @@ fn cli_offline_entry_points_never_connect_or_start_the_application() {
             (vec!["terminal", "capture", "--help"], 0),
             (vec!["help", "terminal", "inspect"], 0),
             (vec!["schema", "harness", "list"], 0),
+            (vec!["schema", "terminal", "follow"], 0),
             (vec!["--version"], 0),
             (vec!["schema", "--format", "json"], 0),
             (vec!["schema", "missing"], 2),
@@ -56,6 +57,11 @@ fn cli_offline_entry_points_never_connect_or_start_the_application() {
                 assert_eq!(value["schemaVersion"], 1);
                 assert_eq!(value["ok"], code == 0);
                 assert!(output.stderr.is_empty());
+                if args==["schema","terminal","follow"] {
+                    assert_eq!(value["data"]["automation"]["terminal follow"]["textPointer"],"/data/text");
+                    assert!(value["data"]["responseSchemas"]["terminal follow"]["$defs"]["Capture"]["properties"]["text"].is_object());
+                    assert_eq!(value["data"]["responseSchemaCoverage"]["complete"],false);
+                }
             }
             if args[0] == "completion" {
                 let mut bash = Command::new("bash")

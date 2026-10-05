@@ -130,7 +130,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!("harness list", "List available launcher types on the daemon's PC", "harness list [--all] [--format text|json] [--target local]", "Detects executables without running or installing them; --all includes unavailable types; arguments are redacted", "Compatible local daemon; availability does not prove authentication or safe permissions", "Versioned envelope containing harnesses, availability reasons and mayDownload; exits 0/2/4/6/7/8", "super-desktop harness list --all --format json", false),
     command!("harness inspect", "Inspect one configured launcher type", "harness inspect ID [--format text|json] [--target local]", "Read-only; reports detected permission-bypass flags, not a verified security policy", "Compatible local daemon; exact built-in or custom launcher ID", "Versioned envelope with launcher metadata; exits 0/2/3/4/6/7/8", "super-desktop harness inspect claude --format json", false),
     command!("help", "Show command help or the agent guide", "help [COMMAND ...|agents]", "None; offline", "None", "Plain text", "super-desktop help agents", false),
-    command!("schema", "Print the compiled command catalog as JSON", "schema [COMMAND ...] [--format json]", "None; offline", "None", "JSON envelope: schemaVersion, ok, data.commands", "super-desktop schema --format json", false),
+    command!("schema", "Print the compiled command catalog as JSON", "schema [COMMAND ...] [--format json]", "None; offline", "None", "JSON envelope with data.commands, wireSchemas, responseSchemas, responseSchemaCoverage and automation hints; unsupported result schemas are explicitly absent", "super-desktop schema --format json", false),
     command!("completion", "Generate Bash completion from the command catalog", "completion bash", "Writes shell code to stdout; does not install it", "None", "Bash source", "super-desktop completion bash > /tmp/super-desktop.bash", false),
     command!("version", "Print this executable's version", "version", "None; offline", "None", "Plain text version", "super-desktop --version", false),
     command!("status", "Show overlay visibility and card counts", "status", "Reads local daemon state", "Running local daemon; legacy output when absent", "Legacy human-readable status", "super-desktop status", true),
@@ -292,11 +292,14 @@ fn schema(args: &[String]) -> Output {
     Output::text(format!("{}\n", serde_json::to_string_pretty(&json!({
         "schemaVersion": 1, "ok": true, "data": {
             "clientVersion": env!("CARGO_PKG_VERSION"), "source": "compiled-client",
+            "responseSchemas": commands.iter().filter_map(|c| crate::control_output::schema(c.name).map(|schema|(c.name.to_owned(),schema))).collect::<serde_json::Map<String,serde_json::Value>>(),
+            "automation": commands.iter().filter_map(|c| crate::control_output::automation(c.name).map(|value|(c.name.to_owned(),value))).collect::<serde_json::Map<String,serde_json::Value>>(),
+            "responseSchemaCoverage":{"commands":crate::control_output::COVERED,"complete":false,"scope":"JSON envelopes for runtime/capture/composer; individual JSONL lines for follow. Other result data remains command-specific."},
             "commands": commands, "aliases": ALIASES.iter().map(|(alias, command)| json!({"name": alias, "command": command})).collect::<Vec<_>>(),
             "defaultCommand": "toggle", "helpFlags": ["--help", "-h"],
             "versionFlags": ["--version", "-V"],
             "clientWorkflows":{"harnessLaunch":{"options":["--width","--height","--center","--prompt","--prompt-file","--prompt-stdin","--ready-timeout","--show"],"atomic":false,"readiness":"recognized-empty-composer","readinessTimeoutSeconds":{"default":30,"max":300},"partialResults":true,"automaticMutationRetries":false}},
-            "catalogFormat": "command-metadata", "wireSchemas":{"request":schemars::schema_for!(crate::control::Request),"replyEnvelope":schemars::schema_for!(crate::control::Reply)}, "schemaScope":"Local request shapes and reply envelope; result data and semantic/runtime constraints remain command-specific", "legacyOutputIsUnchanged": true
+            "catalogFormat": "command-metadata", "wireSchemas":{"request":schemars::schema_for!(crate::control::Request),"replyEnvelope":schemars::schema_for!(crate::control::Reply)}, "schemaScope":"Local request shapes, reply envelope, and the outputs listed in responseSchemaCoverage. Semantic/runtime constraints remain command-specific", "legacyOutputIsUnchanged": true
         }
     })).expect("static command catalog serializes")))
 }
