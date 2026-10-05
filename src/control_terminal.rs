@@ -306,7 +306,7 @@ fn observe(
     recheck: impl FnOnce(&TerminalData) -> Result<bool, ()>,
 ) -> Result<Value, Failure> {
     let (id, capture) = match &request.command {
-        Command::Runtime { id } | Command::Lifecycle { id } => (id, None),
+        Command::Runtime { id } | Command::Lifecycle { id } | Command::Composer { id } => (id, None),
         Command::Capture { id, history, lines } => {
             if (!history && lines.is_some()) || lines.is_some_and(|n| !(1..=2000).contains(&n)) {
                 return Err((
@@ -346,6 +346,9 @@ fn observe(
     } else {
         None
     };
+    let composer = if matches!(request.command, Command::Composer { .. }) {
+        Some(crate::control_input::composer(&card.agent_type, &before, deadline)?)
+    } else { None };
     let captured = match capture {
         Some(lines) => Some(tmux(
             &[
@@ -373,6 +376,13 @@ fn observe(
     let after = probe(session, deadline)?;
     if !same_instance(&before, &after) {
         return Err(CONFLICT);
+    }
+    if let Some((ready, reason)) = composer {
+        let mut data=runtime(card, &after);
+        data["ready"]=json!(ready);
+        data["reason"]=json!(reason);
+        data["readiness"]=json!("recognized-empty-composer");
+        return Ok(data);
     }
     if let Some(data) = lifecycle {
         return Ok(data);

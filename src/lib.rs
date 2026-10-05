@@ -27,3 +27,5 @@ pub mod control_journal;
 mod cli_application;
 
 mod cli_peer;
+
+mod cli_launch_flow;

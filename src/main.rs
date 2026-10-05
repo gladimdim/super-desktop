@@ -876,7 +876,7 @@ fn run_daemon(start_visible: bool) {
                                     },
                                 )
                             }
-                            Ok(snapshot) if matches!(request.command, control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. }) => {
+                            Ok(snapshot) if matches!(request.command, control::Command::Lifecycle { .. } | control::Command::Composer { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. }) => {
                                 control_terminal::execute(&request, &snapshot.state, deadline, |card| {
                                     let (responder, response) = std::sync::mpsc::sync_channel(1);
                                     control_tx.clone().try_send(control_service::Query { responder, deadline }).map_err(|_| ())?;

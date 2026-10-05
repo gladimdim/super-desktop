@@ -52,7 +52,7 @@ pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
         | Command::Launch { .. }
         | Command::InspectRequest { .. }
         | Command::Lifecycle { .. }
-        | Command::Runtime { .. }
+        | Command::Composer { .. } | Command::Runtime { .. }
         | Command::Capture { .. } => {
             return Reply::failure(
                 id,

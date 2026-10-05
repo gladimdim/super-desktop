@@ -164,7 +164,7 @@ fn spawn(exe: &Path, log: &Path) -> io::Result<std::process::Child> {
     }
     process.spawn()
 }
-fn execute(root: &Path, path: &Path, exe: &Path, action: &str, id: &str) -> control::Reply {
+pub(crate) fn execute(root: &Path, path: &Path, exe: &Path, action: &str, id: &str) -> control::Reply {
     control_journal::execute_operation(
         root,
         id,

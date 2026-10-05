@@ -101,6 +101,17 @@ fn cli_missing_control_daemon_is_an_error_without_legacy_fallback() {
         env!("CARGO_BIN_EXE_super-desktop-client"),
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
+        for extra in [
+            vec!["--width","600"],
+            vec!["--width","0","--height","300"],
+            vec!["--ready-timeout","30s"],
+            vec!["--prompt","Hello","--ready-timeout","301s"],
+            vec!["--prompt","Hello","--prompt-stdin"],
+        ] {
+            let output=Command::new(binary).args(["harness","launch","claude","--cwd","/tmp","--request-id","invalid","--format=json"])
+                .args(extra).env("HOME",&root).env("XDG_STATE_HOME",&root).env("XDG_RUNTIME_DIR",&root).output().unwrap();
+            assert_eq!(output.status.code(),Some(2),"{}",String::from_utf8_lossy(&output.stdout));
+        }
         let output = Command::new(binary)
             .args(["app", "status", "--format", "json"])
             .env("HOME", &root)

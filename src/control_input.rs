@@ -128,6 +128,20 @@ pub fn execute(
     })
 }
 
+/// Observe the same conservative composer guard used by prompt delivery.
+/// This constructs a candidate input but never sends it or writes metadata.
+pub(crate) fn composer(agent:&str,pane:&Pane,deadline:Instant)->Result<(bool,&'static str),Failure>{
+    if !matches!(agent,"claude"|"codex"|"grok") {
+        return Err(("unsupported_composer","This launcher has no verified composer reader."));
+    }
+    if pane.dead { return Ok((false,"exited")); }
+    match input_command(&InputData::Prompt {text:"probe".into(),attachments:vec![]},agent,pane,deadline){
+        Ok(_)=>Ok((true,"empty")),
+        Err((code @ ("unsupported_composer"|"composer_not_empty"),_))=>Ok((false,code)),
+        Err(error)=>Err(error),
+    }
+}
+
 fn prepare_attachments(input: &InputData, card: &crate::state::TerminalData, root: &Path, request: &str) -> Result<InputData, Failure> {
     use crate::prompt_attachments::{self as attachments, Attachment, Delivery, Kind};
     let InputData::Prompt {text, attachments: ids} = input else { return Ok(input.clone()); };
@@ -459,6 +473,9 @@ mod tests {
         prompt_target.data.id=prompt_session.into();prompt_target.data.session_name=prompt_session.into();prompt_target.data.agent_type="claude".into();prompt_target.data.workspace_dir=Some(root.to_string_lossy().into_owned());
         let until=deadline();
         while run(&["display-message","-p","-t",prompt_session,"#{pane_current_command}"]).trim()!="claude" { assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10)); }
+        let observed=composer("claude",&probe(prompt_session,deadline()).unwrap(),deadline()).unwrap();
+        assert_eq!(observed,(true,"empty"));
+        assert!(std::fs::read(&received).unwrap_or_default().is_empty(),"Composer observation must never type");
         std::fs::write(root.join("attachment.md"),"immutable snapshot").unwrap();
         let asset=crate::assets::cli::add(&prompt_target.data,"attachment.md").unwrap();
         let prompt=request(&prompt_target,"prompt-files",InputData::Prompt {text:"Read this file".into(),attachments:vec![asset.id.clone()]});

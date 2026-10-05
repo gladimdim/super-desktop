@@ -499,6 +499,52 @@ explicit launch commands to create new sessions.
 
 ## Launching and permission choices
 
+Launch Claude in a centered 600 × 300 card and submit its first prompt:
+
+```bash
+super-desktop harness launch claude --cwd "$PWD" \
+  --width 600 --height 300 --center \
+  --prompt "Hello world" --show --ready-timeout 30s \
+  --allow-unsafe-harness --request-id hello-world-001 --format json
+```
+
+Use a unique request ID for each intended launch. The unsafe acknowledgment
+accepts the configured launcher's permission policy; it does not sandbox Claude.
+Dimensions are the card's outer size in logical pixels. Both dimensions are
+required together. Centering uses the current allocated canvas; sizes and positions
+must fit the daemon's geometry limits and are never silently clamped. `--show`
+shows the overlay before configuring geometry; without it visibility is unchanged.
+Shell creation also accepts `--width`, `--height`, `--center` and `--show`.
+
+For multiline or private prompts, use `--prompt-file PATH` or pipe text with
+`--prompt-stdin` instead of `--prompt TEXT`. Choose exactly one source; the same
+4096-byte text limit as terminal prompt applies. Initial prompts support direct
+Claude, Codex and Grok launchers. The workflow waits for a recognized empty
+composer (default 30 seconds; `--ready-timeout` accepts seconds or `s`/`m`, up to
+300 seconds), then rechecks the card/pane and sends bracketed paste plus Enter
+once. It does not dismiss trust/login dialogs or overwrite a draft. Inspect that
+readiness independently with `terminal composer CARD_ID --format json`.
+
+This is a client-orchestrated sequence, not an atomic daemon transaction.
+Capability checks happen before launch. The parent receipt and each mutation's
+child receipt prevent automatic replay. Success reports `id`, final `geometry`,
+`completedSteps`, `requestIds`, `readiness` and the prompt delivery receipt.
+Failure can include both `error` and partial `data`, including the created card,
+`failedStep` and child request IDs. The card remains open after a later failure;
+readiness timeout sends no prompt. Inspect the parent and child receipts and the
+card before recovery. Repeating the identical request returns its historical
+result; it does not continue a partial workflow. If the client was interrupted,
+the pending parent receipt's `cardId` identifies the child launch request ID;
+inspect that receipt to find the reserved/created terminal.
+
+The readiness timeout bounds polling; each control call also has its own bounded
+I/O deadline. Other workflow steps add bounded calls. Successful delivery does
+not confirm model acceptance or completion. Resizing, moving or changing the
+pane while it waits causes a conflict rather than silently refreshing consent.
+The daemon's low-level `launch.initialPrompt=false` describes the raw launch
+operation; this CLI workflow composes launch with composer observation and input.
+
+
 For a new, explicitly intended operation, choose a unique ID and retain it with
 the exact request. The examples below are mutations: run them only when you
 intend to create a card. Replace the sample IDs for each distinct operation.
@@ -627,7 +673,8 @@ commands or every future restoration of a saved card.
 ## JSON and exit statuses
 
 Structured live replies contain `schemaVersion`, `requestId`, `target`, `ok`
-and either `data` or `error`. An illustrative successful status reply:
+and `data` or `error`. Composed launch failures can include partial `data` alongside
+`error`. An illustrative successful status reply:
 
 ```json
 {"schemaVersion":1,"requestId":"example-status","target":"local","ok":true,"data":{"controlVersion":1,"serverVersion":"1.1.21","ready":true,"visible":false,"notesCount":0,"terminalsCount":2}}
@@ -761,10 +808,11 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal geometry ID [--format text\|json] [--target local]` | Structured local | Inspect current card geometry and its revision |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Move a terminal card within the logical display |
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Resize a normal terminal card in logical pixels |
+| `terminal composer ID [--format text\|json] [--target local]` | Structured local | Check whether a harness exposes an empty prompt composer |
 | `terminal runtime ID [--format text\|json] [--target local]` | Structured local | Observe an owned terminal's live pane and cell grid |
 | `terminal capture ID [--screen \| --history [--lines N]] [--format text\|json] [--target local]` | Structured local | Read plain screen text or bounded retained scrollback |
-| `harness launch ID --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]` | Structured local | Launch a configured harness without opening the overlay |
-| `terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
+| `harness launch ID --cwd PATH --request-id ID [--width W --height H] [--center] [--prompt TEXT \| --prompt-file PATH \| --prompt-stdin] [--ready-timeout DURATION] [--show] [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]` | Structured local | Launch a harness with optional size, centering and first prompt |
+| `terminal create --cwd PATH --request-id ID [--width W --height H] [--center] [--show] [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
 | `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable mutation receipt |
 | `capabilities [--format text\|json] [--target local]` | Structured local | Query the running local control service |
 | `terminal forget ID --preserve-session --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Remove a card while preserving its session |

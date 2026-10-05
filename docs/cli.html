@@ -608,6 +608,44 @@ current pane. Other same-user tmux actions may replace a same-name session.
 A missing session can leave an empty or failed-attachment terminal view; use
 explicit launch commands to create new sessions.</p>
 <h2 id="launching-and-permission-choices">Launching and permission choices</h2>
+<p>Launch Claude in a centered 600 × 300 card and submit its first prompt:</p>
+<pre><code class="language-bash">super-desktop harness launch claude --cwd &quot;$PWD&quot; \
+  --width 600 --height 300 --center \
+  --prompt &quot;Hello world&quot; --show --ready-timeout 30s \
+  --allow-unsafe-harness --request-id hello-world-001 --format json
+</code></pre>
+<p>Use a unique request ID for each intended launch. The unsafe acknowledgment
+accepts the configured launcher's permission policy; it does not sandbox Claude.
+Dimensions are the card's outer size in logical pixels. Both dimensions are
+required together. Centering uses the current allocated canvas; sizes and positions
+must fit the daemon's geometry limits and are never silently clamped. <code>--show</code>
+shows the overlay before configuring geometry; without it visibility is unchanged.
+Shell creation also accepts <code>--width</code>, <code>--height</code>, <code>--center</code> and <code>--show</code>.</p>
+<p>For multiline or private prompts, use <code>--prompt-file PATH</code> or pipe text with
+<code>--prompt-stdin</code> instead of <code>--prompt TEXT</code>. Choose exactly one source; the same
+4096-byte text limit as terminal prompt applies. Initial prompts support direct
+Claude, Codex and Grok launchers. The workflow waits for a recognized empty
+composer (default 30 seconds; <code>--ready-timeout</code> accepts seconds or <code>s</code>/<code>m</code>, up to
+300 seconds), then rechecks the card/pane and sends bracketed paste plus Enter
+once. It does not dismiss trust/login dialogs or overwrite a draft. Inspect that
+readiness independently with <code>terminal composer CARD_ID --format json</code>.</p>
+<p>This is a client-orchestrated sequence, not an atomic daemon transaction.
+Capability checks happen before launch. The parent receipt and each mutation's
+child receipt prevent automatic replay. Success reports <code>id</code>, final <code>geometry</code>,
+<code>completedSteps</code>, <code>requestIds</code>, <code>readiness</code> and the prompt delivery receipt.
+Failure can include both <code>error</code> and partial <code>data</code>, including the created card,
+<code>failedStep</code> and child request IDs. The card remains open after a later failure;
+readiness timeout sends no prompt. Inspect the parent and child receipts and the
+card before recovery. Repeating the identical request returns its historical
+result; it does not continue a partial workflow. If the client was interrupted,
+the pending parent receipt's <code>cardId</code> identifies the child launch request ID;
+inspect that receipt to find the reserved/created terminal.</p>
+<p>The readiness timeout bounds polling; each control call also has its own bounded
+I/O deadline. Other workflow steps add bounded calls. Successful delivery does
+not confirm model acceptance or completion. Resizing, moving or changing the
+pane while it waits causes a conflict rather than silently refreshing consent.
+The daemon's low-level <code>launch.initialPrompt=false</code> describes the raw launch
+operation; this CLI workflow composes launch with composer observation and input.</p>
 <p>For a new, explicitly intended operation, choose a unique ID and retain it with
 the exact request. The examples below are mutations: run them only when you
 intend to create a card. Replace the sample IDs for each distinct operation.</p>
@@ -717,7 +755,8 @@ killed or relaunched. These receipts cover structured launches, moves, resizes, 
 commands or every future restoration of a saved card.</p>
 <h2 id="json-and-exit-statuses">JSON and exit statuses</h2>
 <p>Structured live replies contain <code>schemaVersion</code>, <code>requestId</code>, <code>target</code>, <code>ok</code>
-and either <code>data</code> or <code>error</code>. An illustrative successful status reply:</p>
+and <code>data</code> or <code>error</code>. Composed launch failures can include partial <code>data</code> alongside
+<code>error</code>. An illustrative successful status reply:</p>
 <pre><code class="language-json">{&quot;schemaVersion&quot;:1,&quot;requestId&quot;:&quot;example-status&quot;,&quot;target&quot;:&quot;local&quot;,&quot;ok&quot;:true,&quot;data&quot;:{&quot;controlVersion&quot;:1,&quot;serverVersion&quot;:&quot;1.1.21&quot;,&quot;ready&quot;:true,&quot;visible&quot;:false,&quot;notesCount&quot;:0,&quot;terminalsCount&quot;:2}}
 </code></pre>
 <p>Errors contain <code>code</code>, <code>message</code>, <code>retryable</code> and <code>outcome</code>. Treat codes and
@@ -1116,6 +1155,11 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td>Resize a normal terminal card in logical pixels</td>
 </tr>
 <tr>
+<td><code>terminal composer ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Check whether a harness exposes an empty prompt composer</td>
+</tr>
+<tr>
 <td><code>terminal runtime ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Observe an owned terminal's live pane and cell grid</td>
@@ -1126,12 +1170,12 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td>Read plain screen text or bounded retained scrollback</td>
 </tr>
 <tr>
-<td><code>harness launch ID --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]</code></td>
+<td><code>harness launch ID --cwd PATH --request-id ID [--width W --height H] [--center] [--prompt TEXT \| --prompt-file PATH \| --prompt-stdin] [--ready-timeout DURATION] [--show] [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
-<td>Launch a configured harness without opening the overlay</td>
+<td>Launch a harness with optional size, centering and first prompt</td>
 </tr>
 <tr>
-<td><code>terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]</code></td>
+<td><code>terminal create --cwd PATH --request-id ID [--width W --height H] [--center] [--show] [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Create a shell terminal without opening the overlay</td>
 </tr>

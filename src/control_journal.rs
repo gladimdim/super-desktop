@@ -177,6 +177,17 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
 
 /// Owner-client orchestration shares the same ID namespace and durable journal.
 pub fn execute_operation(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply)->Reply {
+    execute_reserved(root,id,payload,target,apply,false)
+}
+
+/// Reserve a workflow ID durably, then release the global lock so its child
+/// mutations can use the same journal. Only the reservation owner writes the
+/// result: concurrent/restarted callers see pending and never enter apply.
+pub fn execute_workflow(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply)->Reply {
+    execute_reserved(root,id,payload,target,apply,true)
+}
+
+fn execute_reserved(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply,release:bool)->Reply {
     let _lock = match lock(root) {
         Ok(lock) => lock,
         Err(e) => return journal_error(id, e),
@@ -229,7 +240,9 @@ pub fn execute_operation(root:&Path,id:&str,payload:&impl Serialize,target:impl 
     if let Err(e) = durable {
         return journal_error(id, e);
     }
+    let held = if release { drop(_lock); None } else { Some(_lock) };
     let reply = apply(&entry.card_id);
+    let _held = held;
     entry.reply = Some(reply.clone());
     let temporary = root.join(format!(".{id}.{}.tmp", std::process::id()));
     // A leftover temporary file is evidence of an interrupted write, never

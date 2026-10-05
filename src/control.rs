@@ -33,6 +33,7 @@ pub const METHODS: &[&str] = &[
     "terminal.list",
     "terminal.inspect",
     "terminal.runtime",
+    "terminal.composer",
     "terminal.status",
     "terminal.capture",
     "terminal.geometry",
@@ -246,6 +247,8 @@ pub enum FilesEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="terminal.composer")]
+    Composer { id:String },
     #[serde(rename="peer.read")]
     PeerRead {id:Option<String>,query:String},
     #[serde(rename="peer.command")]
@@ -542,6 +545,7 @@ pub fn capabilities() -> Value {
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
         "promptAttachments":{"maxFiles":4,"maxBytes":16777216,"delivery":"path-references","nativeImageConfirmation":false,"source":"checked-cli-assets","privateCopies":true},
+        "terminalComposer":{"supportedHarnesses":["claude","codex","grok"],"readOnly":true,"readiness":"recognized-empty-composer","submissionObserved":false},
         "terminalInput":{"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
         "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
