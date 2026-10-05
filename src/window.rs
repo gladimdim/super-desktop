@@ -1,3 +1,4 @@
+mod cli_preferences;
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -329,6 +330,7 @@ pub struct SuperDesktopWindow {
     /// Rebuilds the ⚙ settings panel (detection + brand logos for the new
     /// light/dark mode) after a theme switch.
     settings_refresh: Rc<dyn Fn()>,
+    cli_harness_bar: Rc<RefCell<Option<Rc<crate::harness_bar::HarnessBar>>>>,
     /// Floating panels (the ⚙ settings card) inside `root_overlay`; hidden with
     /// the window so they cannot reappear on the next show.
     overlay_panels: Vec<gtk4::Widget>,
@@ -682,6 +684,7 @@ impl SuperDesktopWindow {
             on_slide_hidden,
             brand_images: Rc::clone(&brand_images),
             settings_refresh: Rc::clone(&settings_panel.refresh),
+            cli_harness_bar: Rc::clone(&harness_bar_for_settings),
             overlay_panels: vec![settings_panel.widget.clone()],
             ws_popover: workspace_bar.popover.clone(),
             ws_bar: workspace_bar.clone(),
@@ -2115,6 +2118,7 @@ impl SuperDesktopWindow {
     pub(crate) fn cli_workspace(&self, model: &crate::workspace_model::LocalWorkspace,
         request: &crate::control::Request) -> crate::control::Reply
     {
+        if let Some(reply)=self.cli_preferences(model,request) { return reply; }
         use crate::control::{Command, Reply, WorkspaceEdit as Edit, WorkspaceQuery as Query};
         use crate::control_workspace as workspace;
         use serde_json::json;
@@ -3074,6 +3078,41 @@ mod tests {
         assert_eq!(read(Query::Note {id:note_id}).exit_code(),3);
         assert_eq!(window.note_cards.borrow().len(),0);
         assert!(crate::state::load_state().notes.is_empty());
+        use crate::control::{PreferencesQuery as PQ,PreferencesEdit as PE,LauncherSpec};
+        let pref_read=|query| window.cli_workspace(&model,&Request {control_version:1,request_id:"prefs-read".into(),command:Command::Preferences {query}});
+        let pref_request=|edit,id:&str| {let data=read(Query::Inspect).data.unwrap();Request {control_version:1,request_id:id.into(),command:Command::PreferencesEdit {edit,expect_epoch:data["epoch"].as_str().unwrap().into(),expect_revision:data["revision"].as_str().unwrap().into()}}};
+        assert!(pref_read(PQ::Settings {key:None}).ok);
+        assert_eq!(pref_read(PQ::Settings {key:Some("unlisted".into())}).exit_code(),3);
+        let secret="PRIVATE_ARGUMENT_LITERAL";
+        let args=pref_request(PE::HarnessArgs {id:"claude".into(),arguments:Some(vec![secret.into()])},"args-set");
+        assert!(apply(&args).ok);
+        assert_eq!(crate::launch_args::effective("claude"),[secret]);
+        assert_eq!(pref_read(PQ::HarnessArgs {id:"claude".into()}).data.unwrap()["arguments"][0],secret);
+        assert!(!std::fs::read_to_string(journal.join("args-set.json")).unwrap().contains(secret));
+        assert!(apply(&pref_request(PE::HarnessArgs {id:"claude".into(),arguments:None},"args-reset")).ok);
+        assert_eq!(crate::launch_args::effective("claude"),crate::launch_args::builtin("claude"));
+        assert_eq!(apply(&pref_request(PE::Setting {key:"toolbarSize".into(),value:Some(serde_json::json!("giant"))},"invalid-size")).exit_code(),2);
+        for size in ["small","medium","large"] {
+            assert!(apply(&pref_request(PE::Setting {key:"toolbarSize".into(),value:Some(serde_json::json!(size))},size)).ok);
+            assert_eq!(pref_read(PQ::Settings {key:Some("toolbarSize".into())}).data.unwrap()["setting"]["value"],size);
+            assert_eq!(window.hud.height_request(),top_bar_height(model.state().borrow().top_bar_size));
+        }
+        for (key,value) in [("settingsPanelPosition",serde_json::json!([30,100])),("settingsPanelSize",serde_json::json!([700,650]))] {
+            assert!(apply(&pref_request(PE::Setting {key:key.into(),value:Some(value)},key)).ok);
+        }
+        assert_eq!(window.settings_layout.borrow().as_ref().unwrap().geometry(),(Some((30,100)),(700,650)));
+        assert!(apply(&pref_request(PE::Setting {key:"settingsPanelPosition".into(),value:None},"position-reset")).ok);
+        assert_eq!(window.settings_layout.borrow().as_ref().unwrap().geometry().0,None);
+        let custom=LauncherSpec {id:"custom-cli".into(),name:"CLI test".into(),icon:"🤖".into(),executable:"/bin/true".into(),arguments:vec![secret.into()]};
+        assert!(apply(&pref_request(PE::CustomPut {launcher:custom,create:true},"custom-add")).ok);
+        assert_eq!(pref_read(PQ::Custom {id:"custom-cli".into()}).data.unwrap()["launcher"]["arguments"][0],secret);
+        assert!(apply(&pref_request(PE::Visibility {keys:Some(vec!["custom-cli".into()])},"visible")).ok);
+        assert_eq!(model.state().borrow().visible_harnesses,Some(vec!["custom-cli".to_string()]));
+        assert!(apply(&pref_request(PE::CustomRemove {id:"custom-cli".into()},"custom-remove")).ok);
+        assert!(model.state().borrow().custom_harnesses.is_empty());
+        assert_eq!(model.state().borrow().visible_harnesses,Some(vec![]));
+        assert_eq!(pref_read(PQ::Custom {id:"custom-cli".into()}).exit_code(),3);
+        assert!(!window.window.is_visible());
         window.window.close(); drop(old);
         crate::state::flush_state_saves_checked().unwrap();
         let _ = std::fs::remove_dir_all(root);

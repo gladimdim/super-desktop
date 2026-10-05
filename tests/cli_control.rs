@@ -15,12 +15,12 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
-            control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
+            control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Lifecycle { id } => serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"nativeMetadataObserved":id=="completed-card","lifecycle":if id=="completed-card" {"completed"} else {"unknown"},"completion":{"supported":id=="completed-card","state":if id=="completed-card" {"completed"} else {"unknown"},"completionId":if id=="completed-card" {Some("b".repeat(64))} else {None}}}),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}","runtime":{"paneIdentity":"a".repeat(64),"columns":120,"rows":35},"truncated":false}),
@@ -108,6 +108,22 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             let value:serde_json::Value=serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(value["ok"],true);
             if args[1]=="create" || args[1]=="update" { assert_eq!(value["data"]["edit"]["text"],"line one\nПривіт\t$(literal)"); }
+        }
+        let args_file=fixture.root.join("args.json");std::fs::write(&args_file,r#"["--flag","literal value"]"#).unwrap();
+        let custom_file=fixture.root.join("custom.json");std::fs::write(&custom_file,r#"{"id":"custom-cli","name":"test","icon":"🤖","executable":"/bin/true","arguments":[]}"#).unwrap();
+        for (args,edit) in [
+            (vec!["settings","list"],false),(vec!["settings","get","toolbarSize"],false),
+            (vec!["settings","set","toolbarSize","--value",r#""small""#],true),(vec!["settings","reset","toolbarSize"],true),
+            (vec!["harness","args","get","claude"],false),(vec!["harness","args","set","claude","--file",args_file.to_str().unwrap()],true),
+            (vec!["harness","args","reset","claude"],true),(vec!["harness","custom","get","custom-cli"],false),
+            (vec!["harness","custom","add","--file",custom_file.to_str().unwrap()],true),(vec!["harness","custom","update","--file",custom_file.to_str().unwrap()],true),
+            (vec!["harness","custom","remove","custom-cli"],true),(vec!["harness","visibility","set","--file",args_file.to_str().unwrap()],true),
+            (vec!["harness","visibility","reset"],true),(vec!["harness","rescan"],true),
+            (vec!["theme","inspect"],false),(vec!["theme","reload"],true),(vec!["usage","inspect"],false),
+        ] {
+            let mut command=Command::new(executable);command.args(&args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root);
+            if edit{command.args(["--expect-epoch","epoch","--expect-revision",&revision,"--request-id","settings-test"]);}
+            let output=command.output().unwrap();assert!(output.status.success(),"{args:?}: {output:?}");
         }
         for action in ["minimize", "restore", "expand", "collapse"] {
             let args = [

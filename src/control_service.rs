@@ -28,7 +28,9 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
-        Command::Workspace { .. }
+        Command::Preferences { .. }
+        | Command::PreferencesEdit { .. }
+        | Command::Workspace { .. }
         | Command::WorkspaceEdit { .. }
         | Command::Input { .. }
         | Command::Mode { .. }

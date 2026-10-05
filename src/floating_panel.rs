@@ -229,6 +229,13 @@ impl MovablePanel {
         (self.wanted.get(), self.size.get())
     }
 
+    /// Restore explicit local settings, retaining centered placement when reset.
+    pub(crate) fn apply_preference(&self, position: Option<(i32,i32)>, size: (i32,i32)) {
+        self.wanted.set(position);
+        self.size.set(fit_min(size,self.min_size));
+        self.overlay.queue_allocate();
+    }
+
     /// Put the panel's top-left at `position` at `size`, both kept on screen.
     pub fn set_geometry(&self, position: (i32, i32), size: (i32, i32)) {
         let size = fit_min(size, self.min_size);

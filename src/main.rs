@@ -720,7 +720,7 @@ fn run_daemon(start_visible: bool) {
                                 response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
                             });
                         }
-                        if matches!(request.command, control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Mode { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. }) {
+                        if matches!(request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Mode { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. }) {
                             return control_geometry::dispatch(&control_journal::root(), &request, deadline, |request| {
                                 let (responder, response) = std::sync::mpsc::sync_channel(1);
                                 geometry_tx.clone().try_send(control_geometry::Query { request: request.clone(), responder, deadline }).map_err(|_| ())?;
@@ -814,7 +814,7 @@ fn run_daemon(start_visible: bool) {
                 control::Reply::failure(&query.request.request_id, "timeout", "Geometry request expired before application.")
             } else if let Some(window) = live_window(&geometry_context) {
                 let model = Rc::clone(&geometry_context.borrow().local_workspace);
-                if matches!(query.request.command, control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
+                if matches!(query.request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
                     window.cli_workspace(&model, &query.request)
                 } else { window.cli_geometry(&model, &query.request) }
             } else {

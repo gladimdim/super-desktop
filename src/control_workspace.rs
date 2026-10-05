@@ -69,17 +69,24 @@ pub fn check(
     snapshot: &LocalWorkspaceSnapshot,
     epoch: &str,
 ) -> Result<(), Reply> {
-    let crate::control::Command::WorkspaceEdit {
-        expect_epoch,
-        expect_revision,
-        ..
-    } = &request.command
-    else {
-        return Err(Reply::failure(
-            &request.request_id,
-            "invalid_request",
-            "Expected a workspace edit.",
-        ));
+    let (expect_epoch, expect_revision) = match &request.command {
+        crate::control::Command::WorkspaceEdit {
+            expect_epoch,
+            expect_revision,
+            ..
+        }
+        | crate::control::Command::PreferencesEdit {
+            expect_epoch,
+            expect_revision,
+            ..
+        } => (expect_epoch, expect_revision),
+        _ => {
+            return Err(Reply::failure(
+                &request.request_id,
+                "invalid_request",
+                "Expected a guarded local edit.",
+            ))
+        }
     };
     if expect_epoch != epoch || expect_revision != &revision(state, snapshot) {
         return Err(Reply::failure(&request.request_id,"conflict","Workspace, note editor or display changed. Read workspace inspect or note inspect again."));

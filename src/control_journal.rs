@@ -195,6 +195,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
                 | control::WorkspaceEdit::NoteDelete {id} | control::WorkspaceEdit::NoteMove {id,..}
                 | control::WorkspaceEdit::NoteResize {id,..} | control::WorkspaceEdit::NoteTag {id,..}, .. } => id.clone(),
             control::Command::WorkspaceEdit {..} => "workspace".into(),
+            control::Command::PreferencesEdit {..} => "settings".into(),
             control::Command::Input { id, .. }
             | control::Command::Mode { id, .. }
             | control::Command::Move { id, .. }

@@ -157,6 +157,47 @@ point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
 
+## Settings and launcher configuration
+
+`settings list` publishes the typed allowlist, defaults and writable flags;
+`settings get KEY` reads one entry. Use `settings set KEY --value JSON` or
+`settings reset KEY` with workspace epoch/revision and a request ID. Strings
+need JSON quotes, for example `--value '"small"'`. Writable keys are
+`toolbarSize` (small/medium/large), `sleepLockOnAc` (Linux boolean),
+`workspaceDefault` (existing absolute directory or null),
+`settingsPanelPosition` ([x,y] or null) and `settingsPanelSize` ([width,height]
+or null, 660×620 through 8192×8192). Panel preferences are fitted to the current
+display; resetting position restores centered placement. Shortcut configuration
+is readable here and editable through Settings. No arbitrary state keys are
+accepted. Close Settings before CLI edits to avoid replacing an in-progress UI
+edit. Toolbar changes apply immediately; launch preferences affect future starts.
+
+`harness args get ID` explicitly reads built-in launcher arguments, which can
+contain private values. `harness args set ID --file arguments.json` accepts a
+JSON array of strings; `harness args reset ID` restores defaults. Custom
+launchers use `harness custom get ID`, `add --file launcher.json`,
+`update --file launcher.json` and `remove ID`. The strict launcher object has
+`id`, `name`, `icon`, `executable`, `arguments`. IDs start with `custom-` and
+contain only ASCII letters, digits and hyphens (maximum 64 bytes); names are
+up to 48 characters. Icons: ⚡ 🤖 🔮 🚀 🧭 🧠 🌌 💻. Executable paths must be
+absolute, existing and executable. Arguments are at most 32 strings of 1024
+bytes each, without controls; JSON input is bounded to 12000 bytes. Up to 64
+custom launchers can be configured through these commands. Removal preserves
+running sessions; a later restore may no longer find that launcher.
+
+`harness visibility set --file ids.json` accepts unique known harness IDs;
+`harness visibility reset` restores automatic visibility. `harness rescan`
+refreshes executable detection and launcher controls. Configuration commands
+require workspace epoch/revision and request IDs, just like settings edits.
+They do not install or authenticate harnesses, submit prompts, or restart
+running processes. Mutation receipts omit arguments. A configured executable
+can perform arbitrary owner-level actions when later launched.
+
+`theme inspect` reads the active theme; guarded `theme reload` rereads it and
+repaints the application. `usage inspect` reads cached provider usage without
+refreshing credentials or contacting providers. The legacy `theme` command
+retains its existing behavior.
+
 ## Notes and workspace layouts
 
 `workspace inspect` returns the selected launch directory, logical canvas,
@@ -592,6 +633,23 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `settings list [--format text\|json] [--target local]` | Structured local | List typed settings and defaults |
+| `settings get KEY [--format text\|json] [--target local]` | Structured local | Inspect an allowlisted setting |
+| `settings set KEY --value JSON --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Change an allowlisted setting |
+| `settings reset KEY --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Reset an allowlisted setting |
+| `harness args get ID [--format text\|json] [--target local]` | Structured local | Read built-in launch arguments |
+| `harness args set ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Configure built-in launch arguments |
+| `harness args reset ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Restore built-in launch arguments |
+| `harness custom get ID [--format text\|json] [--target local]` | Structured local | Read a custom launcher including arguments |
+| `harness custom add (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Add an explicit executable launcher |
+| `harness custom update (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Update a custom executable launcher |
+| `harness custom remove ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Remove a launcher configuration |
+| `harness visibility set (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Set the visible launcher IDs |
+| `harness visibility reset --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Restore automatic launcher visibility |
+| `harness rescan --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Rescan executable availability and refresh launchers |
+| `theme inspect [--format text\|json] [--target local]` | Structured local | Read active theme metadata |
+| `theme reload --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Reload active theme and repaint widgets |
+| `usage inspect [--format text\|json] [--target local]` | Structured local | Read cached provider usage |
 | `workspace layout export [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
 | `workspace layout validate (--stdin \| --file PATH) [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
 | `workspace layout apply (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |

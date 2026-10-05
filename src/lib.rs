@@ -10,3 +10,5 @@ pub mod control;
 mod cli_extended;
 
 mod cli_workspace;
+
+mod cli_preferences;

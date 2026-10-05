@@ -44,6 +44,7 @@
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
+<li><a href="#settings-and-launcher-configuration">Settings and launcher configuration</a></li>
 <li><a href="#notes-and-workspace-layouts">Notes and workspace layouts</a></li>
 <li><a href="#native-status-finite-waits-and-sampled-output">Native status, finite waits and sampled output</a></li>
 <li><a href="#card-geometry-movement-and-resizing">Card geometry, movement and resizing</a></li>
@@ -301,6 +302,42 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (<code>consistency: "checked-before-and-after"</code>), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.</p>
+<h2 id="settings-and-launcher-configuration">Settings and launcher configuration</h2>
+<p><code>settings list</code> publishes the typed allowlist, defaults and writable flags;
+<code>settings get KEY</code> reads one entry. Use <code>settings set KEY --value JSON</code> or
+<code>settings reset KEY</code> with workspace epoch/revision and a request ID. Strings
+need JSON quotes, for example <code>--value '"small"'</code>. Writable keys are
+<code>toolbarSize</code> (small/medium/large), <code>sleepLockOnAc</code> (Linux boolean),
+<code>workspaceDefault</code> (existing absolute directory or null),
+<code>settingsPanelPosition</code> ([x,y] or null) and <code>settingsPanelSize</code> ([width,height]
+or null, 660×620 through 8192×8192). Panel preferences are fitted to the current
+display; resetting position restores centered placement. Shortcut configuration
+is readable here and editable through Settings. No arbitrary state keys are
+accepted. Close Settings before CLI edits to avoid replacing an in-progress UI
+edit. Toolbar changes apply immediately; launch preferences affect future starts.</p>
+<p><code>harness args get ID</code> explicitly reads built-in launcher arguments, which can
+contain private values. <code>harness args set ID --file arguments.json</code> accepts a
+JSON array of strings; <code>harness args reset ID</code> restores defaults. Custom
+launchers use <code>harness custom get ID</code>, <code>add --file launcher.json</code>,
+<code>update --file launcher.json</code> and <code>remove ID</code>. The strict launcher object has
+<code>id</code>, <code>name</code>, <code>icon</code>, <code>executable</code>, <code>arguments</code>. IDs start with <code>custom-</code> and
+contain only ASCII letters, digits and hyphens (maximum 64 bytes); names are
+up to 48 characters. Icons: ⚡ 🤖 🔮 🚀 🧭 🧠 🌌 💻. Executable paths must be
+absolute, existing and executable. Arguments are at most 32 strings of 1024
+bytes each, without controls; JSON input is bounded to 12000 bytes. Up to 64
+custom launchers can be configured through these commands. Removal preserves
+running sessions; a later restore may no longer find that launcher.</p>
+<p><code>harness visibility set --file ids.json</code> accepts unique known harness IDs;
+<code>harness visibility reset</code> restores automatic visibility. <code>harness rescan</code>
+refreshes executable detection and launcher controls. Configuration commands
+require workspace epoch/revision and request IDs, just like settings edits.
+They do not install or authenticate harnesses, submit prompts, or restart
+running processes. Mutation receipts omit arguments. A configured executable
+can perform arbitrary owner-level actions when later launched.</p>
+<p><code>theme inspect</code> reads the active theme; guarded <code>theme reload</code> rereads it and
+repaints the application. <code>usage inspect</code> reads cached provider usage without
+refreshing credentials or contacting providers. The legacy <code>theme</code> command
+retains its existing behavior.</p>
 <h2 id="notes-and-workspace-layouts">Notes and workspace layouts</h2>
 <p><code>workspace inspect</code> returns the selected launch directory, logical canvas,
 counts, epoch and workspace revision. <code>workspace folders</code> reads remembered
@@ -709,6 +746,91 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>settings list [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>List typed settings and defaults</td>
+</tr>
+<tr>
+<td><code>settings get KEY [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect an allowlisted setting</td>
+</tr>
+<tr>
+<td><code>settings set KEY --value JSON --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Change an allowlisted setting</td>
+</tr>
+<tr>
+<td><code>settings reset KEY --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Reset an allowlisted setting</td>
+</tr>
+<tr>
+<td><code>harness args get ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Read built-in launch arguments</td>
+</tr>
+<tr>
+<td><code>harness args set ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Configure built-in launch arguments</td>
+</tr>
+<tr>
+<td><code>harness args reset ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Restore built-in launch arguments</td>
+</tr>
+<tr>
+<td><code>harness custom get ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Read a custom launcher including arguments</td>
+</tr>
+<tr>
+<td><code>harness custom add (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Add an explicit executable launcher</td>
+</tr>
+<tr>
+<td><code>harness custom update (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Update a custom executable launcher</td>
+</tr>
+<tr>
+<td><code>harness custom remove ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Remove a launcher configuration</td>
+</tr>
+<tr>
+<td><code>harness visibility set (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Set the visible launcher IDs</td>
+</tr>
+<tr>
+<td><code>harness visibility reset --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Restore automatic launcher visibility</td>
+</tr>
+<tr>
+<td><code>harness rescan --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Rescan executable availability and refresh launchers</td>
+</tr>
+<tr>
+<td><code>theme inspect [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Read active theme metadata</td>
+</tr>
+<tr>
+<td><code>theme reload --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Reload active theme and repaint widgets</td>
+</tr>
+<tr>
+<td><code>usage inspect [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Read cached provider usage</td>
+</tr>
 <tr>
 <td><code>workspace layout export [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>

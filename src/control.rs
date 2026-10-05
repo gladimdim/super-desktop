@@ -39,6 +39,8 @@ pub const METHODS: &[&str] = &[
     "request.inspect",
     "workspace.read",
     "workspace.edit",
+    "settings.read",
+    "settings.edit",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,10 +163,50 @@ pub enum WorkspaceEdit {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PreferencesQuery {
+    Settings { key: Option<String> },
+    HarnessArgs { id: String },
+    Custom { id: String },
+    Theme,
+    Usage,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LauncherSpec {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub executable: String,
+    pub arguments: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PreferencesEdit {
+    Setting { key: String, value: Option<Value> },
+    HarnessArgs { id: String, arguments: Option<Vec<String>> },
+    CustomPut { launcher: LauncherSpec, create: bool },
+    CustomRemove { id: String },
+    Visibility { keys: Option<Vec<String>> },
+    Rescan,
+    ThemeReload,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
     #[serde(rename = "app.status")]
     Status {},
+    #[serde(rename = "settings.read")]
+    Preferences { query: PreferencesQuery },
+    #[serde(rename = "settings.edit")]
+    PreferencesEdit {
+        edit: PreferencesEdit,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
     #[serde(rename = "workspace.read")]
     Workspace { query: WorkspaceQuery },
     #[serde(rename = "workspace.edit")]
@@ -270,7 +312,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::WorkspaceEdit { .. }
+            Self::PreferencesEdit { .. }
+                | Self::WorkspaceEdit { .. }
                 | Self::Input { .. }
                 | Self::Mode { .. }
                 | Self::Launch { .. }
@@ -366,6 +409,7 @@ pub fn capabilities() -> Value {
     json!({"controlVersion": VERSION, "serverVersion": env!("CARGO_PKG_VERSION"),
         "target": "local", "access": "owner", "readOnly": false, "methods": METHODS,
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
+        "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
         "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
         "delegatedAccess": false, "remoteTargets": false,

@@ -18,7 +18,7 @@ Connections have three-second I/O deadlines, with at most eight workers.
 The API exposes status, capabilities, saved card metadata, launcher discovery,
 launching, mutation receipts, guarded closing, card movement/resizing and explicit terminal capture. Inventory omits
 prompts and terminal output; `terminal capture` can reveal sensitive text,
-including credentials and prompts. Note text is exposed only by explicit `note inspect`; launch arguments remain redacted in inventory.
+including credentials and prompts. Note text is exposed only by explicit `note inspect`; launch arguments remain redacted in inventory but explicit `harness args get` and `harness custom get` return them.
 Paths and labels can still be private. JSON output escapes terminal
 control characters. This endpoint is independent of the existing bridge IPC.
 
@@ -51,6 +51,12 @@ bounded on write and omitted from receipts; inspect is an explicit content read.
 Layout imports accept only typed IDs/modes/rectangles, validate all entries
 before movement, and cannot create sessions or import commands. Operations can
 still have unknown outcomes after application if transport or persistence fails.
+
+Settings mutations accept only typed, allowlisted keys. Launcher configuration
+can select executables and permission-bypass arguments for future starts; it
+does not confine the configured program. Argument-bearing configuration is
+returned only by explicit get operations and omitted from mutation receipts.
+CLI setting changes refuse an open Settings panel to avoid replacing UI edits.
 
 Structured launches use configured executables and arguments. Recognized
 permission-bypass flags, argument overrides saved in Settings, and custom
