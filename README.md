@@ -656,3 +656,15 @@ events (`peer-events`) and sends one command (`peer-command`);
 ```
 
 Key invariants for contributors: one daemon per machine; one tmux client per card with per-session `detach-on-destroy on`; card titles may only ever reflect the prompt typed **into that card's own harness** (see `resolve_own_opencode_id`); the toggle shortcut is only ever written inside the marked block in `bindings.lua` (see `src/shortcut.rs`); the hot corner must stay a pointer gesture — never a key grab, and never more than a few pixels wide (see `src/hotcorner.rs`); run `cargo test` before every rebuild.
+
+## License
+
+Copyright (c) 2026 Dmytro Gladkyi.
+
+SUPER DESKTOP is licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`). You may redistribute and modify it under those terms. It is
+provided without warranty; see [LICENSE](LICENSE) for the full terms.
+
+Third-party dependencies and assets retain their own licenses. See the
+[asset license notices](assets/logos/LICENSES.md) and
+[attribution](assets/logos/ATTRIBUTION.md) for bundled logos and icons.
