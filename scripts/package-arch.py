@@ -10,8 +10,10 @@ import subprocess
 import tarfile
 import tempfile
 import tomllib
+import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
+PREPARE_SOURCES = runpy.run_path(str(ROOT / "scripts/arch_sources.py"))["prepare_sources"]
 LIBRARIES = ("glibc", "gcc-libs", "glib2", "gtk4", "gtk4-layer-shell", "vte4", "cairo", "pango", "gdk-pixbuf2", "graphene")
 RUNTIME = ("bash", "coreutils", "python", "tmux", "wl-clipboard", "libnotify", "sqlite", "avahi", "bubblewrap", "poppler")
 
@@ -42,7 +44,7 @@ def check_release(root, tag, version):
         raise ValueError("Release packaging requires a clean checkout")
 
 
-def stage(root, binaries, destination):
+def stage(root, binaries, destination, sources=None):
     def install(source, relative, mode=0o644):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -58,6 +60,13 @@ def stage(root, binaries, destination):
         shutil.copytree(root / "assets" / folder, destination / "usr/share/super-desktop/assets" / folder)
     install(root / "assets/logos/LICENSES.md", "usr/share/licenses/super-desktop-bin/ASSET-LICENSES")
     install(root / "assets/logos/ATTRIBUTION.md", "usr/share/licenses/super-desktop-bin/ASSET-ATTRIBUTION")
+    if sources is not None:
+        for name in ("THIRD_PARTY_LICENSES.txt", "RUST_LIBRARY_COPYRIGHT.html", "DEPENDENCIES.json"):
+            install(sources / name, f"usr/share/licenses/super-desktop-bin/{name}")
+        version, _ = release_metadata(root)
+        source_url = f"https://github.com/gladimdim/super-desktop/releases/download/v{version}/super-desktop-{version}-source.tar.gz"
+        notice = destination / "usr/share/licenses/super-desktop-bin/SOURCE"
+        notice.write_text(f"Corresponding source, vendored Rust dependencies and build instructions:\n{source_url}\n")
 
 
 def recipe(version, license_id, checksum, dependencies):
@@ -108,15 +117,21 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f"super-desktop-{version}-linux-x86_64.tar.gz"
-    if archive.exists() or (output / "aur").exists():
+    source_archive = output / f"super-desktop-{version}-source.tar.gz"
+    if archive.exists() or source_archive.exists() or (output / "aur").exists():
         parser.error("Output already contains a package; use a fresh output directory")
     with tempfile.TemporaryDirectory() as temp:
-        staged = Path(temp)
-        stage(ROOT, args.binary_dir, staged)
+        sources = Path(temp) / f"super-desktop-{version}-source"
+        PREPARE_SOURCES(ROOT, sources)
+        with tarfile.open(source_archive, "w:gz") as tar:
+            tar.add(sources, arcname=sources.name, filter=normalize_owner)
+        staged = Path(temp) / "staged"
+        stage(ROOT, args.binary_dir, staged, sources)
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(staged / "usr", arcname="usr", filter=normalize_owner)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
-    (output / "SHA256SUMS").write_text(f"{checksum}  {archive.name}\n")
+    source_checksum = hashlib.sha256(source_archive.read_bytes()).hexdigest()
+    (output / "SHA256SUMS").write_text(f"{checksum}  {archive.name}\n{source_checksum}  {source_archive.name}\n")
     aur = output / "aur"
     aur.mkdir()
     (aur / "PKGBUILD").write_text(recipe(version, license_id, checksum, dependencies))

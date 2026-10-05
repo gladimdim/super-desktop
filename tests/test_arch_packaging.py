@@ -1,5 +1,7 @@
 import contextlib
 import io
+import hashlib
+import json
 import os
 from pathlib import Path
 import runpy
@@ -10,6 +12,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = runpy.run_path(str(ROOT / "packaging/arch/super-desktop-setup"))
 PACKAGE = runpy.run_path(str(ROOT / "scripts/package-arch.py"))
+SOURCES = runpy.run_path(str(ROOT / "scripts/arch_sources.py"))
 
 
 class DesktopSetupTests(unittest.TestCase):
@@ -107,6 +110,54 @@ class PackageTests(unittest.TestCase):
         self.assertIn("a" * 64, text)
         self.assertNotIn("SKIP", text)
         subprocess.run(["bash", "-n"], input=text, text=True, check=True)
+
+    def test_dependency_notices_preserve_nested_notices_and_reject_unreviewed_terms(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fallback = root / "packaging/arch/licenses"
+            fallback.mkdir(parents=True)
+            (fallback / "sources.json").write_text("{}")
+            crate = root / "crate"
+            (crate / "third_party").mkdir(parents=True)
+            (crate / "LICENSE").write_text("Upstream copyright and license")
+            (crate / "third_party/NOTICE").write_text("Additional attribution")
+            package = {"id": "fixture", "name": "fixture", "version": "1.0.0", "license": "MIT",
+                       "source": "registry", "manifest_path": str(crate / "Cargo.toml")}
+            metadata = {"packages": [package], "resolve": {"nodes": [{"id": "fixture"}]}}
+            text, inventory = SOURCES["dependency_notices"](root, metadata)
+            self.assertIn("Upstream copyright and license", text)
+            self.assertIn("Additional attribution", text)
+            self.assertEqual(len(inventory), 1)
+            package["license"] = "LicenseRef-Unreviewed"
+            with self.assertRaisesRegex(ValueError, "Unreviewed license"):
+                SOURCES["dependency_notices"](root, metadata)
+
+    def test_missing_crate_license_requires_exact_version_and_verified_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fallback = root / "packaging/arch/licenses"
+            fallback.mkdir(parents=True)
+            (fallback / "sources.json").write_text("{}")
+            crate = root / "crate"
+            crate.mkdir()
+            package = {"id": "fixture", "name": "fixture", "version": "1.0.0", "license": "MIT",
+                       "source": "registry", "manifest_path": str(crate / "Cargo.toml")}
+            metadata = {"packages": [package], "resolve": {"nodes": [{"id": "fixture"}]}}
+            with self.assertRaisesRegex(ValueError, "Missing license text"):
+                SOURCES["dependency_notices"](root, metadata)
+            data = b"Original upstream license"
+            (fallback / "license.txt").write_bytes(data)
+            (fallback / "sources.json").write_text(json.dumps({"fixture@1.0.0": {
+                "file": "license.txt", "url": "https://example.org/pinned/LICENSE",
+                "sha256": hashlib.sha256(data).hexdigest(),
+            }}))
+            self.assertIn(data.decode(), SOURCES["dependency_notices"](root, metadata)[0])
+            (fallback / "license.txt").write_text("changed")
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                SOURCES["dependency_notices"](root, metadata)
+            package["version"] = "2.0.0"
+            with self.assertRaisesRegex(ValueError, "Missing license text"):
+                SOURCES["dependency_notices"](root, metadata)
 
 
 if __name__ == "__main__":

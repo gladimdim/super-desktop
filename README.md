@@ -88,6 +88,11 @@ Running harnesses remain in tmux while the overlay restarts. Package installatio
 and removal do not change per-user configuration; removing a package leaves its
 shortcut, autostart and theme hook for you to remove if no longer needed.
 
+Binary release packages include dependency license notices and a link to their
+corresponding source under `/usr/share/licenses/super-desktop-bin/`. The matching
+`super-desktop-X.Y.Z-source.tar.gz` release asset includes the application source,
+locked Rust dependencies and instructions for building without downloading crates.
+
 ### Installing a specific version
 
 The phone app and the PC talk over a protocol that must match, so if your

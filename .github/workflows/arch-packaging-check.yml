@@ -1,9 +1,9 @@
 name: Arch packaging checks
 on:
   push:
-    paths: ['packaging/**', 'scripts/*arch*', 'scripts/publish-aur.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'packaging/**', 'scripts/*arch*', 'scripts/publish-aur.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml']
   pull_request:
-    paths: ['packaging/**', 'scripts/*arch*', 'scripts/publish-aur.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'packaging/**', 'scripts/*arch*', 'scripts/publish-aur.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml']
 permissions:
   contents: read
 jobs:
