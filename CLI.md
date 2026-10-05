@@ -752,7 +752,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal send ID (--stdin \| --file PATH) [--enter] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send literal UTF-8 text to an observed terminal |
 | `terminal keys ID KEY... --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send named keys to an observed terminal |
 | `terminal interrupt ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send Ctrl-C to an observed terminal |
-| `terminal prompt ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Submit text through a verified empty harness composer |
+| `terminal prompt ID (--stdin \| --file PATH) [--attachment ASSET_ID ...] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Submit text through a verified empty harness composer |
 | `terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Minimize a terminal card to its saved icon position |
 | `terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Restore a minimized terminal card |
 | `terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Expand one terminal card |
@@ -799,6 +799,23 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Prompt file references
+
+Add `--attachment ASSET_ID` to `terminal prompt`, repeated up to four times.
+Get IDs from `terminal files list/add`. The daemon rechecks each file's version
+and workspace boundary, then copies up to 16 MiB total into private
+`cli-attachments` storage beside its request journal. Files are delivered as
+paths in the same guarded bracketed paste as the prompt. The reply reports
+`attachmentDelivery: "path-references"`; it does not confirm a native image
+attachment or that the harness read a file. Supported composers and the
+4096-byte input limit still apply, including the appended paths.
+
+Copies survive for the conversation and are never automatically deleted.
+Storage is capped at 512 MiB or 1024 requests. A refused prompt can leave staged
+copies but sends no input. Removing old storage manually does not remove the
+request receipt or authorize a replay. File contents and prompt text are omitted
+from receipts. Existing phone attachment delivery is unchanged.
 
 ## Local terminal attachment
 

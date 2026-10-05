@@ -10,6 +10,7 @@ pub(crate) struct Options {
     pub values: BTreeMap<String, String>,
     pub flags: BTreeSet<String>,
     pub json: bool,
+    pub attachments: Vec<String>,
 }
 impl Options {
     pub fn parse(args: &[String], values: &[&str], flags: &[&str]) -> Result<Self, &'static str> {
@@ -18,6 +19,7 @@ impl Options {
             values: BTreeMap::new(),
             flags: BTreeSet::new(),
             json: false,
+            attachments: vec![],
         };
         let mut index = 0;
         while index < args.len() {
@@ -44,6 +46,12 @@ impl Options {
                         args.get(index).ok_or("Missing option value.")?
                     }
                 };
+                if key == "--attachment" && !value.is_empty() {
+                    parsed.attachments.push(value.into());
+                    if parsed.attachments.len()>4 { return Err("Use at most four attachments."); }
+                    index += 1;
+                    continue;
+                }
                 if value.is_empty() || parsed.values.insert(key.into(), value.into()).is_some() {
                     return Err("Missing or repeated option value.");
                 }
@@ -215,6 +223,7 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             values.push("--file");
             flags.push("--stdin");
         }
+        if action == "prompt" { values.push("--attachment"); }
         if action == "send" {
             flags.push("--enter");
         }
@@ -244,6 +253,7 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
                 },
                 "prompt" => InputData::Prompt {
                     text: options.text(control::MAX_INPUT)?,
+                    attachments: options.attachments.clone(),
                 },
                 _ => InputData::Send {
                     text: options.text(control::MAX_INPUT)?,

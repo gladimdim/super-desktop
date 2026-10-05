@@ -120,6 +120,13 @@ without an appended Enter. Composer checks cannot exclude concurrent GUI/phone
 input. Acknowledged delivery is not verified submission or completion. Unknown
 outcomes are never replayed. A harmless input marker may remain after refusal.
 
+CLI prompt attachments accept only checked CLI asset IDs, revalidate the file
+version, and stage separate 0600 copies under a 0700 directory. The four-file,
+16 MiB prompt limit and 512 MiB/1024-request store cap apply. Delivery uses path
+references with existing composer and pane guards; native image confirmation
+is not implied. Staged copies may remain after a refused submission and are
+not pruned automatically. Receipts omit both file contents and prompt text.
+
 Local terminal attachment uses a single-use 0600 socket in the owner-only
 runtime directory, peer-UID checks at both ends and a random token handshake.
 Streams have a five-second admission window, at most 300 seconds and about

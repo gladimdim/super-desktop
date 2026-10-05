@@ -366,6 +366,7 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             if matches!(action, "send" | "prompt") {
                 args.extend(["--file", input_file.to_str().unwrap()]);
             }
+            if action == "prompt" { args.extend(["--attachment", &revision]); }
             if action == "keys" {
                 args.extend(["Enter", "Ctrl-C"]);
             }
@@ -387,6 +388,7 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             if matches!(action, "send" | "prompt") {
                 assert_eq!(reply["data"]["input"]["text"], "literal ✓\nsecond line");
             }
+            if action == "prompt" { assert_eq!(reply["data"]["input"]["attachments"], serde_json::json!([revision])); }
             for extra in ["--clamp", "--all", "--width=500", "--raw"] {
                 let output = Command::new(executable)
                     .args(&args)

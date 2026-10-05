@@ -85,6 +85,8 @@ pub enum InputData {
     },
     Prompt {
         text: String,
+        #[serde(default)]
+        attachments: Vec<String>,
     },
 }
 
@@ -113,8 +115,14 @@ pub fn key_name(key: &str) -> Option<&'static str> {
 
 impl InputData {
     pub fn validate(&self) -> Result<(), &'static str> {
+        if let Self::Prompt { attachments, .. } = self {
+            let unique: std::collections::BTreeSet<_> = attachments.iter().collect();
+            if attachments.len() > 4 || unique.len() != attachments.len() || attachments.iter().any(|id| id.len()!=64 || !id.bytes().all(|b| b.is_ascii_hexdigit())) {
+                return Err("Use at most four distinct checked asset IDs from terminal files list/add.");
+            }
+        }
         match self {
-            Self::Send { text, .. } | Self::Prompt { text } => {
+            Self::Send { text, .. } | Self::Prompt { text, .. } => {
                 if text.is_empty()
                     || text.len() > MAX_INPUT
                     || text
@@ -496,6 +504,7 @@ pub fn capabilities() -> Value {
         "delegatedAccess": false, "remoteTargets": false,
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
+        "promptAttachments":{"maxFiles":4,"maxBytes":16777216,"delivery":"path-references","nativeImageConfirmation":false,"source":"checked-cli-assets","privateCopies":true},
         "terminalInput":{"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
         "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},

@@ -59,6 +59,7 @@
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
 <li><a href="#legacy-and-remote-commands">Legacy and remote commands</a></li>
 <li><a href="#complete-public-command-syntax">Complete public command syntax</a></li>
+<li><a href="#prompt-file-references">Prompt file references</a></li>
 <li><a href="#local-terminal-attachment">Local terminal attachment</a></li>
 <li><a href="#shell-completion-and-updates">Shell completion and updates</a></li>
 </ul>
@@ -1063,7 +1064,7 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td>Send Ctrl-C to an observed terminal</td>
 </tr>
 <tr>
-<td><code>terminal prompt ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
+<td><code>terminal prompt ID (--stdin \| --file PATH) [--attachment ASSET_ID ...] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Submit text through a verified empty harness composer</td>
 </tr>
@@ -1299,6 +1300,20 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </tbody>
 </table></div>
+<h2 id="prompt-file-references">Prompt file references</h2>
+<p>Add <code>--attachment ASSET_ID</code> to <code>terminal prompt</code>, repeated up to four times.
+Get IDs from <code>terminal files list/add</code>. The daemon rechecks each file's version
+and workspace boundary, then copies up to 16 MiB total into private
+<code>cli-attachments</code> storage beside its request journal. Files are delivered as
+paths in the same guarded bracketed paste as the prompt. The reply reports
+<code>attachmentDelivery: "path-references"</code>; it does not confirm a native image
+attachment or that the harness read a file. Supported composers and the
+4096-byte input limit still apply, including the appended paths.</p>
+<p>Copies survive for the conversation and are never automatically deleted.
+Storage is capped at 512 MiB or 1024 requests. A refused prompt can leave staged
+copies but sends no input. Removing old storage manually does not remove the
+request receipt or authorize a replay. File contents and prompt text are omitted
+from receipts. Existing phone attachment delivery is unchanged.</p>
 <h2 id="local-terminal-attachment">Local terminal attachment</h2>
 <p><code>terminal attach ID --seconds 30 --request-id REQUEST --expect-epoch EPOCH
 --expect-revision REVISION --expect-pane-identity IDENTITY</code> opens a single-use

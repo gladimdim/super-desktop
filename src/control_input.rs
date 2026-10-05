@@ -78,8 +78,16 @@ pub fn execute(
                 Ok(false) => return fail(CONFLICT),
                 Err(error) => return fail(error),
             }
+            // Refuse an unsupported or occupied composer before staging private copies.
+            if let Err(error) = input_command(input, &target.data.agent_type, &before, deadline) {
+                return fail(error);
+            }
+            let prepared = match prepare_attachments(input, &target.data, root, &request.request_id) {
+                Ok(input) => input,
+                Err(error) => return fail(error),
+            };
             let (payload, kind, bytes) =
-                match input_command(input, &target.data.agent_type, &before, deadline) {
+                match input_command(&prepared, &target.data.agent_type, &before, deadline) {
                     Ok(value) => value,
                     Err(error) => return fail(error),
                 };
@@ -93,6 +101,7 @@ pub fn execute(
                     if current.data.id == target.data.id
                         && current.data.session_name == target.data.session_name
                         && current.data.created_at == target.data.created_at
+                        && current.data.workspace_dir == target.data.workspace_dir
                         && Arc::ptr_eq(&current.task, &target.task) => {}
                 Ok(Err(reply)) => return reply,
                 Ok(_) => return fail(CONFLICT),
@@ -107,7 +116,7 @@ pub fn execute(
                     json!({"id":target.data.id,
                     "sessionName":session,"paneIdentity":before.identity,"kind":kind,"bytes":bytes,
                     "outcome":"delivered","submissionObserved":false,"completionObserved":false,
-                    "turnId":null,"gridChanged":false}),
+                    "turnId":null,"gridChanged":false,"attachments":match input {InputData::Prompt {attachments,..}=>attachments.len(),_=>0},"attachmentDelivery":match input {InputData::Prompt {attachments,..} if !attachments.is_empty()=>Some("path-references"),_=>None},"nativeImageConfirmation":false}),
                 ),
                 Ok(false) => fail(CONFLICT),
                 // A failed process/acknowledgement cannot establish whether
@@ -117,6 +126,26 @@ pub fn execute(
         })
         .unwrap_or_else(|| fail(("busy", "Terminal preparation or closing prevented input.")))
     })
+}
+
+fn prepare_attachments(input: &InputData, card: &crate::state::TerminalData, root: &Path, request: &str) -> Result<InputData, Failure> {
+    use crate::prompt_attachments::{self as attachments, Attachment, Delivery, Kind};
+    let InputData::Prompt {text, attachments: ids} = input else { return Ok(input.clone()); };
+    if ids.is_empty() { return Ok(input.clone()); }
+    let _slot=crate::assets::Transfer::acquire().ok_or(("busy","File workers are busy."))?;
+    let mut files=Vec::new(); let mut total=0usize;
+    for id in ids {
+        let (asset,bytes)=crate::assets::cli::read(card,id).map_err(|_|("file_unavailable","Attachment changed, expired or is no longer readable; refresh terminal files."))?;
+        total=total.saturating_add(bytes.len());
+        if total>attachments::MAX_TOTAL { return Err(("invalid_arguments","Attachments together exceed 16 MiB.")); }
+        files.push(Attachment {kind:Kind::File,name:attachments::safe_name(&asset.name,Kind::File),bytes});
+    }
+    let store=root.parent().ok_or(("unavailable","Private state directory unavailable."))?.join("cli-attachments");
+    let key=attachments::request_key("local-cli",&card.id,request);
+    let paths=attachments::stage(&store,&key,&files).map_err(|_|("attachment_storage","Cannot stage private attachments; storage may be full or contain a prior attempt. No input sent."))?;
+    let prepared=InputData::Prompt {text:attachments::prompt_text(Delivery::Path,text,&files,&paths),attachments:vec![]};
+    prepared.validate().map_err(|_|("invalid_arguments","Prompt plus attachment paths exceeds the input limit or contains unsupported controls. No input sent."))?;
+    Ok(prepared)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -155,7 +184,7 @@ fn input_command(
             "keys",
             0,
         ),
-        InputData::Prompt { text } => {
+        InputData::Prompt { text, .. } => {
             // Composer readers are conservative: unsupported and unrecognized
             // frames are not assumed empty. Shell input must use send/keys.
             if !matches!(agent, "claude" | "codex" | "grok") {
@@ -419,6 +448,36 @@ mod tests {
             assert!(Instant::now() < until);
             std::thread::sleep(Duration::from_millis(5));
         }
+        // A local cat stub named claude exposes an empty composer without invoking a model.
+        let stub=root.join("claude");
+        std::fs::copy("/usr/bin/cat",&stub).unwrap();
+        let received=root.join("prompt-received");
+        let launch=format!("stty raw -echo; printf '❯ '; exec {} > {}",shlex::try_quote(stub.to_str().unwrap()).unwrap(),shlex::try_quote(received.to_str().unwrap()).unwrap());
+        let prompt_session="sd_term_prompt_test";
+        run(&["new-session","-d","-s",prompt_session,&launch]);
+        let mut prompt_target=Target {data:target.data.clone(),task:Arc::new(crate::session_task::SessionTask::default())};
+        prompt_target.data.id=prompt_session.into();prompt_target.data.session_name=prompt_session.into();prompt_target.data.agent_type="claude".into();prompt_target.data.workspace_dir=Some(root.to_string_lossy().into_owned());
+        let until=deadline();
+        while run(&["display-message","-p","-t",prompt_session,"#{pane_current_command}"]).trim()!="claude" { assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10)); }
+        std::fs::write(root.join("attachment.md"),"immutable snapshot").unwrap();
+        let asset=crate::assets::cli::add(&prompt_target.data,"attachment.md").unwrap();
+        let prompt=request(&prompt_target,"prompt-files",InputData::Prompt {text:"Read this file".into(),attachments:vec![asset.id.clone()]});
+        let reply=execute(&journal,&prompt,deadline(),||inspect(&prompt_target));
+        assert!(reply.ok,"{reply:?}");assert_eq!(reply.data.unwrap()["attachmentDelivery"],"path-references");
+        let until=deadline();let delivered=loop {let data=std::fs::read(&received).unwrap_or_default();if data.ends_with(b"\r") {break data;}assert!(Instant::now()<until);std::thread::sleep(Duration::from_millis(10));};
+        let text=String::from_utf8(delivered.clone()).unwrap();assert!(text.starts_with("\x1b[200~Read this file "));assert!(text.ends_with("\x1b[201~\r"));
+        let key=crate::prompt_attachments::request_key("local-cli",prompt_session,"prompt-files");
+        let copy=root.join("cli-attachments").join(key).join("attachment.md");assert_eq!(std::fs::read_to_string(&copy).unwrap(),"immutable snapshot");
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(std::fs::metadata(&copy).unwrap().mode() & 0o777,0o600);
+        assert!(execute(&journal,&prompt,deadline(),||panic!("do not submit twice")).ok);
+        assert_eq!(std::fs::read(&received).unwrap(),delivered);
+        std::fs::write(root.join("attachment.md"),"changed").unwrap();
+        let changed=request(&prompt_target,"prompt-stale-file",InputData::Prompt {text:"Never".into(),attachments:vec![asset.id]});
+        assert!(!execute(&journal,&changed,deadline(),||inspect(&prompt_target)).ok);
+        assert_eq!(std::fs::read(&received).unwrap(),delivered);
+        assert_eq!(std::fs::read_to_string(&copy).unwrap(),"immutable snapshot");
+        assert!(!std::fs::read_to_string(journal.join("prompt-files.json")).unwrap().contains("Read this file"));
         let mut second = request(
             &target,
             "stale-ui",
