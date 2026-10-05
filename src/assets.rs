@@ -1,4 +1,5 @@
 //! Bounded, on-demand file references. Never a filesystem browser or a URL proxy.
+pub(crate) mod cli;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;

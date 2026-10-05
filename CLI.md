@@ -157,6 +157,40 @@ point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
 
+## Terminal file references
+
+`terminal files list ID` samples the screen and up to 300 retained lines,
+combines supported paths with remembered references, and returns a bounded
+local CLI catalog (64 files per card, 64 catalogs). Capture is limited to 64 KiB;
+`captureTruncated` identifies incomplete samples. Paths that scrolled away or
+wrapped ambiguously can be supplied with `terminal files add ID PATH`.
+References use the terminal's recorded workspace, never a HOME fallback.
+Hidden paths, traversal, symlinks, hard links, special files and unsupported
+formats are refused. Text is limited to 512 KiB and other supported files to
+16 MiB. List/read operations can update reference caches but do not edit files.
+
+`terminal files read ID ASSET_ID` returns up to 64 KiB as base64, optional UTF-8
+text, offset/nextOffset/eof and the whole-file SHA-256. Use `--offset BYTES` for
+another chunk. `--output NEW_PATH` exports all chunks to an explicitly named
+new local file (0600), verifies the hash, and never overwrites an existing file
+or symlink. A failed export can leave a partial file at that path. No browser,
+preview decoder or embedded instruction is invoked.
+
+`terminal files save ID ASSET_ID --file edited.md` replaces a listed Markdown
+file only if its recorded inode/device/size/timestamps still match. CLI saves
+currently accept at most 8192 UTF-8 bytes, also subject to the 16 KiB encoded
+request limit; larger files remain readable/exportable. Saves return the new
+asset ID and never include content in receipts. Write failures can leave a
+partial file and an unknown outcome; inspect before deciding how to recover.
+
+Add, save and `terminal files remove ID ASSET_ID` require epoch/revision from
+`terminal geometry ID` and a unique request ID. Remove forgets the remembered
+reference and CLI catalog entry; it never deletes the file. A later output
+sample, explicit add, or another open file browser can rediscover the path.
+Content IDs are versioned and catalog-local: refresh after daemon restart,
+workspace changes or edits. File operations recheck the exact saved card;
+read data is withheld if its mapping changes during the operation.
+
 ## Settings and launcher configuration
 
 `settings list` publishes the typed allowlist, defaults and writable flags;
@@ -633,6 +667,11 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal files list ID [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
+| `terminal files add ID PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
+| `terminal files read ID ASSET_ID [--offset BYTES \| --output NEW_PATH] [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
+| `terminal files save ID ASSET_ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
+| `terminal files remove ID ASSET_ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Access checked workspace file references |
 | `settings list [--format text\|json] [--target local]` | Structured local | List typed settings and defaults |
 | `settings get KEY [--format text\|json] [--target local]` | Structured local | Inspect an allowlisted setting |
 | `settings set KEY --value JSON --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Change an allowlisted setting |

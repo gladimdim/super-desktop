@@ -90,6 +90,15 @@ fn merge_at(
     root: &Path,
     paths: Vec<String>,
 ) -> std::io::Result<Vec<String>> {
+    update_at(directory,session,root,paths,None)
+}
+
+pub(crate) fn remove(session:&str,root:&Path,path:&str)->std::io::Result<()> {
+    let home=std::env::var_os("HOME").ok_or_else(||std::io::Error::other("HOME unavailable"))?;
+    update_at(&Path::new(&home).join(".local/state/super-desktop/file-assets"),session,root,vec![],Some(path)).map(|_|())
+}
+
+fn update_at(directory:&Path,session:&str,root:&Path,paths:Vec<String>,remove:Option<&str>)->std::io::Result<Vec<String>> {
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -138,7 +147,7 @@ fn merge_at(
     let paths: Vec<_> = paths
         .into_iter()
         .chain(old)
-        .filter(|p| valid_path(p) && seen.insert(p.clone()))
+        .filter(|p| remove!=Some(p.as_str()) && valid_path(p) && seen.insert(p.clone()))
         .take(64)
         .collect();
     records.push(Record {

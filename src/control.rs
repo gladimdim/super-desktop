@@ -41,6 +41,8 @@ pub const METHODS: &[&str] = &[
     "workspace.edit",
     "settings.read",
     "settings.edit",
+    "terminal.files.read",
+    "terminal.files.edit",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -193,10 +195,34 @@ pub enum PreferencesEdit {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum FilesQuery {
+    List,
+    Read { asset: String, offset: u64 },
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum FilesEdit {
+    Add { path: String },
+    Save { asset: String, text: String },
+    Remove { asset: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
     #[serde(rename = "app.status")]
     Status {},
+    #[serde(rename="terminal.files.read")]
+    Files { id: String, query: FilesQuery },
+    #[serde(rename="terminal.files.edit")]
+    FilesEdit {
+        id: String, edit: FilesEdit,
+        #[serde(rename="expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename="expectRevision")]
+        expect_revision: String,
+    },
     #[serde(rename = "settings.read")]
     Preferences { query: PreferencesQuery },
     #[serde(rename = "settings.edit")]
@@ -312,7 +338,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::PreferencesEdit { .. }
+            Self::FilesEdit { .. }
+                | Self::PreferencesEdit { .. }
                 | Self::WorkspaceEdit { .. }
                 | Self::Input { .. }
                 | Self::Mode { .. }
@@ -409,6 +436,7 @@ pub fn capabilities() -> Value {
     json!({"controlVersion": VERSION, "serverVersion": env!("CARGO_PKG_VERSION"),
         "target": "local", "access": "owner", "readOnly": false, "methods": METHODS,
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
+        "terminalFiles":{"methods":["list","add","read","save","remove"],"chunkBytes":65536,"maxSaveBytes":8192,"fileLimitBytes":16777216,"textLimitBytes":524288,"referenceRemovalDeletesFile":false,"saveFormat":"markdown","catalog":"local-cli"},
         "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
         "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,

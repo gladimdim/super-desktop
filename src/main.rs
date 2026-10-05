@@ -10,6 +10,7 @@ mod control_terminal;
 mod control_geometry;
 mod control_close;
 mod control_input;
+mod control_files;
 mod control_workspace;
 mod control_service;
 mod brand;
@@ -686,6 +687,7 @@ fn run_daemon(start_visible: bool) {
     let (control_tx, mut control_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
     let (adopt_tx, mut adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
     let (geometry_tx, mut geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
+    let (files_tx, mut files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
     let (close_tx, mut close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
     match control::Server::bind(&runtime_dir()) {
         Ok(server) => {
@@ -705,6 +707,13 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 id,
                             );
+                        }
+                        if matches!(request.command,control::Command::Files {..}|control::Command::FilesEdit {..}) {
+                            return control_files::execute(&control_journal::root(),&request,deadline,|| {
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);
+                                files_tx.clone().try_send(control_files::Query {request:request.clone(),responder,deadline}).map_err(|_|control::Reply::failure(&request.request_id,"busy","File inventory is busy."))?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|control::Reply::failure(&request.request_id,"timeout","File inventory timed out."))?
+                            });
                         }
                         if matches!(request.command, control::Command::Input { .. }) {
                             return control_input::execute(&control_journal::root(), &request, deadline, || {
@@ -805,6 +814,15 @@ fn run_daemon(start_visible: bool) {
                 Err(control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready."))
             };
             let _ = query.responder.send(result);
+        }
+    });
+    let files_context=Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query)=files_rx.next().await {
+            let result=if std::time::Instant::now()>=query.deadline {Err(control::Reply::failure(&query.request.request_id,"timeout","File request expired."))}
+                else if let Some(window)=live_window(&files_context) {let model=Rc::clone(&files_context.borrow().local_workspace);window.cli_file_target(&model,&query.request)}
+                else {Err(control::Reply::failure(&query.request.request_id,"unavailable","Local desktop is not ready."))};
+            let _=query.responder.send(result);
         }
     });
     let geometry_context = Rc::clone(&context);

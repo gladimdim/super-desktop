@@ -2094,6 +2094,23 @@ impl SuperDesktopWindow {
         model.snapshot(canvas, &presentation)
     }
 
+    pub(crate) fn cli_file_target(&self,model:&crate::workspace_model::LocalWorkspace,request:&crate::control::Request)->Result<crate::state::TerminalData,crate::control::Reply> {
+        use crate::control::{Command,Reply};
+        let fail=|code,message|Reply::failure(&request.request_id,code,message);
+        let id=match &request.command {Command::Files {id,..}|Command::FilesEdit {id,..}=>id,_=>return Err(fail("invalid_request","Expected terminal files request."))};
+        let snapshot=self.desktop_snapshot(model).map_err(|_|fail("unavailable","Workspace unavailable."))?;
+        let matches:Vec<_>=snapshot.cards.iter().filter(|c|c.card_id==*id).collect();
+        if matches.len()!=1{return Err(fail("not_found","No unique local terminal card has that ID."));}
+        let card=matches[0];
+        if let Command::FilesEdit {expect_epoch,expect_revision,..}=&request.command {
+            if expect_epoch!=&snapshot.epoch || expect_revision!=&crate::control_geometry::revision(&snapshot,card){return Err(fail("conflict","Card or display changed; read terminal geometry again."));}
+        }
+        let widget=self.any_terminal_card(id).map_err(|_|fail("not_found","Local terminal widget missing."))?;
+        let data=widget.data.borrow().clone();
+        if snapshot.cards.iter().filter(|c|c.session_name==data.session_name).count()!=1 || data.session_name!=card.session_name || widget.cli_session_task().is_closed(){return Err(fail("conflict","Terminal identity is ambiguous or closing."));}
+        Ok(data)
+    }
+
     /// Read actual note buffers, including edits waiting for autosave.
     fn cli_live_state(&self) -> AppState {
         let mut state = self.state.borrow().clone();

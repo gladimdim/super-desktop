@@ -15,12 +15,18 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Files {..} | control::Command::FilesEdit {..} | control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
-            control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
+            control::Command::Files {id,query:control::FilesQuery::Read {asset,offset}} => {
+                use base64::Engine;use sha2::{Digest,Sha256};
+                let bytes=vec![b'x';70000];let offset=*offset as usize;let end=(offset+65536).min(bytes.len());
+                serde_json::json!({"id":id,"asset":{"id":asset},"offset":offset,"nextOffset":end,"eof":end==bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"bytes":base64::engine::general_purpose::STANDARD.encode(&bytes[offset..end])})
+            },
+
+            control::Command::Files {..} | control::Command::FilesEdit {..} | control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Lifecycle { id } => serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"nativeMetadataObserved":id=="completed-card","lifecycle":if id=="completed-card" {"completed"} else {"unknown"},"completion":{"supported":id=="completed-card","state":if id=="completed-card" {"completed"} else {"unknown"},"completionId":if id=="completed-card" {Some("b".repeat(64))} else {None}}}),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}","runtime":{"paneIdentity":"a".repeat(64),"columns":120,"rows":35},"truncated":false}),
@@ -125,6 +131,22 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             if edit{command.args(["--expect-epoch","epoch","--expect-revision",&revision,"--request-id","settings-test"]);}
             let output=command.output().unwrap();assert!(output.status.success(),"{args:?}: {output:?}");
         }
+        for (args,edit) in [
+            (vec!["terminal","files","list","card-1"],false),
+            (vec!["terminal","files","add","card-1","note.md"],true),
+            (vec!["terminal","files","save","card-1",&revision,"--file",note_file.to_str().unwrap()],true),
+            (vec!["terminal","files","remove","card-1",&revision],true),
+            (vec!["terminal","files","read","card-1",&revision],false),
+        ] {
+            let mut command=Command::new(executable);command.args(&args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root);
+            if edit{command.args(["--expect-epoch","epoch","--expect-revision",&revision,"--request-id","files-test"]);}
+            let output=command.output().unwrap();assert!(output.status.success(),"{args:?}: {output:?}");
+        }
+        let export=fixture.root.join(format!("export-{}",Path::new(executable).file_name().unwrap().to_string_lossy()));
+        let exported=Command::new(executable).args(["terminal","files","read","card-1",&revision,"--output",export.to_str().unwrap(),"--format=json"]).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();
+        assert!(exported.status.success(),"{exported:?}");assert_eq!(std::fs::read(&export).unwrap(),vec![b'x';70000]);
+        let duplicate=Command::new(executable).args(["terminal","files","read","card-1",&revision,"--output",export.to_str().unwrap(),"--format=json"]).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();
+        assert_eq!(duplicate.status.code(),Some(8));assert_eq!(std::fs::read(&export).unwrap().len(),70000);
         for action in ["minimize", "restore", "expand", "collapse"] {
             let args = [
                 "terminal",

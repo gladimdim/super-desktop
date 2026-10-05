@@ -52,6 +52,15 @@ Layout imports accept only typed IDs/modes/rectangles, validate all entries
 before movement, and cannot create sessions or import commands. Operations can
 still have unknown outcomes after application if transport or persistence fails.
 
+Local CLI file commands use a separate bounded catalog and the existing
+workspace-relative descriptor traversal checks. Explicit reads return bounded
+base64 chunks; exports create only a user-named new file, with mode 0600 and
+no overwrite. Markdown saves compare the listed file version before opening
+for write, share durable mutation receipts, and report unknown on possible
+partial writes. Removing a reference never deletes its file; other views or
+later output may rediscover it. Existing bridge file routes and formats remain
+unchanged. CLI file content is not stored in receipts.
+
 Settings mutations accept only typed, allowlisted keys. Launcher configuration
 can select executables and permission-bypass arguments for future starts; it
 does not confine the configured program. Argument-bearing configuration is
