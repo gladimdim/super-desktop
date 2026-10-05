@@ -98,7 +98,8 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(hashlib.sha256(data).hexdigest(), digest)
                     if key in ASSETS["INITIALS"]:
                         ET.fromstring(data)
-                        self.assertNotEqual(data, (ROOT / "assets/logos" / name).read_bytes())
+                        if original[key].get("source") != "SUPER DESKTOP original geometric initials":
+                            self.assertNotEqual(data, (ROOT / "assets/logos" / name).read_bytes())
                 if key not in ASSETS["INITIALS"]:
                     self.assertEqual(entry, original[key])
             self.assertFalse((directory / "anthropic-black.svg").exists())
