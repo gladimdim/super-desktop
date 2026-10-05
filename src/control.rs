@@ -30,11 +30,21 @@ pub const METHODS: &[&str] = &[
     "terminal.move",
     "terminal.resize",
     "terminal.close",
+    "terminal.mode",
     "harness.list",
     "harness.inspect",
     "harness.launch",
     "request.inspect",
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeAction {
+    Minimize,
+    Restore,
+    Expand,
+    Collapse,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
@@ -83,6 +93,15 @@ pub enum Command {
         #[serde(rename = "expectRevision")]
         expect_revision: String,
     },
+    #[serde(rename = "terminal.mode")]
+    Mode {
+        id: String,
+        action: ModeAction,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
     #[serde(rename = "terminal.close")]
     Close {
         id: String,
@@ -114,7 +133,11 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Launch { .. } | Self::Move { .. } | Self::Resize { .. } | Self::Close { .. }
+            Self::Mode { .. }
+                | Self::Launch { .. }
+                | Self::Move { .. }
+                | Self::Resize { .. }
+                | Self::Close { .. }
         )
     }
 }
@@ -208,6 +231,7 @@ pub fn capabilities() -> Value {
         "delegatedAccess": false, "remoteTargets": false,
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
+        "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
         "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
 }

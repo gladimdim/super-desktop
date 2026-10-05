@@ -2,14 +2,14 @@
 
 Use the CLI to discover harnesses, inspect terminal cards, launch configured
 agents, create shell terminals, read their screen or retained history, move or
-resize cards, close exact sessions, and inspect mutation receipts. Existing
+resize cards, minimize/restore/expand/collapse cards, close exact sessions, and inspect mutation receipts. Existing
 commands also control overlay visibility, notes, themes and paired PCs.
 This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 `--help` and `capabilities` before automating them.
 
 **Current coverage:** the structured local CLI supports discovery, creation,
-terminal observation, card geometry and guarded closing. It does not provide local terminal input,
+terminal observation, card geometry, card modes and guarded closing. It does not provide local terminal input,
 attachment or direct terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
@@ -22,7 +22,7 @@ There is no claim of complete CLI parity with every graphical action.
    it is not a formal JSON Schema for request or result validation.
 3. Read `super-desktop capabilities --format json` for the running daemon's
    methods and limits. Do not infer support from the version number alone.
-4. Check `super-desktop app status --format json`. Launch, geometry and close commands need `data.ready`.
+4. Check `super-desktop app status --format json`. Launch, geometry, mode and close commands need `data.ready`.
 5. Select exact harness and card IDs from returned data. A harness ID identifies
    a launcher type; a card ID identifies a saved terminal. Never select by list
    position or guess an ID from a title. `sessionName` is a separate field used
@@ -64,9 +64,17 @@ override, global request ID option or remote target is accepted here.
 | `app status` | Readiness, visibility, note and terminal counts | `app.status` |
 | `terminal list` | Saved cards, exact IDs and geometry | `terminal.list` |
 | `terminal inspect ID` | One saved card | `terminal.inspect` |
+| `terminal minimize ID` | Minimize to the saved icon position; requires epoch/revision and request ID | `terminal.mode` |
+| `terminal restore ID` | Restore a minimized card; requires epoch/revision and request ID | `terminal.mode` |
+| `terminal expand ID` | Expand one card without collapsing another; requires epoch/revision and request ID | `terminal.mode` |
+| `terminal collapse ID` | Return an expanded card to its saved mode; requires epoch/revision and request ID | `terminal.mode` |
 | `terminal geometry ID` | Current logical geometry, bounds, epoch and revision | `terminal.geometry` |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Move and raise a normal card or minimized icon | `terminal.move` |
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Change a normal card’s outer and restored size | `terminal.resize` |
+| `terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Minimize a terminal card to its saved icon position |
+| `terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Restore a minimized terminal card |
+| `terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Expand one terminal card |
+| `terminal collapse ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Collapse an expanded terminal card to its saved mode |
 | `terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID` | Remove the exact card and close its guarded tmux session | `terminal.close` |
 | `terminal runtime ID` | Live pane identity, process status and cell grid | `terminal.runtime` |
 | `terminal capture ID [--screen \| --history [--lines N]]` | Plain screen text or bounded retained history plus screen | `terminal.capture` |
@@ -197,7 +205,7 @@ position to fit; the reply reports `requested`, final `rect`, `clamped`, a new
 from -32768 to 32768; dimensions from 1 to 32768, before display validation.
 
 Expanded cards refuse moves and resizes; minimized cards allow icon movement
-but refuse resizing. Restore/collapse through the existing UI first. Resizing
+but refuse resizing. Use `terminal restore` or `terminal collapse` first. Resizing
 updates both the normal and restored dimensions. It can cause VTE to refit the
 session naturally; it does not request a fixed terminal cell grid. Geometry
 returns `gridObserved: false`: use `terminal runtime` afterward for a fresh
@@ -206,6 +214,52 @@ columns/rows observation. A hidden card may refit only when shown.
 Moves and resizes share the durable request journal with launches. Inspect
 `request inspect "$request_id"` after an uncertain response. A recorded success
 is historical and does not prove that nobody moved the card afterward.
+
+## Guarded card modes
+
+`terminal minimize`, `terminal restore`, `terminal expand` and `terminal collapse`
+use the same exact card IDs, epoch/revision guards and durable receipts as moves.
+Check the daemon's `terminal.mode` capability. For each operation, read a fresh
+`terminal geometry` and supply a unique request ID:
+
+```bash
+set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+geometry=$(super-desktop terminal geometry "$card_id" --format json)
+epoch=$(jq -er '.data.epoch' <<<"$geometry")
+revision=$(jq -er '.data.revision' <<<"$geometry")
+request_id="mode-$(cat /proc/sys/kernel/random/uuid)"
+super-desktop terminal minimize "$card_id" \
+  --expect-epoch "$epoch" --expect-revision "$revision" \
+  --request-id "$request_id" --format json
+```
+
+- `minimize` saves the normal size and returns to the remembered icon position.
+- `restore` returns a minimized card to its saved normal position and dimensions,
+  using the UI's current display size limits.
+- `expand` uses the UI's centered 80% rectangle. It preserves whether the card
+  was normal or minimized. If another card is expanded it returns `conflict`;
+  explicitly collapse that card with its own current guards first.
+- `collapse` returns to the saved normal or minimized presentation. Expanded mode
+  is transient and is not restored after a daemon restart.
+
+Minimize and restore refuse expanded cards: collapse first. An already satisfied
+request succeeds with `changed: false`, but still checks the current guards and
+refuses active drag/resize gestures. Replies contain the geometry envelope,
+`requested.action`, `changed`, and `outcome: "applied"`. They are historical
+receipts; replay does not reapply a mode after later user edits.
+
+These commands do not show the overlay or explicitly request keyboard focus.
+Normal pointer-hover behavior still applies. Restore/expand can attach an
+existing session by its exact saved name; they never create or respawn a missing
+session or execute its saved launcher. Minimize and collapse back to an icon
+release that card's terminal attachment, keeping its session running. Attachment
+can change the session's cell grid. The reply reports `attachmentObserved: false`
+and `gridObserved: false`; it confirms presentation, not terminal attachment,
+readiness or process identity. Use `terminal runtime` afterward to observe the
+current pane. Other same-user tmux actions may replace a same-name session.
+A missing session can leave an empty or failed-attachment terminal view; use
+explicit launch commands to create new sessions.
 
 ## Launching and permission choices
 
@@ -303,7 +357,7 @@ super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 ```
 
-The daemon records intent before a launch, move, resize or close. Reusing the same ID
+The daemon records intent before a launch, move, resize, mode change or close. Reusing the same ID
 with the identical payload returns the recorded result without applying it again,
 including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
@@ -331,7 +385,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches, moves, resizes and closes, not legacy
+killed or relaunched. These receipts cover structured launches, moves, resizes, mode changes and closes, not legacy
 commands or every future restoration of a saved card.
 
 ## JSON and exit statuses

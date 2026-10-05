@@ -52,7 +52,10 @@ pub fn dispatch(
 
 pub fn card_id(command: &Command) -> &str {
     match command {
-        Command::Geometry { id } | Command::Move { id, .. } | Command::Resize { id, .. } => id,
+        Command::Mode { id, .. }
+        | Command::Geometry { id }
+        | Command::Move { id, .. }
+        | Command::Resize { id, .. } => id,
         _ => "",
     }
 }
@@ -118,6 +121,55 @@ fn max_size(canvas: &Canvas) -> (i32, i32) {
         ((canvas.width as f64 * 0.70).round() as i32).min(canvas.width as i32 - 20),
         ((canvas.height as f64 * 0.75).round() as i32).min(canvas.height as i32 - top(canvas) - 10),
     )
+}
+
+/// Return whether the requested mode differs, after checking all guards.
+/// Expanding never implicitly mutates a second card.
+pub fn prepare_mode(
+    request: &Request,
+    snapshot: &LocalWorkspaceSnapshot,
+    card: &DesktopCard,
+) -> Result<bool, Reply> {
+    use crate::control::ModeAction;
+    let fail = |code, message| Reply::failure(&request.request_id, code, message);
+    let Command::Mode {
+        id,
+        action,
+        expect_epoch,
+        expect_revision,
+    } = &request.command
+    else {
+        return Err(fail("invalid_request", "Expected a mode mutation."));
+    };
+    if id != &card.card_id
+        || expect_epoch != &snapshot.epoch
+        || expect_revision != &revision(snapshot, card)
+    {
+        return Err(fail("conflict", "Card or display changed. Read terminal geometry again before deciding on a new request."));
+    }
+    if card.expanded && matches!(action, ModeAction::Minimize | ModeAction::Restore) {
+        return Err(fail(
+            "invalid_state",
+            "Collapse the expanded card before minimizing or restoring it.",
+        ));
+    }
+    if *action == ModeAction::Expand
+        && snapshot
+            .cards
+            .iter()
+            .any(|other| other.card_id != card.card_id && other.expanded)
+    {
+        return Err(fail(
+            "conflict",
+            "Another card is expanded. Explicitly collapse it with its own current revision first.",
+        ));
+    }
+    Ok(match action {
+        ModeAction::Minimize => !card.layout.iconified,
+        ModeAction::Restore => card.layout.iconified,
+        ModeAction::Expand => !card.expanded,
+        ModeAction::Collapse => card.expanded,
+    })
 }
 
 pub struct Prepared {
@@ -276,6 +328,136 @@ mod tests {
                 }
             },
         }
+    }
+    fn mode_request(s: &LocalWorkspaceSnapshot, action: crate::control::ModeAction) -> Request {
+        Request {
+            control_version: 1,
+            request_id: "mode-test".into(),
+            command: Command::Mode {
+                id: s.cards[0].card_id.clone(),
+                action,
+                expect_epoch: s.epoch.clone(),
+                expect_revision: revision(s, &s.cards[0]),
+            },
+        }
+    }
+    #[test]
+    fn cli_mode_transitions_and_noops_preserve_other_cards() {
+        use crate::control::ModeAction::*;
+        for expanded in [false, true] {
+            for minimized in [false, true] {
+                let mut s = snapshot();
+                s.cards[0].expanded = expanded;
+                s.cards[0].layout.iconified = minimized;
+                for action in [Minimize, Restore, Expand, Collapse] {
+                    let result = prepare_mode(&mode_request(&s, action), &s, &s.cards[0]);
+                    if expanded && matches!(action, Minimize | Restore) {
+                        assert_eq!(result.unwrap_err().error.unwrap().code, "invalid_state");
+                    } else {
+                        assert_eq!(
+                            result.unwrap(),
+                            match action {
+                                Minimize => !minimized,
+                                Restore => minimized,
+                                Expand => !expanded,
+                                Collapse => expanded,
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        let mut s = snapshot();
+        let mut other = s.cards[0].clone();
+        other.card_id = "another-card".into();
+        other.expanded = true;
+        s.cards.push(other);
+        assert_eq!(
+            prepare_mode(&mode_request(&s, Expand), &s, &s.cards[0])
+                .unwrap_err()
+                .exit_code(),
+            5
+        );
+        assert!(prepare_mode(&mode_request(&s, Minimize), &s, &s.cards[0]).unwrap());
+    }
+    #[test]
+    fn cli_mode_stale_identity_display_and_epoch_fail_even_for_noop() {
+        let s = snapshot();
+        let r = mode_request(&s, crate::control::ModeAction::Restore);
+        for mutate in [
+            |s: &mut LocalWorkspaceSnapshot| s.cards[0].revision += 1,
+            |s: &mut LocalWorkspaceSnapshot| s.cards[0].card_id = "other".into(),
+            |s: &mut LocalWorkspaceSnapshot| s.cards[0].session_name = "other".into(),
+            |s: &mut LocalWorkspaceSnapshot| s.epoch = "restarted".into(),
+            |s: &mut LocalWorkspaceSnapshot| s.canvas.width = 800,
+            |s: &mut LocalWorkspaceSnapshot| s.canvas.scale = 2.0,
+            |s: &mut LocalWorkspaceSnapshot| s.canvas.top_inset = 90,
+        ] {
+            let mut changed = s.clone();
+            mutate(&mut changed);
+            assert_eq!(
+                prepare_mode(&r, &changed, &changed.cards[0])
+                    .unwrap_err()
+                    .exit_code(),
+                5
+            );
+        }
+    }
+    #[test]
+    fn cli_mode_receipts_bind_action_target_and_do_not_replay() {
+        let root = std::env::temp_dir().join(format!(
+            "sd-mode-{}",
+            crate::control::new_request(Command::Status {})
+                .unwrap()
+                .request_id
+        ));
+        let r = mode_request(&snapshot(), crate::control::ModeAction::Minimize);
+        let deadline = Instant::now() + std::time::Duration::from_secs(5);
+        assert!(
+            dispatch(&root, &r, deadline, |_| Ok(Reply::success(
+                &r.request_id,
+                json!({"changed":true})
+            )))
+            .ok
+        );
+        assert!(dispatch(&root, &r, deadline, |_| panic!("must not reapply")).ok);
+        assert_eq!(
+            crate::control_journal::inspect(&root, "read", &r.request_id)
+                .data
+                .unwrap()["cardId"],
+            "sd_term_test"
+        );
+        for change_action in [true, false] {
+            let mut changed = r.clone();
+            if let Command::Mode { id, action, .. } = &mut changed.command {
+                if change_action {
+                    *action = crate::control::ModeAction::Restore;
+                } else {
+                    *id = "other".into();
+                }
+            }
+            assert_eq!(
+                dispatch(&root, &changed, deadline, |_| panic!("conflict")).exit_code(),
+                5
+            );
+        }
+        let mut lost = r.clone();
+        lost.request_id = "lost-mode".into();
+        assert_eq!(
+            dispatch(&root, &lost, deadline, |_| Err(()))
+                .error
+                .unwrap()
+                .outcome,
+            "unknown"
+        );
+        assert_eq!(
+            dispatch(&root, &lost, deadline, |_| panic!("unknown replay"))
+                .error
+                .unwrap()
+                .outcome,
+            "unknown"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn cli_geometry_stale_card_epoch_and_logical_output_are_refused() {

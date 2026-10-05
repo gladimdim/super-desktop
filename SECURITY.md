@@ -45,7 +45,7 @@ require `--allow-download`. These are per-request acknowledgements, not
 restrictions on an executable's own behavior, startup files or network access.
 Launches require an absolute existing directory and never submit a prompt.
 
-Before a structured launch, move, resize or close the daemon durably records the
+Before a structured launch, move, resize, mode change or close the daemon durably records the
 request ID, a hash of its parameters and a target or reserved card ID in an
 owner-only state directory.
 Receipts and the journal lock have mode 0600; symlink paths are refused.
@@ -65,6 +65,13 @@ or resized; minimized cards cannot be resized. Bounds adjustments require
 `--clamp`. A move can raise a card and a resize can naturally change its VTE grid;
 neither command starts a harness or explicitly focuses it. Receipts include
 historical geometry and target IDs, and replay never overwrites later edits.
+
+Card mode commands use the same revision and gesture guards. Expanding refuses
+another expanded card rather than implicitly changing it. Restore/expand attach
+only to an exact existing session name and never execute the saved launcher or
+respawn an exited pane. Attachment is asynchronous and can change the cell grid;
+a successful mode receipt does not establish attachment or process identity.
+No mode command explicitly shows or focuses the overlay. Expansion is transient.
 
 Structured close requires the current card epoch/revision and live pane identity.
 The worker serializes against pending preparation; GTK rechecks the exact card

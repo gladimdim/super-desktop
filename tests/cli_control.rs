@@ -1,9 +1,9 @@
 //! Actual CLI clients against the production local transport in a child process.
-use super_desktop::control;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
+use super_desktop::control;
 
 #[test]
 fn control_daemon_fixture() {
@@ -15,12 +15,12 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
-            control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
+            control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}"}),
             control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
@@ -84,6 +84,65 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
         let revision = "a".repeat(64);
+        for action in ["minimize", "restore", "expand", "collapse"] {
+            let args = [
+                "terminal",
+                action,
+                "card-1",
+                "--expect-epoch=epoch-1",
+                "--expect-revision",
+                &revision,
+                "--request-id=mode-001",
+            ];
+            let output = Command::new(executable)
+                .args(args)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(reply["data"]["method"], "terminal.mode");
+            assert_eq!(reply["data"]["action"], action);
+            assert_eq!(reply["data"]["id"], "card-1");
+            assert_eq!(reply["data"]["expectRevision"], revision);
+            assert_eq!(reply["requestId"], "mode-001");
+            for extra in [
+                "--clamp",
+                "--width=640",
+                "--expect-pane-identity=bad",
+                "--all",
+                "--allow-download",
+                "--screen",
+            ] {
+                let output = Command::new(executable)
+                    .args(args)
+                    .arg(extra)
+                    .arg("--format=json")
+                    .env("XDG_RUNTIME_DIR", &fixture.root)
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(2), "{action} {extra}");
+            }
+            for missing in [
+                vec!["terminal", action, "card-1"],
+                args[..4].to_vec(),
+                args[..6].to_vec(),
+            ] {
+                let output = Command::new(executable)
+                    .args(missing)
+                    .arg("--format=json")
+                    .env("XDG_RUNTIME_DIR", &fixture.root)
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(2));
+            }
+        }
         let geometry = [
             "terminal",
             "move",
@@ -401,6 +460,11 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 "older-001",
             ],
             vec!["request", "inspect", "older-001"],
+            vec!["terminal", "minimize", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
+            vec!["terminal", "restore", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
+            vec!["terminal", "expand", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
+            vec!["terminal", "collapse", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
+
             vec!["terminal", "close", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--expect-pane-identity=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "--request-id=older-close"],
             vec!["terminal", "geometry", "card-1"],
             vec!["terminal", "move", "card-1", "--x=80", "--y=100", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-move"],

@@ -2108,15 +2108,24 @@ impl SuperDesktopWindow {
         if matches!(request.command, Command::Geometry { .. }) {
             return Reply::success(id, geometry::describe(&snapshot, current));
         }
-        let prepared = match geometry::prepare(request, &snapshot, current) {
-            Ok(prepared) => prepared,
-            Err(reply) => return reply,
-        };
+        let mode_change = if matches!(request.command, Command::Mode { .. }) {
+            match geometry::prepare_mode(request, &snapshot, current) {
+                Ok(changed) => Some(changed),
+                Err(reply) => return reply,
+            }
+        } else { None };
+        let prepared = if mode_change.is_none() {
+            match geometry::prepare(request, &snapshot, current) {
+                Ok(prepared) => Some(prepared),
+                Err(reply) => return reply,
+            }
+        } else { None };
         let card = match self.any_terminal_card(card_id) {
             Ok(card) => card,
             Err(_) => return Reply::failure(id, "not_found", "No local terminal widget has that ID."),
         };
         if snapshot.cards.iter().filter(|other| other.session_name == current.session_name).count() != 1
+            || self.terminal_cards.borrow().iter().filter(|other| other.data.borrow().id == card_id).count() != 1
             || card.data.borrow().session_name != current.session_name
         {
             return Reply::failure(id, "conflict", "The card-to-session mapping is ambiguous or changed.");
@@ -2125,8 +2134,31 @@ impl SuperDesktopWindow {
             return Reply::failure(id, "conflict", "A local geometry gesture is in progress.");
         }
         let applied = match request.command {
-            Command::Move { .. } => self.move_terminal_card(card_id, prepared.rect.x as i32, prepared.rect.y as i32).is_ok(),
-            Command::Resize { .. } => card.apply_geometry(prepared.rect),
+            Command::Mode { action, .. } => {
+                if mode_change == Some(false) { true } else {
+                    let changed = card.cli_set_mode(action, self.screen_width(), self.screen_height());
+                    if changed {
+                        let rect = card.canvas_rect(self.screen_width(), self.screen_height());
+                        // Minimize/restore already position and persist through
+                        // the card's save callback, including display clamping.
+                        match action {
+                            crate::control::ModeAction::Expand => {
+                                self.canvas.remove(&card.container);
+                                self.canvas.put(&card.container, rect.x, rect.y);
+                            }
+                            crate::control::ModeAction::Collapse => self.canvas.move_(&card.container, rect.x, rect.y),
+                            _ => {}
+                        }
+                        self.ghosts.refresh();
+                    }
+                    changed
+                }
+            }
+            Command::Move { .. } => {
+                let rect = prepared.as_ref().unwrap().rect;
+                self.move_terminal_card(card_id, rect.x as i32, rect.y as i32).is_ok()
+            }
+            Command::Resize { .. } => card.apply_geometry(prepared.as_ref().unwrap().rect),
             _ => false,
         };
         if !applied {
@@ -2140,8 +2172,14 @@ impl SuperDesktopWindow {
             return Reply::unknown(id);
         };
         let mut data = geometry::describe(&after, current);
-        data["requested"] = prepared.requested;
-        data["clamped"] = serde_json::json!(prepared.clamped);
+        if let Some(prepared) = prepared {
+            data["requested"] = prepared.requested;
+            data["clamped"] = serde_json::json!(prepared.clamped);
+        } else if let Command::Mode { action, .. } = &request.command {
+            data["requested"] = serde_json::json!({"action":action});
+            data["changed"] = serde_json::json!(mode_change.unwrap());
+            data["attachmentObserved"] = serde_json::json!(false);
+        }
         data["outcome"] = serde_json::json!("applied");
         Reply::success(id, data)
     }
@@ -2808,6 +2846,70 @@ fn apply_terminal_expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_mode_handler_checks_live_widgets_and_persists_layout() {
+        crate::gtk_test::run_in_child_process("window::tests::cli_mode_handler_inner");
+    }
+
+    #[test]
+    fn cli_mode_handler_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        use crate::control::{Command, ModeAction, Request};
+        let root = std::env::temp_dir().join(format!("sd-mode-window-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.CliModeTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state = AppState::default();
+        state.terminals.push(serde_json::from_value(serde_json::json!({
+            "id":"sd_term_mode", "session_name":"sd_term_mode", "agent_type":"shell", "command":"/bin/false",
+            "x":100, "y":200, "width":128, "height":128, "restored_width":480, "restored_height":320,
+            "iconified":true, "icon_x":300, "icon_y":400, "created_at":0.0
+        })).unwrap());
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let card = window.any_terminal_card("sd_term_mode").unwrap();
+        let request = |action| {
+            let snapshot = window.desktop_snapshot(&model).unwrap();
+            Request { control_version: 1, request_id: "mode-test".into(), command: Command::Mode {
+                id: "sd_term_mode".into(), action, expect_epoch: snapshot.epoch.clone(),
+                expect_revision: crate::control_geometry::revision(&snapshot, &snapshot.cards[0]),
+            }}
+        };
+        let restore = request(ModeAction::Restore);
+        card.container.add_css_class("term-resizing");
+        assert_eq!(window.cli_geometry(&model, &restore).exit_code(), 5);
+        card.container.remove_css_class("term-resizing");
+        let reply = window.cli_geometry(&model, &restore);
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.data.as_ref().unwrap()["mode"], "normal");
+        assert_eq!(reply.data.as_ref().unwrap()["changed"], true);
+        assert_eq!(model.state().borrow().terminals[0].width, 480);
+        assert_eq!(window.cli_geometry(&model, &restore).exit_code(), 5, "old revision must conflict");
+        let noop = window.cli_geometry(&model, &request(ModeAction::Restore));
+        assert_eq!(noop.data.unwrap()["changed"], false);
+        for (action, mode) in [(ModeAction::Minimize, "minimized"), (ModeAction::Expand, "expanded"), (ModeAction::Collapse, "minimized")] {
+            let reply = window.cli_geometry(&model, &request(action));
+            assert!(reply.ok, "{reply:?}");
+            let data = reply.data.unwrap();
+            assert_eq!(data["mode"], mode);
+            assert_eq!(data["changed"], true);
+        }
+        assert!(!window.window.is_visible());
+        crate::state::flush_state_saves_checked().unwrap();
+        let persisted = crate::state::load_state();
+        assert!(persisted.terminals[0].iconified);
+        assert_eq!(persisted.terminals[0].restored_width, 480);
+        assert_eq!(persisted.terminals[0].icon_x, Some(300));
+        window.window.close();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn test_card_slide_goes_to_the_nearest_left_or_right_edge() {

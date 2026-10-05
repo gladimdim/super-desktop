@@ -33,6 +33,10 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("terminal minimize", "Minimize a terminal card to its saved icon position", "terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text|json] [--target local]", "Changes card presentation without showing the overlay or explicitly focusing it; may refit/attach an existing session but never starts one. Expand refuses another expanded card; minimize/restore refuse expanded cards", "Compatible ready local daemon; exact card ID; epoch/revision from terminal geometry; unique durable request ID", "Versioned geometry envelope with requested action, changed and outcome=applied; expanded mode is transient; gridObserved=false; durable receipt; exits 0/2/3/4/5/6/7/8", "super-desktop terminal minimize CARD_ID --expect-epoch EPOCH --expect-revision REVISION --request-id mode-001 --format json", false),
+    command!("terminal restore", "Restore a minimized terminal card", "terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text|json] [--target local]", "Changes card presentation without showing the overlay or explicitly focusing it; may refit/attach an existing session but never starts one. Expand refuses another expanded card; minimize/restore refuse expanded cards", "Compatible ready local daemon; exact card ID; epoch/revision from terminal geometry; unique durable request ID", "Versioned geometry envelope with requested action, changed and outcome=applied; expanded mode is transient; gridObserved=false; durable receipt; exits 0/2/3/4/5/6/7/8", "super-desktop terminal restore CARD_ID --expect-epoch EPOCH --expect-revision REVISION --request-id mode-001 --format json", false),
+    command!("terminal expand", "Expand one terminal card", "terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text|json] [--target local]", "Changes card presentation without showing the overlay or explicitly focusing it; may refit/attach an existing session but never starts one. Expand refuses another expanded card; minimize/restore refuse expanded cards", "Compatible ready local daemon; exact card ID; epoch/revision from terminal geometry; unique durable request ID", "Versioned geometry envelope with requested action, changed and outcome=applied; expanded mode is transient; gridObserved=false; durable receipt; exits 0/2/3/4/5/6/7/8", "super-desktop terminal expand CARD_ID --expect-epoch EPOCH --expect-revision REVISION --request-id mode-001 --format json", false),
+    command!("terminal collapse", "Collapse an expanded terminal card to its saved mode", "terminal collapse ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text|json] [--target local]", "Changes card presentation without showing the overlay or explicitly focusing it; may refit/attach an existing session but never starts one. Expand refuses another expanded card; minimize/restore refuse expanded cards", "Compatible ready local daemon; exact card ID; epoch/revision from terminal geometry; unique durable request ID", "Versioned geometry envelope with requested action, changed and outcome=applied; expanded mode is transient; gridObserved=false; durable receipt; exits 0/2/3/4/5/6/7/8", "super-desktop terminal collapse CARD_ID --expect-epoch EPOCH --expect-revision REVISION --request-id mode-001 --format json", false),
     command!("terminal close", "Close an exact terminal card and its observed session", "terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text|json] [--target local]", "Destructive: cancels pending preparation, removes the card and kills its exact guarded tmux session. May interrupt running work. No name-based fallback or automatic retry; descendants are not individually verified", "Ready local daemon; exact card ID; epoch/revision from terminal geometry and paneIdentity from terminal runtime; one unlinked pane/window; unique durable request ID. Missing sessions must be handled through existing UI", "Versioned envelope with id, sessionName, sessionId, paneIdentity, cardRemoved, sessionClosed, outcome=closed and processExitObserved=false. Unknown may mean card removed while session still runs. Inspect request ID before any recovery; exits 0/2/3/4/5/6/7/8", "super-desktop terminal close CARD_ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity PANE_IDENTITY --request-id close-001 --format json", false),
     command!("terminal geometry", "Inspect current card geometry and its revision", "terminal geometry ID [--format text|json] [--target local]", "Read-only; reports logical output bounds and saved/expanded/minimized mode; no terminal text", "Compatible ready local daemon; exact saved card ID", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; exits 0/2/3/4/5/6/7/8", "super-desktop terminal geometry CARD_ID --format json", false),
     command!("terminal move", "Move a terminal card within the logical display", "terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text|json] [--target local]", "Moves and raises the card; moves minimized icons separately; refuses expanded cards; does not focus or launch", "Compatible ready local daemon; exact saved card ID; epoch and opaque revision from terminal geometry; explicit --clamp permits adjustment", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; requested, clamped and outcome; durable receipt; timeout may mean unknown; exits 0/2/3/4/5/6/7/8", "super-desktop terminal move CARD_ID --x 80 --y 100 --expect-epoch EPOCH --expect-revision REVISION --request-id geometry-1 --format json", false),
@@ -112,7 +116,7 @@ Inspect saved terminal cards: super-desktop terminal list --format json\n\
 Observe a card's live cell grid: super-desktop terminal runtime CARD_ID --format json\n\
 Read its screen (may contain secrets): super-desktop terminal capture CARD_ID --screen --format json\n\
 Read layout before moving/resizing: super-desktop terminal geometry CARD_ID --format json\n\
-Move/resize require --expect-epoch, --expect-revision and --request-id; bounds adjust only with --clamp.\n\
+Move/resize and minimize/restore/expand/collapse require --expect-epoch, --expect-revision and --request-id; bounds adjust only with --clamp.\n\
 Closing also requires --expect-pane-identity from terminal runtime; it interrupts work. Unknown close outcomes may leave a running session without a card.\n\
 Inspect running instances with private prompt metadata: super-desktop harnesses\n\
 Inspect saved PCs: super-desktop peer-list\n\n\
@@ -236,7 +240,9 @@ fn schema_error(message: &str) -> Output {
 pub fn dispatch(args: &[String]) -> Option<Output> {
     let action = args.first()?.as_str();
     #[cfg(target_os = "macos")]
-    if action == "diagnose" { return None; }
+    if action == "diagnose" {
+        return None;
+    }
     if INTERNAL.contains(&action) {
         return None;
     }
@@ -570,11 +576,19 @@ fn live(args: &[String]) -> Output {
     let resizing = matches!(words.as_slice(), ["terminal", "resize", _]);
     let changing_geometry = moving || resizing;
     let closing = matches!(words.as_slice(), ["terminal", "close", _]);
-    let guarded = changing_geometry || closing;
+    let changing_mode = matches!(
+        words.as_slice(),
+        [
+            "terminal",
+            "minimize" | "restore" | "expand" | "collapse",
+            _
+        ]
+    );
+    let guarded = changing_geometry || closing || changing_mode;
     if (!guarded && !geometry_options.is_empty()) || (!changing_geometry && clamp) {
         return fail(
             "invalid_arguments",
-            "Guard options are for move/resize/close; --clamp is only for move/resize.",
+            "Guard options are for move/resize/close/mode changes; --clamp is only for move/resize.",
         );
     }
     if !launching && !guarded && request_id.is_some() {
@@ -590,7 +604,9 @@ fn live(args: &[String]) -> Output {
         );
     }
     if guarded {
-        let expected: &[&str] = if closing {
+        let expected: &[&str] = if changing_mode {
+            &["--expect-epoch", "--expect-revision"]
+        } else if closing {
             &[
                 "--expect-epoch",
                 "--expect-revision",
@@ -631,7 +647,7 @@ fn live(args: &[String]) -> Output {
                 "Copy paneIdentity from terminal runtime.",
             );
         }
-        for flag in if closing {
+        for flag in if closing || changing_mode {
             [].as_slice()
         } else if moving {
             ["--x", "--y"].as_slice()
@@ -689,6 +705,21 @@ fn live(args: &[String]) -> Output {
         }
     }
     let command = match words.as_slice() {
+        ["terminal", action @ ("minimize" | "restore" | "expand" | "collapse"), id]
+            if !all && valid_id(id) =>
+        {
+            Command::Mode {
+                id: (*id).into(),
+                action: match *action {
+                    "minimize" => control::ModeAction::Minimize,
+                    "restore" => control::ModeAction::Restore,
+                    "expand" => control::ModeAction::Expand,
+                    _ => control::ModeAction::Collapse,
+                },
+                expect_epoch: geometry_options["--expect-epoch"].into(),
+                expect_revision: geometry_options["--expect-revision"].into(),
+            }
+        }
         ["terminal", "close", id] if !all && valid_id(id) => Command::Close {
             id: (*id).into(),
             expect_epoch: geometry_options["--expect-epoch"].into(),
@@ -762,6 +793,7 @@ fn live(args: &[String]) -> Output {
     let required_method = match &request.command {
         Command::Launch { .. } => Some("harness.launch"),
         Command::InspectRequest { .. } => Some("request.inspect"),
+        Command::Mode { .. } => Some("terminal.mode"),
         Command::Close { .. } => Some("terminal.close"),
         Command::Geometry { .. } => Some("terminal.geometry"),
         Command::Move { .. } => Some("terminal.move"),
