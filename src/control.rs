@@ -46,6 +46,7 @@ pub const METHODS: &[&str] = &[
     "workspace.read",
     "workspace.edit",
     "settings.read",
+    "settings.shortcut",
     "settings.edit",
     "terminal.files.read",
     "terminal.files.edit",
@@ -237,6 +238,8 @@ pub enum FilesEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="settings.shortcut")]
+    Shortcut {combo:String,preview:Option<String>,#[serde(rename="expectEpoch")] expect_epoch:Option<String>,#[serde(rename="expectRevision")] expect_revision:Option<String>},
     #[serde(rename = "audit.list")]
     Audit { after: Option<String>, limit:u16, #[serde(rename="expectRevision")] expect_revision:Option<String> },
     #[serde(rename = "access.list")]
@@ -402,7 +405,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Attach { .. }
+            Self::Shortcut {preview:Some(_),..}
+                | Self::Attach { .. }
                 | Self::Viewport { .. }
                 | Self::CardAction { .. }
                 | Self::FilesEdit { .. }

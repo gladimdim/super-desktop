@@ -767,6 +767,8 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
 | `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable mutation receipt |
 | `capabilities [--format text\|json] [--target local]` | Structured local | Query the running local control service |
+| `settings shortcut preview --combo COMBO [--format text\|json] [--target local]` | Structured local | Preview a managed Hyprland shortcut change |
+| `settings shortcut apply --combo COMBO --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Apply a reviewed shortcut preview |
 | `audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text\|json] [--target local]` | Structured local | List private mutation receipt metadata |
 | `audit export --output PATH [--format text\|json] [--target local]` | Structured local | Export a stable receipt metadata inventory |
 | `access list [--format text\|json] [--target local]` | Structured local | Inspect local control ownership |
@@ -804,6 +806,27 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Shortcut preview and apply
+
+On Linux Hyprland, run `settings shortcut preview --combo 'SUPER + CTRL + F8'`.
+The response includes exact before/after `bindings.lua` contents, any runtime
+binding conflict, and `preview`, `epoch` and `revision` guards. Review the
+replacement and conflict before calling `settings shortcut apply` with the same
+combo and those three guards plus a unique request ID. Settings must be closed.
+Preview can expose private configuration text.
+
+Apply rechecks the file, runtime bindings and desktop settings, creates a new
+0600 backup beside `bindings.lua`, then atomically writes the managed block.
+It runs `hyprctl reload` and `hyprctl configerrors`. Failed validation attempts
+to restore the backup only if the file still contains this operation's bytes;
+the reply reports rollback and validation status. Unknown outcomes require
+inspection. Concurrent external edits can still race the final file check.
+
+Use named keys with SUPER/CTRL/ALT/SHIFT, or F1–F12 alone. CLI changes do not add
+a physical-keycode binding. The existing file must be owned, regular, without
+hardlinks, not writable by others, and at most 128 KiB. macOS CLI shortcut
+editing is currently unsupported. No automatic reset of user configuration occurs.
 
 ## One-shot launcher arguments and wire schemas
 

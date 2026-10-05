@@ -19,6 +19,17 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
     if !selected {
         return None;
     }
+    if matches!(words.as_slice(),["settings","shortcut",..]) {
+        let build=||->Result<Output,&'static str>{
+            let o=Options::parse(args,&["--combo","--preview","--expect-epoch","--expect-revision"],&[])?;
+            let apply=match o.words.iter().map(String::as_str).collect::<Vec<_>>().as_slice(){["settings","shortcut","preview"]=>false,["settings","shortcut","apply"]=>true,_=>return Err("Use settings shortcut preview or apply.")};
+            let combo=o.required("--combo")?;
+            if !apply&&o.values.keys().any(|k|matches!(k.as_str(),"--preview"|"--request-id"|"--expect-epoch"|"--expect-revision")){return Err("Preview only takes --combo, --format and --target.");}
+            let (preview,epoch,revision)=if apply {let p=o.required("--preview")?;let e=o.required("--expect-epoch")?;let r=o.required("--expect-revision")?;if !opaque(&p)||!valid_id(&e,64)||!opaque(&r){return Err("Copy preview, epoch and revision from the preview response.");}(Some(p),Some(e),Some(r))}else{(None,None,None)};
+            Ok(render_reply(send(Command::Shortcut {combo,preview,expect_epoch:epoch,expect_revision:revision},&o,"settings.shortcut"),o.json))
+        };
+        return Some(build().unwrap_or_else(|m|render_reply(Reply::failure("","invalid_arguments",m),json_requested(args))));
+    }
     let build = || -> Result<(Command, Options), &'static str> {
         let read = matches!(
             words.as_slice(),

@@ -10,12 +10,26 @@ fn settings(state: &AppState) -> Value {
         {"key":"workspaceDefault","value":state.workspace_dir,"effective":crate::state::effective_workspace_dir(state),"default":Value::Null,"type":"absolute-directory-or-null","writable":true,"restartRequired":false},
         {"key":"settingsPanelPosition","value":state.settings_panel_pos,"default":Value::Null,"type":"integer-pair-or-null","writable":true,"restartRequired":false},
         {"key":"settingsPanelSize","value":state.settings_panel_size,"default":Value::Null,"type":"integer-pair-or-null","minimum":[660,620],"maximum":[8192,8192],"writable":true,"restartRequired":false},
-        {"key":"toggleShortcut","value":state.toggle_shortcut,"type":"shortcut","writable":false,"editEntry":"Settings → Keyboard shortcut"},
+        {"key":"toggleShortcut","value":state.toggle_shortcut,"type":"shortcut","writable":false,"editEntry":"settings shortcut preview/apply"},
         {"key":"visibleHarnesses","value":state.visible_harnesses,"default":Value::Null,"type":"harness-ids-or-null","writable":false,"editEntry":"harness visibility set/reset"}
     ])
 }
 
 impl SuperDesktopWindow {
+    pub fn cli_shortcut(&self,model:&crate::workspace_model::LocalWorkspace,request:&Request,commit:bool)->Reply {
+        let fail=|code,message|Reply::failure(&request.request_id,code,message);
+        let Command::Shortcut {combo,preview,expect_epoch,expect_revision}=&request.command else{return fail("invalid_request","Expected shortcut operation.");};
+        let combo=match crate::control_shortcut::canonical(combo){Ok(c)=>c,Err((c,m))=>return fail(c,m)};
+        let snapshot=match self.desktop_snapshot(model){Ok(s)=>s,Err(_)=>return fail("unavailable","Local workspace unavailable.")};
+        let state=self.cli_live_state();let revision=crate::control_workspace::revision(&state,&snapshot);
+        if preview.is_some(){
+            if expect_epoch.as_ref()!=Some(&snapshot.epoch)||expect_revision.as_ref()!=Some(&revision){return fail("conflict","Settings changed; preview the shortcut again.");}
+            if self.overlay_panels.iter().any(|p|p.is_visible()){return fail("conflict","Close Settings before applying a CLI shortcut.");}
+        }else if commit{return fail("invalid_request","Apply requires a preview.");}
+        if commit {let mut state=self.state.borrow_mut();state.toggle_shortcut=Some(combo.clone());crate::state::save_state_async(state.clone());}
+        Reply::success(&request.request_id,json!({"epoch":snapshot.epoch,"revision":revision,"current":state.toggle_shortcut,"combo":combo,"stateSaved":commit}))
+    }
+
     pub(super) fn cli_preferences(
         &self,
         model: &crate::workspace_model::LocalWorkspace,

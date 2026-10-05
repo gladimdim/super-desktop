@@ -3190,6 +3190,12 @@ mod tests {
         assert_eq!(model.state().borrow().visible_harnesses,Some(vec![]));
         assert_eq!(pref_read(PQ::Custom {id:"custom-cli".into()}).exit_code(),3);
         assert!(!window.window.is_visible());
+        let mut shortcut=Request {control_version:1,request_id:"shortcut-state".into(),command:Command::Shortcut {combo:"SUPER + F8".into(),preview:None,expect_epoch:None,expect_revision:None}};
+        let preview=window.cli_shortcut(&model,&shortcut,false).data.unwrap();
+        if let Command::Shortcut {preview:p,expect_epoch,expect_revision,..}=&mut shortcut.command {*p=Some("a".repeat(64));*expect_epoch=Some(preview["epoch"].as_str().unwrap().into());*expect_revision=Some(preview["revision"].as_str().unwrap().into());}
+        assert!(window.cli_shortcut(&model,&shortcut,false).ok);assert!(window.cli_shortcut(&model,&shortcut,true).ok);
+        assert_eq!(model.state().borrow().toggle_shortcut.as_deref(),Some("SUPER + F8"));
+        assert_eq!(window.cli_shortcut(&model,&shortcut,false).exit_code(),5,"old workspace revision must fail after shortcut state changes");
         window.window.close(); drop(old);
         crate::state::flush_state_saves_checked().unwrap();
         let _ = std::fs::remove_dir_all(root);

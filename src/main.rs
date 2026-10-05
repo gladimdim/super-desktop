@@ -13,6 +13,7 @@ mod control_input;
 mod control_files;
 mod control_viewport;
 mod control_attach;
+mod control_shortcut;
 mod control_workspace;
 mod control_service;
 mod brand;
@@ -690,6 +691,7 @@ fn run_daemon(start_visible: bool) {
     let (adopt_tx, mut adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
     let (geometry_tx, mut geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
     let (files_tx, mut files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
+    let (shortcut_tx, mut shortcut_rx)=futures_channel::mpsc::channel::<control_shortcut::Query>(8);
     let (close_tx, mut close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
     match control::Server::bind(&runtime_dir()) {
         Ok(server) => {
@@ -702,6 +704,13 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 control::capabilities(),
                             );
+                        }
+                        if matches!(request.command,control::Command::Shortcut {..}) {
+                            return control_shortcut::execute(&control_journal::root(),&request,deadline,|commit|{
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);
+                                shortcut_tx.clone().try_send(control_shortcut::Query {request:request.clone(),commit,responder,deadline}).map_err(|_|())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
+                            });
                         }
                         if let control::Command::Audit {after,limit,expect_revision}=&request.command {
                             return control_journal::list(&control_journal::root(), &request.request_id,after.as_deref(),*limit,expect_revision.as_deref());
@@ -894,6 +903,15 @@ fn run_daemon(start_visible: bool) {
                 else if let Some(window)=live_window(&files_context) {let model=Rc::clone(&files_context.borrow().local_workspace);window.cli_file_target(&model,&query.request)}
                 else {Err(control::Reply::failure(&query.request.request_id,"unavailable","Local desktop is not ready."))};
             let _=query.responder.send(result);
+        }
+    });
+    let shortcut_context=Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query)=shortcut_rx.next().await {
+            let reply=if std::time::Instant::now()>=query.deadline {control::Reply::failure(&query.request.request_id,"timeout","Shortcut request expired.")}
+                else if let Some(window)=live_window(&shortcut_context){let model=Rc::clone(&shortcut_context.borrow().local_workspace);window.cli_shortcut(&model,&query.request,query.commit)}
+                else{control::Reply::failure(&query.request.request_id,"unavailable","Desktop is not ready.")};
+            let _=query.responder.send(reply);
         }
     });
     let geometry_context = Rc::clone(&context);

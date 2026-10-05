@@ -95,6 +95,15 @@ the request and terminal inventory before taking further action. Unknown may
 include a launched process whose card could not be added. No automatic cleanup
 kills such a process, and a receipt does not establish ongoing process liveness.
 
+Shortcut preview/apply is Linux-local and separate from bridge operations.
+Preview exposes the configuration being reviewed. Apply binds a hash to the
+existing file, proposed contents and runtime bindings, plus workspace revision
+guards; key/modifier validation excludes injected Lua. It keeps a private backup,
+validates reload/configerrors and attempts rollback without overwriting a detected
+intervening edit. External writers are not locked, so a final-check race remains.
+A lost acknowledgement or failed state save can leave a changed binding and an
+unknown receipt; inspect it before choosing another operation.
+
 Audit list/export expose only local receipt metadata, with bounded pages and
 revision checks; full results require request inspect. Exports create a new
 0600 file and retain partial output on failure. Resource events are finite

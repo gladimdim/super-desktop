@@ -204,7 +204,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
                 ..
             } => id.clone(),
             control::Command::WorkspaceEdit { .. } => "workspace".into(),
-            control::Command::PreferencesEdit { .. } => "settings".into(),
+            control::Command::PreferencesEdit { .. } | control::Command::Shortcut {..} => "settings".into(),
             control::Command::Attach { id, .. }
             | control::Command::Viewport { id, .. }
             | control::Command::CardAction { id, .. }
