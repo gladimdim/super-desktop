@@ -2393,7 +2393,8 @@ impl SuperDesktopWindow {
         use crate::control_close::{Action, Target};
         let fail = |code, message| Reply::failure(&request.request_id, code, message);
         let (id, expect_epoch, expect_revision) = match &request.command {
-            Command::Close { id, expect_epoch, expect_revision, .. }
+            Command::Viewport {id,expect_epoch:Some(expect_epoch),expect_revision:Some(expect_revision),..}
+            | Command::Close { id, expect_epoch, expect_revision, .. }
             | Command::Input { id, expect_epoch, expect_revision, .. } => (id, expect_epoch, expect_revision),
             _ => return Err(fail("invalid_request", "Expected a guarded terminal operation.")),
         };

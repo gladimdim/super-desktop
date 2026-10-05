@@ -11,6 +11,7 @@ mod control_geometry;
 mod control_close;
 mod control_input;
 mod control_files;
+mod control_viewport;
 mod control_workspace;
 mod control_service;
 mod brand;
@@ -713,6 +714,13 @@ fn run_daemon(start_visible: bool) {
                                 let (responder,response)=std::sync::mpsc::sync_channel(1);
                                 files_tx.clone().try_send(control_files::Query {request:request.clone(),responder,deadline}).map_err(|_|control::Reply::failure(&request.request_id,"busy","File inventory is busy."))?;
                                 response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|control::Reply::failure(&request.request_id,"timeout","File inventory timed out."))?
+                            });
+                        }
+                        if matches!(request.command,control::Command::Viewport {..}|control::Command::Viewports {..}) {
+                            return control_viewport::execute(&control_journal::root(),&request,deadline,|| {
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);
+                                close_tx.clone().try_send(control_close::Query {request:request.clone(),action:control_close::Action::Inspect,responder,deadline}).map_err(|_|())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
                             });
                         }
                         if matches!(request.command, control::Command::Input { .. }) {

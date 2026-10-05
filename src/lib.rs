@@ -14,3 +14,5 @@ mod cli_workspace;
 mod cli_preferences;
 
 mod cli_files;
+
+mod cli_viewport;

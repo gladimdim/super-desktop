@@ -10,8 +10,7 @@ Your installed client and running daemon may support fewer commands: check
 
 **Current coverage:** the structured local CLI supports discovery, creation,
 terminal observation, guarded text/key input and prompt delivery, card geometry,
-card modes, guarded closing, notes and workspace layouts. It does not provide local attachment or direct
-terminal-grid resizing commands. Remote terminal
+card modes, guarded closing, notes and workspace layouts. Temporary terminal-grid leases are available; interactive attachment is not yet available. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
 
@@ -156,6 +155,29 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
+
+## Temporary terminal grid leases
+
+`terminal viewport acquire ID --columns 120 --rows 36 --ttl 60s` creates a
+separate sizing client for that exact live pane. Acquire and `terminal viewport
+set ID LEASE_ID --columns N --rows N` require terminal geometry epoch/revision,
+runtime pane identity and a request ID. Bounds are 20–500 columns, 5–300 rows
+and 1–300 seconds TTL (default 60s). Set renews the lease. At most four leases
+are active, one per card, and only single unlinked pane/window sessions using
+`window-size latest` qualify. Other policies are refused without changing them.
+
+`terminal viewport list ID` lists local CLI leases, including busy entries.
+`terminal viewport release ID LEASE_ID --request-id ID` detaches only that
+lease's client and works even if the card is gone. No persistent tmux option,
+input or harness process changes. The grid is shared: other clients may take
+sizing ownership, and resizing can reflow output. Reported effective size is
+from the last lease operation; use `terminal runtime` for a fresh observation.
+
+Expiry and detected pane replacement detach the client in the background.
+Cleanup can lag an in-flight bounded tmux command. Remaining clients determine
+the resulting grid; without an active sizing client the last grid may remain.
+Receipts are historical and do not renew or resurrect expired leases. After an
+unknown outcome, inspect both the receipt and viewport list before acting.
 
 ## Card stacking, focus and tags
 
@@ -679,6 +701,10 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
+| `terminal viewport acquire ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
+| `terminal viewport set ID LEASE_ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
+| `terminal viewport release ID LEASE_ID --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
 | `terminal focus ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Focus an attached local terminal |
 | `terminal raise ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Raise one local card |
 | `terminal tag set ID VALUE --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Set a terminal color tag |

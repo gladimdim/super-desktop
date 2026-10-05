@@ -52,6 +52,14 @@ Layout imports accept only typed IDs/modes/rectangles, validate all entries
 before movement, and cannot create sessions or import commands. Operations can
 still have unknown outcomes after application if transport or persistence fails.
 
+Local viewport leases own separate tmux clients and change only those clients'
+sizing participation. They require exact pane identity and current card guards,
+refuse linked/split windows and non-latest sizing policies, and expire after at
+most 300 requested seconds plus an in-flight command's cleanup delay. At most
+four clients are retained. Lease expiry, release and detected pane replacement
+detach the client without killing the harness. Leases do not imply exclusive
+control of the shared grid or restrict another owner's tmux access.
+
 Local CLI file commands use a separate bounded catalog and the existing
 workspace-relative descriptor traversal checks. Explicit reads return bounded
 base64 chunks; exports create only a user-named new file, with mode 0600 and
