@@ -106,7 +106,11 @@ def main():
         assert "Restart SUPER DESKTOP" in output, output
         pacman("-Rdd", "super-desktop-bin")
         assert not (root / "usr/bin/super-desktop").exists()
+        assert not (root / "usr/bin/super-desktop").is_symlink()
         assert not (root / "usr/bin/super-desktop-setup").exists()
+        assert not (root / "usr/lib/super-desktop").exists()
+        assert not (root / "usr/share/super-desktop").exists()
+        assert not (root / "usr/share/applications/super-desktop.desktop").exists()
         assert not notices.exists()
         for home, before in homes:
             assert snapshot(home) == before, "Package transaction changed user data"

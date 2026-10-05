@@ -787,13 +787,13 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
 }
 
 #[cfg(target_os = "linux")]
-fn read_chunk(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
+pub(crate) fn read_chunk(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
     stream.set_read_timeout(Some(remaining(deadline)?))?;
     stream.read(bytes)
 }
 
 #[cfg(target_os = "macos")]
-fn read_chunk(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
+pub(crate) fn read_chunk(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
     // Darwin rejects SO_RCVTIMEO after the peer closes, even when a complete
     // reply is buffered. Poll against the same absolute deadline and receive
     // without blocking so a closed peer cannot discard an already sent reply.

@@ -4,7 +4,7 @@ use crate::cli::{render_reply, Output};
 use crate::cli_extended::{json_requested, valid_id, Options};
 use crate::{control, control_journal};
 use serde_json::{json, Value};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::os::unix::{
     fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     net::UnixStream,
@@ -81,17 +81,12 @@ fn exchange(mut stream: UnixStream, action: &str, deadline: Instant) -> io::Resu
     let timeout = deadline
         .checked_duration_since(Instant::now())
         .ok_or(io::ErrorKind::TimedOut)?;
-    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     stream.write_all(format!("{action}\n").as_bytes())?;
     let mut bytes = vec![];
     loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .ok_or(io::ErrorKind::TimedOut)?;
-        stream.set_read_timeout(Some(remaining))?;
         let mut buffer = [0; 4096];
-        let count = match stream.read(&mut buffer) {
+        let count = match control::read_chunk(&mut stream, &mut buffer, deadline) {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             result => result?,
         };
@@ -248,12 +243,7 @@ pub(crate) fn execute(root: &Path, path: &Path, exe: &Path, action: &str, id: &s
                         reply.data = Some(v);
                         return reply;
                     }
-                    Err(error) => {
-                        #[cfg(test)]
-                        eprintln!("application exchange failed: {error}");
-                        let _ = error;
-                        return control::Reply::unknown(id);
-                    }
+                    Err(_) => return control::Reply::unknown(id),
                 }
             } else if action == "stop" {
                 return control::Reply::success(
@@ -356,7 +346,23 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    #[test]
+    fn lifecycle_keeps_complete_reply_from_a_peer_that_closes_immediately() {
+        for _ in 0..32 {
+            let (client, mut server) = UnixStream::pair().unwrap();
+            let worker = std::thread::spawn(move || {
+                let mut action = [0; 7];
+                server.read_exact(&mut action).unwrap();
+                assert_eq!(&action, b"status\n");
+                server.write_all(b"{\"ok\":true}").unwrap();
+            });
+            let reply = exchange(client, "status", Instant::now() + Duration::from_secs(2));
+            worker.join().unwrap();
+            assert_eq!(reply.unwrap()["ok"], true);
+        }
+    }
     #[test]
     fn lifecycle_reply_deadline_is_absolute_even_when_bytes_keep_arriving() {
         let (client, mut server) = UnixStream::pair().unwrap();
