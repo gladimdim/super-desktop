@@ -20,6 +20,8 @@ fn control_daemon_fixture() {
             }
         }
         let data = match &request.command {
+            control::Command::Audit {..}=>serde_json::json!({"entries":[{"id":"example","state":"recorded"}],"revision":"a".repeat(64),"nextCursor":null}),
+            control::Command::Access {}=>serde_json::json!({"mode":"owner"}),
             control::Command::Attach {interactive,expect_pane_identity,..}=>{
                 let nonce=control::new_request(control::Command::Status {}).unwrap().request_id;
                 let name=format!("attach-{nonce}.sock");let path=Path::new(&runtime).join("super-desktop").join(&name);
@@ -349,6 +351,16 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 assert_eq!(output.status.code(), Some(2));
             }
         }
+        for arguments in [vec!["audit","list"],vec!["access","list"],vec!["doctor"]] {
+            let out=Command::new(executable).args(arguments).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
+        }
+        let export=fixture.root.join(format!("audit-{}.jsonl",Path::new(executable).file_name().unwrap().to_string_lossy()));
+        let export_args=["audit","export","--output",export.to_str().unwrap(),"--format=json"];
+        assert!(Command::new(executable).args(export_args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap().status.success());
+        assert!(std::fs::read_to_string(&export).unwrap().contains("example"));
+        assert!(!Command::new(executable).args(export_args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap().status.success());
+        let events=Command::new(executable).args(["events","--resource","terminals","--seconds","1","--after",&revision,"--format=jsonl"]).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(events.status.success(),"{}",String::from_utf8_lossy(&events.stdout));
+        let frames:Vec<serde_json::Value>=String::from_utf8(events.stdout).unwrap().lines().map(|s|serde_json::from_str(s).unwrap()).collect();assert_eq!(frames.len(),2);assert_eq!(frames[0]["type"],"snapshot");assert_eq!(frames[0]["resyncRequired"],true);assert_eq!(frames[0]["sequence"],0);assert_eq!(frames[1]["type"],"end");assert_eq!(frames[1]["sequence"],1);
         let input_file = fixture.root.join("input.txt");
         std::fs::write(&input_file, "literal ✓\nsecond line").unwrap();
         for action in ["send", "prompt", "keys", "interrupt"] {

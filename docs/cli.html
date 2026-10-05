@@ -59,6 +59,7 @@
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
 <li><a href="#legacy-and-remote-commands">Legacy and remote commands</a></li>
 <li><a href="#complete-public-command-syntax">Complete public command syntax</a></li>
+<li><a href="#audit-access-and-resource-events">Audit, access and resource events</a></li>
 <li><a href="#prompt-file-references">Prompt file references</a></li>
 <li><a href="#local-terminal-attachment">Local terminal attachment</a></li>
 <li><a href="#shell-completion-and-updates">Shell completion and updates</a></li>
@@ -1139,6 +1140,31 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td>Query the running local control service</td>
 </tr>
 <tr>
+<td><code>audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>List private mutation receipt metadata</td>
+</tr>
+<tr>
+<td><code>audit export --output PATH [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Export a stable receipt metadata inventory</td>
+</tr>
+<tr>
+<td><code>access list [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Inspect local control ownership</td>
+</tr>
+<tr>
+<td><code>doctor [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Check local CLI and daemon connectivity</td>
+</tr>
+<tr>
+<td><code>events --resource app\|terminals\|workspace\|notes [--seconds N] [--interval-ms N] [--after CURSOR] [--format jsonl] [--target local]</code></td>
+<td>Structured local</td>
+<td>Stream finite resource snapshots</td>
+</tr>
+<tr>
 <td><code>app status [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Inspect local daemon readiness and counts</td>
@@ -1300,6 +1326,27 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </tbody>
 </table></div>
+<h2 id="audit-access-and-resource-events">Audit, access and resource events</h2>
+<p><code>audit list</code> returns receipt metadata sorted by request ID, without result
+contents. Use <code>nextCursor</code> as <code>--after</code> and the returned <code>revision</code> as
+<code>--expect-revision</code> for consistent pagination (1–100 per page). A change during
+pagination requires a fresh inventory. These receipts cover local CLI mutations,
+not every action performed through the GUI or bridge. Timestamps are receipt
+modification times, not a complete action timeline.</p>
+<p><code>audit export --output PATH</code> writes up to 4096 metadata records as JSONL into a
+new 0600 file. It never overwrites. Failure can leave a partial file. Use
+<code>request inspect ID</code> separately for a full historical result.</p>
+<p><code>access list</code> describes the owner-only socket and current UID. Delegated access
+is unsupported; same-user programs already run with the owner's authority.
+<code>doctor</code> reads daemon readiness/capabilities and reports client/platform details
+without starting or repairing anything; absent or unreachable daemons fail.</p>
+<p><code>events --resource app|terminals|workspace|notes --seconds 10</code> emits finite JSONL
+replacement snapshots and an end event. It polls every 500 ms by default, with
+limits of one hour, 4096 snapshots and about 4 MiB plus a final snapshot.
+Sequences belong to a single stream. <code>--after CURSOR</code> always produces a fresh
+baseline marked <code>resyncRequired: true</code>: there is no durable replay, and
+<code>mayHaveGaps: true</code> means intervening changes can be missed. Terminal content
+uses <code>terminal follow</code> or explicit attachment instead.</p>
 <h2 id="prompt-file-references">Prompt file references</h2>
 <p>Add <code>--attachment ASSET_ID</code> to <code>terminal prompt</code>, repeated up to four times.
 Get IDs from <code>terminal files list/add</code>. The daemon rechecks each file's version

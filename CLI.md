@@ -767,6 +767,11 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
 | `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable mutation receipt |
 | `capabilities [--format text\|json] [--target local]` | Structured local | Query the running local control service |
+| `audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text\|json] [--target local]` | Structured local | List private mutation receipt metadata |
+| `audit export --output PATH [--format text\|json] [--target local]` | Structured local | Export a stable receipt metadata inventory |
+| `access list [--format text\|json] [--target local]` | Structured local | Inspect local control ownership |
+| `doctor [--format text\|json] [--target local]` | Structured local | Check local CLI and daemon connectivity |
+| `events --resource app\|terminals\|workspace\|notes [--seconds N] [--interval-ms N] [--after CURSOR] [--format jsonl] [--target local]` | Structured local | Stream finite resource snapshots |
 | `app status [--format text\|json] [--target local]` | Structured local | Inspect local daemon readiness and counts |
 | `terminal list [--format text\|json] [--target local]` | Structured local | List local saved terminal cards |
 | `terminal inspect ID [--format text\|json] [--target local]` | Structured local | Inspect one local saved terminal card |
@@ -799,6 +804,32 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Audit, access and resource events
+
+`audit list` returns receipt metadata sorted by request ID, without result
+contents. Use `nextCursor` as `--after` and the returned `revision` as
+`--expect-revision` for consistent pagination (1–100 per page). A change during
+pagination requires a fresh inventory. These receipts cover local CLI mutations,
+not every action performed through the GUI or bridge. Timestamps are receipt
+modification times, not a complete action timeline.
+
+`audit export --output PATH` writes up to 4096 metadata records as JSONL into a
+new 0600 file. It never overwrites. Failure can leave a partial file. Use
+`request inspect ID` separately for a full historical result.
+
+`access list` describes the owner-only socket and current UID. Delegated access
+is unsupported; same-user programs already run with the owner's authority.
+`doctor` reads daemon readiness/capabilities and reports client/platform details
+without starting or repairing anything; absent or unreachable daemons fail.
+
+`events --resource app|terminals|workspace|notes --seconds 10` emits finite JSONL
+replacement snapshots and an end event. It polls every 500 ms by default, with
+limits of one hour, 4096 snapshots and about 4 MiB plus a final snapshot.
+Sequences belong to a single stream. `--after CURSOR` always produces a fresh
+baseline marked `resyncRequired: true`: there is no durable replay, and
+`mayHaveGaps: true` means intervening changes can be missed. Terminal content
+uses `terminal follow` or explicit attachment instead.
 
 ## Prompt file references
 

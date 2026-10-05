@@ -28,7 +28,8 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
-        Command::Attach { .. }
+        Command::Audit { .. }
+        | Command::Attach { .. }
         | Command::Viewport { .. }
         | Command::Viewports { .. }
         | Command::CardAction { .. }
@@ -55,6 +56,7 @@ pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
                 "This request requires a dedicated dispatcher.",
             )
         }
+        Command::Access {} => json!({"mode":"owner","uid":unsafe {libc::geteuid()},"delegationSupported":false,"sandbox":false,"credentials":[],"scope":"local-control","socketPermissions":"0600","directoryPermissions":"0700"}),
         Command::Capabilities {} => control::capabilities(),
         Command::Status {} => {
             json!({"serverVersion":env!("CARGO_PKG_VERSION"), "controlVersion":control::VERSION,

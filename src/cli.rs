@@ -99,6 +99,11 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
     command!("request inspect", "Inspect a durable mutation receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and target or reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact mutation request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
     command!("capabilities", "Query the running local control service", "capabilities [--format text|json] [--target local]", "Read-only; never starts a daemon", "Compatible local daemon and private owner socket", "Versioned envelope with supported methods, access and limits; exits 0/2/4/6/7/8", "super-desktop capabilities --format json", false),
+    command!("audit list", "List private mutation receipt metadata", "audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text|json] [--target local]", "Reads metadata only, sorted by request ID; no prompt, result contents or credentials", "Owner daemon; returned revision guards pagination", "Envelope with entries, total, revision and nextCursor; historical receipts do not establish current state", "super-desktop audit list --format json", false),
+    command!("audit export", "Export a stable receipt metadata inventory", "audit export --output PATH [--format text|json] [--target local]", "Creates a new 0600 JSONL file, never overwrites; partial file retained on failure", "Owner daemon; explicit new destination; up to 4096 receipts", "Envelope with output, count and revision; no receipt result payloads", "super-desktop audit export --output /tmp/receipts.jsonl --format json", false),
+    command!("access list", "Inspect local control ownership", "access list [--format text|json] [--target local]", "Read-only; exposes no bridge credentials", "Owner daemon; same-user callers are not sandboxed", "Owner UID, socket modes and delegationSupported=false; no grant or revoke facility", "super-desktop access list --format json", false),
+    command!("doctor", "Check local CLI and daemon connectivity", "doctor [--format text|json] [--target local]", "Reads capabilities and readiness; does not start or repair anything", "Works without a daemon; reports connection failure with nonzero exit", "Client version, platform, display environment presence, daemon response and capabilities", "super-desktop doctor --format json", false),
+    command!("events", "Stream finite resource snapshots", "events --resource app|terminals|workspace|notes [--seconds N] [--interval-ms N] [--after CURSOR] [--format jsonl] [--target local]", "Polls replacement snapshots, not every intervening event; cursor resume always emits a fresh baseline with resyncRequired=true", "Owner daemon; 1-3600 seconds default10; 200-10000ms interval default500; 4096 snapshots or about4MiB plus one final snapshot", "JSONL snapshot/end events with streamId, sequence, cursor and mayHaveGaps=true; no durable event replay", "super-desktop events --resource terminals --seconds 10 --format jsonl", false),
     command!("app status", "Inspect local daemon readiness and counts", "app status [--format text|json] [--target local]", "Read-only; never opens the overlay", "Compatible local daemon and private owner socket", "Versioned envelope with ready, visible, notesCount, terminalsCount; exits 0/2/4/6/7/8", "super-desktop app status --format json", false),
     command!("terminal list", "List local saved terminal cards", "terminal list [--format text|json] [--target local]", "Reads IDs, harness types, launch directories and saved logical-pixel geometry; no prompts or output", "Compatible local daemon; runtime liveness is not observed", "Versioned envelope containing terminals, inventory and runtimeObserved; exits 0/2/4/6/7/8", "super-desktop terminal list --format json", false),
     command!("terminal inspect", "Inspect one local saved terminal card", "terminal inspect ID [--format text|json] [--target local]", "Read-only; exact card ID required; geometry describes saved card bounds, not live terminal cells", "Compatible local daemon; runtime liveness is not observed", "Versioned envelope with card metadata; exits 0/2/3/4/6/7/8", "super-desktop terminal inspect CARD_ID --format json", false),
@@ -300,7 +305,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
     if args.len() >= 2 && matches!(args.last().map(String::as_str), Some("--help" | "-h")) {
         let path = args[..args.len() - 1].join(" ");
-        if args.len() == 2 || action == "theme" || matches!(action, "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
+        if args.len() == 2 || action == "theme" || matches!(action, "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
             return Some(group_or_help(&path));
         }
     }
@@ -335,7 +340,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
             Output::usage("Usage: super-desktop completion bash")
         });
     }
-    if matches!(action, "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
+    if matches!(action, "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
         return if args.len() == 1 {
             Some(group_or_help(action))
         } else {
@@ -352,6 +357,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
 pub fn run(args: &[String]) -> Option<i32> {
     let offline = dispatch(args);
     if offline.is_none() {
+        if let Some(code)=crate::cli_admin::events(args){return Some(code);}
         if let Some(code) = crate::cli_attach::run(args) {
             return Some(code);
         }
@@ -362,7 +368,7 @@ pub fn run(args: &[String]) -> Option<i32> {
     let output = offline.or_else(|| {
         (args.first().is_some_and(|a| a=="theme") && args.len()>1 || matches!(
             args.first().map(String::as_str),
-            Some("app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage" | "capabilities")
+            Some("audit" | "access" | "doctor" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage" | "capabilities")
         ))
         .then(|| live(args))
     });
@@ -464,6 +470,7 @@ fn group_or_help(path: &str) -> Output {
 }
 
 fn live(args: &[String]) -> Output {
+    if let Some(output)=crate::cli_admin::run(args){return output;}
     if let Some(output) = crate::cli_viewport::run(args) { return output; }
     if let Some(output) = crate::cli_extended::card(args) { return output; }
     if let Some(output) = crate::cli_files::run(args) { return output; }

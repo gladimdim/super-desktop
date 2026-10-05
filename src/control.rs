@@ -21,6 +21,8 @@ pub const MAX_CONNECTIONS: usize = 8;
 pub const DEADLINE: Duration = Duration::from_secs(3);
 pub const METHODS: &[&str] = &[
     "app.status",
+    "audit.list",
+    "access.list",
     "capabilities",
     "terminal.list",
     "terminal.inspect",
@@ -235,6 +237,10 @@ pub enum FilesEdit {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename = "audit.list")]
+    Audit { after: Option<String>, limit:u16, #[serde(rename="expectRevision")] expect_revision:Option<String> },
+    #[serde(rename = "access.list")]
+    Access {},
     #[serde(rename = "app.status")]
     Status {},
     #[serde(rename = "terminal.attach")]

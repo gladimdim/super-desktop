@@ -703,6 +703,9 @@ fn run_daemon(start_visible: bool) {
                                 control::capabilities(),
                             );
                         }
+                        if let control::Command::Audit {after,limit,expect_revision}=&request.command {
+                            return control_journal::list(&control_journal::root(), &request.request_id,after.as_deref(),*limit,expect_revision.as_deref());
+                        }
                         if let control::Command::InspectRequest { id } = &request.command {
                             return control_journal::inspect(
                                 &control_journal::root(),

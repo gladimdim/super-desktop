@@ -18,3 +18,5 @@ mod cli_files;
 mod cli_viewport;
 
 mod cli_attach;
+
+mod cli_admin;

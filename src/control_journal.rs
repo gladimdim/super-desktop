@@ -259,6 +259,37 @@ pub fn inspect(root: &Path, request_id: &str, id: &str) -> Reply {
     }
 }
 
+/// Stable, bounded receipt metadata; never includes result payloads or credentials.
+pub fn list(root:&Path,request_id:&str,after:Option<&str>,limit:u16,expected:Option<&str>)->Reply {
+    use std::os::unix::fs::MetadataExt;
+    let fail=|code,message|Reply::failure(request_id,code,message);
+    if !(1..=100).contains(&limit) || after.is_some_and(|s|!valid_id(s)) { return fail("invalid_arguments","Use limit 1-100 and a returned cursor."); }
+    let collect=||->io::Result<Vec<(String,u64,i64,i64,u64)>> {
+        match control::private_dir(root) { Err(e) if e.kind()==io::ErrorKind::NotFound=>return Ok(vec![]),Err(e)=>return Err(e),Ok(_)=>{} }
+        let mut files=vec![];
+        for file in fs::read_dir(root)? {
+            let file=file?;let name=file.file_name();let Some(id)=name.to_str().and_then(|n|n.strip_suffix(".json")) else {continue;};
+            if !valid_id(id) {return Err(io::Error::other("invalid receipt name"));}
+            let m=control::private_file(&file.path(),false)?;
+            files.push((id.to_owned(),m.ino(),m.mtime(),m.mtime_nsec(),m.len()));
+            if files.len()>MAX_ENTRIES {return Err(io::Error::other("too many receipts"));}
+        }
+        files.sort();Ok(files)
+    };
+    let files=match collect(){Ok(v)=>v,Err(_)=>return fail("unavailable","Private receipt inventory is unavailable.")};
+    let revision=format!("{:x}",Sha256::digest(serde_json::to_vec(&files).unwrap()));
+    if expected.is_some_and(|v|v!=revision) {return fail("conflict","Receipt inventory changed; restart pagination.");}
+    let mut entries=vec![];
+    let eligible:Vec<_>=files.iter().filter(|f|after.is_none_or(|a|f.0.as_str()>a)).collect();
+    for (id,_,modified,_,_) in eligible.iter().take(limit as usize).copied() {
+        let entry=match read(&root.join(format!("{id}.json"))){Ok(Some(v))=>v,_=>return fail("unavailable","A receipt is unreadable; inventory is incomplete.")};
+        entries.push(serde_json::json!({"id":id,"cardId":entry.card_id,"state":if entry.reply.is_some(){"recorded"}else{"unknown"},"ok":entry.reply.as_ref().map(|r|r.ok),"outcome":entry.reply.as_ref().and_then(|r|r.error.as_ref()).map(|e|e.outcome.as_str()),"modifiedUnixSeconds":modified}));
+    }
+    if collect().ok().as_ref()!=Some(&files){return fail("conflict","Receipt inventory changed during this read.");}
+    let next=if eligible.len()>entries.len(){entries.last().map(|e|e["id"].clone())}else{None};
+    Reply::success(request_id,serde_json::json!({"entries":entries,"revision":revision,"total":files.len(),"nextCursor":next,"order":"request-id","contentIncluded":false,"scope":"local-cli-mutations"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +323,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn audit_pages_redact_content_guard_revisions_and_refuse_symlinks() {
+        let root=Temp::new();let request=request();
+        assert!(list(&root.0,"read",None,1,None).ok);
+        for n in 0..3 {let mut r=request.clone();r.request_id=format!("audit-{n}");assert!(execute(&root.0,&r,|_|Reply::success(&r.request_id,serde_json::json!({"secret":"PRIVATE TEXT"}))).ok);}
+        let first=list(&root.0,"read",None,1,None).data.unwrap();
+        assert_eq!(first["total"],3);assert_eq!(first["nextCursor"],"audit-0");assert!(!first.to_string().contains("PRIVATE TEXT"));
+        let revision=first["revision"].as_str().unwrap();
+        let second=list(&root.0,"read",Some("audit-0"),2,Some(revision)).data.unwrap();assert_eq!(second["entries"].as_array().unwrap().len(),2);assert!(second["nextCursor"].is_null());
+        assert!(execute(&root.0,&request,|_|Reply::success("launch-1",serde_json::json!({}))).ok);
+        assert_eq!(list(&root.0,"read",Some("audit-0"),2,Some(revision)).exit_code(),5);
+        std::os::unix::fs::symlink(root.0.join("audit-0.json"),root.0.join("linked.json")).unwrap();
+        assert!(!list(&root.0,"read",None,100,None).ok);
+    }
     #[test]
     fn cli_launch_receipt_replays_result_and_rejects_reused_id_with_changed_payload() {
         let root = Temp::new();

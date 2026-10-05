@@ -95,6 +95,13 @@ the request and terminal inventory before taking further action. Unknown may
 include a launched process whose card could not be added. No automatic cleanup
 kills such a process, and a receipt does not establish ongoing process liveness.
 
+Audit list/export expose only local receipt metadata, with bounded pages and
+revision checks; full results require request inspect. Exports create a new
+0600 file and retain partial output on failure. Resource events are finite
+polled replacement snapshots with explicit gap/resync markers; they are not an
+audit log. Access inspection exposes owner UID/modes, not bridge credentials,
+and offers no delegated sandbox or grant/revoke facility.
+
 Moves and resizes require the epoch and opaque revision from a current geometry
 read. The daemon validates them on the GTK thread against the current card and
 logical output, and refuses an active gesture. Expanded cards cannot be moved
