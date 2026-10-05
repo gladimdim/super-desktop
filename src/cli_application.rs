@@ -248,7 +248,12 @@ pub(crate) fn execute(root: &Path, path: &Path, exe: &Path, action: &str, id: &s
                         reply.data = Some(v);
                         return reply;
                     }
-                    Err(_) => return control::Reply::unknown(id),
+                    Err(error) => {
+                        #[cfg(test)]
+                        eprintln!("application exchange failed: {error}");
+                        let _ = error;
+                        return control::Reply::unknown(id);
+                    }
                 }
             } else if action == "stop" {
                 return control::Reply::success(
@@ -446,7 +451,9 @@ mod tests {
             already.data.unwrap()["outcome"],
             "already_running"
         );
-        assert_eq!(run("show", "show").data.unwrap()["status"]["visible"], true);
+        let shown = run("show", "show");
+        assert!(shown.ok, "{shown:?}\n{}", std::fs::read_to_string(root.join("cli-start-start.log")).unwrap_or_default());
+        assert_eq!(shown.data.unwrap()["status"]["visible"], true);
         assert_eq!(
             run("toggle", "toggle").data.unwrap()["status"]["visible"],
             false
