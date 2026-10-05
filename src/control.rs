@@ -31,6 +31,7 @@ pub const METHODS: &[&str] = &[
     "terminal.resize",
     "terminal.close",
     "terminal.mode",
+    "terminal.input",
     "harness.list",
     "harness.inspect",
     "harness.launch",
@@ -44,6 +45,73 @@ pub enum ModeAction {
     Restore,
     Expand,
     Collapse,
+}
+
+pub const MAX_INPUT: usize = 4096;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum InputData {
+    Send {
+        text: String,
+        #[serde(default)]
+        enter: bool,
+    },
+    Keys {
+        keys: Vec<String>,
+    },
+    Prompt {
+        text: String,
+    },
+}
+
+pub fn key_name(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "Enter" => "Enter",
+        "Escape" => "Escape",
+        "Tab" => "Tab",
+        "Backspace" => "BSpace",
+        "Delete" => "DC",
+        "Up" => "Up",
+        "Down" => "Down",
+        "Left" => "Left",
+        "Right" => "Right",
+        "Home" => "Home",
+        "End" => "End",
+        "PageUp" => "PPage",
+        "PageDown" => "NPage",
+        "Ctrl-C" => "C-c",
+        "Ctrl-D" => "C-d",
+        "Ctrl-U" => "C-u",
+        "Ctrl-L" => "C-l",
+        _ => return None,
+    })
+}
+
+impl InputData {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        match self {
+            Self::Send { text, .. } | Self::Prompt { text } => {
+                if text.is_empty()
+                    || text.len() > MAX_INPUT
+                    || text
+                        .chars()
+                        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+                {
+                    return Err("Input must contain 1-4096 UTF-8 bytes; controls other than newline/tab are refused. Use named keys for controls.");
+                }
+            }
+            Self::Keys { keys }
+                if keys.is_empty()
+                    || keys.len() > 32
+                    || keys.iter().any(|key| key_name(key).is_none()) =>
+            {
+                return Err("Send 1-32 supported named keys. See terminal keys --help.");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +170,17 @@ pub enum Command {
         #[serde(rename = "expectRevision")]
         expect_revision: String,
     },
+    #[serde(rename = "terminal.input")]
+    Input {
+        id: String,
+        input: InputData,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+        #[serde(rename = "expectPaneIdentity")]
+        expect_pane_identity: String,
+    },
     #[serde(rename = "terminal.close")]
     Close {
         id: String,
@@ -133,7 +212,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Mode { .. }
+            Self::Input { .. }
+                | Self::Mode { .. }
                 | Self::Launch { .. }
                 | Self::Move { .. }
                 | Self::Resize { .. }
@@ -231,6 +311,7 @@ pub fn capabilities() -> Value {
         "delegatedAccess": false, "remoteTargets": false,
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
+        "terminalInput":{"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
         "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
         "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})

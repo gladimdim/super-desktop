@@ -190,7 +190,8 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
         version: 1,
         request_hash: hash,
         card_id: match &request.command {
-            control::Command::Mode { id, .. }
+            control::Command::Input { id, .. }
+            | control::Command::Mode { id, .. }
             | control::Command::Move { id, .. }
             | control::Command::Resize { id, .. }
             | control::Command::Close { id, .. } => id.clone(),

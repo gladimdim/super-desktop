@@ -3,7 +3,7 @@ use crate::control::{Command, Reply, Request};
 use crate::state::{AppState, TerminalData};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::process::{Child, Command as Process, Stdio};
@@ -39,7 +39,16 @@ pub(crate) struct Output {
 /// Drain a nonblocking pipe with a hard allocation limit and absolute deadline.
 /// Never wait on a child while its stdout can fill, and never leave it behind.
 pub(crate) fn read_process(
+    command: Process,
+    limit: usize,
+    deadline: Instant,
+) -> Result<Output, Failure> {
+    read_process_input(command, None, limit, deadline)
+}
+
+pub(crate) fn read_process_input(
     mut command: Process,
+    input: Option<&[u8]>,
     limit: usize,
     deadline: Instant,
 ) -> Result<Output, Failure> {
@@ -48,7 +57,11 @@ pub(crate) fn read_process(
     }
     let mut child = Reap(
         command
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .env_remove("TMUX")
@@ -56,6 +69,15 @@ pub(crate) fn read_process(
             .spawn()
             .map_err(|_| UNAVAILABLE)?,
     );
+    let mut stdin = child.0.stdin.take();
+    if let Some(pipe) = &stdin {
+        let fd = pipe.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(UNAVAILABLE);
+        }
+    }
+    let mut remaining_input = input.unwrap_or_default();
     let mut pipe = child.0.stdout.take().ok_or(UNAVAILABLE)?;
     let fd = pipe.as_raw_fd();
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
@@ -67,6 +89,23 @@ pub(crate) fn read_process(
     loop {
         if Instant::now() >= deadline {
             return Err(TIMEOUT);
+        }
+        if let Some(pipe) = &mut stdin {
+            if !remaining_input.is_empty() {
+                match pipe.write(remaining_input) {
+                    Ok(0) => return Err(UNAVAILABLE),
+                    Ok(n) => remaining_input = &remaining_input[n..],
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => return Err(UNAVAILABLE),
+                }
+            }
+            if remaining_input.is_empty() {
+                stdin.take();
+            }
         }
         for _ in 0..8 {
             let mut buffer = [0; 8192];

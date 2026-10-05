@@ -9,6 +9,7 @@ mod control_launch;
 mod control_terminal;
 mod control_geometry;
 mod control_close;
+mod control_input;
 mod control_service;
 mod brand;
 mod assets;
@@ -703,6 +704,13 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 id,
                             );
+                        }
+                        if matches!(request.command, control::Command::Input { .. }) {
+                            return control_input::execute(&control_journal::root(), &request, deadline, || {
+                                let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action: control_close::Action::Inspect, responder, deadline }).map_err(|_| ())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
+                            });
                         }
                         if matches!(request.command, control::Command::Close { .. }) {
                             return control_close::execute(&control_journal::root(), &request, deadline, |action| {

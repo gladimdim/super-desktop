@@ -45,7 +45,7 @@ require `--allow-download`. These are per-request acknowledgements, not
 restrictions on an executable's own behavior, startup files or network access.
 Launches require an absolute existing directory and never submit a prompt.
 
-Before a structured launch, move, resize, mode change or close the daemon durably records the
+Before a structured launch, move, resize, mode change, input or close the daemon durably records the
 request ID, a hash of its parameters and a target or reserved card ID in an
 owner-only state directory.
 Receipts and the journal lock have mode 0600; symlink paths are refused.
@@ -72,6 +72,16 @@ only to an exact existing session name and never execute the saved launcher or
 respawn an exited pane. Attachment is asynchronous and can change the cell grid;
 a successful mode receipt does not establish attachment or process identity.
 No mode command explicitly shows or focuses the overlay. Expansion is transient.
+
+Structured input additionally requires the observed pane identity. It rechecks
+card ownership and runtime identity, then uses a synchronous tmux condition and
+per-operation marker to send to the exact observed pane. Copy mode, exited and
+ambiguous/shared panes are refused. Text travels over stdin as hexadecimal bytes,
+not in subprocess arguments, receipt contents or temporary files. Named keys are
+allowlisted. Input is code execution as the owner; multiline text can execute
+without an appended Enter. Composer checks cannot exclude concurrent GUI/phone
+input. Acknowledged delivery is not verified submission or completion. Unknown
+outcomes are never replayed. A harmless input marker may remain after refusal.
 
 Structured close requires the current card epoch/revision and live pane identity.
 The worker serializes against pending preparation; GTK rechecks the exact card

@@ -2192,8 +2192,10 @@ impl SuperDesktopWindow {
         use crate::control::{Command, Reply};
         use crate::control_close::{Action, Target};
         let fail = |code, message| Reply::failure(&request.request_id, code, message);
-        let Command::Close { id, expect_epoch, expect_revision, .. } = &request.command else {
-            return Err(fail("invalid_request", "Expected terminal close."));
+        let (id, expect_epoch, expect_revision) = match &request.command {
+            Command::Close { id, expect_epoch, expect_revision, .. }
+            | Command::Input { id, expect_epoch, expect_revision, .. } => (id, expect_epoch, expect_revision),
+            _ => return Err(fail("invalid_request", "Expected a guarded terminal operation.")),
         };
         let snapshot = self.desktop_snapshot(model).map_err(|_| fail("unavailable", "Local workspace is unavailable."))?;
         let current = snapshot.cards.iter().find(|card| card.card_id == *id)
@@ -2215,6 +2217,9 @@ impl SuperDesktopWindow {
         match action {
             Action::Inspect => Ok(Some(Target { data, task: card.cli_session_task() })),
             Action::Remove(expected) => {
+                if !matches!(request.command, Command::Close { .. }) {
+                    return Err(fail("invalid_request", "Only close may remove a card."));
+                }
                 if data.id != expected.data.id || data.session_name != expected.data.session_name
                     || data.created_at != expected.data.created_at
                     || !std::sync::Arc::ptr_eq(&card.cli_session_task(), &expected.task) {

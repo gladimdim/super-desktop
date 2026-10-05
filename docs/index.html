@@ -220,7 +220,7 @@
       <div class="card"><h3>📖 Built for foldables</h3><p>Unfold for two live terminals side by side next to your harness list, with layouts that follow every fold and resize. On Android today, coming to iPhone.</p></div>
       <div class="card"><h3>🖥️ All your PCs, connected</h3><p>Pair as many PCs as you like. Each one can open any other's workspace, to watch and type into its sessions as if you were there.</p></div>
       <div class="card"><h3>🔒 No accounts, no servers</h3><p>Your PCs and phones talk directly over your own network or Tailscale, encrypted and pinned to each device. Nothing to sign up for, no cloud in between.</p></div>
-      <div class="card"><h3>⌨️ CLI control for agents</h3><p>List harnesses, inspect terminal cards, live sizes and bounded output, move, resize and change card modes, close exact sessions, create shell terminals, and launch configured agents. Built-in help and JSON results let other agents discover how to use it. <a href="cli.html">Read the CLI reference →</a></p></div>
+      <div class="card"><h3>⌨️ CLI control for agents</h3><p>List harnesses, inspect terminal cards, live sizes and bounded output, send guarded text and keys, move, resize and change card modes, close exact sessions, create shell terminals, and launch configured agents. Built-in help and JSON results let other agents discover how to use it. <a href="cli.html">Read the CLI reference →</a></p></div>
       <div class="card"><h3>⚡ Native and fast</h3><p>Rust, GTK4 and tmux: no Electron, no web views. The workspace is there the moment you press the shortcut, and your agents keep running while it is hidden.</p></div>
       <div class="card wide"><h3>🤖 Use any harness</h3><p>Every coding agent installed on the PC gets a one-click launcher.</p>
         <div class="harness-row">
@@ -253,7 +253,7 @@
     <div class="grid">
       <div class="card"><h3>Discover before acting</h3><p>Read command help, inspect the command catalog, and query the running desktop's capabilities. List available harnesses, inspect saved cards and live cell grids, and capture screen text or bounded scrollback using exact card IDs.</p></div>
       <div class="card"><h3>Launch with explicit choices</h3><p>Create a shell or launch a harness without opening the overlay. Permission-bypass configurations and built-in download fallbacks require explicit opt-in.</p></div>
-      <div class="card"><h3>Track each change</h3><p>JSON responses and durable request receipts let an agent inspect an uncertain result. Reusing the same request ID and payload does not repeat a launch, move, resize, mode change or close.</p></div>
+      <div class="card"><h3>Track each change</h3><p>JSON responses and durable request receipts let an agent inspect an uncertain result. Reusing the same request ID and payload does not repeat a launch, move, resize, mode change, input or close.</p></div>
       <div class="card"><h3>Move and resize safely</h3><p>Read logical display bounds, move and resize cards, and minimize, restore, expand or collapse them. Revision checks reject stale edits; bounds adjustments require explicit opt-in.</p></div>
       <div class="card"><h3>Close the intended session</h3><p>Close a terminal using its exact card and live pane identities. Stale targets are refused, and durable receipts prevent a repeated request from closing a replacement session.</p></div>
     </div>

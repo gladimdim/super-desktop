@@ -15,12 +15,12 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
-            control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
+            control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}"}),
             control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
@@ -141,6 +141,55 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                     .output()
                     .unwrap();
                 assert_eq!(output.status.code(), Some(2));
+            }
+        }
+        let input_file = fixture.root.join("input.txt");
+        std::fs::write(&input_file, "literal ✓\nsecond line").unwrap();
+        for action in ["send", "prompt", "keys", "interrupt"] {
+            let mut args = vec![
+                "terminal",
+                action,
+                "card-1",
+                "--expect-epoch=epoch-1",
+                "--expect-revision",
+                &revision,
+                "--expect-pane-identity",
+                &revision,
+                "--request-id=input-001",
+            ];
+            if matches!(action, "send" | "prompt") {
+                args.extend(["--file", input_file.to_str().unwrap()]);
+            }
+            if action == "keys" {
+                args.extend(["Enter", "Ctrl-C"]);
+            }
+            let output = Command::new(executable)
+                .args(&args)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(reply["data"]["method"], "terminal.input");
+            assert_eq!(reply["requestId"], "input-001");
+            if matches!(action, "send" | "prompt") {
+                assert_eq!(reply["data"]["input"]["text"], "literal ✓\nsecond line");
+            }
+            for extra in ["--clamp", "--all", "--width=500", "--raw"] {
+                let output = Command::new(executable)
+                    .args(&args)
+                    .arg(extra)
+                    .arg("--format=json")
+                    .env("XDG_RUNTIME_DIR", &fixture.root)
+                    .output()
+                    .unwrap();
+                assert_eq!(output.status.code(), Some(2), "{action} {extra}");
             }
         }
         let geometry = [
@@ -460,6 +509,7 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 "older-001",
             ],
             vec!["request", "inspect", "older-001"],
+            vec!["terminal", "interrupt", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--expect-pane-identity=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "--request-id=older-input"],
             vec!["terminal", "minimize", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
             vec!["terminal", "restore", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
             vec!["terminal", "expand", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],

@@ -45,6 +45,7 @@
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
 <li><a href="#card-geometry-movement-and-resizing">Card geometry, movement and resizing</a></li>
+<li><a href="#guarded-terminal-input">Guarded terminal input</a></li>
 <li><a href="#guarded-card-modes">Guarded card modes</a></li>
 <li><a href="#launching-and-permission-choices">Launching and permission choices</a></li>
 <li><a href="#guarded-terminal-closing">Guarded terminal closing</a></li>
@@ -67,8 +68,9 @@ This reference covers implemented public commands on the default branch.
 Your installed client and running daemon may support fewer commands: check
 <code>--help</code> and <code>capabilities</code> before automating them.</p>
 <p><strong>Current coverage:</strong> the structured local CLI supports discovery, creation,
-terminal observation, card geometry, card modes and guarded closing. It does not provide local terminal input,
-attachment or direct terminal-grid resizing commands. Remote terminal
+terminal observation, guarded text/key input and prompt delivery, card geometry,
+card modes and guarded closing. It does not provide local attachment or direct
+terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy <code>peer-*</code> commands.
 There is no claim of complete CLI parity with every graphical action.</p>
 <h2 id="start-here-for-agents">Start here for agents</h2>
@@ -157,6 +159,26 @@ override, global request ID option or remote target is accepted here.</p>
 <td><code>terminal collapse ID</code></td>
 <td>Return an expanded card to its saved mode; requires epoch/revision and request ID</td>
 <td><code>terminal.mode</code></td>
+</tr>
+<tr>
+<td><code>terminal send ID</code></td>
+<td>Literal UTF-8 text from stdin/file; optional Enter</td>
+<td><code>terminal.input</code></td>
+</tr>
+<tr>
+<td><code>terminal keys ID</code></td>
+<td>One to 32 named keys</td>
+<td><code>terminal.input</code></td>
+</tr>
+<tr>
+<td><code>terminal interrupt ID</code></td>
+<td>Ctrl-C without killing the session</td>
+<td><code>terminal.input</code></td>
+</tr>
+<tr>
+<td><code>terminal prompt ID</code></td>
+<td>Paste and submit through a verified empty composer</td>
+<td><code>terminal.input</code></td>
 </tr>
 <tr>
 <td><code>terminal geometry ID</code></td>
@@ -346,6 +368,58 @@ columns/rows observation. A hidden card may refit only when shown.</p>
 <p>Moves and resizes share the durable request journal with launches. Inspect
 <code>request inspect "$request_id"</code> after an uncertain response. A recorded success
 is historical and does not prove that nobody moved the card afterward.</p>
+<h2 id="guarded-terminal-input">Guarded terminal input</h2>
+<p><code>terminal send</code>, <code>terminal keys</code>, <code>terminal interrupt</code> and <code>terminal prompt</code>
+require an exact card ID, a fresh geometry <code>epoch</code>/<code>revision</code>, runtime
+<code>paneIdentity</code>, and a unique request ID. Check capability <code>terminal.input</code>.
+These commands can execute code as the desktop owner. Multiline text can execute
+commands even without a final Enter. Use them only for input you intend to send.</p>
+<pre><code class="language-bash">set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+runtime=$(super-desktop terminal runtime &quot;$card_id&quot; --format json)
+geometry=$(super-desktop terminal geometry &quot;$card_id&quot; --format json)
+pane_identity=$(jq -er '.data.paneIdentity' &lt;&lt;&lt;&quot;$runtime&quot;)
+epoch=$(jq -er '.data.epoch' &lt;&lt;&lt;&quot;$geometry&quot;)
+revision=$(jq -er '.data.revision' &lt;&lt;&lt;&quot;$geometry&quot;)
+request_id=&quot;input-$(cat /proc/sys/kernel/random/uuid)&quot;
+super-desktop terminal send &quot;$card_id&quot; --file task.txt \
+  --expect-epoch &quot;$epoch&quot; --expect-revision &quot;$revision&quot; \
+  --expect-pane-identity &quot;$pane_identity&quot; --request-id &quot;$request_id&quot; --format json
+</code></pre>
+<ul>
+<li><code>send --file PATH</code> or <code>send --stdin</code> preserves UTF-8 text literally. No Enter
+  is appended unless <code>--enter</code> is present. Text must be 1–4096 bytes. Newline and
+  tab are accepted; other control characters are refused. Oversized input is
+  refused in full. <code>--stdin</code> requires a pipe/redirection; files must be regular.</li>
+<li><code>keys ID KEY...</code> accepts 1–32 keys: <code>Enter</code>, <code>Escape</code>, <code>Tab</code>, <code>Backspace</code>,
+  <code>Delete</code>, <code>Up</code>, <code>Down</code>, <code>Left</code>, <code>Right</code>, <code>Home</code>, <code>End</code>, <code>PageUp</code>, <code>PageDown</code>,
+  <code>Ctrl-C</code>, <code>Ctrl-D</code>, <code>Ctrl-U</code>, and <code>Ctrl-L</code>.</li>
+<li><code>interrupt ID</code> sends <code>Ctrl-C</code>. It neither kills the session nor escalates to
+  a process signal. The foreground application decides what the key does.</li>
+<li><code>prompt --file PATH</code> or <code>prompt --stdin</code> verifies an empty composer, sends
+  bracketed text, then Enter. Currently this requires a saved direct Claude,
+  Codex or Grok launcher and a matching foreground command. Unknown/nonempty
+  composers and other launchers are refused. It never clears an existing draft.</li>
+</ul>
+<p>Input targets one live pane in one unlinked window. Copy mode, multiple panes,
+exited panes, changed card/pane identities, active card gestures and expired
+requests are refused. Input does not attach, resize, show the overlay or change
+focus. The local mutation journal serializes CLI input with CLI mutations; it
+cannot lock out typing from the PC, phone or other same-user tmux clients.
+Composer inspection and delivery are separate observations; concurrent input
+can still arrive between them.</p>
+<p>Success reports <code>outcome: "delivered"</code>, <code>paneIdentity</code>, <code>kind</code>, and a byte count
+(for named keys the byte count is 0 because encoding depends on terminal mode).
+It reports <code>submissionObserved: false</code>, <code>completionObserved: false</code>, and
+<code>turnId: null</code>. Delivery does not prove that a harness accepted a submission or
+finished a response. Native hooks continue to observe actual prompts; the CLI
+does not invent a card title or native turn ID from delivered bytes.</p>
+<p>Text is sent through subprocess stdin and is absent from process arguments,
+temporary files and durable receipts. The target program can still echo or log
+it. Reusing the same request ID and payload returns the historical receipt.
+After an unknown outcome, inspect that ID and stop automated retries; do not
+send the input again under a fresh ID. A refused attempt may leave a harmless
+<code>@super_desktop_cli_input</code> marker on its session.</p>
 <h2 id="guarded-card-modes">Guarded card modes</h2>
 <p><code>terminal minimize</code>, <code>terminal restore</code>, <code>terminal expand</code> and <code>terminal collapse</code>
 use the same exact card IDs, epoch/revision guards and durable receipts as moves.
@@ -467,7 +541,7 @@ same OS user.</p>
 <pre><code class="language-bash">super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 </code></pre>
-<p>The daemon records intent before a launch, move, resize, mode change or close. Reusing the same ID
+<p>The daemon records intent before a launch, move, resize, mode change, input or close. Reusing the same ID
 with the identical payload returns the recorded result without applying it again,
 including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
@@ -493,7 +567,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches, moves, resizes, mode changes and closes, not legacy
+killed or relaunched. These receipts cover structured launches, moves, resizes, mode changes, input and closes, not legacy
 commands or every future restoration of a saved card.</p>
 <h2 id="json-and-exit-statuses">JSON and exit statuses</h2>
 <p>Structured live replies contain <code>schemaVersion</code>, <code>requestId</code>, <code>target</code>, <code>ok</code>
@@ -595,6 +669,46 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>terminal send ID (--stdin \| --file PATH) [--enter] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Send literal UTF-8 text to an observed terminal</td>
+</tr>
+<tr>
+<td><code>terminal keys ID KEY... --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Send named keys to an observed terminal</td>
+</tr>
+<tr>
+<td><code>terminal interrupt ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Send Ctrl-C to an observed terminal</td>
+</tr>
+<tr>
+<td><code>terminal prompt ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Submit text through a verified empty harness composer</td>
+</tr>
+<tr>
+<td><code>terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Minimize a terminal card to its saved icon position</td>
+</tr>
+<tr>
+<td><code>terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Restore a minimized terminal card</td>
+</tr>
+<tr>
+<td><code>terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Expand one terminal card</td>
+</tr>
+<tr>
+<td><code>terminal collapse ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Collapse an expanded terminal card to its saved mode</td>
+</tr>
 <tr>
 <td><code>terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>

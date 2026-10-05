@@ -9,8 +9,9 @@ Your installed client and running daemon may support fewer commands: check
 `--help` and `capabilities` before automating them.
 
 **Current coverage:** the structured local CLI supports discovery, creation,
-terminal observation, card geometry, card modes and guarded closing. It does not provide local terminal input,
-attachment or direct terminal-grid resizing commands. Remote terminal
+terminal observation, guarded text/key input and prompt delivery, card geometry,
+card modes and guarded closing. It does not provide local attachment or direct
+terminal-grid resizing commands. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
 
@@ -68,6 +69,10 @@ override, global request ID option or remote target is accepted here.
 | `terminal restore ID` | Restore a minimized card; requires epoch/revision and request ID | `terminal.mode` |
 | `terminal expand ID` | Expand one card without collapsing another; requires epoch/revision and request ID | `terminal.mode` |
 | `terminal collapse ID` | Return an expanded card to its saved mode; requires epoch/revision and request ID | `terminal.mode` |
+| `terminal send ID` | Literal UTF-8 text from stdin/file; optional Enter | `terminal.input` |
+| `terminal keys ID` | One to 32 named keys | `terminal.input` |
+| `terminal interrupt ID` | Ctrl-C without killing the session | `terminal.input` |
+| `terminal prompt ID` | Paste and submit through a verified empty composer | `terminal.input` |
 | `terminal geometry ID` | Current logical geometry, bounds, epoch and revision | `terminal.geometry` |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Move and raise a normal card or minimized icon | `terminal.move` |
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Change a normal card’s outer and restored size | `terminal.resize` |
@@ -215,6 +220,64 @@ Moves and resizes share the durable request journal with launches. Inspect
 `request inspect "$request_id"` after an uncertain response. A recorded success
 is historical and does not prove that nobody moved the card afterward.
 
+## Guarded terminal input
+
+`terminal send`, `terminal keys`, `terminal interrupt` and `terminal prompt`
+require an exact card ID, a fresh geometry `epoch`/`revision`, runtime
+`paneIdentity`, and a unique request ID. Check capability `terminal.input`.
+These commands can execute code as the desktop owner. Multiline text can execute
+commands even without a final Enter. Use them only for input you intend to send.
+
+```bash
+set -euo pipefail
+card_id=sd_term_REPLACE_WITH_RETURNED_ID
+runtime=$(super-desktop terminal runtime "$card_id" --format json)
+geometry=$(super-desktop terminal geometry "$card_id" --format json)
+pane_identity=$(jq -er '.data.paneIdentity' <<<"$runtime")
+epoch=$(jq -er '.data.epoch' <<<"$geometry")
+revision=$(jq -er '.data.revision' <<<"$geometry")
+request_id="input-$(cat /proc/sys/kernel/random/uuid)"
+super-desktop terminal send "$card_id" --file task.txt \
+  --expect-epoch "$epoch" --expect-revision "$revision" \
+  --expect-pane-identity "$pane_identity" --request-id "$request_id" --format json
+```
+
+- `send --file PATH` or `send --stdin` preserves UTF-8 text literally. No Enter
+  is appended unless `--enter` is present. Text must be 1–4096 bytes. Newline and
+  tab are accepted; other control characters are refused. Oversized input is
+  refused in full. `--stdin` requires a pipe/redirection; files must be regular.
+- `keys ID KEY...` accepts 1–32 keys: `Enter`, `Escape`, `Tab`, `Backspace`,
+  `Delete`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`,
+  `Ctrl-C`, `Ctrl-D`, `Ctrl-U`, and `Ctrl-L`.
+- `interrupt ID` sends `Ctrl-C`. It neither kills the session nor escalates to
+  a process signal. The foreground application decides what the key does.
+- `prompt --file PATH` or `prompt --stdin` verifies an empty composer, sends
+  bracketed text, then Enter. Currently this requires a saved direct Claude,
+  Codex or Grok launcher and a matching foreground command. Unknown/nonempty
+  composers and other launchers are refused. It never clears an existing draft.
+
+Input targets one live pane in one unlinked window. Copy mode, multiple panes,
+exited panes, changed card/pane identities, active card gestures and expired
+requests are refused. Input does not attach, resize, show the overlay or change
+focus. The local mutation journal serializes CLI input with CLI mutations; it
+cannot lock out typing from the PC, phone or other same-user tmux clients.
+Composer inspection and delivery are separate observations; concurrent input
+can still arrive between them.
+
+Success reports `outcome: "delivered"`, `paneIdentity`, `kind`, and a byte count
+(for named keys the byte count is 0 because encoding depends on terminal mode).
+It reports `submissionObserved: false`, `completionObserved: false`, and
+`turnId: null`. Delivery does not prove that a harness accepted a submission or
+finished a response. Native hooks continue to observe actual prompts; the CLI
+does not invent a card title or native turn ID from delivered bytes.
+
+Text is sent through subprocess stdin and is absent from process arguments,
+temporary files and durable receipts. The target program can still echo or log
+it. Reusing the same request ID and payload returns the historical receipt.
+After an unknown outcome, inspect that ID and stop automated retries; do not
+send the input again under a fresh ID. A refused attempt may leave a harmless
+`@super_desktop_cli_input` marker on its session.
+
 ## Guarded card modes
 
 `terminal minimize`, `terminal restore`, `terminal expand` and `terminal collapse`
@@ -357,7 +420,7 @@ super-desktop request inspect agent-task-001 --format json
 super-desktop terminal list --format json
 ```
 
-The daemon records intent before a launch, move, resize, mode change or close. Reusing the same ID
+The daemon records intent before a launch, move, resize, mode change, input or close. Reusing the same ID
 with the identical payload returns the recorded result without applying it again,
 including after a daemon restart. Changing any operation parameter under that ID
 returns a conflict. Validation refusals can also have receipts: changing a
@@ -385,7 +448,7 @@ private paths and are retained up to 4096 entries with no automatic pruning.
 Deleting them removes duplicate protection. Existing IDs remain inspectable
 when the journal is full. Busy, invalid or unreadable journals refuse new
 execution. A started process whose card could not be added is not automatically
-killed or relaunched. These receipts cover structured launches, moves, resizes, mode changes and closes, not legacy
+killed or relaunched. These receipts cover structured launches, moves, resizes, mode changes, input and closes, not legacy
 commands or every future restoration of a saved card.
 
 ## JSON and exit statuses
@@ -465,6 +528,14 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal send ID (--stdin \| --file PATH) [--enter] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send literal UTF-8 text to an observed terminal |
+| `terminal keys ID KEY... --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send named keys to an observed terminal |
+| `terminal interrupt ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send Ctrl-C to an observed terminal |
+| `terminal prompt ID (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Submit text through a verified empty harness composer |
+| `terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Minimize a terminal card to its saved icon position |
+| `terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Restore a minimized terminal card |
+| `terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Expand one terminal card |
+| `terminal collapse ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Collapse an expanded terminal card to its saved mode |
 | `terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Close an exact terminal card and its observed session |
 | `terminal geometry ID [--format text\|json] [--target local]` | Structured local | Inspect current card geometry and its revision |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Move a terminal card within the logical display |

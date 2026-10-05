@@ -28,7 +28,8 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
-        Command::Mode { .. }
+        Command::Input { .. }
+        | Command::Mode { .. }
         | Command::Close { .. }
         | Command::Geometry { .. }
         | Command::Move { .. }
