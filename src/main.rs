@@ -104,6 +104,9 @@ mod ws;
 /// process fails with "Attempted to initialize GTK from two different threads"
 /// / "GTK may only be used from the main thread". A GTK assertion therefore
 /// re-runs this test binary in a child process filtered to just that one test.
+#[cfg(all(test, target_os = "linux"))]
+mod package_tests;
+
 #[cfg(test)]
 pub mod gtk_test {
     pub const CHILD_ENV: &str = "SUPER_DESKTOP_GTK_TEST_CHILD";

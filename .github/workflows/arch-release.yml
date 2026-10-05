@@ -48,6 +48,14 @@ jobs:
           useradd -m builder
           chown -R builder:builder "$GITHUB_WORKSPACE"
           runuser -u builder -- bash scripts/build-arch-release.sh "$RELEASE_TAG" /tmp/sd-release
+      - name: Exercise the installed package on a private display
+        shell: bash
+        run: |
+          pacman -U --noconfirm /tmp/sd-release/*.pkg.tar.zst
+          touch /super-desktop-package-test-root
+          install -d -m 700 -o builder -g builder /tmp/sd-package-runtime
+          runuser -u builder -- env -u SD_GTK_TESTS_ON_DESKTOP XDG_RUNTIME_DIR=/tmp/sd-package-runtime \
+            cargo test --locked package_tests::packaged_desktop_lifecycle -- --ignored --nocapture
       - uses: actions/upload-artifact@v4
         with:
           name: arch-release
