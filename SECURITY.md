@@ -153,6 +153,15 @@ preparation lock. It can execute arbitrary owner commands; concurrent GUI or
 phone input is still possible. There is no automatic replay after disconnect.
 Cleanup detaches only this client, never the harness, and takes no grid lease.
 
+Terminal restart/resume reuse exact-session close guards, then launch into a
+new reserved identity under one receipt. The saved command/workspace and widget
+identity are rechecked before destruction. Unsafe acknowledgement covers that
+saved command, including its potential downloads. Resume appends only a validated
+explicit native selector to a supported direct executable; it never guesses the
+latest conversation. A failure after close is partial/unknown and never replayed.
+Forget only removes the card under geometry/preparation guards and never kills
+or launches a session, including when the old session is missing.
+
 Structured close requires the current card epoch/revision and live pane identity.
 The worker serializes against pending preparation; GTK rechecks the exact card
 and widget before canceling attachment and removing it. Tmux destruction uses an

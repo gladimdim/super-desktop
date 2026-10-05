@@ -767,6 +767,9 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
 | `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable mutation receipt |
 | `capabilities [--format text\|json] [--target local]` | Structured local | Query the running local control service |
+| `terminal forget ID --preserve-session --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Remove a card while preserving its session |
+| `terminal restart ID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Replace an exact terminal with its saved command |
+| `terminal resume ID --native-session NATIVE_ID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Replace a terminal with an explicit native conversation |
 | `settings shortcut preview --combo COMBO [--format text\|json] [--target local]` | Structured local | Preview a managed Hyprland shortcut change |
 | `settings shortcut apply --combo COMBO --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Apply a reviewed shortcut preview |
 | `audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text\|json] [--target local]` | Structured local | List private mutation receipt metadata |
@@ -806,6 +809,31 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Terminal replacement and card removal
+
+`terminal restart ID` closes the exact observed session and launches the card's
+saved command in its recorded workspace as a new card, with a new ID and normal
+new-card placement. It requires geometry/pane guards and
+`--allow-unsafe-harness`: the saved command may execute code or download software.
+It does not promise a fresh conversation or recovery of interrupted work.
+
+`terminal resume ID --native-session NATIVE_ID` performs the same replacement
+with an explicit native selector. Direct Claude and Codex executables accept an
+exact UUID; OpenCode accepts an exact `ses_` ID. Shell wrappers, other harnesses,
+and saved commands already selecting resume modes are refused. The receipt
+reports the requested conversation, not verified native resumption. Neither
+replacement command submits a new prompt. The old pane must still exist;
+missing-session cards can be forgotten and a launcher started explicitly.
+
+Failures after closing the old session may leave no replacement, or a running
+replacement without an adopted card. Such results are unknown and never replayed;
+inspect the receipt's reserved ID. Success returns `id` and `replacedId`.
+
+`terminal forget ID --preserve-session` requires only current geometry guards
+and a request ID. It cancels pending attachment and removes the saved card,
+without inspecting or killing a session. It works for both live and missing
+sessions. An existing session becomes unmanaged by this card.
 
 ## Shortcut preview and apply
 

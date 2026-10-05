@@ -2393,7 +2393,7 @@ impl SuperDesktopWindow {
         use crate::control_close::{Action, Target};
         let fail = |code, message| Reply::failure(&request.request_id, code, message);
         let (id, expect_epoch, expect_revision) = match &request.command {
-            Command::Viewport {
+            Command::Forget {id,expect_epoch,expect_revision} | Command::Relaunch {id,expect_epoch,expect_revision,..} | Command::Viewport {
                 id,
                 expect_epoch: Some(expect_epoch),
                 expect_revision: Some(expect_revision),
@@ -2444,11 +2444,12 @@ impl SuperDesktopWindow {
         match action {
             Action::Inspect => Ok(Some(Target { data, task: card.cli_session_task() })),
             Action::Remove(expected) => {
-                if !matches!(request.command, Command::Close { .. }) {
+                if !matches!(request.command, Command::Close { .. } | Command::Forget {..} | Command::Relaunch {..}) {
                     return Err(fail("invalid_request", "Only close may remove a card."));
                 }
                 if data.id != expected.data.id || data.session_name != expected.data.session_name
                     || data.created_at != expected.data.created_at
+                    || data.command != expected.data.command || data.workspace_dir != expected.data.workspace_dir
                     || !std::sync::Arc::ptr_eq(&card.cli_session_task(), &expected.task) {
                     return Err(fail("conflict", "The terminal card was replaced before close."));
                 }

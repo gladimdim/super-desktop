@@ -14,6 +14,7 @@ mod control_files;
 mod control_viewport;
 mod control_attach;
 mod control_shortcut;
+mod control_relaunch;
 mod control_workspace;
 mod control_service;
 mod brand;
@@ -704,6 +705,11 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 control::capabilities(),
                             );
+                        }
+                        if matches!(request.command,control::Command::Forget {..}|control::Command::Relaunch {..}) {
+                            return control_relaunch::execute(&control_journal::root(),&request,deadline,|action|{
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);close_tx.clone().try_send(control_close::Query {request:request.clone(),action,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
+                            },|data,deadline|{let (responder,response)=std::sync::mpsc::sync_channel(1);adopt_tx.clone().try_send(control_service::Adoption {data,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())?});
                         }
                         if matches!(request.command,control::Command::Shortcut {..}) {
                             return control_shortcut::execute(&control_journal::root(),&request,deadline,|commit|{

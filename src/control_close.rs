@@ -38,7 +38,10 @@ pub fn execute(
     deadline: Instant,
     mut ui: impl FnMut(Action) -> Result<UiResult, ()>,
 ) -> Reply {
-    crate::control_journal::execute(root, request, |_| {
+    crate::control_journal::execute(root, request, |_| apply(request,deadline,&mut ui))
+}
+
+pub fn apply(request:&Request,deadline:Instant,mut ui:impl FnMut(Action)->Result<UiResult,()>)->Reply {
         let Command::Close {
             expect_pane_identity,
             ..
@@ -113,7 +116,6 @@ pub fn execute(
             }
             finish_removed(request, session, &before, &nonce, deadline)
         }).unwrap_or_else(|| Reply::failure(&request.request_id, "conflict", "Terminal preparation is busy or the card is already closing; no CLI close was applied."))
-    })
 }
 
 fn finish_removed(
@@ -325,6 +327,21 @@ mod tests {
         let keeper = create("sd_term_keeper");
         let journal = root.join("journal");
 
+        let mut restart=create("sd_term_restart");restart.data.command="/bin/sleep 120".into();restart.data.workspace_dir=Some(root.to_string_lossy().into_owned());
+        let original=probe(&restart.data.session_name,deadline()).unwrap();
+        let r=Request {control_version:1,request_id:"relaunch-test".into(),command:Command::Relaunch {id:restart.data.id.clone(),native_session:None,allow_unsafe_harness:true,expect_epoch:"epoch".into(),expect_revision:"a".repeat(64),expect_pane_identity:original.identity.clone()}};
+        let mut adopted=None;
+        let result=crate::control_relaunch::execute(&journal,&r,deadline(),|action|Ok(match action{Action::Inspect=>inspect(&restart),Action::Remove(_)=>{restart.task.close();Ok(None)}}),|data,_|{adopted=Some(data);Ok(())});
+        assert!(result.ok,"{result:?}");let replacement=adopted.unwrap();assert!(!alive(&restart.data.session_name));assert!(alive(&replacement.session_name));assert!(alive(&keeper.data.session_name));
+        assert!(crate::control_relaunch::execute(&journal,&r,deadline(),|_|panic!("duplicate must not close"),|_,_|panic!("duplicate must not launch")).ok);
+        let target=Target {data:replacement,task:Arc::new(crate::session_task::SessionTask::default())};
+        let forget=Request {control_version:1,request_id:"forget-test".into(),command:Command::Forget {id:target.data.id.clone(),expect_epoch:"epoch".into(),expect_revision:"a".repeat(64)}};
+        let result=crate::control_relaunch::execute(&journal,&forget,deadline(),|action|Ok(match action{Action::Inspect=>inspect(&target),Action::Remove(_)=>{target.task.close();Ok(None)}}),|_,_|panic!("forget never launches"));
+        assert!(result.ok);assert!(alive(&target.data.session_name));assert!(target.task.is_closed());
+        let mut missing=create("sd_term_missing_card");run(&["kill-session","-t","=sd_term_missing_card"]);
+        missing.data.command="/bin/false".into();
+        let forget=Request {control_version:1,request_id:"forget-missing".into(),command:Command::Forget {id:missing.data.id.clone(),expect_epoch:"epoch".into(),expect_revision:"a".repeat(64)}};
+        assert!(crate::control_relaunch::execute(&journal,&forget,deadline(),|action|Ok(match action{Action::Inspect=>inspect(&missing),Action::Remove(_)=>{missing.task.close();Ok(None)}}),|_,_|panic!("no launch")).ok);
         let target = create("sd_term_close");
         let r = request(&target, "close-1");
         let mut removed = false;

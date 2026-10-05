@@ -33,6 +33,8 @@ pub const METHODS: &[&str] = &[
     "terminal.move",
     "terminal.resize",
     "terminal.close",
+    "terminal.forget",
+    "terminal.relaunch",
     "terminal.mode",
     "terminal.card",
     "terminal.viewport",
@@ -238,6 +240,10 @@ pub enum FilesEdit {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="terminal.forget")]
+    Forget {id:String,#[serde(rename="expectEpoch")] expect_epoch:String,#[serde(rename="expectRevision")] expect_revision:String},
+    #[serde(rename="terminal.relaunch")]
+    Relaunch {id:String,#[serde(rename="nativeSession")] native_session:Option<String>,#[serde(rename="allowUnsafeHarness")] allow_unsafe_harness:bool,#[serde(rename="expectEpoch")] expect_epoch:String,#[serde(rename="expectRevision")] expect_revision:String,#[serde(rename="expectPaneIdentity")] expect_pane_identity:String},
     #[serde(rename="settings.shortcut")]
     Shortcut {combo:String,preview:Option<String>,#[serde(rename="expectEpoch")] expect_epoch:Option<String>,#[serde(rename="expectRevision")] expect_revision:Option<String>},
     #[serde(rename = "audit.list")]
@@ -405,7 +411,7 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Shortcut {preview:Some(_),..}
+            Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
                 | Self::Attach { .. }
                 | Self::Viewport { .. }
                 | Self::CardAction { .. }

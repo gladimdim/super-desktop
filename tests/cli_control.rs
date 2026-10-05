@@ -20,6 +20,7 @@ fn control_daemon_fixture() {
             }
         }
         let data = match &request.command {
+            control::Command::Forget {..}|control::Command::Relaunch {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Shortcut {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Audit {..}=>serde_json::json!({"entries":[{"id":"example","state":"recorded"}],"revision":"a".repeat(64),"nextCursor":null}),
             control::Command::Access {}=>serde_json::json!({"mode":"owner"}),
@@ -364,6 +365,12 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         let frames:Vec<serde_json::Value>=String::from_utf8(events.stdout).unwrap().lines().map(|s|serde_json::from_str(s).unwrap()).collect();assert_eq!(frames.len(),2);assert_eq!(frames[0]["type"],"snapshot");assert_eq!(frames[0]["resyncRequired"],true);assert_eq!(frames[0]["sequence"],0);assert_eq!(frames[1]["type"],"end");assert_eq!(frames[1]["sequence"],1);
         for extra in [vec!["preview","--combo","SUPER + F8"],vec!["apply","--combo","SUPER + F8","--preview",&revision,"--expect-epoch","epoch","--expect-revision",&revision,"--request-id","shortcut"]] {
             let out=Command::new(executable).args(["settings","shortcut"]).args(extra).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
+        }
+        for action in ["forget","restart","resume"] {
+            let mut args=vec!["terminal",action,"card-1","--expect-epoch","epoch","--expect-revision",&revision,"--request-id","lifecycle","--format=json"];
+            if action=="forget"{args.push("--preserve-session");}else{args.extend(["--expect-pane-identity",&revision,"--allow-unsafe-harness"]);}
+            if action=="resume"{args.extend(["--native-session","12345678-1234-1234-1234-123456789abc"]);}
+            let out=Command::new(executable).args(args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stdout));
         }
         let one_shot=fixture.root.join("one-shot.json");std::fs::write(&one_shot,r#"["literal ; $(touch NEVER)",""]"#).unwrap();
         let launch_args=["harness","launch","claude","--cwd","/tmp","--request-id","one-shot","--args-file",one_shot.to_str().unwrap(),"--format=json"];
