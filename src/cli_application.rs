@@ -440,8 +440,10 @@ mod tests {
         assert!(!path.exists());
         let started = run("start", "start");
         assert!(started.ok, "{started:?}");
+        let already = run("start", "already");
+        assert!(already.ok, "{already:?}\n{}", std::fs::read_to_string(root.join("cli-start-start.log")).unwrap_or_default());
         assert_eq!(
-            run("start", "already").data.unwrap()["outcome"],
+            already.data.unwrap()["outcome"],
             "already_running"
         );
         assert_eq!(run("show", "show").data.unwrap()["status"]["visible"], true);
