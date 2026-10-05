@@ -320,7 +320,10 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
+            let path = std::env::temp_dir()
+                .canonicalize()
+                .expect("resolve system temporary directory")
+                .join(format!(
                 "sd-receipt-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

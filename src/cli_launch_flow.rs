@@ -383,7 +383,8 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             Self {
-                root: std::env::temp_dir().join(format!(
+                root: std::env::temp_dir().canonicalize()
+                    .expect("resolve system temporary directory").join(format!(
                     "sd-launch-flow-{}-{}",
                     std::process::id(),
                     NEXT.fetch_add(1, Ordering::Relaxed)

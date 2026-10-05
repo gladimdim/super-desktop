@@ -410,7 +410,10 @@ mod tests {
     #[test]
     fn application_lifecycle_is_explicit_journaled_and_preserves_sessions() {
         let Some(root) = std::env::var_os("SD_APP_TEST_ROOT").map(std::path::PathBuf::from) else {
-            let root = std::env::temp_dir().join(format!("sd-cli-app-{}", std::process::id()));
+            let root = std::env::temp_dir()
+                .canonicalize()
+                .expect("resolve system temporary directory")
+                .join(format!("sd-cli-app-{}", std::process::id()));
             std::fs::DirBuilder::new()
                 .mode(0o700)
                 .create(&root)
