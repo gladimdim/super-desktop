@@ -143,7 +143,38 @@ fn journal_error(id: &str, _error: io::Error) -> Reply {
 /// Serializes mutations across threads/processes and saves intent before any
 /// side effect. There is deliberately no automatic pruning of IDs.
 pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply) -> Reply {
-    let id = &request.request_id;
+    execute_operation(root,&request.request_id,&request.command,|random|match &request.command {
+            control::Command::WorkspaceEdit {
+                edit: control::WorkspaceEdit::NoteCreate { .. },
+                ..
+            } => format!("note_cli_{}", request.request_id),
+            control::Command::WorkspaceEdit {
+                edit:
+                    control::WorkspaceEdit::NoteUpdate { id, .. }
+                    | control::WorkspaceEdit::NoteDelete { id }
+                    | control::WorkspaceEdit::NoteMove { id, .. }
+                    | control::WorkspaceEdit::NoteResize { id, .. }
+                    | control::WorkspaceEdit::NoteTag { id, .. },
+                ..
+            } => id.clone(),
+            control::Command::WorkspaceEdit { .. } => "workspace".into(),
+            control::Command::PreferencesEdit { .. } | control::Command::Shortcut {..} => "settings".into(),
+            control::Command::Forget {id,..}
+            | control::Command::Attach { id, .. }
+            | control::Command::Viewport { id, .. }
+            | control::Command::CardAction { id, .. }
+            | control::Command::FilesEdit { id, .. }
+            | control::Command::Input { id, .. }
+            | control::Command::Mode { id, .. }
+            | control::Command::Move { id, .. }
+            | control::Command::Resize { id, .. }
+            | control::Command::Close { id, .. } => id.clone(),
+            _ => format!("sd_term_cli_{random}"),
+        },apply)
+}
+
+/// Owner-client orchestration shares the same ID namespace and durable journal.
+pub fn execute_operation(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply)->Reply {
     let _lock = match lock(root) {
         Ok(lock) => lock,
         Err(e) => return journal_error(id, e),
@@ -154,7 +185,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
     };
     let hash = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&request.command).unwrap())
+        Sha256::digest(serde_json::to_vec(payload).unwrap())
     );
     match read(&path) {
         Ok(Some(entry)) if entry.request_hash != hash => {
@@ -189,34 +220,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
     let mut entry = Entry {
         version: 1,
         request_hash: hash,
-        card_id: match &request.command {
-            control::Command::WorkspaceEdit {
-                edit: control::WorkspaceEdit::NoteCreate { .. },
-                ..
-            } => format!("note_cli_{}", request.request_id),
-            control::Command::WorkspaceEdit {
-                edit:
-                    control::WorkspaceEdit::NoteUpdate { id, .. }
-                    | control::WorkspaceEdit::NoteDelete { id }
-                    | control::WorkspaceEdit::NoteMove { id, .. }
-                    | control::WorkspaceEdit::NoteResize { id, .. }
-                    | control::WorkspaceEdit::NoteTag { id, .. },
-                ..
-            } => id.clone(),
-            control::Command::WorkspaceEdit { .. } => "workspace".into(),
-            control::Command::PreferencesEdit { .. } | control::Command::Shortcut {..} => "settings".into(),
-            control::Command::Forget {id,..}
-            | control::Command::Attach { id, .. }
-            | control::Command::Viewport { id, .. }
-            | control::Command::CardAction { id, .. }
-            | control::Command::FilesEdit { id, .. }
-            | control::Command::Input { id, .. }
-            | control::Command::Mode { id, .. }
-            | control::Command::Move { id, .. }
-            | control::Command::Resize { id, .. }
-            | control::Command::Close { id, .. } => id.clone(),
-            _ => format!("sd_term_cli_{random}"),
-        },
+        card_id: target(&random),
         reply: None,
     };
     let durable = write_new(&path, &entry).and_then(|()| File::open(root)?.sync_all());

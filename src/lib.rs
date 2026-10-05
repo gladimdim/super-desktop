@@ -22,3 +22,6 @@ mod cli_attach;
 mod cli_admin;
 
 mod cli_launch;
+
+pub mod control_journal;
+mod cli_application;

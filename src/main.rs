@@ -4,7 +4,7 @@ mod macos_shortcut;
 #[cfg(target_os = "macos")]
 mod macos_diagnostics;
 use super_desktop::{cli, control};
-mod control_journal;
+use super_desktop::control_journal;
 mod control_launch;
 mod control_terminal;
 mod control_geometry;

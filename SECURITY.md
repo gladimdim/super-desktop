@@ -104,6 +104,14 @@ intervening edit. External writers are not locked, so a final-check race remains
 A lost acknowledgement or failed state save can leave a changed binding and an
 unknown receipt; inspect it before choosing another operation.
 
+Structured application lifecycle is owner-client orchestration over existing
+local IPC, with private parent-directory validation, socket ownership/type
+checks and peer UID checks. It uses the shared durable receipt journal, which is
+also available to the GTK-free client. Stop waits for the observed process start
+identity to disappear; restart never resends an uncertain shutdown. Startup is
+explicit, logs to a new0600 file, and does not imply desktop readiness. No bridge
+route or existing IPC contract is changed.
+
 Audit list/export expose only local receipt metadata, with bounded pages and
 revision checks; full results require request inspect. Exports create a new
 0600 file and retain partial output on failure. Resource events are finite

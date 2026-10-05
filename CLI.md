@@ -47,8 +47,7 @@ super-desktop terminal list --format json
 
 With no arguments, `super-desktop` toggles the overlay. Always pass an explicit
 command in automation. Help, version, schema and completion work offline,
-without a display or daemon. Structured live commands never start a missing
-daemon or fall back to legacy IPC. Start the application separately if needed.
+without a display or daemon. Structured reads never start a missing daemon. Use `app start` explicitly. Application lifecycle commands orchestrate the existing owner IPC under the same durable journal; other structured commands use the framed control socket without legacy fallback.
 
 ## Structured local commands
 
@@ -777,6 +776,12 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `access list [--format text\|json] [--target local]` | Structured local | Inspect local control ownership |
 | `doctor [--format text\|json] [--target local]` | Structured local | Check local CLI and daemon connectivity |
 | `events --resource app\|terminals\|workspace\|notes [--seconds N] [--interval-ms N] [--after CURSOR] [--format jsonl] [--target local]` | Structured local | Stream finite resource snapshots |
+| `app start --request-id ID [--format text\|json] [--target local]` | Structured local | Start the local application explicitly |
+| `app stop --request-id ID [--format text\|json] [--target local]` | Structured local | Stop the daemon while preserving harness sessions |
+| `app restart --request-id ID [--format text\|json] [--target local]` | Structured local | Restart the daemon while preserving harness sessions |
+| `app show --request-id ID [--format text\|json] [--target local]` | Structured local | Show the running application |
+| `app hide --request-id ID [--format text\|json] [--target local]` | Structured local | Hide the running application |
+| `app toggle --request-id ID [--format text\|json] [--target local]` | Structured local | Toggle the running application visibility |
 | `app status [--format text\|json] [--target local]` | Structured local | Inspect local daemon readiness and counts |
 | `terminal list [--format text\|json] [--target local]` | Structured local | List local saved terminal cards |
 | `terminal inspect ID [--format text\|json] [--target local]` | Structured local | Inspect one local saved terminal card |
@@ -809,6 +814,26 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Application lifecycle
+
+`app start|stop|restart|show|hide|toggle --request-id ID` provides structured,
+journaled orchestration of existing local application operations. All are local
+only. Show/hide/toggle refuse an absent daemon; start explicitly starts it hidden,
+or reports an already-running daemon. Stop waits for the observed daemon process
+to end. Restart waits for stop, then starts a hidden daemon. Harness tmux sessions
+are left running; ordinary daemon startup can restore saved missing sessions.
+
+These commands use owner-checked existing IPC, sharing the same private receipt
+journal and request-ID namespace as framed commands. Connected mutations are
+never automatically resent. Repeating an ID returns its historical receipt,
+even if the application has since stopped or changed. The operation waits up to
+ten seconds plus bounded IPC; interrupted startup or restart can be unknown.
+
+Start/restart require a desktop environment and a sibling `super-desktop`
+executable. Startup logs are new private `cli-start-ID.log` files beside the
+journal. A startup acknowledgement does not establish GTK readiness; check
+`app status` before launching cards. No installed app is rebuilt by these commands.
 
 ## Terminal replacement and card removal
 
