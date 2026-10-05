@@ -16,3 +16,5 @@ mod cli_preferences;
 mod cli_files;
 
 mod cli_viewport;
+
+mod cli_attach;

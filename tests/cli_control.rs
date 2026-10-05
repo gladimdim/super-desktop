@@ -15,11 +15,30 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Viewport {..} | control::Command::Viewports {..} | control::Command::CardAction {..} | control::Command::Files {..} | control::Command::FilesEdit {..} | control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Attach {..} | control::Command::Viewport {..} | control::Command::Viewports {..} | control::Command::CardAction {..} | control::Command::Files {..} | control::Command::FilesEdit {..} | control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
+            control::Command::Attach {interactive,expect_pane_identity,..}=>{
+                let nonce=control::new_request(control::Command::Status {}).unwrap().request_id;
+                let name=format!("attach-{nonce}.sock");let path=Path::new(&runtime).join("super-desktop").join(&name);
+                let listener=std::os::unix::net::UnixListener::bind(&path).unwrap();std::fs::set_permissions(&path,std::fs::Permissions::from_mode(0o600)).unwrap();
+                let (token,identity,interactive)=(nonce.clone(),expect_pane_identity.clone(),*interactive);
+                std::thread::spawn(move||{
+                    use base64::Engine;
+                    let (mut stream,_)=listener.accept().unwrap();let deadline=Instant::now()+Duration::from_secs(5);
+                    let handshake=control::read_frame(&mut stream,256,deadline).unwrap();let value:serde_json::Value=serde_json::from_slice(&handshake).unwrap();assert_eq!(value["token"],token);
+                    for event in [serde_json::json!({"type":"attached","ok":true,"sequence":0,"streamId":token,"paneIdentity":identity,"grid":{"columns":80,"rows":24}}),serde_json::json!({"type":"output","ok":true,"sequence":1,"streamId":token,"bytes":base64::engine::general_purpose::STANDARD.encode(b"fake\x1b[31moutput")})] {
+                        control::write_frame(&mut stream,&serde_json::to_vec(&event).unwrap(),65536,deadline).unwrap();
+                    }
+                    if interactive {let _=control::read_frame(&mut stream,8192,deadline);}
+                    let _=control::write_frame(&mut stream,&serde_json::to_vec(&serde_json::json!({"type":"end","ok":true,"sequence":2,"streamId":token,"reason":"detached"})).unwrap(),65536,deadline);
+                    drop(stream);drop(listener);let _=std::fs::remove_file(path);
+                });
+                serde_json::json!({"socket":name,"token":nonce})
+            },
+
             control::Command::Files {id,query:control::FilesQuery::Read {asset,offset}} => {
                 use base64::Engine;use sha2::{Digest,Sha256};
                 let bytes=vec![b'x';70000];let offset=*offset as usize;let end=(offset+65536).min(bytes.len());
@@ -61,7 +80,7 @@ impl Drop for Fixture {
 
 #[test]
 fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
-    let root = std::env::temp_dir().join(format!("sd-cli-wire-{}", std::process::id()));
+    let root = Path::new("/tmp").join(format!("sd-cli-wire-{}", std::process::id()));
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&root)
@@ -156,10 +175,120 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             (vec!["terminal","viewport","set","card-1","viewport-test","--columns","140","--rows","40"],true,true),
             (vec!["terminal","viewport","release","card-1","viewport-test"],false,true),
         ] {
-            let mut command=Command::new(executable);command.args(&args).arg("--format=json").env("XDG_RUNTIME_DIR",&fixture.root);
-            if sizing{command.args(["--expect-epoch","epoch","--expect-revision",&revision,"--expect-pane-identity",&revision]);}
-            if edit{command.args(["--request-id","viewport-test"]);}
-            let output=command.output().unwrap();assert!(output.status.success(),"{args:?}: {output:?}");
+            let mut command = Command::new(executable);
+            command
+                .args(&args)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root);
+            if sizing {
+                command.args([
+                    "--expect-epoch",
+                    "epoch",
+                    "--expect-revision",
+                    &revision,
+                    "--expect-pane-identity",
+                    &revision,
+                ]);
+            }
+            if edit {
+                command.args(["--request-id", "viewport-test"]);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{args:?}: {output:?}");
+        }
+        let attach_args = [
+            "terminal",
+            "attach",
+            "card-1",
+            "--expect-epoch",
+            "epoch",
+            "--expect-revision",
+            &revision,
+            "--expect-pane-identity",
+            &revision,
+            "--request-id",
+            "attach-test",
+            "--seconds",
+            "1",
+        ];
+        let attached = Command::new(executable)
+            .args(attach_args)
+            .arg("--format=jsonl")
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .output()
+            .unwrap();
+        assert!(attached.status.success(), "{attached:?}");
+        assert!(!attached.stdout.contains(&0x1b));
+        let records = String::from_utf8(attached.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["type"], "attached");
+        assert_eq!(records[2]["type"], "end");
+        let refused = Command::new(executable)
+            .args(attach_args)
+            .args(["--interactive", "--raw"])
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(refused.status.code(), Some(2));
+        // A private PTY, never the desktop/session terminal, verifies raw mode
+        // is restored after the detach key and after a handled termination signal.
+        for signal in [false, true] {
+            use std::io::Write;
+            use std::os::fd::AsRawFd;
+            let (mut master, slave) = super_desktop::platform::pty::open(80, 24).unwrap();
+            let mut before: libc::termios = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(master.as_raw_fd(), &mut before) },
+                0
+            );
+            let mut command = Command::new(executable);
+            command
+                .args(attach_args)
+                .args(["--interactive", "--raw"])
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .stdin(std::process::Stdio::from(slave.try_clone().unwrap()))
+                .stdout(std::process::Stdio::from(slave))
+                .stderr(std::process::Stdio::null());
+            super_desktop::platform::pty::configure_child_session(&mut command);
+            let mut child = command.spawn().unwrap();
+            let until = Instant::now() + Duration::from_secs(3);
+            loop {
+                let mut current = unsafe { std::mem::zeroed() };
+                assert_eq!(
+                    unsafe { libc::tcgetattr(master.as_raw_fd(), &mut current) },
+                    0
+                );
+                if current.c_lflag & libc::ICANON == 0 {
+                    break;
+                }
+                assert!(Instant::now() < until, "client did not enter raw mode");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if signal {
+                assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+            } else {
+                master.write_all(&[0x1d]).unwrap();
+            }
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                assert!(Instant::now() < until, "client did not detach");
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            assert_eq!(status.code(), Some(if signal { 143 } else { 0 }));
+            let mut after = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { libc::tcgetattr(master.as_raw_fd(), &mut after) },
+                0
+            );
+            assert_eq!(after.c_lflag, before.c_lflag);
+            assert_eq!(after.c_iflag, before.c_iflag);
+            assert_eq!(after.c_oflag, before.c_oflag);
         }
         for action in ["minimize", "restore", "expand", "collapse"] {
             let args = [

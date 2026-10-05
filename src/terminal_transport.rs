@@ -50,6 +50,79 @@ impl PtyAttachment {
         Ok((Self::spawn(tmux_command, session, grid)?, grid))
     }
 
+    /// Local CLI construction with a bounded preflight and no tmux autostart.
+    pub(crate) fn open_cli(
+        session: &str,
+        deadline: std::time::Instant,
+    ) -> io::Result<(Self, TerminalSize)> {
+        let size = Self::cli_grid(session, deadline)?;
+        let (master, slave) = open_pty(size)?;
+        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
+        if flags < 0
+            || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
+                < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let mut command = Command::new(crate::tmux::tmux_bin());
+        command
+            .args([
+                "-N",
+                "-2",
+                "attach-session",
+                "-f",
+                "ignore-size",
+                "-t",
+                &format!("={session}"),
+            ])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env("TERM", "xterm-256color")
+            .env("COLORTERM", "truecolor")
+            .stdin(Stdio::from(slave.try_clone()?))
+            .stdout(Stdio::from(slave.try_clone()?))
+            .stderr(Stdio::from(slave));
+        crate::platform::pty::configure_child_session(&mut command);
+        let child = command.spawn()?;
+        Ok((
+            Self {
+                master,
+                child,
+                session: session.into(),
+                prompt_input: crate::prompt_history::InputTracker::default(),
+            },
+            size,
+        ))
+    }
+    pub(crate) fn cli_grid(
+        session: &str,
+        deadline: std::time::Instant,
+    ) -> io::Result<TerminalSize> {
+        if !session.starts_with("sd_term_")
+            || session.len() > 128
+            || !session
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(invalid("invalid_owned_session_name"));
+        }
+        let mut command = Command::new(crate::tmux::tmux_bin());
+        command.args([
+            "-N",
+            "display-message",
+            "-p",
+            "-t",
+            &format!("={session}:"),
+            "#{window_width} #{window_height} #{status}",
+        ]);
+        let output = crate::control_terminal::read_process(command, 1024, deadline)
+            .map_err(|_| invalid("host_grid_unavailable"))?;
+        if output.limited {
+            return Err(invalid("host_grid_unavailable"));
+        }
+        parse_client_grid(&String::from_utf8_lossy(&output.bytes))
+    }
+
     /// The owned session this attachment belongs to. Already validated as an
     /// `sd_term_*` name; used to arbitrate remote input against the same
     /// per-session guard as local and phone input.

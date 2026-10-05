@@ -4,6 +4,16 @@ mod macos_shortcut;
 #[cfg(target_os = "macos")]
 mod macos_diagnostics;
 use super_desktop::{cli, control};
+mod asset_history;
+mod asset_references;
+mod assets;
+mod brand;
+mod completion;
+mod control_attach;
+mod control_close;
+mod control_files;
+mod control_geometry;
+mod control_input;
 mod control_journal;
 mod control_launch;
 mod control_terminal;
@@ -709,12 +719,71 @@ fn run_daemon(start_visible: bool) {
                                 id,
                             );
                         }
-                        if matches!(request.command,control::Command::Files {..}|control::Command::FilesEdit {..}) {
-                            return control_files::execute(&control_journal::root(),&request,deadline,|| {
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);
-                                files_tx.clone().try_send(control_files::Query {request:request.clone(),responder,deadline}).map_err(|_|control::Reply::failure(&request.request_id,"busy","File inventory is busy."))?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|control::Reply::failure(&request.request_id,"timeout","File inventory timed out."))?
-                            });
+                        if matches!(
+                            request.command,
+                            control::Command::Files { .. } | control::Command::FilesEdit { .. }
+                        ) {
+                            return control_files::execute(
+                                &control_journal::root(),
+                                &request,
+                                deadline,
+                                || {
+                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                    files_tx
+                                        .clone()
+                                        .try_send(control_files::Query {
+                                            request: request.clone(),
+                                            responder,
+                                            deadline,
+                                        })
+                                        .map_err(|_| {
+                                            control::Reply::failure(
+                                                &request.request_id,
+                                                "busy",
+                                                "File inventory is busy.",
+                                            )
+                                        })?;
+                                    response
+                                        .recv_timeout(
+                                            deadline.saturating_duration_since(
+                                                std::time::Instant::now(),
+                                            ),
+                                        )
+                                        .map_err(|_| {
+                                            control::Reply::failure(
+                                                &request.request_id,
+                                                "timeout",
+                                                "File inventory timed out.",
+                                            )
+                                        })?
+                                },
+                            );
+                        }
+                        if matches!(request.command, control::Command::Attach { .. }) {
+                            return control_attach::execute(
+                                &control_journal::root(),
+                                &request,
+                                deadline,
+                                || {
+                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                    close_tx
+                                        .clone()
+                                        .try_send(control_close::Query {
+                                            request: request.clone(),
+                                            action: control_close::Action::Inspect,
+                                            responder,
+                                            deadline,
+                                        })
+                                        .map_err(|_| ())?;
+                                    response
+                                        .recv_timeout(
+                                            deadline.saturating_duration_since(
+                                                std::time::Instant::now(),
+                                            ),
+                                        )
+                                        .map_err(|_| ())
+                                },
+                            );
                         }
                         if matches!(request.command,control::Command::Viewport {..}|control::Command::Viewports {..}) {
                             return control_viewport::execute(&control_journal::root(),&request,deadline,|| {

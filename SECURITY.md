@@ -120,6 +120,16 @@ without an appended Enter. Composer checks cannot exclude concurrent GUI/phone
 input. Acknowledged delivery is not verified submission or completion. Unknown
 outcomes are never replayed. A harmless input marker may remain after refusal.
 
+Local terminal attachment uses a single-use 0600 socket in the owner-only
+runtime directory, peer-UID checks at both ends and a random token handshake.
+Streams have a five-second admission window, at most 300 seconds and about
+16 MiB of output, bounded frames and read/write deadlines. Read-only JSONL is
+the default; raw rendering and interactive input require explicit flags.
+Interactive input requires a TTY, is identity-checked and shares the local
+preparation lock. It can execute arbitrary owner commands; concurrent GUI or
+phone input is still possible. There is no automatic replay after disconnect.
+Cleanup detaches only this client, never the harness, and takes no grid lease.
+
 Structured close requires the current card epoch/revision and live pane identity.
 The worker serializes against pending preparation; GTK rechecks the exact card
 and widget before canceling attachment and removing it. Tmux destruction uses an

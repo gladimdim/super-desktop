@@ -43,6 +43,8 @@ fn watch(lease: Arc<Lease>) {
             Err(_) => continue,
         };
         if state.control.is_none() {
+            drop(state);
+            leases().lock().unwrap().remove(&lease.id);
             break;
         }
         if Instant::now() >= state.expires || !state.control.as_ref().unwrap().is_healthy() {

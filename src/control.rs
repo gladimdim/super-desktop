@@ -34,6 +34,7 @@ pub const METHODS: &[&str] = &[
     "terminal.mode",
     "terminal.card",
     "terminal.viewport",
+    "terminal.attach",
     "terminal.viewport.list",
     "terminal.input",
     "harness.list",
@@ -228,9 +229,21 @@ pub enum FilesEdit {
 pub enum Command {
     #[serde(rename = "app.status")]
     Status {},
-    #[serde(rename="terminal.viewport.list")]
-    Viewports { id:String },
-    #[serde(rename="terminal.viewport")]
+    #[serde(rename = "terminal.attach")]
+    Attach {
+        id: String,
+        interactive: bool,
+        seconds: u16,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+        #[serde(rename = "expectPaneIdentity")]
+        expect_pane_identity: String,
+    },
+    #[serde(rename = "terminal.viewport.list")]
+    Viewports { id: String },
+    #[serde(rename = "terminal.viewport")]
     Viewport {
         id:String,action:ViewportAction,
         #[serde(rename="expectEpoch")]
@@ -373,7 +386,8 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::Viewport { .. }
+            Self::Attach { .. }
+                | Self::Viewport { .. }
                 | Self::CardAction { .. }
                 | Self::FilesEdit { .. }
                 | Self::PreferencesEdit { .. }
@@ -473,6 +487,7 @@ pub fn capabilities() -> Value {
     json!({"controlVersion": VERSION, "serverVersion": env!("CARGO_PKG_VERSION"),
         "target": "local", "access": "owner", "readOnly": false, "methods": METHODS,
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
+        "terminalAttachment":{"seconds":[1,300],"defaultSeconds":30,"connectWithinMs":5000,"maxStreams":4,"maxOutputBytes":16777216,"default":"read-only-jsonl","interactiveRequiresRawAndTty":true,"gridOwnership":false,"singleUse":true},
         "terminalViewport":{"columns":[20,500],"rows":[5,300],"ttlSeconds":[1,300],"maxLeases":4,"sizingPolicy":"latest","exclusive":false,"persistentOptionsChanged":false,"requiresPaneIdentity":true},
         "terminalFiles":{"methods":["list","add","read","save","remove"],"chunkBytes":65536,"maxSaveBytes":8192,"fileLimitBytes":16777216,"textLimitBytes":524288,"referenceRemovalDeletesFile":false,"saveFormat":"markdown","catalog":"local-cli"},
         "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
@@ -549,7 +564,7 @@ pub fn private_file(path: &Path, socket: bool) -> io::Result<fs::Metadata> {
 // SO_SNDTIMEO bounds a blocking AF_UNIX connect when a listener's backlog is
 // full. Set it before connect, not just before writing the request.
 #[cfg(target_os = "linux")]
-fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+pub fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let bytes = path.as_os_str().as_bytes();
     if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
@@ -582,7 +597,7 @@ fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
 }
 
 #[cfg(target_os = "macos")]
-fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+pub fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let bytes = path.as_os_str().as_bytes();
     if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
@@ -688,7 +703,7 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(uid)
 }
 
-fn check_peer(stream: &UnixStream) -> io::Result<()> {
+pub fn check_peer(stream: &UnixStream) -> io::Result<()> {
     if peer_uid(stream)? != unsafe { libc::geteuid() } {
         return Err(denied());
     }

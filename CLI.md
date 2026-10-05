@@ -10,7 +10,7 @@ Your installed client and running daemon may support fewer commands: check
 
 **Current coverage:** the structured local CLI supports discovery, creation,
 terminal observation, guarded text/key input and prompt delivery, card geometry,
-card modes, guarded closing, notes and workspace layouts. Temporary terminal-grid leases are available; interactive attachment is not yet available. Remote terminal
+card modes, guarded closing, notes and workspace layouts. Temporary terminal-grid leases and bounded read-only or interactive attachments are available. Remote terminal
 streaming and workspace operations use the separate legacy `peer-*` commands.
 There is no claim of complete CLI parity with every graphical action.
 
@@ -701,6 +701,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]` | Structured local | Attach a bounded local terminal stream |
 | `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
 | `terminal viewport acquire ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
 | `terminal viewport set ID LEASE_ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
@@ -798,6 +799,29 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Local terminal attachment
+
+`terminal attach ID --seconds 30 --request-id REQUEST --expect-epoch EPOCH
+--expect-revision REVISION --expect-pane-identity IDENTITY` opens a single-use
+stream to the exact observed pane. Default output is JSONL: an `attached` event,
+sequenced base64 `output` and `grid` events, then `end`. It does not acquire a
+grid lease, execute the saved launcher, or start a missing session.
+
+Use `--raw` to render terminal bytes, including untrusted escape sequences.
+`--interactive --raw` also forwards keyboard bytes; both standard input and
+output must be terminals. Ctrl-] detaches. The client restores terminal mode
+on normal exit and handled signals. Piped input is refused; use `terminal send`
+or `terminal keys` for automation. Interactive input can execute commands as
+the desktop owner; an interrupted stream does not prove which bytes arrived.
+
+A stream lasts 1–300 seconds (default 30), with four concurrent streams and
+about 16 MiB of output per stream. Connect within five seconds. Slow readers,
+identity changes and disconnects end the stream. There is no reconnect or replay;
+request receipts describe the original stream, which may already have ended.
+The owner-only socket is removed after use. Detach stops this tmux client and
+preserves the harness. The host grid is followed; acquire a separate viewport
+lease when explicit sizing is needed.
 
 ## Shell completion and updates
 

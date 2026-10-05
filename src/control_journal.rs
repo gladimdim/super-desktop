@@ -190,15 +190,25 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
         version: 1,
         request_hash: hash,
         card_id: match &request.command {
-            control::Command::WorkspaceEdit { edit: control::WorkspaceEdit::NoteCreate {..}, .. } => format!("note_cli_{}", request.request_id),
-            control::Command::WorkspaceEdit { edit: control::WorkspaceEdit::NoteUpdate {id,..}
-                | control::WorkspaceEdit::NoteDelete {id} | control::WorkspaceEdit::NoteMove {id,..}
-                | control::WorkspaceEdit::NoteResize {id,..} | control::WorkspaceEdit::NoteTag {id,..}, .. } => id.clone(),
-            control::Command::WorkspaceEdit {..} => "workspace".into(),
-            control::Command::PreferencesEdit {..} => "settings".into(),
-            control::Command::Viewport {id,..}
-            | control::Command::CardAction {id,..}
-            | control::Command::FilesEdit {id,..}
+            control::Command::WorkspaceEdit {
+                edit: control::WorkspaceEdit::NoteCreate { .. },
+                ..
+            } => format!("note_cli_{}", request.request_id),
+            control::Command::WorkspaceEdit {
+                edit:
+                    control::WorkspaceEdit::NoteUpdate { id, .. }
+                    | control::WorkspaceEdit::NoteDelete { id }
+                    | control::WorkspaceEdit::NoteMove { id, .. }
+                    | control::WorkspaceEdit::NoteResize { id, .. }
+                    | control::WorkspaceEdit::NoteTag { id, .. },
+                ..
+            } => id.clone(),
+            control::Command::WorkspaceEdit { .. } => "workspace".into(),
+            control::Command::PreferencesEdit { .. } => "settings".into(),
+            control::Command::Attach { id, .. }
+            | control::Command::Viewport { id, .. }
+            | control::Command::CardAction { id, .. }
+            | control::Command::FilesEdit { id, .. }
             | control::Command::Input { id, .. }
             | control::Command::Mode { id, .. }
             | control::Command::Move { id, .. }
