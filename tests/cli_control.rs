@@ -15,14 +15,15 @@ fn control_daemon_fixture() {
         if Path::new(&runtime).join("older-daemon").exists() {
             match &request.command {
                 control::Command::Capabilities {} => return control::Reply::success(&request.request_id, serde_json::json!({"methods":["app.status"]})),
-                control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
+                control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } | control::Command::Launch { .. } | control::Command::InspectRequest { .. } | control::Command::Lifecycle { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. } => panic!("client sent an unsupported operation"),
                 _ => {}
             }
         }
         let data = match &request.command {
             control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
+            control::Command::Lifecycle { id } => serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"nativeMetadataObserved":id=="completed-card","lifecycle":if id=="completed-card" {"completed"} else {"unknown"},"completion":{"supported":id=="completed-card","state":if id=="completed-card" {"completed"} else {"unknown"},"completionId":if id=="completed-card" {Some("b".repeat(64))} else {None}}}),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
-            control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}"}),
+            control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}","runtime":{"paneIdentity":"a".repeat(64),"columns":120,"rows":35},"truncated":false}),
             control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
             control::Command::InspectRequest { id } => serde_json::json!({"id":id}),
             control::Command::Capabilities {} => control::capabilities(),
@@ -192,6 +193,82 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 assert_eq!(output.status.code(), Some(2), "{action} {extra}");
             }
         }
+        let output = Command::new(executable)
+            .args(["terminal", "status", "card-1", "--format=json"])
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        for (id, baseline, identity, expected) in [
+            ("completed-card", "none", revision.as_str(), 0),
+            ("card-1", "none", revision.as_str(), 6),
+            (
+                "completed-card",
+                "none",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                5,
+            ),
+            (
+                "completed-card",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                revision.as_str(),
+                7,
+            ),
+        ] {
+            let output = Command::new(executable)
+                .args([
+                    "terminal",
+                    "wait",
+                    id,
+                    "--until=completed",
+                    "--after",
+                    baseline,
+                    "--expect-pane-identity",
+                    identity,
+                    "--timeout=1s",
+                    "--format=json",
+                ])
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(expected),
+                "{}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        let output = Command::new(executable)
+            .args([
+                "terminal",
+                "follow",
+                "card-1",
+                "--seconds=1",
+                "--format=jsonl",
+            ])
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let events: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            events.len(),
+            2,
+            "unchanged screen must not duplicate snapshots"
+        );
+        assert_eq!(events[0]["type"], "snapshot");
+        assert_eq!(events[0]["mayHaveGaps"], true);
+        assert_eq!(events[1]["type"], "end");
+        assert_eq!(events[1]["sequence"], 2);
         let geometry = [
             "terminal",
             "move",
@@ -509,6 +586,7 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 "older-001",
             ],
             vec!["request", "inspect", "older-001"],
+            vec!["terminal", "status", "card-1"],
             vec!["terminal", "interrupt", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--expect-pane-identity=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "--request-id=older-input"],
             vec!["terminal", "minimize", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],
             vec!["terminal", "restore", "card-1", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-mode"],

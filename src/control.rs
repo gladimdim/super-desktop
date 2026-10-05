@@ -25,6 +25,7 @@ pub const METHODS: &[&str] = &[
     "terminal.list",
     "terminal.inspect",
     "terminal.runtime",
+    "terminal.status",
     "terminal.capture",
     "terminal.geometry",
     "terminal.move",
@@ -127,6 +128,8 @@ pub enum Command {
     Terminal { id: String },
     #[serde(rename = "terminal.runtime")]
     Runtime { id: String },
+    #[serde(rename = "terminal.status")]
+    Lifecycle { id: String },
     #[serde(rename = "terminal.capture")]
     Capture {
         id: String,

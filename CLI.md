@@ -56,8 +56,8 @@ daemon or fall back to legacy IPC. Start the application separately if needed.
 Every command in this section accepts `--format text|json` (default `text`) and
 `--target local` (the only supported target). Both `--flag VALUE` and
 `--flag=VALUE` work for value options. Use options on the command, not before
-the command name. Unknown flags and repeated options fail. No JSONL, timeout
-override, global request ID option or remote target is accepted here.
+the command name. Unknown flags and repeated options fail. Only `terminal follow` emits JSONL; `terminal wait` accepts a bounded timeout.
+No global request ID option or remote target is accepted here.
 
 | Command | Result or effect | Capability method |
 | --- | --- | --- |
@@ -76,10 +76,6 @@ override, global request ID option or remote target is accepted here.
 | `terminal geometry ID` | Current logical geometry, bounds, epoch and revision | `terminal.geometry` |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Move and raise a normal card or minimized icon | `terminal.move` |
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Change a normal card’s outer and restored size | `terminal.resize` |
-| `terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Minimize a terminal card to its saved icon position |
-| `terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Restore a minimized terminal card |
-| `terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Expand one terminal card |
-| `terminal collapse ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Collapse an expanded terminal card to its saved mode |
 | `terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID` | Remove the exact card and close its guarded tmux session | `terminal.close` |
 | `terminal runtime ID` | Live pane identity, process status and cell grid | `terminal.runtime` |
 | `terminal capture ID [--screen \| --history [--lines N]]` | Plain screen text or bounded retained history plus screen | `terminal.capture` |
@@ -160,6 +156,32 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (`consistency: "checked-before-and-after"`), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.
+
+## Native status, finite waits and sampled output
+
+`terminal status ID --format json` returns the observed pane identity, lifecycle,
+native metadata availability and completion evidence. Shells and unsupported
+harnesses report unknown lifecycle and unsupported completion. No completion is
+inferred from silence or screen text.
+
+`terminal wait ID --until completed --after COMPLETION_ID --expect-pane-identity IDENTITY`
+waits for a different native completion on that same pane. Take the baseline
+from `terminal status`; use `--after none` only for an observed null baseline.
+This detects a completion change, not a correlated response to your particular
+input. `--until exited|working|idle|error|waiting` selects other conditions and
+must omit `--after`. The default timeout is 30 seconds; `--timeout 5m` accepts
+up to one hour. Unsupported evidence fails explicitly, pane replacement fails
+with conflict, and timeout exits 7. Each socket request retains its own deadline.
+
+`terminal follow ID --seconds 10 --format jsonl` emits replacement screen
+snapshots, with a stream ID, sequence and `mayHaveGaps: true`. It pins the first
+observed pane, or checks `--expect-pane-identity`. Only changed snapshots are
+emitted; this is sampled screen output and can miss intervening content. Polling
+defaults to 500 ms (`--interval-ms 200..10000`), duration to ten seconds (maximum
+one hour). The stream ends at 4096 snapshots or approximately 4 MiB (one final
+snapshot can exceed the byte threshold), with an end record. Neither follow
+nor wait attaches a client, sends input or takes ownership of the terminal grid.
+Snapshot text can contain private information, just like capture.
 
 ## Card geometry, movement and resizing
 
@@ -528,6 +550,9 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `terminal status ID [--format text\|json] [--target local]` | Structured local | Observe native lifecycle and completion evidence |
+| `terminal wait ID --until completed\|exited\|working\|idle\|error\|waiting --expect-pane-identity IDENTITY [--after COMPLETION_ID\|none] [--timeout 30s] [--format text\|json] [--target local]` | Structured local | Wait for an observed terminal condition |
+| `terminal follow ID [--seconds 10] [--interval-ms 500] [--expect-pane-identity IDENTITY] [--format jsonl] [--target local]` | Structured local | Follow bounded plain-text screen snapshots |
 | `terminal send ID (--stdin \| --file PATH) [--enter] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send literal UTF-8 text to an observed terminal |
 | `terminal keys ID KEY... --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send named keys to an observed terminal |
 | `terminal interrupt ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Send Ctrl-C to an observed terminal |

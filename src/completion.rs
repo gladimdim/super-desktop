@@ -539,7 +539,7 @@ fn session_panes<'a>(listing: &'a str, id: &str) -> Vec<(u32, &'a str)> {
         .collect()
 }
 
-fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
+pub(crate) fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
     if !matches!(metadata.agent.as_str(), "pi" | "opencode" | "claude") || !metadata.completion_supported {
         return unknown(id);
     }

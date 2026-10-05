@@ -36,6 +36,7 @@ pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
         | Command::Resize { .. }
         | Command::Launch { .. }
         | Command::InspectRequest { .. }
+        | Command::Lifecycle { .. }
         | Command::Runtime { .. }
         | Command::Capture { .. } => {
             return Reply::failure(

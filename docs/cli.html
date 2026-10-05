@@ -44,6 +44,7 @@
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
+<li><a href="#native-status-finite-waits-and-sampled-output">Native status, finite waits and sampled output</a></li>
 <li><a href="#card-geometry-movement-and-resizing">Card geometry, movement and resizing</a></li>
 <li><a href="#guarded-terminal-input">Guarded terminal input</a></li>
 <li><a href="#guarded-card-modes">Guarded card modes</a></li>
@@ -109,8 +110,8 @@ daemon or fall back to legacy IPC. Start the application separately if needed.</
 <p>Every command in this section accepts <code>--format text|json</code> (default <code>text</code>) and
 <code>--target local</code> (the only supported target). Both <code>--flag VALUE</code> and
 <code>--flag=VALUE</code> work for value options. Use options on the command, not before
-the command name. Unknown flags and repeated options fail. No JSONL, timeout
-override, global request ID option or remote target is accepted here.</p>
+the command name. Unknown flags and repeated options fail. Only <code>terminal follow</code> emits JSONL; <code>terminal wait</code> accepts a bounded timeout.
+No global request ID option or remote target is accepted here.</p>
 <div class="table-scroll" tabindex="0" role="region" aria-label="Reference table"><table>
 <thead>
 <tr>
@@ -194,26 +195,6 @@ override, global request ID option or remote target is accepted here.</p>
 <td><code>terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]</code></td>
 <td>Change a normal card’s outer and restored size</td>
 <td><code>terminal.resize</code></td>
-</tr>
-<tr>
-<td><code>terminal minimize ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
-<td>Structured local</td>
-<td>Minimize a terminal card to its saved icon position</td>
-</tr>
-<tr>
-<td><code>terminal restore ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
-<td>Structured local</td>
-<td>Restore a minimized terminal card</td>
-</tr>
-<tr>
-<td><code>terminal expand ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
-<td>Structured local</td>
-<td>Expand one terminal card</td>
-</tr>
-<tr>
-<td><code>terminal collapse ID --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
-<td>Structured local</td>
-<td>Collapse an expanded terminal card to its saved mode</td>
 </tr>
 <tr>
 <td><code>terminal close ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID</code></td>
@@ -319,6 +300,28 @@ cell dimensions. A changed target returns a conflict with no text. These are
 point-in-time checks (<code>consistency: "checked-before-and-after"</code>), not an atomic
 snapshot of a running process. No native completion or prompt/title metadata
 is inferred from captured text.</p>
+<h2 id="native-status-finite-waits-and-sampled-output">Native status, finite waits and sampled output</h2>
+<p><code>terminal status ID --format json</code> returns the observed pane identity, lifecycle,
+native metadata availability and completion evidence. Shells and unsupported
+harnesses report unknown lifecycle and unsupported completion. No completion is
+inferred from silence or screen text.</p>
+<p><code>terminal wait ID --until completed --after COMPLETION_ID --expect-pane-identity IDENTITY</code>
+waits for a different native completion on that same pane. Take the baseline
+from <code>terminal status</code>; use <code>--after none</code> only for an observed null baseline.
+This detects a completion change, not a correlated response to your particular
+input. <code>--until exited|working|idle|error|waiting</code> selects other conditions and
+must omit <code>--after</code>. The default timeout is 30 seconds; <code>--timeout 5m</code> accepts
+up to one hour. Unsupported evidence fails explicitly, pane replacement fails
+with conflict, and timeout exits 7. Each socket request retains its own deadline.</p>
+<p><code>terminal follow ID --seconds 10 --format jsonl</code> emits replacement screen
+snapshots, with a stream ID, sequence and <code>mayHaveGaps: true</code>. It pins the first
+observed pane, or checks <code>--expect-pane-identity</code>. Only changed snapshots are
+emitted; this is sampled screen output and can miss intervening content. Polling
+defaults to 500 ms (<code>--interval-ms 200..10000</code>), duration to ten seconds (maximum
+one hour). The stream ends at 4096 snapshots or approximately 4 MiB (one final
+snapshot can exceed the byte threshold), with an end record. Neither follow
+nor wait attaches a client, sends input or takes ownership of the terminal grid.
+Snapshot text can contain private information, just like capture.</p>
 <h2 id="card-geometry-movement-and-resizing">Card geometry, movement and resizing</h2>
 <p><code>terminal geometry CARD_ID --format json</code> reads the current local card without
 showing the overlay. It returns <code>epoch</code>, an opaque <code>revision</code>, <code>mode</code>, <code>rect</code>,
@@ -669,6 +672,21 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>terminal status ID [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Observe native lifecycle and completion evidence</td>
+</tr>
+<tr>
+<td><code>terminal wait ID --until completed\|exited\|working\|idle\|error\|waiting --expect-pane-identity IDENTITY [--after COMPLETION_ID\|none] [--timeout 30s] [--format text\|json] [--target local]</code></td>
+<td>Structured local</td>
+<td>Wait for an observed terminal condition</td>
+</tr>
+<tr>
+<td><code>terminal follow ID [--seconds 10] [--interval-ms 500] [--expect-pane-identity IDENTITY] [--format jsonl] [--target local]</code></td>
+<td>Structured local</td>
+<td>Follow bounded plain-text screen snapshots</td>
+</tr>
 <tr>
 <td><code>terminal send ID (--stdin \| --file PATH) [--enter] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>

@@ -28,7 +28,7 @@ also access the existing IPC, tmux, and the user's files. Launcher discovery
 does not execute a launcher, verify its authentication, or establish that its
 permission settings are safe.
 
-`terminal runtime` and `terminal capture` require an exact saved local card and
+`terminal runtime`, `terminal status` and `terminal capture` require an exact saved local card and
 one pane across its tmux session. The daemon rechecks the live card mapping and
 pane/server identity before returning data, withholding content on detected
 replacement, closure, alternate-screen transition or grid change. Observations
@@ -37,6 +37,12 @@ are not atomic with ongoing output. Capture is bounded to 64 KiB and at most
 It strips terminal escapes and control characters, never requests raw ANSI,
 and does not attach a client, send input, clear history or resize the pane.
 Output remains untrusted data even after control sequences are stripped.
+
+`terminal follow` repeatedly captures replacement screen snapshots with explicit
+possible gaps and finite time/output limits. It pins the pane identity. Native
+status and wait use existing attributable harness metadata, without deriving
+completion from screen text or silence. A changed completion ID does not prove
+which submitted input completed. Neither operation attaches or resizes a client.
 
 Structured launches use configured executables and arguments. Recognized
 permission-bypass flags, argument overrides saved in Settings, and custom

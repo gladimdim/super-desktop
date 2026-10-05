@@ -33,6 +33,9 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("terminal status", "Observe native lifecycle and completion evidence", "terminal status ID [--format text|json] [--target local]", "Read-only; no text, prompts, input, attach or resize; unknown is never inferred from silence", "Exact saved card ID; live unambiguous pane; supported native adapter for completion", "Runtime fields plus lifecycle, nativeMetadataObserved, completion supported/state/completionId, turnCorrelation=not_observed; exits 0/2/3/4/5/6/7/8", "super-desktop terminal status CARD_ID --format json", false),
+    command!("terminal wait", "Wait for an observed terminal condition", "terminal wait ID --until completed|exited|working|idle|error|waiting --expect-pane-identity IDENTITY [--after COMPLETION_ID|none] [--timeout 30s] [--format text|json] [--target local]", "Read-only polling; finite deadline; completion requires a new native completion after the supplied baseline on the same pane, not proof of a particular CLI submission", "Exact card and pane identity; completed requires --after from status (none only for a null baseline); other lifecycle conditions require native metadata; duration 1s-60m", "Final status envelope or unsupported/conflict/timeout error; no inferred completion from quiet output; exits 0/2/3/4/5/6/7/8", "super-desktop terminal wait CARD_ID --until completed --after COMPLETION_ID --expect-pane-identity IDENTITY --timeout 5m --format json", false),
+    command!("terminal follow", "Follow bounded plain-text screen snapshots", "terminal follow ID [--seconds 10] [--interval-ms 500] [--expect-pane-identity IDENTITY] [--format jsonl] [--target local]", "Read-only replacement screen snapshots, never an exact byte stream; does not attach, resize or send input; may contain sensitive untrusted text", "Exact card ID; one pane; 1-3600 seconds; polling interval 200-10000ms; at most 4096 snapshots and approximately 4 MiB; pane replacement ends the stream", "JSONL snapshot/end events with streamId, sequence and mayHaveGaps=true; unchanged snapshots omitted; no cursor replay; exits 0/2/3/4/5/6/7/8", "super-desktop terminal follow CARD_ID --seconds 10 --format jsonl", false),
     command!("terminal send", "Send literal UTF-8 text to an observed terminal", "terminal send ID (--stdin | --file PATH) [--enter] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text|json] [--target local]", "May execute code, including multiline input without --enter; appends Enter only when requested. Never retries input or starts/resizes a session", "Ready local daemon; exact card ID, fresh geometry epoch/revision and runtime paneIdentity; unique request ID; 4096-byte UTF-8 limit for text, newline/tab allowed; no other control bytes", "Envelope with outcome=delivered, paneIdentity, submissionObserved=false, completionObserved=false and turnId=null. Durable receipt contains no text. Unknown outcomes must be inspected, never replayed; exits 0/2/3/4/5/6/7/8", "super-desktop terminal send CARD_ID --file task.txt --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id input-001 --format json", false),
     command!("terminal keys", "Send named keys to an observed terminal", "terminal keys ID KEY... --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text|json] [--target local]", "May execute code. Keys: Enter Escape Tab Backspace Delete Up Down Left Right Home End PageUp PageDown Ctrl-C Ctrl-D Ctrl-U Ctrl-L; 1-32 keys. Never retries input or starts/resizes a session", "Ready local daemon; exact card ID, fresh geometry epoch/revision and runtime paneIdentity; unique request ID; 4096-byte UTF-8 limit for text, newline/tab allowed; no other control bytes", "Envelope with outcome=delivered, paneIdentity, submissionObserved=false, completionObserved=false and turnId=null. Durable receipt contains no text. Unknown outcomes must be inspected, never replayed; exits 0/2/3/4/5/6/7/8", "super-desktop terminal keys CARD_ID Ctrl-C --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id input-001 --format json", false),
     command!("terminal interrupt", "Send Ctrl-C to an observed terminal", "terminal interrupt ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text|json] [--target local]", "Interrupts the foreground terminal; does not kill its session or escalate signals. Never retries input or starts/resizes a session", "Ready local daemon; exact card ID, fresh geometry epoch/revision and runtime paneIdentity; unique request ID; 4096-byte UTF-8 limit for text, newline/tab allowed; no other control bytes", "Envelope with outcome=delivered, paneIdentity, submissionObserved=false, completionObserved=false and turnId=null. Durable receipt contains no text. Unknown outcomes must be inspected, never replayed; exits 0/2/3/4/5/6/7/8", "super-desktop terminal interrupt CARD_ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id input-001 --format json", false),
@@ -303,6 +306,11 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
 
 pub fn run(args: &[String]) -> Option<i32> {
     let offline = dispatch(args);
+    if offline.is_none() {
+        if let Some(code) = crate::cli_extended::stream(args) {
+            return Some(code);
+        }
+    }
     let output = offline.or_else(|| {
         matches!(
             args.first().map(String::as_str),
@@ -408,6 +416,9 @@ fn group_or_help(path: &str) -> Output {
 }
 
 fn live(args: &[String]) -> Output {
+    if let Some(output) = crate::cli_extended::observe(args) {
+        return output;
+    }
     if let Some(output) = crate::cli_extended::run(args) {
         return output;
     }

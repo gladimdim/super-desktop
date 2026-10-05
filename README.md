@@ -438,9 +438,10 @@ available as a [web guide](https://superdesktop.dmytrogladkyi.com/cli.html).
 It covers every public command, exact ID selection, JSON results, permission
 choices, exit statuses and handling uncertain launch outcomes.
 
-Current structured local commands cover discovery, creation and terminal
-observation. Local input and resizing commands are not available; saved card
-geometry and live terminal dimensions can be inspected. Remote operations use the separate legacy `peer-*` commands.
+Current structured local commands cover discovery, creation, guarded terminal
+input and closing, card geometry and modes, native status/completion waits, and
+bounded screen capture/follow. Local attachment and direct grid ownership are
+not available. Remote operations use the separate legacy `peer-*` commands.
 
 Start with `super-desktop --help` or `super-desktop help agents`. Each listed
 command accepts `--help` for its effects, requirements, output and an example.

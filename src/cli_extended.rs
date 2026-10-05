@@ -268,3 +268,319 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
         Err(message) => render_reply(Reply::failure("", "invalid_arguments", message), json),
     })
 }
+
+pub(crate) fn seconds(value: &str) -> Result<std::time::Duration, &'static str> {
+    let (number, multiplier) = if let Some(v) = value.strip_suffix('m') {
+        (v, 60)
+    } else {
+        (value.strip_suffix('s').unwrap_or(value), 1)
+    };
+    let n = number
+        .parse::<u64>()
+        .ok()
+        .filter(|n| (1..=3600).contains(n))
+        .ok_or("Use 1-3600 seconds or a duration such as 5m.")?;
+    let n = n
+        .checked_mul(multiplier)
+        .filter(|n| *n <= 3600)
+        .ok_or("Duration must not exceed one hour.")?;
+    Ok(std::time::Duration::from_secs(n))
+}
+
+fn observe_args(args: &[String], wait: bool) -> Result<Options, &'static str> {
+    let options = Options::parse(
+        args,
+        if wait {
+            &["--until", "--after", "--timeout", "--expect-pane-identity"]
+        } else {
+            &[]
+        },
+        &[],
+    )?;
+    if options.words.len() != 3 || !valid_id(&options.words[2], 128) {
+        return Err("Use an exact terminal card ID.");
+    }
+    if options.values.contains_key("--request-id") {
+        return Err("Observation does not accept --request-id.");
+    }
+    Ok(options)
+}
+
+fn wait_terminal(options: &Options) -> Reply {
+    let fail = |code, message| Reply::failure("", code, message);
+    let until = match options.required("--until") {
+        Ok(v)
+            if matches!(
+                v.as_str(),
+                "completed" | "exited" | "working" | "idle" | "error" | "waiting"
+            ) =>
+        {
+            v
+        }
+        _ => {
+            return fail(
+                "invalid_arguments",
+                "Use --until completed|exited|working|idle|error|waiting.",
+            )
+        }
+    };
+    let expected = match options.required("--expect-pane-identity") {
+        Ok(v) if opaque(&v) => v,
+        _ => {
+            return fail(
+                "invalid_arguments",
+                "Wait requires --expect-pane-identity from terminal status/runtime.",
+            )
+        }
+    };
+    let after = options.values.get("--after");
+    if until == "completed" {
+        if !after.is_some_and(|v| v == "none" || opaque(v)) {
+            return fail("invalid_arguments","Completion wait needs --after with the last observed completionId, or none for an observed null baseline.");
+        }
+    } else if after.is_some() {
+        return fail("invalid_arguments", "--after is only for completed waits.");
+    }
+    let timeout = match options
+        .values
+        .get("--timeout")
+        .map_or(Ok(std::time::Duration::from_secs(30)), |v| seconds(v))
+    {
+        Ok(value) => value,
+        Err(message) => return fail("invalid_arguments", message),
+    };
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let reply = send(
+            Command::Lifecycle {
+                id: options.words[2].clone(),
+            },
+            options,
+            "terminal.status",
+        );
+        if !reply.ok {
+            return reply;
+        }
+        let Some(data) = reply.data.as_ref() else {
+            return fail("invalid_response", "Missing terminal status.");
+        };
+        if data["paneIdentity"] != expected {
+            return fail("conflict", "The pane was replaced while waiting.");
+        }
+        let state = data["lifecycle"].as_str().unwrap_or("unknown");
+        if until == "completed" && data["completion"]["supported"] != true {
+            return fail(
+                "unsupported_completion",
+                "This pane has no attributable native completion support.",
+            );
+        }
+        let completed = data["completion"]["state"] == "completed"
+            && data["completion"]["completionId"]
+                .as_str()
+                .is_some_and(|id| Some(id) != after.map(String::as_str));
+        if (until == "completed" && completed) || (until != "completed" && state == until) {
+            return reply;
+        }
+        if state == "exited" {
+            return fail(
+                "terminal_not_running",
+                "The pane exited before the requested condition.",
+            );
+        }
+        if until != "exited" && until != "completed" && data["nativeMetadataObserved"] != true {
+            return fail(
+                "unsupported_completion",
+                "This condition needs native lifecycle metadata; silence is not evidence.",
+            );
+        }
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return fail(
+                "timeout",
+                "The requested terminal condition was not observed before the deadline.",
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250).min(deadline - now));
+    }
+}
+
+pub(crate) fn observe(args: &[String]) -> Option<Output> {
+    if args.first()?.as_str() != "terminal" || !matches!(args.get(1)?.as_str(), "status" | "wait") {
+        return None;
+    }
+    let waiting = args[1] == "wait";
+    let json = json_requested(args);
+    Some(match observe_args(args, waiting) {
+        Err(message) => render_reply(Reply::failure("", "invalid_arguments", message), json),
+        Ok(options) => render_reply(
+            if waiting {
+                wait_terminal(&options)
+            } else {
+                send(
+                    Command::Lifecycle {
+                        id: options.words[2].clone(),
+                    },
+                    &options,
+                    "terminal.status",
+                )
+            },
+            json,
+        ),
+    })
+}
+
+/// A bounded stream of replacement screen snapshots. Polling cannot promise
+/// every intervening output byte, so this never labels snapshots as deltas.
+pub(crate) fn stream(args: &[String]) -> Option<i32> {
+    use std::io::Write;
+    if args.first()?.as_str() != "terminal" || args.get(1)?.as_str() != "follow" {
+        return None;
+    }
+    let mut parse_args = args.to_vec();
+    for i in 0..parse_args.len() {
+        if parse_args[i] == "--format=jsonl" {
+            parse_args[i] = "--format=json".into();
+        } else if parse_args[i] == "jsonl" && i > 0 && parse_args[i - 1] == "--format" {
+            parse_args[i] = "json".into();
+        }
+    }
+    let emit = |value: &serde_json::Value| -> Result<usize, ()> {
+        let line = serde_json::to_string(value)
+            .map_err(|_| ())?
+            .chars()
+            .map(|c| {
+                if c.is_control() {
+                    format!("\\u{:04x}", c as u32)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect::<String>()
+            + "\n";
+        let mut out = std::io::stdout().lock();
+        out.write_all(line.as_bytes())
+            .and_then(|_| out.flush())
+            .map_err(|_| ())?;
+        Ok(line.len())
+    };
+    let fail = |code, message| {
+        let reply = Reply::failure("", code, message);
+        if emit(&serde_json::to_value(&reply).unwrap()).is_err() {
+            8
+        } else {
+            reply.exit_code()
+        }
+    };
+    let options = match Options::parse(
+        &parse_args,
+        &["--seconds", "--interval-ms", "--expect-pane-identity"],
+        &[],
+    ) {
+        Ok(options) => options,
+        Err(message) => return Some(fail("invalid_arguments", message)),
+    };
+    if options.words.len() != 3
+        || !valid_id(&options.words[2], 128)
+        || options.values.contains_key("--request-id")
+    {
+        return Some(fail(
+            "invalid_arguments",
+            "Follow requires an exact card ID and no request ID.",
+        ));
+    }
+    if args
+        .iter()
+        .any(|a| a.starts_with("--format=") && a != "--format=jsonl")
+        || args
+            .windows(2)
+            .any(|a| a[0] == "--format" && a[1] != "jsonl")
+    {
+        return Some(fail(
+            "invalid_arguments",
+            "Follow emits JSONL screen snapshots.",
+        ));
+    }
+    let duration = match options
+        .values
+        .get("--seconds")
+        .map_or(Ok(std::time::Duration::from_secs(10)), |v| seconds(v))
+    {
+        Ok(v) => v,
+        Err(message) => return Some(fail("invalid_arguments", message)),
+    };
+    let interval = match options
+        .values
+        .get("--interval-ms")
+        .map_or(Some(500), |v| v.parse::<u64>().ok())
+        .filter(|v| (200..=10000).contains(v))
+    {
+        Some(v) => std::time::Duration::from_millis(v),
+        None => return Some(fail("invalid_arguments", "Use --interval-ms 200-10000.")),
+    };
+    let mut identity = options.values.get("--expect-pane-identity").cloned();
+    if identity.as_ref().is_some_and(|v| !opaque(v)) {
+        return Some(fail(
+            "invalid_arguments",
+            "Copy paneIdentity from terminal runtime.",
+        ));
+    }
+    let stream_id = match control::new_request(Command::Status {}) {
+        Ok(r) => r.request_id,
+        Err(_) => return Some(fail("unavailable", "OS randomness unavailable.")),
+    };
+    let deadline = std::time::Instant::now() + duration;
+    let mut previous = None;
+    let mut sequence = 0;
+    let mut total = 0;
+    loop {
+        let reply = send(
+            Command::Capture {
+                id: options.words[2].clone(),
+                history: false,
+                lines: None,
+            },
+            &options,
+            "terminal.capture",
+        );
+        if !reply.ok {
+            return Some(if emit(&serde_json::to_value(&reply).unwrap()).is_ok() {
+                reply.exit_code()
+            } else {
+                8
+            });
+        }
+        let Some(data) = reply.data else {
+            return Some(fail("invalid_response", "Missing capture snapshot."));
+        };
+        let Some(pane) = data["runtime"]["paneIdentity"].as_str() else {
+            return Some(fail("invalid_response", "Missing capture pane identity."));
+        };
+        if identity.as_ref().is_some_and(|id| id != pane) {
+            return Some(fail("conflict", "The pane was replaced; the stream ended."));
+        }
+        identity = Some(pane.into());
+        let fingerprint = serde_json::json!([
+            data["text"],
+            data["runtime"]["columns"],
+            data["runtime"]["rows"],
+            data["truncated"]
+        ]);
+        if previous.as_ref() != Some(&fingerprint) {
+            sequence += 1;
+            let event = serde_json::json!({"schemaVersion":1,"ok":true,"target":"local","type":"snapshot","streamId":stream_id,
+                "sequence":sequence,"mayHaveGaps":true,"data":data});
+            match emit(&event) {
+                Ok(n) => total += n,
+                Err(()) => return Some(8),
+            }
+            previous = Some(fingerprint);
+        }
+        if total >= 4 * 1024 * 1024 || sequence >= 4096 || std::time::Instant::now() >= deadline {
+            return Some(if emit(&serde_json::json!({"schemaVersion":1,"ok":true,"type":"end","streamId":stream_id,"sequence":sequence+1,
+                "reason":if total>=4*1024*1024 || sequence>=4096 {"limit"} else {"duration"}})).is_ok() {0} else {8});
+        }
+        std::thread::sleep(
+            interval.min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+}

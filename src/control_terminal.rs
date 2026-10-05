@@ -306,7 +306,7 @@ fn observe(
     recheck: impl FnOnce(&TerminalData) -> Result<bool, ()>,
 ) -> Result<Value, Failure> {
     let (id, capture) = match &request.command {
-        Command::Runtime { id } => (id, None),
+        Command::Runtime { id } | Command::Lifecycle { id } => (id, None),
         Command::Capture { id, history, lines } => {
             if (!history && lines.is_some()) || lines.is_some_and(|n| !(1..=2000).contains(&n)) {
                 return Err((
@@ -341,6 +341,11 @@ fn observe(
         ));
     }
     let before = probe(session, deadline)?;
+    let lifecycle = if matches!(request.command, Command::Lifecycle { .. }) {
+        Some(lifecycle(card, &before, deadline)?)
+    } else {
+        None
+    };
     let captured = match capture {
         Some(lines) => Some(tmux(
             &[
@@ -369,6 +374,9 @@ fn observe(
     if !same_instance(&before, &after) {
         return Err(CONFLICT);
     }
+    if let Some(data) = lifecycle {
+        return Ok(data);
+    }
     let Some(output) = captured else {
         return Ok(runtime(card, &after));
     };
@@ -385,6 +393,63 @@ fn observe(
         "encodingLossy":encoding_lossy,
         "historyScope":if requested == 0 {"current-screen"} else {"tmux-retained-history-plus-current-screen"}}),
     )
+}
+
+fn lifecycle(card: &TerminalData, pane: &Pane, deadline: Instant) -> Result<Value, Failure> {
+    let mut data = runtime(card, pane);
+    let mut lifecycle = if pane.dead {
+        "exited".to_string()
+    } else {
+        "unknown".to_string()
+    };
+    let mut completion = crate::completion::Completion {
+        id: card.id.clone(),
+        supported: false,
+        state: "unknown".into(),
+        completion_id: None,
+    };
+    let mut native = false;
+    if !pane.dead {
+        if card.agent_type == "codex" {
+            completion = crate::completion::inspect(&card.id, pane.pid);
+            lifecycle = completion.state.clone();
+            native = completion.supported;
+        } else {
+            let option = tmux(
+                &[
+                    "-N",
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &pane.pane_id,
+                    "#{@super_desktop_metadata}",
+                ],
+                8192,
+                deadline,
+            )?;
+            if option.limited {
+                return Err(("output_limit", "Metadata reference exceeds the limit."));
+            }
+            let option = std::str::from_utf8(&option.bytes).map_err(|_| UNAVAILABLE)?;
+            if let Some(metadata) =
+                crate::harness_metadata::inspect_option(&card.agent_type, option).filter(
+                    |metadata| {
+                        crate::harness_metadata::owns_pane(metadata, pane.pid)
+                            && metadata.adapter_reported()
+                    },
+                )
+            {
+                native = true;
+                lifecycle = metadata.status.clone();
+                completion = crate::completion::native_completion(&card.id, &metadata);
+            }
+        }
+    }
+    data["lifecycle"] = json!(lifecycle);
+    data["nativeMetadataObserved"] = json!(native);
+    data["completion"] = serde_json::to_value(completion).unwrap();
+    data["turnCorrelation"] = json!("not_observed");
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -569,6 +634,15 @@ mod tests {
         assert_eq!(runtime["rows"], 12);
         assert_eq!(runtime["status"], "running");
         assert!(runtime["retainedHistoryLines"].as_u64().unwrap() > 30);
+        let native = get(&request(Command::Lifecycle {
+            id: "card-1".into(),
+        }))
+        .data
+        .unwrap();
+        assert_eq!(native["lifecycle"], "unknown");
+        assert_eq!(native["completion"]["supported"], false);
+        assert_eq!(native["paneIdentity"], runtime["paneIdentity"]);
+        assert!(native.get("text").is_none() && native.get("prompt").is_none());
         let screen = get(&capture(false, None)).data.unwrap();
         assert!(screen["text"]
             .as_str()
