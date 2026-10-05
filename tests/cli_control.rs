@@ -21,7 +21,7 @@ fn control_daemon_fixture() {
         }
         let data = match &request.command {
             control::Command::Composer {id}=>serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"ready":true,"reason":"empty"}),
-            control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}=>serde_json::to_value(&request.command).unwrap(),
+            control::Command::ConnectionRead {..} | control::Command::ConnectionInvite {..} | control::Command::ConnectionDecide {..} | control::Command::ConnectionRevoke {..} | control::Command::PeerAdd {..} | control::Command::PeerPairing {..} | control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Forget {..}|control::Command::Relaunch {..}=>serde_json::to_value(&request.command).unwrap(),
             control::Command::Shortcut {..}=>serde_json::to_value(&request.command).unwrap(),

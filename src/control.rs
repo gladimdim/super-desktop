@@ -23,6 +23,12 @@ pub const METHODS: &[&str] = &[
     "app.status",
     "audit.list",
     "access.list",
+    "connection.read",
+    "connection.invite",
+    "connection.decide",
+    "connection.revoke",
+    "peer.add",
+    "peer.pairing",
     "peer.read",
     "peer.command",
     "peer.forget",
@@ -249,6 +255,18 @@ pub enum FilesEdit {
 pub enum Command {
     #[serde(rename="terminal.composer")]
     Composer { id:String },
+    #[serde(rename="connection.read")]
+    ConnectionRead { pending: bool },
+    #[serde(rename="connection.invite")]
+    ConnectionInvite { output: String },
+    #[serde(rename="connection.decide")]
+    ConnectionDecide { id: String, code: String, approve: bool, #[serde(rename="allowAccess")] allow_access: bool },
+    #[serde(rename="connection.revoke")]
+    ConnectionRevoke { id: String },
+    #[serde(rename="peer.add")]
+    PeerAdd { invitation: String, host: Option<String>, port: Option<u16>, name: Option<String> },
+    #[serde(rename="peer.pairing")]
+    PeerPairing { id: String },
     #[serde(rename="peer.read")]
     PeerRead {id:Option<String>,query:String},
     #[serde(rename="peer.command")]
@@ -432,7 +450,7 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::PeerCommand {..} | Self::PeerForget {..} | Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
+            Self::ConnectionInvite {..} | Self::ConnectionDecide {..} | Self::ConnectionRevoke {..} | Self::PeerAdd {..} | Self::PeerCommand {..} | Self::PeerForget {..} | Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
                 | Self::Attach { .. }
                 | Self::Viewport { .. }
                 | Self::CardAction { .. }
@@ -541,7 +559,8 @@ pub fn capabilities() -> Value {
         "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
         "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
-        "delegatedAccess": false, "remoteTargets": false, "peerWrappers":{"reads":["list","inspect","workspace"],"mutations":["command","forget"],"wire":"existing-pinned-peer-protocol","localFallback":false},
+        "connections":{"reads":["list","pending"],"mutations":["invite","approve","reject","revoke"],"wireVersion":3,"bridgeAutoStart":false,"invitationOutput":"new-private-file","approvalRequiresCode":true},
+        "delegatedAccess": false, "remoteTargets": false, "peerWrappers":{"reads":["list","inspect","workspace"],"mutations":["add","command","forget"],"pairingJobs":{"statusMethod":"peer.pairing","durable":false,"maxJobs":32,"maxActive":1,"approval":"host-code-comparison"},"wire":"existing-pinned-peer-protocol","localFallback":false},
         "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
         "promptAttachments":{"maxFiles":4,"maxBytes":16777216,"delivery":"path-references","nativeImageConfirmation":false,"source":"checked-cli-assets","privateCopies":true},

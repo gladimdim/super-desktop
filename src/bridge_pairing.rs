@@ -261,7 +261,7 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
 /// Owner-only request over the bridge's control socket. Errors are stable
 /// codes: the bridge's own, or `bridge_offline` / `bridge_not_responding` /
 /// `invalid_bridge_response` when it could not answer.
-fn local_request(method: &str, path: &str, body: Value) -> Result<Value, String> {
+pub(crate) fn local_request(method: &str, path: &str, body: Value) -> Result<Value, String> {
     let mut stream = std::os::unix::net::UnixStream::connect(security::control_path())
         .map_err(|_| "bridge_offline".to_string())?;
     let not_responding = |_| "bridge_not_responding".to_string();

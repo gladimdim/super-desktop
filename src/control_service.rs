@@ -28,7 +28,7 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
-        Command::PeerRead {..} | Command::PeerCommand {..} | Command::PeerForget {..}
+        Command::ConnectionRead {..} | Command::ConnectionInvite {..} | Command::ConnectionDecide {..} | Command::ConnectionRevoke {..} | Command::PeerAdd {..} | Command::PeerPairing {..} | Command::PeerRead {..} | Command::PeerCommand {..} | Command::PeerForget {..}
         | Command::UpdatesCheck {} | Command::UpdatesInstall {..} | Command::UpdatesStatus {..}
         | Command::Forget {..} | Command::Relaunch {..}
         | Command::Shortcut {..}

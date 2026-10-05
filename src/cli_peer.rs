@@ -8,16 +8,20 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
     let build = || -> Result<Output, &'static str> {
         let action = args
             .get(1)
-            .ok_or("Choose peer list/inspect/workspace/command/forget.")?;
+            .ok_or("Choose peer list/inspect/add/pairing/workspace/command/forget.")?;
         let o = Options::parse(
             args,
-            if action == "command" {
-                &["--file"]
+            if action == "add" {
+                &["--file", "--host", "--port", "--name"][..]
+            } else if action == "command" {
+                &["--file"][..]
             } else {
                 &[]
             },
-            if action == "command" {
-                &["--stdin", "--allow-peer-mutation"]
+            if action == "add" {
+                &["--stdin"][..]
+            } else if action == "command" {
+                &["--stdin", "--allow-peer-mutation"][..]
             } else {
                 &[]
             },
@@ -29,6 +33,25 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             .collect::<Vec<_>>()
             .as_slice()
         {
+            ["peer", "add"] => (
+                Command::PeerAdd {
+                    invitation: o.text(8192)?,
+                    host: o.values.get("--host").cloned(),
+                    port: o
+                        .values
+                        .get("--port")
+                        .map(|p| {
+                            p.parse::<u16>()
+                                .ok()
+                                .filter(|p| *p > 0)
+                                .ok_or("Use a port from 1 to 65535.")
+                        })
+                        .transpose()?,
+                    name: o.values.get("--name").cloned(),
+                },
+                "peer.add",
+            ),
+            ["peer", "pairing", id] => (Command::PeerPairing { id: (*id).into() }, "peer.pairing"),
             ["peer", "list"] => (
                 Command::PeerRead {
                     id: None,

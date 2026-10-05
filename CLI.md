@@ -1,7 +1,8 @@
 # SUPER DESKTOP CLI reference
 
 Use the CLI to manage application lifecycle, harnesses, terminal cards, notes,
-workspace layouts, launcher settings, terminal files, update jobs and saved peers.
+workspace layouts, launcher settings, terminal files, update jobs, saved peers
+and inbound device connections.
 Commands include guarded terminal input, bounded attachments and output streams,
 card geometry, temporary grid leases and durable mutation receipts.
 This reference covers implemented public commands on the default branch.
@@ -10,8 +11,8 @@ Your installed client and running daemon may support fewer commands: check
 
 The structured CLI uses an owner-only local socket. Explicit `peer` commands
 wrap existing pinned PC connections; remote streams use the legacy `peer-*`
-commands. Pairing and inbound connection administration remain available in
-Settings. Native image confirmation, per-submission completion correlation and
+commands. `peer add` pairs an outgoing PC, and `connection` manages devices
+authorized on this host. Native image confirmation, per-submission completion correlation and
 delegated agent permissions are not supported.
 
 ## Start here for agents
@@ -843,6 +844,14 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal resume ID --native-session NATIVE_ID --allow-unsafe-harness --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Replace a terminal with an explicit native conversation |
 | `settings shortcut preview --combo COMBO [--format text\|json] [--target local]` | Structured local | Preview a managed Hyprland shortcut change |
 | `settings shortcut apply --combo COMBO --preview HASH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Apply a reviewed shortcut preview |
+| `connection list [--format text\|json] [--target local]` | Structured local | List devices authorized to connect to this PC |
+| `connection pending [--format text\|json] [--target local]` | Structured local | List inbound pairing requests awaiting approval |
+| `connection invite --output PATH --request-id ID [--format text\|json] [--target local]` | Structured local | Create a single-use invitation in a private file |
+| `connection approve ID --code CODE --allow-access --request-id ID [--format text\|json] [--target local]` | Structured local | Approve an exact inbound request after comparing its code |
+| `connection reject ID --code CODE --request-id ID [--format text\|json] [--target local]` | Structured local | Reject and block an exact inbound pairing request |
+| `connection revoke ID --request-id ID [--format text\|json] [--target local]` | Structured local | Revoke an exact registered device and disconnect its streams |
+| `peer add (--stdin \| --file PATH) [--host ADDRESS] [--port PORT] [--name LABEL] --request-id ID [--format text\|json] [--target local]` | Structured local | Request a pinned outgoing PC pairing |
+| `peer pairing ID [--format text\|json] [--target local]` | Structured local | Inspect an outgoing pairing job and comparison code |
 | `peer list [--format text\|json] [--target local]` | Structured local | List saved outgoing peers without credentials |
 | `peer inspect ID [--format text\|json] [--target local]` | Structured local | Inspect one saved peer |
 | `peer workspace ID [--format text\|json] [--target local]` | Structured local | Read a verified remote workspace |
@@ -894,6 +903,75 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## Pairing and device administration
+
+The local daemon and bridge must already be running. These commands reuse the
+existing pinned protocol; they do not start the bridge or change the firewall.
+`connection list` reads inbound device authorizations; `peer list` reads saved
+outgoing PC connections. An offline bridge produces an error, not an empty list.
+
+On the host, create an invitation inside a private directory:
+
+```bash
+install -d -m 700 "$HOME/.local/state/super-desktop/invitations"
+super-desktop connection invite \
+  --output "$HOME/.local/state/super-desktop/invitations/invite-001.json" \
+  --request-id invite-001 --format json
+super-desktop connection pending --format json
+super-desktop connection list --format json
+```
+
+The output filename must be absolute, new, and inside an existing owner-only
+directory with no symlink components. The file is mode 0600 and contains the
+secret invitation JSON. Share it only with the intended device. The invitation
+expires after five minutes, is single-use, and replaces any previous invitation.
+Normal output and durable receipts contain its path and expiry, never its secret.
+An empty file can remain after failure; the command never overwrites a file.
+Replaying the same request ID returns its historical receipt, even after expiry
+or file deletion; it never issues another invitation.
+
+On the viewing PC, supply the invitation through a file or redirected stdin:
+
+```bash
+super-desktop peer add --file /absolute/private/invite-001.json \
+  --host 192.168.1.20 --request-id pair-001 --format json
+super-desktop peer pairing pair-001 --format json
+```
+
+The queued receipt contains `jobId`. Poll `peer pairing JOB_ID` for
+`data.state`: `connecting`, `waiting`, `paired`, or `failed`. While waiting,
+`data.code` is the six-digit comparison code. Compare it on both devices before
+the host approves the exact request:
+
+```bash
+super-desktop connection approve PAIRING_REQUEST_ID --code 123456 \
+  --allow-access --request-id approve-001 --format json
+# Or reject and block the requesting device:
+super-desktop connection reject PAIRING_REQUEST_ID --code 123456 \
+  --request-id reject-001 --format json
+# Revoke an already authorized device:
+super-desktop connection revoke DEVICE_ID --request-id revoke-001 --format json
+```
+
+Copy `PAIRING_REQUEST_ID` and `code` from `connection pending`; copy `DEVICE_ID`
+from `connection list`. Rejection reports `remembered: false` if the bridge
+could not persist its block. Approval grants the bridge's existing device
+permissions. Revocation removes the host authorization and disconnects its
+streams; the requesting device may still have a saved connection entry.
+
+Pairing checks the invitation's certificate pin even with `--host`/`--port`
+overrides. The peer is saved only after host approval; re-pairing replaces its
+saved endpoint and credential. Jobs retain no invitation or issued token in
+status output or receipts. One CLI pairing job may be active, and at most 32
+jobs are retained during a daemon lifetime. Requests normally expire after two
+minutes on the host. Stopping the caller does not cancel a queued job.
+
+Job observation succeeds with `ok: true` even when `data.state` is `failed`;
+inspect the state and `data.error`. Jobs disappear on daemon restart, but durable
+request receipts prevent resubmission. Inspect the host's pending requests and
+authorized devices after any failed, missing, or uncertain job before creating
+another invitation. A missing local job does not prove the host denied access.
 
 ## Structured peer wrappers
 

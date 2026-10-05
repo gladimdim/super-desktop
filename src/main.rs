@@ -17,6 +17,8 @@ mod control_shortcut;
 mod control_relaunch;
 mod control_updates;
 mod control_peer;
+mod control_pairing;
+mod control_connection;
 #[cfg(test)]
 mod control_acceptance;
 mod control_workspace;
@@ -709,6 +711,12 @@ fn run_daemon(start_visible: bool) {
                                 &request.request_id,
                                 control::capabilities(),
                             );
+                        }
+                        if matches!(request.command,control::Command::ConnectionRead {..}|control::Command::ConnectionInvite {..}|control::Command::ConnectionDecide {..}|control::Command::ConnectionRevoke {..}) {
+                            return control_connection::execute(&control_journal::root(), &request, deadline);
+                        }
+                        if matches!(request.command,control::Command::PeerAdd {..}|control::Command::PeerPairing {..}) {
+                            return control_pairing::execute(&control_journal::root(), &request);
                         }
                         if matches!(request.command,control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}) {
                             return control_peer::execute(&control_journal::root(),&request,deadline);
