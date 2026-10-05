@@ -315,6 +315,7 @@ mod tests {
             control_version: 1,
             request_id: "launch-1".into(),
             command: control::Command::Launch {
+                arguments: None,
                 harness: "shell".into(),
                 cwd: "/private/path".into(),
                 allow_unsafe_harness: false,

@@ -75,7 +75,7 @@ does not confine the configured program. Argument-bearing configuration is
 returned only by explicit get operations and omitted from mutation receipts.
 CLI setting changes refuse an open Settings panel to avoid replacing UI edits.
 
-Structured launches use configured executables and arguments. Recognized
+Structured launches use configured executables and arguments; explicit one-shot argument arrays require unsafe acknowledgement and do not change saved defaults. Recognized
 permission-bypass flags, argument overrides saved in Settings, and custom
 launchers require `--allow-unsafe-harness`; built-in package-runner fallbacks
 require `--allow-download`. These are per-request acknowledgements, not

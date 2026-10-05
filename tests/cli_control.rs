@@ -51,7 +51,7 @@ fn control_daemon_fixture() {
             control::Command::Lifecycle { id } => serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"nativeMetadataObserved":id=="completed-card","lifecycle":if id=="completed-card" {"completed"} else {"unknown"},"completion":{"supported":id=="completed-card","state":if id=="completed-card" {"completed"} else {"unknown"},"completionId":if id=="completed-card" {Some("b".repeat(64))} else {None}}}),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}","runtime":{"paneIdentity":"a".repeat(64),"columns":120,"rows":35},"truncated":false}),
-            control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download } => serde_json::json!({"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
+            control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download,arguments } => serde_json::json!({"arguments":arguments,"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
             control::Command::InspectRequest { id } => serde_json::json!({"id":id}),
             control::Command::Capabilities {} => control::capabilities(),
             control::Command::Status {} => serde_json::json!({"visible":false,"ready":true}),
@@ -361,6 +361,10 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         assert!(!Command::new(executable).args(export_args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap().status.success());
         let events=Command::new(executable).args(["events","--resource","terminals","--seconds","1","--after",&revision,"--format=jsonl"]).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(events.status.success(),"{}",String::from_utf8_lossy(&events.stdout));
         let frames:Vec<serde_json::Value>=String::from_utf8(events.stdout).unwrap().lines().map(|s|serde_json::from_str(s).unwrap()).collect();assert_eq!(frames.len(),2);assert_eq!(frames[0]["type"],"snapshot");assert_eq!(frames[0]["resyncRequired"],true);assert_eq!(frames[0]["sequence"],0);assert_eq!(frames[1]["type"],"end");assert_eq!(frames[1]["sequence"],1);
+        let one_shot=fixture.root.join("one-shot.json");std::fs::write(&one_shot,r#"["literal ; $(touch NEVER)",""]"#).unwrap();
+        let launch_args=["harness","launch","claude","--cwd","/tmp","--request-id","one-shot","--args-file",one_shot.to_str().unwrap(),"--format=json"];
+        assert!(!Command::new(executable).args(launch_args).env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap().status.success());
+        let launched=Command::new(executable).args(launch_args).arg("--allow-unsafe-harness").env("XDG_RUNTIME_DIR",&fixture.root).output().unwrap();assert!(launched.status.success());let launched:serde_json::Value=serde_json::from_slice(&launched.stdout).unwrap();assert_eq!(launched["data"]["arguments"],serde_json::json!(["literal ; $(touch NEVER)",""]));
         let input_file = fixture.root.join("input.txt");
         std::fs::write(&input_file, "literal ✓\nsecond line").unwrap();
         for action in ["send", "prompt", "keys", "interrupt"] {

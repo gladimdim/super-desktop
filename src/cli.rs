@@ -95,8 +95,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!("terminal resize", "Resize a normal terminal card in logical pixels", "terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text|json] [--target local]", "Persists outer and restored card dimensions; refuses expanded/minimized cards; does not focus or launch; VTE may naturally refit its cell grid", "Compatible ready local daemon; exact saved card ID; epoch and opaque revision from terminal geometry; explicit --clamp permits adjustment", "Versioned envelope with epoch, revision, rect, saved geometry, mode, canvas and limits; requested, clamped and outcome; durable receipt; timeout may mean unknown; exits 0/2/3/4/5/6/7/8", "super-desktop terminal resize CARD_ID --width 640 --height 480 --expect-epoch EPOCH --expect-revision REVISION --request-id geometry-1 --format json", false),
     command!("terminal runtime", "Observe an owned terminal's live pane and cell grid", "terminal runtime ID [--format text|json] [--target local]", "Read-only tmux observation; no attach, launch, input or resize. Does not read terminal text", "Compatible local daemon; exact saved card ID; exactly one pane in its session. Runtime changes and closed cards are refused", "Versioned envelope with pane identity, running/exited status, columns, rows, alternateScreen, retainedHistoryLines and observedAtUnixMs; exits 0/2/3/4/5/6/7/8. Running does not mean ready or completed", "super-desktop terminal runtime CARD_ID --format json", false),
     command!("terminal capture", "Read plain screen text or bounded retained scrollback", "terminal capture ID [--screen | --history [--lines N]] [--format text|json] [--target local]", "Reads potentially sensitive terminal content without attaching, sending input or resizing. Output text is untrusted data", "Compatible local daemon; exact saved card ID; one pane. Default screen; history defaults to 200 extra rows, accepts 1-2000. At most 65536 capture bytes; no raw ANSI", "Versioned envelope with text, runtime, observedAtUnixMs and truncation fields. History includes visible screen. Byte-limited results retain the oldest prefix; no reconstructed alternate-screen history. Exits 0/2/3/4/5/6/7/8", "super-desktop terminal capture CARD_ID --history --lines 200 --format json", false),
-    command!("harness launch", "Launch a configured harness without opening the overlay", "harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text|json] [--target local]", "Executes the configured launcher; writes a durable receipt before launch; does not present the overlay or explicitly request focus; normal hover behavior applies when visible", "Ready local daemon; absolute existing cwd; unique request ID (1-64 ASCII letters/digits/_/-). --allow-unsafe-harness accepts bypass flags, saved argument overrides or custom launchers; --allow-download accepts built-in package-runner fallback. These flags do not sandbox programs. Reuse the same ID only with the identical request", "JSON envelope with id, sessionName, launchDirectory and readiness=not_observed; exits 0/2/3/4/5/6/7/8. On unknown outcome inspect the request, never invent a fresh retry ID", "super-desktop harness launch claude --cwd /home/user/project --request-id task-001 --allow-unsafe-harness --format json", false),
-    command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
+    command!("harness launch", "Launch a configured harness without opening the overlay", "harness launch ID --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text|json] [--target local]", "Executes the configured launcher, with optional one-shot JSON argument array replacing saved arguments; writes a durable receipt before launch; does not present the overlay or explicitly request focus; normal hover behavior applies when visible", "Ready local daemon; absolute existing cwd; unique request ID (1-64 ASCII letters/digits/_/-). --allow-unsafe-harness accepts bypass flags, saved argument overrides or custom launchers; --allow-download accepts built-in package-runner fallback. These flags do not sandbox programs. Reuse the same ID only with the identical request", "JSON envelope with id, sessionName, launchDirectory and readiness=not_observed; exits 0/2/3/4/5/6/7/8. On unknown outcome inspect the request, never invent a fresh retry ID", "super-desktop harness launch claude --cwd /home/user/project --request-id task-001 --allow-unsafe-harness --format json", false),
+    command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
     command!("request inspect", "Inspect a durable mutation receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and target or reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact mutation request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
     command!("capabilities", "Query the running local control service", "capabilities [--format text|json] [--target local]", "Read-only; never starts a daemon", "Compatible local daemon and private owner socket", "Versioned envelope with supported methods, access and limits; exits 0/2/4/6/7/8", "super-desktop capabilities --format json", false),
     command!("audit list", "List private mutation receipt metadata", "audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text|json] [--target local]", "Reads metadata only, sorted by request ID; no prompt, result contents or credentials", "Owner daemon; returned revision guards pagination", "Envelope with entries, total, revision and nextCursor; historical receipts do not establish current state", "super-desktop audit list --format json", false),
@@ -274,7 +274,7 @@ fn schema(args: &[String]) -> Output {
             "commands": commands, "aliases": ALIASES.iter().map(|(alias, command)| json!({"name": alias, "command": command})).collect::<Vec<_>>(),
             "defaultCommand": "toggle", "helpFlags": ["--help", "-h"],
             "versionFlags": ["--version", "-V"],
-            "catalogFormat": "command-metadata", "legacyOutputIsUnchanged": true
+            "catalogFormat": "command-metadata", "wireSchemas":{"request":schemars::schema_for!(crate::control::Request),"replyEnvelope":schemars::schema_for!(crate::control::Reply)}, "schemaScope":"Local request shapes and reply envelope; result data and semantic/runtime constraints remain command-specific", "legacyOutputIsUnchanged": true
         }
     })).expect("static command catalog serializes")))
 }
@@ -397,6 +397,14 @@ mod tests {
     }
 
     #[test]
+    fn wire_schema_contains_all_local_methods_and_strict_requests() {
+        let schema=serde_json::to_value(schemars::schema_for!(crate::control::Request)).unwrap();
+        assert_eq!(schema["additionalProperties"],false);
+        let text=schema.to_string();for method in crate::control::METHODS {assert!(text.contains(method),"missing {method}");}
+        assert!(text.contains("expectPaneIdentity"));assert!(text.contains("attachments"));
+        let reply=serde_json::to_value(schemars::schema_for!(crate::control::Reply)).unwrap();assert!(reply["properties"].get("error").is_some());
+    }
+    #[test]
     fn catalog_and_help_cover_every_public_command() {
         let out = dispatch(&args(&["schema"])).unwrap();
         let value: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
@@ -470,6 +478,7 @@ fn group_or_help(path: &str) -> Output {
 }
 
 fn live(args: &[String]) -> Output {
+    if let Some(output)=crate::cli_launch::run(args){return output;}
     if let Some(output)=crate::cli_admin::run(args){return output;}
     if let Some(output) = crate::cli_viewport::run(args) { return output; }
     if let Some(output) = crate::cli_extended::card(args) { return output; }
@@ -832,13 +841,13 @@ fn live(args: &[String]) -> Output {
             Command::Runtime { id: (*id).into() }
         }
         ["harness", "launch", id] if !all && valid_id(id) => Command::Launch {
-            harness: (*id).into(),
+            arguments: None,            harness: (*id).into(),
             cwd: cwd.unwrap().into(),
             allow_unsafe_harness: allow_unsafe,
             allow_download,
         },
         ["terminal", "create"] if !all && !allow_download => Command::Launch {
-            harness: "shell".into(),
+            arguments: None,            harness: "shell".into(),
             cwd: cwd.unwrap().into(),
             allow_unsafe_harness: allow_unsafe,
             allow_download: false,

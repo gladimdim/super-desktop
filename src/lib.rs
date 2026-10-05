@@ -20,3 +20,5 @@ mod cli_viewport;
 mod cli_attach;
 
 mod cli_admin;
+
+mod cli_launch;

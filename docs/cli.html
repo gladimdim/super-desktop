@@ -59,6 +59,7 @@
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
 <li><a href="#legacy-and-remote-commands">Legacy and remote commands</a></li>
 <li><a href="#complete-public-command-syntax">Complete public command syntax</a></li>
+<li><a href="#one-shot-launcher-arguments-and-wire-schemas">One-shot launcher arguments and wire schemas</a></li>
 <li><a href="#audit-access-and-resource-events">Audit, access and resource events</a></li>
 <li><a href="#prompt-file-references">Prompt file references</a></li>
 <li><a href="#local-terminal-attachment">Local terminal attachment</a></li>
@@ -86,7 +87,7 @@ There is no claim of complete CLI parity with every graphical action.</p>
 <li>Read <code>super-desktop help agents</code> and the relevant command's <code>--help</code>.</li>
 <li>Read <code>super-desktop schema --format json</code> for the client's command catalog.
    It contains usage, effects, requirements, output, examples and <code>legacy</code> flags;
-   it is not a formal JSON Schema for request or result validation.</li>
+   it also includes formal <code>wireSchemas.request</code> and <code>wireSchemas.replyEnvelope</code> schemas. Result data and semantic/runtime checks remain command-specific.</li>
 <li>Read <code>super-desktop capabilities --format json</code> for the running daemon's
    methods and limits. Do not infer support from the version number alone.</li>
 <li>Check <code>super-desktop app status --format json</code>. Launch, geometry, mode and close commands need <code>data.ready</code>.</li>
@@ -1120,12 +1121,12 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td>Read plain screen text or bounded retained scrollback</td>
 </tr>
 <tr>
-<td><code>harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]</code></td>
+<td><code>harness launch ID --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Launch a configured harness without opening the overlay</td>
 </tr>
 <tr>
-<td><code>terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text\|json] [--target local]</code></td>
+<td><code>terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Create a shell terminal without opening the overlay</td>
 </tr>
@@ -1326,6 +1327,20 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </tbody>
 </table></div>
+<h2 id="one-shot-launcher-arguments-and-wire-schemas">One-shot launcher arguments and wire schemas</h2>
+<p><code>harness launch</code> and <code>terminal create</code> accept <code>--args-file PATH</code>, containing a
+JSON string array that replaces the saved arguments for this launch only.
+Use <code>--allow-unsafe-harness</code> explicitly, including for an empty array. At most
+32 arguments of 1024 bytes each are accepted, with no control characters.
+Each argument is quoted separately; this does not sandbox the program or make
+arbitrary flags safe. Saved launcher preferences are unchanged. Arguments are
+hashed for request reconciliation and omitted from receipts.</p>
+<p><code>schema</code> includes JSON Schemas generated from the same Rust/Serde request and
+reply types used by the local transport. The request schema covers all local
+methods and their tagged payloads. The reply schema describes the envelope;
+<code>data</code> remains command-specific. These are structural schemas: daemon support,
+byte limits, permissions, path checks and revision/pane guards still apply.
+The catalog and schemas work offline in the GTK-free client.</p>
 <h2 id="audit-access-and-resource-events">Audit, access and resource events</h2>
 <p><code>audit list</code> returns receipt metadata sorted by request ID, without result
 contents. Use <code>nextCursor</code> as <code>--after</code> and the returned <code>revision</code> as

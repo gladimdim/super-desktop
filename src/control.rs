@@ -51,7 +51,7 @@ pub const METHODS: &[&str] = &[
     "terminal.files.edit",
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ModeAction {
     Minimize,
@@ -60,11 +60,11 @@ pub enum ModeAction {
     Collapse,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
 pub enum CardAction { Focus, Raise, Tag { value:u8 } }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
 pub enum ViewportAction {
     Acquire { columns:u16, rows:u16, ttl:u16 },
@@ -74,7 +74,7 @@ pub enum ViewportAction {
 
 pub const MAX_INPUT: usize = 4096;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum InputData {
     Send {
@@ -147,13 +147,13 @@ impl InputData {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Layout {
     pub version: u32,
     pub items: Vec<LayoutItem>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LayoutItem {
     pub kind: String,
@@ -165,7 +165,7 @@ pub struct LayoutItem {
     pub height: i32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkspaceQuery {
     Inspect,
@@ -176,7 +176,7 @@ pub enum WorkspaceQuery {
     Note { id: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkspaceEdit {
     NoteCreate { text: String, x: i32, y: i32, width: i32, height: i32, tag: u8 },
@@ -190,7 +190,7 @@ pub enum WorkspaceEdit {
     Layout { layout: Layout },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PreferencesQuery {
     Settings { key: Option<String> },
@@ -199,7 +199,7 @@ pub enum PreferencesQuery {
     Theme,
     Usage,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LauncherSpec {
     pub id: String,
@@ -208,7 +208,7 @@ pub struct LauncherSpec {
     pub executable: String,
     pub arguments: Vec<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PreferencesEdit {
     Setting { key: String, value: Option<Value> },
@@ -220,13 +220,13 @@ pub enum PreferencesEdit {
     ThemeReload,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
 pub enum FilesQuery {
     List,
     Read { asset: String, offset: u64 },
 }
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
 pub enum FilesEdit {
     Add { path: String },
@@ -234,7 +234,7 @@ pub enum FilesEdit {
     Remove { asset: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
     #[serde(rename = "audit.list")]
@@ -385,6 +385,8 @@ pub enum Command {
     Harness { id: String },
     #[serde(rename = "harness.launch")]
     Launch {
+        #[serde(default)]
+        arguments: Option<Vec<String>>,
         harness: String,
         cwd: String,
         #[serde(default, rename = "allowUnsafeHarness")]
@@ -416,7 +418,7 @@ impl Command {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub control_version: u32,
@@ -424,7 +426,7 @@ pub struct Request {
     pub command: Command,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Reply {
     pub schema_version: u32,
@@ -437,7 +439,7 @@ pub struct Reply {
     pub error: Option<Error>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Error {
     pub code: String,
     pub message: String,
@@ -514,7 +516,7 @@ pub fn capabilities() -> Value {
         "terminalInput":{"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
         "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
-        "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
+        "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":true,"focus":false,"journalEntries":4096}})
 }
 
 #[cfg(target_os = "linux")]
@@ -1272,6 +1274,7 @@ mod tests {
             // The daemon may have applied the request. Drop without a reply.
         });
         let request = new_request(Command::Launch {
+            arguments: None,
             harness: "shell".into(),
             cwd: "/tmp".into(),
             allow_unsafe_harness: false,

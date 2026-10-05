@@ -19,7 +19,7 @@ There is no claim of complete CLI parity with every graphical action.
 1. Read `super-desktop help agents` and the relevant command's `--help`.
 2. Read `super-desktop schema --format json` for the client's command catalog.
    It contains usage, effects, requirements, output, examples and `legacy` flags;
-   it is not a formal JSON Schema for request or result validation.
+   it also includes formal `wireSchemas.request` and `wireSchemas.replyEnvelope` schemas. Result data and semantic/runtime checks remain command-specific.
 3. Read `super-desktop capabilities --format json` for the running daemon's
    methods and limits. Do not infer support from the version number alone.
 4. Check `super-desktop app status --format json`. Launch, geometry, mode and close commands need `data.ready`.
@@ -763,8 +763,8 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `terminal resize ID --width W --height H --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp] [--format text\|json] [--target local]` | Structured local | Resize a normal terminal card in logical pixels |
 | `terminal runtime ID [--format text\|json] [--target local]` | Structured local | Observe an owned terminal's live pane and cell grid |
 | `terminal capture ID [--screen \| --history [--lines N]] [--format text\|json] [--target local]` | Structured local | Read plain screen text or bounded retained scrollback |
-| `harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]` | Structured local | Launch a configured harness without opening the overlay |
-| `terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
+| `harness launch ID --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--allow-download] [--format text\|json] [--target local]` | Structured local | Launch a configured harness without opening the overlay |
+| `terminal create --cwd PATH --request-id ID [--args-file PATH] [--allow-unsafe-harness] [--format text\|json] [--target local]` | Structured local | Create a shell terminal without opening the overlay |
 | `request inspect ID [--format text\|json] [--target local]` | Structured local | Inspect a durable mutation receipt |
 | `capabilities [--format text\|json] [--target local]` | Structured local | Query the running local control service |
 | `audit list [--after CURSOR] [--limit 1-100] [--expect-revision REVISION] [--format text\|json] [--target local]` | Structured local | List private mutation receipt metadata |
@@ -804,6 +804,23 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `peer-attach ID CARD [--seconds N]` | Legacy | Stream an existing remote terminal |
 | `peer-command ID < COMMAND.json` | Legacy | Apply one typed remote workspace command from stdin |
 | `integrate-openclaw` | Legacy | Install the local OpenClaw metadata integration |
+
+## One-shot launcher arguments and wire schemas
+
+`harness launch` and `terminal create` accept `--args-file PATH`, containing a
+JSON string array that replaces the saved arguments for this launch only.
+Use `--allow-unsafe-harness` explicitly, including for an empty array. At most
+32 arguments of 1024 bytes each are accepted, with no control characters.
+Each argument is quoted separately; this does not sandbox the program or make
+arbitrary flags safe. Saved launcher preferences are unchanged. Arguments are
+hashed for request reconciliation and omitted from receipts.
+
+`schema` includes JSON Schemas generated from the same Rust/Serde request and
+reply types used by the local transport. The request schema covers all local
+methods and their tagged payloads. The reply schema describes the envelope;
+`data` remains command-specific. These are structural schemas: daemon support,
+byte limits, permissions, path checks and revision/pane guards still apply.
+The catalog and schemas work offline in the GTK-free client.
 
 ## Audit, access and resource events
 
