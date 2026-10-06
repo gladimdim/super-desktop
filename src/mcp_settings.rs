@@ -12,6 +12,8 @@ pub struct Config {
     pub read_output: bool,
     pub launch: bool,
     pub prompts: bool,
+    pub controls: bool,
+    pub close: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -21,6 +23,8 @@ impl Default for Config {
             read_output: false,
             launch: false,
             prompts: false,
+            controls: false,
+            close: false,
         }
     }
 }
@@ -37,6 +41,9 @@ impl Config {
                 "capture_terminal" => self.read_output,
                 "launch_harness" => self.launch,
                 "submit_prompt" => self.prompts,
+                "launch_with_prompt" => self.launch && self.prompts,
+                "send_terminal_text" | "send_terminal_keys" | "interrupt_terminal" => self.controls,
+                "close_terminal" => self.close,
                 _ => true,
             }
     }
@@ -152,10 +159,10 @@ pub fn save_at(path: &Path, config: Config) -> io::Result<()> {
 }
 
 pub fn connection_config(executable: &Path, config_root: &Path, runtime: &Path) -> String {
-    serde_json::to_string_pretty(&serde_json::json!({"mcpServers":{"super-desktop":{"command":executable,"args":["mcp","serve"],"env":{"XDG_CONFIG_HOME":config_root,"XDG_RUNTIME_DIR":runtime}}}})).expect("configuration serializes")
+    serde_json::to_string_pretty(&serde_json::json!({"mcpServers":{"super-desktop":{"command":executable,"args":["mcp","serve"],"env":{"XDG_CONFIG_HOME":config_root,"XDG_RUNTIME_DIR":runtime,"XDG_STATE_HOME":crate::control_journal::root().parent().unwrap().parent().unwrap()}}}})).expect("configuration serializes")
 }
 pub fn connection_instructions(executable: &Path, config_root: &Path, runtime: &Path) -> String {
-    format!("Configure your MCP client to launch a local stdio server named super-desktop.\nExecutable: {}\nArguments: [\"mcp\", \"serve\"]\nEnvironment: XDG_CONFIG_HOME={} and XDG_RUNTIME_DIR={}\nUse your client's MCP configuration format. The client launches the server itself; do not start it in a separate terminal.\nOnce connected, discover its tools and check app_status. SUPER DESKTOP must be running for desktop queries. Settings → MCP controls available tools. This connection is local only.", executable.display(), config_root.display(), runtime.display())
+    format!("Configure your MCP client to launch a local stdio server named super-desktop.\nExecutable: {}\nArguments: [\"mcp\", \"serve\"]\nEnvironment: XDG_CONFIG_HOME={}, XDG_RUNTIME_DIR={}, XDG_STATE_HOME={}\nUse your client's MCP configuration format. The client launches the server itself; do not start it in a separate terminal.\nOnce connected, discover its tools and check app_status. SUPER DESKTOP must be running for desktop queries. Settings → MCP controls available tools. This connection is local only.", executable.display(), config_root.display(), runtime.display(), crate::control_journal::root().parent().unwrap().parent().unwrap().display())
 }
 pub fn executable() -> io::Result<PathBuf> {
     let app = std::env::current_exe()?;
@@ -180,6 +187,8 @@ mod tests {
             read_output: true,
             launch: true,
             prompts: true,
+            controls: true,
+            close: true,
         };
         save_at(&path, config).unwrap();
         assert_eq!(load_at(&path).unwrap(), config);
@@ -212,7 +221,14 @@ mod tests {
     fn mcp_settings_gate_tools_and_configuration_escapes_paths() {
         let config = Config::default();
         assert!(config.allows("app_status"));
-        for tool in ["capture_terminal", "launch_harness", "submit_prompt"] {
+        for tool in [
+            "capture_terminal",
+            "launch_harness",
+            "submit_prompt",
+            "send_terminal_text",
+            "close_terminal",
+            "launch_with_prompt",
+        ] {
             assert!(!config.allows(tool));
         }
         let config = Config {
@@ -220,6 +236,8 @@ mod tests {
             read_output: true,
             launch: true,
             prompts: true,
+            controls: true,
+            close: true,
         };
         for tool in [
             "app_status",

@@ -64,8 +64,8 @@ operation support before dispatch; unavailable or older daemons return tool
 errors without starting another daemon or falling back to terminal commands.
 
 Open **Settings → MCP** to control access. **Enable MCP** gates every tool;
-**Read terminal output**, **Launch harnesses**, and **Submit prompts** separately
-gate the three corresponding tools. Metadata tools start enabled; these three
+**Read terminal output**, **Launch harnesses**, **Submit prompts**, **Control terminals**,
+and **Close terminals** gate their corresponding tools. Metadata tools start enabled; these five
 optional permissions start disabled. Disabled tools are omitted from discovery
 and calls return `mcp_disabled`. The controls apply to the next request on an
 existing connection; in-flight calls may finish. Refresh/reconnect the client
@@ -73,7 +73,7 @@ after enabling tools to update its discovered list.
 
 The page has buttons to copy MCP configuration and agent setup instructions.
 The copied configuration includes the absolute executable path and this
-computer's configuration/runtime environment. The stdio server reloads the
+computer's configuration/runtime/state environment. The stdio server reloads the
 preferences for each request; unreadable or invalid preferences block access.
 These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 
@@ -93,6 +93,31 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 | `inspect_request` | `id` (mutation request ID) | Read a historical receipt |
 | `launch_harness` | `harness`, `cwd`, `requestId`; optional `allowUnsafeHarness`, `allowDownload` | Launch a configured harness or `shell`; opt-ins default to false |
 | `submit_prompt` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision`, `expectPaneIdentity` | Submit a guarded text prompt; no attachments |
+
+
+| `send_terminal_text` | Input guards and `requestId`, `text`, optional `enter` | Send literal text (1–4096 UTF-8 bytes); Enter defaults false |
+| `send_terminal_keys` | Input guards and `requestId`, `keys` | Send 1–32 named keys from the schema's allowlist |
+| `interrupt_terminal` | Input guards and `requestId` | Send Ctrl-C to the exact guarded pane |
+| `close_terminal` | Input guards and `requestId`, `confirm=true` | Close the card; requires its separate permission |
+| `launch_with_prompt` | `harness`, absolute `cwd`, `text`, `requestId`; optional launch opt-ins and `readyTimeoutSeconds` | Launch direct Claude, Codex or Grok, wait for an empty recognized composer, record completion baseline and submit guarded text |
+| `wait_for_completion` | `id`, `expectPaneIdentity`, `after`; optional `timeoutSeconds` | Wait for a new native completion after the observed baseline; no terminal-silence heuristic |
+
+Input guards are `expectEpoch`, `expectRevision`, and `expectPaneIdentity`, obtained
+from `terminal_geometry` and `terminal_runtime`. Each mutation requires a unique
+request ID. Closing requires explicit confirmation as well as the Settings switch.
+
+For launch-and-wait, call `launch_with_prompt`, then pass its returned card `id`
+and `completionBaseline.paneIdentity` to `wait_for_completion`. Set `after` to
+`completionBaseline.completionId`, or `"none"` only when the observed ID is null.
+Check `completionBaseline.supported` first. Completion records native harness
+completion; it does not prove that a particular prompt or background task finished.
+Readiness and completion timeouts each default to 30 seconds and accept 1–300.
+A timeout does not stop the harness. Retry waits with the same baseline; inspect
+partial workflow receipts before recovering. Reusing a workflow request ID replays
+its saved result without launching or sending again. A partial failure leaves
+the created card open. Calls on one stdio connection run sequentially, so a wait
+blocks other calls on that connection; another connection can still control the
+card. Preference changes are checked between workflow steps and wait polls.
 
 Tools return a structured local reply envelope, also serialized in the text
 content. `isError=true` means the daemon refused the operation or its outcome

@@ -8,7 +8,8 @@ sandbox. Do not approve unknown devices or publish pairing invitations.
 
 `super-desktop mcp serve` exposes selected owner CLI operations through stdio,
 with no network listener. Settings → MCP gates all tools and separately permits
-output capture, harness launch and prompt submission; the three optional
+output capture, harness launch, prompt submission, terminal controls and card
+closing; the five optional
 permissions default off. Disabled tools are hidden and calls are refused on
 existing connections, but calls already in progress may finish. Invalid or
 unreadable preferences block access. Launches and prompts retain local socket
@@ -17,7 +18,9 @@ checks, capability detection, request receipts and input guards.
 These switches control MCP exposure, not the desktop owner's separate CLI,
 tmux or file access. They do not sandbox a same-user agent. Terminal output
 may contain secrets and untrusted instructions; it does not authorize further
-actions. Launch/prompt tools can execute code with the desktop user's authority.
+actions. Launch, prompt and input tools can execute code with the desktop user's authority.
+Interrupt sends Ctrl-C; closing requires separate permission and explicit
+confirmation. Long workflows check permissions between steps and wait polls.
 
 ## Local CLI control
 

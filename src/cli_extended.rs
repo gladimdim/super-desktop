@@ -48,7 +48,9 @@ impl Options {
                 };
                 if key == "--attachment" && !value.is_empty() {
                     parsed.attachments.push(value.into());
-                    if parsed.attachments.len()>4 { return Err("Use at most four attachments."); }
+                    if parsed.attachments.len() > 4 {
+                        return Err("Use at most four attachments.");
+                    }
                     index += 1;
                     continue;
                 }
@@ -223,7 +225,9 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             values.push("--file");
             flags.push("--stdin");
         }
-        if action == "prompt" { values.push("--attachment"); }
+        if action == "prompt" {
+            values.push("--attachment");
+        }
         if action == "send" {
             flags.push("--enter");
         }
@@ -317,6 +321,18 @@ fn observe_args(args: &[String], wait: bool) -> Result<Options, &'static str> {
 }
 
 fn wait_terminal(options: &Options) -> Reply {
+    wait_terminal_with(options, || {
+        send(
+            Command::Lifecycle {
+                id: options.words[2].clone(),
+            },
+            options,
+            "terminal.status",
+        )
+    })
+}
+
+pub(crate) fn wait_terminal_with(options: &Options, mut observe: impl FnMut() -> Reply) -> Reply {
     let fail = |code, message| Reply::failure("", code, message);
     let until = match options.required("--until") {
         Ok(v)
@@ -361,13 +377,7 @@ fn wait_terminal(options: &Options) -> Reply {
     };
     let deadline = std::time::Instant::now() + timeout;
     loop {
-        let reply = send(
-            Command::Lifecycle {
-                id: options.words[2].clone(),
-            },
-            options,
-            "terminal.status",
-        );
+        let reply = observe();
         if !reply.ok {
             return reply;
         }

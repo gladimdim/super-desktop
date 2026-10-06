@@ -17,6 +17,8 @@ pub(crate) struct Flow {
     prompt: Option<String>,
     show: bool,
     ready_timeout_ms: u64,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    capture_completion_baseline: bool,
 }
 impl Flow {
     pub(crate) fn parse(launch: Command, options: &Options) -> Result<Option<Self>, &'static str> {
@@ -89,13 +91,27 @@ impl Flow {
                 prompt,
                 show,
                 ready_timeout_ms: wait.as_millis() as u64,
+                capture_completion_baseline: false,
             })
         } else {
             None
         })
     }
 
+    pub(crate) fn with_completion_baseline(mut self) -> Self {
+        self.capture_completion_baseline = true;
+        self
+    }
+
     pub(crate) fn run(self, options: &Options) -> Reply {
+        self.run_with_permission(options, || true)
+    }
+
+    pub(crate) fn run_with_permission(
+        self,
+        options: &Options,
+        mut permitted: impl FnMut() -> bool,
+    ) -> Reply {
         if options.values.get("--target").is_some_and(|s| s != "local") {
             return Reply::failure(
                 "",
@@ -118,7 +134,17 @@ impl Flow {
             &crate::control_journal::root(),
             id,
             &self,
-            |request| control::request_at(&control::runtime_dir(), request),
+            |request| {
+                if permitted() {
+                    control::request_at(&control::runtime_dir(), request)
+                } else {
+                    Reply::failure(
+                        &request.request_id,
+                        "mcp_disabled",
+                        "MCP launch or prompt access was disabled during this workflow.",
+                    )
+                }
+            },
             |id| {
                 let exe = match std::env::current_exe() {
                     Ok(p) => p.with_file_name("super-desktop"),
@@ -205,6 +231,7 @@ fn execute(
             let mut stage = "preflight";
             let mut geometry = Value::Null;
             let mut prompt_receipt = Value::Null;
+            let mut completion_baseline = Value::Null;
             let mut readiness = "not_observed";
             let mut call = |step: &str, command: Command| -> Result<Value, Reply> {
                 let request = Request {
@@ -224,6 +251,9 @@ fn execute(
             let result = (|| -> Result<(), Reply> {
                 let capabilities = call("capabilities", Command::Capabilities {})?;
                 let mut required = vec!["harness.launch", "terminal.geometry"];
+                if flow.capture_completion_baseline {
+                    required.push("terminal.status");
+                }
                 if flow.width.is_some() {
                     required.push("terminal.resize");
                 }
@@ -324,6 +354,30 @@ fn execute(
                         );
                     };
                     readiness = "recognized_empty_composer";
+                    if flow.capture_completion_baseline {
+                        stage = "completionBaseline";
+                        let observed = call("baseline", Command::Lifecycle { id: card.clone() })?;
+                        if observed["paneIdentity"] != ready["paneIdentity"] {
+                            return Err(Reply::failure(
+                                id,
+                                "conflict",
+                                "Pane changed before prompt submission.",
+                            ));
+                        }
+                        let previous = &observed["completion"]["completionId"];
+                        if !previous.is_null()
+                            && !previous.as_str().is_some_and(|s| {
+                                s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+                            })
+                        {
+                            return Err(Reply::failure(
+                                id,
+                                "invalid_response",
+                                "Invalid completion baseline.",
+                            ));
+                        }
+                        completion_baseline = json!({"observed":true,"supported":observed["completion"]["supported"]==true,"completionId":previous,"paneIdentity":observed["paneIdentity"]});
+                    }
                     stage = "prompt";
                     // Keep the last geometry guard: user edits or display changes during
                     // startup must cause a conflict, not silently become new consent.
@@ -362,6 +416,9 @@ fn execute(
             reply.data = Some(
                 json!({"id":card,"outcome":if reply.ok {"configured"}else{reply.error.as_ref().map(|e|e.outcome.as_str()).unwrap_or("unknown")},"completedSteps":completed,"failedStep":if reply.ok {None}else{Some(stage)},"requestIds":request_ids,"geometry":geometry,"readiness":readiness,"prompt":prompt_receipt,"submissionObserved":false,"completionObserved":false}),
             );
+            if flow.capture_completion_baseline {
+                reply.data.as_mut().unwrap()["completionBaseline"] = completion_baseline;
+            }
             reply
         },
     )
@@ -383,12 +440,14 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             Self {
-                root: std::env::temp_dir().canonicalize()
-                    .expect("resolve system temporary directory").join(format!(
-                    "sd-launch-flow-{}-{}",
-                    std::process::id(),
-                    NEXT.fetch_add(1, Ordering::Relaxed)
-                )),
+                root: std::env::temp_dir()
+                    .canonicalize()
+                    .expect("resolve system temporary directory")
+                    .join(format!(
+                        "sd-launch-flow-{}-{}",
+                        std::process::id(),
+                        NEXT.fetch_add(1, Ordering::Relaxed)
+                    )),
                 effects: vec![],
                 polls: 0,
                 geometry: json!({"epoch":"epoch","revision":"one","canvas":{"width":1000,"height":800},"rect":{"x":30,"y":80,"width":640,"height":480}}),
@@ -411,6 +470,12 @@ mod tests {
                 return Reply::success(
                     &r.request_id,
                     json!({"paneIdentity":if self.fail==Some("pane")&&self.polls>1 {"changed"}else{"pane"},"ready":self.polls>=2&&self.fail!=Some("readiness"),"reason":"empty"}),
+                );
+            }
+            if let Command::Lifecycle { .. } = r.command {
+                return Reply::success(
+                    &r.request_id,
+                    json!({"paneIdentity":if self.fail==Some("baseline-pane") {"changed"}else{"pane"},"completion":{"supported":true,"completionId":"a".repeat(64)}}),
                 );
             }
             let root = self.root.clone();
@@ -504,8 +569,38 @@ mod tests {
             prompt: Some("Hello world".into()),
             show: false,
             ready_timeout_ms: 1000,
+            capture_completion_baseline: false,
         }
     }
+    #[test]
+    fn configured_launch_records_pre_prompt_baseline_and_replays_it() {
+        let mut fixture = Fixture::new();
+        let ordinary = flow();
+        assert!(serde_json::to_value(&ordinary)
+            .unwrap()
+            .get("capture_completion_baseline")
+            .is_none());
+        let flow = ordinary.with_completion_baseline();
+        let first = fixture.run("baseline", &flow);
+        assert!(first.ok, "{first:?}");
+        assert_eq!(
+            first.data.as_ref().unwrap()["completionBaseline"]["completionId"],
+            "a".repeat(64)
+        );
+        let effects = fixture.effects.clone();
+        let replay = fixture.run("baseline", &flow);
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(replay).unwrap()
+        );
+        assert_eq!(fixture.effects, effects);
+        let mut changed = Fixture::new();
+        changed.fail = Some("baseline-pane");
+        let result = changed.run("changed", &flow);
+        assert!(!result.ok);
+        assert!(!changed.effects.contains(&"prompt".to_string()));
+    }
+
     #[test]
     fn configured_launch_centers_waits_and_replays_without_repeating_effects() {
         let mut fixture = Fixture::new();

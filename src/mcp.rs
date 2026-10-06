@@ -1,5 +1,6 @@
 //! Local MCP adapter; all desktop access uses the owner control socket.
-use crate::cli_extended::{opaque, valid_id};
+use crate::cli_extended::{opaque, valid_id, Options};
+use crate::cli_launch_flow::Flow;
 use crate::control::{self, Command, InputData};
 use crate::mcp_settings::Config;
 use serde_json::{json, Value};
@@ -21,9 +22,61 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("inspect_request", "Inspect a durable mutation receipt using its request ID. A historical success does not prove the card still exists or a task completed. Inspect after uncertain outcomes; do not invent a new retry ID.", "request"),
     ("launch_harness", "Launch a configured harness or shell in an absolute existing directory. Executes as the local user. Explicit allowUnsafeHarness accepts bypass flags/custom launchers; allowDownload accepts package-runner fallback. These do not sandbox execution. Reuse requestId only for an identical request; inspect uncertain outcomes before retrying. Success means card saved, not ready/authenticated/running. No initial prompt or argument override.", "launch"),
     ("submit_prompt", "Submit text to one exact harness with guarded composer handling. Requires workspace epoch/revision from terminal_geometry and pane identity from terminal_runtime, plus a unique requestId. Executes with the terminal user's authority. No automatic retries. On unknown outcome inspect_request and current state; no per-prompt turn/completion guarantee. No attachments.", "prompt"),
+    ("send_terminal_text", "Send literal text to one exact terminal with optional Enter (default false). Can execute commands as the local user. Requires current geometry/pane guards and an explicit requestId. Not a harness-aware prompt; use submit_prompt for harness tasks. Inspect uncertain receipts; never retry with a fresh ID.", "send"),
+    ("send_terminal_keys", "Send 1–32 supported named keys to one guarded terminal, with explicit requestId. Keys may execute, interrupt or discard work. No arbitrary tmux key syntax. Inspect uncertain receipts; never retry with a fresh ID.", "keys"),
+    ("interrupt_terminal", "Send Ctrl-C to one exact guarded terminal. May interrupt work; does not close its card or promise cancellation of background tasks. Requires requestId; never automatically retry uncertain input.", "interrupt"),
+    ("close_terminal", "Kill one exact owned terminal session and remove its card. Requires close permission, confirm=true, current geometry/pane guards and requestId. Unsaved work may be lost. No bulk selection; never retry uncertain outcomes with a fresh ID.", "close"),
+    ("launch_with_prompt", "Launch a direct Claude, Codex or Grok harness, wait for a recognized empty composer and submit text. Requires both launch and prompt permissions, absolute cwd, requestId and optional launch safety opt-ins. Readiness timeout 1–300 seconds, default 30. Returns completionBaseline observed before input for wait_for_completion. Existing durable workflow receipts prevent replay; partial failure leaves the card open. No dialog dismissal, automatic retry or task-completion guarantee. This stdio connection processes calls sequentially.", "launch_prompt"),
+    ("wait_for_completion", "Wait for a new native completion after an explicitly observed baseline. Requires exact pane identity and after=the last completionId, or none only for an observed null baseline. Timeout 1–300 seconds, default 30; repeated waits retain the same baseline. No output-silence heuristic or per-prompt attribution. Unknown/unsupported completion, exited or replaced panes fail clearly. Settings disable is checked while polling. Other calls on this stdio connection wait until this call returns.", "wait"),
+
 ];
 
 fn schema(kind: &str) -> Value {
+    if matches!(kind, "send" | "keys" | "interrupt" | "close") {
+        let mut result = schema("prompt");
+        let properties = result["properties"].as_object_mut().unwrap();
+        properties.remove("text");
+        match kind {
+            "send" => {
+                properties.insert("text".into(), json!({"type":"string","minLength":1,"maxLength":4096,"description":"1–4096 UTF-8 bytes; only newline/tab controls allowed."}));
+                properties.insert("enter".into(), json!({"type":"boolean","default":false}));
+            }
+            "keys" => {
+                properties.insert("keys".into(),json!({"type":"array","minItems":1,"maxItems":32,"items":{"type":"string","enum":["Enter","Escape","Tab","Backspace","Delete","Up","Down","Left","Right","Home","End","PageUp","PageDown","Ctrl-C","Ctrl-D","Ctrl-U","Ctrl-L"]}}));
+            }
+            "close" => {
+                properties.insert("confirm".into(), json!({"type":"boolean","const":true}));
+            }
+            _ => {}
+        }
+        let mut required = vec![
+            json!("id"),
+            json!("requestId"),
+            json!("expectEpoch"),
+            json!("expectRevision"),
+            json!("expectPaneIdentity"),
+        ];
+        match kind {
+            "send" => required.push(json!("text")),
+            "keys" => required.push(json!("keys")),
+            "close" => required.push(json!("confirm")),
+            _ => {}
+        }
+        result["required"] = json!(required);
+        return result;
+    }
+    if kind == "launch_prompt" {
+        let mut result = schema("launch");
+        result["properties"]["text"] = json!({"type":"string","minLength":1,"maxLength":4096,"description":"Initial prompt, 1–4096 UTF-8 bytes; newline/tab controls only."});
+        result["properties"]["readyTimeoutSeconds"] =
+            json!({"type":"integer","minimum":1,"maximum":300,"default":30});
+        result["properties"]["harness"]["enum"] = json!(["claude", "codex", "grok"]);
+        result["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("text"));
+        return result;
+    }
     let id = json!({"type":"string","minLength":1,"maxLength":128,"pattern":"^[A-Za-z0-9_-]+$"});
     let request_id =
         json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]+$"});
@@ -39,6 +92,10 @@ fn schema(kind: &str) -> Value {
         "launch" => (
             json!({"harness":request_id,"cwd":{"type":"string","minLength":1,"maxLength":4096,"description":"Absolute existing directory, at most 4096 UTF-8 bytes."},"requestId":request_id,"allowUnsafeHarness":{"type":"boolean","default":false},"allowDownload":{"type":"boolean","default":false}}),
             json!(["harness", "cwd", "requestId"]),
+        ),
+        "wait" => (
+            json!({"id":id,"expectPaneIdentity":opaque,"after":{"type":"string","minLength":4,"maxLength":64,"description":"Last observed completionId, or none only for an observed null baseline."},"timeoutSeconds":{"type":"integer","minimum":1,"maximum":300,"default":30}}),
+            json!(["id", "expectPaneIdentity", "after"]),
         ),
         "prompt" => (
             json!({"id":id,"text":{"type":"string","minLength":1,"maxLength":4096,"description":"1–4096 UTF-8 bytes; only newline and tab controls allowed."},"requestId":request_id,"expectEpoch":request_id,"expectRevision":opaque,"expectPaneIdentity":opaque}),
@@ -58,7 +115,7 @@ fn schema(kind: &str) -> Value {
 
 fn tools(config: Config) -> Value {
     Value::Array(TOOLS.iter().filter(|(name, _, _)| config.allows(name)).map(|(name, description, kind)| {
-        let mutation = matches!(*kind, "launch" | "prompt");
+        let mutation = matches!(*kind, "launch" | "prompt" | "launch_prompt" | "send" | "keys" | "interrupt" | "close");
         json!({"name":name,"description":description,"inputSchema":schema(kind),"outputSchema":schemars::schema_for!(control::Reply),
             "annotations":{"readOnlyHint":!mutation,"destructiveHint":mutation,"idempotentHint":!mutation,"openWorldHint":mutation}})
     }).collect())
@@ -68,6 +125,8 @@ struct ToolCall {
     name: String,
     command: Command,
     request_id: Option<String>,
+    workflow: Option<(Flow, Options)>,
+    wait: Option<Options>,
 }
 
 fn command(params: &Value) -> Result<ToolCall, &'static str> {
@@ -94,6 +153,19 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
     }
     for (key, value) in args {
         let property = properties.get(key).ok_or("Unknown tool argument")?;
+        if property
+            .get("const")
+            .is_some_and(|constant| constant != value)
+        {
+            return Err("Explicit confirm=true is required to close a terminal");
+        }
+        if property
+            .get("enum")
+            .and_then(Value::as_array)
+            .is_some_and(|values| !values.contains(value))
+        {
+            return Err("Argument is not one of the supported choices");
+        }
         match property["type"].as_str().unwrap() {
             "boolean" if !value.is_boolean() => return Err("Expected a boolean argument"),
             "integer"
@@ -103,6 +175,18 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
                 }) =>
             {
                 return Err("Integer argument outside the tool limits")
+            }
+            "array" => {
+                let values = value.as_array().ok_or("Expected a named-key array")?;
+                if values.is_empty()
+                    || values.len() > 32
+                    || values.iter().any(|v| {
+                        v.as_str()
+                            .is_none_or(|key| control::key_name(key).is_none())
+                    })
+                {
+                    return Err("Use 1–32 supported named keys");
+                }
             }
             "string" => {
                 let s = value.as_str().ok_or("Expected a string argument")?;
@@ -129,6 +213,8 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
     let string = |key: &str| args[key].as_str().unwrap().to_owned();
     let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
     let request_id = args.get("requestId").map(|_| string("requestId"));
+    let mut workflow = None;
+    let mut wait = None;
     let command = match name {
         "app_status" => Command::Status {},
         "capabilities" => Command::Capabilities {},
@@ -153,23 +239,102 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
                 lines,
             }
         }
-        "launch_harness" => {
+        "launch_harness" | "launch_with_prompt" => {
             let cwd = string("cwd");
             if !std::path::Path::new(&cwd).is_absolute() || cwd.len() > 4096 || cwd.contains('\0') {
                 return Err("cwd must be an absolute directory path of at most 4096 bytes");
             }
-            Command::Launch {
+            let launch = Command::Launch {
                 harness: string("harness"),
                 cwd,
                 arguments: None,
                 allow_unsafe_harness: flag("allowUnsafeHarness"),
                 allow_download: flag("allowDownload"),
+            };
+            if name == "launch_with_prompt" {
+                let args = vec![
+                    "harness".into(),
+                    "launch".into(),
+                    string("harness"),
+                    "--prompt".into(),
+                    string("text"),
+                    "--ready-timeout".into(),
+                    format!(
+                        "{}s",
+                        args.get("readyTimeoutSeconds")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(30)
+                    ),
+                    "--request-id".into(),
+                    string("requestId"),
+                ];
+                let options = Options::parse(&args, &["--prompt", "--ready-timeout"], &[])?;
+                let flow =
+                    Flow::parse(launch.clone(), &options)?.ok_or("Initial prompt required")?;
+                workflow = Some((flow.with_completion_baseline(), options));
             }
+            launch
         }
-        "submit_prompt" => {
-            let input = InputData::Prompt {
-                text: string("text"),
-                attachments: vec![],
+        "close_terminal" => Command::Close {
+            id: string("id"),
+            expect_epoch: string("expectEpoch"),
+            expect_revision: string("expectRevision"),
+            expect_pane_identity: string("expectPaneIdentity"),
+        },
+        "wait_for_completion" => {
+            let after = string("after");
+            if after != "none" && !opaque(&after) {
+                return Err(
+                    "Copy the observed completionId, or use none for an observed null baseline",
+                );
+            }
+            let id = string("id");
+            let args = vec![
+                "terminal".into(),
+                "wait".into(),
+                id.clone(),
+                "--until".into(),
+                "completed".into(),
+                "--after".into(),
+                after,
+                "--expect-pane-identity".into(),
+                string("expectPaneIdentity"),
+                "--timeout".into(),
+                format!(
+                    "{}s",
+                    args.get("timeoutSeconds")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(30)
+                ),
+            ];
+            wait = Some(Options::parse(
+                &args,
+                &["--until", "--after", "--expect-pane-identity", "--timeout"],
+                &[],
+            )?);
+            Command::Lifecycle { id }
+        }
+        "submit_prompt" | "send_terminal_text" | "send_terminal_keys" | "interrupt_terminal" => {
+            let input = match name {
+                "submit_prompt" => InputData::Prompt {
+                    text: string("text"),
+                    attachments: vec![],
+                },
+                "send_terminal_text" => InputData::Send {
+                    text: string("text"),
+                    enter: flag("enter"),
+                },
+                "send_terminal_keys" => InputData::Keys {
+                    keys: args["keys"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|key| key.as_str().unwrap().to_owned())
+                        .collect(),
+                },
+                _ => InputData::Keys {
+                    keys: vec!["Ctrl-C".into()],
+                },
             };
             input.validate()?;
             Command::Input {
@@ -186,6 +351,8 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
         name: name.to_owned(),
         command,
         request_id,
+        workflow,
+        wait,
     })
 }
 
@@ -197,6 +364,32 @@ fn execute(call: ToolCall) -> Value {
             "mcp_disabled",
             "This MCP tool is disabled in Settings → MCP, or its settings cannot be read.",
         ))
+        .unwrap();
+    }
+    if let Some((flow, options)) = call.workflow {
+        return serde_json::to_value(flow.run_with_permission(&options, || {
+            crate::mcp_settings::load().is_ok_and(|config| config.allows("launch_with_prompt"))
+        }))
+        .unwrap();
+    }
+    if let Some(options) = call.wait {
+        return serde_json::to_value(crate::cli_extended::wait_terminal_with(&options, || {
+            if !crate::mcp_settings::load().is_ok_and(|config| config.allows("wait_for_completion"))
+            {
+                return control::Reply::failure(
+                    "mcp",
+                    "mcp_disabled",
+                    "MCP was disabled while waiting.",
+                );
+            }
+            crate::cli_extended::send(
+                Command::Lifecycle {
+                    id: options.words[2].clone(),
+                },
+                &options,
+                "terminal.status",
+            )
+        }))
         .unwrap();
     }
     let reply = match control::new_request(call.command) {
@@ -361,6 +554,8 @@ mod tests {
             read_output: true,
             launch: true,
             prompts: true,
+            controls: true,
+            close: true,
         }
     }
     fn initialized() -> Value {
@@ -477,6 +672,50 @@ mod tests {
         }
     }
     #[test]
+    fn mcp_terminal_controls_require_guards_confirmation_and_valid_payloads() {
+        let base = json!({"id":"card","requestId":"control","expectEpoch":"epoch","expectRevision":"a".repeat(64),"expectPaneIdentity":"b".repeat(64)});
+        for (name, extra) in [
+            ("send_terminal_text", json!({"text":"hello"})),
+            ("send_terminal_keys", json!({"keys":["Escape","Ctrl-C"]})),
+            ("interrupt_terminal", json!({})),
+            ("close_terminal", json!({"confirm":true})),
+        ] {
+            let mut args = base.clone();
+            args.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(command(&json!({"name":name,"arguments":args})).is_ok());
+            for key in [
+                "requestId",
+                "expectEpoch",
+                "expectRevision",
+                "expectPaneIdentity",
+            ] {
+                let mut invalid = args.clone();
+                invalid.as_object_mut().unwrap().remove(key);
+                assert!(command(&json!({"name":name,"arguments":invalid})).is_err());
+            }
+        }
+        for (name, key, value) in [
+            ("close_terminal", "confirm", json!(false)),
+            ("send_terminal_keys", "keys", json!(["F99"])),
+            ("send_terminal_keys", "keys", json!([])),
+            ("send_terminal_text", "text", json!("\u{001b}")),
+            ("send_terminal_text", "text", json!("é".repeat(3000))),
+        ] {
+            let mut args = base.clone();
+            args[key] = value;
+            assert!(command(&json!({"name":name,"arguments":args})).is_err());
+        }
+        let mut config = all_enabled();
+        config.prompts = false;
+        assert!(!config.allows("launch_with_prompt"));
+        config.prompts = true;
+        config.launch = false;
+        assert!(!config.allows("launch_with_prompt"));
+    }
+
+    #[test]
     fn mcp_capture_limits_and_mutation_annotations() {
         for args in [
             json!({"id":"card","lines":20}),
@@ -491,7 +730,13 @@ mod tests {
         for tool in tools(all_enabled()).as_array().unwrap() {
             let mutation = matches!(
                 tool["name"].as_str().unwrap(),
-                "launch_harness" | "submit_prompt"
+                "launch_harness"
+                    | "submit_prompt"
+                    | "launch_with_prompt"
+                    | "send_terminal_text"
+                    | "send_terminal_keys"
+                    | "interrupt_terminal"
+                    | "close_terminal"
             );
             assert_eq!(tool["annotations"]["readOnlyHint"], !mutation);
             assert_eq!(tool["annotations"]["idempotentHint"], !mutation);
@@ -517,7 +762,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            14
+            20
         );
         assert!(s
             .handle(list.clone(), &mut |_| panic!(), Config::disabled())

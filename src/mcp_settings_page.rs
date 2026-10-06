@@ -36,6 +36,8 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
         ("mcp-output", "Read terminal output", "Allow screen and scrollback capture. Output may contain private data."),
         ("mcp-launch", "Launch harnesses", "Allow agents to create terminal cards. Unsafe launch and download opt-ins still apply."),
         ("mcp-prompts", "Submit prompts", "Allow guarded text prompts to existing harnesses. Commands run with your user account's authority."),
+        ("mcp-controls", "Control terminals", "Allow literal text, named keys and Ctrl-C interruption. Input can execute commands."),
+        ("mcp-close", "Close terminals", "Allow agents to stop one exact session and remove its card with explicit confirmation."),
     ] {
         let row = Box::new(Orientation::Horizontal, 12);
         let words = Box::new(Orientation::Vertical, 4);
@@ -62,6 +64,8 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
                 config.read_output,
                 config.launch,
                 config.prompts,
+                config.controls,
+                config.close,
             ]
             .into_iter()
             .enumerate()
@@ -105,7 +109,9 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
                 0 => config.enabled = toggle.is_active(),
                 1 => config.read_output = toggle.is_active(),
                 2 => config.launch = toggle.is_active(),
-                _ => config.prompts = toggle.is_active(),
+                3 => config.prompts = toggle.is_active(),
+                4 => config.controls = toggle.is_active(),
+                _ => config.close = toggle.is_active(),
             }
             match save(config) {
                 Ok(()) => refresh(),
@@ -204,6 +210,12 @@ mod tests {
         let output = find(root.upcast_ref(), "mcp-output").unwrap();
         let launch = find(root.upcast_ref(), "mcp-launch").unwrap();
         let prompts = find(root.upcast_ref(), "mcp-prompts").unwrap();
+        let controls = find(root.upcast_ref(), "mcp-controls").unwrap();
+        let close = find(root.upcast_ref(), "mcp-close").unwrap();
+        assert!(!controls.is_active() && !close.is_active());
+        controls.set_active(true);
+        close.set_active(true);
+        assert!(stored.get().controls && stored.get().close);
         assert!(enabled.is_active());
         assert!(!launch.is_active());
         output.set_active(true);
@@ -213,6 +225,7 @@ mod tests {
         enabled.set_active(false);
         assert!(!stored.get().enabled);
         assert!(!launch.is_sensitive());
+        assert!(!controls.is_sensitive() && !close.is_sensitive());
         enabled.set_active(true);
         assert!(launch.is_sensitive());
         assert!(launch.is_active());
@@ -222,5 +235,6 @@ mod tests {
         assert!(stored.get().launch);
         refresh();
         assert!(prompts.is_active());
+        assert!(controls.is_active() && close.is_active());
     }
 }

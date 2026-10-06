@@ -134,15 +134,15 @@ Discovery is offline. Calls use the existing owner-only local API and check
 operation support before dispatch; unavailable or older daemons return tool
 errors without starting another daemon or falling back to terminal commands.</p>
 <p>Open <strong>Settings → MCP</strong> to control access. <strong>Enable MCP</strong> gates every tool;
-<strong>Read terminal output</strong>, <strong>Launch harnesses</strong>, and <strong>Submit prompts</strong> separately
-gate the three corresponding tools. Metadata tools start enabled; these three
+<strong>Read terminal output</strong>, <strong>Launch harnesses</strong>, <strong>Submit prompts</strong>, <strong>Control terminals</strong>,
+and <strong>Close terminals</strong> gate their corresponding tools. Metadata tools start enabled; these five
 optional permissions start disabled. Disabled tools are omitted from discovery
 and calls return <code>mcp_disabled</code>. The controls apply to the next request on an
 existing connection; in-flight calls may finish. Refresh/reconnect the client
 after enabling tools to update its discovered list.</p>
 <p>The page has buttons to copy MCP configuration and agent setup instructions.
 The copied configuration includes the absolute executable path and this
-computer's configuration/runtime environment. The stdio server reloads the
+computer's configuration/runtime/state environment. The stdio server reloads the
 preferences for each request; unreadable or invalid preferences block access.
 These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.</p>
 <div class="table-scroll" tabindex="0" role="region" aria-label="Reference table"><table>
@@ -226,6 +226,27 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 </tr>
 </tbody>
 </table></div>
+<p>| <code>send_terminal_text</code> | Input guards and <code>requestId</code>, <code>text</code>, optional <code>enter</code> | Send literal text (1–4096 UTF-8 bytes); Enter defaults false |
+| <code>send_terminal_keys</code> | Input guards and <code>requestId</code>, <code>keys</code> | Send 1–32 named keys from the schema's allowlist |
+| <code>interrupt_terminal</code> | Input guards and <code>requestId</code> | Send Ctrl-C to the exact guarded pane |
+| <code>close_terminal</code> | Input guards and <code>requestId</code>, <code>confirm=true</code> | Close the card; requires its separate permission |
+| <code>launch_with_prompt</code> | <code>harness</code>, absolute <code>cwd</code>, <code>text</code>, <code>requestId</code>; optional launch opt-ins and <code>readyTimeoutSeconds</code> | Launch direct Claude, Codex or Grok, wait for an empty recognized composer, record completion baseline and submit guarded text |
+| <code>wait_for_completion</code> | <code>id</code>, <code>expectPaneIdentity</code>, <code>after</code>; optional <code>timeoutSeconds</code> | Wait for a new native completion after the observed baseline; no terminal-silence heuristic |</p>
+<p>Input guards are <code>expectEpoch</code>, <code>expectRevision</code>, and <code>expectPaneIdentity</code>, obtained
+from <code>terminal_geometry</code> and <code>terminal_runtime</code>. Each mutation requires a unique
+request ID. Closing requires explicit confirmation as well as the Settings switch.</p>
+<p>For launch-and-wait, call <code>launch_with_prompt</code>, then pass its returned card <code>id</code>
+and <code>completionBaseline.paneIdentity</code> to <code>wait_for_completion</code>. Set <code>after</code> to
+<code>completionBaseline.completionId</code>, or <code>"none"</code> only when the observed ID is null.
+Check <code>completionBaseline.supported</code> first. Completion records native harness
+completion; it does not prove that a particular prompt or background task finished.
+Readiness and completion timeouts each default to 30 seconds and accept 1–300.
+A timeout does not stop the harness. Retry waits with the same baseline; inspect
+partial workflow receipts before recovering. Reusing a workflow request ID replays
+its saved result without launching or sending again. A partial failure leaves
+the created card open. Calls on one stdio connection run sequentially, so a wait
+blocks other calls on that connection; another connection can still control the
+card. Preference changes are checked between workflow steps and wait polls.</p>
 <p>Tools return a structured local reply envelope, also serialized in the text
 content. <code>isError=true</code> means the daemon refused the operation or its outcome
 is uncertain; inspect the envelope's error code and outcome. Invalid tool

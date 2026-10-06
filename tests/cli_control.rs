@@ -52,11 +52,12 @@ fn control_daemon_fixture() {
                 serde_json::json!({"id":id,"asset":{"id":asset},"offset":offset,"nextOffset":end,"eof":end==bytes.len(),"sha256":format!("{:x}",Sha256::digest(&bytes)),"bytes":base64::engine::general_purpose::STANDARD.encode(&bytes[offset..end])})
             },
 
+            control::Command::Geometry {id} if id=="mcp-launched" => serde_json::json!({"epoch":"epoch-1","revision":"a".repeat(64)}),
             control::Command::Viewport {..} | control::Command::Viewports {..} | control::Command::CardAction {..} | control::Command::Files {..} | control::Command::FilesEdit {..} | control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::Input { .. } | control::Command::Mode { .. } | control::Command::Close { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. } => serde_json::to_value(&request.command).unwrap(),
             control::Command::Lifecycle { id } => serde_json::json!({"id":id,"paneIdentity":"a".repeat(64),"nativeMetadataObserved":id=="completed-card","lifecycle":if id=="completed-card" {"completed"} else {"unknown"},"completion":{"supported":id=="completed-card","state":if id=="completed-card" {"completed"} else {"unknown"},"completionId":if id=="completed-card" {Some("b".repeat(64))} else {None}}}),
             control::Command::Runtime { id } => serde_json::json!({"id":id,"columns":120,"rows":35}),
             control::Command::Capture { id,history,lines } => serde_json::json!({"id":id,"history":history,"lines":lines,"text":"private\u{001b}text\u{009b}","runtime":{"paneIdentity":"a".repeat(64),"columns":120,"rows":35},"truncated":false}),
-            control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download,arguments } => serde_json::json!({"arguments":arguments,"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
+            control::Command::Launch { harness,cwd,allow_unsafe_harness,allow_download,arguments } => serde_json::json!({"id":"mcp-launched","arguments":arguments,"harness":harness,"cwd":cwd,"allowUnsafeHarness":allow_unsafe_harness,"allowDownload":allow_download}),
             control::Command::InspectRequest { id } => serde_json::json!({"id":id}),
             control::Command::Capabilities {} => control::capabilities(),
             control::Command::Status {} => serde_json::json!({"visible":false,"ready":true}),
@@ -903,7 +904,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         .spawn()
         .unwrap();
     let fixture = Fixture { child, root };
-    super_desktop::mcp_settings::save_at(&fixture.root.join("config/super-desktop/mcp.json"), super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true}).unwrap();
+    super_desktop::mcp_settings::save_at(&fixture.root.join("config/super-desktop/mcp.json"), super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true}).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !fixture.root.join("super-desktop/control-v1.sock").exists() {
         assert!(Instant::now() < deadline);
@@ -914,6 +915,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             let mut child = Command::new(executable).args(["mcp", "serve"])
                 .env("XDG_RUNTIME_DIR", &fixture.root)
                 .env("XDG_CONFIG_HOME", fixture.root.join("config"))
+                .env("XDG_STATE_HOME", fixture.root.join("state"))
                 .env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY")
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
                 .spawn().unwrap();
@@ -932,6 +934,25 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         let call = |id, name, args| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}});
         let launch = serde_json::json!({"harness":"shell","cwd":"/tmp","requestId":"mcp-launch","allowUnsafeHarness":true,"allowDownload":true});
         let prompt = serde_json::json!({"id":"card-1","text":"Investigate tests\nReport findings","requestId":"mcp-prompt","expectEpoch":"epoch-1","expectRevision":"a".repeat(64),"expectPaneIdentity":"b".repeat(64)});
+        let guards = serde_json::json!({"id":"card-1","requestId":"control-1","expectEpoch":"epoch-1","expectRevision":"a".repeat(64),"expectPaneIdentity":"a".repeat(64)});
+        for (name, extra) in [("send_terminal_text",serde_json::json!({"text":"hello","enter":false})),("send_terminal_keys",serde_json::json!({"keys":["Escape","Ctrl-U"]})),("interrupt_terminal",serde_json::json!({})),("close_terminal",serde_json::json!({"confirm":true}))] {
+            let mut args=guards.clone(); args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let results=exchange(vec![call(2,name,args)]);
+            assert_eq!(results[1]["result"]["isError"],false,"{results:?}");
+        }
+        let workflow=serde_json::json!({"harness":"claude","cwd":"/tmp","text":"hello","requestId":"mcp-workflow"});
+        let results=exchange(vec![call(2,"launch_with_prompt",workflow.clone()),call(3,"launch_with_prompt",workflow)]);
+        assert_eq!(results[1]["result"]["isError"],false,"{results:?}");
+        assert_eq!(results[1]["result"]["structuredContent"],results[2]["result"]["structuredContent"]);
+        assert_eq!(results[1]["result"]["structuredContent"]["data"]["completionBaseline"]["observed"],true);
+        let wait=serde_json::json!({"id":"completed-card","expectPaneIdentity":"a".repeat(64),"after":"none","timeoutSeconds":1});
+        let results=exchange(vec![call(2,"wait_for_completion",wait.clone())]);
+        assert_eq!(results[1]["result"]["isError"],false,"{results:?}");
+        for (key,value) in [("after",serde_json::json!("b".repeat(64))),("expectPaneIdentity",serde_json::json!("c".repeat(64))),("id",serde_json::json!("unknown-card"))] {
+            let mut args=wait.clone();args[key]=value;
+            let results=exchange(vec![call(2,"wait_for_completion",args)]);
+            assert_eq!(results[1]["result"]["isError"],true,"{results:?}");
+        }
         let replies = exchange(vec![
             serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
             call(3,"app_status",serde_json::json!({})),
@@ -944,7 +965,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         ]);
         assert_eq!(replies.len(), 9);
         assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 14);
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 20);
         assert_eq!(replies[2]["result"]["structuredContent"]["data"]["ready"], true);
         assert_eq!(replies[3]["result"]["isError"], true);
         assert_eq!(replies[3]["result"]["structuredContent"]["error"]["code"], "not_found");
@@ -974,6 +995,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         let policy_path = fixture.root.join("config/super-desktop/mcp.json");
         let mut child = Command::new(executable).args(["mcp", "serve"])
             .env("XDG_RUNTIME_DIR", &fixture.root).env("XDG_CONFIG_HOME", fixture.root.join("config"))
+                .env("XDG_STATE_HOME", fixture.root.join("state"))
             .env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY")
             .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
         let mut input = child.stdin.take().unwrap();
@@ -995,7 +1017,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             assert!(reply["result"]["tools"].as_array().unwrap().is_empty());
             std::fs::write(&policy_path,b"invalid").unwrap();
             assert_eq!(send(call(4,"app_status",serde_json::json!({})),true)["result"]["isError"],true);
-            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true}).unwrap();
+            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true}).unwrap();
             assert_eq!(send(call(5,"app_status",serde_json::json!({})),true)["result"]["structuredContent"]["data"]["ready"],true);
         }
         drop(input);
