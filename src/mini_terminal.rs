@@ -527,6 +527,9 @@ pub struct MiniTerminalCard {
     /// The terminal's screen as a texture, shown in its place while the
     /// overlay slides (see `freeze_for_slide`).
     slide_frame: gtk4::Picture,
+    /// Whether that texture still shows the terminal as it is, so a show can
+    /// reuse the one taken at the hide (see `keep_slide_frame_for_show`).
+    slide_watch: SlideFrameWatch,
     session_task: Arc<crate::session_task::SessionTask>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
@@ -1056,6 +1059,7 @@ impl MiniTerminalCard {
             vte,
             vte_drawing: VteDrawing::new(),
             slide_frame,
+            slide_watch: SlideFrameWatch::default(),
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
             on_raise: Rc::clone(&on_raise_rc),
@@ -1901,13 +1905,38 @@ impl MiniTerminalCard {
         // Out of the borrow: hiding a widget can emit signals that re-enter
         // this card.
         let term = self.vte.borrow().clone();
-        freeze_terminal(term.as_ref(), &self.vte_drawing, &self.slide_frame)
+        let was_frozen = self.vte_drawing.frozen();
+        let done = freeze_terminal(term.as_ref(), &self.vte_drawing, &self.slide_frame);
+        if let (false, true, Some(term)) = (was_frozen, self.vte_drawing.frozen(), term.as_ref()) {
+            self.slide_watch.watch(term, self.slide_look());
+        }
+        done
     }
 
-    /// The slide is over (or the overlay unmapped): the live terminal again.
+    /// The slide is over: the live terminal again.
     pub fn thaw_after_slide(&self) {
         let term = self.vte.borrow().clone();
+        self.slide_watch.forget();
         thaw_terminal(term.as_ref(), &self.vte_drawing, &self.slide_frame);
+    }
+
+    /// The overlay is about to show again. The image taken at the hide stays
+    /// for the slide-in when it still shows this terminal exactly: no output
+    /// since, same emulator, same size and mode. The slide then starts without
+    /// laying out and drawing the live terminal on its first frame and
+    /// rendering a new image on its second, the two heaviest frames of a show.
+    /// Otherwise the live terminal slides in and is frozen anew.
+    pub fn keep_slide_frame_for_show(&self) {
+        let term = self.vte.borrow().clone();
+        if !self.slide_watch.still_shows(term.as_ref(), self.slide_look()) {
+            self.thaw_after_slide();
+        }
+    }
+
+    /// What the card's terminal looks like on screen, for `SlideFrameWatch`.
+    fn slide_look(&self) -> SlideLook {
+        let data = self.data.borrow();
+        (data.width, data.height, self.is_expanded(), data.iconified)
     }
 
     /// The cards painted above hide this terminal completely (`true`), so it
@@ -2056,6 +2085,8 @@ impl MiniTerminalCard {
     }
 
     pub fn apply_theme(&self, theme: &crate::theme::OmarchyTheme) {
+        // A still image would keep the old colors and font.
+        self.thaw_after_slide();
         if let Some(path) = crate::brand::logo_path(&self.data.borrow().agent_type, theme.mode == "light") {
             for image in &self.brand_images { image.set_from_file(Some(&path)); }
         }
@@ -2436,6 +2467,52 @@ fn thaw_terminal(term: Option<&VteTerminal>, drawing: &VteDrawing, frame: &gtk4:
     }
     drawing.set_frozen(false, term, frame);
     frame.set_paintable(None::<&gtk4::gdk::Paintable>);
+}
+
+/// A card's size, expanded and iconified state: an image taken at another
+/// look would be stretched into this one.
+type SlideLook = (i32, i32, bool, bool);
+
+/// Tracks whether a slide's still image still shows its terminal: taken of
+/// this emulator, at this look, with no output processed since.
+#[derive(Default)]
+pub struct SlideFrameWatch {
+    source: RefCell<Option<SlideFrameSource>>,
+}
+
+struct SlideFrameSource {
+    term: glib::WeakRef<VteTerminal>,
+    handler: glib::SignalHandlerId,
+    changed: Rc<Cell<bool>>,
+    look: SlideLook,
+}
+
+impl SlideFrameWatch {
+    /// An image of `term` was just taken.
+    fn watch(&self, term: &VteTerminal, look: SlideLook) {
+        self.forget();
+        let changed = Rc::new(Cell::new(false));
+        let flag = Rc::clone(&changed);
+        let handler = term.connect_contents_changed(move |_| flag.set(true));
+        *self.source.borrow_mut() = Some(SlideFrameSource { term: term.downgrade(), handler, changed, look });
+    }
+
+    fn forget(&self) {
+        let source = self.source.borrow_mut().take();
+        if let Some(source) = source {
+            if let Some(term) = source.term.upgrade() {
+                term.disconnect(source.handler);
+            }
+        }
+    }
+
+    fn still_shows(&self, term: Option<&VteTerminal>, look: SlideLook) -> bool {
+        self.source.borrow().as_ref().is_some_and(|source| {
+            !source.changed.get()
+                && source.look == look
+                && term.is_some_and(|term| source.term.upgrade().as_ref() == Some(term))
+        })
+    }
 }
 
 fn remove_vte(vte: &Rc<RefCell<Option<VteTerminal>>>, preview_box: &gtk4::Box) {
@@ -3460,6 +3537,28 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
         // Frozen again (a reversed slide): the same image stays.
         assert!(freeze_terminal(Some(&term), &drawing, &frame));
         assert_eq!(frame.paintable().as_ref(), Some(&texture));
+
+        // A show reuses the hide's image only while it still shows this
+        // terminal: same emulator and look, nothing printed since.
+        // VTE reports output after processing it: let the earlier output's
+        // report land first (in the desktop it errs on the safe side).
+        pump();
+        let watch = SlideFrameWatch::default();
+        let look = (480, 320, false, false);
+        watch.watch(&term, look);
+        pump();
+        assert!(watch.still_shows(Some(&term), look));
+        assert!(!watch.still_shows(Some(&term), (640, 320, false, false)), "resized");
+        assert!(!watch.still_shows(Some(&term), (480, 320, true, false)), "expanded");
+        assert!(!watch.still_shows(Some(&VteTerminal::new()), look), "another emulator");
+        assert!(!watch.still_shows(None, look), "no emulator");
+        term.feed(b"printed while hidden\r\n");
+        pump();
+        assert!(!watch.still_shows(Some(&term), look), "output since the image");
+        watch.watch(&term, look);
+        assert!(watch.still_shows(Some(&term), look), "a new image");
+        watch.forget();
+        assert!(!watch.still_shows(Some(&term), look));
 
         term.feed(b"written while sliding\r\n");
         pump();

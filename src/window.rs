@@ -1955,8 +1955,8 @@ impl SuperDesktopWindow {
             self.paint_slide(0.0);
         }
         self.slide.appear.set(true);
-        // The terminals were just shown again and have no layout yet: the
-        // slide's tick freezes them from its second frame.
+        // Terminals that slide in live were just shown again and have no
+        // layout yet: the slide's tick freezes them from its second frame.
         self.slide.freeze_pending.set(true);
         self.canvas.add_css_class("sliding");
         self.ensure_slide_tick();
@@ -2875,6 +2875,12 @@ impl SuperDesktopWindow {
         self.hidden_pause.on_shown();
         self.show_token.set(self.show_token.get().wrapping_add(1));
         self.reclaim_input();
+        // Before drawing is re-enabled, so a terminal whose image is stale
+        // comes back live rather than for one frame as an image.
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        for card in &cards {
+            card.keep_slide_frame_for_show();
+        }
         self.set_terminal_gpu_mapped(true);
         crate::desktop_shell::before_present(&self.window);
         self.window.present();
@@ -2928,12 +2934,11 @@ impl SuperDesktopWindow {
         self.slide.gen.set(self.slide.gen.get().wrapping_add(1));
         // Drop live terminal surfaces with the unmap: nothing composites a GPU
         // terminal buffer while the overlay is hidden, and `show_again`
-        // re-enables drawing for the next show. The slide's still images go
-        // too (after the unmap flag, so no terminal is shown in between).
+        // re-enables drawing for the next show. The slide-out's still images
+        // stay: the next slide-in reuses those that still show their terminal
+        // (`MiniTerminalCard::keep_slide_frame_for_show`).
         self.set_terminal_gpu_mapped(false);
         self.slide.freeze_pending.set(false);
-        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
-        thaw_slide_cards(&cards);
         // Floating panels must not come back with the window.
         for panel in &self.overlay_panels {
             panel.set_visible(false);
