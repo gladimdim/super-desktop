@@ -192,9 +192,13 @@ impl HoverRaiseLock {
 /// Stopping only hides the widget. The emulator, its PTY and the tmux client
 /// stay; it keeps reading output and is not reallocated while hidden, so tmux
 /// sees no resize, and it paints its current screen as soon as it draws again.
+///
+/// While the overlay slides, the terminal is also replaced by a still image of
+/// its screen (`frozen`, see [`MiniTerminalCard::freeze_for_slide`]).
 pub struct VteDrawing {
     mapped: Cell<bool>,
     covered: Cell<bool>,
+    frozen: Cell<bool>,
 }
 
 impl VteDrawing {
@@ -202,6 +206,7 @@ impl VteDrawing {
         Self {
             mapped: Cell::new(true),
             covered: Cell::new(false),
+            frozen: Cell::new(false),
         }
     }
 
@@ -217,8 +222,20 @@ impl VteDrawing {
         self.apply(term);
     }
 
+    /// A still image stands in for the terminal (`frame`), or no longer does.
+    pub fn set_frozen(&self, frozen: bool, term: Option<&VteTerminal>, frame: &gtk4::Picture) {
+        self.frozen.set(frozen);
+        // The image first, so the box never lays out with neither child.
+        frame.set_visible(frozen);
+        self.apply(term);
+    }
+
+    pub fn frozen(&self) -> bool {
+        self.frozen.get()
+    }
+
     pub fn drawing(&self) -> bool {
-        self.mapped.get() && !self.covered.get()
+        self.mapped.get() && !self.covered.get() && !self.frozen.get()
     }
 
     /// Bring the widget in line with both reasons. The widget is compared, not
@@ -505,6 +522,9 @@ pub struct MiniTerminalCard {
     vte: Rc<RefCell<Option<VteTerminal>>>,
     /// Whether that terminal draws: the overlay is mapped and no card hides it.
     vte_drawing: VteDrawing,
+    /// The terminal's screen as a texture, shown in its place while the
+    /// overlay slides (see `freeze_for_slide`).
+    slide_frame: gtk4::Picture,
     session_task: Arc<crate::session_task::SessionTask>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
     on_toggle: Rc<dyn Fn(&TerminalData)>,
@@ -803,6 +823,14 @@ impl MiniTerminalCard {
 
         icon_box.set_visible(false);
         preview_box.append(&icon_box);
+        let slide_frame = gtk4::Picture::new();
+        slide_frame.set_can_shrink(true);
+        slide_frame.set_content_fit(gtk4::ContentFit::Fill);
+        slide_frame.set_hexpand(true);
+        slide_frame.set_vexpand(true);
+        slide_frame.set_can_target(false);
+        slide_frame.set_visible(false);
+        preview_box.append(&slide_frame);
         // The terminal area, with Jump to newest over its bottom edge. Only a
         // local card has a pane here to scroll back.
         let preview_area = Overlay::new();
@@ -1025,6 +1053,7 @@ impl MiniTerminalCard {
             jump,
             vte,
             vte_drawing: VteDrawing::new(),
+            slide_frame,
             visual_pos,
             on_toggle: Rc::clone(&on_toggle),
             on_raise: Rc::clone(&on_raise_rc),
@@ -1855,6 +1884,30 @@ impl MiniTerminalCard {
         self.vte_drawing.set_mapped(drawing, term.as_ref());
     }
 
+    /// Slide this card with a still image of its terminal instead of the live
+    /// emulator. A moving card is drawn again on every frame, and a terminal's
+    /// screen (thousands of glyphs, its cell backgrounds, overlapping fills)
+    /// was most of the GPU time of a slide: on a 3440×1440 120 Hz display
+    /// driven by a handheld APU, four live terminals held the slide-in to
+    /// ~75 FPS, and ~118 FPS without them. The texture is rendered once here,
+    /// and moving it costs one textured quad per frame. The emulator keeps
+    /// reading its PTY and comes back with its current screen at `thaw`.
+    ///
+    /// `false` when the terminal has not been laid out since it was shown
+    /// again: try again on a later frame.
+    pub fn freeze_for_slide(&self) -> bool {
+        // Out of the borrow: hiding a widget can emit signals that re-enter
+        // this card.
+        let term = self.vte.borrow().clone();
+        freeze_terminal(term.as_ref(), &self.vte_drawing, &self.slide_frame)
+    }
+
+    /// The slide is over (or the overlay unmapped): the live terminal again.
+    pub fn thaw_after_slide(&self) {
+        let term = self.vte.borrow().clone();
+        thaw_terminal(term.as_ref(), &self.vte_drawing, &self.slide_frame);
+    }
+
     /// The cards painted above hide this terminal completely (`true`), so it
     /// stops drawing, or no longer do. See `overlap_ghost::hidden_indexes`.
     pub fn set_vte_covered(&self, covered: bool) {
@@ -2058,8 +2111,11 @@ impl MiniTerminalCard {
         let opencode_cache = Rc::clone(&self.opencode_session);
         let cached_oc_id: Option<String> = opencode_cache.borrow().clone();
         // Fall back to the persisted id (loaded from state.json at startup)
-        // when the in-memory cache is still empty.
-        let cached_oc_id = cached_oc_id.or_else(|| self.data.borrow().agent_session_id.clone());
+        // when the in-memory cache is still empty. Other harnesses store their
+        // own conversation id there (see `CardUpdate::own_session`).
+        let cached_oc_id = cached_oc_id.or_else(|| {
+            (agent_type == "opencode").then(|| self.data.borrow().agent_session_id.clone()).flatten()
+        });
         // Re-resolve the mapping at most every 30s (immediately on the first
         // refresh). A guess made before a neighbouring console closed
         // otherwise sticks forever, showing that console's prompt here.
@@ -2093,7 +2149,7 @@ impl MiniTerminalCard {
             need_resolve,
         };
         let apply = Box::new(move |update: Option<crate::card_status::CardUpdate>| {
-            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, notice, scrolled_back }) = update else {
+            let Some(crate::card_status::CardUpdate { status: status_info, preview, prompt, oc_id, own_session, notice, scrolled_back }) = update else {
                 if let Some(flag) = in_flight.upgrade() {
                     flag.set(false);
                 }
@@ -2144,11 +2200,13 @@ impl MiniTerminalCard {
             if *opencode_cache.borrow() != oc_id {
                 *opencode_cache.borrow_mut() = oc_id.clone();
             }
-            // Persist the tmux-pane -> opencode-session mapping to state.json
-            // on first resolution (and when a stale guess heals) so a later
-            // reboot resumes THIS card with `opencode --session <id>` instead
-            // of sharing the latest session.
-            if let Some(new_id) = oc_id {
+            // Persist the tmux-pane -> harness-conversation mapping to
+            // state.json on first resolution (and when it changes: a stale
+            // OpenCode guess heals, Claude's `/clear`, a Codex `/new`) so a
+            // later reboot resumes THIS card's conversation (`opencode
+            // --session`, `claude --resume`, `codex resume`) instead of every
+            // card of a harness sharing the latest one.
+            if let Some(new_id) = oc_id.or(own_session) {
                 let needs_save = data_snapshot
                     .as_ref()
                     .map(|d| d.agent_session_id.as_deref() != Some(new_id.as_str()))
@@ -2319,6 +2377,53 @@ pub fn apply_vte_colors(term: &VteTerminal, theme: &crate::theme::OmarchyTheme) 
     }
 }
 
+/// Show `frame`, a texture of `term`'s screen rendered here once, in place of
+/// the terminal (see `MiniTerminalCard::freeze_for_slide`). `false` when the
+/// terminal has no layout yet.
+fn freeze_terminal(term: Option<&VteTerminal>, drawing: &VteDrawing, frame: &gtk4::Picture) -> bool {
+    if drawing.frozen() {
+        return true;
+    }
+    let Some(term) = term else {
+        return true;
+    };
+    if !term.is_visible() {
+        // Not drawing (unmapped or covered): nothing to stand in for.
+        return true;
+    }
+    if !term.is_drawable() || term.width() <= 0 || term.height() <= 0 {
+        return false;
+    }
+    let Some(renderer) = term.native().and_then(|native| native.renderer()) else {
+        return true;
+    };
+    // The terminal's own bounds, so the paintable draws it 1:1.
+    let Some(bounds) = term.compute_bounds(term) else {
+        return false;
+    };
+    let (width, height) = (bounds.width(), bounds.height());
+    let scale = term.scale_factor() as f32;
+    let snapshot = gtk4::Snapshot::new();
+    snapshot.scale(scale, scale);
+    gtk4::WidgetPaintable::new(Some(term)).snapshot(&snapshot, width as f64, height as f64);
+    let Some(node) = snapshot.to_node() else {
+        return false;
+    };
+    let viewport = gtk4::graphene::Rect::new(0.0, 0.0, width * scale, height * scale);
+    let texture = renderer.render_texture(&node, Some(&viewport));
+    frame.set_paintable(Some(&texture));
+    drawing.set_frozen(true, Some(term), frame);
+    true
+}
+
+fn thaw_terminal(term: Option<&VteTerminal>, drawing: &VteDrawing, frame: &gtk4::Picture) {
+    if !drawing.frozen() {
+        return;
+    }
+    drawing.set_frozen(false, term, frame);
+    frame.set_paintable(None::<&gtk4::gdk::Paintable>);
+}
+
 fn remove_vte(vte: &Rc<RefCell<Option<VteTerminal>>>, preview_box: &gtk4::Box) {
     let term = vte.borrow_mut().take();
     if let Some(term) = term {
@@ -2348,6 +2453,15 @@ fn spawn_vte(
     remove_vte(vte, preview_box);
 
     let term = VteTerminal::new();
+    if crate::frame_profile::enabled() {
+        let created = Instant::now();
+        let reported = Cell::new(false);
+        term.connect_contents_changed(move |_| {
+            if !reported.replace(true) {
+                crate::frame_profile::note_terminal_content(created);
+            }
+        });
+    }
     term.set_hexpand(true);
     term.set_vexpand(true);
     term.set_input_enabled(true);
@@ -3246,6 +3360,125 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
         assert!(fresh.is_visible());
         drawing.set_covered(true, Some(&fresh));
         assert!(!fresh.is_visible());
+        window.close();
+    }
+
+    #[test]
+    fn slide_freeze_keeps_the_terminal_and_its_grid() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::slide_freeze_gtk");
+    }
+
+    /// A still image stands in for a terminal during a slide: same place and
+    /// size, no resize reaching tmux, output still read, and only the end of
+    /// the slide brings the live terminal back.
+    #[test]
+    fn slide_freeze_gtk() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let pump = || {
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let window = gtk4::Window::new();
+        let card = gtk4::Box::new(Orientation::Vertical, 0);
+        card.set_size_request(480, 320);
+        card.append(&Label::new(Some("header")));
+        let preview_box = gtk4::Box::new(Orientation::Vertical, 0);
+        preview_box.set_vexpand(true);
+        card.append(&preview_box);
+        let term = VteTerminal::new();
+        term.set_hexpand(true);
+        term.set_vexpand(true);
+        preview_box.append(&term);
+        // Configured as in `MiniTerminalCard::new`.
+        let frame = gtk4::Picture::new();
+        frame.set_can_shrink(true);
+        frame.set_content_fit(gtk4::ContentFit::Fill);
+        frame.set_hexpand(true);
+        frame.set_vexpand(true);
+        frame.set_visible(false);
+        preview_box.append(&frame);
+        let pty = term
+            .pty_new_sync(PtyFlags::DEFAULT, None::<&gtk4::gio::Cancellable>)
+            .unwrap();
+        term.set_pty(Some(&pty));
+        window.set_child(Some(&card));
+        let drawing = VteDrawing::new();
+
+        // Not laid out yet: try again later.
+        assert!(!freeze_terminal(Some(&term), &drawing, &frame));
+        assert!(!drawing.frozen() && term.is_visible() && !frame.is_visible());
+
+        window.present();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while term.width() <= 0 && Instant::now() < deadline {
+            pump();
+        }
+        let card_size = (card.width(), card.height());
+        let term_size = (term.width(), term.height());
+        let pty_size = pty.size().unwrap();
+        term.feed(b"before the slide\r\n");
+        pump();
+
+        assert!(freeze_terminal(Some(&term), &drawing, &frame));
+        assert!(drawing.frozen() && !drawing.drawing());
+        assert!(!term.is_visible() && frame.is_visible());
+        let texture = frame.paintable().expect("the slide shows a texture");
+        let scale = term.scale_factor();
+        assert_eq!(
+            (texture.intrinsic_width(), texture.intrinsic_height()),
+            (term_size.0 * scale, term_size.1 * scale),
+            "rendered 1:1 at the terminal's size"
+        );
+        // Frozen again (a reversed slide): the same image stays.
+        assert!(freeze_terminal(Some(&term), &drawing, &frame));
+        assert_eq!(frame.paintable().as_ref(), Some(&texture));
+
+        term.feed(b"written while sliding\r\n");
+        pump();
+        assert_eq!(
+            (frame.width(), frame.height()),
+            term_size,
+            "the image takes the terminal's place exactly"
+        );
+        assert_eq!((card.width(), card.height()), card_size, "the card keeps its size");
+        assert_eq!(pty.size().unwrap(), pty_size, "tmux sees no resize");
+
+        // Showing the overlay or uncovering the card does not end the slide.
+        drawing.set_mapped(true, Some(&term));
+        drawing.set_covered(false, Some(&term));
+        assert!(!term.is_visible() && frame.is_visible());
+
+        thaw_terminal(Some(&term), &drawing, &frame);
+        assert!(!drawing.frozen() && drawing.drawing());
+        assert!(term.is_visible() && !frame.is_visible());
+        assert!(frame.paintable().is_none(), "the texture is released");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while term.width() <= 0 && Instant::now() < deadline {
+            pump();
+        }
+        pump();
+        assert_eq!((term.width(), term.height()), term_size);
+        assert_eq!(pty.size().unwrap(), pty_size, "tmux sees no resize");
+        let text = term.text_format(vte4::Format::Text).unwrap_or_default();
+        assert!(
+            text.contains("before the slide") && text.contains("written while sliding"),
+            "the terminal kept reading while it was frozen: {text:?}"
+        );
+
+        // Unmapped while frozen (the hide's unmap): thawing must not show the
+        // terminal, and an unmapped terminal has nothing to freeze.
+        assert!(freeze_terminal(Some(&term), &drawing, &frame));
+        drawing.set_mapped(false, Some(&term));
+        thaw_terminal(Some(&term), &drawing, &frame);
+        assert!(!term.is_visible() && !frame.is_visible());
+        assert!(freeze_terminal(Some(&term), &drawing, &frame));
+        assert!(!drawing.frozen(), "nothing on screen to freeze");
         window.close();
     }
 

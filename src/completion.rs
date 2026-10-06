@@ -229,14 +229,23 @@ static SESSION_IDS: OnceLock<Mutex<HashMap<String, (Stamp, Option<String>)>>> = 
 static TITLES: OnceLock<Mutex<HashMap<String, (Stamp, Option<String>)>>> = OnceLock::new();
 static PROMPTS: OnceLock<Mutex<HashMap<String, (Stamp, Option<String>)>>> = OnceLock::new();
 
-fn title_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
+/// The id of the Codex conversation open in this pane, attributed like
+/// `session_title` (the CLI's own rollout, never the latest in a folder).
+/// A card stores it so a reboot resumes this exact conversation.
+pub(crate) fn session_id(pane_pid: u32) -> Option<String> {
+    let (fd, identity) = rollout(pane_pid)?;
+    session_id_for_rollout(&fd, Path::new(&identity))
+}
+
+/// The `session_meta` id of an interactive rollout.
+fn session_id_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
     let file = File::open(fd).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
         return None;
     }
     // Keyed on the whole stamp: a rewritten file may carry another header.
-    let id = memo(&SESSION_IDS, identity.to_string_lossy().into_owned(), stamp(&meta), || {
+    memo(&SESSION_IDS, identity.to_string_lossy().into_owned(), stamp(&meta), || {
         let mut header = Vec::new();
         BufReader::new(file.take(64 * 1024)).read_until(b'\n', &mut header).ok()?;
         if !header.ends_with(b"\n") { return None; }
@@ -245,7 +254,11 @@ fn title_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
             return None;
         }
         record["payload"]["id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
-    })?;
+    })
+}
+
+fn title_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
+    let id = session_id_for_rollout(fd, identity)?;
     // Derive CODEX_HOME from this rollout, including nondefault installations.
     let home = identity.ancestors().find(|path| {
         path.file_name().is_some_and(|name| name == "sessions" || name == "archived_sessions")

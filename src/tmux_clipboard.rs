@@ -162,6 +162,35 @@ pub fn install_session(session: &str) {
     install_pane_hook_on(&base, session, &pane_hook_with(CLIPBOARD_COMMAND));
 }
 
+/// The `set-hook` that `install_session` runs for `session`, as arguments to
+/// chain into the command that creates it. `None` for a session not ours.
+pub fn session_hook_args(session: &str) -> Option<[String; 6]> {
+    session.starts_with(SESSION_PREFIX).then(|| {
+        [
+            "set-hook".into(),
+            "-p".into(),
+            "-t".into(),
+            format!("={session}:"),
+            "pane-set-clipboard".into(),
+            pane_hook_with(CLIPBOARD_COMMAND),
+        ]
+    })
+}
+
+/// Wrap the copy bindings on the tmux server whose pid is `server`. Key tables
+/// are server-wide, so a server already done by this process (same pid) needs
+/// no `list-keys`; a restarted server has a new pid and is done again.
+pub fn ensure_bindings(server: &str) {
+    static DONE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let mut done = DONE.lock().unwrap_or_else(|e| e.into_inner());
+    if !server.is_empty() && *done == server {
+        return;
+    }
+    let bin = crate::tmux::tmux_bin();
+    install_bindings_on(&[bin.as_str()], CLIPBOARD_COMMAND);
+    *done = server.to_string();
+}
+
 /// Daemon start: cover cards whose sessions outlived the previous daemon.
 pub fn install_existing_sessions() {
     let bin = crate::tmux::tmux_bin();

@@ -160,6 +160,19 @@ if [[ -d "$SCRIPT_DIR/assets" ]]; then
   echo "✓ Refreshed toolbar assets in $CONFIG_DIR/assets"
 fi
 
+# The overlay animates its own slide; install.sh's older layer rule let
+# Hyprland fade the layer in (~400 ms with Omarchy's defaults) and out on top
+# of it on every toggle. Updates run this script, not install.sh, so migrate
+# the exact line it used to write here too (a customized rule is kept).
+HYPRLAND_LUA="$HOME/.config/hypr/hyprland.lua"
+LAYER_RULE_OLD='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })'
+LAYER_RULE='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })'
+if [[ -f "$HYPRLAND_LUA" ]] && grep -qxF "$LAYER_RULE_OLD" "$HYPRLAND_LUA"; then
+  migrated="$(awk -v old="$LAYER_RULE_OLD" -v new="$LAYER_RULE" '$0 == old { print new; next } { print }' "$HYPRLAND_LUA")"
+  printf '%s\n' "$migrated" >"$HYPRLAND_LUA"
+  echo "✓ Turned off Hyprland's layer fade for the overlay in $HYPRLAND_LUA"
+fi
+
 # 4. Reload Hyprland + restart daemon.
 if command -v hyprctl >/dev/null 2>&1; then
   echo "--> hyprctl reload..."

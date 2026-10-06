@@ -1068,6 +1068,21 @@ bindd
 
     #[test]
     #[cfg(target_os = "linux")]
+    fn rebuild_sh_migrates_the_layer_rule_like_install_sh() {
+        // Updates run rebuild.sh, not install.sh: both must turn the same old
+        // rule into the same rule without Hyprland's layer fade.
+        let installer = include_str!("../install.sh");
+        let rebuild = include_str!("../rebuild.sh");
+        let old = r#"hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })"#;
+        let new = r#"hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })"#;
+        for script in [installer, rebuild] {
+            assert!(script.contains(&format!("'{old}'")), "old rule");
+            assert!(script.contains(&format!("'{new}'")), "new rule");
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn test_install_sh_writes_the_managed_block_we_read() {
         // install.sh and this module must agree on the markers: the app only
         // ever finds (and replaces) a block install.sh wrote with the same pair

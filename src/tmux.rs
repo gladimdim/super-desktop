@@ -450,6 +450,65 @@ fn is_shell_command(cmd: &str) -> bool {
     matches!(base, "bash" | "zsh" | "fish" | "sh" | "dash")
 }
 
+/// Whether the CLI will find conversation `id` when resumed in `cwd`.
+///
+/// Claude looks in the project directory named after the folder (every
+/// character but ASCII letters and digits becomes `-`), under
+/// `$CLAUDE_CONFIG_DIR` or `~/.claude`. Codex keeps
+/// `sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl` under `$CODEX_HOME` or
+/// `~/.codex`, whatever the folder.
+fn conversation_exists(agent: &str, id: &str, cwd: Option<&str>) -> bool {
+    let home = || std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let dir = |variable: &str, default: &str| {
+        std::env::var_os(variable)
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(|| home().map(|home| home.join(default)))
+    };
+    match agent {
+        "claude" => {
+            let (Some(root), Some(cwd)) = (dir("CLAUDE_CONFIG_DIR", ".claude"), cwd) else {
+                return false;
+            };
+            claude_transcript(&root, cwd, id).is_file()
+        }
+        "codex" => dir("CODEX_HOME", ".codex")
+            .is_some_and(|root| codex_rollout_exists(&root.join("sessions"), id)),
+        _ => false,
+    }
+}
+
+fn claude_transcript(root: &std::path::Path, cwd: &str, id: &str) -> std::path::PathBuf {
+    let project: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    root.join("projects").join(project).join(format!("{id}.jsonl"))
+}
+
+fn codex_rollout_exists(sessions: &std::path::Path, id: &str) -> bool {
+    let suffix = format!("-{id}.jsonl");
+    let children = |dir: &std::path::Path| {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().map(|entry| entry.path())
+    };
+    children(sessions)
+        .flat_map(|year| children(&year).collect::<Vec<_>>())
+        .flat_map(|month| children(&month).collect::<Vec<_>>())
+        .flat_map(|day| children(&day).collect::<Vec<_>>())
+        .any(|file| {
+            file.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(&suffix))
+        })
+}
+
+/// A harness conversation id that can be put on a command line as is:
+/// Claude and Codex use UUIDs, OpenCode `ses_…`.
+pub fn is_resumable_id(id: &str) -> bool {
+    (1..=128).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
     if markers.iter().any(|m| base.contains(m)) {
         base.to_string()
@@ -494,6 +553,36 @@ pub fn resolve_resume_command_with_session(
     custom: Option<&str>,
     agent_session_id: Option<&str>,
 ) -> String {
+    resolve_resume_command_in(agent_type, custom, agent_session_id, None)
+}
+
+/// `resolve_resume_command_with_session` for a session recreated in `cwd`.
+///
+/// CLAUDE / CODEX ISOLATION: a card's own conversation id is stored like
+/// OpenCode's (see `card_status::own_session`), and resumed exactly with
+/// `claude --resume <id>` / `codex resume <id>`. Without that,
+/// `--continue` / `resume --last` gave every card of a harness in one folder
+/// the same, most recent conversation. A stored id is used only while its
+/// conversation file is where the CLI looks for it (`conversation_exists`);
+/// otherwise the card falls back to the latest conversation, as before,
+/// rather than a harness that exits at once on an unknown id.
+pub fn resolve_resume_command_in(
+    agent_type: &str,
+    custom: Option<&str>,
+    agent_session_id: Option<&str>,
+    cwd: Option<&str>,
+) -> String {
+    resume_command_with(agent_type, custom, agent_session_id, &|agent, id| {
+        conversation_exists(agent, id, cwd)
+    })
+}
+
+fn resume_command_with(
+    agent_type: &str,
+    custom: Option<&str>,
+    agent_session_id: Option<&str>,
+    exists: &dyn Fn(&str, &str) -> bool,
+) -> String {
     let base = resolve_command(agent_type, custom);
     if is_shell_command(&base) {
         return base;
@@ -505,6 +594,18 @@ pub fn resolve_resume_command_with_session(
                 return base;
             }
             return format!("{base} --session {id}");
+        }
+    }
+    if let Some(id) = agent_session_id.map(str::trim).filter(|id| is_resumable_id(id)) {
+        match agent_type {
+            "claude" if exists(agent_type, id) => {
+                return append_resume_flag(&base, &format!("--resume {id}"), &["--continue", "--resume"]);
+            }
+            // Global flags before the subcommand parse fine under clap.
+            "codex" if exists(agent_type, id) => {
+                return append_resume_flag(&base, &format!("resume {id}"), &["resume"]);
+            }
+            _ => {}
         }
     }
     match agent_type {
@@ -568,19 +669,54 @@ fn pin_client_exit(session_name: &str) {
 /// Existence + the pinned-client flag of one session, in a single `tmux` call:
 /// `Some(true)` = exists and already pins `detach-on-destroy on`, `Some(false)`
 /// = exists but still inherits the global setting, `None` = no such session.
+///
+/// It can also carry a brand-new card's session (`fresh`): the card's first
+/// attach creates it on its worker, so a launch never waits for tmux on GTK.
 #[derive(Default)]
-pub struct SessionInventory(std::sync::OnceLock<Option<std::collections::HashMap<String, bool>>>);
+pub struct SessionInventory(
+    std::sync::OnceLock<Option<std::collections::HashMap<String, bool>>>,
+    std::sync::Mutex<Option<(String, FreshSession)>>,
+);
+
+/// A session to start with the harness's fresh command, not its resume form.
+pub struct FreshSession {
+    agent_type: String,
+    command: String,
+    workspace_dir: String,
+}
 
 impl SessionInventory {
     // The CLI has already created and pinned this session. Do not execute a
     // second launcher if it exits before the first VTE attachment.
     pub(crate) fn cli_created(session: &str) -> Self {
         let entries = std::collections::HashMap::from([(session.to_string(), true)]);
-        Self(std::sync::OnceLock::from(Some(entries)))
+        Self(std::sync::OnceLock::from(Some(entries)), Default::default())
+    }
+
+    /// `session` does not exist yet: the attach that receives this creates it
+    /// with `command` (already resolved, see `resolve_command`).
+    pub(crate) fn fresh(session: &str, agent_type: &str, command: &str, workspace_dir: &str) -> Self {
+        let fresh = FreshSession {
+            agent_type: agent_type.to_string(),
+            command: command.to_string(),
+            workspace_dir: workspace_dir.to_string(),
+        };
+        Self(Default::default(), std::sync::Mutex::new(Some((session.to_string(), fresh))))
     }
 
     fn state(&self, session_name: &str) -> Option<bool> {
         self.0.get_or_init(read_session_inventory).as_ref()?.get(session_name).copied()
+    }
+
+    /// The fresh session for `session_name`, once: a later attach of the same
+    /// card must find (or resume) the session, never launch a second one.
+    fn take_fresh(&self, session_name: &str) -> Option<FreshSession> {
+        let mut fresh = self.1.lock().unwrap_or_else(|e| e.into_inner());
+        if fresh.as_ref().is_some_and(|(name, _)| name == session_name) {
+            fresh.take().map(|(_, session)| session)
+        } else {
+            None
+        }
     }
 }
 
@@ -631,32 +767,71 @@ pub fn create_session(
     custom_command: Option<&str>,
     workspace_dir: Option<&str>,
 ) -> (String, String) {
-    let session_name = unique_session_name();
     let cmd = resolve_command(agent_type, custom_command);
-    let launch = crate::shell_title::launch_command(agent_type, &cmd);
-    let launch = crate::harness_metadata::prepare(&session_name, agent_type, &launch);
+    // Names are unique within this process (see `session_id`). Only a session
+    // left by an older process can collide, and tmux refuses that name.
+    for _ in 0..20 {
+        let session_name = super_desktop::session_id::candidate();
+        if start_session(&session_name, agent_type, &cmd, workspace_dir) != Started::Duplicate {
+            return (session_name, cmd);
+        }
+    }
+    (super_desktop::session_id::candidate(), cmd)
+}
+
+#[derive(Debug, PartialEq)]
+enum Started {
+    Yes,
+    Duplicate,
+    Failed,
+}
+
+/// Start `session_name` running `command` (wrapped like every card launch) and
+/// set it up for a card: `detach-on-destroy on` and the clipboard hook.
+///
+/// One tmux process instead of five (`has-session`, `new-session`,
+/// `set-option`, `list-keys`, `set-hook`), each ~13 ms on a handheld APU. A
+/// failed command skips the rest of tmux's chain, so nothing is changed on a
+/// session that already existed.
+fn start_session(session_name: &str, agent_type: &str, command: &str, workspace_dir: Option<&str>) -> Started {
+    let launch = crate::shell_title::launch_command(agent_type, command);
+    let launch = crate::harness_metadata::prepare(session_name, agent_type, &launch);
     let cwd = resolve_workspace_dir(workspace_dir);
 
-    let _ = Command::new("tmux")
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &session_name,
-            "-c",
-            &cwd,
-            "-x",
-            "120",
-            "-y",
-            "35",
-            &launch.command,
-        ])
-        .output();
-
-    pin_client_exit(&session_name);
-    launch.register(&session_name);
-
-    (session_name, cmd)
+    let mut tmux = Command::new("tmux");
+    tmux.args([
+        "new-session",
+        "-d",
+        "-s",
+        session_name,
+        "-c",
+        &cwd,
+        "-x",
+        "120",
+        "-y",
+        "35",
+        &launch.command,
+    ]);
+    tmux.args([";", "set-option", "-t", session_name, "detach-on-destroy", "on"]);
+    if let Some(hook) = crate::tmux_clipboard::session_hook_args(session_name) {
+        tmux.arg(";").args(hook);
+    }
+    tmux.args([";", "display-message", "-p", "#{pid}"]);
+    let Ok(out) = tmux.output() else {
+        return Started::Failed;
+    };
+    if !out.status.success() {
+        if String::from_utf8_lossy(&out.stderr).contains("duplicate session") {
+            return Started::Duplicate;
+        }
+        // The harness may have exited at once, taking the session (and the
+        // rest of the chain) with it: still register it, as before.
+        launch.register(session_name);
+        return Started::Failed;
+    }
+    launch.register(session_name);
+    crate::tmux_clipboard::ensure_bindings(String::from_utf8_lossy(&out.stdout).trim());
+    Started::Yes
 }
 
 /// True when a tmux session with this name already exists on the server.
@@ -670,6 +845,7 @@ pub fn session_exists(session_name: &str) -> bool {
 
 /// Generate a session name distinct from concurrent calls, even when the
 /// clock does not advance. Keep checking tmux for names left by older processes.
+#[cfg(test)]
 pub fn unique_session_name() -> String {
     for _ in 0..20 {
         let candidate = super_desktop::session_id::candidate();
@@ -729,6 +905,18 @@ pub fn ensure_session_with_inventory(
     workspace_dir: Option<&str>,
     inventory: Option<&SessionInventory>,
 ) {
+    if let Some(fresh) = inventory.and_then(|inventory| inventory.take_fresh(session_name)) {
+        let started = start_session(
+            session_name,
+            &fresh.agent_type,
+            &fresh.command,
+            Some(&fresh.workspace_dir),
+        );
+        if started == Started::Duplicate {
+            eprintln!("SUPER DESKTOP: session {session_name} already existed; attaching to it");
+        }
+        return;
+    }
     // One `tmux` call answers both questions this function needs: does the
     // session exist, and is `detach-on-destroy` already pinned? Every fork/exec
     // is tens of milliseconds on a loaded machine, and this runs once per card
@@ -750,30 +938,13 @@ pub fn ensure_session_with_inventory(
         // conversations to disk continuously, so recreate with the agent's
         // native resume mechanism (see resolve_resume_command). Brand-new
         // terminals in create_session() still launch fresh.
-        let cmd =
-            resolve_resume_command_with_session(agent_type, custom_command, agent_session_id);
-        let launch = crate::shell_title::launch_command(agent_type, &cmd);
-        let launch = crate::harness_metadata::prepare(session_name, agent_type, &launch);
         let cwd = resolve_workspace_dir(workspace_dir);
-        let _ = Command::new("tmux")
-            .args([
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-c",
-                &cwd,
-                "-x",
-                "120",
-                "-y",
-                "35",
-                &launch.command,
-            ])
-            .output();
-        launch.register(session_name);
+        let cmd = resolve_resume_command_in(agent_type, custom_command, agent_session_id, Some(&cwd));
+        // Another attach may have created it since the inventory was read.
+        if start_session(session_name, agent_type, &cmd, workspace_dir) == Started::Duplicate {
+            pin_client_exit(session_name);
+        }
     }
-
-    pin_client_exit(session_name);
 }
 
 /// Type `text` into a live session (phone → harness), optionally followed by
@@ -2706,6 +2877,83 @@ mod tests {
         assert_eq!(session_state(sess), None);
     }
 
+    /// A new card's session is set up by one tmux process: pinned, with the
+    /// clipboard hook and bindings, never replacing a session that exists,
+    /// and a fresh card's command (not its resume form) runs exactly once.
+    /// Runs on a private tmux server in a child process.
+    #[test]
+    fn start_session_sets_up_a_card_in_one_tmux_process() {
+        let root = std::env::temp_dir().join(format!("sd-start-session-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("tmux")).unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tmux::tests::start_session_inner", "--nocapture"])
+            .env("SD_START_SESSION_ROOT", &root)
+            .env("HOME", &root)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("TMUX_TMPDIR", root.join("tmux"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .unwrap();
+        let _ = Command::new("tmux").env("TMUX_TMPDIR", root.join("tmux")).arg("kill-server").output();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn start_session_inner() {
+        let Some(root) = std::env::var_os("SD_START_SESSION_ROOT") else {
+            return;
+        };
+        let cwd = std::path::PathBuf::from(&root).to_string_lossy().into_owned();
+        let tmux = |args: &[&str]| {
+            let out = Command::new("tmux").args(args).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+        let start_command = |session: &str| {
+            tmux(&["display-message", "-p", "-t", &format!("={session}:"), "#{pane_start_command}"])
+        };
+
+        let card = format!("sd_term_test_{}_a", std::process::id());
+        assert_eq!(start_session(&card, "shell", "sleep 300", Some(&cwd)), Started::Yes);
+        assert_eq!(session_state(&card), Some(true), "detach-on-destroy is pinned");
+        let hooks = tmux(&["show-hooks", "-p", "-t", &format!("={card}:")]);
+        assert!(hooks.contains("pane-set-clipboard"), "clipboard hook: {hooks:?}");
+        let keys = tmux(&["list-keys"]);
+        assert!(keys.contains("sd_term_*"), "copy bindings are wrapped for cards");
+
+        // A name in use is refused, and the session keeps its command.
+        assert_eq!(start_session(&card, "shell", "sleep 301", Some(&cwd)), Started::Duplicate);
+        assert!(start_command(&card).contains("sleep 300"));
+
+        // A brand-new card: its first attach starts the fresh command...
+        let fresh = format!("sd_term_test_{}_b", std::process::id());
+        let inventory = SessionInventory::fresh(&fresh, "shell", "sleep 302", &cwd);
+        assert_eq!(session_state(&fresh), None);
+        ensure_session_with_inventory(&fresh, "shell", Some("sleep 303"), None, Some(&cwd), Some(&inventory));
+        assert_eq!(session_state(&fresh), Some(true));
+        assert!(start_command(&fresh).contains("sleep 302"), "fresh command, not the resume form");
+        // ...once: a later attach of the same card finds (or resumes) it.
+        tmux(&["kill-session", "-t", &format!("={fresh}")]);
+        ensure_session_with_inventory(&fresh, "shell", Some("sleep 303"), None, Some(&cwd), Some(&inventory));
+        assert!(start_command(&fresh).contains("sleep 303"), "resumed with the saved command");
+        // Another card's fresh session is not this one's.
+        let other = SessionInventory::fresh("sd_term_someone_else", "shell", "sleep 304", &cwd);
+        assert!(other.take_fresh(&fresh).is_none());
+
+        // The public entry point: a new name, created before it returns.
+        let (created, command) = create_session("shell", Some("sleep 305"), Some(&cwd));
+        assert_eq!(command, "sleep 305");
+        assert_eq!(session_state(&created), Some(true));
+        assert_ne!(created, card);
+    }
+
     #[test]
     fn restoration_inventory_is_shared_and_not_a_global_cache() {
         let inventory = SessionInventory::default();
@@ -3203,6 +3451,80 @@ mod tests {
         assert_eq!(assign_opencode_sessions(&panes, &sessions)[0].1, None);
         let sessions = vec![("s1".to_string(), 970)];
         assert!(assign_opencode_sessions(&panes, &sessions)[0].1.is_some());
+    }
+
+    /// Every restored Claude or Codex card resumes its own conversation, not
+    /// the latest one in its folder, while that conversation still exists.
+    #[test]
+    fn claude_and_codex_cards_resume_their_own_conversation() {
+        let id = "0b8c4a7e-5d0f-4b61-9a43-2f7c1d9e6a10";
+        let all = |_: &str, _: &str| true;
+        let none = |_: &str, _: &str| false;
+        assert_eq!(
+            resume_command_with("claude", Some("/usr/bin/claude"), Some(id), &all),
+            format!("/usr/bin/claude --resume {id}")
+        );
+        assert_eq!(
+            resume_command_with("codex", Some("/usr/bin/codex --no-alt-screen"), Some(id), &all),
+            format!("/usr/bin/codex --no-alt-screen resume {id}")
+        );
+        // Gone (deleted transcript, other machine): the old fallback, never a
+        // harness that exits on an unknown id.
+        assert_eq!(
+            resume_command_with("claude", Some("/usr/bin/claude"), Some(id), &none),
+            "/usr/bin/claude --continue"
+        );
+        assert_eq!(
+            resume_command_with("codex", Some("/usr/bin/codex"), Some(id), &none),
+            "/usr/bin/codex resume --last"
+        );
+        // No id stored yet (a card from an older build).
+        assert_eq!(resume_command_with("claude", Some("/usr/bin/claude"), None, &all), "/usr/bin/claude --continue");
+        // Ids reach a shell command line: anything but [A-Za-z0-9_-] is ignored.
+        for bad in ["x; rm -rf ~", "$(id)", "a b", "", "'q'"] {
+            assert_eq!(
+                resume_command_with("claude", Some("/usr/bin/claude"), Some(bad), &all),
+                "/usr/bin/claude --continue",
+                "{bad:?}"
+            );
+        }
+        // The user's own resume flag is kept as written.
+        assert_eq!(
+            resume_command_with("claude", Some("/usr/bin/claude --resume other"), Some(id), &all),
+            "/usr/bin/claude --resume other"
+        );
+        // Only the harness's own id is asked about.
+        let asked = std::cell::RefCell::new(Vec::new());
+        resume_command_with("codex", Some("/usr/bin/codex"), Some(id), &|agent, id| {
+            asked.borrow_mut().push((agent.to_string(), id.to_string()));
+            true
+        });
+        assert_eq!(asked.into_inner(), vec![("codex".to_string(), id.to_string())]);
+    }
+
+    #[test]
+    fn conversation_files_are_found_where_each_cli_looks() {
+        let root = std::env::temp_dir().join(format!("sd-resume-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let id = "019a1b2c-3d4e-7f60-8a9b-0c1d2e3f4a5b";
+
+        // Claude: the folder's project directory, letters and digits kept.
+        let transcript = claude_transcript(&root, "/home/u/Github/super.desktop_2", id);
+        assert_eq!(
+            transcript,
+            root.join("projects/-home-u-Github-super-desktop-2").join(format!("{id}.jsonl"))
+        );
+
+        // Codex: sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl, any day.
+        let sessions = root.join("sessions");
+        let day = sessions.join("2026/10/04");
+        std::fs::create_dir_all(&day).unwrap();
+        assert!(!codex_rollout_exists(&sessions, id));
+        std::fs::write(day.join(format!("rollout-2026-10-04T09-00-00-{id}.jsonl")), "{}").unwrap();
+        assert!(codex_rollout_exists(&sessions, id));
+        assert!(!codex_rollout_exists(&sessions, "019a1b2c"), "a prefix is not the id");
+        assert!(!codex_rollout_exists(&root.join("missing"), id));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

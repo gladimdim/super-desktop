@@ -28,6 +28,9 @@ pub struct CardUpdate {
     /// Last submitted prompt, matching the phone list’s `lastPrompt`.
     pub prompt: Option<String>,
     pub oc_id: Option<String>,
+    /// The Claude or Codex conversation running in this card (see
+    /// `own_session`); `None` when unknown, which leaves the stored id alone.
+    pub own_session: Option<String>,
     /// A setup hint for this card (see `setup_notice`); the card shows it once
     /// per session (`claim_setup_notice`), not on every refresh.
     pub notice: Option<crate::command_feedback::Notice>,
@@ -141,7 +144,8 @@ fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
     let prompt = card_prompt(agent, row, metadata.as_ref(), oc_id.as_deref());
     let notice = setup_notice(metadata.as_ref(), crate::harness_metadata::openclaw_plugin);
     let scrolled_back = Some(row.is_some_and(|row| row.in_mode));
-    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back }
+    let own_session = own_session(agent, metadata.as_ref(), row);
+    CardUpdate { status, preview, prompt, oc_id, own_session, notice, scrolled_back }
 }
 
 fn preview_text(screen: Option<&str>, status: &SessionStatus, lines: usize) -> String {
@@ -164,6 +168,21 @@ fn resolve_oc_id(request: &CardRequest) -> Option<String> {
         }
     }
     oc_id
+}
+
+/// The id of the conversation this card's own harness runs, for an exact
+/// resume after a reboot (`tmux::resolve_resume_command_in`): Claude's from
+/// its hooks (they follow `/clear` and `/resume`), Codex's from the rollout
+/// its CLI holds open. Never the latest conversation in the folder.
+fn own_session(agent: &str, metadata: Option<&Metadata>, row: Option<&PaneRow>) -> Option<String> {
+    let id = match agent {
+        "claude" => metadata
+            .filter(|m| m.adapter_reported())
+            .map(|m| m.native_session.clone()),
+        "codex" => crate::completion::session_id(row?.pid.parse().ok()?),
+        _ => None,
+    }?;
+    crate::tmux::is_resumable_id(&id).then_some(id)
 }
 
 /// The prompt of a card whose native adapter reported, else the prompt typed
@@ -266,7 +285,7 @@ fn legacy(request: &CardRequest) -> CardUpdate {
     );
     // Without the inventory the card keeps its button as it is; the next
     // refresh or scroll corrects it.
-    CardUpdate { status, preview, prompt, oc_id, notice, scrolled_back: None }
+    CardUpdate { status, preview, prompt, oc_id, own_session: None, notice, scrolled_back: None }
 }
 
 #[cfg(test)]
@@ -284,6 +303,23 @@ mod tests {
     /// A listing record: the card's fields, then `STAMP`, then not in a mode.
     fn row(fields: &[&str]) -> String {
         record(&[fields, &STAMP[..], &["0"]].concat())
+    }
+
+    /// The id a card stores for an exact resume is its own harness's.
+    #[test]
+    fn own_session_is_the_cards_own_reported_conversation() {
+        let id = "0b8c4a7e-5d0f-4b61-9a43-2f7c1d9e6a10";
+        let reported = Metadata { native_session: id.into(), ..silent("claude") };
+        assert_eq!(own_session("claude", Some(&reported), None).as_deref(), Some(id));
+        // Nothing reported yet, or not a command-line-safe id: unknown.
+        assert_eq!(own_session("claude", Some(&silent("claude")), None), None);
+        let unsafe_id = Metadata { native_session: "x; reboot".into(), ..silent("claude") };
+        assert_eq!(own_session("claude", Some(&unsafe_id), None), None);
+        // OpenCode has its own resolver (`oc_id`); others have no id.
+        assert_eq!(own_session("opencode", Some(&reported), None), None);
+        assert_eq!(own_session("shell", Some(&reported), None), None);
+        // Codex reads its CLI's open rollout, which needs the pane.
+        assert_eq!(own_session("codex", None, None), None);
     }
 
     #[test]

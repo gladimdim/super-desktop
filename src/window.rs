@@ -247,6 +247,11 @@ struct SlideAnim {
     running: Cell<bool>,
     /// Previous `FrameClock::frame_time` (µs). 0 = first frame of this run.
     last_us: Cell<i64>,
+    /// Opt-in vsync accounting for the current run (`frame_profile`).
+    motion: RefCell<crate::frame_profile::Motion>,
+    /// Some cards still slide with a live terminal: replace it with a still
+    /// image once it has been laid out (`MiniTerminalCard::freeze_for_slide`).
+    freeze_pending: Cell<bool>,
 }
 
 impl SlideAnim {
@@ -258,6 +263,8 @@ impl SlideAnim {
             appear: Cell::new(true),
             running: Cell::new(false),
             last_us: Cell::new(0),
+            motion: RefCell::default(),
+            freeze_pending: Cell::new(false),
         }
     }
 }
@@ -800,7 +807,7 @@ impl SuperDesktopWindow {
                 let win_w = Rc::downgrade(&win_rc);
                 move |key: &str| {
                     if let Some(w) = win_w.upgrade() {
-                        w.create_new_terminal(key, None, None, None);
+                        w.launch_new_terminal(key);
                     }
                 }
             }),
@@ -1390,7 +1397,21 @@ impl SuperDesktopWindow {
             "usedDirectories": state.used_dirs})
     }
 
+    /// Create a card and its tmux session; the session exists on return, so
+    /// callers can report it (IPC, a viewer's request).
     pub fn create_new_terminal_in(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>) -> String {
+        self.new_terminal_card(agent_type, cmd, x, y, directory, true)
+    }
+
+    /// The top bar's launch: the card is on screen at the next frame and its
+    /// session is started by the card's first attach, on a worker. Creating it
+    /// here held GTK for one tmux process (several, before they were chained).
+    pub fn launch_new_terminal(&self, agent_type: &str) {
+        self.new_terminal_card(agent_type, None, None, None, None, false);
+    }
+
+    fn new_terminal_card(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>, wait_for_session: bool) -> String {
+        crate::frame_profile::note_request("new terminal");
         // The folder from the top bar field: this card's harness starts there,
         // and keeps it for its whole life (see TerminalData::workspace_dir).
         let workspace_dir = directory.map(str::to_owned)
@@ -1406,12 +1427,22 @@ impl SuperDesktopWindow {
         let custom_command = self.state.borrow().custom_harnesses.iter()
             .find(|item| item.id == agent_type && item.validate().is_ok())
             .map(|item| item.command());
-        let (sess, cmd_run) = create_session(agent_type, custom_command.as_deref().or(cmd), Some(&workspace_dir));
-        let idx = self.terminal_cards.borrow().len();
-
+        let command = custom_command.as_deref().or(cmd);
         // Default size for a new harness: 640x480, clamped to the screen.
         let (def_w, def_h) =
             clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, self.screen_width(), self.screen_height());
+        // A card too narrow to attach has no worker to start its session.
+        let (sess, cmd_run, inventory) = if wait_for_session || def_w < crate::mini_terminal::MIN_CARD_WIDTH {
+            let (sess, cmd_run) = create_session(agent_type, command, Some(&workspace_dir));
+            (sess, cmd_run, None)
+        } else {
+            let cmd_run = crate::tmux::resolve_command(agent_type, command);
+            let sess = super_desktop::session_id::candidate();
+            let fresh = crate::tmux::SessionInventory::fresh(&sess, agent_type, &cmd_run, &workspace_dir);
+            (sess, cmd_run, Some(std::sync::Arc::new(fresh)))
+        };
+        let idx = self.terminal_cards.borrow().len();
+
         // Center on screen; cascade slightly so stacked harnesses don't overlap exactly.
         let cascade = (idx as i32 % 5) * 32;
         let cx = ((self.screen_width() - def_w) / 2 + cascade)
@@ -1446,7 +1477,7 @@ impl SuperDesktopWindow {
             workspace_dir: Some(workspace_dir),
         };
 
-        self.spawn_terminal_widget(data, true, None, None);
+        self.spawn_terminal_widget(data, true, inventory, None);
         sess
     }
 
@@ -1924,6 +1955,9 @@ impl SuperDesktopWindow {
             self.paint_slide(0.0);
         }
         self.slide.appear.set(true);
+        // The terminals were just shown again and have no layout yet: the
+        // slide's tick freezes them from its second frame.
+        self.slide.freeze_pending.set(true);
         self.canvas.add_css_class("sliding");
         self.ensure_slide_tick();
     }
@@ -1952,6 +1986,8 @@ impl SuperDesktopWindow {
             self.slide.velocity.set(-SLIDE_LAUNCH_OUT);
         }
         self.slide.appear.set(false);
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        self.slide.freeze_pending.set(!freeze_slide_cards(&cards));
         self.canvas.add_css_class("sliding");
         self.ensure_slide_tick();
     }
@@ -2024,6 +2060,7 @@ impl SuperDesktopWindow {
         }
         self.slide.running.set(true);
         self.slide.last_us.set(0);
+        self.slide.motion.take();
         let gen = self.slide.gen.get().wrapping_add(1);
         self.slide.gen.set(gen);
 
@@ -2037,6 +2074,8 @@ impl SuperDesktopWindow {
         let canvas = self.canvas.clone();
         let on_hidden = Rc::clone(&self.on_slide_hidden);
         let ghosts = Rc::clone(&self.ghosts);
+        // The cards that slide: one created meanwhile is not frozen.
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
 
         // Tick the window, not the canvas: the layer-shell surface owns the
         // GDK frame clock, which Hyprland drives at the monitor refresh rate.
@@ -2045,6 +2084,7 @@ impl SuperDesktopWindow {
             if slide.gen.get() != gen {
                 return glib::ControlFlow::Break;
             }
+            slide.motion.borrow_mut().frame(clock);
             let now = clock.frame_time();
             let prev = slide.last_us.get();
             slide.last_us.set(now);
@@ -2055,6 +2095,9 @@ impl SuperDesktopWindow {
             } else {
                 ((now - prev) as f64 / 1_000_000.0).clamp(0.0, 0.05)
             };
+            if prev != 0 && slide.freeze_pending.get() {
+                slide.freeze_pending.set(!freeze_slide_cards(&cards));
+            }
             let appear = slide.appear.get();
             let target = if appear { 1.0 } else { 0.0 };
             let omega = if appear { SLIDE_OMEGA_IN } else { SLIDE_OMEGA_OUT };
@@ -2073,6 +2116,9 @@ impl SuperDesktopWindow {
                     paint_slide_widget(widget, *traj, target);
                 }
                 canvas.remove_css_class("sliding");
+                slide.freeze_pending.set(false);
+                thaw_slide_cards(&cards);
+                slide.motion.take().report(if appear { "slide in" } else { "slide out" });
                 if appear {
                     // The cards are at rest again: the buried ones can have
                     // their outlines back.
@@ -2823,6 +2869,7 @@ impl SuperDesktopWindow {
     /// load, panels, one `tmux` exec per card, ~30 forks) that used to sit
     /// between the shortcut and the overlay appearing.
     pub fn show_again(&self) {
+        crate::frame_profile::note_request("show");
         // First: paused tmux clients redraw within a few ms of this, before
         // the slide-in brings their cards on screen.
         self.hidden_pause.on_shown();
@@ -2874,12 +2921,19 @@ impl SuperDesktopWindow {
         }
         // Stop a vsync tick that may never fire (GPU stall) from later
         // painting or calling `on_slide_hidden` after we already unmapped.
+        if self.slide.running.get() {
+            self.slide.motion.take().report("slide out, cut short by the unmap");
+        }
         self.slide.running.set(false);
         self.slide.gen.set(self.slide.gen.get().wrapping_add(1));
         // Drop live terminal surfaces with the unmap: nothing composites a GPU
         // terminal buffer while the overlay is hidden, and `show_again`
-        // re-enables drawing for the next show.
+        // re-enables drawing for the next show. The slide's still images go
+        // too (after the unmap flag, so no terminal is shown in between).
         self.set_terminal_gpu_mapped(false);
+        self.slide.freeze_pending.set(false);
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        thaw_slide_cards(&cards);
         // Floating panels must not come back with the window.
         for panel in &self.overlay_panels {
             panel.set_visible(false);
@@ -2974,6 +3028,22 @@ fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[Rc<crate::sticky_note::S
                 note.container.insert_after(canvas, Some(&last));
             }
         }
+    }
+}
+
+/// Freeze every card's terminal for the slide; `false` while one still needs
+/// a layout first (see `MiniTerminalCard::freeze_for_slide`). Takes a snapshot
+/// of the card list: hiding a widget can emit signals that re-enter it.
+fn freeze_slide_cards(cards: &[Rc<MiniTerminalCard>]) -> bool {
+    let started = std::time::Instant::now();
+    let done = cards.iter().fold(true, |done, card| card.freeze_for_slide() && done);
+    crate::frame_profile::note_duration("slide freeze", started);
+    done
+}
+
+fn thaw_slide_cards(cards: &[Rc<MiniTerminalCard>]) {
+    for card in cards {
+        card.thaw_after_slide();
     }
 }
 
