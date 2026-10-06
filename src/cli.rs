@@ -1,5 +1,8 @@
 //! Command discovery and owner-only read commands shared by both entry points.
 //! Offline discovery never contacts a daemon.
+#[path = "mcp.rs"]
+mod mcp;
+
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -33,6 +36,7 @@ macro_rules! command {
 }
 
 pub const COMMANDS: &[CommandSpec] = &[
+    command!("mcp serve", "Serve read-only local MCP tools over stdio", "mcp serve", "Reads owner-only local control API; never starts the daemon or opens the overlay", "MCP client using protocol 2025-11-25 or 2025-03-26; live tools require compatible local daemon", "Newline-delimited JSON-RPC on stdout; diagnostics on stderr", "super-desktop mcp serve", false),
     command!("harness launch", "Launch a configured harness without opening the overlay", "harness launch ID --cwd PATH --request-id ID [--allow-unsafe-harness] [--allow-download] [--format text|json] [--target local]", "Executes the configured launcher; writes a durable receipt before launch; does not present the overlay or explicitly request focus; normal hover behavior applies when visible", "Ready local daemon; absolute existing cwd; unique request ID (1-64 ASCII letters/digits/_/-). --allow-unsafe-harness accepts bypass flags, saved argument overrides or custom launchers; --allow-download accepts built-in package-runner fallback. These flags do not sandbox programs. Reuse the same ID only with the identical request", "JSON envelope with id, sessionName, launchDirectory and readiness=not_observed; exits 0/2/3/4/5/6/7/8. On unknown outcome inspect the request, never invent a fresh retry ID", "super-desktop harness launch claude --cwd /home/user/project --request-id task-001 --allow-unsafe-harness --format json", false),
     command!("terminal create", "Create a shell terminal without opening the overlay", "terminal create --cwd PATH --request-id ID [--allow-unsafe-harness] [--format text|json] [--target local]", "Same launch contract as harness launch shell; no shell command or prompt is submitted", "Ready local daemon; absolute existing directory; unique request ID; configured shell arguments may require explicit unsafe opt-in", "Versioned launch envelope; readiness is not observed. Exit codes 0/2/4/5/6/7/8", "super-desktop terminal create --cwd /home/user/project --request-id shell-001 --format json", false),
     command!("request inspect", "Inspect a durable launch receipt", "request inspect ID [--format text|json] [--target local]", "Reads the historical outcome and reserved card ID. A recorded success does not mean the card still exists; unknown receipts are never replayed", "Compatible local daemon; exact launch request ID; receipts are retained up to 4096 entries without automatic pruning", "Versioned envelope with id, cardId, state and result; exits 0/2/3/4/6/7/8", "super-desktop request inspect task-001 --format json", false),
@@ -229,7 +233,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
     if args.len() >= 2 && matches!(args.last().map(String::as_str), Some("--help" | "-h")) {
         let path = args[..args.len() - 1].join(" ");
-        if args.len() == 2 || matches!(action, "app" | "terminal" | "harness" | "request") {
+        if args.len() == 2 || matches!(action, "app" | "terminal" | "harness" | "request" | "mcp") {
             return Some(group_or_help(&path));
         }
     }
@@ -264,7 +268,10 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
             Output::usage("Usage: super-desktop completion bash")
         });
     }
-    if matches!(action, "app" | "terminal" | "harness" | "request") {
+    if action == "mcp" && args.len() > 1 {
+        return Some(Output::usage("Usage: super-desktop mcp serve"));
+    }
+    if matches!(action, "app" | "terminal" | "harness" | "request" | "mcp") {
         return if args.len() == 1 {
             Some(group_or_help(action))
         } else {
@@ -279,6 +286,12 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
 }
 
 pub fn run(args: &[String]) -> Option<i32> {
+    if args.first().map(String::as_str) == Some("mcp")
+        && args.get(1).map(String::as_str) == Some("serve")
+        && args.len() == 2
+    {
+        return Some(mcp::serve());
+    }
     let offline = dispatch(args);
     let output = offline.or_else(|| {
         matches!(

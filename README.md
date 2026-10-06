@@ -403,6 +403,34 @@ its history into scrollback.
 | Double-click terminal/header | Expand to 80% / collapse back |
 | Click the 📁 folder field | Choose the working directory for new harness cards (`Enter` = home, `▾` = folders used before) |
 
+### Local MCP access
+
+Configure an MCP client to launch the local read-only server:
+
+```json
+{
+  "mcpServers": {
+    "super-desktop": {
+      "command": "super-desktop",
+      "args": ["mcp", "serve"]
+    }
+  }
+}
+```
+
+Use an absolute executable path if your client does not inherit your shell's
+PATH. The server uses stdio and supports MCP 2025-11-25 and 2025-03-26.
+It exposes `app_status`, `capabilities`, `list_terminals`, `inspect_terminal`,
+`list_harnesses`, and `inspect_harness`. Discovery works without a running
+desktop; tool calls require the existing owner-only local control service.
+An unavailable daemon returns a tool error and is never started automatically.
+
+These tools read saved card metadata and launcher configuration; they do not
+read terminal output, submit prompts, launch programs, or observe process
+liveness. Launch directories are private user data shared with the configured
+client. There is no HTTP listener or remote access. Client configuration syntax
+varies; the example uses the common `mcpServers` format.
+
 ### CLI quick reference
 
 Start with `super-desktop --help` or `super-desktop help agents`. Each listed

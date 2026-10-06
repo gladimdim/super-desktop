@@ -235,3 +235,75 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
         "client must not unlink an unsafe server socket"
     );
 }
+
+#[test]
+fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let root = std::env::temp_dir().join(format!("sd-mcp-wire-{}", std::process::id()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "control_daemon_fixture", "--nocapture"])
+        .env("SD_CONTROL_TEST_RUNTIME", &root)
+        .env_remove("DISPLAY")
+        .env_remove("WAYLAND_DISPLAY")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let fixture = Fixture { child, root };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !fixture.root.join("super-desktop/control-v1.sock").exists() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for executable in [
+        env!("CARGO_BIN_EXE_super-desktop-client"),
+        env!("CARGO_BIN_EXE_super-desktop"),
+    ] {
+        let mut child = Command::new(executable)
+            .args(["mcp", "serve"])
+            .env("XDG_RUNTIME_DIR", &fixture.root)
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        for msg in [
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"app_status"}}),
+            serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"inspect_terminal","arguments":{"id":"missing"}}}),
+        ] {
+            writeln!(input, "{msg}").unwrap();
+        }
+        drop(input);
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert!(output.stderr.is_empty());
+        let replies: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(replies.len(), 4);
+        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            replies[2]["result"]["structuredContent"]["data"]["ready"],
+            true
+        );
+        assert_eq!(replies[3]["result"]["isError"], true);
+        assert_eq!(
+            replies[3]["result"]["structuredContent"]["error"]["code"],
+            "not_found"
+        );
+    }
+}
