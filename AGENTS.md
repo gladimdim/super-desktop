@@ -174,6 +174,19 @@ as "user" turns, and sends them to the `UserPromptSubmit` hook.
   and run `cargo test card_title_`. Those tests must fail if the filter is
   removed; add a case for every new injected-turn shape you see in the wild.
 
+## Tests never reach the user's live terminals
+
+Tests are often run from inside a card, whose `$TMUX` points at the user's
+tmux server (plain `tmux` follows `$TMUX` even when `TMUX_TMPDIR` is set).
+`src/test_isolation.rs` runs before any test: it drops `TMUX`, `TMUX_PANE` and
+the card's `SD_HARNESS_*` variables, and points `TMUX_TMPDIR` and
+`XDG_RUNTIME_DIR` at a private `/tmp/sd-test-<pid>` that is cleaned up on exit.
+Every process a test starts inherits that. Do not remove it or work around it
+(no hard-coded `/tmp/tmux-<uid>` or `/run/user/<uid>` paths in tests), and keep
+`cargo test test_isolation` passing; it fails if the isolation is gone. A test
+that re-runs itself in a private root must still clear `TMUX` for every tmux
+command it runs in the parent, including cleanup.
+
 ## GTK tests never use the user's desktop
 
 Tests must not open windows on the user's screen. Every GTK test runs its

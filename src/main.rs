@@ -107,6 +107,8 @@ mod ws;
 /// re-runs this test binary in a child process filtered to just that one test.
 #[cfg(all(test, target_os = "linux"))]
 mod package_tests;
+#[cfg(test)]
+mod test_isolation;
 
 #[cfg(test)]
 pub mod gtk_test {

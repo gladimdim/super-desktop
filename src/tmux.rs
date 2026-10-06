@@ -2896,7 +2896,14 @@ mod tests {
             .env_remove("TMUX_PANE")
             .output()
             .unwrap();
-        let _ = Command::new("tmux").env("TMUX_TMPDIR", root.join("tmux")).arg("kill-server").output();
+        // $TMUX outranks TMUX_TMPDIR: left set (tests run inside a card), this
+        // would kill the user's own tmux server instead of the private one.
+        let _ = Command::new("tmux")
+            .env("TMUX_TMPDIR", root.join("tmux"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .arg("kill-server")
+            .output();
         let _ = std::fs::remove_dir_all(&root);
         assert!(
             output.status.success(),
