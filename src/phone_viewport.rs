@@ -152,7 +152,7 @@ mod tests {
                 "120",
                 "-y",
                 "40",
-                "/usr/bin/sleep",
+                "/bin/sleep",
                 "1000",
             ]);
             server
@@ -374,7 +374,7 @@ mod tests {
             "-d",
             "-t",
             "sd_term_viewport",
-            "/usr/bin/sleep",
+            "/bin/sleep",
             "1000",
         ]);
         lease.apply(message, Instant::now(), || server.open());

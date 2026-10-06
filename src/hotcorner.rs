@@ -31,8 +31,12 @@
 //! transparent rect would be a visible smudge.
 
 use gtk4::glib;
+#[cfg(target_os = "linux")]
 use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow, DrawingArea, EventControllerMotion};
+use gtk4::{Application, ApplicationWindow};
+#[cfg(target_os = "linux")]
+use gtk4::{DrawingArea, EventControllerMotion};
+#[cfg(target_os = "linux")]
 use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -201,12 +205,21 @@ pub struct HotCorner {
 }
 
 impl HotCorner {
+    #[cfg(target_os = "macos")]
+    pub fn spawn(_app: &Application, zone: Rc<Zone>, on_toggle: impl Fn() + 'static) -> Option<Self> {
+        // A Wayland corner surface cannot be placed by AppKit. Keep the shared
+        // visible-overlay dwell; the native hotkey opens a hidden overlay.
+        *zone.on_toggle.borrow_mut() = Some(Rc::new(on_toggle));
+        None
+    }
+
     /// Create and map the corner surface, and arm the dwell that watches it.
     ///
     /// `zone` is the shared "the pointer is in the corner zone" flag — the
     /// overlay window writes it too. `on_toggle` runs once per completed dwell.
     /// `None` means there is no display to draw on (see `main::show_window`):
     /// building widgets then dereferences NULL deep inside GTK.
+    #[cfg(target_os = "linux")]
     pub fn spawn(
         app: &Application,
         zone: Rc<Zone>,

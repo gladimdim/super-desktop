@@ -163,6 +163,14 @@ impl Control {
         Self::spawn(session, None)
     }
 
+    /// Isolated local CLI sizing client. Existing phone clients keep their
+    /// current construction and behavior.
+    pub(crate) fn open_cli(session:&str)->Result<Self,String> {
+        let mut command=Command::new(crate::tmux::tmux_bin());
+        command.arg("-N").env_remove("TMUX").env_remove("TMUX_PANE");
+        Self::spawn_with_command(session,None,command)
+    }
+
     /// Client that also reports pane output/layout changes through `Activity`.
     pub fn open_watching(session: &str) -> Result<(Self, Arc<Activity>), String> {
         let activity = Arc::new(Activity::default());

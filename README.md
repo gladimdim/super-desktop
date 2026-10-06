@@ -61,6 +61,38 @@ and leaves its git state alone; update it with `git pull && ./rebuild.sh`.
 Running the one-line command later updates the clone your install runs from,
 as long as it has no local changes.
 
+### Package installations
+
+An Arch package installation uses `/usr/bin/super-desktop` and keeps the
+application files under `/usr/lib/super-desktop` and `/usr/share/super-desktop`.
+Configure your Omarchy shortcut, autostart and theme hook as your normal user:
+
+```bash
+super-desktop-setup
+```
+
+For an existing `install.sh` installation, use
+`/usr/bin/super-desktop-setup --migrate`. It backs up the old per-user launcher
+and desktop entry, routes the launcher to the package, and preserves existing
+shortcuts, notes, settings and source checkouts. Custom launcher scripts require
+manual migration. Setup requires Omarchy's Lua Hyprland configuration.
+
+Update package installations through **Omarchy's system update** (`omarchy
+update`). Restart the overlay afterwards, or log out and back in:
+
+```bash
+/usr/bin/super-desktop kill && /usr/bin/super-desktop toggle
+```
+
+Running harnesses remain in tmux while the overlay restarts. Package installation
+and removal do not change per-user configuration; removing a package leaves its
+shortcut, autostart and theme hook for you to remove if no longer needed.
+
+Binary release packages include dependency license notices and a link to their
+corresponding source under `/usr/share/licenses/super-desktop-bin/`. The matching
+`super-desktop-X.Y.Z-source.tar.gz` release asset includes the application source,
+locked Rust dependencies and instructions for building without downloading crates.
+
 ### Installing a specific version
 
 The phone app and the PC talk over a protocol that must match, so if your
@@ -112,6 +144,7 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
 - **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
+- **⌨️ CLI control for agents** — discover available harnesses, inspect terminal cards, live cell grids and bounded terminal output, send guarded text and keys, attach read-only or interactively, lease a temporary grid, move, resize, minimize, restore, expand and collapse cards with revision checks, close exact sessions with identity guards, create shells and launch configured agents with a requested size, centering and first prompt through commands with built-in help and JSON output. Pair PCs, inspect pending connections, compare approval codes, and revoke device access through the same interface. Explicit unsafe/download choices and durable request receipts make mutations inspectable. See the [CLI reference](CLI.md) for supported commands and limits.
 - **🔢 Keyboard terminal picker** — hold **Alt for 30 ms** to dim terminal output and show dotted borders with centered digits. Press **Alt+0 … Alt+9** to raise and focus that terminal immediately, even before the preview appears; compact cards restore first. Each terminal gets the first free digit when created or restored (starting at **0**), and keeps it while open. Closing a card frees its digit without renumbering the others. Up to ten terminals per local or remote PC view get shortcuts; extra cards remain mouse-accessible. Release Alt or press Escape to dismiss. Assignments are rebuilt when cards are restored after restarting the app.
 - **⌨ Your own shortcut** — `SUPER + SHIFT + Q` out of the box. Open ⚙ Settings, click **Record**, press any combination you like — `SUPER`/`CTRL`/`ALT` plus a key, or an `F1`–`F12` key on its own: it is captured, remembered in `state.json` and written into Hyprland's config (plus its `code:` form, so a layout switch does not break it).
 - **⚙ Movable settings** — drag the ⚙ Settings card by its header, like a terminal card, to see what is under it, and drag its edges to resize it. It opens at 1024×768, stays on screen below the top bar, and comes back where and how big you left it.
@@ -433,6 +466,16 @@ varies; the example uses the common `mcpServers` format.
 
 ### CLI quick reference
 
+Read the **[complete CLI reference for people and AI agents](CLI.md)**, also
+available as a [web guide](https://superdesktop.dmytrogladkyi.com/cli.html).
+It covers every public command, exact ID selection, JSON results, permission
+choices, exit statuses and handling uncertain launch outcomes.
+
+Current structured local commands cover discovery, creation, guarded terminal
+input and closing, card geometry and modes, native status/completion waits, and
+bounded screen capture/follow. Local attachment and direct grid ownership are
+not available. Remote operations use the separate legacy `peer-*` commands.
+
 Start with `super-desktop --help` or `super-desktop help agents`. Each listed
 command accepts `--help` for its effects, requirements, output and an example.
 `super-desktop schema --format json` prints the compiled command catalog;
@@ -440,7 +483,7 @@ command accepts `--help` for its effects, requirements, output and an example.
 `--version`, and `completion bash` work without a daemon or display. Unknown
 commands exit with status 2 without contacting the daemon.
 
-The owner-only local API provides read-only discovery without opening the
+The owner-only local API provides read-only inspection without opening the
 overlay or starting a daemon:
 
 ```bash
@@ -448,6 +491,9 @@ super-desktop capabilities --format json
 super-desktop app status --format json
 super-desktop terminal list --format json
 super-desktop terminal inspect CARD_ID --format json
+super-desktop terminal geometry CARD_ID --format json
+super-desktop terminal runtime CARD_ID --format json
+super-desktop terminal capture CARD_ID --screen --format json
 super-desktop harness list --all --format json
 super-desktop harness inspect claude --format json
 ```
@@ -459,6 +505,13 @@ Detection uses the daemon's environment and does not run or install a harness.
 Launch arguments are redacted, package-runner fallbacks are identified, and
 detected permission-bypass flags are reported without claiming a verified
 security policy. These commands support only `--target local`.
+
+`terminal runtime` observes the pane's running/exited status and columns/rows.
+`terminal capture` reads plain screen text; `--history --lines 200` adds bounded
+retained scrollback. Capture can contain secrets. It never attaches, sends input
+or resizes the pane. Check its truncation fields: the 64 KiB byte limit keeps the
+oldest prefix of the selected region, and alternate-screen history may be
+unavailable. Changed or ambiguous pane targets are refused without returning text.
 
 Create a shell card or launch a configured harness without opening the overlay:
 
@@ -636,3 +689,15 @@ events (`peer-events`) and sends one command (`peer-command`);
 ```
 
 Key invariants for contributors: one daemon per machine; one tmux client per card with per-session `detach-on-destroy on`; card titles may only ever reflect the prompt typed **into that card's own harness** (see `resolve_own_opencode_id`); the toggle shortcut is only ever written inside the marked block in `bindings.lua` (see `src/shortcut.rs`); the hot corner must stay a pointer gesture — never a key grab, and never more than a few pixels wide (see `src/hotcorner.rs`); run `cargo test` before every rebuild.
+
+## License
+
+Copyright (c) 2026 Dmytro Gladkyi.
+
+SUPER DESKTOP is licensed under the GNU General Public License, version 3 only
+(`GPL-3.0-only`). You may redistribute and modify it under those terms. It is
+provided without warranty; see [LICENSE](LICENSE) for the full terms.
+
+Third-party dependencies and assets retain their own licenses. See the
+[asset license notices](assets/logos/LICENSES.md) and
+[attribution](assets/logos/ATTRIBUTION.md) for bundled logos and icons.

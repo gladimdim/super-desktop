@@ -1,0 +1,17 @@
+name: Arch packaging checks
+on:
+  push:
+    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'packaging/**', 'scripts/*arch*', 'scripts/publish-aur.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml']
+  pull_request:
+    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'packaging/**', 'scripts/*arch*', 'scripts/publish-aur.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml']
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s tests -p 'test_arch_packaging.py'
+      - run: bash -n scripts/publish-aur.sh packaging/arch/super-desktop-bin.install

@@ -75,7 +75,6 @@ where
     row.add_css_class("tag-pop-box");
 
     let on_pick = std::rc::Rc::new(on_pick);
-    let current = std::rc::Rc::new(std::cell::Cell::new(initial));
     let mut swatches: Vec<Button> = Vec::with_capacity(TAG_COUNT as usize);
 
     for n in 1..=TAG_COUNT {
@@ -97,11 +96,12 @@ where
         let btn_w = btn.downgrade();
         let pop_w = pop.downgrade();
         let on_pick = std::rc::Rc::clone(&on_pick);
-        let current = std::rc::Rc::clone(&current);
         let swatches_w: Vec<_> = swatches.iter().map(|s| s.downgrade()).collect();
         sw.connect_clicked(move |_| {
-            let next = if current.get() == n { TAG_NONE } else { n };
-            current.set(next);
+            // Header and compact dots can be updated by each other or CLI.
+            // Read the painted value instead of retaining a stale private copy.
+            let current=btn_w.upgrade().and_then(|b|(1..=TAG_COUNT).find(|tag|b.has_css_class(&tag_class(*tag)))).unwrap_or(TAG_NONE);
+            let next = if current == n { TAG_NONE } else { n };
             if let Some(b) = btn_w.upgrade() {
                 apply_tag(&b, next);
             }
@@ -144,6 +144,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn externally_updated_dot_toggles_current_value() {crate::gtk_test::run_in_child_process("tag::tests::cli_tag_inner");}
+    #[test]
+    fn cli_tag_inner() {
+        if !crate::gtk_test::is_child(){return;}gtk4::init().unwrap();
+        let picked=std::rc::Rc::new(std::cell::Cell::new(255));let changed=picked.clone();
+        let button=make_tag_dot(1,move|value|changed.set(value));apply_tag(&button,7);
+        fn find(widget:&gtk4::Widget)->Option<Button>{
+            if widget.has_css_class("tag-swatch")&&widget.has_css_class("tag-dot-7"){return widget.clone().downcast().ok();}
+            let mut child=widget.first_child();while let Some(w)=child {if let Some(found)=find(&w){return Some(found);}child=w.next_sibling();}None
+        }
+        let swatch=find(button.upcast_ref()).unwrap();swatch.emit_clicked();assert_eq!(picked.get(),0);
+        swatch.emit_clicked();assert_eq!(picked.get(),7);
+    }
 
     #[test]
     fn test_tag_class_mapping() {

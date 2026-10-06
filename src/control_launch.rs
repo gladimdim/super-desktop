@@ -21,6 +21,7 @@ pub fn prepare(state: &AppState, request: &Command) -> Result<Prepared, Refusal>
         cwd,
         allow_unsafe_harness,
         allow_download,
+        arguments: one_shot,
     } = request
     else {
         return Err(("invalid_arguments", "Expected a launch request."));
@@ -39,6 +40,10 @@ pub fn prepare(state: &AppState, request: &Command) -> Result<Prepared, Refusal>
             "invalid_arguments",
             "The working directory is missing, inaccessible or not UTF-8.",
         ))?;
+    if let Some(arguments)=one_shot {
+        crate::launch_args::validate(arguments).map_err(|_|("invalid_arguments","Invalid one-shot arguments."))?;
+        if !allow_unsafe_harness {return Err(("unsafe_harness","One-shot arguments require --allow-unsafe-harness."));}
+    }
     let command = if let Some(custom) = state.custom_harnesses.iter().find(|c| c.id == *harness) {
         custom
             .validate()
@@ -48,13 +53,15 @@ pub fn prepare(state: &AppState, request: &Command) -> Result<Prepared, Refusal>
         }
         // A custom executable can download or execute arbitrary programs. It
         // is owner-configured code, not a verified package-runner policy.
-        custom.command()
+        let mut selected=custom.clone();
+        if let Some(arguments)=one_shot {selected.arguments=arguments.clone();}
+        selected.command()
     } else {
         if !crate::tmux::HARNESS_KEYS.contains(&harness.as_str()) {
             return Err(("not_found", "No configured harness has that ID."));
         }
         let defaults = crate::launch_args::builtin(harness);
-        let arguments = state.harness_args.get(harness).unwrap_or(&defaults);
+        let arguments = one_shot.as_ref().or_else(||state.harness_args.get(harness)).unwrap_or(&defaults);
         crate::launch_args::validate(arguments)
             .map_err(|_| ("invalid_arguments", "Saved launcher arguments are invalid."))?;
         if !allow_unsafe_harness
@@ -242,6 +249,7 @@ mod tests {
     use super::*;
     fn launch(harness: &str, cwd: &str, unsafe_allowed: bool) -> Command {
         Command::Launch {
+            arguments: None,
             harness: harness.into(),
             cwd: cwd.into(),
             allow_unsafe_harness: unsafe_allowed,
@@ -264,6 +272,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn one_shot_arguments_are_quoted_and_never_change_saved_defaults() {
+        let mut state=AppState::default();
+        state.custom_harnesses.push(crate::custom_harness::CustomHarness {id:"custom-test".into(),name:"Test".into(),icon:"⚡".into(),executable:"/bin/sh".into(),arguments:vec!["saved".into()]});
+        let mut request=launch("custom-test","/",true);
+        if let Command::Launch {arguments,..}=&mut request {*arguments=Some(vec!["literal ; $(touch NEVER)".into(),"".into()]);}
+        let prepared=prepare(&state,&request).unwrap();assert_eq!(shlex::split(&prepared.command).unwrap(),vec!["/bin/sh","literal ; $(touch NEVER)",""]);
+        assert_eq!(state.custom_harnesses[0].arguments,vec!["saved"]);
+        if let Command::Launch {allow_unsafe_harness,..}=&mut request {*allow_unsafe_harness=false;}
+        assert_eq!(prepare(&state,&request).err().unwrap().0,"unsafe_harness");
+    }
     #[test]
     fn cli_launch_tmux_integration() {
         let root = std::env::temp_dir().join(format!("sd-launch-native-{}", std::process::id()));
@@ -461,7 +480,9 @@ mod tests {
         // executables to test package and argument policy without downloads.
         let bin = root.join("tools ; quoted");
         std::fs::create_dir(&bin).unwrap();
-        std::os::unix::fs::symlink("/bin/true", bin.join("npx")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(bin.join("npx"), "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(bin.join("npx"), std::fs::Permissions::from_mode(0o700)).unwrap();
         std::os::unix::fs::symlink("/bin/sh", bin.join("bash")).unwrap();
         let old_path = std::env::var_os("PATH").unwrap();
         std::env::set_var("PATH", &bin);
@@ -473,6 +494,7 @@ mod tests {
         let allowed = prepare(
             &defaults,
             &Command::Launch {
+                arguments: None,
                 harness: "reasonix".into(),
                 cwd: workspace.to_str().unwrap().into(),
                 allow_download: true,

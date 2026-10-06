@@ -1,3 +1,4 @@
+mod cli_preferences;
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -5,7 +6,7 @@ use gtk4::{
     Align, Application, ApplicationWindow, Button, EventControllerFocus, EventControllerKey,
     EventControllerMotion, Fixed, Image, Label, Orientation, Overlay, Popover, PositionType,
 };
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
+use crate::desktop_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -329,6 +330,7 @@ pub struct SuperDesktopWindow {
     /// Rebuilds the ⚙ settings panel (detection + brand logos for the new
     /// light/dark mode) after a theme switch.
     settings_refresh: Rc<dyn Fn()>,
+    cli_harness_bar: Rc<RefCell<Option<Rc<crate::harness_bar::HarnessBar>>>>,
     /// Floating panels (the ⚙ settings card) inside `root_overlay`; hidden with
     /// the window so they cannot reappear on the next show.
     overlay_panels: Vec<gtk4::Widget>,
@@ -682,6 +684,7 @@ impl SuperDesktopWindow {
             on_slide_hidden,
             brand_images: Rc::clone(&brand_images),
             settings_refresh: Rc::clone(&settings_panel.refresh),
+            cli_harness_bar: Rc::clone(&harness_bar_for_settings),
             overlay_panels: vec![settings_panel.widget.clone()],
             ws_popover: workspace_bar.popover.clone(),
             ws_bar: workspace_bar.clone(),
@@ -1628,6 +1631,7 @@ impl SuperDesktopWindow {
 
             card.close_session();
             canvas_del.remove(&card.container);
+            crate::desktop_shell::terminal_removed(&canvas_del);
             let mut s = state_del.borrow_mut();
             s.terminals.retain(|t| t.session_name != sess);
             crate::state::normalize_terminal_order(&mut s);
@@ -2090,6 +2094,382 @@ impl SuperDesktopWindow {
         model.snapshot(canvas, &presentation)
     }
 
+    pub(crate) fn cli_file_target(&self,model:&crate::workspace_model::LocalWorkspace,request:&crate::control::Request)->Result<crate::state::TerminalData,crate::control::Reply> {
+        use crate::control::{Command,Reply};
+        let fail=|code,message|Reply::failure(&request.request_id,code,message);
+        let id=match &request.command {Command::Files {id,..}|Command::FilesEdit {id,..}=>id,_=>return Err(fail("invalid_request","Expected terminal files request."))};
+        let snapshot=self.desktop_snapshot(model).map_err(|_|fail("unavailable","Workspace unavailable."))?;
+        let matches:Vec<_>=snapshot.cards.iter().filter(|c|c.card_id==*id).collect();
+        if matches.len()!=1{return Err(fail("not_found","No unique local terminal card has that ID."));}
+        let card=matches[0];
+        if let Command::FilesEdit {expect_epoch,expect_revision,..}=&request.command {
+            if expect_epoch!=&snapshot.epoch || expect_revision!=&crate::control_geometry::revision(&snapshot,card){return Err(fail("conflict","Card or display changed; read terminal geometry again."));}
+        }
+        let widget=self.any_terminal_card(id).map_err(|_|fail("not_found","Local terminal widget missing."))?;
+        let data=widget.data.borrow().clone();
+        if snapshot.cards.iter().filter(|c|c.session_name==data.session_name).count()!=1 || data.session_name!=card.session_name || widget.cli_session_task().is_closed(){return Err(fail("conflict","Terminal identity is ambiguous or closing."));}
+        Ok(data)
+    }
+
+    /// Read actual note buffers, including edits waiting for autosave.
+    fn cli_live_state(&self) -> AppState {
+        let mut state = self.state.borrow().clone();
+        state.notes = self.note_cards.borrow().iter().map(|note| note.live_data()).collect();
+        state
+    }
+
+    fn cli_layout_ready(&self, layout: &crate::control::Layout) -> Result<(), &'static str> {
+        if self.slide.running.get() {return Err("Workspace animation is in progress.");}
+        for item in &layout.items {
+            if item.kind=="note" {
+                let cards:Vec<_>=self.note_cards.borrow().iter().filter(|n|n.data.borrow().id==item.id).cloned().collect();
+                if cards.len()!=1 || cards[0].text_view.has_focus() || cards[0].container.has_css_class("dragging") || cards[0].container.has_css_class("resizing") {return Err("A note is missing, ambiguous or being edited.");}
+            } else {
+                let cards:Vec<_>=self.terminal_cards.borrow().iter().filter(|n|n.data.borrow().id==item.id).cloned().collect();
+                if cards.len()!=1 || cards[0].is_being_dragged() || cards[0].container.has_css_class("term-resizing") {return Err("A terminal is missing, ambiguous or being moved.");}
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cli_workspace(&self, model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request) -> crate::control::Reply
+    {
+        if let Some(reply)=self.cli_preferences(model,request) { return reply; }
+        use crate::control::{Command, Reply, WorkspaceEdit as Edit, WorkspaceQuery as Query};
+        use crate::control_workspace as workspace;
+        use serde_json::json;
+        let fail = |code, message| Reply::failure(&request.request_id, code, message);
+        let snapshot = match self.desktop_snapshot(model) {
+            Ok(s) => s, Err(_) => return fail("unavailable", "Local workspace is unavailable."),
+        };
+        let state = self.cli_live_state();
+        let envelope = |state: &AppState| json!({"epoch":snapshot.epoch,"revision":workspace::revision(state,&snapshot),
+            "revisionScope":"workspace","units":"logical-pixels","canvas":snapshot.canvas});
+        if let Command::Workspace { query } = &request.command {
+            let mut data = envelope(&state);
+            match query {
+                Query::Inspect => { data["workspace"] = json!(crate::state::effective_workspace_dir(&state));
+                    data["notesCount"] = json!(state.notes.len()); data["terminalsCount"] = json!(state.terminals.len()); },
+                Query::Folders => data["folders"] = self.workspace_choices(),
+                Query::Layout => data["layout"] = json!(crate::control_workspace::export(&state,&snapshot)),
+                Query::ValidateLayout {layout} => {
+                    if let Err(message)=crate::control_workspace::validate_layout(layout,&state,&snapshot) { return fail("invalid_arguments",message); }
+                    if let Err(message)=self.cli_layout_ready(layout) { return fail("conflict",message); }
+                    data["valid"]=json!(true); data["layout"]=json!(layout);
+                },
+                Query::Notes => data["notes"] = json!(state.notes.iter().map(|n| workspace::note(n,false)).collect::<Vec<_>>()),
+                Query::Note { id } => {
+                    let matches:Vec<_> = state.notes.iter().filter(|n| n.id == *id).collect();
+                    if matches.len()!=1 { return fail("not_found","No unique local note has that ID."); }
+                    data["note"] = workspace::note(matches[0],true);
+                },
+            }
+            return Reply::success(&request.request_id,data);
+        }
+        if let Err(reply) = workspace::check(request,&state,&snapshot,&snapshot.epoch) { return reply; }
+        if self.slide.running.get() { return fail("conflict","A workspace animation is in progress."); }
+        let Command::WorkspaceEdit {edit,..} = &request.command else { unreachable!() };
+        let mut result = json!({});
+        if matches!(edit,Edit::Layout {..}|Edit::Arrange) {
+            let layout=match edit {
+                Edit::Layout {layout} => layout.clone(),
+                _ => match workspace::arrange(&state,&snapshot) {Ok(v)=>v,Err(message)=>return fail("out_of_bounds",message)},
+            };
+            if let Err(message)=workspace::validate_layout(&layout,&state,&snapshot) { return fail("invalid_arguments",message); }
+            if let Err(message)=self.cli_layout_ready(&layout) { return fail("conflict",message); }
+            for item in &layout.items {
+                if item.kind=="note" {
+                    let note=self.note_cards.borrow().iter().find(|n| n.data.borrow().id==item.id).cloned().unwrap();
+                    {let mut data=note.data.borrow_mut();data.x=item.x;data.y=item.y;data.width=item.width;data.height=item.height;}
+                    note.container.set_size_request(item.width,item.height);
+                    self.canvas.move_(&note.container,item.x as f64,item.y as f64);
+                    if let Some(data)=self.state.borrow_mut().notes.iter_mut().find(|n|n.id==item.id) {*data=note.live_data();}
+                } else {
+                    let card=self.any_terminal_card(&item.id).unwrap();
+                    let applied=if item.mode=="minimized" {self.move_terminal_card(&item.id,item.x,item.y).is_ok()} else {
+                        card.apply_geometry(crate::card_resize::Rect {x:item.x as f64,y:item.y as f64,width:item.width,height:item.height})
+                    };
+                    if !applied {return Reply::unknown(&request.request_id);}
+                }
+            }
+            self.ghosts.refresh();
+            result["layout"]=json!(layout);
+        } else if let Edit::Folder { path } = edit {
+            if !std::path::Path::new(path).is_absolute() || path.len()>4096 || path.chars().any(char::is_control) {
+                return fail("invalid_arguments","Use an absolute existing folder path without control characters.");
+            }
+            let Some(directory) = crate::state::clean_dir(path) else { return fail("invalid_arguments","Folder does not exist."); };
+            { let mut state = self.state.borrow_mut(); state.workspace_dir=Some(directory.clone()); crate::state::remember_workspace_dir(&mut state,&directory); }
+            self.ws_bar.show_folder(&directory);
+            result["workspace"] = json!(directory);
+        } else {
+            let (id, mut updated, old) = match edit {
+                Edit::NoteCreate { text,x,y,width,height,tag } => {
+                    if state.notes.len()>=256 { return fail("limit_exceeded","At most 256 notes can be created through the CLI."); }
+                    let id=format!("note_cli_{}",request.request_id);
+                    if state.notes.iter().any(|n| n.id==id) { return fail("conflict","Reserved note ID already exists."); }
+                    (id.clone(),Some(NoteData {id,text:text.clone(),x:*x,y:*y,width:*width,height:*height,tag:*tag,
+                        color:"omarchy".into(),updated_at:0.0}),None)
+                },
+                Edit::NoteUpdate {id,..} | Edit::NoteDelete {id} | Edit::NoteMove {id,..} | Edit::NoteResize {id,..} | Edit::NoteTag {id,..} => {
+                    let cards:Vec<_>=self.note_cards.borrow().iter().filter(|n| n.data.borrow().id==*id).cloned().collect();
+                    if cards.len()!=1 { return fail("not_found","No unique local note has that ID."); }
+                    let card=Rc::clone(&cards[0]);
+                    if card.text_view.has_focus() || card.container.has_css_class("dragging") || card.container.has_css_class("resizing") {
+                        return fail("conflict","The note is being edited or moved on the desktop.");
+                    }
+                    let mut note=card.live_data();
+                    match edit {
+                        Edit::NoteUpdate {text,..} => note.text=text.clone(),
+                        Edit::NoteMove {x,y,..} => {note.x=*x; note.y=*y;},
+                        Edit::NoteResize {width,height,..} => {note.width=*width;note.height=*height;},
+                        Edit::NoteTag {tag,..} => note.tag=*tag,
+                        _ => {}
+                    }
+                    (id.clone(), if matches!(edit,Edit::NoteDelete {..}) {None} else {Some(note)},Some(card))
+                },
+                _ => unreachable!()
+            };
+            if let Some(note) = &mut updated {
+                if let Err(message)=workspace::validate_note(note,&snapshot.canvas,true) {
+                    return fail("invalid_arguments",message);
+                }
+                note.updated_at=SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64();
+            }
+            if let Some(old)=old {
+                old.cancel_pending_save();
+                self.note_cards.borrow_mut().retain(|n| n.data.borrow().id!=id);
+                self.drag_pending.borrow_mut().remove(old.container.upcast_ref::<gtk4::Widget>());
+                self.canvas.remove(&old.container);
+            }
+            self.state.borrow_mut().notes.retain(|n| n.id!=id);
+            if let Some(note)=updated {
+                result["note"] = workspace::note(&note,false);
+                self.state.borrow_mut().notes.push(note.clone());
+                self.spawn_note_widget(note,false);
+            }
+            result["id"] = json!(id);
+            result["deleted"] = json!(matches!(edit,Edit::NoteDelete {..}));
+        }
+        crate::state::save_state_async(self.state.borrow().clone());
+        let mut data=envelope(&self.cli_live_state());
+        data["result"]=result; data["outcome"]=json!("applied");
+        Reply::success(&request.request_id,data)
+    }
+
+    fn cli_card_action(&self,model:&crate::workspace_model::LocalWorkspace,request:&crate::control::Request)->crate::control::Reply {
+        use crate::control::{CardAction,Command,Reply};
+        let fail=|code,message|Reply::failure(&request.request_id,code,message);
+        let Command::CardAction {id,action,expect_epoch,expect_revision}=&request.command else {return fail("invalid_request","Expected a card action.");};
+        let snapshot=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return fail("unavailable","Workspace unavailable.")};
+        let Some(current)=snapshot.cards.iter().find(|c|c.card_id==*id)else{return fail("not_found","No local card has that ID.");};
+        if expect_epoch!=&snapshot.epoch||expect_revision!=&crate::control_geometry::revision(&snapshot,current){return fail("conflict","Card or display changed; read terminal geometry again.");}
+        let card=match self.any_terminal_card(id){Ok(c)=>c,Err(_)=>return fail("not_found","Card widget is unavailable.")};
+        if card.is_being_dragged()||card.container.has_css_class("term-resizing")||self.slide.running.get(){return fail("conflict","A local gesture or animation is in progress.");}
+        if snapshot.cards.iter().filter(|c|c.card_id==*id||c.session_name==current.session_name).count()!=1{return fail("conflict","Card identity is ambiguous.");}
+        match action {
+            CardAction::Raise=>card.cli_raise(),
+            CardAction::Focus=>{
+                if !self.window.is_visible()||self.machine_view.is_remote()||current.layout.iconified && !current.expanded||self.overlay_panels.iter().any(|p|p.is_visible())||self.pairing_requests.is_open()||self.pairing_wizard.is_open(){return fail("invalid_state","Focus requires a visible local workspace, restored card and closed dialogs. Use show and terminal restore first.");}
+                if !card.cli_focus(){return Reply::unknown(&request.request_id);}
+            },
+            CardAction::Tag {value}=>{
+                if *value>8{return fail("invalid_arguments","Tag must be 0..8.");}
+                let before=card.data.borrow().clone();card.cli_set_tag(*value);let after=card.data.borrow().clone();
+                let mut state=self.state.borrow_mut();crate::folder_colors::note_card_saved(&mut state,Some(&before),&after);
+                if let Some(saved)=state.terminals.iter_mut().find(|c|c.id==*id){saved.tag=*value;}
+                let saved=state.clone();drop(state);crate::state::save_state_async(saved);
+            },
+        }
+        let after=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return Reply::unknown(&request.request_id)};
+        let Some(current)=after.cards.iter().find(|c|c.card_id==*id)else{return Reply::unknown(&request.request_id)};
+        let mut data=crate::control_geometry::describe(&after,current);
+        data["tag"]=serde_json::json!(card.data.borrow().tag);data["action"]=serde_json::json!(action);data["outcome"]=serde_json::json!("applied");
+        data["compositorFocusObserved"]=serde_json::json!(false);
+        Reply::success(&request.request_id,data)
+    }
+
+    /// Local CLI geometry uses the live card and output on this GTK turn.
+    /// It never sends a bridge command, starts a session, or presents the overlay.
+    pub fn cli_geometry(&self, model: &crate::workspace_model::LocalWorkspace, request: &crate::control::Request) -> crate::control::Reply {
+        if matches!(request.command,crate::control::Command::CardAction {..}) {return self.cli_card_action(model,request);}
+        use crate::control::{Command, Reply};
+        use crate::control_geometry as geometry;
+        let id = &request.request_id;
+        let card_id = geometry::card_id(&request.command);
+        let snapshot = match self.desktop_snapshot(model) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Reply::failure(id, "unavailable", "Local geometry is unavailable."),
+        };
+        let Some(current) = snapshot.cards.iter().find(|card| card.card_id == card_id) else {
+            return Reply::failure(id, "not_found", "No local terminal card has that ID.");
+        };
+        if matches!(request.command, Command::Geometry { .. }) {
+            return Reply::success(id, geometry::describe(&snapshot, current));
+        }
+        let mode_change = if matches!(request.command, Command::Mode { .. }) {
+            match geometry::prepare_mode(request, &snapshot, current) {
+                Ok(changed) => Some(changed),
+                Err(reply) => return reply,
+            }
+        } else { None };
+        let prepared = if mode_change.is_none() {
+            match geometry::prepare(request, &snapshot, current) {
+                Ok(prepared) => Some(prepared),
+                Err(reply) => return reply,
+            }
+        } else { None };
+        let card = match self.any_terminal_card(card_id) {
+            Ok(card) => card,
+            Err(_) => return Reply::failure(id, "not_found", "No local terminal widget has that ID."),
+        };
+        if snapshot.cards.iter().filter(|other| other.session_name == current.session_name).count() != 1
+            || self.terminal_cards.borrow().iter().filter(|other| other.data.borrow().id == card_id).count() != 1
+            || card.data.borrow().session_name != current.session_name
+        {
+            return Reply::failure(id, "conflict", "The card-to-session mapping is ambiguous or changed.");
+        }
+        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+            return Reply::failure(id, "conflict", "A local geometry gesture is in progress.");
+        }
+        let applied = match request.command {
+            Command::Mode { action, .. } => {
+                if mode_change == Some(false) { true } else {
+                    let changed = card.cli_set_mode(action, self.screen_width(), self.screen_height());
+                    if changed {
+                        let rect = card.canvas_rect(self.screen_width(), self.screen_height());
+                        // Minimize/restore already position and persist through
+                        // the card's save callback, including display clamping.
+                        match action {
+                            crate::control::ModeAction::Expand => {
+                                self.canvas.remove(&card.container);
+                                self.canvas.put(&card.container, rect.x, rect.y);
+                            }
+                            crate::control::ModeAction::Collapse => self.canvas.move_(&card.container, rect.x, rect.y),
+                            _ => {}
+                        }
+                        self.ghosts.refresh();
+                    }
+                    changed
+                }
+            }
+            Command::Move { .. } => {
+                let rect = prepared.as_ref().unwrap().rect;
+                self.move_terminal_card(card_id, rect.x as i32, rect.y as i32).is_ok()
+            }
+            Command::Resize { .. } => card.apply_geometry(prepared.as_ref().unwrap().rect),
+            _ => false,
+        };
+        if !applied {
+            return Reply::unknown(id);
+        }
+        let after = match self.desktop_snapshot(model) {
+            Ok(snapshot) => snapshot,
+            Err(_) => return Reply::unknown(id),
+        };
+        let Some(current) = after.cards.iter().find(|card| card.card_id == card_id) else {
+            return Reply::unknown(id);
+        };
+        let mut data = geometry::describe(&after, current);
+        if let Some(prepared) = prepared {
+            data["requested"] = prepared.requested;
+            data["clamped"] = serde_json::json!(prepared.clamped);
+        } else if let Command::Mode { action, .. } = &request.command {
+            data["requested"] = serde_json::json!({"action":action});
+            data["changed"] = serde_json::json!(mode_change.unwrap());
+            data["attachmentObserved"] = serde_json::json!(false);
+        }
+        data["outcome"] = serde_json::json!("applied");
+        Reply::success(id, data)
+    }
+
+    /// The close worker owns destruction; GTK only validates and removes the
+    /// exact card. This path deliberately does not call close_session().
+    pub(crate) fn cli_close(&self, model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request, action: crate::control_close::Action) -> crate::control_close::UiResult
+    {
+        use crate::control::{Command, Reply};
+        use crate::control_close::{Action, Target};
+        let fail = |code, message| Reply::failure(&request.request_id, code, message);
+        let (id, expect_epoch, expect_revision) = match &request.command {
+            Command::Forget {id,expect_epoch,expect_revision} | Command::Relaunch {id,expect_epoch,expect_revision,..} | Command::Viewport {
+                id,
+                expect_epoch: Some(expect_epoch),
+                expect_revision: Some(expect_revision),
+                ..
+            }
+            | Command::Attach {
+                id,
+                expect_epoch,
+                expect_revision,
+                ..
+            }
+            | Command::Close {
+                id,
+                expect_epoch,
+                expect_revision,
+                ..
+            }
+            | Command::Input {
+                id,
+                expect_epoch,
+                expect_revision,
+                ..
+            } => (id, expect_epoch, expect_revision),
+            _ => {
+                return Err(fail(
+                    "invalid_request",
+                    "Expected a guarded terminal operation.",
+                ))
+            }
+        };
+        let snapshot = self.desktop_snapshot(model).map_err(|_| fail("unavailable", "Local workspace is unavailable."))?;
+        let current = snapshot.cards.iter().find(|card| card.card_id == *id)
+            .ok_or_else(|| fail("not_found", "No local terminal card has that ID."))?;
+        if expect_epoch != &snapshot.epoch || expect_revision != &crate::control_geometry::revision(&snapshot, current) {
+            return Err(fail("conflict", "The card changed or the daemon restarted. Read terminal geometry again."));
+        }
+        let card = self.any_terminal_card(id).map_err(|_| fail("not_found", "No local terminal widget has that ID."))?;
+        let data = card.data.borrow().clone();
+        if snapshot.cards.iter().filter(|other| other.card_id == *id).count() != 1
+            || snapshot.cards.iter().filter(|other| other.session_name == data.session_name).count() != 1
+            || current.session_name != data.session_name || card.cli_session_task().is_closed()
+        {
+            return Err(fail("conflict", "The card-to-session mapping changed, is ambiguous, or is closing."));
+        }
+        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+            return Err(fail("conflict", "A local geometry gesture is in progress; the card was not closed."));
+        }
+        match action {
+            Action::Inspect => Ok(Some(Target { data, task: card.cli_session_task() })),
+            Action::Remove(expected) => {
+                if !matches!(request.command, Command::Close { .. } | Command::Forget {..} | Command::Relaunch {..}) {
+                    return Err(fail("invalid_request", "Only close may remove a card."));
+                }
+                if data.id != expected.data.id || data.session_name != expected.data.session_name
+                    || data.created_at != expected.data.created_at
+                    || data.command != expected.data.command || data.workspace_dir != expected.data.workspace_dir
+                    || !std::sync::Arc::ptr_eq(&card.cli_session_task(), &expected.task) {
+                    return Err(fail("conflict", "The terminal card was replaced before close."));
+                }
+                card.detach_for_cli_close();
+                self.terminal_cards.borrow_mut().retain(|other| other.data.borrow().id != *id);
+                self.drag_pending.borrow_mut().remove(card.container.upcast_ref::<gtk4::Widget>());
+                self.canvas.remove(&card.container);
+                let snapshot = {
+                    let mut state = self.state.borrow_mut();
+                    state.terminals.retain(|other| other.id != *id);
+                    crate::state::normalize_terminal_order(&mut state);
+                    state.clone()
+                };
+                crate::state::save_state_async(snapshot);
+                self.ghosts.refresh();
+                Ok(None)
+            }
+        }
+    }
+
     pub fn item_counts(&self) -> (usize, usize) {
         (self.note_cards.borrow().len(), self.terminal_cards.borrow().len())
     }
@@ -2106,6 +2486,7 @@ impl SuperDesktopWindow {
 
         card.close_session();
         self.canvas.remove(&card.container);
+        crate::desktop_shell::terminal_removed(&self.canvas);
         let mut s = self.state.borrow_mut();
         s.terminals.retain(|t| t.session_name != sess);
         crate::state::normalize_terminal_order(&mut s);
@@ -2433,6 +2814,7 @@ impl SuperDesktopWindow {
         self.show_token.set(self.show_token.get().wrapping_add(1));
         self.reclaim_input();
         self.set_terminal_gpu_mapped(true);
+        crate::desktop_shell::before_present(&self.window);
         self.window.present();
         self.window.set_visible(true);
         // Re-assert keyboard interactivity: typing in a card flips it to
@@ -2520,22 +2902,17 @@ impl SuperDesktopWindow {
     /// The unmap waits for the slide-out (up to `HIDE_FALLBACK`), and until
     /// then a full-screen surface that still takes input swallows the keys
     /// and clicks meant for the window underneath (with a card expanded, the
-    /// keyboard is even `Exclusive`). An empty input region lets clicks
+    /// keyboard is even `Exclusive`). The window-system adapter lets clicks
     /// through; `reclaim_input` undoes both on the next show.
     fn release_input(&self) {
         INPUT_RELEASED.with(|released| released.set(true));
         set_overlay_keyboard_mode(&self.window, KeyboardMode::None);
-        if let Some(surface) = self.window.surface() {
-            surface.set_input_region(Some(&gtk4::cairo::Region::create()));
-        }
+        crate::desktop_shell::set_pointer_input(&self.window, false);
     }
 
     fn reclaim_input(&self) {
         INPUT_RELEASED.with(|released| released.set(false));
-        if let Some(surface) = self.window.surface() {
-            // `None` is the whole surface, GTK's default.
-            surface.set_input_region(None);
-        }
+        crate::desktop_shell::set_pointer_input(&self.window, true);
     }
 
     /// Hide VTE widgets so hide/unmap does not composite live GPU terminals.
@@ -2702,6 +3079,198 @@ fn apply_terminal_expand(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_notes_preserve_live_text_and_guard_edits() {
+        crate::gtk_test::run_in_child_process("window::tests::cli_notes_inner");
+    }
+
+    #[test]
+    fn cli_notes_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        use crate::control::{Command, Request, WorkspaceQuery as Query, WorkspaceEdit as Edit};
+        let root=std::env::temp_dir().join(format!("sd-notes-window-{}",std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME","XDG_CONFIG_HOME","XDG_STATE_HOME","XDG_CACHE_HOME","TMUX_TMPDIR"] { std::env::set_var(name,&root); }
+        std::env::remove_var("TMUX"); std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app=gtk4::Application::new(Some("com.superdesktop.CliNotesTest"),gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state=AppState::default(); state.notes.clear();
+        let model=crate::workspace_model::LocalWorkspace::new(state);
+        let window=SuperDesktopWindow::new(&app,||{},Rc::new(crate::hotcorner::Zone::default()),model.state());
+        let read=|query| window.cli_workspace(&model,&Request {control_version:1,request_id:"read".into(),command:Command::Workspace {query}});
+        let prepare=|edit,id:&str| {
+            let data=read(Query::Inspect).data.unwrap();
+            Request {control_version:1,request_id:id.into(),command:Command::WorkspaceEdit {edit,
+                expect_epoch:data["epoch"].as_str().unwrap().into(),expect_revision:data["revision"].as_str().unwrap().into()}}
+        };
+        let create=prepare(Edit::NoteCreate {text:"one\nПривіт\t$(literal)".into(),x:80,y:140,width:260,height:200,tag:3},"create");
+        let journal=root.join("receipts");
+        let apply=|request:&Request| crate::control_geometry::dispatch(&journal,request,std::time::Instant::now()+Duration::from_secs(3),|r|Ok(window.cli_workspace(&model,r)));
+        assert!(apply(&create).ok);
+        assert!(apply(&create).ok,"duplicate returns receipt");
+        assert_eq!(window.note_cards.borrow().len(),1);
+        assert!(!read(Query::Notes).data.unwrap()["notes"][0].as_object().unwrap().contains_key("text"));
+        let note_id="note_cli_create".to_string();
+        assert_eq!(read(Query::Note {id:note_id.clone()}).data.unwrap()["note"]["text"],"one\nПривіт\t$(literal)");
+        let stale=prepare(Edit::NoteUpdate {id:note_id.clone(),text:"overwrite".into()},"stale");
+        let old=Rc::clone(&window.note_cards.borrow()[0]);
+        old.text_view.buffer().set_text("unsaved desktop edit");
+        assert_eq!(window.cli_workspace(&model,&stale).exit_code(),5,"pending autosave must invalidate revision");
+        assert_eq!(read(Query::Note {id:note_id.clone()}).data.unwrap()["note"]["text"],"unsaved desktop edit");
+        let update=prepare(Edit::NoteUpdate {id:note_id.clone(),text:"replacement\n".into()},"update");
+        old.container.add_css_class("resizing");
+        assert_eq!(window.cli_workspace(&model,&update).exit_code(),5);
+        old.container.remove_css_class("resizing");
+        assert!(apply(&update).ok);
+        // Keep the retired widget alive past its former debounce deadline.
+        let deadline=std::time::Instant::now()+Duration::from_millis(400);
+        while std::time::Instant::now()<deadline { while glib::MainContext::default().iteration(false) {} std::thread::sleep(Duration::from_millis(10)); }
+        assert_eq!(model.state().borrow().notes[0].text,"replacement\n");
+        for (edit,id) in [(Edit::NoteMove {id:note_id.clone(),x:100,y:160},"move"),
+            (Edit::NoteResize {id:note_id.clone(),width:300,height:220},"resize"),
+            (Edit::NoteTag {id:note_id.clone(),tag:8},"tag")] {
+            let reply=apply(&prepare(edit,id)); assert!(reply.ok,"{reply:?}");
+        }
+        let bad=prepare(Edit::NoteMove {id:note_id.clone(),x:i32::MAX,y:160},"bad");
+        assert_eq!(apply(&bad).exit_code(),2);
+        assert_eq!(model.state().borrow().notes[0].x,100);
+        assert_eq!(model.state().borrow().notes[0].tag,8);
+        let exported=read(Query::Layout).data.unwrap()["layout"].clone();
+        let mut layout:crate::control::Layout=serde_json::from_value(exported).unwrap();
+        layout.items[0].x=120;
+        assert!(read(Query::ValidateLayout {layout:layout.clone()}).ok);
+        layout.items.push(crate::control::LayoutItem {kind:"note".into(),id:"missing".into(),mode:"normal".into(),x:20,y:140,width:260,height:200});
+        assert!(!apply(&prepare(Edit::Layout {layout:layout.clone()},"invalid-layout")).ok);
+        assert_eq!(model.state().borrow().notes[0].x,100,"invalid later item must not move earlier item");
+        layout.items.pop();
+        assert!(apply(&prepare(Edit::Layout {layout},"layout")).ok);
+        assert_eq!(model.state().borrow().notes[0].x,120);
+        assert!(apply(&prepare(Edit::Arrange,"arrange")).ok);
+        assert_eq!(model.state().borrow().notes[0].x,10);
+        assert!(!window.window.is_visible());
+        crate::state::flush_state_saves_checked().unwrap();
+        assert_eq!(crate::state::load_state().notes[0].text,"replacement\n");
+        assert!(apply(&prepare(Edit::NoteDelete {id:note_id.clone()},"delete")).ok);
+        assert_eq!(read(Query::Note {id:note_id}).exit_code(),3);
+        assert_eq!(window.note_cards.borrow().len(),0);
+        assert!(crate::state::load_state().notes.is_empty());
+        use crate::control::{PreferencesQuery as PQ,PreferencesEdit as PE,LauncherSpec};
+        let pref_read=|query| window.cli_workspace(&model,&Request {control_version:1,request_id:"prefs-read".into(),command:Command::Preferences {query}});
+        let pref_request=|edit,id:&str| {let data=read(Query::Inspect).data.unwrap();Request {control_version:1,request_id:id.into(),command:Command::PreferencesEdit {edit,expect_epoch:data["epoch"].as_str().unwrap().into(),expect_revision:data["revision"].as_str().unwrap().into()}}};
+        assert!(pref_read(PQ::Settings {key:None}).ok);
+        assert_eq!(pref_read(PQ::Settings {key:Some("unlisted".into())}).exit_code(),3);
+        let secret="PRIVATE_ARGUMENT_LITERAL";
+        let args=pref_request(PE::HarnessArgs {id:"claude".into(),arguments:Some(vec![secret.into()])},"args-set");
+        assert!(apply(&args).ok);
+        assert_eq!(crate::launch_args::effective("claude"),[secret]);
+        assert_eq!(pref_read(PQ::HarnessArgs {id:"claude".into()}).data.unwrap()["arguments"][0],secret);
+        assert!(!std::fs::read_to_string(journal.join("args-set.json")).unwrap().contains(secret));
+        assert!(apply(&pref_request(PE::HarnessArgs {id:"claude".into(),arguments:None},"args-reset")).ok);
+        assert_eq!(crate::launch_args::effective("claude"),crate::launch_args::builtin("claude"));
+        assert_eq!(apply(&pref_request(PE::Setting {key:"toolbarSize".into(),value:Some(serde_json::json!("giant"))},"invalid-size")).exit_code(),2);
+        for size in ["small","medium","large"] {
+            assert!(apply(&pref_request(PE::Setting {key:"toolbarSize".into(),value:Some(serde_json::json!(size))},size)).ok);
+            assert_eq!(pref_read(PQ::Settings {key:Some("toolbarSize".into())}).data.unwrap()["setting"]["value"],size);
+            assert_eq!(window.hud.height_request(),top_bar_height(model.state().borrow().top_bar_size));
+        }
+        for (key,value) in [("settingsPanelPosition",serde_json::json!([30,100])),("settingsPanelSize",serde_json::json!([700,650]))] {
+            assert!(apply(&pref_request(PE::Setting {key:key.into(),value:Some(value)},key)).ok);
+        }
+        assert_eq!(window.settings_layout.borrow().as_ref().unwrap().geometry(),(Some((30,100)),(700,650)));
+        assert!(apply(&pref_request(PE::Setting {key:"settingsPanelPosition".into(),value:None},"position-reset")).ok);
+        assert_eq!(window.settings_layout.borrow().as_ref().unwrap().geometry().0,None);
+        let custom=LauncherSpec {id:"custom-cli".into(),name:"CLI test".into(),icon:"🤖".into(),executable:"/bin/true".into(),arguments:vec![secret.into()]};
+        assert!(apply(&pref_request(PE::CustomPut {launcher:custom,create:true},"custom-add")).ok);
+        assert_eq!(pref_read(PQ::Custom {id:"custom-cli".into()}).data.unwrap()["launcher"]["arguments"][0],secret);
+        assert!(apply(&pref_request(PE::Visibility {keys:Some(vec!["custom-cli".into()])},"visible")).ok);
+        assert_eq!(model.state().borrow().visible_harnesses,Some(vec!["custom-cli".to_string()]));
+        assert!(apply(&pref_request(PE::CustomRemove {id:"custom-cli".into()},"custom-remove")).ok);
+        assert!(model.state().borrow().custom_harnesses.is_empty());
+        assert_eq!(model.state().borrow().visible_harnesses,Some(vec![]));
+        assert_eq!(pref_read(PQ::Custom {id:"custom-cli".into()}).exit_code(),3);
+        assert!(!window.window.is_visible());
+        let mut shortcut=Request {control_version:1,request_id:"shortcut-state".into(),command:Command::Shortcut {combo:"SUPER + F8".into(),preview:None,expect_epoch:None,expect_revision:None}};
+        let preview=window.cli_shortcut(&model,&shortcut,false).data.unwrap();
+        if let Command::Shortcut {preview:p,expect_epoch,expect_revision,..}=&mut shortcut.command {*p=Some("a".repeat(64));*expect_epoch=Some(preview["epoch"].as_str().unwrap().into());*expect_revision=Some(preview["revision"].as_str().unwrap().into());}
+        assert!(window.cli_shortcut(&model,&shortcut,false).ok);assert!(window.cli_shortcut(&model,&shortcut,true).ok);
+        assert_eq!(model.state().borrow().toggle_shortcut.as_deref(),Some("SUPER + F8"));
+        assert_eq!(window.cli_shortcut(&model,&shortcut,false).exit_code(),5,"old workspace revision must fail after shortcut state changes");
+        window.window.close(); drop(old);
+        crate::state::flush_state_saves_checked().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cli_mode_handler_checks_live_widgets_and_persists_layout() {
+        crate::gtk_test::run_in_child_process("window::tests::cli_mode_handler_inner");
+    }
+
+    #[test]
+    fn cli_mode_handler_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        use crate::control::{Command, ModeAction, Request};
+        let root = std::env::temp_dir().join(format!("sd-mode-window-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.CliModeTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state = AppState::default();
+        state.terminals.push(serde_json::from_value(serde_json::json!({
+            "id":"sd_term_mode", "session_name":"sd_term_mode", "agent_type":"shell", "command":"/bin/false",
+            "x":100, "y":200, "width":128, "height":128, "restored_width":480, "restored_height":320,
+            "iconified":true, "icon_x":300, "icon_y":400, "created_at":0.0
+        })).unwrap());
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let card = window.any_terminal_card("sd_term_mode").unwrap();
+        let request = |action| {
+            let snapshot = window.desktop_snapshot(&model).unwrap();
+            Request { control_version: 1, request_id: "mode-test".into(), command: Command::Mode {
+                id: "sd_term_mode".into(), action, expect_epoch: snapshot.epoch.clone(),
+                expect_revision: crate::control_geometry::revision(&snapshot, &snapshot.cards[0]),
+            }}
+        };
+        let restore = request(ModeAction::Restore);
+        card.container.add_css_class("term-resizing");
+        assert_eq!(window.cli_geometry(&model, &restore).exit_code(), 5);
+        card.container.remove_css_class("term-resizing");
+        let reply = window.cli_geometry(&model, &restore);
+        assert!(reply.ok, "{reply:?}");
+        assert_eq!(reply.data.as_ref().unwrap()["mode"], "normal");
+        assert_eq!(reply.data.as_ref().unwrap()["changed"], true);
+        assert_eq!(model.state().borrow().terminals[0].width, 480);
+        assert_eq!(window.cli_geometry(&model, &restore).exit_code(), 5, "old revision must conflict");
+        let noop = window.cli_geometry(&model, &request(ModeAction::Restore));
+        assert_eq!(noop.data.unwrap()["changed"], false);
+        for (action, mode) in [(ModeAction::Minimize, "minimized"), (ModeAction::Expand, "expanded"), (ModeAction::Collapse, "minimized")] {
+            let reply = window.cli_geometry(&model, &request(action));
+            assert!(reply.ok, "{reply:?}");
+            let data = reply.data.unwrap();
+            assert_eq!(data["mode"], mode);
+            assert_eq!(data["changed"], true);
+        }
+        let action=|action| {let snapshot=window.desktop_snapshot(&model).unwrap();Request {control_version:1,request_id:"card-action".into(),command:Command::CardAction {id:"sd_term_mode".into(),action,expect_epoch:snapshot.epoch.clone(),expect_revision:crate::control_geometry::revision(&snapshot,&snapshot.cards[0])}}};
+        let tagged=window.cli_geometry(&model,&action(crate::control::CardAction::Tag {value:7}));assert!(tagged.ok,"{tagged:?}");
+        assert_eq!(model.state().borrow().terminals[0].tag,7);
+        assert!(window.cli_geometry(&model,&action(crate::control::CardAction::Raise)).ok);
+        assert_eq!(window.cli_geometry(&model,&action(crate::control::CardAction::Focus)).exit_code(),6,"hidden workspace must not take focus");
+        assert!(!window.window.is_visible());
+        crate::state::flush_state_saves_checked().unwrap();
+        let persisted = crate::state::load_state();
+        assert!(persisted.terminals[0].iconified);
+        assert_eq!(persisted.terminals[0].restored_width, 480);
+        assert_eq!(persisted.terminals[0].icon_x, Some(300));
+        window.window.close();
+        crate::state::flush_state_saves_checked().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn test_card_slide_goes_to_the_nearest_left_or_right_edge() {

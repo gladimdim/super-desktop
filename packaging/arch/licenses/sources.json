@@ -1,0 +1,32 @@
+{
+  "asn1-rs-impl@0.2.0": {
+    "file": "asn1-rs-impl-0.2.0.txt",
+    "url": "https://raw.githubusercontent.com/rusticata/asn1-rs/a20e5f7319c896737ad0f2557037817b91ad854f/LICENSE-MIT",
+    "sha256": "a5c61b93b6ee1d104af9920cf020ff3c7efe818e31fe562c72261847a728f513"
+  },
+  "gl@0.14.0": {
+    "file": "gl-0.14.0.txt",
+    "url": "https://raw.githubusercontent.com/brendanzab/gl-rs/ea503e8d5fb6d73c6030e6191ce738cd3bf3433e/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "gl_generator@0.14.0": {
+    "file": "gl_generator-0.14.0.txt",
+    "url": "https://raw.githubusercontent.com/brendanzab/gl-rs/ea503e8d5fb6d73c6030e6191ce738cd3bf3433e/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  },
+  "gtk4-layer-shell@0.8.1": {
+    "file": "gtk4-layer-shell-0.8.1.txt",
+    "url": "https://raw.githubusercontent.com/pentamassiv/gtk4-layer-shell-gir/7043a44adc4e31868e6f30a4f8c8279168417a94/LICENSE",
+    "sha256": "4cc6d27d63d65b3bfe5a10c81fa65d58d6a1f36f2523bdb1f11bc1b4fe6931cb"
+  },
+  "gtk4-layer-shell-sys@0.6.1": {
+    "file": "gtk4-layer-shell-sys-0.6.1.txt",
+    "url": "https://raw.githubusercontent.com/pentamassiv/gtk4-layer-shell-gir/c52b9b12e6b1afa38dcb496ec821c55bb298da78/LICENSE",
+    "sha256": "4cc6d27d63d65b3bfe5a10c81fa65d58d6a1f36f2523bdb1f11bc1b4fe6931cb"
+  },
+  "khronos_api@3.1.0": {
+    "file": "khronos_api-3.1.0.txt",
+    "url": "https://raw.githubusercontent.com/brendanzab/gl-rs/f150967b1c44ae888e6676f93f639ebc82771bdc/LICENSE",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  }
+}

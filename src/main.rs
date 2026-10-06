@@ -1,10 +1,31 @@
-mod cli;
-mod control;
-mod control_journal;
+mod desktop_shell;
+#[cfg(target_os = "macos")]
+mod macos_shortcut;
+#[cfg(target_os = "macos")]
+mod macos_diagnostics;
+use super_desktop::{cli, control};
+use super_desktop::control_journal;
 mod control_launch;
+mod control_terminal;
+mod control_geometry;
+mod control_close;
+mod control_input;
+mod control_files;
+mod control_viewport;
+mod control_attach;
+mod control_shortcut;
+mod control_relaunch;
+mod control_updates;
+mod control_peer;
+mod control_pairing;
+mod control_connection;
+#[cfg(test)]
+mod control_acceptance;
+mod control_workspace;
 mod control_service;
 mod brand;
 mod assets;
+mod asset_references;
 mod asset_history;
 mod completion;
 mod custom_harness;
@@ -18,10 +39,9 @@ mod floating_panel;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;
-mod harness_record;
 mod hidden_pause;
 mod preload;
-mod terminal_text;
+use super_desktop::{harness_record, platform, session_task, terminal_text};
 mod terminal_frame;
 mod asset_pdf;
 mod asset_view;
@@ -60,7 +80,6 @@ mod terminal_links;
 mod overlap_ghost;
 mod shortcut;
 mod sleep_lock;
-mod session_task;
 mod state;
 mod startup;
 mod sticky_note;
@@ -85,6 +104,9 @@ mod ws;
 /// process fails with "Attempted to initialize GTK from two different threads"
 /// / "GTK may only be used from the main thread". A GTK assertion therefore
 /// re-runs this test binary in a child process filtered to just that one test.
+#[cfg(all(test, target_os = "linux"))]
+mod package_tests;
+
 #[cfg(test)]
 pub mod gtk_test {
     pub const CHILD_ENV: &str = "SUPER_DESKTOP_GTK_TEST_CHILD";
@@ -234,6 +256,7 @@ pub mod gtk_test {
                 .stderr(std::process::Stdio::null());
             unsafe {
                 server.pre_exec(|| {
+                    #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
                     Ok(())
                 });
@@ -278,9 +301,7 @@ use styles::apply_styles;
 use window::SuperDesktopWindow;
 
 fn runtime_dir() -> PathBuf {
-    env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() })))
+    platform::runtime::directory()
 }
 
 fn get_socket_path() -> PathBuf {
@@ -291,7 +312,7 @@ fn get_socket_path() -> PathBuf {
 /// `XDG_RUNTIME_DIR`, which is process-wide (and would leak into any child
 /// process a test spawns, including GTK ones).
 fn socket_path_in(runtime_dir: &std::path::Path) -> PathBuf {
-    runtime_dir.join("super-desktop.sock")
+    platform::runtime::socket_path_in(runtime_dir)
 }
 
 /// Outcome of talking to the daemon over the Unix socket.
@@ -316,17 +337,31 @@ fn ipc_request(cmd: &str) -> Ipc {
 }
 
 fn ipc_request_at(sock_path: &std::path::Path, cmd: &str) -> Ipc {
-    if !sock_path.exists() {
-        return Ipc::NoDaemon;
-    }
+    ipc_request_with(sock_path, cmd, true, |path| UnixStream::connect(path))
+}
 
-    let mut stream = match UnixStream::connect(sock_path) {
+fn ipc_request_with(
+    sock_path: &std::path::Path,
+    cmd: &str,
+    remove_stale_socket: bool,
+    connect: impl FnOnce(&std::path::Path) -> std::io::Result<UnixStream>,
+) -> Ipc {
+    let mut stream = match connect(sock_path) {
         Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ipc::NoDaemon,
         // Connection refused: the file is a leftover from a daemon that is
         // gone. Clear it so the daemon we start can bind cleanly.
-        Err(_) => {
-            let _ = fs::remove_file(sock_path);
+        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            if remove_stale_socket {
+                let _ = fs::remove_file(sock_path);
+            }
             return Ipc::NoDaemon;
+        }
+        // A sandbox denial or transient error says nothing about liveness.
+        // Unlinking here makes the live daemon's ownership watcher exit.
+        Err(e) => {
+            eprintln!("SUPER DESKTOP: cannot connect to {}: {e}", sock_path.display());
+            return Ipc::Stalled;
         }
     };
 
@@ -394,14 +429,23 @@ fn main() {
     // Before anything else, and before any thread exists: layer-shell is
     // already mapped into this process, and must not leak into tmux, card
     // shells/agents, the bridge or any helper subprocess.
+    #[cfg(target_os = "macos")]
+    platform::environment::prepare();
     preload::strip_from_process_env();
     startup::mark("process entry");
-    // First thing: release builds abort on panic and the daemon's stderr goes
-    // to /dev/null, so without this a crash leaves no readable trace.
-    crashlog::install_panic_hook();
 
     let args: Vec<String> = env::args().collect();
     let action = args.get(1).map(|s| s.as_str()).unwrap_or("toggle");
+
+    #[cfg(target_os = "macos")]
+    if action == "diagnose" {
+        macos_diagnostics::print();
+        return;
+    }
+
+    // First thing: release builds abort on panic and the daemon's stderr goes
+    // to /dev/null, so without this a crash leaves no readable trace.
+    crashlog::install_panic_hook();
 
     if action == "harness-event" {
         harness_record::record(args.get(2).map(String::as_str).unwrap_or(""));
@@ -512,6 +556,13 @@ fn main() {
 
     // Daemon not running -> spawn it
     if action == "toggle" || action == "show" || action == "pairing-review" {
+        // LaunchServices owns the no-argument app process. Keep that process
+        // alive so reopening the app and its native shortcut reach the UI.
+        #[cfg(target_os = "macos")]
+        if args.len() == 1 {
+            run_daemon(true);
+            return;
+        }
         // A clicked pairing notification must still end at the approval panel.
         let first = if action == "pairing-review" { "pairing-review" } else { "show" };
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
@@ -563,7 +614,10 @@ fn run_daemon(start_visible: bool) {
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     // Before any card is restored: restores resolve through these too.
     launch_args::install(&initial_state.harness_args);
-    let _ = gtk4::init();
+    if let Err(error) = gtk4::init() {
+        eprintln!("SUPER DESKTOP cannot initialize its display: {error}");
+        return;
+    }
     startup::mark("GTK initialized");
 
     let app = Application::builder()
@@ -573,6 +627,7 @@ fn run_daemon(start_visible: bool) {
 
     let _ = app.register(gtk4::gio::Cancellable::NONE);
     std::mem::forget(app.hold());
+    #[cfg(target_os = "linux")]
     ensure_omarchy_theme_hook();
     apply_styles();
     startup::mark("theme and styles ready");
@@ -587,9 +642,27 @@ fn run_daemon(start_visible: bool) {
     // Older installs bound the shortcut on press (which repeats while held).
     // Upgrade in place to a release-bind so a held key is one toggle, not a
     // strobe, and a second tap during the slide-in can reverse immediately.
+    #[cfg(target_os = "linux")]
     shortcut::ensure_release_toggle();
 
     let (ipc_tx, mut ipc_rx) = futures_channel::mpsc::unbounded::<IpcMessage>();
+
+    #[cfg(target_os = "macos")]
+    {
+        let ctx = Rc::clone(&context);
+        let application = app.clone();
+        let quit_ctx = Rc::clone(&context);
+        let quit_app = app.clone();
+        let combo = shortcut::current_combo(context.borrow().local_workspace.state().borrow().toggle_shortcut.as_deref());
+        if let Err(error) = macos_shortcut::install(&combo,
+            move || { toggle_window(&ctx, &application); },
+            move || { handle_ipc_command("quit", &quit_ctx, &quit_app); }) {
+            eprintln!("SUPER DESKTOP shortcut: {error}");
+            crashlog::note(&format!("shortcut registration failed: {error}"));
+        } else {
+            crashlog::note(&format!("shortcut registered: {combo}"));
+        }
+    }
 
     let ctx_activate = Rc::clone(&context);
     let app_clone = app.clone();
@@ -616,16 +689,20 @@ fn run_daemon(start_visible: bool) {
 
     // After the socket bind: a duplicate daemon exits inside `start_ipc_thread`
     // (see its liveness probe) and must not look like a run in the crash log.
+    start_ipc_thread(ipc_tx);
     crashlog::note_start(if start_visible {
         "daemon (visible)"
     } else {
         "daemon"
     });
-    start_ipc_thread(ipc_tx);
     startup::mark("IPC listening");
     // Independent owner-only CLI endpoint. Legacy bridge IPC remains unchanged.
     let (control_tx, mut control_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
     let (adopt_tx, mut adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
+    let (geometry_tx, mut geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
+    let (files_tx, mut files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
+    let (shortcut_tx, mut shortcut_rx)=futures_channel::mpsc::channel::<control_shortcut::Query>(8);
+    let (close_tx, mut close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
     match control::Server::bind(&runtime_dir()) {
         Ok(server) => {
             let _ = thread::Builder::new()
@@ -638,12 +715,133 @@ fn run_daemon(start_visible: bool) {
                                 control::capabilities(),
                             );
                         }
+                        if matches!(request.command,control::Command::ConnectionRead {..}|control::Command::ConnectionInvite {..}|control::Command::ConnectionDecide {..}|control::Command::ConnectionRevoke {..}) {
+                            return control_connection::execute(&control_journal::root(), &request, deadline);
+                        }
+                        if matches!(request.command,control::Command::PeerAdd {..}|control::Command::PeerPairing {..}) {
+                            return control_pairing::execute(&control_journal::root(), &request);
+                        }
+                        if matches!(request.command,control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}) {
+                            return control_peer::execute(&control_journal::root(),&request,deadline);
+                        }
+                        if matches!(request.command,control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}) {
+                            return control_updates::execute(&control_journal::root(),&request);
+                        }
+                        if matches!(request.command,control::Command::Forget {..}|control::Command::Relaunch {..}) {
+                            return control_relaunch::execute(&control_journal::root(),&request,deadline,|action|{
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);close_tx.clone().try_send(control_close::Query {request:request.clone(),action,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
+                            },|data,deadline|{let (responder,response)=std::sync::mpsc::sync_channel(1);adopt_tx.clone().try_send(control_service::Adoption {data,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())?});
+                        }
+                        if matches!(request.command,control::Command::Shortcut {..}) {
+                            return control_shortcut::execute(&control_journal::root(),&request,deadline,|commit|{
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);
+                                shortcut_tx.clone().try_send(control_shortcut::Query {request:request.clone(),commit,responder,deadline}).map_err(|_|())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
+                            });
+                        }
+                        if let control::Command::Audit {after,limit,expect_revision}=&request.command {
+                            return control_journal::list(&control_journal::root(), &request.request_id,after.as_deref(),*limit,expect_revision.as_deref());
+                        }
                         if let control::Command::InspectRequest { id } = &request.command {
                             return control_journal::inspect(
                                 &control_journal::root(),
                                 &request.request_id,
                                 id,
                             );
+                        }
+                        if matches!(
+                            request.command,
+                            control::Command::Files { .. } | control::Command::FilesEdit { .. }
+                        ) {
+                            return control_files::execute(
+                                &control_journal::root(),
+                                &request,
+                                deadline,
+                                || {
+                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                    files_tx
+                                        .clone()
+                                        .try_send(control_files::Query {
+                                            request: request.clone(),
+                                            responder,
+                                            deadline,
+                                        })
+                                        .map_err(|_| {
+                                            control::Reply::failure(
+                                                &request.request_id,
+                                                "busy",
+                                                "File inventory is busy.",
+                                            )
+                                        })?;
+                                    response
+                                        .recv_timeout(
+                                            deadline.saturating_duration_since(
+                                                std::time::Instant::now(),
+                                            ),
+                                        )
+                                        .map_err(|_| {
+                                            control::Reply::failure(
+                                                &request.request_id,
+                                                "timeout",
+                                                "File inventory timed out.",
+                                            )
+                                        })?
+                                },
+                            );
+                        }
+                        if matches!(request.command, control::Command::Attach { .. }) {
+                            return control_attach::execute(
+                                &control_journal::root(),
+                                &request,
+                                deadline,
+                                || {
+                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                    close_tx
+                                        .clone()
+                                        .try_send(control_close::Query {
+                                            request: request.clone(),
+                                            action: control_close::Action::Inspect,
+                                            responder,
+                                            deadline,
+                                        })
+                                        .map_err(|_| ())?;
+                                    response
+                                        .recv_timeout(
+                                            deadline.saturating_duration_since(
+                                                std::time::Instant::now(),
+                                            ),
+                                        )
+                                        .map_err(|_| ())
+                                },
+                            );
+                        }
+                        if matches!(request.command,control::Command::Viewport {..}|control::Command::Viewports {..}) {
+                            return control_viewport::execute(&control_journal::root(),&request,deadline,|| {
+                                let (responder,response)=std::sync::mpsc::sync_channel(1);
+                                close_tx.clone().try_send(control_close::Query {request:request.clone(),action:control_close::Action::Inspect,responder,deadline}).map_err(|_|())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
+                            });
+                        }
+                        if matches!(request.command, control::Command::Input { .. }) {
+                            return control_input::execute(&control_journal::root(), &request, deadline, || {
+                                let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action: control_close::Action::Inspect, responder, deadline }).map_err(|_| ())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
+                            });
+                        }
+                        if matches!(request.command, control::Command::Close { .. }) {
+                            return control_close::execute(&control_journal::root(), &request, deadline, |action| {
+                                let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action, responder, deadline }).map_err(|_| ())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
+                            });
+                        }
+                        if matches!(request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::CardAction { .. } | control::Command::Mode { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. }) {
+                            return control_geometry::dispatch(&control_journal::root(), &request, deadline, |request| {
+                                let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                geometry_tx.clone().try_send(control_geometry::Query { request: request.clone(), responder, deadline }).map_err(|_| ())?;
+                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
+                            });
                         }
                         let (responder, response) = std::sync::mpsc::sync_channel(1);
                         if control_tx
@@ -689,6 +887,16 @@ fn run_daemon(start_visible: bool) {
                                     },
                                 )
                             }
+                            Ok(snapshot) if matches!(request.command, control::Command::Lifecycle { .. } | control::Command::Composer { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. }) => {
+                                control_terminal::execute(&request, &snapshot.state, deadline, |card| {
+                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
+                                    control_tx.clone().try_send(control_service::Query { responder, deadline }).map_err(|_| ())?;
+                                    let current = response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())?;
+                                    Ok(current.state.terminals.iter().any(|candidate|
+                                        candidate.id == card.id && candidate.session_name == card.session_name
+                                        && candidate.created_at == card.created_at))
+                                })
+                            }
                             Ok(snapshot) => control_service::answer(request, snapshot),
                             Err(_) => control::Reply::failure(
                                 &request.request_id,
@@ -701,6 +909,54 @@ fn run_daemon(start_visible: bool) {
         }
         Err(error) => eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}"),
     }
+    let close_context = Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query) = close_rx.next().await {
+            let result = if std::time::Instant::now() >= query.deadline {
+                Err(control::Reply::failure(&query.request.request_id, "timeout", "Close expired before card removal."))
+            } else if let Some(window) = live_window(&close_context) {
+                let model = Rc::clone(&close_context.borrow().local_workspace);
+                window.cli_close(&model, &query.request, query.action)
+            } else {
+                Err(control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready."))
+            };
+            let _ = query.responder.send(result);
+        }
+    });
+    let files_context=Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query)=files_rx.next().await {
+            let result=if std::time::Instant::now()>=query.deadline {Err(control::Reply::failure(&query.request.request_id,"timeout","File request expired."))}
+                else if let Some(window)=live_window(&files_context) {let model=Rc::clone(&files_context.borrow().local_workspace);window.cli_file_target(&model,&query.request)}
+                else {Err(control::Reply::failure(&query.request.request_id,"unavailable","Local desktop is not ready."))};
+            let _=query.responder.send(result);
+        }
+    });
+    let shortcut_context=Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query)=shortcut_rx.next().await {
+            let reply=if std::time::Instant::now()>=query.deadline {control::Reply::failure(&query.request.request_id,"timeout","Shortcut request expired.")}
+                else if let Some(window)=live_window(&shortcut_context){let model=Rc::clone(&shortcut_context.borrow().local_workspace);window.cli_shortcut(&model,&query.request,query.commit)}
+                else{control::Reply::failure(&query.request.request_id,"unavailable","Desktop is not ready.")};
+            let _=query.responder.send(reply);
+        }
+    });
+    let geometry_context = Rc::clone(&context);
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query) = geometry_rx.next().await {
+            let reply = if std::time::Instant::now() >= query.deadline {
+                control::Reply::failure(&query.request.request_id, "timeout", "Geometry request expired before application.")
+            } else if let Some(window) = live_window(&geometry_context) {
+                let model = Rc::clone(&geometry_context.borrow().local_workspace);
+                if matches!(query.request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
+                    window.cli_workspace(&model, &query.request)
+                } else { window.cli_geometry(&model, &query.request) }
+            } else {
+                control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready.")
+            };
+            let _ = query.responder.send(reply);
+        }
+    });
     let adopt_context = Rc::clone(&context);
     glib::MainContext::default().spawn_local(async move {
         while let Some(query) = adopt_rx.next().await {
@@ -788,6 +1044,7 @@ fn run_daemon(start_visible: bool) {
     state::flush_state_saves();
 }
 
+#[cfg(target_os = "linux")]
 fn ensure_omarchy_theme_hook() {
     let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     let hook_dir = PathBuf::from(&home).join(".config/omarchy/hooks/theme-set.d");
@@ -837,9 +1094,10 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     let local_state = ctx.borrow().local_workspace.state();
     let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside, local_state);
 
-    win.window.present();
-    win.start_slide_in();
-    ctx.borrow_mut().window = Some(win);
+    // First launch needs the same native screen sizing, focus and input setup
+    // as a window restored from the hidden state.
+    ctx.borrow_mut().window = Some(Rc::clone(&win));
+    win.show_again();
     ctx.borrow_mut().shown = true;
     true
 }
@@ -980,6 +1238,7 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
             // Without the socket this process would still open an overlay
             // window that nothing can control — leave instead.
             eprintln!("Failed to bind IPC socket: {e}");
+            crashlog::note(&format!("cannot bind control socket {}: {e}", sock_path.display()));
             std::process::exit(1);
         }
     };
@@ -1366,6 +1625,31 @@ mod ipc_tests {
     /// `NoDaemon` may. Getting this wrong is what left a second daemon holding
     /// the socket while the first one's overlay stayed on screen.
     #[test]
+    fn ipc_denied_or_transient_connections_preserve_the_daemon_socket() {
+        let dir = private_runtime_dir("denied");
+        let socket = socket_path_in(&dir);
+        for errno in [libc::EPERM, libc::EACCES, libc::ETIMEDOUT, libc::EAGAIN, libc::EIO] {
+            fs::write(&socket, b"live daemon socket sentinel").unwrap();
+            let reply = ipc_request_with(&socket, "status", true, |_| {
+                Err(std::io::Error::from_raw_os_error(errno))
+            });
+            assert!(matches!(reply, Ipc::Stalled), "errno {errno} must not start a duplicate");
+            assert_eq!(fs::read(&socket).unwrap(), b"live daemon socket sentinel");
+        }
+        let reply = ipc_request_with(&socket, "status", false, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ECONNREFUSED))
+        });
+        assert!(matches!(reply, Ipc::NoDaemon));
+        assert!(socket.exists(), "diagnostics must preserve even a stale socket");
+        let reply = ipc_request_with(&socket, "status", true, |_| {
+            Err(std::io::Error::from_raw_os_error(libc::ECONNREFUSED))
+        });
+        assert!(matches!(reply, Ipc::NoDaemon));
+        assert!(!socket.exists(), "a confirmed stale socket may be removed");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn test_ipc_outcomes_never_report_a_live_daemon_as_absent() {
         let dir = private_runtime_dir("outcomes");
         let sock_path = socket_path_in(&dir);
@@ -1373,10 +1657,9 @@ mod ipc_tests {
         // 1. Nothing at the path at all.
         assert!(matches!(ipc_request_at(&sock_path, "status"), Ipc::NoDaemon));
 
-        // 2. Leftover file from a daemon that is gone: the connect fails, the
-        //    file is cleared (so a freshly spawned daemon can bind) and the
-        //    caller is told to start one.
-        fs::write(&sock_path, b"").expect("write stale socket file");
+        // 2. A real socket left after its listener exits. A regular file has
+        // different connect errors on Darwin and is not a stale daemon socket.
+        drop(UnixListener::bind(&sock_path).expect("bind stale daemon socket"));
         assert!(matches!(ipc_request_at(&sock_path, "status"), Ipc::NoDaemon));
         assert!(!sock_path.exists(), "a stale socket file must be removed");
 

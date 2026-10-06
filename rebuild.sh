@@ -57,6 +57,9 @@ echo "=== SUPER DESKTOP rebuild ==="
 
 # 1. Build first, while the old daemon keeps serving: a broken tree must not
 # kill the running desktop (that failure mode used to require a second run).
+# The installed command links into this clone's target/release, just as in
+# install.sh. Clean and build that directory even if the shell sets another.
+unset CARGO_TARGET_DIR
 if [[ "$CLEAN" -eq 1 ]]; then
   echo "--> cargo clean (full rebuild)..."
   cargo clean --manifest-path "$SCRIPT_DIR/Cargo.toml"

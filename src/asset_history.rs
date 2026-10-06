@@ -17,18 +17,32 @@ struct Record {
 
 fn open_at(dir: &File, name: &str, flags: i32) -> std::io::Result<File> {
     let name = std::ffi::CString::new(name)?;
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
-            0o600,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    let mut retries = 0;
+    loop {
+        let fd = unsafe {
+            libc::openat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0o600,
+            )
+        };
+        if fd >= 0 {
+            return Ok(unsafe { File::from_raw_fd(fd) });
+        }
+        let error = std::io::Error::last_os_error();
+        // Darwin can return ENOENT when concurrent O_CREAT calls race to
+        // create the lock file. Retry the same descriptor-relative operation;
+        // never drop O_NOFOLLOW or retry ordinary missing-file reads.
+        if cfg!(target_os = "macos") && flags & libc::O_CREAT != 0
+            && error.kind() == std::io::ErrorKind::NotFound && retries < 3
+        {
+            retries += 1;
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        return Err(error);
     }
-    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 fn private(file: &File, directory: bool) -> std::io::Result<()> {
@@ -76,6 +90,15 @@ fn merge_at(
     root: &Path,
     paths: Vec<String>,
 ) -> std::io::Result<Vec<String>> {
+    update_at(directory,session,root,paths,None)
+}
+
+pub(crate) fn remove(session:&str,root:&Path,path:&str)->std::io::Result<()> {
+    let home=std::env::var_os("HOME").ok_or_else(||std::io::Error::other("HOME unavailable"))?;
+    update_at(&Path::new(&home).join(".local/state/super-desktop/file-assets"),session,root,vec![],Some(path)).map(|_|())
+}
+
+fn update_at(directory:&Path,session:&str,root:&Path,paths:Vec<String>,remove:Option<&str>)->std::io::Result<Vec<String>> {
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -124,7 +147,7 @@ fn merge_at(
     let paths: Vec<_> = paths
         .into_iter()
         .chain(old)
-        .filter(|p| valid_path(p) && seen.insert(p.clone()))
+        .filter(|p| remove!=Some(p.as_str()) && valid_path(p) && seen.insert(p.clone()))
         .take(64)
         .collect();
     records.push(Record {

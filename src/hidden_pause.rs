@@ -273,16 +273,10 @@ fn plan(targets: &[Target], listing: &str) -> Vec<(i32, String)> {
     plans
 }
 
-/// The terminal name (`/dev/pts/N`) of a pty master: the tty tmux reports for
+/// The slave device name of a pty master: the tty tmux reports for
 /// the client running on it.
 pub fn pty_name(master: std::os::fd::BorrowedFd<'_>) -> Option<String> {
-    use std::os::fd::AsRawFd;
-    let mut buffer = [0 as libc::c_char; 128];
-    if unsafe { libc::ptsname_r(master.as_raw_fd(), buffer.as_mut_ptr(), buffer.len()) } != 0 {
-        return None;
-    }
-    let name = unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) };
-    name.to_str().ok().filter(|name| name.starts_with("/dev/")).map(str::to_string)
+    crate::platform::pty::name(master).ok()
 }
 
 fn run(tmux: &dyn Fn() -> Command, args: &[&str]) -> Option<String> {
@@ -316,15 +310,14 @@ pub fn pause(tmux: &dyn Fn() -> Command, targets: &[Target], keep_going: &dyn Fn
 }
 
 /// Wake paused clients: SIGCONT makes a tmux client send MSG_WAKEUP, and tmux
-/// redraws its whole screen. Cheap enough for the GTK thread (one `/proc` read
-/// and one `kill` per client). A pid that is no longer a tmux client of this
+/// redraws its whole screen. Uses one process lookup and one signal per client.
+/// A pid that is no longer a tmux client of this
 /// process (card closed, client exited, pid reused) is left alone; waking a
 /// client that was not suspended does nothing.
 pub fn resume_clients(pids: &[i32]) {
     let parent = std::process::id() as i32;
     for &pid in pids {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
-        if is_live_tmux_child(&stat, parent) {
+        if crate::platform::process::is_live_child_named(pid, parent, "tmux") {
             unsafe {
                 libc::kill(pid as libc::pid_t, libc::SIGCONT);
             }
@@ -332,28 +325,12 @@ pub fn resume_clients(pids: &[i32]) {
     }
 }
 
-/// `/proc/<pid>/stat` names a running `tmux` whose parent is `parent`.
-fn is_live_tmux_child(stat: &str, parent: i32) -> bool {
-    let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
-        return false;
-    };
-    if close < open {
-        return false;
-    }
-    let comm = &stat[open + 1..close];
-    let mut rest = stat[close + 1..].split_whitespace();
-    let state = rest.next().unwrap_or("");
-    let ppid = rest.next().and_then(|v| v.parse::<i32>().ok());
-    comm.starts_with("tmux") && !matches!(state, "Z" | "X" | "x") && ppid == Some(parent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::os::fd::{AsFd, AsRawFd, FromRawFd};
+    use std::os::fd::AsFd;
     use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::CommandExt;
     use std::path::PathBuf;
     use std::process::{Child, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -443,17 +420,6 @@ mod tests {
         assert_eq!(plan(&targets, &listing), vec![(1, "client-1".to_string())]);
     }
 
-    #[test]
-    fn hidden_pause_resume_only_signals_live_tmux_children() {
-        let me = 4242;
-        assert!(is_live_tmux_child("77 (tmux: client) S 4242 77 77 0", me));
-        assert!(!is_live_tmux_child("77 (tmux: client) Z 4242 77 77 0", me), "zombie");
-        assert!(!is_live_tmux_child("77 (tmux: client) S 1 77 77 0", me), "not our child");
-        assert!(!is_live_tmux_child("77 (bash) S 4242 77 77 0", me), "pid reused");
-        assert!(!is_live_tmux_child("77 (a) b) S 4242", me));
-        assert!(!is_live_tmux_child("", me));
-    }
-
     /// Own server, socket and config per test. Never touches the user's tmux.
     struct Server {
         directory: PathBuf,
@@ -496,19 +462,7 @@ mod tests {
         /// A client like a card's: `tmux attach` in its own pty, leading its
         /// own session (so its process group is orphaned, as under VTE).
         fn attach(&self, session: &str, columns: u16, rows: u16) -> Attached {
-            let mut master_fd = -1;
-            let mut slave_fd = -1;
-            let size = libc::winsize { ws_row: rows, ws_col: columns, ws_xpixel: 0, ws_ypixel: 0 };
-            let opened = unsafe {
-                libc::openpty(&mut master_fd, &mut slave_fd, std::ptr::null_mut(), std::ptr::null(), &size)
-            };
-            assert_eq!(opened, 0, "openpty");
-            let master = unsafe { std::fs::File::from_raw_fd(master_fd) };
-            let slave = unsafe { std::fs::File::from_raw_fd(slave_fd) };
-            unsafe {
-                libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-                libc::fcntl(slave.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
-            }
+            let (master, slave) = crate::platform::pty::open(columns, rows).unwrap();
             let tty = pty_name(master.as_fd()).expect("pty name");
             let mut command = self.command();
             command
@@ -517,14 +471,7 @@ mod tests {
                 .stdin(Stdio::from(slave.try_clone().unwrap()))
                 .stdout(Stdio::from(slave.try_clone().unwrap()))
                 .stderr(Stdio::from(slave));
-            unsafe {
-                command.pre_exec(|| {
-                    if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                    Ok(())
-                });
-            }
+            crate::platform::pty::configure_child_session(&mut command);
             let child = command.spawn().unwrap();
             let bytes = Arc::new(AtomicUsize::new(0));
             let counter = Arc::clone(&bytes);

@@ -1,4 +1,5 @@
 //! Bounded, on-demand file references. Never a filesystem browser or a URL proxy.
+pub(crate) mod cli;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
@@ -79,6 +80,26 @@ pub fn file_type(path: &Path) -> Option<(&'static str, &'static str)> {
     )
 }
 
+/// Additional desktop previews; the bridge keeps its existing format set.
+fn desktop_file_type(path: &Path) -> Option<(&'static str, &'static str)> {
+    file_type(path).or_else(|| Some(match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "wav" | "wave" => ("audio/wav", "audio"),
+        "mp3" => ("audio/mpeg", "audio"),
+        "ogg" | "oga" | "opus" => ("audio/ogg", "audio"),
+        "flac" => ("audio/flac", "audio"),
+        "m4a" => ("audio/mp4", "audio"),
+        "aac" => ("audio/aac", "audio"),
+        "aif" | "aiff" => ("audio/aiff", "audio"),
+        "bmp" => ("image/bmp", "image"),
+        "tif" | "tiff" => ("image/tiff", "image"),
+        "jsonl" | "ndjson" | "json5" | "srt" | "vtt" | "ini" | "cfg"
+        | "sql" | "lua" | "rb" | "swift" | "kts" | "scss" | "sass"
+        | "vue" | "svelte" | "gradle" | "properties" | "glsl" | "vert"
+        | "frag" | "gd" | "tscn" | "tres" => ("text/plain", "text"),
+        _ => return None,
+    }))
+}
+
 fn version(meta: &Metadata) -> (u64, u64, u64, i64, i64, i64, i64) {
     (
         meta.dev(),
@@ -150,6 +171,10 @@ fn open_in(root: &Path, relative: &Path, write: bool) -> Result<File, String> {
 }
 
 fn register(root: &Path, session: &str, reference: &str) -> Result<Entry, String> {
+    register_for(root, session, reference, false)
+}
+
+fn register_for(root: &Path, session: &str, reference: &str, desktop: bool) -> Result<Entry, String> {
     let reference = reference.trim();
     if reference.len() > 4096
         || reference.chars().any(char::is_control)
@@ -165,7 +190,8 @@ fn register(root: &Path, session: &str, reference: &str) -> Result<Entry, String
     } else {
         path.to_path_buf()
     };
-    let (mime, kind) = file_type(&relative).ok_or("unsupported_file_type")?;
+    let (mime, kind) = if desktop { desktop_file_type(&relative) } else { file_type(&relative) }
+        .ok_or("unsupported_file_type")?;
     let file = open_regular(root, &relative)?;
     let meta = file.metadata().map_err(|_| "file_unavailable")?;
     if meta.len()
@@ -248,14 +274,37 @@ fn candidates(text: &str) -> Vec<String> {
 }
 
 pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String> {
+    list_for(session, explicit, false)
+}
+
+pub fn list_desktop(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String> {
+    list_for(session, explicit, true)
+}
+
+fn catalog_key(session: &str, desktop: bool) -> String {
+    if desktop { format!("desktop:{session}") } else { session.to_owned() }
+}
+
+fn list_for(session: &str, explicit: Option<&str>, desktop: bool) -> Result<Vec<Asset>, String> {
     let root = workspace(session)?;
+    let key = catalog_key(session, desktop);
+    let register = |root: &Path, session: &str, reference: &str| register_for(root, session, reference, desktop);
     let mut found = Vec::new();
     if let Some(path) = explicit {
         found.push(register(&root, session, path)?);
     }
     // This runs only when opening/refreshing the drawer, never per frame/keystroke.
-    let screen = crate::tmux::capture_pane_history(session).unwrap_or_default();
-    for path in candidates(&screen) {
+    let screen = if desktop {
+        crate::tmux::capture_file_references(session)
+    } else {
+        crate::tmux::capture_pane_history(session)
+    }.unwrap_or_default();
+    let paths = if desktop {
+        crate::asset_references::candidates(&screen, |path| desktop_file_type(Path::new(path)).is_some())
+    } else {
+        candidates(&screen)
+    };
+    for path in paths {
         if let Ok(entry) = register(&root, session, &path) {
             found.push(entry);
         }
@@ -283,7 +332,7 @@ pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String>
     let old = catalog
         .sessions
         .iter()
-        .position(|(id, _)| id == session)
+        .position(|(id, _)| id == &key)
         .and_then(|i| catalog.sessions.remove(i))
         .map(|(_, items)| items)
         .unwrap_or_default();
@@ -299,21 +348,22 @@ pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String>
     found.retain(|entry| paths.insert(entry.relative.clone()));
     found.truncate(MAX_ASSETS);
     let result = found.iter().map(|e| e.asset.clone()).collect();
-    catalog.sessions.push_back((session.to_string(), found));
+    catalog.sessions.push_back((key, found));
     while catalog.sessions.len() > MAX_SESSIONS {
         catalog.sessions.pop_front();
     }
     Ok(result)
 }
 
-fn listed(session: &str, id: &str) -> Result<Entry, String> {
+fn listed(session: &str, id: &str, desktop: bool) -> Result<Entry, String> {
+    let key = catalog_key(session, desktop);
     let root = workspace(session)?;
     let entry = {
         let catalog = catalog().lock().unwrap();
         catalog
             .sessions
             .iter()
-            .find(|(s, _)| s == session)
+            .find(|(s, _)| s == &key)
             .and_then(|(_, entries)| entries.iter().find(|e| e.asset.id == id))
             .cloned()
             .ok_or("asset_expired_refresh_list")?
@@ -325,7 +375,11 @@ fn listed(session: &str, id: &str) -> Result<Entry, String> {
 }
 
 pub fn read(session: &str, id: &str) -> Result<(Asset, Vec<u8>), String> {
-    read_entry(&listed(session, id)?)
+    read_entry(&listed(session, id, false)?)
+}
+
+pub fn read_desktop(session: &str, id: &str) -> Result<(Asset, Vec<u8>), String> {
+    read_entry(&listed(session, id, true)?)
 }
 
 /// Replace a listed Markdown file's contents with `text`, as edited on this
@@ -333,14 +387,14 @@ pub fn read(session: &str, id: &str) -> Result<(Asset, Vec<u8>), String> {
 /// since then is refused rather than overwritten. Returns the file's new
 /// listing (with a new ID), which replaces the old one.
 pub fn write_markdown(session: &str, id: &str, text: &str) -> Result<Asset, String> {
-    let entry = listed(session, id)?;
+    let entry = listed(session, id, true)?;
     let saved = write_entry(session, &entry, text)?;
     let asset = saved.asset.clone();
     let mut catalog = catalog().lock().unwrap();
     if let Some(slot) = catalog
         .sessions
         .iter_mut()
-        .find(|(s, _)| s == session)
+        .find(|(s, _)| s == &catalog_key(session, true))
         .and_then(|(_, entries)| entries.iter_mut().find(|e| e.asset.id == id))
     {
         *slot = saved;
@@ -391,6 +445,16 @@ fn read_entry(entry: &Entry) -> Result<(Asset, Vec<u8>), String> {
         "image/gif" => gif_frames(&bytes).is_ok(),
         "image/webp" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"),
         "application/pdf" => bytes.starts_with(b"%PDF-"),
+        "image/bmp" => bytes.starts_with(b"BM"),
+        "image/tiff" => bytes.starts_with(b"II\x2a\0") || bytes.starts_with(b"MM\0\x2a"),
+        "audio/wav" => bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WAVE"),
+        "audio/ogg" => bytes.starts_with(b"OggS"),
+        "audio/flac" => bytes.starts_with(b"fLaC"),
+        "audio/mp4" => bytes.get(4..8) == Some(b"ftyp"),
+        "audio/aiff" => bytes.starts_with(b"FORM") && matches!(bytes.get(8..12), Some(b"AIFF" | b"AIFC")),
+        "audio/mpeg" => bytes.starts_with(b"ID3") || bytes.first() == Some(&0xff)
+            && bytes.get(1).is_some_and(|b| b & 0xe6 == 0xe2),
+        "audio/aac" => bytes.first() == Some(&0xff) && bytes.get(1).is_some_and(|b| b & 0xf6 == 0xf0),
         _ => std::str::from_utf8(&bytes).is_ok() && !bytes.contains(&0),
     };
     if !valid {
@@ -477,7 +541,9 @@ mod tests {
                 crate::tmux::unique_session_name()
             ));
             std::fs::create_dir(&path).unwrap();
-            Self(path)
+            // Production resolves the workspace before the no-symlink walk.
+            // macOS's temporary directory commonly starts with /var -> /private/var.
+            Self(std::fs::canonicalize(path).unwrap())
         }
     }
     impl Drop for Fixture {
@@ -530,6 +596,57 @@ mod tests {
             .unwrap();
         assert!(register(&dir.0, "s", "huge.txt").is_err());
     }
+    #[test]
+    fn desktop_references_find_existing_wrapped_files_without_relaxing_access() {
+        let dir = Fixture::new();
+        std::fs::create_dir_all(dir.0.join("game/assets/art/menu")).unwrap();
+        for name in ["prisoners_at_dawn_v1.png", "prisoners_at_dawn_v1.prompt.json"] {
+            std::fs::write(dir.0.join("game/assets/art/menu").join(name), "fixture").unwrap();
+        }
+        std::fs::write(dir.0.join("hidden.png"), "must not substitute for .hidden.png").unwrap();
+        symlink("game/assets/art/menu/prisoners_at_dawn_v1.png", dir.0.join("link.png")).unwrap();
+        let text = "Created with imagegen: image (game/assets/art/menu/\n  prisoners_at_dawn_v1.png) · prompt (game/assets/art/menu/\n  prisoners_at_dawn_v1.prompt.json). .hidden.png link.png ../outside.png https://example.org/hidden.png";
+        let found: Vec<_> = crate::asset_references::candidates(text, |p| desktop_file_type(Path::new(p)).is_some())
+            .iter().filter_map(|path| register_for(&dir.0, "s", path, true).ok())
+            .map(|entry| entry.asset.relative_path).collect();
+        assert_eq!(found, ["game/assets/art/menu/prisoners_at_dawn_v1.png", "game/assets/art/menu/prisoners_at_dawn_v1.prompt.json"]);
+    }
+
+    #[test]
+    fn desktop_audio_and_extra_formats_preserve_bridge_types_and_limits() {
+        let dir = Fixture::new();
+        for (name, bytes) in [
+            ("sound.wav", b"RIFF\0\0\0\0WAVE".as_slice()),
+            ("sound.mp3", b"ID3".as_slice()),
+            ("sound.ogg", b"OggS".as_slice()),
+            ("sound.opus", b"OggS".as_slice()),
+            ("sound.flac", b"fLaC".as_slice()),
+            ("sound.m4a", b"\0\0\0\x18ftypM4A ".as_slice()),
+            ("sound.aac", b"\xff\xf1".as_slice()),
+            ("sound.aiff", b"FORM\0\0\0\0AIFF".as_slice()),
+            ("art.bmp", b"BM".as_slice()),
+            ("art.tiff", b"II\x2a\0".as_slice()),
+            ("events.jsonl", b"{}\n".as_slice()),
+            ("menu.gd", b"extends Node".as_slice()),
+        ] {
+            std::fs::write(dir.0.join(name), bytes).unwrap();
+            assert!(register(&dir.0, "s", name).is_err(), "bridge: {name}");
+            let entry = register_for(&dir.0, "s", name, true).unwrap();
+            assert_eq!(read_entry(&entry).unwrap().1, bytes, "desktop: {name}");
+            std::fs::write(dir.0.join(name), b"\0invalid format").unwrap();
+            let entry = register_for(&dir.0, "s", name, true).unwrap();
+            assert!(read_entry(&entry).is_err(), "mismatch: {name}");
+        }
+        File::create(dir.0.join("large.wav")).unwrap().set_len(MAX_FILE + 1).unwrap();
+        assert!(register_for(&dir.0, "s", "large.wav", true).is_err());
+        File::create(dir.0.join("large.jsonl")).unwrap().set_len(MAX_TEXT + 1).unwrap();
+        assert!(register_for(&dir.0, "s", "large.jsonl", true).is_err());
+        for path in ["app.exe", "page.html", "vector.svg", "archive.zip"] {
+            assert!(desktop_file_type(Path::new(path)).is_none());
+        }
+        assert_ne!(catalog_key("s", true), catalog_key("s", false));
+    }
+
     #[test]
     fn saves_edited_markdown_only_over_the_file_that_was_read() {
         let dir = Fixture::new();

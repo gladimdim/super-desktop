@@ -1,4 +1,4 @@
-//! Durable launch receipts. An interrupted request is never re-executed.
+//! Durable mutation receipts. An interrupted request is never re-executed.
 use crate::control::{self, Reply, Request};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -126,7 +126,7 @@ fn lock(root: &Path) -> io::Result<Lock> {
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
-            "launch journal busy",
+            "mutation journal busy",
         ));
     }
     Ok(Lock(file))
@@ -134,16 +134,63 @@ fn lock(root: &Path) -> io::Result<Lock> {
 
 fn journal_error(id: &str, _error: io::Error) -> Reply {
     // A competing execution or unreadable receipt may represent an earlier
-    // launch. Refusing this connection cannot establish its original outcome.
+    // mutation. Refusing this connection cannot establish its original outcome.
     let mut reply = Reply::unknown(id);
-    reply.error.as_mut().unwrap().message = "The private launch journal is busy, unavailable or invalid. No new launch was attempted; an earlier outcome cannot be established. Inspect this ID; do not retry with a new ID.".into();
+    reply.error.as_mut().unwrap().message = "The private mutation journal is busy, unavailable or invalid. No new mutation was attempted; an earlier outcome cannot be established. Inspect this ID; do not retry with a new ID.".into();
     reply
 }
 
-/// Serializes launches across threads/processes and saves intent before any
-/// launcher side effect. There is deliberately no automatic pruning of IDs.
+/// Serializes mutations across threads/processes and saves intent before any
+/// side effect. There is deliberately no automatic pruning of IDs.
 pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply) -> Reply {
-    let id = &request.request_id;
+    execute_operation(root,&request.request_id,&request.command,|random|match &request.command {
+            control::Command::WorkspaceEdit {
+                edit: control::WorkspaceEdit::NoteCreate { .. },
+                ..
+            } => format!("note_cli_{}", request.request_id),
+            control::Command::WorkspaceEdit {
+                edit:
+                    control::WorkspaceEdit::NoteUpdate { id, .. }
+                    | control::WorkspaceEdit::NoteDelete { id }
+                    | control::WorkspaceEdit::NoteMove { id, .. }
+                    | control::WorkspaceEdit::NoteResize { id, .. }
+                    | control::WorkspaceEdit::NoteTag { id, .. },
+                ..
+            } => id.clone(),
+            control::Command::ConnectionInvite {..} => "connection:invitation".into(),
+            control::Command::ConnectionDecide {id,..} | control::Command::ConnectionRevoke {id} => format!("connection:{id}"),
+            control::Command::PeerAdd {..} => "peer:pairing".into(),
+            control::Command::PeerCommand {id,..} | control::Command::PeerForget {id}=>format!("peer:{id}"),
+            control::Command::UpdatesCheck {} | control::Command::UpdatesInstall {..} => "updates".into(),
+            control::Command::WorkspaceEdit { .. } => "workspace".into(),
+            control::Command::PreferencesEdit { .. } | control::Command::Shortcut {..} => "settings".into(),
+            control::Command::Forget {id,..}
+            | control::Command::Attach { id, .. }
+            | control::Command::Viewport { id, .. }
+            | control::Command::CardAction { id, .. }
+            | control::Command::FilesEdit { id, .. }
+            | control::Command::Input { id, .. }
+            | control::Command::Mode { id, .. }
+            | control::Command::Move { id, .. }
+            | control::Command::Resize { id, .. }
+            | control::Command::Close { id, .. } => id.clone(),
+            _ => format!("sd_term_cli_{random}"),
+        },apply)
+}
+
+/// Owner-client orchestration shares the same ID namespace and durable journal.
+pub fn execute_operation(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply)->Reply {
+    execute_reserved(root,id,payload,target,apply,false)
+}
+
+/// Reserve a workflow ID durably, then release the global lock so its child
+/// mutations can use the same journal. Only the reservation owner writes the
+/// result: concurrent/restarted callers see pending and never enter apply.
+pub fn execute_workflow(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply)->Reply {
+    execute_reserved(root,id,payload,target,apply,true)
+}
+
+fn execute_reserved(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnce(&str)->String,apply:impl FnOnce(&str)->Reply,release:bool)->Reply {
     let _lock = match lock(root) {
         Ok(lock) => lock,
         Err(e) => return journal_error(id, e),
@@ -154,14 +201,14 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
     };
     let hash = format!(
         "{:x}",
-        Sha256::digest(serde_json::to_vec(&request.command).unwrap())
+        Sha256::digest(serde_json::to_vec(payload).unwrap())
     );
     match read(&path) {
         Ok(Some(entry)) if entry.request_hash != hash => {
             return Reply::failure(
                 id,
                 "conflict",
-                "This request ID already describes a different launch.",
+                "This request ID already describes a different mutation.",
             )
         }
         Ok(Some(entry)) => return entry.reply.unwrap_or_else(|| Reply::unknown(id)),
@@ -177,7 +224,7 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
         return Reply::failure(
             id,
             "journal_full",
-            "Launch journal is full. Existing IDs remain inspectable; no new launch was attempted.",
+            "Mutation journal is full. Existing IDs remain inspectable; no new mutation was attempted.",
         );
     }
     // Fresh random identity, recorded before launch. A request replay never
@@ -189,14 +236,16 @@ pub fn execute(root: &Path, request: &Request, apply: impl FnOnce(&str) -> Reply
     let mut entry = Entry {
         version: 1,
         request_hash: hash,
-        card_id: format!("sd_term_cli_{random}"),
+        card_id: target(&random),
         reply: None,
     };
     let durable = write_new(&path, &entry).and_then(|()| File::open(root)?.sync_all());
     if let Err(e) = durable {
         return journal_error(id, e);
     }
+    let held = if release { drop(_lock); None } else { Some(_lock) };
     let reply = apply(&entry.card_id);
+    let _held = held;
     entry.reply = Some(reply.clone());
     let temporary = root.join(format!(".{id}.{}.tmp", std::process::id()));
     // A leftover temporary file is evidence of an interrupted write, never
@@ -216,7 +265,7 @@ pub fn inspect(root: &Path, request_id: &str, id: &str) -> Reply {
         Err(_) => return Reply::failure(request_id, "invalid_arguments", "Invalid request ID."),
     };
     if !root.exists() {
-        return Reply::failure(request_id, "not_found", "No launch receipt has that ID.");
+        return Reply::failure(request_id, "not_found", "No mutation receipt has that ID.");
     }
     if let Err(e) = control::private_dir(root) {
         return journal_error(request_id, e);
@@ -228,9 +277,40 @@ pub fn inspect(root: &Path, request_id: &str, id: &str) -> Reply {
             "state":if entry.reply.is_some() {"recorded"} else {"unknown"},
             "result":entry.reply.unwrap_or_else(|| Reply::unknown(id))}),
         ),
-        Ok(None) => Reply::failure(request_id, "not_found", "No launch receipt has that ID."),
+        Ok(None) => Reply::failure(request_id, "not_found", "No mutation receipt has that ID."),
         Err(e) => journal_error(request_id, e),
     }
+}
+
+/// Stable, bounded receipt metadata; never includes result payloads or credentials.
+pub fn list(root:&Path,request_id:&str,after:Option<&str>,limit:u16,expected:Option<&str>)->Reply {
+    use std::os::unix::fs::MetadataExt;
+    let fail=|code,message|Reply::failure(request_id,code,message);
+    if !(1..=100).contains(&limit) || after.is_some_and(|s|!valid_id(s)) { return fail("invalid_arguments","Use limit 1-100 and a returned cursor."); }
+    let collect=||->io::Result<Vec<(String,u64,i64,i64,u64)>> {
+        match control::private_dir(root) { Err(e) if e.kind()==io::ErrorKind::NotFound=>return Ok(vec![]),Err(e)=>return Err(e),Ok(_)=>{} }
+        let mut files=vec![];
+        for file in fs::read_dir(root)? {
+            let file=file?;let name=file.file_name();let Some(id)=name.to_str().and_then(|n|n.strip_suffix(".json")) else {continue;};
+            if !valid_id(id) {return Err(io::Error::other("invalid receipt name"));}
+            let m=control::private_file(&file.path(),false)?;
+            files.push((id.to_owned(),m.ino(),m.mtime(),m.mtime_nsec(),m.len()));
+            if files.len()>MAX_ENTRIES {return Err(io::Error::other("too many receipts"));}
+        }
+        files.sort();Ok(files)
+    };
+    let files=match collect(){Ok(v)=>v,Err(_)=>return fail("unavailable","Private receipt inventory is unavailable.")};
+    let revision=format!("{:x}",Sha256::digest(serde_json::to_vec(&files).unwrap()));
+    if expected.is_some_and(|v|v!=revision) {return fail("conflict","Receipt inventory changed; restart pagination.");}
+    let mut entries=vec![];
+    let eligible:Vec<_>=files.iter().filter(|f|after.is_none_or(|a|f.0.as_str()>a)).collect();
+    for (id,_,modified,_,_) in eligible.iter().take(limit as usize).copied() {
+        let entry=match read(&root.join(format!("{id}.json"))){Ok(Some(v))=>v,_=>return fail("unavailable","A receipt is unreadable; inventory is incomplete.")};
+        entries.push(serde_json::json!({"id":id,"cardId":entry.card_id,"state":if entry.reply.is_some(){"recorded"}else{"unknown"},"ok":entry.reply.as_ref().map(|r|r.ok),"outcome":entry.reply.as_ref().and_then(|r|r.error.as_ref()).map(|e|e.outcome.as_str()),"modifiedUnixSeconds":modified}));
+    }
+    if collect().ok().as_ref()!=Some(&files){return fail("conflict","Receipt inventory changed during this read.");}
+    let next=if eligible.len()>entries.len(){entries.last().map(|e|e["id"].clone())}else{None};
+    Reply::success(request_id,serde_json::json!({"entries":entries,"revision":revision,"total":files.len(),"nextCursor":next,"order":"request-id","contentIncluded":false,"scope":"local-cli-mutations"}))
 }
 
 #[cfg(test)]
@@ -240,7 +320,10 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let path = std::env::temp_dir().join(format!(
+            let path = std::env::temp_dir()
+                .canonicalize()
+                .expect("resolve system temporary directory")
+                .join(format!(
                 "sd-receipt-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -258,6 +341,7 @@ mod tests {
             control_version: 1,
             request_id: "launch-1".into(),
             command: control::Command::Launch {
+                arguments: None,
                 harness: "shell".into(),
                 cwd: "/private/path".into(),
                 allow_unsafe_harness: false,
@@ -266,6 +350,20 @@ mod tests {
         }
     }
 
+    #[test]
+    fn audit_pages_redact_content_guard_revisions_and_refuse_symlinks() {
+        let root=Temp::new();let request=request();
+        assert!(list(&root.0,"read",None,1,None).ok);
+        for n in 0..3 {let mut r=request.clone();r.request_id=format!("audit-{n}");assert!(execute(&root.0,&r,|_|Reply::success(&r.request_id,serde_json::json!({"secret":"PRIVATE TEXT"}))).ok);}
+        let first=list(&root.0,"read",None,1,None).data.unwrap();
+        assert_eq!(first["total"],3);assert_eq!(first["nextCursor"],"audit-0");assert!(!first.to_string().contains("PRIVATE TEXT"));
+        let revision=first["revision"].as_str().unwrap();
+        let second=list(&root.0,"read",Some("audit-0"),2,Some(revision)).data.unwrap();assert_eq!(second["entries"].as_array().unwrap().len(),2);assert!(second["nextCursor"].is_null());
+        assert!(execute(&root.0,&request,|_|Reply::success("launch-1",serde_json::json!({}))).ok);
+        assert_eq!(list(&root.0,"read",Some("audit-0"),2,Some(revision)).exit_code(),5);
+        std::os::unix::fs::symlink(root.0.join("audit-0.json"),root.0.join("linked.json")).unwrap();
+        assert!(!list(&root.0,"read",None,100,None).ok);
+    }
     #[test]
     fn cli_launch_receipt_replays_result_and_rejects_reused_id_with_changed_payload() {
         let root = Temp::new();

@@ -21,32 +21,420 @@ pub const MAX_CONNECTIONS: usize = 8;
 pub const DEADLINE: Duration = Duration::from_secs(3);
 pub const METHODS: &[&str] = &[
     "app.status",
+    "audit.list",
+    "access.list",
+    "connection.read",
+    "connection.invite",
+    "connection.decide",
+    "connection.revoke",
+    "peer.add",
+    "peer.pairing",
+    "peer.read",
+    "peer.command",
+    "peer.forget",
+    "updates.check",
+    "updates.install",
+    "updates.status",
     "capabilities",
     "terminal.list",
     "terminal.inspect",
+    "terminal.runtime",
+    "terminal.composer",
+    "terminal.status",
+    "terminal.capture",
+    "terminal.geometry",
+    "terminal.move",
+    "terminal.resize",
+    "terminal.close",
+    "terminal.forget",
+    "terminal.relaunch",
+    "terminal.mode",
+    "terminal.card",
+    "terminal.viewport",
+    "terminal.attach",
+    "terminal.viewport.list",
+    "terminal.input",
     "harness.list",
     "harness.inspect",
     "harness.launch",
     "request.inspect",
+    "workspace.read",
+    "workspace.edit",
+    "settings.read",
+    "settings.shortcut",
+    "settings.edit",
+    "terminal.files.read",
+    "terminal.files.edit",
 ];
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ModeAction {
+    Minimize,
+    Restore,
+    Expand,
+    Collapse,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum CardAction { Focus, Raise, Tag { value:u8 } }
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum ViewportAction {
+    Acquire { columns:u16, rows:u16, ttl:u16 },
+    Set { lease:String, columns:u16, rows:u16, ttl:u16 },
+    Release { lease:String },
+}
+
+pub const MAX_INPUT: usize = 4096;
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum InputData {
+    Send {
+        text: String,
+        #[serde(default)]
+        enter: bool,
+    },
+    Keys {
+        keys: Vec<String>,
+    },
+    Prompt {
+        text: String,
+        #[serde(default)]
+        attachments: Vec<String>,
+    },
+}
+
+pub fn key_name(key: &str) -> Option<&'static str> {
+    Some(match key {
+        "Enter" => "Enter",
+        "Escape" => "Escape",
+        "Tab" => "Tab",
+        "Backspace" => "BSpace",
+        "Delete" => "DC",
+        "Up" => "Up",
+        "Down" => "Down",
+        "Left" => "Left",
+        "Right" => "Right",
+        "Home" => "Home",
+        "End" => "End",
+        "PageUp" => "PPage",
+        "PageDown" => "NPage",
+        "Ctrl-C" => "C-c",
+        "Ctrl-D" => "C-d",
+        "Ctrl-U" => "C-u",
+        "Ctrl-L" => "C-l",
+        _ => return None,
+    })
+}
+
+impl InputData {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if let Self::Prompt { attachments, .. } = self {
+            let unique: std::collections::BTreeSet<_> = attachments.iter().collect();
+            if attachments.len() > 4 || unique.len() != attachments.len() || attachments.iter().any(|id| id.len()!=64 || !id.bytes().all(|b| b.is_ascii_hexdigit())) {
+                return Err("Use at most four distinct checked asset IDs from terminal files list/add.");
+            }
+        }
+        match self {
+            Self::Send { text, .. } | Self::Prompt { text, .. } => {
+                if text.is_empty()
+                    || text.len() > MAX_INPUT
+                    || text
+                        .chars()
+                        .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
+                {
+                    return Err("Input must contain 1-4096 UTF-8 bytes; controls other than newline/tab are refused. Use named keys for controls.");
+                }
+            }
+            Self::Keys { keys }
+                if keys.is_empty()
+                    || keys.len() > 32
+                    || keys.iter().any(|key| key_name(key).is_none()) =>
+            {
+                return Err("Send 1-32 supported named keys. See terminal keys --help.");
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Layout {
+    pub version: u32,
+    pub items: Vec<LayoutItem>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LayoutItem {
+    pub kind: String,
+    pub id: String,
+    pub mode: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum WorkspaceQuery {
+    Inspect,
+    Layout,
+    ValidateLayout { layout: Layout },
+    Folders,
+    Notes,
+    Note { id: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum WorkspaceEdit {
+    NoteCreate { text: String, x: i32, y: i32, width: i32, height: i32, tag: u8 },
+    NoteUpdate { id: String, text: String },
+    NoteDelete { id: String },
+    NoteMove { id: String, x: i32, y: i32 },
+    NoteResize { id: String, width: i32, height: i32 },
+    NoteTag { id: String, tag: u8 },
+    Folder { path: String },
+    Arrange,
+    Layout { layout: Layout },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PreferencesQuery {
+    Settings { key: Option<String> },
+    HarnessArgs { id: String },
+    Custom { id: String },
+    Theme,
+    Usage,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LauncherSpec {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub executable: String,
+    pub arguments: Vec<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum PreferencesEdit {
+    Setting { key: String, value: Option<Value> },
+    HarnessArgs { id: String, arguments: Option<Vec<String>> },
+    CustomPut { launcher: LauncherSpec, create: bool },
+    CustomRemove { id: String },
+    Visibility { keys: Option<Vec<String>> },
+    Rescan,
+    ThemeReload,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum FilesQuery {
+    List,
+    Read { asset: String, offset: u64 },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum FilesEdit {
+    Add { path: String },
+    Save { asset: String, text: String },
+    Remove { asset: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="terminal.composer")]
+    Composer { id:String },
+    #[serde(rename="connection.read")]
+    ConnectionRead { pending: bool },
+    #[serde(rename="connection.invite")]
+    ConnectionInvite { output: String },
+    #[serde(rename="connection.decide")]
+    ConnectionDecide { id: String, code: String, approve: bool, #[serde(rename="allowAccess")] allow_access: bool },
+    #[serde(rename="connection.revoke")]
+    ConnectionRevoke { id: String },
+    #[serde(rename="peer.add")]
+    PeerAdd { invitation: String, host: Option<String>, port: Option<u16>, name: Option<String> },
+    #[serde(rename="peer.pairing")]
+    PeerPairing { id: String },
+    #[serde(rename="peer.read")]
+    PeerRead {id:Option<String>,query:String},
+    #[serde(rename="peer.command")]
+    PeerCommand {id:String,document:Value,#[serde(rename="allowMutation")] allow_mutation:bool},
+    #[serde(rename="peer.forget")]
+    PeerForget {id:String},
+    #[serde(rename="updates.check")]
+    UpdatesCheck {},
+    #[serde(rename="updates.install")]
+    UpdatesInstall {#[serde(rename="checkId")] check_id:String,#[serde(rename="expectVersion")] expect_version:String,#[serde(rename="expectCommit")] expect_commit:String,#[serde(rename="allowInstall")] allow_install:bool},
+    #[serde(rename="updates.status")]
+    UpdatesStatus {id:String},
+    #[serde(rename="terminal.forget")]
+    Forget {id:String,#[serde(rename="expectEpoch")] expect_epoch:String,#[serde(rename="expectRevision")] expect_revision:String},
+    #[serde(rename="terminal.relaunch")]
+    Relaunch {id:String,#[serde(rename="nativeSession")] native_session:Option<String>,#[serde(rename="allowUnsafeHarness")] allow_unsafe_harness:bool,#[serde(rename="expectEpoch")] expect_epoch:String,#[serde(rename="expectRevision")] expect_revision:String,#[serde(rename="expectPaneIdentity")] expect_pane_identity:String},
+    #[serde(rename="settings.shortcut")]
+    Shortcut {combo:String,preview:Option<String>,#[serde(rename="expectEpoch")] expect_epoch:Option<String>,#[serde(rename="expectRevision")] expect_revision:Option<String>},
+    #[serde(rename = "audit.list")]
+    Audit { after: Option<String>, limit:u16, #[serde(rename="expectRevision")] expect_revision:Option<String> },
+    #[serde(rename = "access.list")]
+    Access {},
     #[serde(rename = "app.status")]
     Status {},
+    #[serde(rename = "terminal.attach")]
+    Attach {
+        id: String,
+        interactive: bool,
+        seconds: u16,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+        #[serde(rename = "expectPaneIdentity")]
+        expect_pane_identity: String,
+    },
+    #[serde(rename = "terminal.viewport.list")]
+    Viewports { id: String },
+    #[serde(rename = "terminal.viewport")]
+    Viewport {
+        id:String,action:ViewportAction,
+        #[serde(rename="expectEpoch")]
+        expect_epoch:Option<String>,
+        #[serde(rename="expectRevision")]
+        expect_revision:Option<String>,
+        #[serde(rename="expectPaneIdentity")]
+        expect_pane_identity:Option<String>,
+    },
+    #[serde(rename="terminal.card")]
+    CardAction {
+        id:String, action:CardAction,
+        #[serde(rename="expectEpoch")]
+        expect_epoch:String,
+        #[serde(rename="expectRevision")]
+        expect_revision:String,
+    },
+    #[serde(rename="terminal.files.read")]
+    Files { id: String, query: FilesQuery },
+    #[serde(rename="terminal.files.edit")]
+    FilesEdit {
+        id: String, edit: FilesEdit,
+        #[serde(rename="expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename="expectRevision")]
+        expect_revision: String,
+    },
+    #[serde(rename = "settings.read")]
+    Preferences { query: PreferencesQuery },
+    #[serde(rename = "settings.edit")]
+    PreferencesEdit {
+        edit: PreferencesEdit,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
+    #[serde(rename = "workspace.read")]
+    Workspace { query: WorkspaceQuery },
+    #[serde(rename = "workspace.edit")]
+    WorkspaceEdit {
+        edit: WorkspaceEdit,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
     #[serde(rename = "capabilities")]
     Capabilities {},
     #[serde(rename = "terminal.list")]
     Terminals {},
     #[serde(rename = "terminal.inspect")]
     Terminal { id: String },
+    #[serde(rename = "terminal.runtime")]
+    Runtime { id: String },
+    #[serde(rename = "terminal.status")]
+    Lifecycle { id: String },
+    #[serde(rename = "terminal.capture")]
+    Capture {
+        id: String,
+        #[serde(default)]
+        history: bool,
+        #[serde(default)]
+        lines: Option<u32>,
+    },
+    #[serde(rename = "terminal.geometry")]
+    Geometry { id: String },
+    #[serde(rename = "terminal.move")]
+    Move {
+        id: String,
+        x: i32,
+        y: i32,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
+    #[serde(rename = "terminal.resize")]
+    Resize {
+        id: String,
+        width: u32,
+        height: u32,
+        #[serde(default)]
+        clamp: bool,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
+    #[serde(rename = "terminal.mode")]
+    Mode {
+        id: String,
+        action: ModeAction,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+    },
+    #[serde(rename = "terminal.input")]
+    Input {
+        id: String,
+        input: InputData,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+        #[serde(rename = "expectPaneIdentity")]
+        expect_pane_identity: String,
+    },
+    #[serde(rename = "terminal.close")]
+    Close {
+        id: String,
+        #[serde(rename = "expectEpoch")]
+        expect_epoch: String,
+        #[serde(rename = "expectRevision")]
+        expect_revision: String,
+        #[serde(rename = "expectPaneIdentity")]
+        expect_pane_identity: String,
+    },
     #[serde(rename = "harness.list")]
     Harnesses { all: bool },
     #[serde(rename = "harness.inspect")]
     Harness { id: String },
     #[serde(rename = "harness.launch")]
     Launch {
+        #[serde(default)]
+        arguments: Option<Vec<String>>,
         harness: String,
         cwd: String,
         #[serde(default, rename = "allowUnsafeHarness")]
@@ -58,7 +446,28 @@ pub enum Command {
     InspectRequest { id: String },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+impl Command {
+    pub fn is_mutation(&self) -> bool {
+        matches!(
+            self,
+            Self::ConnectionInvite {..} | Self::ConnectionDecide {..} | Self::ConnectionRevoke {..} | Self::PeerAdd {..} | Self::PeerCommand {..} | Self::PeerForget {..} | Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
+                | Self::Attach { .. }
+                | Self::Viewport { .. }
+                | Self::CardAction { .. }
+                | Self::FilesEdit { .. }
+                | Self::PreferencesEdit { .. }
+                | Self::WorkspaceEdit { .. }
+                | Self::Input { .. }
+                | Self::Mode { .. }
+                | Self::Launch { .. }
+                | Self::Move { .. }
+                | Self::Resize { .. }
+                | Self::Close { .. }
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
     pub control_version: u32,
@@ -66,7 +475,7 @@ pub struct Request {
     pub command: Command,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Reply {
     pub schema_version: u32,
@@ -79,7 +488,7 @@ pub struct Reply {
     pub error: Option<Error>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Error {
     pub code: String,
     pub message: String,
@@ -114,7 +523,7 @@ impl Reply {
         }
     }
     pub fn unknown(id: &str) -> Self {
-        let mut reply = Self::failure(id, "unknown_outcome", "Launch outcome is unknown. Inspect this request ID and terminal inventory; do not launch with a new ID to retry.");
+        let mut reply = Self::failure(id, "unknown_outcome", "Mutation outcome is unknown. Inspect this request ID and current terminal state; do not retry with a new ID.");
         reply.error.as_mut().unwrap().outcome = "unknown".into();
         reply
     }
@@ -124,16 +533,17 @@ impl Reply {
         }
         match self.error.as_ref().map(|e| e.code.as_str()) {
             Some("invalid_arguments" | "invalid_request") => 2,
-            Some("not_found") => 3,
+            Some("not_found" | "terminal_not_running") => 3,
             Some(
                 "permission_denied"
+                | "denied"
                 | "unsafe_socket"
                 | "unsafe_harness"
                 | "download_requires_opt_in",
             ) => 4,
             Some("conflict") => 5,
             Some("timeout" | "unknown_outcome") => 7,
-            Some("output_failed" | "invalid_response") => 8,
+            Some("output_failed" | "invalid_response" | "operation_failed" | "configuration_error") => 8,
             _ => 6,
         }
     }
@@ -143,15 +553,34 @@ pub fn capabilities() -> Value {
     json!({"controlVersion": VERSION, "serverVersion": env!("CARGO_PKG_VERSION"),
         "target": "local", "access": "owner", "readOnly": false, "methods": METHODS,
         "limits": {"requestBytes":MAX_REQUEST,"replyBytes":MAX_REPLY,"connections":MAX_CONNECTIONS,"timeoutMs":DEADLINE.as_millis()},
+        "terminalAttachment":{"seconds":[1,300],"defaultSeconds":30,"connectWithinMs":5000,"maxStreams":4,"maxOutputBytes":16777216,"default":"read-only-jsonl","interactiveRequiresRawAndTty":true,"gridOwnership":false,"singleUse":true},
+        "terminalViewport":{"columns":[20,500],"rows":[5,300],"ttlSeconds":[1,300],"maxLeases":4,"sizingPolicy":"latest","exclusive":false,"persistentOptionsChanged":false,"requiresPaneIdentity":true},
+        "terminalFiles":{"methods":["list","add","read","save","remove"],"chunkBytes":65536,"maxSaveBytes":8192,"fileLimitBytes":16777216,"textLimitBytes":524288,"referenceRemovalDeletesFile":false,"saveFormat":"markdown","catalog":"local-cli"},
+        "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
+        "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
-        "delegatedAccess": false, "remoteTargets": false,
-        "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":false,"focus":false,"journalEntries":4096}})
+        "connections":{"reads":["list","pending"],"mutations":["invite","approve","reject","revoke"],"wireVersion":3,"bridgeAutoStart":false,"invitationOutput":"new-private-file","approvalRequiresCode":true},
+        "delegatedAccess": false, "remoteTargets": false, "peerWrappers":{"reads":["list","inspect","workspace"],"mutations":["add","command","forget"],"pairingJobs":{"statusMethod":"peer.pairing","durable":false,"maxJobs":32,"maxActive":1,"approval":"host-code-comparison"},"wire":"existing-pinned-peer-protocol","localFallback":false},
+        "terminalObservation":{"readOnly":true,"maxHistoryLines":2000,"defaultHistoryLines":200,"maxCaptureBytes":65536,"rawAnsi":false,"resize":false},
+        "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
+        "promptAttachments":{"maxFiles":4,"maxBytes":16777216,"delivery":"path-references","nativeImageConfirmation":false,"source":"checked-cli-assets","privateCopies":true},
+        "terminalComposer":{"supportedHarnesses":["claude","codex","grok"],"readOnly":true,"readiness":"recognized-empty-composer","submissionObserved":false},
+        "terminalInput":{"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
+        "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
+        "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
+        "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":true,"focus":false,"journalEntries":4096}})
 }
 
+#[cfg(target_os = "linux")]
 pub fn runtime_dir() -> PathBuf {
     std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("/run/user/{}", unsafe { libc::geteuid() })))
+}
+
+#[cfg(target_os = "macos")]
+pub fn runtime_dir() -> PathBuf {
+    crate::platform::runtime::directory()
 }
 
 fn denied() -> io::Error {
@@ -161,7 +590,8 @@ fn denied() -> io::Error {
     )
 }
 
-pub(crate) fn private_dir(path: &Path) -> io::Result<()> {
+#[doc(hidden)]
+pub fn private_dir(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(denied());
     }
@@ -184,7 +614,8 @@ pub(crate) fn private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn private_file(path: &Path, socket: bool) -> io::Result<fs::Metadata> {
+#[doc(hidden)]
+pub fn private_file(path: &Path, socket: bool) -> io::Result<fs::Metadata> {
     let m = fs::symlink_metadata(path)?;
     if m.uid() != unsafe { libc::geteuid() }
         || m.mode() & 0o777 != 0o600
@@ -201,7 +632,8 @@ pub(crate) fn private_file(path: &Path, socket: bool) -> io::Result<fs::Metadata
 
 // SO_SNDTIMEO bounds a blocking AF_UNIX connect when a listener's backlog is
 // full. Set it before connect, not just before writing the request.
-fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+#[cfg(target_os = "linux")]
+pub fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let bytes = path.as_os_str().as_bytes();
     if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
@@ -233,6 +665,83 @@ fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
+#[cfg(target_os = "macos")]
+pub fn connect_bounded(path: &Path, deadline: Instant) -> io::Result<UnixStream> {
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.len() >= address.sun_path.len() || bytes.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "control path is too long",
+        ));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    address.sun_len = (std::mem::offset_of!(libc::sockaddr_un, sun_path) + bytes.len() + 1) as u8;
+    for (to, from) in address.sun_path.iter_mut().zip(bytes) {
+        *to = *from as libc::c_char;
+    }
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Darwin has no SOCK_CLOEXEC and a send timeout does not reliably bound
+    // connect. Keep the socket nonblocking until the deadline-controlled poll.
+    stream.set_nonblocking(true)?;
+    remaining(deadline)?;
+    let rc = unsafe {
+        libc::connect(
+            fd,
+            &address as *const _ as *const libc::sockaddr,
+            address.sun_len.into(),
+        )
+    };
+    if rc != 0 {
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EINPROGRESS) | Some(libc::EWOULDBLOCK)
+        ) {
+            return Err(error);
+        }
+        loop {
+            let timeout = remaining(deadline)?.as_millis().clamp(1, i32::MAX as u128) as i32;
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                continue;
+            }
+            if let Some(error) = stream.take_error()? {
+                return Err(error);
+            }
+            if poll.revents & libc::POLLOUT != 0 {
+                break;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "control connect failed",
+            ));
+        }
+    }
+    stream.set_nonblocking(false)?;
+    Ok(stream)
+}
+
+#[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut size = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -254,7 +763,16 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     Ok(cred.uid)
 }
 
-fn check_peer(stream: &UnixStream) -> io::Result<()> {
+#[cfg(target_os = "macos")]
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let (mut uid, mut gid) = (0, 0);
+    if unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(uid)
+}
+
+pub fn check_peer(stream: &UnixStream) -> io::Result<()> {
     if peer_uid(stream)? != unsafe { libc::geteuid() } {
         return Err(denied());
     }
@@ -268,10 +786,61 @@ fn remaining(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "control deadline exceeded"))
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn read_chunk(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
+    stream.set_read_timeout(Some(remaining(deadline)?))?;
+    stream.read(bytes)
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn read_chunk(stream: &mut UnixStream, bytes: &mut [u8], deadline: Instant) -> io::Result<usize> {
+    // Darwin rejects SO_RCVTIMEO after the peer closes, even when a complete
+    // reply is buffered. Poll against the same absolute deadline and receive
+    // without blocking so a closed peer cannot discard an already sent reply.
+    loop {
+        let timeout = remaining(deadline)?.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let mut poll = libc::pollfd {
+            fd: stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        remaining(deadline)?;
+        let count = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT,
+            )
+        };
+        if count >= 0 {
+            return Ok(count as usize);
+        }
+        let error = io::Error::last_os_error();
+        if matches!(
+            error.kind(),
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+        ) {
+            continue;
+        }
+        return Err(error);
+    }
+}
+
 fn read_exact(stream: &mut UnixStream, mut bytes: &mut [u8], deadline: Instant) -> io::Result<()> {
     while !bytes.is_empty() {
-        stream.set_read_timeout(Some(remaining(deadline)?))?;
-        match stream.read(bytes) {
+        match read_chunk(stream, bytes, deadline) {
             Ok(0) => {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -501,9 +1070,7 @@ pub fn request_at(runtime: &Path, request: &Request) -> Reply {
     let mut attempted = false;
     match exchange(runtime, request, &mut attempted) {
         Ok(reply) => reply,
-        Err(_) if attempted && matches!(request.command, Command::Launch { .. }) => {
-            Reply::unknown(&request.request_id)
-        }
+        Err(_) if attempted && request.command.is_mutation() => Reply::unknown(&request.request_id),
         Err(e) => {
             let (code, message) = match e.kind() {
                 io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ("unavailable", "Local control is unavailable. Start a compatible SUPER DESKTOP daemon; this command never starts one."),
@@ -557,22 +1124,39 @@ pub fn new_request(command: Command) -> io::Result<Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn administration_errors_preserve_documented_exit_categories() {
+        for (code, expected) in [("denied",4),("operation_failed",8),("configuration_error",8),("unknown_outcome",7),("conflict",5)] {
+            assert_eq!(Reply::failure("test",code,"test").exit_code(),expected, "{code}");
+        }
+    }
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     struct Runtime(PathBuf);
     impl Runtime {
         fn new() -> Self {
-            let p = std::env::temp_dir().join(format!(
+            // macOS TMPDIR can exceed the Unix socket path limit once the
+            // runtime directory and socket filename are appended.
+            let p = Path::new("/tmp").join(format!(
                 "sd-control-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             fs::DirBuilder::new().mode(0o700).create(&p).unwrap();
-            Self(p)
+            Self(p.canonicalize().unwrap())
         }
     }
     impl Drop for Runtime {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn socket_pair_peer_identity_is_the_current_owner() {
+        let (first, second) = UnixStream::pair().unwrap();
+        for stream in [&first, &second] {
+            assert_eq!(peer_uid(stream).unwrap(), unsafe { libc::geteuid() });
+            check_peer(stream).unwrap();
         }
     }
 
@@ -653,6 +1237,24 @@ mod tests {
     }
 
     #[test]
+    fn buffered_reply_survives_peer_close_and_truncation_still_fails() {
+        for (bytes, complete) in [
+            (vec![0, 0, 0, 2, b'{', b'}'], true),
+            (vec![0, 0, 0, 2, b'{'], false),
+        ] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            server.write_all(&bytes).unwrap();
+            drop(server);
+            let reply = read_frame(&mut client, MAX_REPLY, Instant::now() + DEADLINE);
+            if complete {
+                assert_eq!(reply.unwrap(), b"{}");
+            } else {
+                assert_eq!(reply.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+            }
+        }
+    }
+
+    #[test]
     fn framing_rejects_truncation_and_oversized_lengths_before_dispatch() {
         for bytes in [
             vec![0, 0, 0, 0],
@@ -730,10 +1332,61 @@ mod tests {
             // The daemon may have applied the request. Drop without a reply.
         });
         let request = new_request(Command::Launch {
+            arguments: None,
             harness: "shell".into(),
             cwd: "/tmp".into(),
             allow_unsafe_harness: false,
             allow_download: false,
+        })
+        .unwrap();
+        let reply = request_at(&runtime.0, &request);
+        assert_eq!(reply.exit_code(), 7);
+        assert_eq!(reply.error.unwrap().outcome, "unknown");
+        worker.join().unwrap();
+        let absent = request_at(&runtime.0, &request);
+        assert_eq!(absent.error.unwrap().outcome, "not_applied");
+    }
+
+    #[test]
+    fn cli_geometry_lost_reply_is_unknown_and_never_replayed() {
+        let runtime = Runtime::new();
+        let server = Server::bind(&runtime.0).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.listener.accept().unwrap();
+            read_frame(&mut stream, MAX_REQUEST, Instant::now() + DEADLINE).unwrap();
+            // The daemon may have applied the request. Drop without a reply.
+        });
+        let request = new_request(Command::Move {
+            id: "sd_term_test".into(),
+            x: 80,
+            y: 100,
+            clamp: false,
+            expect_epoch: "epoch".into(),
+            expect_revision: "revision".into(),
+        })
+        .unwrap();
+        let reply = request_at(&runtime.0, &request);
+        assert_eq!(reply.exit_code(), 7);
+        assert_eq!(reply.error.unwrap().outcome, "unknown");
+        worker.join().unwrap();
+        let absent = request_at(&runtime.0, &request);
+        assert_eq!(absent.error.unwrap().outcome, "not_applied");
+    }
+
+    #[test]
+    fn cli_close_lost_reply_is_unknown_and_never_replayed() {
+        let runtime = Runtime::new();
+        let server = Server::bind(&runtime.0).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = server.listener.accept().unwrap();
+            read_frame(&mut stream, MAX_REQUEST, Instant::now() + DEADLINE).unwrap();
+            // The daemon may have applied the request. Drop without a reply.
+        });
+        let request = new_request(Command::Close {
+            id: "sd_term_test".into(),
+            expect_epoch: "epoch".into(),
+            expect_revision: "a".repeat(64),
+            expect_pane_identity: "b".repeat(64),
         })
         .unwrap();
         let reply = request_at(&runtime.0, &request);

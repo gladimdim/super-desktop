@@ -85,11 +85,17 @@ fn asset_path(name: &str) -> Option<PathBuf> {
     path.is_file().then_some(path)
 }
 
-/// Locate the vendored logos directory: installed copy under
+/// Packaged builds use /usr/share/super-desktop/assets. Other builds use the copy under
 /// `~/.config/super-desktop/assets/logos` first, then the `assets/logos`
 /// folder of the repo checkout relative to the executable
 /// (`<repo>/target/{release,debug}/super-desktop`).
 pub fn find_logos_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = bundle_asset("logos") { return Some(path); }
+    #[cfg(target_os = "linux")]
+    if let Some(path) = packaged_assets("logos") {
+        return Some(path);
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let p = PathBuf::from(home).join(".config/super-desktop/assets/logos");
         if p.is_dir() {
@@ -117,9 +123,15 @@ pub fn logo_path(agent: &str, light_theme: bool) -> Option<PathBuf> {
 }
 
 /// Locate the vendored icon-theme root (`assets/icons`, containing `hicolor/`).
-/// Same resolution order as [`find_logos_dir`]: installed copy first, then the
+/// Same resolution order as [`find_logos_dir`]: package assets, installed copy, then the
 /// repo checkout relative to the executable.
 pub fn find_icons_root() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let Some(path) = bundle_asset("icons") { return Some(path); }
+    #[cfg(target_os = "linux")]
+    if let Some(path) = packaged_assets("icons") {
+        return Some(path);
+    }
     if let Some(home) = std::env::var_os("HOME") {
         let p = PathBuf::from(home).join(".config/super-desktop/assets/icons");
         if p.join("hicolor").is_dir() {
@@ -139,6 +151,25 @@ pub fn find_icons_root() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_asset(kind: &str) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let path = executable.parent()?.parent()?.join("Resources/assets").join(kind);
+    path.is_dir().then_some(path)
+}
+
+// Package upgrades own these assets. An old installer's per-user copy must
+// not shadow the assets matching the packaged executable.
+#[cfg(target_os = "linux")]
+fn packaged_assets(kind: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    if exe != std::path::Path::new("/usr/lib/super-desktop/super-desktop") {
+        return None;
+    }
+    let path = PathBuf::from("/usr/share/super-desktop/assets").join(kind);
+    path.is_dir().then_some(path)
 }
 
 #[cfg(test)]

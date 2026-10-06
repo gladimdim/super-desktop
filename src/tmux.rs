@@ -668,37 +668,16 @@ pub fn session_exists(session_name: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Generate a tmux session name that cannot collide with a live session.
-///
-/// The old scheme (`millis % 1_000_000`) wrapped every ~16 minutes AND
-/// collided when two cards were created within the same millisecond: the
-/// second `tmux new-session -d -s <dup>` silently failed and the new card
-/// attached to the OLD session, so Ctrl+C / output in one card leaked into
-/// the other. Full millis + pid + random suffix + existence check fixes it.
+/// Generate a session name distinct from concurrent calls, even when the
+/// clock does not advance. Keep checking tmux for names left by older processes.
 pub fn unique_session_name() -> String {
     for _ in 0..20 {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        // Cheap randomness without new deps: nanos + pid mix.
-        let nano = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let rand = (nano ^ (std::process::id() << 8)) % 46656;
-        let candidate = format!("sd_term_{now}_{rand:04x}");
+        let candidate = super_desktop::session_id::candidate();
         if !session_exists(&candidate) {
             return candidate;
         }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    // Practically unreachable fallback.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    format!("sd_term_{now}_{}", std::process::id())
+    super_desktop::session_id::candidate()
 }
 
 pub fn kill_session(session_name: &str) {
@@ -847,12 +826,14 @@ pub fn preview_from_screen(screen: &str, lines: usize) -> String {
     tail.join("\n")
 }
 
+#[cfg(target_os = "linux")]
 fn get_proc_comm(pid: u32) -> String {
     std::fs::read_to_string(format!("/proc/{}/comm", pid))
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
 fn get_direct_children(pid: u32) -> Vec<u32> {
     let task_path = format!("/proc/{}/task/{}/children", pid, pid);
     if let Ok(content) = std::fs::read_to_string(&task_path) {
@@ -863,6 +844,12 @@ fn get_direct_children(pid: u32) -> Vec<u32> {
     }
     Vec::new()
 }
+
+#[cfg(target_os = "macos")]
+fn get_proc_comm(pid: u32) -> String { crate::platform::process::name(pid).unwrap_or_default() }
+
+#[cfg(target_os = "macos")]
+fn get_direct_children(pid: u32) -> Vec<u32> { crate::platform::process::children(pid) }
 
 /// Compare the shell's process group with the terminal's foreground group.
 /// Background jobs and persistent helpers are not evidence of a busy prompt.
@@ -1112,7 +1099,7 @@ pub fn status_for_pane(
     }
 
     let p_num = pid.parse::<u32>().unwrap_or(0);
-    if p_num != 0 && !std::path::Path::new(&format!("/proc/{}", p_num)).exists() {
+    if p_num != 0 && !crate::platform::process::exists(p_num) {
         return SessionStatus { status: "EXITED", label: "○ EXITED", pid, cmd, cwd };
     }
 
@@ -1155,8 +1142,11 @@ pub fn status_for_pane(
 
     let is_shell_cmd = matches!(cmd.as_str(), "bash" | "zsh" | "fish" | "sh");
     if is_shell_agent {
+        #[cfg(target_os = "linux")]
         let foreground = std::fs::read_to_string(format!("/proc/{p_num}/stat"))
             .map(|stat| foreground_job_from_stat(&stat)).unwrap_or(false);
+        #[cfg(target_os = "macos")]
+        let foreground = crate::platform::process::has_foreground_job(p_num);
         let busy = foreground || (!is_shell_cmd && !cmd.is_empty());
         return SessionStatus {
             status: if busy { "WORKING" } else { "IDLE" },
@@ -1396,6 +1386,18 @@ pub const CARD_CAPTURE_HISTORY: u32 = 30;
 /// (asset discovery), not for per-second status work.
 pub fn capture_pane_history(session_name: &str) -> Option<String> {
     capture_pane(session_name, false, 300)
+}
+
+/// Join terminal soft wraps for desktop file discovery, without changing captures
+/// used for display, status, links or the phone bridge.
+pub fn capture_file_references(session_name: &str) -> Option<String> {
+    capture_file_references_with(Command::new("tmux"), session_name)
+}
+
+fn capture_file_references_with(mut command: Command, session_name: &str) -> Option<String> {
+    let output = command.args(["capture-pane", "-p", "-J", "-t", session_name, "-S", "-300"])
+        .output().ok()?;
+    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Visible rows only: the status fallback for screen-based agents.
@@ -2330,14 +2332,15 @@ mod tests {
         run("PRAGMA journal_mode=WAL; CREATE TABLE session(id TEXT, title TEXT); INSERT INTO session VALUES('a','First');");
         let runs = || SQLITE_RUNS.with(|runs| runs.get());
         let sql = "SELECT title FROM session WHERE id = 'a';";
-        // The first reader of a closed WAL database recreates its (empty) WAL,
-        // which changes the stamp; opencode itself keeps the WAL open.
+        assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
+        // Some SQLite builds create a WAL on the first read; others do not.
+        // Warm both cases before asserting that stable reads start no process.
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
         let before = runs();
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
         assert_eq!(sqlite_query(&db, sql).as_deref(), Some("First"));
-        assert_eq!(runs() - before, 1, "an unchanged database must be answered from memory");
+        assert_eq!(runs() - before, 0, "an unchanged database must be answered from memory");
         let before = runs();
         // A write (through the WAL or a checkpoint) must be seen.
         run("UPDATE session SET title = 'Renamed' WHERE id = 'a';");
@@ -2687,7 +2690,7 @@ mod tests {
         let sess = "test_sd_session_state_probe";
         let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", sess, "-c", "/tmp", "/usr/bin/bash"])
+            .args(["new-session", "-d", "-s", sess, "-c", "/tmp", "/bin/bash"])
             .output();
 
         assert_eq!(session_state("test_sd_session_state_missing"), None);
@@ -3412,7 +3415,7 @@ mod tests {
         if !has_tmux {
             return;
         }
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let (sess, _cmd) = create_session("shell", Some("/bin/bash"), None);
         let _cleanup = SessionCleanup(vec![sess.clone()]);
         let grid = pane_grid(&sess).expect("an owned pane has a grid");
         // It is the pane's own size — the width its captured text is rendered
@@ -3463,7 +3466,7 @@ mod tests {
         };
 
         // 1. A new card runs in the folder from the top bar.
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), Some(&dir_s));
+        let (sess, _cmd) = create_session("shell", Some("/bin/bash"), Some(&dir_s));
         let mut cleanup = SessionCleanup(vec![sess.clone()]);
         assert_eq!(
             pane_dir(&sess).as_deref(),
@@ -3477,7 +3480,7 @@ mod tests {
         let _ = Command::new("tmux")
             .args(["kill-session", "-t", &sess])
             .output();
-        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None, Some(&dir_s));
+        ensure_session_with_agent_id(&sess, "shell", Some("/bin/bash"), None, Some(&dir_s));
         assert_eq!(
             pane_dir(&sess).as_deref(),
             Some(dir_s.as_str()),
@@ -3485,7 +3488,7 @@ mod tests {
         );
 
         // 3. With nothing configured the old behaviour stands: $HOME.
-        let (sess_home, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let (sess_home, _cmd) = create_session("shell", Some("/bin/bash"), None);
         cleanup.0.push(sess_home.clone());
         let home_s = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
         let home_s = std::fs::canonicalize(&home_s)
@@ -3530,7 +3533,7 @@ mod tests {
         let probe = "test_sd_detach_on_destroy_probe";
         let mut cleanup = SessionCleanup(vec![probe.to_string()]);
         let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", probe, "-c", "/tmp", "/usr/bin/bash"])
+            .args(["new-session", "-d", "-s", probe, "-c", "/tmp", "/bin/bash"])
             .output();
         let global_before = show_option(&["-gv", "detach-on-destroy"]);
         assert!(
@@ -3549,7 +3552,7 @@ mod tests {
             return;
         }
 
-        let (sess, _cmd) = create_session("shell", Some("/usr/bin/bash"), None);
+        let (sess, _cmd) = create_session("shell", Some("/bin/bash"), None);
         cleanup.0.push(sess.clone());
         assert_eq!(
             session_detach_on_destroy(&sess),
@@ -3568,7 +3571,7 @@ mod tests {
             .args(["set-option", "-t", &sess, "detach-on-destroy", "off"])
             .output();
         assert_eq!(session_detach_on_destroy(&sess), "off");
-        ensure_session_with_agent_id(&sess, "shell", Some("/usr/bin/bash"), None, None);
+        ensure_session_with_agent_id(&sess, "shell", Some("/bin/bash"), None, None);
         assert_eq!(
             session_detach_on_destroy(&sess),
             "on",
@@ -3752,6 +3755,36 @@ mod tests {
             kept,
             [("sd_term_a".to_string(), CaptureKind::Card), ("sd_term_a".to_string(), CaptureKind::Visible)]
         );
+    }
+
+    #[test]
+    fn file_references_capture_joins_real_terminal_soft_wraps() {
+        let socket = format!("sd-files-{}", unique_session_name());
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["-L", &self.0, "kill-server"]).output();
+            }
+        }
+        let _cleanup = Cleanup(socket.clone());
+        let made = Command::new("tmux").args([
+            "-L", &socket, "-f", "/dev/null", "new-session", "-d", "-x", "35", "-y", "10", "-s", "files",
+            "printf '%s\\n' 'Created image (game/assets/art/menu/prisoners_at_dawn_v1.png).'; sleep 30",
+        ]).output().unwrap();
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let start = std::time::Instant::now();
+        loop {
+            let mut command = Command::new("tmux");
+            command.args(["-L", &socket]);
+            let text = capture_file_references_with(command, "files").unwrap();
+            if text.contains("prisoners_at_dawn_v1.png") {
+                let paths = crate::asset_references::candidates(&text, |p| p.ends_with(".png"));
+                assert!(paths.contains(&"game/assets/art/menu/prisoners_at_dawn_v1.png".into()), "{paths:?}");
+                break;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(3), "{text}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// What reuse relies on, against a real tmux server: an idle pane's row

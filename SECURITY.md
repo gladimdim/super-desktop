@@ -6,7 +6,7 @@ sandbox. Do not approve unknown devices or publish pairing invitations.
 
 ## Local CLI control
 
-Local CLI inventory and structured launches use a separate Unix socket at
+Local CLI inventory, terminal observation, geometry and structured launches use a separate Unix socket at
 `$XDG_RUNTIME_DIR/super-desktop/control-v1.sock`, with a 0700 directory and
 0600 socket. Both ends check the peer UID. Unsafe paths, symlinks and insecure
 permissions are refused. A lifecycle lock protects the listener, and only an
@@ -16,8 +16,10 @@ Client errors never unlink sockets or start another daemon.
 Requests and responses are length-framed and bounded to 16 KiB and 1 MiB.
 Connections have three-second I/O deadlines, with at most eight workers.
 The API exposes status, capabilities, saved card metadata, launcher discovery,
-launching and launch receipts; it does not expose prompts, terminal output,
-notes or launch arguments. Paths and labels can still be private. JSON output escapes terminal
+launching, mutation receipts, guarded closing, card movement/resizing and explicit terminal capture. Inventory omits
+prompts and terminal output; `terminal capture` can reveal sensitive text,
+including credentials and prompts. Note text is exposed only by explicit `note inspect`; launch arguments remain redacted in inventory but explicit `harness args get` and `harness custom get` return them.
+Paths and labels can still be private. JSON output escapes terminal
 control characters. This endpoint is independent of the existing bridge IPC.
 
 Access belongs to the desktop owner, including agents running as that user.
@@ -26,24 +28,173 @@ also access the existing IPC, tmux, and the user's files. Launcher discovery
 does not execute a launcher, verify its authentication, or establish that its
 permission settings are safe.
 
-Structured launches use configured executables and arguments. Recognized
+`terminal runtime`, `terminal status` and `terminal capture` require an exact saved local card and
+one pane across its tmux session. The daemon rechecks the live card mapping and
+pane/server identity before returning data, withholding content on detected
+replacement, closure, alternate-screen transition or grid change. Observations
+are not atomic with ongoing output. Capture is bounded to 64 KiB and at most
+2000 requested history rows plus the screen, with explicit truncation fields.
+It strips terminal escapes and control characters, never requests raw ANSI,
+and does not attach a client, send input, clear history or resize the pane.
+Output remains untrusted data even after control sequences are stripped.
+
+`terminal follow` repeatedly captures replacement screen snapshots with explicit
+possible gaps and finite time/output limits. It pins the pane identity. Native
+status and wait use existing attributable harness metadata, without deriving
+completion from screen text or silence. A changed completion ID does not prove
+which submitted input completed. Neither operation attaches or resizes a client.
+
+Workspace and note edits share the durable mutation journal. Their revision
+covers the workspace, current display and live note buffers, including edits
+waiting for autosave. Focused or gesturing notes are refused. Note text is
+bounded on write and omitted from receipts; inspect is an explicit content read.
+Layout imports accept only typed IDs/modes/rectangles, validate all entries
+before movement, and cannot create sessions or import commands. Operations can
+still have unknown outcomes after application if transport or persistence fails.
+
+Local viewport leases own separate tmux clients and change only those clients'
+sizing participation. They require exact pane identity and current card guards,
+refuse linked/split windows and non-latest sizing policies, and expire after at
+most 300 requested seconds plus an in-flight command's cleanup delay. At most
+four clients are retained. Lease expiry, release and detected pane replacement
+detach the client without killing the harness. Leases do not imply exclusive
+control of the shared grid or restrict another owner's tmux access.
+
+Local CLI file commands use a separate bounded catalog and the existing
+workspace-relative descriptor traversal checks. Explicit reads return bounded
+base64 chunks; exports create only a user-named new file, with mode 0600 and
+no overwrite. Markdown saves compare the listed file version before opening
+for write, share durable mutation receipts, and report unknown on possible
+partial writes. Removing a reference never deletes its file; other views or
+later output may rediscover it. Existing bridge file routes and formats remain
+unchanged. CLI file content is not stored in receipts.
+
+Settings mutations accept only typed, allowlisted keys. Launcher configuration
+can select executables and permission-bypass arguments for future starts; it
+does not confine the configured program. Argument-bearing configuration is
+returned only by explicit get operations and omitted from mutation receipts.
+CLI setting changes refuse an open Settings panel to avoid replacing UI edits.
+
+Structured launches use configured executables and arguments; explicit one-shot argument arrays require unsafe acknowledgement and do not change saved defaults. Recognized
 permission-bypass flags, argument overrides saved in Settings, and custom
 launchers require `--allow-unsafe-harness`; built-in package-runner fallbacks
 require `--allow-download`. These are per-request acknowledgements, not
 restrictions on an executable's own behavior, startup files or network access.
 Launches require an absolute existing directory and never submit a prompt.
 
-Before starting a launcher the daemon durably records the request ID, a hash
-of its parameters and a reserved card ID in an owner-only state directory.
+Before a structured launch, move, resize, mode change, input or close the daemon durably records the
+request ID, a hash of its parameters and a target or reserved card ID in an
+owner-only state directory.
 Receipts and the journal lock have mode 0600; symlink paths are refused.
-The saved result includes its launch directory, so receipts are private data.
+Saved results can include launch directories and geometry, so receipts are private data.
 Matching IDs return the recorded result; changed payloads conflict; incomplete
 or unreadable receipts are never replayed. The journal holds up to 4096 entries
 without automatic pruning. Removing it removes duplicate protection. A timeout
-or lost connection after sending a launch means an unknown outcome: inspect
+or lost connection after sending a mutation means an unknown outcome: inspect
 the request and terminal inventory before taking further action. Unknown may
 include a launched process whose card could not be added. No automatic cleanup
 kills such a process, and a receipt does not establish ongoing process liveness.
+
+Shortcut preview/apply is Linux-local and separate from bridge operations.
+Preview exposes the configuration being reviewed. Apply binds a hash to the
+existing file, proposed contents and runtime bindings, plus workspace revision
+guards; key/modifier validation excludes injected Lua. It keeps a private backup,
+validates reload/configerrors and attempts rollback without overwriting a detected
+intervening edit. External writers are not locked, so a final-check race remains.
+A lost acknowledgement or failed state save can leave a changed binding and an
+unknown receipt; inspect it before choosing another operation.
+
+Structured application lifecycle is owner-client orchestration over existing
+local IPC, with private parent-directory validation, socket ownership/type
+checks and peer UID checks. It uses the shared durable receipt journal, which is
+also available to the GTK-free client. Stop waits for the observed process start
+identity to disappear; restart never resends an uncertain shutdown. Startup is
+explicit, logs to a new0600 file, and does not imply desktop readiness. No bridge
+route or existing IPC contract is changed.
+
+Update checks run explicit background jobs and never install. Installation
+requires an unconsumed successful check, exact reviewed version/commit and an
+explicit acknowledgement. The worker rechecks the branch, tracked changes and
+upstream commit, and merges the immutable commit before invoking the existing
+rebuild script. Pinned/detached installs are refused. Queue receipts survive;
+job progress does not survive daemon replacement, and failures may leave the
+source clone fast-forwarded. Job replies omit credentials and raw process errors.
+
+Audit list/export expose only local receipt metadata, with bounded pages and
+revision checks; full results require request inspect. Exports create a new
+0600 file and retain partial output on failure. Resource events are finite
+polled replacement snapshots with explicit gap/resync markers; they are not an
+audit log. Access inspection exposes owner UID/modes, not bridge credentials,
+and offers no delegated sandbox or grant/revoke facility.
+
+Moves and resizes require the epoch and opaque revision from a current geometry
+read. The daemon validates them on the GTK thread against the current card and
+logical output, and refuses an active gesture. Expanded cards cannot be moved
+or resized; minimized cards cannot be resized. Bounds adjustments require
+`--clamp`. A move can raise a card and a resize can naturally change its VTE grid;
+neither command starts a harness or explicitly focuses it. Receipts include
+historical geometry and target IDs, and replay never overwrites later edits.
+
+Card mode commands use the same revision and gesture guards. Expanding refuses
+another expanded card rather than implicitly changing it. Restore/expand attach
+only to an exact existing session name and never execute the saved launcher or
+respawn an exited pane. Attachment is asynchronous and can change the cell grid;
+a successful mode receipt does not establish attachment or process identity.
+No mode command explicitly shows or focuses the overlay. Expansion is transient.
+
+Structured input additionally requires the observed pane identity. It rechecks
+card ownership and runtime identity, then uses a synchronous tmux condition and
+per-operation marker to send to the exact observed pane. Copy mode, exited and
+ambiguous/shared panes are refused. Text travels over stdin as hexadecimal bytes,
+not in subprocess arguments, receipt contents or temporary files. Named keys are
+allowlisted. Input is code execution as the owner; multiline text can execute
+without an appended Enter. Composer checks cannot exclude concurrent GUI/phone
+input. Acknowledged delivery is not verified submission or completion. Unknown
+outcomes are never replayed. A harmless input marker may remain after refusal.
+
+CLI prompt attachments accept only checked CLI asset IDs, revalidate the file
+version, and stage separate 0600 copies under a 0700 directory. The four-file,
+16 MiB prompt limit and 512 MiB/1024-request store cap apply. Delivery uses path
+references with existing composer and pane guards; native image confirmation
+is not implied. Staged copies may remain after a refused submission and are
+not pruned automatically. Receipts omit both file contents and prompt text.
+
+Local terminal attachment uses a single-use 0600 socket in the owner-only
+runtime directory, peer-UID checks at both ends and a random token handshake.
+Streams have a five-second admission window, at most 300 seconds and about
+16 MiB of output, bounded frames and read/write deadlines. Read-only JSONL is
+the default; raw rendering and interactive input require explicit flags.
+Interactive input requires a TTY, is identity-checked and shares the local
+preparation lock. It can execute arbitrary owner commands; concurrent GUI or
+phone input is still possible. There is no automatic replay after disconnect.
+Cleanup detaches only this client, never the harness, and takes no grid lease.
+
+Terminal restart/resume reuse exact-session close guards, then launch into a
+new reserved identity under one receipt. The saved command/workspace and widget
+identity are rechecked before destruction. Unsafe acknowledgement covers that
+saved command, including its potential downloads. Resume appends only a validated
+explicit native selector to a supported direct executable; it never guesses the
+latest conversation. A failure after close is partial/unknown and never replayed.
+Forget only removes the card under geometry/preparation guards and never kills
+or launches a session, including when the old session is missing.
+
+Structured close requires the current card epoch/revision and live pane identity.
+The worker serializes against pending preparation; GTK rechecks the exact card
+and widget before canceling attachment and removing it. Tmux destruction uses an
+exact session ID behind checks of session/pane IDs, PIDs, name, single unlinked
+window/pane and a random per-operation session marker. A second process-identity
+probe follows marker installation, and a restarted server cannot inherit the
+marker. There is no prefix matching or name-based cleanup fallback. Missing
+panes, foreign names, active geometry gestures and ambiguous/shared layouts are refused. A harmless marker
+may remain after refusal. Owner-controlled hooks and direct tmux commands are
+outside these guards; this is not a same-user sandbox.
+
+Close interrupts work. Card removal and tmux destruction are not atomic: an
+unknown outcome can leave a running session without its card. Inspect the
+original request receipt before recovery; never retry under a new ID or kill a
+replacement by name. Success confirms session destruction and saved card
+removal, not the exit of every descendant process. Historical close receipts
+never execute again against a recreated session.
 
 ## Transport and identity
 

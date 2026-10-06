@@ -10,6 +10,7 @@ use crate::desktop_protocol::{
     AttachCommand, AttachEvent, TerminalSize, ATTACH_MAX_BACKLOG, ATTACH_MAX_CHUNK,
 };
 use crate::peer_client::{self, Peer, PeerError, Result};
+use super_desktop::platform::wake::Wake;
 use futures_channel::mpsc::{self, Receiver, Sender};
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -402,53 +403,6 @@ fn input_disposition(ready: bool, stopped: bool) -> Disposition {
         Disposition::Send
     } else {
         Disposition::Hold
-    }
-}
-
-/// `eventfd` the worker polls beside the socket, so a keystroke is written
-/// without waiting out the idle read.
-struct Wake(RawFd);
-
-impl Wake {
-    fn new() -> Arc<Self> {
-        let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
-        assert!(fd >= 0, "eventfd: {}", std::io::Error::last_os_error());
-        Arc::new(Self(fd))
-    }
-
-    fn notify(&self) {
-        let one = 1u64.to_ne_bytes();
-        let _ = unsafe { libc::write(self.0, one.as_ptr().cast(), one.len()) };
-    }
-
-    fn drain(&self) {
-        let mut buf = [0u8; 8];
-        loop {
-            let n = unsafe { libc::read(self.0, buf.as_mut_ptr().cast(), buf.len()) };
-            if n < 0 {
-                break;
-            }
-        }
-    }
-
-    fn raw(&self) -> RawFd {
-        self.0
-    }
-
-    #[cfg(test)]
-    fn pending(&self) -> bool {
-        let mut fd = libc::pollfd {
-            fd: self.0,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        unsafe { libc::poll(&mut fd, 1, 0) > 0 && fd.revents & libc::POLLIN != 0 }
-    }
-}
-
-impl Drop for Wake {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.0) };
     }
 }
 

@@ -537,6 +537,8 @@ pub struct MiniTerminalCard {
     /// not grow a second copy of an action that could drift from the button's.
     iconify_action: CardAction,
     restore_action: CardAction,
+    cli_mode_change: Rc<Cell<bool>>,
+    cli_tag_buttons: Rc<RefCell<Vec<glib::WeakRef<Button>>>>,
     geometry_commit: GeometryAction,
 }
 
@@ -1038,6 +1040,8 @@ impl MiniTerminalCard {
             source_message: Rc::clone(&source_message),
             iconify_action: Rc::new(RefCell::new(None)),
             restore_action: Rc::new(RefCell::new(None)),
+            cli_mode_change: Rc::new(Cell::new(false)),
+            cli_tag_buttons: Rc::clone(&tag_sync),
             geometry_commit: Rc::new(RefCell::new(None)),
         };
 
@@ -1152,6 +1156,7 @@ impl MiniTerminalCard {
         };
 
         let restore_action: Rc<dyn Fn()> = {
+            let cli_mode_change = Rc::clone(&card.cli_mode_change);
             let session_task = Arc::clone(&card.session_task);
             let expanded = Rc::clone(&expanded);
             let data = Rc::clone(&data);
@@ -1208,7 +1213,7 @@ impl MiniTerminalCard {
                 container.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
-                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore, remote_restore.clone(), &fit, &font_fit);
+                    spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore, remote_restore.clone(), &fit, &font_fit, !cli_mode_change.get());
                 } else if let Some(term) = vte.borrow().as_ref() {
                     let theme = crate::theme::current_theme();
                     let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
@@ -1501,6 +1506,10 @@ impl MiniTerminalCard {
     }
 
     pub fn expand(&self, screen_w: i32, screen_h: i32) {
+        self.expand_with_policy(screen_w, screen_h, true);
+    }
+
+    fn expand_with_policy(&self, screen_w: i32, screen_h: i32, interactive: bool) {
         if *self.expanded.borrow() {
             return;
         }
@@ -1518,7 +1527,7 @@ impl MiniTerminalCard {
             .set_label(&card_hint_or(&self.source_message, "Double-click header to collapse"));
 
         if self.vte.borrow().is_none() {
-            self.attach_vte();
+            self.attach_vte_with_policy(None, interactive);
         } else if let Some(term) = self.vte.borrow().as_ref() {
             let theme = crate::theme::current_theme();
             let font = gtk4::pango::FontDescription::from_string(&format!("{} 11", theme.font_family));
@@ -1526,7 +1535,7 @@ impl MiniTerminalCard {
         }
 
         self.apply_chrome();
-        self.focus_terminal();
+        if interactive { self.focus_terminal(); }
     }
 
     pub fn collapse(&self) {
@@ -1580,6 +1589,39 @@ impl MiniTerminalCard {
             }
             None => false,
         }
+    }
+
+    /// Local CLI presentation changes never prepare a saved launcher or
+    /// explicitly focus the terminal. Interactive and bridge actions keep
+    /// their existing attachment policy.
+    pub(crate) fn cli_set_mode(&self, action: crate::control::ModeAction, width: i32, height: i32) -> bool {
+        use crate::control::ModeAction;
+        match action {
+            ModeAction::Minimize | ModeAction::Restore => {
+                self.cli_mode_change.set(true);
+                let changed = self.set_iconified(action == ModeAction::Minimize);
+                self.cli_mode_change.set(false);
+                changed
+            }
+            ModeAction::Expand => {
+                self.expand_with_policy(width, height, false);
+                true
+            }
+            ModeAction::Collapse => {
+                self.collapse();
+                true
+            }
+        }
+    }
+
+    pub(crate) fn cli_raise(&self) { (self.on_raise)(self.container.clone().upcast()); }
+    pub(crate) fn cli_focus(&self) -> bool {
+        self.cli_raise();
+        self.vte.borrow().as_ref().is_some_and(|vte| vte.grab_focus())
+    }
+    pub(crate) fn cli_set_tag(&self,tag:u8) {
+        self.data.borrow_mut().tag=tag;
+        for button in self.cli_tag_buttons.borrow().iter().filter_map(|b|b.upgrade()) {crate::tag::apply_tag(&button,tag);}
     }
 
     /// Apply a geometry commit exactly like a local resize gesture: stored
@@ -1902,6 +1944,10 @@ impl MiniTerminalCard {
     }
 
     fn attach_vte_with_inventory(&self, inventory: Option<Arc<crate::tmux::SessionInventory>>) {
+        self.attach_vte_with_policy(inventory, true);
+    }
+
+    fn attach_vte_with_policy(&self, inventory: Option<Arc<crate::tmux::SessionInventory>>, prepare: bool) {
         if self.vte.borrow().is_some() {
             return;
         }
@@ -1919,7 +1965,19 @@ impl MiniTerminalCard {
             self.remote.clone(),
             &self.fit,
             &self.font_fit,
+            prepare,
         );
+    }
+
+    pub(crate) fn cli_session_task(&self) -> Arc<crate::session_task::SessionTask> {
+        Arc::clone(&self.session_task)
+    }
+
+    /// Cancel attachment/preparation without scheduling a name-based kill.
+    /// The CLI worker already holds the preparation lock and owns destruction.
+    pub(crate) fn detach_for_cli_close(&self) {
+        self.session_task.close();
+        self.detach_vte();
     }
 
     pub fn close_session(&self) {
@@ -2262,8 +2320,10 @@ pub fn apply_vte_colors(term: &VteTerminal, theme: &crate::theme::OmarchyTheme) 
 }
 
 fn remove_vte(vte: &Rc<RefCell<Option<VteTerminal>>>, preview_box: &gtk4::Box) {
-    if let Some(term) = vte.borrow_mut().take() {
+    let term = vte.borrow_mut().take();
+    if let Some(term) = term {
         preview_box.remove(&term);
+        crate::desktop_shell::terminal_removed(preview_box);
     }
 }
 
@@ -2282,6 +2342,7 @@ fn spawn_vte(
     remote: Option<Rc<RemoteSession>>,
     fit: &Rc<Cell<(f64, f64, f64)>>,
     font_fit: &RefCell<Option<crate::card_source::FontFit>>,
+    prepare: bool,
 ) {
     if session_task.is_closed() { return; }
     remove_vte(vte, preview_box);
@@ -2426,10 +2487,10 @@ fn spawn_vte(
         let prepare_session = session.clone();
         let prepared = gtk4::gio::spawn_blocking(move || {
             let cwd = crate::tmux::resolve_workspace_dir(workspace_dir.as_deref());
-            let ready = prepare_task.prepare(|| ensure_session_with_inventory(
+            let ready = prepare_task.prepare(|| if prepare { ensure_session_with_inventory(
                 &prepare_session, &agent_type, Some(&cmd), agent_session_id.as_deref(), Some(&cwd),
                 inventory.as_deref(),
-            ));
+            ) });
             (ready, cwd, tmux_bin())
         }).await;
         let Ok((true, cwd, tmux)) = prepared else { return; };
@@ -2437,7 +2498,10 @@ fn spawn_vte(
         if task.is_closed() { return; }
         let (Some(term), Some(slot)) = (weak_term.upgrade(), weak_slot.upgrade()) else { return; };
         if slot.borrow().as_ref() != Some(&term) { return; }
-        let argv = [tmux.as_str(), "-2", "attach-session", "-t", session.as_str()];
+        // CLI mode changes attach only by exact saved name. attach-session
+        // cannot create or respawn a missing session.
+        let target = if prepare { session.clone() } else { format!("={session}") };
+        let argv = [tmux.as_str(), "-2", "attach-session", "-t", target.as_str()];
 
         let mut env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
         // Attaching from inside a tmux client nests sessions and routes input
@@ -2668,6 +2732,159 @@ mod tests {
     }
 
     #[test]
+    fn cli_close_detaches_without_legacy_cleanup() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_close_detach_inner");
+    }
+
+    #[test]
+    fn cli_close_detach_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let card = MiniTerminalCard::new(
+            term_data(true), |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        );
+        card.open_with_bare_terminal(480, 320);
+        let task = card.cli_session_task();
+        let before = std::time::Instant::now();
+        assert_eq!(task.with_idle_until(before + Duration::from_secs(1), || card.detach_for_cli_close()), Some(()));
+        assert!(task.is_closed());
+        assert!(card.vte.borrow().is_none());
+        assert!(!task.prepare(|| panic!("closed card must not restart")));
+    }
+
+    #[test]
+    fn cli_mode_changes_keep_geometry_and_never_start_sessions() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_mode_changes_inner");
+    }
+
+    #[test]
+    fn cli_mode_changes_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        use crate::control::ModeAction::*;
+        use std::os::unix::fs::PermissionsExt;
+        let tmux = crate::tmux::tmux_bin();
+        let root = std::env::temp_dir().join(format!("sd-mode-gtk-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let socket = root.join("socket");
+        struct Cleanup { tmux: String, root: std::path::PathBuf }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new(&self.tmux).arg("-S").arg(self.root.join("socket"))
+                    .arg("kill-server").output();
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let _cleanup = Cleanup { tmux: tmux.clone(), root: root.clone() };
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        let run = |args: &[&str]| std::process::Command::new(&tmux).arg("-S").arg(&socket)
+            .args(["-f", "/dev/null"]).args(args).output().unwrap();
+        let session = "sd_term_mode_missing_suffix";
+        assert!(run(&["new-session", "-d", "-s", session, "sleep 60"]).status.success());
+        std::fs::write(root.join("bin/tmux"), r#"#!/bin/sh
+printf '%s\n' "$*" >> "$SD_MODE_LOG"
+exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
+"#).unwrap();
+        std::fs::set_permissions(root.join("bin/tmux"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::env::set_var("SD_MODE_TMUX", &tmux);
+        std::env::set_var("SD_MODE_SOCKET", &socket);
+        std::env::set_var("SD_MODE_LOG", root.join("calls"));
+        std::env::set_var("PATH", format!("{}:{}", root.join("bin").display(), std::env::var("PATH").unwrap()));
+        gtk4::init().unwrap();
+        let mut data = term_data(true);
+        data.id = "sd_term_mode_missing".into();
+        data.session_name = data.id.clone();
+        data.width = icon_side(1.0); data.height = icon_side(1.0);
+        data.restored_width = 480; data.restored_height = 320;
+        data.icon_x = Some(300); data.icon_y = Some(400);
+        let saved = Rc::new(RefCell::new(None));
+        let capture = Rc::clone(&saved);
+        let card = MiniTerminalCard::new(data, |_, _, _| {},
+            move |_, data| { *capture.borrow_mut() = Some(data.clone()); },
+            |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local);
+        let wait = |done: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !done() {
+                assert!(Instant::now() < deadline, "attachment did not settle");
+                crate::gtk_test::pump(10);
+            }
+        };
+        for action in [Restore, Expand] {
+            assert!(card.cli_set_mode(action, 1024, 768));
+            let exited = Rc::new(Cell::new(false));
+            let signal = Rc::clone(&exited);
+            card.vte.borrow().as_ref().unwrap().connect_child_exited(move |_, status| {
+                assert_ne!(status, 0, "missing exact session must fail, not match its prefix");
+                signal.set(true);
+            });
+            wait(&|| exited.get());
+            assert!(!card.vte.borrow().as_ref().unwrap().has_focus());
+            if action == Restore {
+                {
+                    let saved = saved.borrow(); let d = saved.as_ref().unwrap();
+                    assert!(!d.iconified);
+                    assert_eq!((d.width, d.height, d.x, d.y), (480, 320, 100, 200));
+                    assert_eq!((d.icon_x, d.icon_y), (Some(300), Some(400)));
+                }
+                assert!(card.cli_set_mode(Minimize, 1024, 768));
+            } else {
+                assert!(card.is_expanded());
+                assert!(card.data.borrow().iconified, "expansion preserves saved mode");
+                assert!(card.cli_set_mode(Collapse, 1024, 768));
+                assert!(card.is_compact());
+                assert!(card.vte.borrow().is_none());
+            }
+        }
+        assert_eq!(String::from_utf8(run(&["list-sessions", "-F", "#{session_name}"]).stdout).unwrap().trim(), session);
+        // Restoring an existing session attaches without replacing its process.
+        card.data.borrow_mut().session_name = session.into();
+        let pane_pid = || run(&["display-message", "-p", "-t", session, "#{pane_pid}"]).stdout;
+        let before = pane_pid();
+        assert!(card.cli_set_mode(Restore, 1024, 768));
+        wait(&|| !run(&["list-clients", "-t", session]).stdout.is_empty());
+        assert_eq!(pane_pid(), before);
+        assert!(card.cli_set_mode(Minimize, 1024, 768));
+        assert_eq!((saved.borrow().as_ref().unwrap().restored_width, saved.borrow().as_ref().unwrap().restored_height), (480, 320));
+        let calls = std::fs::read_to_string(root.join("calls")).unwrap();
+        assert!(calls.contains("attach-session -t =sd_term_mode_missing"), "{calls}");
+        for forbidden in ["new-session", "respawn-pane", "respawn-window", "kill-session"] {
+            assert!(!calls.contains(forbidden), "unexpected {forbidden}: {calls}");
+        }
+    }
+
+    #[test]
+    fn cli_geometry_commit_uses_card_callback() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::cli_geometry_commit_inner");
+    }
+
+    #[test]
+    fn cli_geometry_commit_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let saved = Rc::new(RefCell::new(None));
+        let capture = Rc::clone(&saved);
+        let card = MiniTerminalCard::new(
+            term_data(true), |_, _, _| {}, move |_, data| { *capture.borrow_mut() = Some(data.clone()); },
+            |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        );
+        card.open_with_bare_terminal(480, 320);
+        assert!(card.apply_geometry(crate::card_resize::Rect { x: 40.0, y: 90.0, width: 640, height: 480 }));
+        let data = saved.borrow();
+        let data = data.as_ref().expect("geometry must reach persistence callback");
+        assert_eq!((data.x, data.y, data.width, data.height), (40, 90, 640, 480));
+        assert_eq!((data.restored_width, data.restored_height), (640, 480));
+        assert!(!data.iconified);
+        assert_eq!((card.container.width_request(), card.container.height_request()), (640, 480));
+        assert!(!card.vte.borrow().as_ref().unwrap().has_focus());
+    }
+
+    #[test]
     fn test_icon_keeps_its_own_position() {
         // A card that was never minimized draws at the card position.
         let mut d = term_data(false);
@@ -2713,7 +2930,7 @@ mod tests {
         spawn_vte(&slot, &preview, &Rc::new(RefCell::new(data)), false,
             &toggle, &Rc::new(RefCell::new(false)), &task, None, HoverRaiseLock::new(),
             &Rc::new(CardActivity::new(Rc::new(|| {}))), None,
-            &Rc::new(Cell::new((0.0, 0.0, 1.0))), &RefCell::new(None));
+            &Rc::new(Cell::new((0.0, 0.0, 1.0))), &RefCell::new(None), true);
         assert!(slot.borrow().is_some(), "placeholder exists before async setup");
         task.close();
         remove_vte(&slot, &preview);

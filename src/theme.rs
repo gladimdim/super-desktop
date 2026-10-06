@@ -3,6 +3,7 @@ use std::env;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::Command;
 use std::sync::RwLock;
 
@@ -291,6 +292,10 @@ pub fn get_theme_colors_path() -> PathBuf {
     PathBuf::from("/usr/share/omarchy/themes/loca-deserta-dark/colors.toml")
 }
 
+#[cfg(target_os = "macos")]
+pub fn detect_font_family() -> String { "Menlo".to_owned() }
+
+#[cfg(target_os = "linux")]
 pub fn detect_font_family() -> String {
     if let Ok(output) = Command::new("fc-match")
         .args(["monospace", "-f", "%{family}\n"])

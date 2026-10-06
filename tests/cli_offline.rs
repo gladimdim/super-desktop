@@ -24,8 +24,11 @@ fn cli_offline_entry_points_never_connect_or_start_the_application() {
             (vec!["harness", "launch", "--help"], 0),
             (vec!["request", "inspect", "--help"], 0),
             (vec!["terminal", "--help"], 0),
+            (vec!["terminal", "runtime", "--help"], 0),
+            (vec!["terminal", "capture", "--help"], 0),
             (vec!["help", "terminal", "inspect"], 0),
             (vec!["schema", "harness", "list"], 0),
+            (vec!["schema", "terminal", "follow"], 0),
             (vec!["--version"], 0),
             (vec!["schema", "--format", "json"], 0),
             (vec!["schema", "missing"], 2),
@@ -54,6 +57,11 @@ fn cli_offline_entry_points_never_connect_or_start_the_application() {
                 assert_eq!(value["schemaVersion"], 1);
                 assert_eq!(value["ok"], code == 0);
                 assert!(output.stderr.is_empty());
+                if args==["schema","terminal","follow"] {
+                    assert_eq!(value["data"]["automation"]["terminal follow"]["textPointer"],"/data/text");
+                    assert!(value["data"]["responseSchemas"]["terminal follow"]["$defs"]["Capture"]["properties"]["text"].is_object());
+                    assert_eq!(value["data"]["responseSchemaCoverage"]["complete"],false);
+                }
             }
             if args[0] == "completion" {
                 let mut bash = Command::new("bash")
@@ -92,12 +100,24 @@ fn cli_missing_control_daemon_is_an_error_without_legacy_fallback() {
         .mode(0o700)
         .create(&root)
         .unwrap();
+    let root = root.canonicalize().unwrap();
     let listener = UnixListener::bind(root.join("super-desktop.sock")).unwrap();
     listener.set_nonblocking(true).unwrap();
     for binary in [
         env!("CARGO_BIN_EXE_super-desktop-client"),
         env!("CARGO_BIN_EXE_super-desktop"),
     ] {
+        for extra in [
+            vec!["--width","600"],
+            vec!["--width","0","--height","300"],
+            vec!["--ready-timeout","30s"],
+            vec!["--prompt","Hello","--ready-timeout","301s"],
+            vec!["--prompt","Hello","--prompt-stdin"],
+        ] {
+            let output=Command::new(binary).args(["harness","launch","claude","--cwd","/tmp","--request-id","invalid","--format=json"])
+                .args(extra).env("HOME",&root).env("XDG_STATE_HOME",&root).env("XDG_RUNTIME_DIR",&root).output().unwrap();
+            assert_eq!(output.status.code(),Some(2),"{}",String::from_utf8_lossy(&output.stdout));
+        }
         let output = Command::new(binary)
             .args(["app", "status", "--format", "json"])
             .env("HOME", &root)

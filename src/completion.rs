@@ -98,8 +98,7 @@ const ROLLOUT_REWALK: std::time::Duration = std::time::Duration::from_secs(5);
 const ROLLOUT_NEGATIVE: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn process_start(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    Some(stat.rsplit_once(')')?.1.split_whitespace().nth(19)?.to_owned())
+    crate::platform::process::start_time(pid)
 }
 
 /// Find only the nearest CLI's own open rollout, never "latest file in cwd".
@@ -540,7 +539,7 @@ fn session_panes<'a>(listing: &'a str, id: &str) -> Vec<(u32, &'a str)> {
         .collect()
 }
 
-fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
+pub(crate) fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
     if !matches!(metadata.agent.as_str(), "pi" | "opencode" | "claude") || !metadata.completion_supported {
         return unknown(id);
     }

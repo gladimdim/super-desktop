@@ -34,7 +34,10 @@ use std::process::Command;
 
 /// The binding SUPER DESKTOP ships with, and the fallback whenever `state.json`
 /// holds nothing usable (fresh install, hand-edited file, empty string).
+#[cfg(target_os = "linux")]
 pub const DEFAULT_COMBO: &str = "SUPER + SHIFT + Q";
+#[cfg(target_os = "macos")]
+pub const DEFAULT_COMBO: &str = "CTRL + ALT + space";
 
 /// Fence around the block of `bindings.lua` this app owns.
 ///
@@ -352,6 +355,13 @@ pub fn apply_combo_at(
 
 /// [`apply_combo_at`] against this machine's `bindings.lua` and `hyprctl`.
 pub fn apply_combo(combo: &str, keycode: Option<u32>) -> Result<Applied, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = keycode;
+        crate::macos_shortcut::apply(combo)?;
+        Ok(Applied { combo: combo.to_owned(), conflict: None, warning: None })
+    }
+    #[cfg(target_os = "linux")]
     apply_combo_at(&bindings_path(), "hyprctl", combo, keycode)
 }
 
@@ -439,6 +449,12 @@ impl CaptureGuard {
     }
 
     fn release(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.hyprctl.is_empty() {
+            crate::macos_shortcut::capture(false);
+            self.armed = false;
+            return;
+        }
         if !self.armed {
             return;
         }
@@ -473,6 +489,12 @@ pub fn begin_capture_at(hyprctl_bin: &str) -> CaptureGuard {
 
 /// [`begin_capture_at`] against this machine's `hyprctl`.
 pub fn begin_capture() -> CaptureGuard {
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_shortcut::capture(true);
+        CaptureGuard { armed: true, hyprctl: String::new() }
+    }
+    #[cfg(target_os = "linux")]
     begin_capture_at("hyprctl")
 }
 
@@ -1045,6 +1067,7 @@ bindd
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_install_sh_writes_the_managed_block_we_read() {
         // install.sh and this module must agree on the markers: the app only
         // ever finds (and replaces) a block install.sh wrote with the same pair
