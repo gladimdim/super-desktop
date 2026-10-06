@@ -873,7 +873,7 @@ impl SuperDesktopWindow {
         btn_arrange.update_property(&[gtk4::accessible::Property::Label(
             "Arrange notes and terminals",
         )]);
-        btn_arrange.set_tooltip_text(Some("Organize notes left, terminals right"));
+        btn_arrange.set_tooltip_text(Some("Fit terminals to the display; organize notes left"));
         btn_arrange.add_css_class("hud-button");
         btn_arrange.add_css_class("hud-icon-btn");
         if let Some(img) = btn_arrange.child().and_downcast::<Image>() {
@@ -1837,44 +1837,59 @@ impl SuperDesktopWindow {
         }
         set_overlay_keyboard_mode(&self.window, KeyboardMode::OnDemand);
 
-        let start_y = 110.0;
-        let gap = 20.0;
-
-        // Notes left
-        let mut col_x = 60.0;
-        let mut curr_y = start_y;
-        for note in notes.iter() {
-            let w = note.data.borrow().width as f64;
-            let h = note.data.borrow().height as f64;
-            if curr_y + h > (self.screen_height() - 60) as f64 {
-                col_x += w + gap;
-                curr_y = start_y;
-            }
-            note.data.borrow_mut().x = col_x as i32;
-            note.data.borrow_mut().y = curr_y as i32;
-            self.canvas.move_(&note.container, col_x, curr_y);
-            curr_y += h + gap;
+        let margin = 12;
+        let gap = 12;
+        let top = self.hud.height().max(top_bar_height(self.state.borrow().top_bar_size)) + gap;
+        let width = (self.screen_width() - 2 * margin).max(1);
+        let height = (self.screen_height() - top - margin).max(1);
+        // Keep notes in their own lane; terminal geometry never depends on
+        // saved card extents or a previously connected output.
+        let note_width = if notes.is_empty() { 0 } else {
+            notes.iter().map(|n| n.data.borrow().width).max().unwrap_or(0)
+                .min(width / 3)
+        };
+        let note_area = crate::card_resize::Rect {
+            x: f64::from(margin), y: f64::from(top), width: note_width.max(1), height,
+        };
+        for (note, rect) in notes.iter().zip(crate::arrange::terminal_grid(note_area, notes.len())) {
+            let mut data = note.data.borrow_mut();
+            data.x = rect.x as i32;
+            data.y = rect.y as i32;
+            data.width = rect.width;
+            data.height = rect.height;
+            drop(data);
+            note.container.set_size_request(rect.width, rect.height);
+            self.canvas.move_(&note.container, rect.x, rect.y);
         }
-
-        // Terminals right
-        let mut col_right = (self.screen_width() - 30) as f64;
-        let mut curr_y = start_y;
-        let mut col_width = 0.0;
-        for term in terms.iter() {
-            let w = term.data.borrow().width as f64;
-            let h = term.data.borrow().height as f64;
-            if curr_y + h > (self.screen_height() - 60) as f64 && curr_y > start_y {
-                col_right -= col_width + gap;
-                curr_y = start_y;
-                col_width = 0.0;
-            }
-            let col_x = col_right - w;
-            col_width = col_width.max(w);
-            // Arrange writes the spot of whichever form is on screen (icons and
-            // cards keep separate positions).
-            set_displayed_pos(&mut term.data.borrow_mut(), col_x as i32, curr_y as i32);
-            self.canvas.move_(&term.container, col_x, curr_y);
-            curr_y += h + gap;
+        let left = margin + if notes.is_empty() { 0 } else { note_width + gap };
+        let area = crate::card_resize::Rect {
+            x: f64::from(left), y: f64::from(top),
+            width: (self.screen_width() - margin - left).max(1), height,
+        };
+        let icons: Vec<_> = terms.iter().filter(|term| term.is_compact()).collect();
+        let terminals: Vec<_> = terms.iter().filter(|term| !term.is_compact()).collect();
+        let icon_side = icons.iter().map(|term| {
+            let data = term.data.borrow();
+            data.width.max(data.height)
+        }).max().unwrap_or(0);
+        let icon_columns = ((area.width + gap) / (icon_side + gap)).max(1) as usize;
+        let icon_rows = icons.len().div_ceil(icon_columns);
+        let icon_height = if icons.is_empty() { 0 } else {
+            (icon_rows as i32 * (icon_side + gap)).min(area.height)
+        };
+        let terminal_area = crate::card_resize::Rect {
+            height: (area.height - icon_height).max(1), ..area
+        };
+        for (term, rect) in terminals.iter().zip(crate::arrange::terminal_grid(terminal_area, terminals.len())) {
+            term.apply_geometry(rect);
+            self.canvas.move_(&term.container, rect.x, rect.y);
+        }
+        for (index, term) in icons.iter().enumerate() {
+            let x = area.x + ((index % icon_columns) as i32 * (icon_side + gap)) as f64;
+            let y = area.y + (area.height - icon_height + (index / icon_columns) as i32 * (icon_side + gap)) as f64;
+            // Icons retain their own size and independent restore position.
+            set_displayed_pos(&mut term.data.borrow_mut(), x as i32, y as i32);
+            self.canvas.move_(&term.container, x, y);
         }
 
         let mut s = self.state.borrow_mut();
@@ -1891,7 +1906,7 @@ impl SuperDesktopWindow {
         let snapshot = s.clone();
         drop(s);
         crate::state::save_state_async(snapshot);
-        // Arrange can stack a column of cards on top of each other.
+        // Refresh outlines after every card has its final geometry.
         self.ghosts.refresh();
     }
 

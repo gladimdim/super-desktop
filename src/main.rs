@@ -47,6 +47,7 @@ mod asset_pdf;
 mod asset_view;
 mod bridge;
 mod card_resize;
+mod arrange;
 mod card_status;
 mod crashlog;
 mod desktop_protocol;
