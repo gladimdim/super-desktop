@@ -82,3 +82,18 @@ Tailscale. IP addresses, and the names of other saved computers, were blurred
 after OCR (tesseract) located them. The verification code is the one that
 pairing really used; the invitation in the QR code has expired and its bridge
 no longer exists. All images are WebP at quality 90–92.
+
+## Feature clips (`../media/`)
+
+Short muted loops for the website's feature sections, cut from
+`../video/super-desktop-trailer.mp4` (real footage, see `../video/README.md`)
+with FFmpeg: scaled to 1280 px wide, 30 fps, H.264 CRF 25, `+faststart`, no
+audio. Each has a WebP poster taken from a frame inside it.
+
+- `reveal.mp4` (0.0–4.0 s): the shortcut and the overlay sliding in.
+- `prompt.mp4` (4.0–15.0 s): a prompt typed into a live Claude Code session.
+- `phone.mp4` (17.2–24.8 s): the Android app on an unfolded Galaxy Z Fold 7.
+- `remote.mp4` (24.8–38.3 s): opening a paired PC and typing into its session.
+
+The captions in the clips come from the trailer. The interactive demos on the
+page are a simulation in `../assets/` with sample data, labeled as such.
