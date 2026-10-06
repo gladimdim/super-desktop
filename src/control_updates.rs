@@ -57,7 +57,7 @@ fn execute_with(root:&std::path::Path,request:&Request,check:impl FnOnce()->Resu
     #[test]fn update_jobs_require_reviewed_identity_and_never_replay_installs(){
         let root=std::env::temp_dir().join(format!("sd-update-job-{}",std::process::id()));
         let request=|id:&str,command|Request {control_version:1,request_id:id.into(),command};
-        let status=Status {current:crate::updates::Version(1,0,0),latest:crate::updates::Version(1,0,1),upstream:"origin/master".into(),url:"private".into(),dir:root.clone(),changes:vec![],more:0,blocked:None,pinned:None};
+        let status=Status {current:crate::updates::Version(1,0,0),latest:crate::updates::Version(1,0,1),upstream:"origin/master".into(),release:None,url:"private".into(),dir:root.clone(),changes:vec![],more:0,blocked:None,pinned:None};
         let check=request("job-check",Command::UpdatesCheck {});
         assert!(execute_with(&root,&check,move||Ok((status,"a".repeat(40))),|_,_|panic!("check cannot install")).ok);
         let until=std::time::Instant::now()+std::time::Duration::from_secs(2);

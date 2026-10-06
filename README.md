@@ -33,8 +33,10 @@ The installer needs nothing set up beforehand. It:
   tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap and poppler;
 - installs Rust with the official rustup into `~/.cargo` and `~/.rustup` when
   there is no Rust 1.92 or newer, without changing your shell profile;
-- downloads the source to `~/.local/share/super-desktop/source` and builds it
-  (the first build takes several minutes);
+- downloads the source of the newest
+  [release](https://github.com/gladimdim/super-desktop/releases) to
+  `~/.local/share/super-desktop/source` and builds it (the first build takes
+  several minutes);
 - adds the app to your application launcher, and configures the shortcut,
   startup and Omarchy theme integration.
 
@@ -45,21 +47,26 @@ Then press **SUPER + SHIFT + Q** (SUPER is usually the Windows key), or run
 an installed harness in the top bar. Install and sign in to your preferred AI
 CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
 
-To update later, open **⚙ Settings → Updates**, or run the same command
-again. Settings → Updates compares this build's version with the newest on
-GitHub (the version is raised for each release) and lists what a newer version
-brings. **Update** fast-forwards the source and rebuilds it; SUPER DESKTOP
-restarts on the new build only once the build succeeds, and a notification
-says how it went (the log is `~/.local/state/super-desktop/update.log`). The
-install command also rebuilds and restarts SUPER DESKTOP if it is running.
-Either way your settings, notes and running harnesses are kept, and a clone
-with uncommitted changes or commits of its own is not updated.
+To update later, run the same command again: it moves the source to the
+newest release, rebuilds it, and restarts SUPER DESKTOP if it is running. Work
+that is on `master` but not yet released is not installed. **⚙ Settings →
+Updates** compares this build's version with the newest on GitHub and lists
+what a newer version brings. **Update** rebuilds the source on the newer
+version; SUPER DESKTOP restarts on the new build only once the build succeeds,
+and a notification says how it went (the log is
+`~/.local/state/super-desktop/update.log`). Either way your settings, notes and
+running harnesses are kept, and a clone with uncommitted changes or commits of
+its own is not updated.
+
+Builds up to `v1.1.21` show an install of a release as "Pinned to vX.Y.Z" in
+Settings → Updates, and their **Switch to** button moves it to `master` once.
+Running the install command again brings it back to the releases.
 
 **Installing from a clone.** If you work on the code, clone the repository and
 run `./install.sh` inside it. The installer then builds and installs that clone
 and leaves its git state alone; update it with `git pull && ./rebuild.sh`.
-Running the one-line command later updates the clone your install runs from,
-as long as it has no local changes.
+Running the one-line command later moves the clone your install runs from to
+the newest release, unless it has local changes or commits of its own.
 
 ### Package installations
 
@@ -110,7 +117,7 @@ This works for a first install and on a PC that already has SUPER DESKTOP
 (`v1.1.17` and `1.1.17` are the same). The source then stays on that release:
 running the plain install command again keeps it, and **⚙ Settings → Updates**
 shows "Pinned to v1.1.17" and offers **Switch to** the newest. To move to the
-newest yourself, or to another release:
+newest release yourself:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=latest bash
@@ -120,6 +127,10 @@ Settings → Updates only understands a pinned install in releases newer than
 `v1.1.17`; on `v1.1.17` itself use the install command above to move. A clone
 with uncommitted changes is left as it is. Install the same release on every
 PC you connect to each other.
+
+To try changes that are not released yet, `SUPER_DESKTOP_VERSION=master`
+follows the `master` branch instead, until you install a release again with
+`latest` or a version.
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
@@ -233,7 +244,7 @@ button, and removing a saved PC from the GUI. To remove a saved PC, run
 
 | You see | Do this |
 | --- | --- |
-| *Update SUPER DESKTOP on the host* (or *on that PC*) | That PC runs an older build: run the install command there, or `git pull && ./rebuild.sh` in its clone. |
+| *Update SUPER DESKTOP on the host* (or *on that PC*) | That PC runs an older build: run the install command there (in a clone you work in, `git pull && ./rebuild.sh`). |
 | *… needs pairing again* or *Pairing required · Add this PC again* | The host revoked this PC, or its 90-day credential expired. Click **Pair again** and use a new link. |
 | *… is not answering*, *Cannot reach this PC* or *Reconnecting…* | Check that the host is on, SUPER DESKTOP is running there, and port 8759/tcp is reachable over LAN or Tailscale. The checklist under the message shows which link fails. Consoles reconnect on their own. |
 | *Tailscale is off on this PC* | That PC was paired at its Tailscale address. Run `tailscale up` on this PC. |
@@ -613,7 +624,7 @@ From an existing clone, `./install.sh` installs that clone instead and does not 
 1. Refuses to run as root; checks for Omarchy and `pacman`.
 2. Installs missing Arch packages with one `sudo pacman -S --needed` call.
 3. Uses a working Rust 1.92+; otherwise selects or updates rustup's stable toolchain, or downloads the official `rustup-init`, checks its SHA-256 and installs stable with `--no-modify-path`.
-4. Picks the source: the clone holding the script; else `$SUPER_DESKTOP_DIR`; else the clone `~/.local/bin/super-desktop` already links into; else clones `~/.local/share/super-desktop/source`. An existing clone is fast-forwarded only when it has no local changes.
+4. Picks the source: the clone holding the script; else `$SUPER_DESKTOP_DIR`; else the clone `~/.local/bin/super-desktop` already links into; else clones `~/.local/share/super-desktop/source`. It checks out the newest release tag (`vX.Y.Z`), or the release in `SUPER_DESKTOP_VERSION`, and records the choice in the clone's git config (`superdesktop.channel`); a pinned clone stays on its release, and a clone with local changes or commits of its own is installed as it is.
 5. `cargo build --release --locked`.
 6. Symlinks `~/.local/bin/super-desktop` → `target/release/super-desktop-client`, a lightweight native IPC client. Existing-daemon commands avoid loading GTK/VTE; cold starts delegate to the main binary with layer-shell preloaded. The repository's `bin/super-desktop` remains a build-on-demand fallback.
 7. Copies `assets/` → `~/.config/super-desktop/assets/`.
@@ -663,7 +674,7 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 
 ### 5. Updating an existing install
 
-Run the install command again, then `super-desktop status`. It fast-forwards the clone the install runs from, rebuilds, and restarts the daemon and bridge when run inside the Hyprland session. A clone with local changes is left as it is: there, use `git pull && ./rebuild.sh`. The user can do the same from ⚙ Settings → Updates, which checks the clone's upstream branch on GitHub, fast-forwards it and runs `rebuild.sh` (log: `~/.local/state/super-desktop/update.log`).
+Run the install command again, then `super-desktop status`. It moves the clone the install runs from to the newest release tag (a pinned clone stays on its release), rebuilds, and restarts the daemon and bridge when run inside the Hyprland session. A clone with local changes or commits of its own is left as it is: there, use `git pull && ./rebuild.sh`. The user can do the same from ⚙ Settings → Updates, which checks GitHub for a newer version and runs `rebuild.sh` (log: `~/.local/state/super-desktop/update.log`).
 
 ---
 

@@ -1102,22 +1102,23 @@ the existing `peer-attach` and `peer-events` interfaces.
 
 ## Update jobs
 
-`updates check --request-id ID` queues a source-install check, including an
-upstream fetch, without installing. Poll `updates status ID` until `checked` or
+`updates check --request-id ID` queues a source-install check, including a
+fetch of the release tags, without installing. Poll `updates status ID` until `checked` or
 `failed`. A completed check reports the release version, exact commit, changes
 and blockers. Only one CLI update job runs at a time; up to 32 jobs are retained
 for the daemon's lifetime.
 
 To install, pass the check ID, its exact version and commit, `--allow-install`
-and a fresh request ID to `updates install`. The worker rechecks the branch,
-tracked-tree cleanliness and reviewed commit, then fast-forwards to that commit
-and invokes the existing rebuild script. It refuses pinned/detached installs;
-use Settings to explicitly switch a pinned install to latest first.
+and a fresh request ID to `updates install`. The worker rechecks tracked-tree
+cleanliness and the reviewed commit, then checks out that release (or
+fast-forwards a clone installed with `SUPER_DESKTOP_VERSION=master`) and invokes
+the existing rebuild script. It refuses pinned installs; use Settings to
+explicitly switch a pinned install to the newest release first.
 
 Queue receipts are durable; job progress is not. A successful rebuild replaces
 the daemon, so the job may disappear: inspect `app status` and its running
 version, along with the original request receipt. `installer_exited` alone does
-not confirm installation. Failure can leave the clone fast-forwarded; inspect
+not confirm installation. Failure can leave the clone on the reviewed commit; inspect
 the existing private update log before another explicit check/install. These
 commands never run automatically as dependencies of other CLI operations.
 

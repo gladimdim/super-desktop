@@ -112,10 +112,10 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
     body.append(&source);
     let hint = text(&["launcher-hint"]);
     hint.set_text(
-        "Updating fast-forwards the clone SUPER DESKTOP runs from and rebuilds it with its rebuild.sh. \
-         The build runs first, and SUPER DESKTOP restarts on it only if it succeeds; terminal cards keep \
-         running. A clone with uncommitted changes or commits of its own is left alone. A copy installed \
-         at a release tag stays on that version until you switch to the latest here.",
+        "Updating moves the clone SUPER DESKTOP runs from to the newest release and rebuilds it with its \
+         rebuild.sh. The build runs first, and SUPER DESKTOP restarts on it only if it succeeds; terminal \
+         cards keep running. A clone with uncommitted changes or commits of its own is left alone. A copy \
+         pinned to a release stays on that version until you switch to the newest here.",
     );
     body.append(&hint);
 
@@ -151,7 +151,11 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
                     return;
                 }
             };
-            source.set_text(&format!("From {} ({}) into {}", checked.url, checked.upstream, checked.dir.display()));
+            let follows = match &checked.release {
+                Some(_) => "releases".to_string(),
+                None => checked.upstream.clone(),
+            };
+            source.set_text(&format!("From {} ({follows}) into {}", checked.url, checked.dir.display()));
             source.set_visible(true);
             let pinned = checked.pinned.as_deref();
             if checked.available() {
@@ -179,10 +183,14 @@ fn build_updates_page(root: &Box, entry_chip: &Label) -> Rc<dyn Fn(bool)> {
                 entry_chip.set_text(&format!("{} available", checked.latest));
                 entry_chip.add_css_class("update-available");
             } else {
+                let newest = match &checked.release {
+                    Some(tag) => format!("the newest release is {tag}"),
+                    None => format!("the newest on {} is {}", checked.upstream, checked.latest),
+                };
                 status.set_text(&format!(
-                    "{}Up to date. This build is {}; the newest on {} is {}.",
+                    "{}Up to date. This build is {}; {newest}.",
                     pinned.map(|tag| format!("Pinned to {tag}. ")).unwrap_or_default(),
-                    checked.current, checked.upstream, checked.latest
+                    checked.current
                 ));
                 changes.set_visible(false);
                 blocked.set_visible(false);

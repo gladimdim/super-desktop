@@ -12,26 +12,31 @@
 #   1. installs the Arch packages it needs that are missing (one sudo prompt);
 #   2. installs Rust with rustup when there is no Rust 1.92 or newer, into
 #      ~/.cargo and ~/.rustup, without editing your shell profile;
-#   3. clones the source into ~/.local/share/super-desktop/source, or
-#      fast-forwards the clone an earlier install runs from (or, with
-#      SUPER_DESKTOP_VERSION, checks out that release);
+#   3. clones the source into ~/.local/share/super-desktop/source (or uses
+#      the clone an earlier install runs from) and checks out the newest
+#      release, or the release SUPER_DESKTOP_VERSION names;
 #   4. builds the release binaries in that clone;
 #   5. links ~/.local/bin/super-desktop, copies the toolbar assets, and adds
 #      the launcher entry, the SUPER + SHIFT + Q binding, the overlay's layer
 #      rule and the Omarchy theme hook;
 #   6. restarts SUPER DESKTOP if it is running, or reloads Hyprland.
 #
-# Running it again updates the app and keeps every setting already in place.
+# Running it again updates the app to the newest release and keeps every
+# setting already in place.
 #
 # Environment:
 #   SUPER_DESKTOP_DIR     clone to install from (default: step 3)
 #   SUPER_DESKTOP_REPO    git URL to clone
-#   SUPER_DESKTOP_BRANCH  branch to clone (default: master)
-#   SUPER_DESKTOP_VERSION release to install, for example v1.1.17 (or 1.1.17):
-#                         the source stays on that tag until you install
-#                         another release, or "latest" to return to the branch.
-#                         Unset, an install keeps following the branch, and a
-#                         pinned install stays on its release.
+#   SUPER_DESKTOP_BRANCH  branch to follow with SUPER_DESKTOP_VERSION=master
+#                         (default: master); setting it implies that
+#   SUPER_DESKTOP_VERSION what to install:
+#                         unset   the newest release, and a pinned install
+#                                 stays on its release
+#                         latest  the newest release, leaving any pin
+#                         v1.1.17 (or 1.1.17) that release, pinned: the source
+#                                 stays on it until you choose another
+#                         master  the branch with unreleased changes, followed
+#                                 until you choose a release again
 #
 # Everything runs from main, called on the last line, so a download cut
 # short runs nothing.
@@ -43,8 +48,11 @@ SELF="${BASH_SOURCE[0]:-}"
 INSTALL_COMMAND="curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash"
 REPO_URL="${SUPER_DESKTOP_REPO:-https://github.com/gladimdim/super-desktop.git}"
 BRANCH="${SUPER_DESKTOP_BRANCH:-master}"
-# "", "latest", or a release tag vX.Y.Z; see resolve_release.
+# "", "latest", "master", or a release tag vX.Y.Z; see resolve_release.
 RELEASE="${SUPER_DESKTOP_VERSION:-}"
+# What the clone follows, in its git config: releases, pinned or branch.
+# src/updates.rs (Settings → Updates) reads and writes the same key.
+CHANNEL_KEY="superdesktop.channel"
 RELEASES_URL="https://github.com/gladimdim/super-desktop/releases"
 DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-desktop/source"
 
@@ -87,9 +95,12 @@ Environment:
   SUPER_DESKTOP_DIR     clone to install from (default: $DEFAULT_DIR,
                         or the clone an earlier install runs from)
   SUPER_DESKTOP_REPO    git URL to clone (default: $REPO_URL)
-  SUPER_DESKTOP_BRANCH  branch to clone (default: $BRANCH)
-  SUPER_DESKTOP_VERSION release to install, for example v1.1.17, or "latest"
-                        to return to the branch (releases: $RELEASES_URL)
+  SUPER_DESKTOP_BRANCH  branch for SUPER_DESKTOP_VERSION=master (default: $BRANCH)
+  SUPER_DESKTOP_VERSION unset: the newest release (a pinned install stays put)
+                        latest: the newest release, leaving a pin
+                        v1.1.17: that release, pinned
+                        master: the branch, with unreleased changes
+                        (releases: $RELEASES_URL)
 
 A specific release, for example the one that matches an older phone app:
 
@@ -237,12 +248,18 @@ installed_checkout() {
     printf '%s\n' "$dir"
 }
 
-# SUPER_DESKTOP_VERSION as "", "latest" or a tag vX.Y.Z (1.1.17 is v1.1.17).
+# SUPER_DESKTOP_VERSION as "", "latest", "master" or a tag vX.Y.Z (1.1.17 is
+# v1.1.17). A branch named with SUPER_DESKTOP_BRANCH is followed.
 resolve_release() {
-    [[ -z "$RELEASE" || "$RELEASE" == latest ]] && return
+    if [[ -z "$RELEASE" && -n "${SUPER_DESKTOP_BRANCH:-}" ]]; then
+        RELEASE=master
+    fi
+    case "$RELEASE" in
+    "" | latest | master) return ;;
+    esac
     RELEASE="v${RELEASE#v}"
     [[ "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
-        die "SUPER_DESKTOP_VERSION must look like v1.1.17, or be \"latest\". See $RELEASES_URL"
+        die "SUPER_DESKTOP_VERSION must look like v1.1.17, or be \"latest\" or \"master\". See $RELEASES_URL"
 }
 
 # The release tag vX.Y.Z that "$1" is pinned to (HEAD detached exactly on it).
@@ -254,65 +271,124 @@ pinned_release() {
     printf '%s\n' "$tag"
 }
 
+channel_of() {
+    git -C "$1" config --get "$CHANNEL_KEY" 2>/dev/null || true
+}
+
+set_channel() {
+    git -C "$1" config "$CHANNEL_KEY" "$2"
+}
+
+# The newest release tag vX.Y.Z on the clone's origin; empty when there is none.
+newest_release() {
+    local tags
+    tags="$(git -C "$1" ls-remote --tags --refs origin 'v*' </dev/null)" ||
+        die "Could not read the releases from $REPO_URL. Check the network connection and run the installer again."
+    printf '%s\n' "$tags" | sed -n 's|.*refs/tags/\(v[0-9]*\.[0-9]*\.[0-9]*\)$|\1|p' | sort -V | tail -n 1
+}
+
+has_local_changes() {
+    [[ -n "$(git -C "$1" status --porcelain --untracked-files=no)" ]]
+}
+
 # Move the clone to the release tag "$2". A clone with local changes is left
-# as it is; a tag that does not exist stops the install.
+# as it is (status 1); a tag that does not exist stops the install.
 checkout_release() {
     local dir="$1" tag="$2"
-    say "Switching $dir to $tag..."
-    if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
+    if has_local_changes "$dir"; then
         warn "$dir has local changes, so it was not switched to $tag. Installing it as it is."
-        return
+        return 1
     fi
-    git -C "$dir" fetch --quiet --tags origin </dev/null ||
+    git -C "$dir" fetch --quiet --force --no-tags origin '+refs/tags/v*:refs/tags/v*' </dev/null ||
         die "Could not fetch the releases from $REPO_URL. Check the network connection and run the installer again."
     git -C "$dir" rev-parse -q --verify "refs/tags/$tag^{commit}" >/dev/null ||
         die "There is no release $tag. The releases are listed at $RELEASES_URL"
-    git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach "$tag" ||
+    if [[ "$(git -C "$dir" rev-parse HEAD)" == "$(git -C "$dir" rev-parse "refs/tags/$tag^{commit}")" ]] &&
+        ! git -C "$dir" symbolic-ref -q HEAD >/dev/null; then
+        say "✓ $dir is on $tag"
+        return
+    fi
+    say "Switching $dir to $tag..."
+    git -C "$dir" -c advice.detachedHead=false checkout --quiet --detach "refs/tags/$tag" ||
         die "Could not check out $tag in $dir."
 }
 
-# Back from a pinned release to the tip of the branch.
-switch_to_branch() {
+# Follow the branch: switch to it, or fast-forward it. A clone with local work
+# or its own history is installed as it is (status 1).
+follow_branch() {
     local dir="$1"
-    say "Switching $dir back to $BRANCH..."
-    if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
-        warn "$dir has local changes, so it was not switched. Installing it as it is."
+    if has_local_changes "$dir"; then
+        warn "$dir has local changes, so it was not updated. Installing it as it is."
+        return 1
+    fi
+    if [[ "$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null)" == "$BRANCH" ]]; then
+        say "Updating $dir ($BRANCH)..."
+        if ! git -C "$dir" pull --ff-only </dev/null; then
+            warn "Could not fast-forward $dir, so it was not updated. Installing it as it is."
+            return 1
+        fi
         return
     fi
+    say "Switching $dir to $BRANCH..."
     git -C "$dir" fetch --quiet --no-tags origin "$BRANCH" </dev/null ||
         die "Could not fetch $BRANCH from $REPO_URL. Check the network connection and run the installer again."
     git -C "$dir" checkout --quiet -B "$BRANCH" "origin/$BRANCH" ||
         die "Could not switch $dir to $BRANCH."
+    git -C "$dir" branch --quiet --set-upstream-to="origin/$BRANCH" "$BRANCH" >/dev/null 2>&1 || true
 }
 
-# An existing clone: a requested release wins; "latest" leaves a pin; with
-# nothing requested a pinned clone stays put and any other clone fast-forwards
-# only (a clone with local work or its own history is installed as it is).
+# Move the clone to the newest release. A clone on a branch with commits that
+# are not on GitHub is someone's own work: it is installed as it is.
+follow_releases() {
+    local dir="$1" tag
+    tag="$(newest_release "$dir")"
+    if [[ -z "$tag" ]]; then
+        warn "$REPO_URL has no releases yet, so $dir follows $BRANCH instead."
+        follow_branch "$dir" || true
+        return
+    fi
+    if git -C "$dir" symbolic-ref -q HEAD >/dev/null 2>&1 &&
+        [[ -n "$(git -C "$dir" rev-list '@{upstream}..HEAD' 2>/dev/null || echo own)" ]]; then
+        warn "$dir has commits that are not on GitHub, so it was not switched to $tag. Installing it as it is."
+        return
+    fi
+    checkout_release "$dir" "$tag" && set_channel "$dir" releases
+    return 0
+}
+
+# A requested version wins. With nothing requested, a pinned clone stays put
+# (pinned in its git config, or detached on a release by an older installer
+# that recorded nothing), a clone set to follow the branch follows it, and
+# every other clone moves to the newest release.
 update_checkout() {
-    local dir="$1" pinned=""
+    local dir="$1" channel pinned
+    case "$RELEASE" in
+    master)
+        follow_branch "$dir" && set_channel "$dir" branch
+        return 0
+        ;;
+    latest)
+        follow_releases "$dir"
+        return 0
+        ;;
+    v*)
+        checkout_release "$dir" "$RELEASE" && set_channel "$dir" pinned
+        return 0
+        ;;
+    esac
+    channel="$(channel_of "$dir")"
     pinned="$(pinned_release "$dir")" || pinned=""
-    if [[ -n "$RELEASE" && "$RELEASE" != latest ]]; then
-        checkout_release "$dir" "$RELEASE"
+    if [[ -n "$pinned" && ("$channel" == pinned || -z "$channel") ]]; then
+        say "$dir is pinned to $pinned, so it was not updated."
+        say "  Newest:  ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=latest bash"
+        say "  Another: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=vX.Y.Z bash   (releases: $RELEASES_URL)"
         return
     fi
-    if [[ -n "$pinned" ]]; then
-        if [[ "$RELEASE" == latest ]]; then
-            switch_to_branch "$dir"
-        else
-            say "$dir is pinned to $pinned, so it was not updated."
-            say "  Newest:  ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=latest bash"
-            say "  Another: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=vX.Y.Z bash   (releases: $RELEASES_URL)"
-        fi
+    if [[ "$channel" == branch ]]; then
+        follow_branch "$dir" || true
         return
     fi
-    say "Updating $dir..."
-    if [[ -n "$(git -C "$dir" status --porcelain --untracked-files=no)" ]]; then
-        warn "$dir has local changes, so it was not updated. Installing it as it is."
-        return
-    fi
-    if ! git -C "$dir" pull --ff-only </dev/null; then
-        warn "Could not fast-forward $dir, so it was not updated. Installing it as it is."
-    fi
+    follow_releases "$dir"
 }
 
 prepare_source() {
@@ -321,7 +397,7 @@ prepare_source() {
     if dir="$(script_checkout)"; then
         SRC="$dir"
         say "Installing from this clone: $SRC"
-        [[ -z "$RELEASE" ]] || warn "SUPER_DESKTOP_VERSION is ignored when installing from a clone: check out the release in the clone yourself."
+        [[ -z "${SUPER_DESKTOP_VERSION:-}" ]] || warn "SUPER_DESKTOP_VERSION is ignored when installing from a clone: check out the release in the clone yourself."
         return
     fi
     dir="${SUPER_DESKTOP_DIR:-}"
@@ -341,9 +417,7 @@ prepare_source() {
         # prints a confusing "is not a commit!" warning for an annotated tag.
         git -c advice.detachedHead=false clone --branch "$BRANCH" "$REPO_URL" "$dir" </dev/null ||
             die "Could not clone $REPO_URL. Check the network connection and run the installer again."
-        if [[ -n "$RELEASE" && "$RELEASE" != latest ]]; then
-            checkout_release "$dir" "$RELEASE"
-        fi
+        update_checkout "$dir"
     fi
     SRC="$(cd "$dir" && pwd)"
 }
@@ -526,12 +600,18 @@ summary() {
     say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
     say "Install and sign in to the AI coding CLIs you want to use separately."
     say "Source: $SRC (keep it: the installed command runs the binaries built there)"
-    local pinned
-    if pinned="$(pinned_release "$SRC")"; then
+    local pinned channel
+    pinned="$(pinned_release "$SRC")" || pinned=""
+    channel="$(channel_of "$SRC")"
+    if [[ -n "$pinned" && "$channel" != releases && "$channel" != branch ]]; then
         say "Pinned to $pinned. It stays on this release until you choose another:"
         say "  Newest: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=latest bash"
+    elif [[ "$channel" == branch ]]; then
+        say "Follows $BRANCH, with unreleased changes. Update: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=master bash"
+        say "  Back to the releases: ${INSTALL_COMMAND%| bash}| SUPER_DESKTOP_VERSION=latest bash"
     else
-        say "Update: $INSTALL_COMMAND"
+        [[ -z "$pinned" ]] || say "Release: $pinned"
+        say "Update to the newest release: $INSTALL_COMMAND"
     fi
     if ((RUST_INSTALLED)); then
         say "Rust was installed into ${CARGO_HOME:-$HOME/.cargo}/bin and is not on your PATH."

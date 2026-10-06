@@ -114,10 +114,13 @@ mobile terminal output and Linux performance notes.
 Do not raise the version in `Cargo.toml` and `Cargo.lock` in ordinary commits.
 It changes only when the user tells you to release a new version, and then to
 the version they name (ask which if they did not): a release commit edits both
-files together, and that commit is tagged (see "Releases (git tags)"). Settings
-→ Updates offers an update when the version in Cargo.toml on GitHub is newer than
-the running build, so it notices a release when its version bump reaches
-`master`. The checked-in `.githooks/pre-commit` never changes a version; it
+files together, and that commit is tagged (see "Releases (git tags)"). Installs
+follow the release tags, not `master`: `install.sh` checks out the newest
+`vX.Y.Z` tag, and Settings → Updates offers an update when the newest tag's
+Cargo.toml is newer than the running build. A release reaches users only once
+its tag is pushed. Both record what a clone follows in its git config
+(`superdesktop.channel`: `releases`, `pinned` or `branch`); keep
+`install.sh` and `src/updates.rs` in step. The checked-in `.githooks/pre-commit` never changes a version; it
 refuses a commit whose `Cargo.toml` and `Cargo.lock` versions differ. Enable it
 once per clone with `git config core.hooksPath .githooks`, and do not bypass it
 (`--no-verify`). A rebase or merge conflict in the version line resolves to the

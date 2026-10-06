@@ -1766,20 +1766,21 @@ and explicitly name a peer; none falls back to local workspace operations.
 <code>--target peer:ID</code> is not supported. Remote attachment and event streaming retain
 the existing <code>peer-attach</code> and <code>peer-events</code> interfaces.</p>
 <h2 id="update-jobs">Update jobs</h2>
-<p><code>updates check --request-id ID</code> queues a source-install check, including an
-upstream fetch, without installing. Poll <code>updates status ID</code> until <code>checked</code> or
+<p><code>updates check --request-id ID</code> queues a source-install check, including a
+fetch of the release tags, without installing. Poll <code>updates status ID</code> until <code>checked</code> or
 <code>failed</code>. A completed check reports the release version, exact commit, changes
 and blockers. Only one CLI update job runs at a time; up to 32 jobs are retained
 for the daemon's lifetime.</p>
 <p>To install, pass the check ID, its exact version and commit, <code>--allow-install</code>
-and a fresh request ID to <code>updates install</code>. The worker rechecks the branch,
-tracked-tree cleanliness and reviewed commit, then fast-forwards to that commit
-and invokes the existing rebuild script. It refuses pinned/detached installs;
-use Settings to explicitly switch a pinned install to latest first.</p>
+and a fresh request ID to <code>updates install</code>. The worker rechecks tracked-tree
+cleanliness and the reviewed commit, then checks out that release (or
+fast-forwards a clone installed with <code>SUPER_DESKTOP_VERSION=master</code>) and invokes
+the existing rebuild script. It refuses pinned installs; use Settings to
+explicitly switch a pinned install to the newest release first.</p>
 <p>Queue receipts are durable; job progress is not. A successful rebuild replaces
 the daemon, so the job may disappear: inspect <code>app status</code> and its running
 version, along with the original request receipt. <code>installer_exited</code> alone does
-not confirm installation. Failure can leave the clone fast-forwarded; inspect
+not confirm installation. Failure can leave the clone on the reviewed commit; inspect
 the existing private update log before another explicit check/install. These
 commands never run automatically as dependencies of other CLI operations.</p>
 <h2 id="application-lifecycle">Application lifecycle</h2>
