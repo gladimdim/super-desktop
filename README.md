@@ -464,18 +464,20 @@ Configure an MCP client to launch the local server:
 
 Use an absolute executable path if your client does not inherit your shell's
 PATH. The server uses stdio and supports MCP 2025-11-25 and 2025-03-26.
-With all tool switches on, it exposes 20 tools for desktop and launcher discovery, terminal runtime,
+With all tool switches on, it exposes 25 tools for desktop and launcher discovery, terminal runtime,
 lifecycle, geometry, composer readiness, bounded output capture, receipt
 inspection, harness launch, guarded prompt submission, terminal text/keys,
-interrupt/close, launch-with-prompt and native completion waiting. Tool calls require
+interrupt/close, launch-with-prompt, native completion waiting, and guarded sticky note
+reading and editing. Tool calls require
 the owner-only local control service; discovery works without a daemon.
 An unavailable or unsupported daemon returns a tool error and is never started
 automatically. See [the MCP tool reference](CLI.md#local-mcp-tools).
 
 Open **Settings → MCP** to turn access on or off and separately allow terminal
-output, harness launches, prompt submission, terminal controls and card closing.
-The five optional permissions
-start off; metadata inspection starts on. The page includes **Copy MCP
+output, harness launches, prompt submission, terminal controls, card closing,
+and sticky note reading and editing. Optional permissions start off; general
+metadata inspection starts on, while note content and note edits require their
+own switches. The page includes **Copy MCP
 configuration** and **Copy agent setup instructions** buttons with the executable
 path and environment for this computer. Turning access off blocks subsequent
 calls on existing connections; calls already in progress may finish. Refresh
