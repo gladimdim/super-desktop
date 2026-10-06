@@ -903,55 +903,103 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         .spawn()
         .unwrap();
     let fixture = Fixture { child, root };
+    super_desktop::mcp_settings::save_at(&fixture.root.join("config/super-desktop/mcp.json"), super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true}).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !fixture.root.join("super-desktop/control-v1.sock").exists() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
-    for executable in [
-        env!("CARGO_BIN_EXE_super-desktop-client"),
-        env!("CARGO_BIN_EXE_super-desktop"),
-    ] {
-        let mut child = Command::new(executable)
-            .args(["mcp", "serve"])
-            .env("XDG_RUNTIME_DIR", &fixture.root)
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut input = child.stdin.take().unwrap();
-        for msg in [
-            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
-            serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    for executable in [env!("CARGO_BIN_EXE_super-desktop-client"), env!("CARGO_BIN_EXE_super-desktop")] {
+        let exchange = |calls: Vec<serde_json::Value>| {
+            let mut child = Command::new(executable).args(["mcp", "serve"])
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .env("XDG_CONFIG_HOME", fixture.root.join("config"))
+                .env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY")
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+                .spawn().unwrap();
+            let mut input = child.stdin.take().unwrap();
+            for msg in [
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"fixture","version":"1"}}}),
+                serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            ].into_iter().chain(calls) { writeln!(input, "{msg}").unwrap(); }
+            drop(input);
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{:?}", output);
+            assert!(output.stderr.is_empty());
+            std::str::from_utf8(&output.stdout).unwrap().lines()
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()).collect::<Vec<_>>()
+        };
+        let call = |id, name, args| serde_json::json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":args}});
+        let launch = serde_json::json!({"harness":"shell","cwd":"/tmp","requestId":"mcp-launch","allowUnsafeHarness":true,"allowDownload":true});
+        let prompt = serde_json::json!({"id":"card-1","text":"Investigate tests\nReport findings","requestId":"mcp-prompt","expectEpoch":"epoch-1","expectRevision":"a".repeat(64),"expectPaneIdentity":"b".repeat(64)});
+        let replies = exchange(vec![
             serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
-            serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"app_status"}}),
-            serde_json::json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"inspect_terminal","arguments":{"id":"missing"}}}),
-        ] {
-            writeln!(input, "{msg}").unwrap();
+            call(3,"app_status",serde_json::json!({})),
+            call(4,"inspect_terminal",serde_json::json!({"id":"missing"})),
+            call(5,"capture_terminal",serde_json::json!({"id":"card-1","history":true,"lines":37})),
+            call(6,"terminal_runtime",serde_json::json!({"id":"card-1"})),
+            call(7,"launch_harness",launch.clone()),
+            call(8,"submit_prompt",prompt),
+            call(9,"inspect_request",serde_json::json!({"id":"mcp-prompt"})),
+        ]);
+        assert_eq!(replies.len(), 9);
+        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 14);
+        assert_eq!(replies[2]["result"]["structuredContent"]["data"]["ready"], true);
+        assert_eq!(replies[3]["result"]["isError"], true);
+        assert_eq!(replies[3]["result"]["structuredContent"]["error"]["code"], "not_found");
+        assert_eq!(replies[4]["result"]["structuredContent"]["data"]["lines"], 37);
+        assert!(replies[4]["result"]["structuredContent"]["data"]["text"].as_str().unwrap().contains("private"));
+        assert_eq!(replies[5]["result"]["structuredContent"]["data"]["columns"], 120);
+        let launch = &replies[6]["result"]["structuredContent"];
+        assert_eq!(launch["requestId"], "mcp-launch");
+        assert_eq!(launch["data"]["allowUnsafeHarness"], true);
+        assert_eq!(launch["data"]["allowDownload"], true);
+        assert_eq!(launch["data"]["arguments"], serde_json::Value::Null);
+        let prompt = &replies[7]["result"]["structuredContent"];
+        assert_eq!(prompt["requestId"], "mcp-prompt");
+        assert_eq!(prompt["data"]["expectPaneIdentity"], "b".repeat(64));
+        assert_eq!(prompt["data"]["input"]["kind"], "prompt");
+        assert_eq!(prompt["data"]["input"]["text"], "Investigate tests\nReport findings");
+        assert_eq!(replies[8]["result"]["structuredContent"]["data"]["id"], "mcp-prompt");
+
+        std::fs::write(fixture.root.join("older-daemon"), "").unwrap();
+        let replies = exchange(vec![call(2,"launch_harness",serde_json::json!({"harness":"shell","cwd":"/tmp","requestId":"unsupported-launch"})),call(3,"terminal_runtime",serde_json::json!({"id":"card-1"}))]);
+        for reply in &replies[1..] {
+            assert_eq!(reply["result"]["isError"], true);
+            assert_eq!(reply["result"]["structuredContent"]["error"]["code"], "unsupported_command");
+        }
+        std::fs::remove_file(fixture.root.join("older-daemon")).unwrap();
+        // A connected client must lose access when the owner switches MCP off.
+        let policy_path = fixture.root.join("config/super-desktop/mcp.json");
+        let mut child = Command::new(executable).args(["mcp", "serve"])
+            .env("XDG_RUNTIME_DIR", &fixture.root).env("XDG_CONFIG_HOME", fixture.root.join("config"))
+            .env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let mut input = child.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+        {
+            use std::io::BufRead;
+            let mut send = |msg:serde_json::Value, response:bool| {
+                writeln!(input,"{msg}").unwrap();input.flush().unwrap();
+                if !response {return serde_json::Value::Null;}
+                let mut line=String::new();output.read_line(&mut line).unwrap();
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()
+            };
+            send(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"live-policy-test","version":"1"}}}),true);
+            send(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),false);
+            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config::disabled()).unwrap();
+            let reply=send(call(2,"app_status",serde_json::json!({})),true);
+            assert_eq!(reply["result"]["structuredContent"]["error"]["code"],"mcp_disabled");
+            let reply=send(serde_json::json!({"jsonrpc":"2.0","id":3,"method":"tools/list"}),true);
+            assert!(reply["result"]["tools"].as_array().unwrap().is_empty());
+            std::fs::write(&policy_path,b"invalid").unwrap();
+            assert_eq!(send(call(4,"app_status",serde_json::json!({})),true)["result"]["isError"],true);
+            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true}).unwrap();
+            assert_eq!(send(call(5,"app_status",serde_json::json!({})),true)["result"]["structuredContent"]["data"]["ready"],true);
         }
         drop(input);
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        assert!(output.stderr.is_empty());
-        let replies: Vec<serde_json::Value> = std::str::from_utf8(&output.stdout)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(replies.len(), 4);
-        assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 6);
-        assert_eq!(
-            replies[2]["result"]["structuredContent"]["data"]["ready"],
-            true
-        );
-        assert_eq!(replies[3]["result"]["isError"], true);
-        assert_eq!(
-            replies[3]["result"]["structuredContent"]["error"]["code"],
-            "not_found"
-        );
+        assert!(child.wait().unwrap().success());
+
     }
 }

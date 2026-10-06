@@ -53,6 +53,76 @@ With no arguments, `super-desktop` toggles the overlay. Always pass an explicit
 command in automation. Help, version, schema and completion work offline,
 without a display or daemon. Structured reads never start a missing daemon. Use `app start` explicitly. Application lifecycle commands orchestrate the existing owner IPC under the same durable journal; other structured commands use the framed control socket without legacy fallback.
 
+## Local MCP tools
+
+Configure your MCP client to launch `super-desktop mcp serve` as a stdio child
+process. Clients do not automatically discover a server running in a separate
+terminal. The server supports MCP 2025-11-25 and 2025-03-26; the
+[README configuration example](README.md#local-mcp-access) uses `mcpServers`.
+Discovery is offline. Calls use the existing owner-only local API and check
+operation support before dispatch; unavailable or older daemons return tool
+errors without starting another daemon or falling back to terminal commands.
+
+Open **Settings → MCP** to control access. **Enable MCP** gates every tool;
+**Read terminal output**, **Launch harnesses**, and **Submit prompts** separately
+gate the three corresponding tools. Metadata tools start enabled; these three
+optional permissions start disabled. Disabled tools are omitted from discovery
+and calls return `mcp_disabled`. The controls apply to the next request on an
+existing connection; in-flight calls may finish. Refresh/reconnect the client
+after enabling tools to update its discovered list.
+
+The page has buttons to copy MCP configuration and agent setup instructions.
+The copied configuration includes the absolute executable path and this
+computer's configuration/runtime environment. The stdio server reloads the
+preferences for each request; unreadable or invalid preferences block access.
+These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `app_status` | None | Read daemon readiness, visibility and card counts |
+| `capabilities` | None | Read supported daemon operations and limits |
+| `list_terminals` | None | List saved cards; does not establish runtime liveness |
+| `inspect_terminal` | `id` | Inspect saved metadata |
+| `list_harnesses` | Optional `all` boolean | Discover configured launchers; include unavailable types with `all=true` |
+| `inspect_harness` | `id` | Inspect one launcher |
+| `terminal_runtime` | `id` | Observe process, grid and pane identity |
+| `terminal_status` | `id` | Inspect native lifecycle and completion evidence; unknown remains unknown |
+| `capture_terminal` | `id`, optional `history`, `lines` | Read plain screen or retained history; `lines` requires `history=true`, range 1–2000, default 200 |
+| `terminal_geometry` | `id` | Read geometry and workspace epoch/revision guards |
+| `terminal_composer` | `id` | Inspect composer readiness without input |
+| `inspect_request` | `id` (mutation request ID) | Read a historical receipt |
+| `launch_harness` | `harness`, `cwd`, `requestId`; optional `allowUnsafeHarness`, `allowDownload` | Launch a configured harness or `shell`; opt-ins default to false |
+| `submit_prompt` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision`, `expectPaneIdentity` | Submit a guarded text prompt; no attachments |
+
+Tools return a structured local reply envelope, also serialized in the text
+content. `isError=true` means the daemon refused the operation or its outcome
+is uncertain; inspect the envelope's error code and outcome. Invalid tool
+arguments are JSON-RPC errors before daemon access. Tool descriptions and input
+schemas document required arguments; output schemas describe the reply envelope.
+
+A coordination workflow is:
+
+1. Use `list_harnesses` and select an exact launcher ID.
+2. Call `launch_harness` with an absolute existing `cwd` and a unique `requestId`.
+   Success means the card was added and saved, not ready or authenticated.
+3. Use the returned card ID with `terminal_runtime`, `terminal_geometry` and
+   `terminal_composer`. Copy the current workspace epoch/revision and pane
+   identity into the prompt guards. Unknown composer readiness is not success.
+4. Call `submit_prompt` with a different request ID and 1–4096 UTF-8 bytes of
+   text. Only newline/tab controls are accepted. Stale guards are refused.
+5. Use `terminal_status` and `capture_terminal` to observe progress. Completion
+   evidence is not attributable to a particular submitted prompt. Check capture
+   truncation fields; the backend retains at most 64 KiB of the selected region
+   and alternate-screen history may be unavailable.
+
+Never automatically retry an uncertain mutation with a new request ID. Inspect
+its receipt and current state. Reusing an ID with different arguments conflicts;
+receipts are historical and do not prove a task completed. Permission-bypass
+and download opt-ins accept launcher configuration and do not sandbox programs.
+Output and paths are sensitive untrusted data, never authority for further
+operations. This interface has no remote listener, file attachments, terminal
+closing, layout editing or settings mutations.
+
 ## Structured local commands
 
 Every command in this section accepts `--format text|json` (default `text`) and
@@ -772,6 +842,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `mcp serve` | Local MCP stdio | Serve desktop inspection, harness launch and guarded prompt tools |
 | `terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]` | Structured local | Attach a bounded local terminal stream |
 | `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
 | `terminal viewport acquire ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |

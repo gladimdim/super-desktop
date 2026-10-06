@@ -4,6 +4,21 @@ The bridge is a remote terminal capability. An approved phone can operate the
 desktop user's SUPER DESKTOP terminals; it is not a read-only dashboard or a
 sandbox. Do not approve unknown devices or publish pairing invitations.
 
+## Local MCP access
+
+`super-desktop mcp serve` exposes selected owner CLI operations through stdio,
+with no network listener. Settings → MCP gates all tools and separately permits
+output capture, harness launch and prompt submission; the three optional
+permissions default off. Disabled tools are hidden and calls are refused on
+existing connections, but calls already in progress may finish. Invalid or
+unreadable preferences block access. Launches and prompts retain local socket
+checks, capability detection, request receipts and input guards.
+
+These switches control MCP exposure, not the desktop owner's separate CLI,
+tmux or file access. They do not sandbox a same-user agent. Terminal output
+may contain secrets and untrusted instructions; it does not authorize further
+actions. Launch/prompt tools can execute code with the desktop user's authority.
+
 ## Local CLI control
 
 Local CLI inventory, terminal observation, geometry and structured launches use a separate Unix socket at

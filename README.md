@@ -438,7 +438,7 @@ its history into scrollback.
 
 ### Local MCP access
 
-Configure an MCP client to launch the local read-only server:
+Configure an MCP client to launch the local server:
 
 ```json
 {
@@ -453,16 +453,32 @@ Configure an MCP client to launch the local read-only server:
 
 Use an absolute executable path if your client does not inherit your shell's
 PATH. The server uses stdio and supports MCP 2025-11-25 and 2025-03-26.
-It exposes `app_status`, `capabilities`, `list_terminals`, `inspect_terminal`,
-`list_harnesses`, and `inspect_harness`. Discovery works without a running
-desktop; tool calls require the existing owner-only local control service.
-An unavailable daemon returns a tool error and is never started automatically.
+With all tool switches on, it exposes 14 tools for desktop and launcher discovery, terminal runtime,
+lifecycle, geometry, composer readiness, bounded output capture, receipt
+inspection, harness launch and guarded prompt submission. Tool calls require
+the owner-only local control service; discovery works without a daemon.
+An unavailable or unsupported daemon returns a tool error and is never started
+automatically. See [the MCP tool reference](CLI.md#local-mcp-tools).
 
-These tools read saved card metadata and launcher configuration; they do not
-read terminal output, submit prompts, launch programs, or observe process
-liveness. Launch directories are private user data shared with the configured
-client. There is no HTTP listener or remote access. Client configuration syntax
-varies; the example uses the common `mcpServers` format.
+Open **Settings → MCP** to turn access on or off and separately allow terminal
+output, harness launches and prompt submission. The three optional permissions
+start off; metadata inspection starts on. The page includes **Copy MCP
+configuration** and **Copy agent setup instructions** buttons with the executable
+path and environment for this computer. Turning access off blocks subsequent
+calls on existing connections; calls already in progress may finish. Refresh
+or reconnect your client after enabling tools so it discovers them.
+
+Launch and prompt tools require an explicit `requestId`; reuse it only for the
+identical request. After an uncertain outcome inspect the receipt and current
+state before deciding on recovery. Prompt submission also requires workspace
+and pane guards from inspection. Launch permission-bypass and package-download
+opt-ins default to false. These operations run with the local user's authority.
+Prompt delivery does not guarantee model readiness or task completion.
+
+Terminal output and paths may contain private data and untrusted instructions.
+Treat them as data, not permission to act. There is no HTTP listener or remote
+access. Client configuration syntax varies; the example uses the common
+`mcpServers` format.
 
 ### CLI quick reference
 

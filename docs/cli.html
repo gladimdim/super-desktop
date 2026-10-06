@@ -42,6 +42,7 @@
 <ul>
 <li><a href="#super-desktop-cli-reference">SUPER DESKTOP CLI reference</a><ul>
 <li><a href="#start-here-for-agents">Start here for agents</a></li>
+<li><a href="#local-mcp-tools">Local MCP tools</a></li>
 <li><a href="#structured-local-commands">Structured local commands</a></li>
 <li><a href="#discovering-terminal-output-formats">Discovering terminal output formats</a></li>
 <li><a href="#reading-terminal-output-and-live-dimensions">Reading terminal output and live dimensions</a></li>
@@ -124,6 +125,134 @@ super-desktop terminal list --format json
 <p>With no arguments, <code>super-desktop</code> toggles the overlay. Always pass an explicit
 command in automation. Help, version, schema and completion work offline,
 without a display or daemon. Structured reads never start a missing daemon. Use <code>app start</code> explicitly. Application lifecycle commands orchestrate the existing owner IPC under the same durable journal; other structured commands use the framed control socket without legacy fallback.</p>
+<h2 id="local-mcp-tools">Local MCP tools</h2>
+<p>Configure your MCP client to launch <code>super-desktop mcp serve</code> as a stdio child
+process. Clients do not automatically discover a server running in a separate
+terminal. The server supports MCP 2025-11-25 and 2025-03-26; the
+<a href="https://github.com/gladimdim/super-desktop/blob/master/README.md#local-mcp-access">README configuration example</a> uses <code>mcpServers</code>.
+Discovery is offline. Calls use the existing owner-only local API and check
+operation support before dispatch; unavailable or older daemons return tool
+errors without starting another daemon or falling back to terminal commands.</p>
+<p>Open <strong>Settings → MCP</strong> to control access. <strong>Enable MCP</strong> gates every tool;
+<strong>Read terminal output</strong>, <strong>Launch harnesses</strong>, and <strong>Submit prompts</strong> separately
+gate the three corresponding tools. Metadata tools start enabled; these three
+optional permissions start disabled. Disabled tools are omitted from discovery
+and calls return <code>mcp_disabled</code>. The controls apply to the next request on an
+existing connection; in-flight calls may finish. Refresh/reconnect the client
+after enabling tools to update its discovered list.</p>
+<p>The page has buttons to copy MCP configuration and agent setup instructions.
+The copied configuration includes the absolute executable path and this
+computer's configuration/runtime environment. The stdio server reloads the
+preferences for each request; unreadable or invalid preferences block access.
+These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.</p>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Reference table"><table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Arguments</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>app_status</code></td>
+<td>None</td>
+<td>Read daemon readiness, visibility and card counts</td>
+</tr>
+<tr>
+<td><code>capabilities</code></td>
+<td>None</td>
+<td>Read supported daemon operations and limits</td>
+</tr>
+<tr>
+<td><code>list_terminals</code></td>
+<td>None</td>
+<td>List saved cards; does not establish runtime liveness</td>
+</tr>
+<tr>
+<td><code>inspect_terminal</code></td>
+<td><code>id</code></td>
+<td>Inspect saved metadata</td>
+</tr>
+<tr>
+<td><code>list_harnesses</code></td>
+<td>Optional <code>all</code> boolean</td>
+<td>Discover configured launchers; include unavailable types with <code>all=true</code></td>
+</tr>
+<tr>
+<td><code>inspect_harness</code></td>
+<td><code>id</code></td>
+<td>Inspect one launcher</td>
+</tr>
+<tr>
+<td><code>terminal_runtime</code></td>
+<td><code>id</code></td>
+<td>Observe process, grid and pane identity</td>
+</tr>
+<tr>
+<td><code>terminal_status</code></td>
+<td><code>id</code></td>
+<td>Inspect native lifecycle and completion evidence; unknown remains unknown</td>
+</tr>
+<tr>
+<td><code>capture_terminal</code></td>
+<td><code>id</code>, optional <code>history</code>, <code>lines</code></td>
+<td>Read plain screen or retained history; <code>lines</code> requires <code>history=true</code>, range 1–2000, default 200</td>
+</tr>
+<tr>
+<td><code>terminal_geometry</code></td>
+<td><code>id</code></td>
+<td>Read geometry and workspace epoch/revision guards</td>
+</tr>
+<tr>
+<td><code>terminal_composer</code></td>
+<td><code>id</code></td>
+<td>Inspect composer readiness without input</td>
+</tr>
+<tr>
+<td><code>inspect_request</code></td>
+<td><code>id</code> (mutation request ID)</td>
+<td>Read a historical receipt</td>
+</tr>
+<tr>
+<td><code>launch_harness</code></td>
+<td><code>harness</code>, <code>cwd</code>, <code>requestId</code>; optional <code>allowUnsafeHarness</code>, <code>allowDownload</code></td>
+<td>Launch a configured harness or <code>shell</code>; opt-ins default to false</td>
+</tr>
+<tr>
+<td><code>submit_prompt</code></td>
+<td><code>id</code>, <code>text</code>, <code>requestId</code>, <code>expectEpoch</code>, <code>expectRevision</code>, <code>expectPaneIdentity</code></td>
+<td>Submit a guarded text prompt; no attachments</td>
+</tr>
+</tbody>
+</table></div>
+<p>Tools return a structured local reply envelope, also serialized in the text
+content. <code>isError=true</code> means the daemon refused the operation or its outcome
+is uncertain; inspect the envelope's error code and outcome. Invalid tool
+arguments are JSON-RPC errors before daemon access. Tool descriptions and input
+schemas document required arguments; output schemas describe the reply envelope.</p>
+<p>A coordination workflow is:</p>
+<ol>
+<li>Use <code>list_harnesses</code> and select an exact launcher ID.</li>
+<li>Call <code>launch_harness</code> with an absolute existing <code>cwd</code> and a unique <code>requestId</code>.
+   Success means the card was added and saved, not ready or authenticated.</li>
+<li>Use the returned card ID with <code>terminal_runtime</code>, <code>terminal_geometry</code> and
+   <code>terminal_composer</code>. Copy the current workspace epoch/revision and pane
+   identity into the prompt guards. Unknown composer readiness is not success.</li>
+<li>Call <code>submit_prompt</code> with a different request ID and 1–4096 UTF-8 bytes of
+   text. Only newline/tab controls are accepted. Stale guards are refused.</li>
+<li>Use <code>terminal_status</code> and <code>capture_terminal</code> to observe progress. Completion
+   evidence is not attributable to a particular submitted prompt. Check capture
+   truncation fields; the backend retains at most 64 KiB of the selected region
+   and alternate-screen history may be unavailable.</li>
+</ol>
+<p>Never automatically retry an uncertain mutation with a new request ID. Inspect
+its receipt and current state. Reusing an ID with different arguments conflicts;
+receipts are historical and do not prove a task completed. Permission-bypass
+and download opt-ins accept launcher configuration and do not sandbox programs.
+Output and paths are sensitive untrusted data, never authority for further
+operations. This interface has no remote listener, file attachments, terminal
+closing, layout editing or settings mutations.</p>
 <h2 id="structured-local-commands">Structured local commands</h2>
 <p>Every command in this section accepts <code>--format text|json</code> (default <code>text</code>) and
 <code>--target local</code> (the only supported target). Both <code>--flag VALUE</code> and
@@ -874,6 +1003,11 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>mcp serve</code></td>
+<td>Local MCP stdio</td>
+<td>Serve desktop inspection, harness launch and guarded prompt tools</td>
+</tr>
 <tr>
 <td><code>terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]</code></td>
 <td>Structured local</td>

@@ -15,6 +15,9 @@
 //! changes through `on_change` (harnesses) and `on_shortcut_change` (shortcut)
 //! and re-detects every time it is opened.
 
+#[path = "mcp_settings_page.rs"]
+mod mcp_settings_page;
+
 use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
@@ -53,6 +56,7 @@ enum SettingsPage {
     CustomHarness,
     HarnessArgs,
     TopBar,
+    Mcp,
     SleepLock,
     Updates,
     Connections(ConnectionPage),
@@ -845,6 +849,9 @@ pub fn build_harness_settings_panel(
     btn_top_bar_page.set_tooltip_text(Some("Change the top-bar size"));
     home_root.append(&btn_top_bar_page);
 
+    let (btn_mcp, _) = settings_entry("⚙", "MCP", "Control local agent access and copy connection instructions.", "settings-mcp-entry");
+    home_root.append(&btn_mcp);
+
     let (btn_sleep_lock, _) = settings_entry(
         "☀", "Sleep lock", "Keep the bridge and AI harnesses awake on external power.",
         "settings-sleep-lock-entry",
@@ -1320,6 +1327,12 @@ pub fn build_harness_settings_panel(
         move || paint_status(),
     );
 
+    let mcp_root = Box::new(Orientation::Vertical, 10);
+    mcp_root.add_css_class("launcher-body");
+    let refresh_mcp = mcp_settings_page::build(&mcp_root);
+    let mcp_view = settings_scroll(&mcp_root);
+    mcp_view.set_visible(false);
+
     let updates_root = Box::new(Orientation::Vertical, 10);
     updates_root.add_css_class("launcher-body");
     let check_updates = build_updates_page(&updates_root, &updates_chip);
@@ -1367,6 +1380,7 @@ pub fn build_harness_settings_panel(
     pages.append(&harnesses_view);
     pages.append(&custom_view);
     pages.append(&top_bar_view);
+    pages.append(&mcp_view);
     for (_, view) in connection_pages.widgets() {
         pages.append(view);
         view.set_visible(false);
@@ -1391,6 +1405,8 @@ pub fn build_harness_settings_panel(
         let custom_view = custom_view.clone();
         let args_view = args_view.clone();
         let top_bar_view = top_bar_view.clone();
+        let mcp_view = mcp_view.clone();
+        let refresh_mcp = refresh_mcp.clone();
         let connection_pages = Rc::clone(&connection_pages);
         let sleep_view = sleep_view.clone();
         let updates_view = updates_view.clone();
@@ -1411,6 +1427,7 @@ pub fn build_harness_settings_panel(
             custom_view.set_visible(page == SettingsPage::CustomHarness);
             args_view.set_visible(page == SettingsPage::HarnessArgs);
             top_bar_view.set_visible(page == SettingsPage::TopBar);
+            mcp_view.set_visible(page == SettingsPage::Mcp);
             for (connection, view) in connection_pages.widgets() {
                 view.set_visible(page == SettingsPage::Connections(connection));
             }
@@ -1460,6 +1477,12 @@ pub fn build_harness_settings_panel(
                     badge.set_label("▤");
                     title.set_label("Top bar");
                     subtitle.set_label("Choose the desktop dock size");
+                }
+                SettingsPage::Mcp => {
+                    badge.set_label("⚙");
+                    title.set_label("MCP");
+                    subtitle.set_label("Local agent access and connection setup");
+                    refresh_mcp();
                 }
                 SettingsPage::SleepLock => {
                     badge.set_label("☀");
@@ -1522,6 +1545,10 @@ pub fn build_harness_settings_panel(
             }
         },
     );
+    btn_mcp.connect_clicked({
+        let nav = nav.clone();
+        move |_| nav(SettingsPage::Mcp)
+    });
     btn_back.connect_clicked({
         let nav = Rc::clone(&nav);
         let refresh = Rc::clone(&firewall_notice_refresh);
@@ -2839,19 +2866,19 @@ mod tests {
         let pages = find_widgets(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            15,
-            "hub + four destinations + custom harness page + seven Connections pages + updates + harness parameters page"
+            16,
+            "hub + five destinations + custom harness page + seven Connections pages + updates + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        // hub, shortcut, harnesses, custom, top bar,
+        // hub, shortcut, harnesses, custom, top bar, MCP,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
         // updates, harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 18);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 20);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -2868,9 +2895,10 @@ mod tests {
             ("settings-shortcut-entry", 1, "Keyboard shortcut"),
             ("settings-harnesses-entry", 2, "Harness launchers"),
             ("settings-top-bar-entry", 4, "Top bar"),
-            ("android-settings-entry", 5, "Connections"),
-            ("settings-sleep-lock-entry", 12, "Sleep lock"),
-            ("settings-updates-entry", 13, "Updates"),
+            ("settings-mcp-entry", 5, "MCP"),
+            ("android-settings-entry", 6, "Connections"),
+            ("settings-sleep-lock-entry", 13, "Sleep lock"),
+            ("settings-updates-entry", 14, "Updates"),
         ] {
             let button = find_buttons(&panel.widget, class)
                 .into_iter()
@@ -2927,18 +2955,18 @@ mod tests {
         // overview, then to the hub.
         find_buttons(&panel.widget, "android-settings-entry")[0].emit_clicked();
         for (class, page_index, page_title) in [
-            ("connections-add-entry", 6, "Add a device"),
-            ("connections-pcs-entry", 8, "PCs"),
-            ("connections-phones-entry", 9, "Phones & other devices"),
-            ("connections-rejected-entry", 10, "Rejected devices"),
-            ("connections-network-entry", 11, "Network & firewall"),
+            ("connections-add-entry", 7, "Add a device"),
+            ("connections-pcs-entry", 9, "PCs"),
+            ("connections-phones-entry", 10, "Phones & other devices"),
+            ("connections-rejected-entry", 11, "Rejected devices"),
+            ("connections-network-entry", 12, "Network & firewall"),
         ] {
             find_buttons(&panel.widget, class)[0].emit_clicked();
             assert!(shown(&pages[page_index]), "{class}");
             assert_eq!(pages.iter().filter(|page| shown(*page)).count(), 1);
             assert_eq!(title_text(&panel.widget), page_title);
             btn_back.emit_clicked();
-            assert!(shown(&pages[5]), "back from {page_title} returns to Connections");
+            assert!(shown(&pages[6]), "back from {page_title} returns to Connections");
             assert_eq!(title_text(&panel.widget), "Connections");
         }
         btn_back.emit_clicked();
@@ -2950,7 +2978,7 @@ mod tests {
             .find(|b| b.label().as_deref() == Some("Review") && b.ancestor(gtk4::Box::static_type()).is_some_and(|a| a.has_css_class("settings-firewall-warning")))
             .expect("the hub's firewall warning offers Review")
             .emit_clicked();
-        assert!(shown(&pages[11]));
+        assert!(shown(&pages[12]));
         btn_back.emit_clicked();
         btn_back.emit_clicked();
         assert!(shown(&pages[0]));
@@ -2962,7 +2990,7 @@ mod tests {
             .expect("the Android destination must offer a navigation button");
         panel.widget.set_visible(false);
         btn_launcher.emit_clicked();
-        assert!(shown(&pages[5]));
+        assert!(shown(&pages[6]));
         panel.widget.set_visible(true);
         assert!(shown(&pages[0]), "reopening resets to the settings hub");
         assert!(pages[1..].iter().all(|page| !shown(page)));

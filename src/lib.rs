@@ -33,3 +33,5 @@ mod cli_launch_flow;
 pub mod control_output;
 
 mod cli_connection;
+
+pub mod mcp_settings;
