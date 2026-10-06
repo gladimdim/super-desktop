@@ -3467,38 +3467,47 @@ mod tests {
         let id = "0b8c4a7e-5d0f-4b61-9a43-2f7c1d9e6a10";
         let all = |_: &str, _: &str| true;
         let none = |_: &str, _: &str| false;
+        // The launch command with this machine's default flags, which the
+        // resume form only extends.
+        let claude = resolve_command("claude", Some("/usr/bin/claude"));
+        let codex = resolve_command("codex", Some("/usr/bin/codex --no-alt-screen"));
         assert_eq!(
             resume_command_with("claude", Some("/usr/bin/claude"), Some(id), &all),
-            format!("/usr/bin/claude --resume {id}")
+            format!("{claude} --resume {id}")
         );
         assert_eq!(
             resume_command_with("codex", Some("/usr/bin/codex --no-alt-screen"), Some(id), &all),
-            format!("/usr/bin/codex --no-alt-screen resume {id}")
+            format!("{codex} resume {id}")
         );
         // Gone (deleted transcript, other machine): the old fallback, never a
         // harness that exits on an unknown id.
         assert_eq!(
             resume_command_with("claude", Some("/usr/bin/claude"), Some(id), &none),
-            "/usr/bin/claude --continue"
+            format!("{claude} --continue")
         );
         assert_eq!(
-            resume_command_with("codex", Some("/usr/bin/codex"), Some(id), &none),
-            "/usr/bin/codex resume --last"
+            resume_command_with("codex", Some("/usr/bin/codex --no-alt-screen"), Some(id), &none),
+            format!("{codex} resume --last")
         );
         // No id stored yet (a card from an older build).
-        assert_eq!(resume_command_with("claude", Some("/usr/bin/claude"), None, &all), "/usr/bin/claude --continue");
+        assert_eq!(
+            resume_command_with("claude", Some("/usr/bin/claude"), None, &all),
+            format!("{claude} --continue")
+        );
         // Ids reach a shell command line: anything but [A-Za-z0-9_-] is ignored.
         for bad in ["x; rm -rf ~", "$(id)", "a b", "", "'q'"] {
             assert_eq!(
                 resume_command_with("claude", Some("/usr/bin/claude"), Some(bad), &all),
-                "/usr/bin/claude --continue",
+                format!("{claude} --continue"),
                 "{bad:?}"
             );
         }
         // The user's own resume flag is kept as written.
+        let own = resolve_command("claude", Some("/usr/bin/claude --resume other"));
+        assert!(own.contains("--resume other"), "{own}");
         assert_eq!(
             resume_command_with("claude", Some("/usr/bin/claude --resume other"), Some(id), &all),
-            "/usr/bin/claude --resume other"
+            own
         );
         // Only the harness's own id is asked about.
         let asked = std::cell::RefCell::new(Vec::new());

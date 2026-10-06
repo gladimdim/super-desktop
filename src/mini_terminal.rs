@@ -240,12 +240,14 @@ impl VteDrawing {
 
     /// Bring the widget in line with both reasons. The widget is compared, not
     /// the last value set: a terminal re-created by a restore starts visible.
+    /// Its own flag (`get_visible`), not `is_visible`, which is also false
+    /// while the overlay window is hidden and would leave the flag set then.
     fn apply(&self, term: Option<&VteTerminal>) {
         let Some(term) = term else {
             return;
         };
         let drawing = self.drawing();
-        if term.is_visible() != drawing {
+        if term.get_visible() != drawing {
             term.set_visible(drawing);
         }
     }
@@ -2387,29 +2389,41 @@ fn freeze_terminal(term: Option<&VteTerminal>, drawing: &VteDrawing, frame: &gtk
     let Some(term) = term else {
         return true;
     };
-    if !term.is_visible() {
+    if !term.get_visible() {
         // Not drawing (unmapped or covered): nothing to stand in for.
         return true;
     }
     if !term.is_drawable() || term.width() <= 0 || term.height() <= 0 {
         return false;
     }
-    let Some(renderer) = term.native().and_then(|native| native.renderer()) else {
+    let (Some(renderer), Some(parent)) =
+        (term.native().and_then(|native| native.renderer()), term.parent())
+    else {
         return true;
     };
-    // The terminal's own bounds, so the paintable draws it 1:1.
-    let Some(bounds) = term.compute_bounds(term) else {
+    // The terminal's own border box, so the image is drawn 1:1.
+    let (Some(bounds), Some(origin)) = (
+        term.compute_bounds(term),
+        term.compute_point(&parent, &gtk4::graphene::Point::zero()),
+    ) else {
         return false;
     };
     let (width, height) = (bounds.width(), bounds.height());
     let scale = term.scale_factor() as f32;
     let snapshot = gtk4::Snapshot::new();
     snapshot.scale(scale, scale);
-    gtk4::WidgetPaintable::new(Some(term)).snapshot(&snapshot, width as f64, height as f64);
+    snapshot.translate(&gtk4::graphene::Point::new(-origin.x(), -origin.y()));
+    // Through the parent, which renders the terminal's current screen. A
+    // `WidgetPaintable` only replays the node of the last painted frame, and
+    // GTK drops that node as soon as new output queues a redraw: a busy
+    // terminal gave an empty image on almost every try.
+    parent.snapshot_child(term, &snapshot);
     let Some(node) = snapshot.to_node() else {
         return false;
     };
-    let viewport = gtk4::graphene::Rect::new(0.0, 0.0, width * scale, height * scale);
+    // The border box (VTE's CSS padding lies outside its content origin):
+    // the still image takes the whole allocation the terminal leaves.
+    let viewport = gtk4::graphene::Rect::new(bounds.x() * scale, bounds.y() * scale, width * scale, height * scale);
     let texture = renderer.render_texture(&node, Some(&viewport));
     frame.set_paintable(Some(&texture));
     drawing.set_frozen(true, Some(term), frame);
@@ -3412,7 +3426,7 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
 
         // Not laid out yet: try again later.
         assert!(!freeze_terminal(Some(&term), &drawing, &frame));
-        assert!(!drawing.frozen() && term.is_visible() && !frame.is_visible());
+        assert!(!drawing.frozen() && term.get_visible() && !frame.get_visible());
 
         window.present();
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -3421,9 +3435,17 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
         }
         let card_size = (card.width(), card.height());
         let term_size = (term.width(), term.height());
+        // The allocation the terminal leaves, CSS padding included.
+        let border_box = term
+            .compute_bounds(&term)
+            .map(|bounds| (bounds.width() as i32, bounds.height() as i32))
+            .unwrap();
         let pty_size = pty.size().unwrap();
         term.feed(b"before the slide\r\n");
         pump();
+        // Output since the last painted frame (a busy agent): GTK has dropped
+        // the terminal's cached node, and the freeze must still succeed.
+        term.feed(b"just printed\r\n");
 
         assert!(freeze_terminal(Some(&term), &drawing, &frame));
         assert!(drawing.frozen() && !drawing.drawing());
@@ -3432,7 +3454,7 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
         let scale = term.scale_factor();
         assert_eq!(
             (texture.intrinsic_width(), texture.intrinsic_height()),
-            (term_size.0 * scale, term_size.1 * scale),
+            (border_box.0 * scale, border_box.1 * scale),
             "rendered 1:1 at the terminal's size"
         );
         // Frozen again (a reversed slide): the same image stays.
@@ -3441,9 +3463,14 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
 
         term.feed(b"written while sliding\r\n");
         pump();
+        // Broadway can take a few frames to lay the image out.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while frame.width() <= 0 && Instant::now() < deadline {
+            pump();
+        }
         assert_eq!(
             (frame.width(), frame.height()),
-            term_size,
+            border_box,
             "the image takes the terminal's place exactly"
         );
         assert_eq!((card.width(), card.height()), card_size, "the card keeps its size");
