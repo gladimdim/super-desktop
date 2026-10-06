@@ -97,3 +97,12 @@ audio. Each has a WebP poster taken from a frame inside it.
 
 The captions in the clips come from the trailer. The interactive demos on the
 page are a simulation in `../assets/` with sample data, labeled as such.
+
+## Social preview card (`../media/social-card.jpg`)
+
+The 1200 × 630 image that link previews show (Open Graph and X/Twitter
+`summary_large_image`) for `index.html`, `connect.html` and `cli.html`. It was
+drawn as an HTML page in headless Chromium on 2026-10-06: the brand, the hero
+headline and `readme-overlay.webp` (a real capture, see above) in perspective,
+in Noto Sans and JetBrains Mono, then saved as JPEG at quality 88. Keep text
+away from the edges: some sites crop the card a little.

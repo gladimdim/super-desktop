@@ -31,6 +31,21 @@ def render():
 <title>SUPER DESKTOP CLI reference for people and AI agents</title>
 <meta name="description" content="Commands, JSON results, launch permissions and request receipts for controlling SUPER DESKTOP from scripts and AI agents.">
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/cli.html">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SUPER DESKTOP">
+<meta property="og:url" content="https://superdesktop.dmytrogladkyi.com/cli.html">
+<meta property="og:title" content="SUPER DESKTOP CLI reference">
+<meta property="og:description" content="Commands and JSON results for driving SUPER DESKTOP from scripts and AI agents.">
+<meta property="og:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="SUPER DESKTOP CLI reference">
+<meta name="twitter:description" content="Commands and JSON results for driving SUPER DESKTOP from scripts and AI agents.">
+<meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
+<meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <style>
   :root { color-scheme: dark; --bg: #0b0e14; --panel: #131722; --text: #e6e9f0; --muted: #a8b2c5; --accent: #22d3ee; --border: #262e42; }
   * { box-sizing: border-box; }
