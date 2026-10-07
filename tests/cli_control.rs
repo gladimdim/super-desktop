@@ -904,7 +904,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         .spawn()
         .unwrap();
     let fixture = Fixture { child, root };
-    super_desktop::mcp_settings::save_at(&fixture.root.join("config/super-desktop/mcp.json"), super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true}).unwrap();
+    super_desktop::mcp_settings::save_at(&fixture.root.join("config/super-desktop/mcp.json"), super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true,read_notes:true,edit_notes:true}).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     while !fixture.root.join("super-desktop/control-v1.sock").exists() {
         assert!(Instant::now() < deadline);
@@ -953,6 +953,10 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             let results=exchange(vec![call(2,"wait_for_completion",args)]);
             assert_eq!(results[1]["result"]["isError"],true,"{results:?}");
         }
+        let note_guards=serde_json::json!({"expectEpoch":"epoch-1","expectRevision":"a".repeat(64)});
+        let mut create_note=note_guards.as_object().unwrap().clone();create_note.extend(serde_json::json!({"requestId":"note-create","text":"hello"}).as_object().unwrap().clone());
+        let mut update_note=note_guards.as_object().unwrap().clone();update_note.extend(serde_json::json!({"requestId":"note-update","id":"note-1","text":"updated"}).as_object().unwrap().clone());
+        let mut delete_note=note_guards.as_object().unwrap().clone();delete_note.extend(serde_json::json!({"requestId":"note-delete","id":"note-1","confirm":true}).as_object().unwrap().clone());
         let replies = exchange(vec![
             serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
             call(3,"app_status",serde_json::json!({})),
@@ -962,10 +966,15 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             call(7,"launch_harness",launch.clone()),
             call(8,"submit_prompt",prompt),
             call(9,"inspect_request",serde_json::json!({"id":"mcp-prompt"})),
+            call(10,"list_notes",serde_json::json!({})),
+            call(11,"inspect_note",serde_json::json!({"id":"note-1"})),
+            call(12,"create_note",serde_json::Value::Object(create_note)),
+            call(13,"update_note",serde_json::Value::Object(update_note)),
+            call(14,"delete_note",serde_json::Value::Object(delete_note)),
         ]);
-        assert_eq!(replies.len(), 9);
+        assert_eq!(replies.len(), 14);
         assert_eq!(replies[0]["result"]["protocolVersion"], "2025-03-26");
-        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 20);
+        assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 25);
         assert_eq!(replies[2]["result"]["structuredContent"]["data"]["ready"], true);
         assert_eq!(replies[3]["result"]["isError"], true);
         assert_eq!(replies[3]["result"]["structuredContent"]["error"]["code"], "not_found");
@@ -983,6 +992,13 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
         assert_eq!(prompt["data"]["input"]["kind"], "prompt");
         assert_eq!(prompt["data"]["input"]["text"], "Investigate tests\nReport findings");
         assert_eq!(replies[8]["result"]["structuredContent"]["data"]["id"], "mcp-prompt");
+        assert_eq!(replies[9]["result"]["structuredContent"]["data"]["method"], "workspace.read");
+        assert_eq!(replies[9]["result"]["structuredContent"]["data"]["query"]["kind"], "notes");
+        assert_eq!(replies[10]["result"]["structuredContent"]["data"]["query"]["kind"], "note");
+        assert_eq!(replies[11]["result"]["structuredContent"]["requestId"], "note-create");
+        assert_eq!(replies[11]["result"]["structuredContent"]["data"]["edit"]["kind"], "noteCreate");
+        assert_eq!(replies[12]["result"]["structuredContent"]["data"]["edit"]["kind"], "noteUpdate");
+        assert_eq!(replies[13]["result"]["structuredContent"]["data"]["edit"]["kind"], "noteDelete");
 
         std::fs::write(fixture.root.join("older-daemon"), "").unwrap();
         let replies = exchange(vec![call(2,"launch_harness",serde_json::json!({"harness":"shell","cwd":"/tmp","requestId":"unsupported-launch"})),call(3,"terminal_runtime",serde_json::json!({"id":"card-1"}))]);
@@ -1010,6 +1026,13 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             };
             send(serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"live-policy-test","version":"1"}}}),true);
             send(serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"}),false);
+            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true,read_notes:false,edit_notes:true}).unwrap();
+            let note_reply=send(call(20,"list_notes",serde_json::json!({})),true);
+            assert_eq!(note_reply["result"]["structuredContent"]["error"]["code"],"mcp_disabled");
+            let tools_reply=send(serde_json::json!({"jsonrpc":"2.0","id":21,"method":"tools/list"}),true);
+            let names=tools_reply["result"]["tools"].as_array().unwrap().iter().filter_map(|tool|tool["name"].as_str()).collect::<Vec<_>>();
+            assert!(!names.contains(&"list_notes") && !names.contains(&"inspect_note"));
+            assert!(names.contains(&"create_note"));
             super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config::disabled()).unwrap();
             let reply=send(call(2,"app_status",serde_json::json!({})),true);
             assert_eq!(reply["result"]["structuredContent"]["error"]["code"],"mcp_disabled");
@@ -1017,7 +1040,7 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             assert!(reply["result"]["tools"].as_array().unwrap().is_empty());
             std::fs::write(&policy_path,b"invalid").unwrap();
             assert_eq!(send(call(4,"app_status",serde_json::json!({})),true)["result"]["isError"],true);
-            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true}).unwrap();
+            super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true,read_notes:true,edit_notes:true}).unwrap();
             assert_eq!(send(call(5,"app_status",serde_json::json!({})),true)["result"]["structuredContent"]["data"]["ready"],true);
         }
         drop(input);

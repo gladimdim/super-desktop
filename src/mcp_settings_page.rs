@@ -38,6 +38,8 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
         ("mcp-prompts", "Submit prompts", "Allow guarded text prompts to existing harnesses. Commands run with your user account's authority."),
         ("mcp-controls", "Control terminals", "Allow literal text, named keys and Ctrl-C interruption. Input can execute commands."),
         ("mcp-close", "Close terminals", "Allow agents to stop one exact session and remove its card with explicit confirmation."),
+        ("mcp-read-notes", "Read sticky notes", "Allow agents to list note metadata and read note text."),
+        ("mcp-edit-notes", "Edit sticky notes", "Allow agents to create, replace and delete note text with workspace guards."),
     ] {
         let row = Box::new(Orientation::Horizontal, 12);
         let words = Box::new(Orientation::Vertical, 4);
@@ -66,6 +68,8 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
                 config.prompts,
                 config.controls,
                 config.close,
+                config.read_notes,
+                config.edit_notes,
             ]
             .into_iter()
             .enumerate()
@@ -111,7 +115,9 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
                 2 => config.launch = toggle.is_active(),
                 3 => config.prompts = toggle.is_active(),
                 4 => config.controls = toggle.is_active(),
-                _ => config.close = toggle.is_active(),
+                5 => config.close = toggle.is_active(),
+                6 => config.read_notes = toggle.is_active(),
+                _ => config.edit_notes = toggle.is_active(),
             }
             match save(config) {
                 Ok(()) => refresh(),
@@ -212,7 +218,13 @@ mod tests {
         let prompts = find(root.upcast_ref(), "mcp-prompts").unwrap();
         let controls = find(root.upcast_ref(), "mcp-controls").unwrap();
         let close = find(root.upcast_ref(), "mcp-close").unwrap();
+        let read_notes = find(root.upcast_ref(), "mcp-read-notes").unwrap();
+        let edit_notes = find(root.upcast_ref(), "mcp-edit-notes").unwrap();
         assert!(!controls.is_active() && !close.is_active());
+        assert!(!read_notes.is_active() && !edit_notes.is_active());
+        read_notes.set_active(true);
+        edit_notes.set_active(true);
+        assert!(stored.get().read_notes && stored.get().edit_notes);
         controls.set_active(true);
         close.set_active(true);
         assert!(stored.get().controls && stored.get().close);
@@ -226,6 +238,7 @@ mod tests {
         assert!(!stored.get().enabled);
         assert!(!launch.is_sensitive());
         assert!(!controls.is_sensitive() && !close.is_sensitive());
+        assert!(!read_notes.is_sensitive() && !edit_notes.is_sensitive());
         enabled.set_active(true);
         assert!(launch.is_sensitive());
         assert!(launch.is_active());
@@ -236,5 +249,6 @@ mod tests {
         refresh();
         assert!(prompts.is_active());
         assert!(controls.is_active() && close.is_active());
+        assert!(read_notes.is_active() && edit_notes.is_active());
     }
 }

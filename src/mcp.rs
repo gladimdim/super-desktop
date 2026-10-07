@@ -28,6 +28,11 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("close_terminal", "Kill one exact owned terminal session and remove its card. Requires close permission, confirm=true, current geometry/pane guards and requestId. Unsaved work may be lost. No bulk selection; never retry uncertain outcomes with a fresh ID.", "close"),
     ("launch_with_prompt", "Launch a direct Claude, Codex or Grok harness, wait for a recognized empty composer and submit text. Requires both launch and prompt permissions, absolute cwd, requestId and optional launch safety opt-ins. Readiness timeout 1–300 seconds, default 30. Returns completionBaseline observed before input for wait_for_completion. Existing durable workflow receipts prevent replay; partial failure leaves the card open. No dialog dismissal, automatic retry or task-completion guarantee. This stdio connection processes calls sequentially.", "launch_prompt"),
     ("wait_for_completion", "Wait for a new native completion after an explicitly observed baseline. Requires exact pane identity and after=the last completionId, or none only for an observed null baseline. Timeout 1–300 seconds, default 30; repeated waits retain the same baseline. No output-silence heuristic or per-prompt attribution. Unknown/unsupported completion, exited or replaced panes fail clearly. Settings disable is checked while polling. Other calls on this stdio connection wait until this call returns.", "wait"),
+    ("list_notes", "List sticky note metadata without exposing text. The result includes epoch and revision guards for edits. Requires the Read sticky notes permission.", ""),
+    ("inspect_note", "Read one sticky note by exact ID, including its text. The result includes epoch and revision guards for edits. Requires the Read sticky notes permission.", "id"),
+    ("create_note", "Create a sticky note at x=80, y=140 with size 260×200 and tag 0; creation does not change visibility. Requires workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_create"),
+    ("update_note", "Replace the text of one sticky note by exact ID. Requires workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_update"),
+    ("delete_note", "Delete one sticky note by exact ID. Requires confirm=true, workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_delete"),
 
 ];
 
@@ -108,6 +113,18 @@ fn schema(kind: &str) -> Value {
                 "expectPaneIdentity"
             ]),
         ),
+        "note_create" => (
+            json!({"text":{"type":"string","minLength":0,"maxLength":4096,"description":"UTF-8 note text, at most 4096 bytes. Empty text is allowed; newline and tab are the only allowed control characters."},"requestId":request_id,"expectEpoch":request_id,"expectRevision":opaque}),
+            json!(["text","requestId","expectEpoch","expectRevision"]),
+        ),
+        "note_update" => (
+            json!({"id":id,"text":{"type":"string","minLength":0,"maxLength":4096,"description":"Replacement UTF-8 note text, at most 4096 bytes. Empty text is allowed; newline and tab are the only allowed control characters."},"requestId":request_id,"expectEpoch":request_id,"expectRevision":opaque}),
+            json!(["id","text","requestId","expectEpoch","expectRevision"]),
+        ),
+        "note_delete" => (
+            json!({"id":id,"confirm":{"type":"boolean","const":true},"requestId":request_id,"expectEpoch":request_id,"expectRevision":opaque}),
+            json!(["id","confirm","requestId","expectEpoch","expectRevision"]),
+        ),
         _ => (json!({}), json!([])),
     };
     json!({"type":"object","properties":properties,"required":required,"additionalProperties":false})
@@ -115,7 +132,7 @@ fn schema(kind: &str) -> Value {
 
 fn tools(config: Config) -> Value {
     Value::Array(TOOLS.iter().filter(|(name, _, _)| config.allows(name)).map(|(name, description, kind)| {
-        let mutation = matches!(*kind, "launch" | "prompt" | "launch_prompt" | "send" | "keys" | "interrupt" | "close");
+        let mutation = matches!(*kind, "launch" | "prompt" | "launch_prompt" | "send" | "keys" | "interrupt" | "close" | "note_create" | "note_update" | "note_delete");
         json!({"name":name,"description":description,"inputSchema":schema(kind),"outputSchema":schemars::schema_for!(control::Reply),
             "annotations":{"readOnlyHint":!mutation,"destructiveHint":mutation,"idempotentHint":!mutation,"openWorldHint":mutation}})
     }).collect())
@@ -157,7 +174,7 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
             .get("const")
             .is_some_and(|constant| constant != value)
         {
-            return Err("Explicit confirm=true is required to close a terminal");
+            return Err("Explicit confirm=true is required for this destructive action");
         }
         if property
             .get("enum")
@@ -192,8 +209,13 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
                 let s = value.as_str().ok_or("Expected a string argument")?;
                 let min = property["minLength"].as_u64().unwrap() as usize;
                 let max = property["maxLength"].as_u64().unwrap() as usize;
-                if s.chars().count() < min || s.chars().count() > max {
+                let byte_limited = matches!(*kind, "note_create" | "note_update") && key == "text";
+                let measured = if byte_limited { s.len() } else { s.chars().count() };
+                if measured < min || measured > max {
                     return Err("String argument outside the tool limits");
+                }
+                if byte_limited && s.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t')) {
+                    return Err("Note text permits only newline and tab control characters");
                 }
                 if property.get("pattern").is_some()
                     && !(if min == 64 {
@@ -217,6 +239,37 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
     let mut wait = None;
     let command = match name {
         "app_status" => Command::Status {},
+        "list_notes" => Command::Workspace {
+            query: crate::control::WorkspaceQuery::Notes,
+        },
+        "inspect_note" => Command::Workspace {
+            query: crate::control::WorkspaceQuery::Note { id: string("id") },
+        },
+        "create_note" => Command::WorkspaceEdit {
+            edit: crate::control::WorkspaceEdit::NoteCreate {
+                text: string("text"),
+                x: 80,
+                y: 140,
+                width: 260,
+                height: 200,
+                tag: 0,
+            },
+            expect_epoch: string("expectEpoch"),
+            expect_revision: string("expectRevision"),
+        },
+        "update_note" => Command::WorkspaceEdit {
+            edit: crate::control::WorkspaceEdit::NoteUpdate {
+                id: string("id"),
+                text: string("text"),
+            },
+            expect_epoch: string("expectEpoch"),
+            expect_revision: string("expectRevision"),
+        },
+        "delete_note" => Command::WorkspaceEdit {
+            edit: crate::control::WorkspaceEdit::NoteDelete { id: string("id") },
+            expect_epoch: string("expectEpoch"),
+            expect_revision: string("expectRevision"),
+        },
         "capabilities" => Command::Capabilities {},
         "list_terminals" => Command::Terminals {},
         "inspect_terminal" => Command::Terminal { id: string("id") },
@@ -556,6 +609,8 @@ mod tests {
             prompts: true,
             controls: true,
             close: true,
+            read_notes: true,
+            edit_notes: true,
         }
     }
     fn initialized() -> Value {
@@ -619,6 +674,55 @@ mod tests {
             .unwrap()["error"]["code"],
             -32600
         );
+    }
+    #[test]
+    fn mcp_note_commands_map_to_guarded_workspace_operations() {
+        let guards = json!({"requestId":"note-req","expectEpoch":"epoch-1","expectRevision":"a".repeat(64)});
+        for name in ["list_notes", "inspect_note"] {
+            let args = if name == "list_notes" {
+                json!({})
+            } else {
+                json!({"id":"note-1"})
+            };
+            let call = command(&json!({"name":name,"arguments":args})).unwrap();
+            assert!(matches!(call.command, Command::Workspace { .. }));
+            assert!(call.request_id.is_none());
+        }
+        let mut args = guards.as_object().unwrap().clone();
+        args.insert("text".into(), json!(""));
+        let create = command(&json!({"name":"create_note","arguments":args})).unwrap();
+        assert_eq!(create.request_id.as_deref(), Some("note-req"));
+        assert!(matches!(create.command, Command::WorkspaceEdit {
+            edit: crate::control::WorkspaceEdit::NoteCreate { ref text, x: 80, y: 140, width: 260, height: 200, tag: 0 },
+            expect_epoch, ..
+        } if text.is_empty() && expect_epoch == "epoch-1"));
+        let mut update = guards.as_object().unwrap().clone();
+        update.insert("id".into(), json!("note-1"));
+        update.insert("text".into(), json!("revised"));
+        assert!(matches!(command(&json!({"name":"update_note","arguments":update})).unwrap().command,
+            Command::WorkspaceEdit { edit: crate::control::WorkspaceEdit::NoteUpdate { .. }, .. }));
+        let mut delete = guards.as_object().unwrap().clone();
+        delete.insert("id".into(), json!("note-1"));
+        delete.insert("confirm".into(), json!(true));
+        assert!(matches!(command(&json!({"name":"delete_note","arguments":delete})).unwrap().command,
+            Command::WorkspaceEdit { edit: crate::control::WorkspaceEdit::NoteDelete { .. }, .. }));
+        for (name, args) in [
+            ("create_note", json!({"text":"x","requestId":"r","expectEpoch":"e","expectRevision":"bad"})),
+            ("update_note", json!({"id":"note-1","text":"x","requestId":"r","expectEpoch":"e","expectRevision":"bad"})),
+            ("delete_note", json!({"id":"note-1","confirm":false,"requestId":"r","expectEpoch":"e","expectRevision":"a".repeat(64)})),
+        ] { assert!(command(&json!({"name":name,"arguments":args})).is_err(), "{name}: {:?}", command(&json!({"name":name,"arguments":args})).err()); }
+        let mut oversized = guards.as_object().unwrap().clone();
+        oversized.insert("text".into(), json!("é".repeat(2049)));
+        assert!(command(&json!({"name":"create_note","arguments":oversized})).is_err());
+        let mut prohibited = guards.as_object().unwrap().clone();
+        prohibited.insert("text".into(), json!("bad\u{0001}"));
+        assert!(command(&json!({"name":"create_note","arguments":prohibited})).is_err());
+        let mut boundary = guards.as_object().unwrap().clone();
+        boundary.insert("text".into(), json!("é".repeat(2048)));
+        assert!(command(&json!({"name":"create_note","arguments":boundary})).is_ok());
+        let mut controls = guards.as_object().unwrap().clone();
+        controls.insert("text".into(), json!("line one\nline two\tend"));
+        assert!(command(&json!({"name":"create_note","arguments":controls})).is_ok());
     }
     #[test]
     fn mcp_mutation_guards_and_input_limits_are_required() {
@@ -737,6 +841,9 @@ mod tests {
                     | "send_terminal_keys"
                     | "interrupt_terminal"
                     | "close_terminal"
+                    | "create_note"
+                    | "update_note"
+                    | "delete_note"
             );
             assert_eq!(tool["annotations"]["readOnlyHint"], !mutation);
             assert_eq!(tool["annotations"]["idempotentHint"], !mutation);
@@ -756,13 +863,21 @@ mod tests {
             ready: true,
         };
         let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        let default_tools=tools(Config::default());
+        let default_names=default_tools.as_array().unwrap().iter().filter_map(|tool|tool["name"].as_str()).collect::<Vec<_>>();
+        assert!(!default_names.contains(&"list_notes") && !default_names.contains(&"inspect_note") && !default_names.contains(&"create_note"));
+        let mut read_only=Config::default();read_only.read_notes=true;
+        let read_tools=tools(read_only);
+        let note_names=read_tools.as_array().unwrap().iter().filter_map(|tool|tool["name"].as_str()).collect::<Vec<_>>();
+        assert!(note_names.contains(&"list_notes") && note_names.contains(&"inspect_note"));
+        assert!(!note_names.contains(&"create_note") && !note_names.contains(&"update_note") && !note_names.contains(&"delete_note"));
         assert_eq!(
             s.handle(list.clone(), &mut |_| panic!(), all_enabled())
                 .unwrap()["result"]["tools"]
                 .as_array()
                 .unwrap()
                 .len(),
-            20
+            25
         );
         assert!(s
             .handle(list.clone(), &mut |_| panic!(), Config::disabled())
