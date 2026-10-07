@@ -751,6 +751,11 @@ impl MiniTerminalCard {
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
             ));
+            // Prompt history reads this machine's journal and agent files too.
+            header.append(&crate::prompt_history_view::button(
+                data.borrow().session_name.clone(),
+                display_name.to_string(),
+            ));
         }
 
         // Iconify button: iconifies the window into 128x128 size

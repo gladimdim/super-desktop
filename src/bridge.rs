@@ -843,6 +843,34 @@ fn session_meta(session: &str) -> (String, u8) {
         .unwrap_or_else(|| ("shell".to_string(), 0))
 }
 
+/// `GET /api/v1/harnesses/<id>/prompts` — the terminal's submitted prompts,
+/// newest first (`prompt_log`). Read-only; an older PC answers 404 without
+/// the `no_such_session` error, which tells the phone to ask for an update.
+fn handle_prompts(stream: &mut Connection, req: &Request, id: &str) {
+    if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
+        return;
+    }
+    if !crate::tmux::session_alive(id) {
+        return respond(
+            stream,
+            404,
+            "Not Found",
+            &serde_json::json!({"status": "error", "error": "no_such_session"}),
+        );
+    }
+    let (agent, persisted) = load_state()
+        .terminals
+        .iter()
+        .find(|t| t.session_name == id)
+        .map(|t| (t.agent_type.clone(), t.agent_session_id.clone()))
+        .unwrap_or_else(|| ("shell".to_string(), None));
+    let history = crate::prompt_log::history(id, &agent, persisted.as_deref());
+    if !stream.still_authorized() {
+        return;
+    }
+    respond(stream, 200, "OK", &history.to_json());
+}
+
 /// `POST /api/v1/harnesses/<id>/keys` — type into a harness from the phone.
 ///
 /// Body: `{"text": "ls -la", "enter": true}`. `text` is optional (so the phone
@@ -1239,6 +1267,7 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
                             ),
                         };
                     }
+                    ("GET", "prompts") => return handle_prompts(stream, req, id),
                     ("POST", "keys") => return handle_keys(stream, req, id),
                     ("POST", "editor-action") => return handle_editor_action(stream, req, id),
                     _ => {}

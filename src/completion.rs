@@ -328,16 +328,71 @@ fn prompt_from_rollout(file: &mut File, meta: &std::fs::Metadata) -> Option<Stri
     prompt_from_records(tail)
 }
 
+/// The text a person submitted, from either rollout shape: older Codex logs
+/// an `event_msg` of type `user_message`; Codex 0.160 logs only a completed
+/// `UserMessage` item. Instructions and environment context Codex adds as
+/// `response_item` user messages are neither.
+fn user_message_text(record: &Value) -> Option<String> {
+    if record["type"] != "event_msg" {
+        return None;
+    }
+    let payload = &record["payload"];
+    match payload["type"].as_str()? {
+        "user_message" => payload["message"].as_str().map(str::to_owned),
+        "item_completed" if payload["item"]["type"] == "UserMessage" => {
+            let text = payload["item"]["content"]
+                .as_array()?
+                .iter()
+                .filter(|part| part["type"] == "text")
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(text)
+        }
+        _ => None,
+    }
+}
+
 fn prompt_from_records(bytes: &[u8]) -> Option<String> {
     bytes.split_inclusive(|b| *b == b'\n').rev().find_map(|line| {
         if !line.ends_with(b"\n") { return None; }
         let record: Value = serde_json::from_slice(line).ok()?;
-        if record["type"] != "event_msg" || record["payload"]["type"] != "user_message" {
-            return None;
-        }
-        let text = record["payload"]["message"].as_str()?;
-        (!text.trim().is_empty()).then(|| crate::tmux::truncate_prompt_title(text))
+        let text = user_message_text(&record)?;
+        (!text.trim().is_empty()).then(|| crate::tmux::truncate_prompt_title(&text))
     })
+}
+
+/// Every user message in the last `limit` bytes of the rollout this pane's
+/// own Codex CLI holds open, oldest first, with each record's timestamp; the
+/// `bool` is true when older records were left unread.
+pub(crate) fn user_prompts_for_pid(
+    pid: u32,
+    limit: u64,
+) -> Option<(Vec<crate::harness_record::PromptRecord>, bool)> {
+    let (fd, _) = rollout(pid)?;
+    let mut file = File::open(fd).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    let start = meta.len().saturating_sub(limit);
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
+    let tail = if start > 0 {
+        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
+    } else { &bytes };
+    Some((prompt_records(tail), start > 0))
+}
+
+fn prompt_records(bytes: &[u8]) -> Vec<crate::harness_record::PromptRecord> {
+    bytes.split_inclusive(|b| *b == b'\n').filter_map(|line| {
+        if !line.ends_with(b"\n") { return None; }
+        let record: Value = serde_json::from_slice(line).ok()?;
+        let text = user_message_text(&record)?;
+        crate::harness_record::is_user_prompt(&text).then(|| crate::harness_record::PromptRecord {
+            text: text.trim().to_owned(),
+            at: record["timestamp"].as_str().map(str::to_owned),
+        })
+    }).collect()
 }
 
 type Cached = (Stamp, (String, Option<String>));
@@ -804,5 +859,26 @@ mod prompt_tests {
         );
         assert_eq!(super::prompt_from_records(records.as_bytes()).as_deref(), Some("Fix the layout"));
         assert_eq!(super::prompt_from_records(b"# response\n$ tool output\n"), None);
+    }
+
+    /// Codex 0.160 rollouts: no `user_message` events, a completed
+    /// `UserMessage` item per prompt, and injected instructions as
+    /// `response_item` user messages that are never prompts.
+    #[test]
+    fn current_rollouts_list_every_user_message_item_with_its_time() {
+        let records = concat!(
+            "{\"timestamp\":\"2026-10-07T06:06:43.008Z\",\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions\"}]}}\n",
+            "{\"timestamp\":\"2026-10-07T06:06:43.339Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"UserMessage\",\"id\":\"a\",\"content\":[{\"type\":\"text\",\"text\":\"check the art\",\"text_elements\":[]}]}}}\n",
+            "{\"timestamp\":\"2026-10-07T06:07:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"AgentMessage\",\"content\":[{\"type\":\"text\",\"text\":\"Done\"}]}}}\n",
+            "{\"timestamp\":\"2026-10-07T06:13:25.867Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"UserMessage\",\"id\":\"b\",\"content\":[{\"type\":\"text\",\"text\":\"what about\\nquest step\"}]}}}\n",
+            "{\"timestamp\":\"2026-10-07T06:14:00.000Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"older shape\"}}\n",
+        );
+        let prompts = super::prompt_records(records.as_bytes());
+        let texts: Vec<_> = prompts.iter().map(|p| p.text.as_str()).collect();
+        assert_eq!(texts, ["check the art", "what about\nquest step", "older shape"]);
+        assert_eq!(prompts[0].at.as_deref(), Some("2026-10-07T06:06:43.339Z"));
+        assert_eq!(super::prompt_from_records(records.as_bytes()).as_deref(), Some("older shape"));
+        let current = records.rsplit_once("{\"timestamp\":\"2026-10-07T06:14").unwrap().0;
+        assert_eq!(super::prompt_from_records(current.as_bytes()).as_deref(), Some("what about quest step"));
     }
 }

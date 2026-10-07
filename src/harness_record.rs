@@ -31,6 +31,9 @@ pub struct Metadata {
     pub completion_id: Option<String>,
     pub claude_turn: u64,
     pub claude_turn_active: bool,
+    /// Claude Code's transcript for `native_session`, from its hooks. Read
+    /// only for the terminal's prompt history (`claude_prompts`).
+    pub transcript: String,
 }
 
 impl Metadata {
@@ -246,6 +249,7 @@ pub fn apply(data: &mut Metadata, event: &Value) {
     if let Some(session) = event["session"].as_str() {
         if !session.is_empty() && data.native_session != session {
             data.native_session = session.into();
+            data.transcript.clear();
             data.title.clear();
             data.prompt.clear();
             data.model.clear();
@@ -380,6 +384,11 @@ pub fn apply_claude(data: &mut Metadata, input: &Value) {
         patch["completionTurn"] = json!(format!("prompt-{}", data.claude_turn));
     }
     apply(data, &patch);
+    if let Some(path) = input["transcript_path"].as_str() {
+        if data.native_session == session && is_claude_transcript(Path::new(path), session) {
+            data.transcript = path.into();
+        }
+    }
     match event {
         "SessionStart" | "SessionEnd" | "StopFailure" => data.claude_turn_active = false,
         "UserPromptSubmit" => {
@@ -440,27 +449,8 @@ pub fn claude_transcript_scan(bytes: &[u8], session: &str) -> TranscriptScan {
         {
             continue;
         }
-        let text = || {
-            let content = &record["message"]["content"];
-            content.as_str().map(str::to_owned).or_else(|| {
-                content.as_array().map(|parts| {
-                    parts
-                        .iter()
-                        .filter(|p| p["type"] == "text")
-                        .filter_map(|p| p["text"].as_str())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-            })
-        };
-        // Newer transcripts label turns Claude Code produced itself.
-        let injected = record["isMeta"] == true
-            || record["promptSource"] == "system"
-            || matches!(
-                record["origin"]["kind"].as_str(),
-                Some("task-notification" | "auto-continuation" | "peer")
-            );
-        if injected {
+        let text = || claude_record_text(&record);
+        if claude_injected(&record) {
             if record["type"] == "user" {
                 if let Some(value) = text().filter(|v| !v.trim().is_empty()) {
                     scan.injected.push(clean(&value));
@@ -483,6 +473,104 @@ pub fn claude_transcript_scan(bytes: &[u8], session: &str) -> TranscriptScan {
         }
     }
     scan
+}
+
+/// The text of a transcript record's message (its text parts, joined).
+fn claude_record_text(record: &Value) -> Option<String> {
+    let content = &record["message"]["content"];
+    content.as_str().map(str::to_owned).or_else(|| {
+        content.as_array().map(|parts| {
+            parts
+                .iter()
+                .filter(|p| p["type"] == "text")
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+    })
+}
+
+/// Newer transcripts label turns Claude Code produced itself; a compaction
+/// summary is written as a user turn too.
+fn claude_injected(record: &Value) -> bool {
+    record["isMeta"] == true
+        || record["isCompactSummary"] == true
+        || record["promptSource"] == "system"
+        || matches!(
+            record["origin"]["kind"].as_str(),
+            Some("task-notification" | "auto-continuation" | "peer")
+        )
+}
+
+/// A hook's `transcript_path` is kept only when it names this session's own
+/// transcript file.
+fn is_claude_transcript(path: &Path, session: &str) -> bool {
+    path.is_absolute()
+        && path.extension().is_some_and(|ext| ext == "jsonl")
+        && path.file_stem().is_some_and(|stem| stem == session)
+}
+
+/// One prompt a person submitted, with the transcript's own time.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PromptRecord {
+    pub text: String,
+    pub at: Option<String>,
+}
+
+/// Every prompt of `session` in the last `limit` bytes of its transcript,
+/// oldest first; `bool` is true when older records were left unread. Same
+/// filters as the card title (`claude_transcript_scan`): sidechains, other
+/// sessions, injected turns and anything `is_user_prompt` rejects never count.
+pub fn claude_prompts(path: &Path, session: &str, limit: u64) -> Option<(Vec<PromptRecord>, bool)> {
+    if !is_claude_transcript(path, session) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let offset = metadata.len().saturating_sub(limit);
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut bytes = Vec::new();
+    file.take(metadata.len() - offset).read_to_end(&mut bytes).ok()?;
+    let bytes = if offset > 0 {
+        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
+    } else {
+        &bytes
+    };
+    Some((claude_prompt_records(bytes, session), offset > 0))
+}
+
+pub fn claude_prompt_records(bytes: &[u8], session: &str) -> Vec<PromptRecord> {
+    let mut prompts = Vec::new();
+    for line in bytes
+        .split_inclusive(|b| *b == b'\n')
+        .filter(|l| l.ends_with(b"\n"))
+    {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        if record["type"] != "user"
+            || record["isSidechain"] == true
+            || record["sessionId"].as_str().is_some_and(|id| id != session)
+        {
+            continue;
+        }
+        if claude_injected(&record) {
+            continue;
+        }
+        let Some(text) = claude_record_text(&record) else {
+            continue;
+        };
+        if is_user_prompt(&text) {
+            prompts.push(PromptRecord {
+                text: text.trim().to_owned(),
+                at: record["timestamp"].as_str().map(str::to_owned),
+            });
+        }
+    }
+    prompts
 }
 
 #[cfg(test)]
@@ -566,10 +654,39 @@ mod tests {
             json!({"type":"user","sessionId":"own","message":{"content":"<local-command-stdout>done</local-command-stdout>"}}),
             json!({"type":"user","sessionId":"own","message":{"content":[{"type":"text","text":"<bash-input>ls</bash-input>"}]}}),
             json!({"type":"user","sessionId":"own","message":{"content":[{"type":"tool_result","content":"noise"}]}}),
+            // A compaction summary is written as a plain user turn.
+            json!({"type":"user","sessionId":"own","isCompactSummary":true,"message":{"content":"This session is being continued from a previous conversation that ran out of context."}}),
         ];
         let bytes = records.iter().map(|r| format!("{r}\n")).collect::<String>();
         let (_, prompt) = claude_transcript_records(bytes.as_bytes(), "own");
         assert_eq!(prompt.as_deref(), Some("My request"));
+        // The prompt history uses the same filters.
+        let history = claude_prompt_records(bytes.as_bytes(), "own");
+        assert_eq!(history, vec![PromptRecord { text: "My request".into(), at: None }]);
+    }
+
+    #[test]
+    fn card_title_prompt_history_lists_every_own_prompt_in_full() {
+        let records = [
+            json!({"type":"user","sessionId":"own","timestamp":"2026-10-07T09:00:00.000Z","message":{"content":"first\n  with two lines"}}),
+            json!({"type":"assistant","sessionId":"own","message":{"content":[{"type":"text","text":"answer"}]}}),
+            json!({"type":"user","sessionId":"other","message":{"content":"another conversation"}}),
+            json!({"type":"user","sessionId":"own","isSidechain":true,"message":{"content":"subagent task"}}),
+            json!({"type":"user","sessionId":"own","origin":{"kind":"task-notification"},"message":{"content":"Background done"}}),
+            json!({"type":"user","sessionId":"own","timestamp":"2026-10-07T09:05:00.000Z","message":{"content":[{"type":"text","text":"second"},{"type":"image","source":{}}]}}),
+        ];
+        let bytes = records.iter().map(|r| format!("{r}\n")).collect::<String>() + "{\"type\":\"user\",\"partial";
+        let history = claude_prompt_records(bytes.as_bytes(), "own");
+        assert_eq!(
+            history,
+            vec![
+                PromptRecord { text: "first\n  with two lines".into(), at: Some("2026-10-07T09:00:00.000Z".into()) },
+                PromptRecord { text: "second".into(), at: Some("2026-10-07T09:05:00.000Z".into()) },
+            ]
+        );
+        assert!(is_claude_transcript(Path::new("/h/.claude/projects/x/own.jsonl"), "own"));
+        assert!(!is_claude_transcript(Path::new("/h/.claude/projects/x/other.jsonl"), "own"));
+        assert!(!is_claude_transcript(Path::new("own.jsonl"), "own"));
     }
 
     #[test]

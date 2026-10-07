@@ -32,6 +32,8 @@ mod custom_harness;
 mod prompt_image;
 mod prompt_attachments;
 mod prompt_history;
+mod prompt_log;
+mod prompt_history_view;
 mod shell_title;
 mod scrollback;
 mod updates;

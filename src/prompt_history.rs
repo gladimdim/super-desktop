@@ -7,7 +7,9 @@ use std::process::Command;
 const OPTION: &str = "@super_desktop_last_prompt";
 const MAX_CHARS: usize = 16_384;
 
+/// Also adds the full text to the terminal's prompt history (`prompt_log`).
 pub fn record(session: &str, text: &str) {
+    crate::prompt_log::append(session, text);
     record_with(Command::new(crate::tmux::tmux_bin()), session, text);
 }
 

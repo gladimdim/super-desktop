@@ -2454,6 +2454,60 @@ pub fn get_opencode_user_text_by_id(opencode_session_id: &str) -> Option<String>
     }
 }
 
+/// Every prompt submitted to an opencode session, newest first (at most
+/// `limit` messages), with the message time in Unix milliseconds. Synthetic
+/// and ignored parts (attached file contents, injected reminders) are skipped;
+/// the text parts of one message are joined. Read fresh: the history panel
+/// asks rarely and the multi-row answer is not worth caching.
+pub fn get_opencode_user_prompts_by_id(opencode_session_id: &str, limit: usize) -> Option<Vec<(String, i64)>> {
+    let db = opencode_db_path()?;
+    let sql = format!(
+        "SELECT m.id AS id, m.time_created AS t, p.data AS d FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = '{0}' AND m.id IN (SELECT id FROM message WHERE session_id = '{0}' AND data LIKE '%\"role\":\"user\"%' ORDER BY time_created DESC LIMIT {1}) AND p.data LIKE '%\"type\":\"text\"%' ORDER BY m.time_created DESC, m.id DESC, p.id ASC;",
+        sql_escape(opencode_session_id),
+        limit
+    );
+    let output = Command::new("sqlite3")
+        .args(["-readonly", "-json", db.to_str()?, &sql])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(opencode_prompt_rows(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Pure helper: group `sqlite3 -json` rows (`id`, `t`, `d`) into prompts.
+pub fn opencode_prompt_rows(json: &str) -> Vec<(String, i64)> {
+    let rows: Vec<serde_json::Value> = serde_json::from_str(json.trim()).unwrap_or_default();
+    let mut prompts: Vec<(String, String, i64)> = Vec::new();
+    for row in rows {
+        let (Some(id), Some(t), Some(data)) = (row["id"].as_str(), row["t"].as_i64(), row["d"].as_str()) else {
+            continue;
+        };
+        let Ok(part) = serde_json::from_str::<serde_json::Value>(data) else {
+            continue;
+        };
+        if part["type"] != "text" || part["synthetic"] == true || part["ignored"] == true {
+            continue;
+        }
+        let Some(text) = part["text"].as_str().map(str::trim).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        match prompts.last_mut() {
+            Some((last, joined, _)) if last == id => {
+                joined.push('\n');
+                joined.push_str(text);
+            }
+            _ => prompts.push((id.to_owned(), text.to_owned(), t)),
+        }
+    }
+    prompts
+        .into_iter()
+        .filter(|(_, text, _)| crate::harness_record::is_user_prompt(text))
+        .map(|(_, text, t)| (text, t))
+        .collect()
+}
+
 pub fn get_opencode_title_by_id(session_id: &str) -> Option<String> {
     let title = sqlite_query(&opencode_db_path()?, &format!(
         "SELECT title FROM session WHERE id = '{}' LIMIT 1;", sql_escape(session_id)))?;

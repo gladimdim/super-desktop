@@ -246,6 +246,16 @@ pub fn set_host(overlay: &gtk4::Overlay, top: Rc<dyn Fn() -> i32>, ceiling: &imp
     });
 }
 
+/// The overlay, top-bar height and ceiling panels open in (shared with the
+/// prompt history panel).
+pub(crate) fn host() -> Option<(gtk4::Overlay, Rc<dyn Fn() -> i32>, Option<gtk4::Widget>)> {
+    HOST.with(|host| {
+        let host = host.borrow();
+        let host = host.as_ref()?;
+        Some((host.overlay.upgrade()?, Rc::clone(&host.top), host.ceiling.upgrade()))
+    })
+}
+
 /// Unsaved Markdown edits in a panel, and whether the user was warned once
 /// that leaving would lose them.
 #[derive(Clone, Default)]
@@ -284,11 +294,7 @@ pub fn button(session: String, title: String) -> gtk4::Button {
 /// Show the Files panel of `session`, bringing it to the front when it is
 /// already open.
 fn open(session: &str, title: &str, collapsed: &Collapsed) {
-    let Some((overlay, top, ceiling)) = HOST.with(|host| {
-        let host = host.borrow();
-        let host = host.as_ref()?;
-        Some((host.overlay.upgrade()?, Rc::clone(&host.top), host.ceiling.upgrade()))
-    }) else {
+    let Some((overlay, top, ceiling)) = host() else {
         return;
     };
     let existing = OPEN.with(|open| {
