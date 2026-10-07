@@ -103,6 +103,8 @@ section.feature { padding: 84px 0 0; }
 .feature.flip .copy { order: 2; }
 .feature.wide .wrap { grid-template-columns: minmax(0, 1fr); gap: 26px; }
 .feature.wide .copy { max-width: 720px; margin: 0 auto; text-align: center; }
+.copy .store { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+.feature.wide .copy .store { justify-content: center; }
 @media (max-width: 900px) {
   section.feature { padding-top: 64px; }
   .feature .wrap, .feature.flip .wrap { grid-template-columns: 1fr; gap: 22px; }
