@@ -458,3 +458,21 @@ footer a { color: var(--muted); }
 }
 .cli-cmds button:hover { border-color: var(--accent); }
 .cli-cmds button:disabled { opacity: .45; cursor: default; }
+
+/* ── Phones and touch screens ─────────────────────────────── */
+@media (max-width: 720px) {
+  /* The replica is a whole desktop scaled to the screen: watch it here, try it on a bigger screen. */
+  .try-hints { display: none; }
+  .sim-note, .caption, .tabs .tab-note { font-size: 13.5px; }
+  .cmd { flex-wrap: wrap; padding: 12px 12px 12px 14px; }
+  .cmd code { flex-basis: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; }
+  .cmd button { margin-left: auto; }
+  footer nav { margin-left: 0; gap: 4px 18px; }
+}
+@media (pointer: coarse) {
+  .nav .btn, .tabs button, .cmd button, .swatches button { min-height: 44px; }
+  .cli-cmds button, .phone-push { min-height: 40px; }
+  .clip .play { min-height: 40px; padding: 0 14px; }
+  .brand, footer a, details.more summary { display: inline-flex; align-items: center; min-height: 44px; }
+  details.more summary { display: list-item; padding: 10px 0; }
+}
