@@ -613,6 +613,21 @@ mod tests {
     }
 
     #[test]
+    fn desktop_references_find_files_a_harness_wrapped_mid_name() {
+        let dir = Fixture::new();
+        std::fs::create_dir_all(dir.0.join("src/assets")).unwrap();
+        for name in ["src/assets/cli.rs", "src/assets/view.rs", "notes.md"] {
+            std::fs::write(dir.0.join(name), "fixture").unwrap();
+        }
+        // Claude Code's tool output, re-wrapped by the harness for a narrow card.
+        let text = "⏺ Update(src/assets/cl\n       i.rs)\n  ⎿  Added 3 lines to src/assets/vi\n     ew.rs and notes.md\n  view.rs";
+        let found: Vec<_> = crate::asset_references::candidates(text, |p| desktop_file_type(Path::new(p)).is_some())
+            .iter().filter_map(|path| register_for(&dir.0, "s", path, true).ok())
+            .map(|entry| entry.asset.relative_path).collect();
+        assert_eq!(found, ["src/assets/cli.rs", "notes.md", "src/assets/view.rs"]);
+    }
+
+    #[test]
     fn desktop_audio_and_extra_formats_preserve_bridge_types_and_limits() {
         let dir = Fixture::new();
         for (name, bytes) in [
