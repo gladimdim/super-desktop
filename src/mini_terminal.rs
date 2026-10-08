@@ -755,6 +755,7 @@ impl MiniTerminalCard {
             header.append(&crate::prompt_history_view::button(
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
+                &agent_type,
             ));
         }
 

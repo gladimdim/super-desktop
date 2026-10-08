@@ -886,6 +886,11 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     background-color: {btn_hover_bg};
 }}
 
+.term-btn:disabled {{
+    opacity: 0.4;
+    background: transparent;
+}}
+
 .term-preview-box {{
     background-color: {darker_background};
     margin: 4px 8px 4px 8px;

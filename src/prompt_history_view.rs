@@ -20,10 +20,22 @@ thread_local! {
     static LAST: Cell<(Option<(i32, i32)>, Option<(i32, i32)>)> = const { Cell::new((None, None)) };
 }
 
-pub fn button(session: String, title: String) -> gtk4::Button {
+/// Harnesses whose cards cannot list their prompts: Codex 0.160 and newer
+/// keep the conversation in a shared background process, so a card cannot
+/// tell which conversation is its own.
+fn supported(agent: &str) -> bool {
+    agent != "codex"
+}
+
+pub fn button(session: String, title: String, agent: &str) -> gtk4::Button {
     let button = gtk4::Button::from_icon_name("document-open-recent-symbolic");
     button.update_property(&[gtk4::accessible::Property::Label("Prompt history")]);
     button.add_css_class("term-btn");
+    if !supported(agent) {
+        button.set_sensitive(false);
+        button.set_tooltip_text(Some("harness does not support this"));
+        return button;
+    }
     button.set_tooltip_text(Some("Prompts submitted to this terminal"));
     button.connect_clicked(move |_| open(&session, &title));
     button
@@ -313,7 +325,11 @@ mod tests {
         let body = item.last_child().unwrap().downcast::<gtk4::Label>().unwrap();
         assert_eq!(body.text(), "first line\nsecond line");
         assert!(body.is_selectable());
-        let button = button("sd_term_1_a".into(), "Codex".into());
+        let button = button("sd_term_1_a".into(), "Claude".into(), "claude");
         assert_eq!(button.icon_name().as_deref(), Some("document-open-recent-symbolic"));
+        assert!(button.is_sensitive());
+        let codex = super::button("sd_term_1_b".into(), "Codex".into(), "codex");
+        assert!(!codex.is_sensitive());
+        assert_eq!(codex.tooltip_text().as_deref(), Some("harness does not support this"));
     }
 }
