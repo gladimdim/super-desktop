@@ -947,13 +947,55 @@ pub fn ensure_session_with_inventory(
     }
 }
 
+/// Harnesses read a burst of typed keys as a paste, and a Return that arrives
+/// inside it becomes a newline in the draft instead of submitting it. Shells
+/// take keys one at a time and submit at once.
+pub fn settles_before_enter(agent: &str) -> bool {
+    !matches!(agent, "shell" | "bash" | "terminal")
+}
+
+/// Shortest wait between typed text and Return: longer than the harnesses'
+/// paste-detection windows (Codex needs it, Claude Code collects ~100 ms).
+const ENTER_SETTLE_MIN: std::time::Duration = std::time::Duration::from_millis(200);
+/// Longest wait for a harness to show the typed text before Return goes anyway.
+const ENTER_SETTLE_MAX: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Wait until typed text can be submitted: [ENTER_SETTLE_MIN], then until the
+/// visible screen differs from `before` (the harness has read the keys), for
+/// at most [ENTER_SETTLE_MAX] in all. A busy harness that lags behind its
+/// input would otherwise read the text and Return in one burst. Without a
+/// `before` screen, or when `screen` fails, only the minimum applies.
+pub fn settle_before_enter(before: Option<&str>, screen: impl FnMut() -> Option<String>) {
+    settle_before_enter_within(before, screen, ENTER_SETTLE_MIN, ENTER_SETTLE_MAX)
+}
+
+fn settle_before_enter_within(
+    before: Option<&str>,
+    mut screen: impl FnMut() -> Option<String>,
+    min: std::time::Duration,
+    max: std::time::Duration,
+) {
+    let started = std::time::Instant::now();
+    std::thread::sleep(min);
+    let Some(before) = before else { return };
+    while started.elapsed() < max {
+        match screen() {
+            Some(now) if now == before => std::thread::sleep(std::time::Duration::from_millis(25)),
+            _ => return,
+        }
+    }
+}
+
 /// Type `text` into a live session (phone → harness), optionally followed by
 /// Return.
 ///
 /// `-l` sends the text literally, so quotes, pipes and globs reach the pane as
 /// written instead of being interpreted by tmux, and `--` stops a message that
-/// begins with a dash from being read as a flag.
-pub fn send_keys(session_name: &str, text: &str, enter: bool) -> Result<(), String> {
+/// begins with a dash from being read as a flag. For a harness `agent`,
+/// Return waits until the typed text has settled ([settle_before_enter]).
+pub fn send_keys(session_name: &str, agent: &str, text: &str, enter: bool) -> Result<(), String> {
+    let settle = enter && !text.is_empty() && settles_before_enter(agent);
+    let before = if settle { capture_visible_screen(session_name) } else { None };
     if !text.is_empty() {
         let out = Command::new("tmux")
             .args(["send-keys", "-t", session_name, "-l", "--", text])
@@ -962,6 +1004,9 @@ pub fn send_keys(session_name: &str, text: &str, enter: bool) -> Result<(), Stri
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
+    }
+    if settle {
+        settle_before_enter(before.as_deref(), || capture_visible_screen(session_name));
     }
     if enter {
         let out = Command::new("tmux")
@@ -2527,6 +2572,44 @@ pub(crate) fn opencode_db_title(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harnesses_wait_before_return_and_shells_do_not() {
+        for agent in ["claude", "codex", "grok", "opencode", "gemini", "custom-launcher"] {
+            assert!(settles_before_enter(agent), "{agent}");
+        }
+        for agent in ["shell", "bash", "terminal"] {
+            assert!(!settles_before_enter(agent), "{agent}");
+        }
+    }
+
+    #[test]
+    fn return_waits_for_the_typed_text_to_reach_the_screen() {
+        use std::time::{Duration, Instant};
+        let (min, max) = (Duration::from_millis(40), Duration::from_millis(400));
+        // Already shown: only the minimum.
+        let started = Instant::now();
+        settle_before_enter_within(Some("> "), || Some("> hello".into()), min, max);
+        assert!((min..max).contains(&started.elapsed()));
+        // A harness that lags shows the text later; Return waits for it.
+        let started = Instant::now();
+        let mut polls = 0;
+        settle_before_enter_within(Some("> "), || {
+            polls += 1;
+            Some(if polls < 5 { "> ".into() } else { "> hello".into() })
+        }, min, max);
+        assert_eq!(polls, 5);
+        assert!(started.elapsed() < max);
+        // A screen that never changes still gets Return at the maximum.
+        let started = Instant::now();
+        settle_before_enter_within(Some("> "), || Some("> ".into()), min, max);
+        assert!(started.elapsed() >= max && started.elapsed() < max * 2);
+        // No screen to compare, or a failed capture: the minimum only.
+        let started = Instant::now();
+        settle_before_enter_within(None, || unreachable!(), min, max);
+        settle_before_enter_within(Some("> "), || None, min, max);
+        assert!(started.elapsed() < max);
+    }
 
     /// Driven by tests/harness_phone_matrix.py: launch one harness through the
     /// desktop's own `create_session` (resolved command, default flags, shell

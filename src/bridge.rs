@@ -769,10 +769,14 @@ fn ws_client_message(stream: &mut Connection, mut on_text: impl FnMut(&str)) -> 
 /// Ordered input on a persistent socket. Never replay an input after a lost
 /// acknowledgement: the client must treat that outcome as uncertain.
 fn stream_keys(stream: &mut Connection, id: &str) {
+    let (agent, _) = session_meta(id);
+    stream_keys_as(stream, id, &agent);
+}
+
+fn stream_keys_as(stream: &mut Connection, id: &str, agent: &str) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
-    let (agent, _) = session_meta(id);
     let Ok(mut control) = crate::tmux_control::Control::open(id) else {
         let _ = crate::ws::write_close(stream, 1011, "terminal unavailable");
         return;
@@ -787,7 +791,7 @@ fn stream_keys(stream: &mut Connection, id: &str) {
                     let _input = crate::prompt_image::input_guard(id)?;
                     if value.len() > 4096 { return Err("text_too_long".into()); }
                     if body["checkIdle"].as_bool().unwrap_or(false) {
-                        if !matches!(inspect_status(id, &agent).status, "IDLE" | "FINISHED") {
+                        if !matches!(inspect_status(id, agent).status, "IDLE" | "FINISHED") {
                             return Err("Wait for the harness to become idle.".into());
                         }
                         if get_composer_draft(id).is_some_and(|s| !s.trim().is_empty()) {
@@ -802,12 +806,18 @@ fn stream_keys(stream: &mut Connection, id: &str) {
                     if !control.is_healthy() {
                         control = crate::tmux_control::Control::open(id)?;
                     }
+                    // A harness must finish reading the text as a paste
+                    // before Return, or Return lands in the draft as a
+                    // newline. The wait stays here, without another
+                    // phone-to-bridge round trip.
+                    let settle = enter && !value.is_empty() && crate::tmux::settles_before_enter(agent);
+                    // Probe outside the control client: a failed capture
+                    // there would poison it before Return is sent.
+                    let before = if settle { crate::tmux::capture_visible_screen(id) } else { None };
                     control.send(value, false)?;
                     wake_terminal_streams(id);
-                    // Codex paste detection needs settling, but it does not
-                    // need another phone-to-bridge round trip.
-                    if enter && !value.is_empty() && agent == "codex" {
-                        std::thread::sleep(Duration::from_millis(200));
+                    if settle {
+                        crate::tmux::settle_before_enter(before.as_deref(), || crate::tmux::capture_visible_screen(id));
                     }
                     if !stream.still_authorized() { return Err("device_revoked".into()); }
                     if enter { control.send("", true)?; }
@@ -908,7 +918,8 @@ fn handle_keys(stream: &mut Connection, req: &Request, id: &str) {
             &serde_json::json!({"status": "error", "error": "text_too_long"}),
         );
     }
-    let result = crate::prompt_image::input_guard(id).and_then(|_guard| crate::tmux::send_keys(id, text, enter));
+    let (agent, _) = session_meta(id);
+    let result = crate::prompt_image::input_guard(id).and_then(|_guard| crate::tmux::send_keys(id, &agent, text, enter));
     match result {
         Ok(()) => respond(stream, 200, "OK", &serde_json::json!({"status": "ok"})),
         Err(e) => respond(
@@ -2100,6 +2111,68 @@ mod tests {
             false
         });
         assert!(appeared, "tmux never rendered the acknowledged input");
+        drop(client);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn persistent_input_submits_after_a_harness_reads_the_text_as_a_paste() {
+        // Like Claude Code, this harness treats keys that arrive within 100 ms
+        // of each other as one paste; a Return inside it is a newline in the
+        // draft. Return sent straight after the text used to land there, so
+        // the prompt sat in the composer unsent.
+        let id = format!("sd_paste_test_{}", std::process::id());
+        struct Session(String, std::path::PathBuf);
+        impl Drop for Session {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+                let _ = std::fs::remove_file(&self.1);
+            }
+        }
+        let script = std::env::temp_dir().join(format!("{id}.py"));
+        std::fs::write(&script, r#"
+import os, select, tty
+tty.setraw(0)
+draft = b""
+while True:
+    chunk = os.read(0, 4096)
+    while select.select([0], [], [], 0.1)[0]:
+        chunk += os.read(0, 4096)
+    if chunk == b"\r":
+        os.write(1, b"\r\nSUBMIT:" + draft + b"\r\n")
+        draft = b""
+    else:
+        draft += chunk.replace(b"\r", b"|")
+        os.write(1, chunk.replace(b"\r", b"|"))
+"#).unwrap();
+        let result = Command::new("tmux")
+            .args(["new-session", "-d", "-s", &id, "python3", &script.to_string_lossy()])
+            .output().unwrap();
+        assert!(result.status.success());
+        let session = Session(id.clone(), script);
+        // Let the harness put its terminal in raw mode before typing.
+        std::thread::sleep(Duration::from_millis(300));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream_keys_as(&mut Connection::plain(stream), &id, "claude");
+        });
+        for (sequence, prompt) in [(1, "first prompt"), (2, "second prompt")] {
+            ws_send(&mut client, serde_json::json!({"sequence":sequence,"text":prompt,"enter":true}));
+            assert_eq!(ws_receive(&mut client)["ok"], true);
+            let expected = format!("SUBMIT:{prompt}");
+            let submitted = (0..40).any(|_| {
+                if capture_pane_text(&session.0).is_some_and(|screen| screen.contains(&expected)) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+                false
+            });
+            let screen = capture_pane_text(&session.0).unwrap_or_default();
+            assert!(submitted && !screen.contains('|'), "Return joined the paste: {screen:?}");
+        }
         drop(client);
         worker.join().unwrap();
     }
