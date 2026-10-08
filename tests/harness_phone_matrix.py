@@ -425,7 +425,11 @@ class World:
         spec = self.root / f"launch-{agent}.json"
         out = self.root / f"launched-{agent}.json"
         spec.write_text(json.dumps({"agent": agent, "workspace": str(workspace), "out": str(out)}))
-        env = dict(self.env, SUPER_DESKTOP_PHONE_MATRIX_LAUNCH=str(spec), RUST_TEST_THREADS="1")
+        # The test binary moves itself to its own tmux server unless it is
+        # already isolated (src/test_isolation.rs). This environment already
+        # is: the harness must start in the matrix's private server.
+        env = dict(self.env, SUPER_DESKTOP_PHONE_MATRIX_LAUNCH=str(spec), RUST_TEST_THREADS="1",
+                   SD_TEST_ISOLATION_ROOT=str(self.root))
         result = subprocess.run([str(self.launch_exe), "--exact", "tmux::tests::phone_matrix_launch",
                                  "--nocapture", "--quiet"], env=env, capture_output=True, encoding="utf-8", errors="replace",
                                 timeout=60)
