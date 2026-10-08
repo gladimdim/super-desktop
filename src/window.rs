@@ -21,7 +21,7 @@ use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
 use crate::tmux::create_session;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Trajectory {
     sx: f64,
     sy: f64,
@@ -1974,7 +1974,11 @@ impl SuperDesktopWindow {
         // exhausted (a 27B local model on a 16 GB card) moving those buffers can
         // stall the compositor, and `HIDE_FALLBACK` unmaps regardless. tmux
         // clients stay attached for the next show.
-        self.ensure_slide_trajectories(false);
+        // From rest, start from where the cards are now: a card moved, resized,
+        // arranged or opened since the show must not jump back to its old spot
+        // and leave by the side that was nearer then. Only a reversed slide-in
+        // keeps its paths.
+        self.ensure_slide_trajectories(!self.slide.running.get());
         // A remote PC's cards are created while that PC is viewed, so they are
         // added to the slide at each slide start rather than at window build.
         self.add_remote_slide_targets();
@@ -3405,6 +3409,57 @@ mod tests {
         for mode in [KeyboardMode::None, KeyboardMode::OnDemand, KeyboardMode::Exclusive] {
             assert!(overlay_keyboard_mode_allowed(mode, false));
         }
+    }
+
+    #[test]
+    fn hide_slides_cards_from_where_they_are_now() {
+        crate::gtk_test::run_in_child_process("window::tests::hide_slides_cards_from_where_they_are_now_inner");
+    }
+
+    #[test]
+    fn hide_slides_cards_from_where_they_are_now_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-slide-out-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.SlideOutTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state = AppState::default();
+        state.terminals.push(serde_json::from_value(serde_json::json!({
+            "id":"sd_term_slide", "session_name":"sd_term_slide", "agent_type":"shell", "command":"/bin/false",
+            "x":20, "y":200, "width":160, "height":120, "created_at":0.0
+        })).unwrap());
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let card = window.any_terminal_card("sd_term_slide").unwrap();
+        let widget: gtk4::Widget = card.container.clone().upcast();
+        let sw = window.screen_width() as f64;
+        let path = || *window.anim_trajectories.borrow().get(&widget).unwrap();
+
+        window.start_slide_in();
+        assert!(path().sx < 0.0, "a left-half card enters from the left");
+        // The slide-in settles; the user then drags the card to the right.
+        window.slide.running.set(false);
+        window.slide.gen.set(window.slide.gen.get().wrapping_add(1));
+        let right = (sw - 200.0) as i32;
+        card.data.borrow_mut().x = right;
+
+        window.start_slide_out(|| {});
+        let out = path();
+        assert_eq!((out.tx, out.ty), (right as f64, 200.0), "hide must start where the card is");
+        assert!(out.sx > sw, "a right-half card must leave to the right, got {}", out.sx);
+
+        // Reversing a hide mid-flight keeps the same path, so nothing jumps.
+        card.data.borrow_mut().x = 20;
+        window.start_slide_in();
+        assert_eq!(path(), out);
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
