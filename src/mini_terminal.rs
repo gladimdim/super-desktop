@@ -57,15 +57,16 @@ fn card_hint_or(message: &Rc<RefCell<Option<String>>>, fallback: &str) -> String
 
 /// Resize bounds for a card in a `width × height` workspace drawn at `scale`
 /// times this machine's pixels: the local rules (10 px margins, 70 px under
-/// the dock, at most 70% × 75% of the workspace), scaled with the workspace.
+/// the dock), scaled with the workspace.
 pub fn workspace_limits((width, height): (i32, i32), scale: f64) -> crate::card_resize::Limits {
     let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
     let (min_width, min_height) = min_card_size(scale);
+    let (max_width, max_height) = max_card_size(width, height, scale);
     crate::card_resize::Limits {
         min_width,
         min_height,
-        max_width: ((width as f64) * 0.70).round() as i32,
-        max_height: ((height as f64) * 0.75).round() as i32,
+        max_width,
+        max_height,
         left: 10.0 * scale,
         top: 70.0 * scale,
         right: width as f64 - 10.0 * scale,
@@ -73,12 +74,22 @@ pub fn workspace_limits((width, height): (i32, i32), scale: f64) -> crate::card_
     }
 }
 
+/// The largest card a `width × height` workspace holds at `scale`: all of it
+/// inside the 10 px side and bottom margins and under the 70 px toolbar strip,
+/// so an edge can be dragged right up to the screen's margin.
+pub fn max_card_size(width: i32, height: i32, scale: f64) -> (i32, i32) {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    (
+        (width as f64 - 20.0 * scale).round() as i32,
+        (height as f64 - 80.0 * scale).round() as i32,
+    )
+}
+
 /// Clamp a card size in a workspace whose smallest card is `scale` times this
 /// machine's: one rule for the local workspace (scale 1) and a fitted one.
 pub fn clamp_card_size_at(w: i32, h: i32, screen_w: i32, screen_h: i32, scale: f64) -> (i32, i32) {
     let (min_w, min_h) = min_card_size(scale);
-    let max_w = ((screen_w as f64) * 0.70).round() as i32;
-    let max_h = ((screen_h as f64) * 0.75).round() as i32;
+    let (max_w, max_h) = max_card_size(screen_w, screen_h, scale);
     (
         w.clamp(min_w, max_w.max(min_w)),
         h.clamp(min_h, max_h.max(min_h)),
@@ -323,8 +334,7 @@ pub fn expanded_rect(screen_w: i32, screen_h: i32) -> (f64, f64, f64, f64) {
 }
 
 pub fn clamp_card_size(w: i32, h: i32, screen_w: i32, screen_h: i32) -> (i32, i32) {
-    let max_w = ((screen_w as f64) * 0.70).round() as i32;
-    let max_h = ((screen_h as f64) * 0.75).round() as i32;
+    let (max_w, max_h) = max_card_size(screen_w, screen_h, 1.0);
     (
         w.clamp(MIN_CARD_WIDTH, max_w.max(MIN_CARD_WIDTH)),
         h.clamp(MIN_CARD_HEIGHT, max_h.max(MIN_CARD_HEIGHT)),
@@ -3289,9 +3299,31 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
     fn test_clamp_card_size_bounds() {
         let (w, h) = clamp_card_size(10, 10, 1920, 1080);
         assert_eq!((w, h), (MIN_CARD_WIDTH, MIN_CARD_HEIGHT));
+        // The whole screen inside the 10 px margins and under the toolbar.
         let (w, h) = clamp_card_size(99999, 99999, 1920, 1080);
-        assert_eq!(w, 1344);
-        assert_eq!(h, 810);
+        assert_eq!(w, 1900);
+        assert_eq!(h, 1000);
+    }
+
+    #[test]
+    fn test_card_edges_resize_up_to_the_screen_margins() {
+        use crate::card_resize::{resized_rect, Edge, Rect};
+        // A card part-way down a 3440×1440 screen: its bottom edge goes all
+        // the way to the 10 px margin, not to a fraction of the screen height.
+        let limits = workspace_limits((3440, 1440), 1.0);
+        let start = Rect { x: 1822.0, y: 192.0, width: 994, height: 1051 };
+        let down = resized_rect(Edge::South, start, 0.0, 5000.0, limits);
+        assert_eq!(down.y + down.height as f64, 1430.0);
+        let right = resized_rect(Edge::East, start, 5000.0, 0.0, limits);
+        assert_eq!(right.x + right.width as f64, 3430.0);
+        // Dragged from the far corner, the card fills the usable screen.
+        let start = Rect { x: 10.0, y: 70.0, width: 640, height: 480 };
+        let full = resized_rect(Edge::SouthEast, start, 9000.0, 9000.0, limits);
+        assert_eq!((full.width, full.height), (3420, 1360));
+        // A fitted remote view keeps the same margins in its own pixels.
+        let fitted = workspace_limits((1720, 720), 0.5);
+        assert_eq!((fitted.max_width, fitted.max_height), (1710, 680));
+        assert_eq!(fitted.bottom, 715.0);
     }
 
     #[test]

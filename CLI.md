@@ -494,7 +494,7 @@ A revision is a comparison token, not a number to increment or parse.
 
 Bounds are strict by default: the whole card must fit inside the output with
 10-pixel side/bottom margins and space for the toolbar. Normal resizing respects
-the UI minimum size and its maximum 70% width / 75% height. The current geometry
+the UI minimum size; the maximum is the whole output inside those margins. The current geometry
 reports the exact bounds. `--clamp` explicitly permits adjustment of size and/or
 position to fit; the reply reports `requested`, final `rect`, `clamped`, a new
 `revision` and `outcome: "applied"`. Without it, an out-of-bounds request returns
