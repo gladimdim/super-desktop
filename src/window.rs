@@ -252,6 +252,9 @@ struct SlideAnim {
     /// Some cards still slide with a live terminal: replace it with a still
     /// image once it has been laid out (`MiniTerminalCard::freeze_for_slide`).
     freeze_pending: Cell<bool>,
+    /// The workspace size the paths in `anim_trajectories` were built for.
+    /// The tick rebuilds them when the window's real size differs.
+    built_for: Cell<(i32, i32)>,
 }
 
 impl SlideAnim {
@@ -265,6 +268,7 @@ impl SlideAnim {
             last_us: Cell::new(0),
             motion: RefCell::default(),
             freeze_pending: Cell::new(false),
+            built_for: Cell::new((0, 0)),
         }
     }
 }
@@ -360,6 +364,9 @@ pub struct SuperDesktopWindow {
     /// the card goes and how big it is, and stretches the card over the whole
     /// screen once it is dropped.
     settings_layout: RefCell<Option<Rc<crate::floating_panel::MovablePanel>>>,
+    /// This window, for the slide's frame tick, which rebuilds the paths once
+    /// the window has its real size.
+    this: std::cell::OnceCell<std::rc::Weak<Self>>,
 }
 
 /// Use compositor-allocated logical pixels; monitor zero is only a startup fallback.
@@ -370,6 +377,28 @@ fn allocated_workspace_size(window: &impl IsA<gtk4::Window>, fallback: (i32, i32
     } else {
         fallback
     }
+}
+
+/// The window's size, once the compositor has given it one. GTK clears it when
+/// the window is hidden, so a shown-again overlay has none until its first frame
+/// is laid out.
+fn allocated_size(window: &impl IsA<gtk4::Window>) -> Option<(i32, i32)> {
+    let window = window.as_ref();
+    (window.width() > 0 && window.height() > 0).then(|| (window.width(), window.height()))
+}
+
+/// The size to build slide paths for while the window has no size yet: the
+/// widest and tallest monitor. A card parked past that right edge is off
+/// screen on whichever monitor the compositor picks; monitor 0 alone (the
+/// startup fallback) can be a laptop panel narrower than the screen the
+/// overlay opens on, which started right-hand cards in the middle of it.
+fn provisional_slide_size(fallback: (i32, i32)) -> (i32, i32) {
+    let Some(display) = gdk::Display::default() else { return fallback };
+    let monitors = display.monitors();
+    (0..monitors.n_items())
+        .filter_map(|i| monitors.item(i).and_then(|m| m.downcast::<gdk::Monitor>().ok()))
+        .map(|m| m.geometry())
+        .fold(fallback, |(w, h), geo| (w.max(geo.width()), h.max(geo.height())))
 }
 
 impl SuperDesktopWindow {
@@ -700,7 +729,9 @@ impl SuperDesktopWindow {
             hover_raise_lock: HoverRaiseLock::new(),
             terminal_picker: RefCell::new(None),
             settings_layout: RefCell::new(None),
+            this: std::cell::OnceCell::new(),
         });
+        let _ = win_rc.this.set(Rc::downgrade(&win_rc));
 
         // The overlay is OnDemand so an unfocused HUD does not eat desktop
         // keys. GtkEntry on a layer-shell surface only receives those keys
@@ -2004,8 +2035,9 @@ impl SuperDesktopWindow {
     fn add_remote_slide_targets(&self) {
         let mut trajectories = self.anim_trajectories.borrow_mut();
         trajectories.retain(|widget, _| widget.parent().is_some());
+        let (sw, _) = self.slide_size();
         for (widget, x, y, width, offset) in self.machine_view.slide_cards() {
-            let (sx, sy) = card_slide_offscreen(x + offset, y, width, self.screen_width() as f64);
+            let (sx, sy) = card_slide_offscreen(x + offset, y, width, sw as f64);
             trajectories.insert(
                 widget,
                 Trajectory {
@@ -2026,6 +2058,8 @@ impl SuperDesktopWindow {
             return;
         }
         trajs.clear();
+        let (sw, sh) = self.slide_size();
+        self.slide.built_for.set((sw, sh));
 
         let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
         let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
@@ -2034,19 +2068,42 @@ impl SuperDesktopWindow {
             let tx = note.data.borrow().x as f64;
             let ty = note.data.borrow().y as f64;
             let w = note.data.borrow().width as f64;
-            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width() as f64);
+            let (sx, sy) = card_slide_offscreen(tx, ty, w, sw as f64);
             trajs.insert(note.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
         for term in terms.iter() {
-            let (tx, ty, w, _) = terminal_slide_geom(term, self.screen_width(), self.screen_height());
-            let (sx, sy) = card_slide_offscreen(tx, ty, w, self.screen_width() as f64);
+            let (tx, ty, w, _) = terminal_slide_geom(term, sw, sh);
+            let (sx, sy) = card_slide_offscreen(tx, ty, w, sw as f64);
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
 
         let (hw, hh) = hud_measured_size(&self.hud);
-        let (tx, ty, sx, sy) = hud_slide_pose(hw, hh, self.screen_width() as f64);
+        let (tx, ty, sx, sy) = hud_slide_pose(hw, hh, sw as f64);
         trajs.insert(self.hud.clone().upcast(), Trajectory { sx, sy, tx, ty });
         raise_canvas_child(&self.canvas, &self.hud);
+    }
+
+    /// The workspace size the slide paths are built for. A window shown again
+    /// has no size until its first frame is laid out (GTK clears it on hide),
+    /// so until then the paths are provisional and the tick rebuilds them.
+    fn slide_size(&self) -> (i32, i32) {
+        allocated_size(&self.window)
+            .unwrap_or_else(|| provisional_slide_size((self.screen_width, self.screen_height)))
+    }
+
+    /// The paths of every sliding widget, rebuilt for the current size.
+    fn rebuild_slide_frames(&self) -> Vec<(gtk4::Widget, Trajectory)> {
+        self.ensure_slide_trajectories(true);
+        self.add_remote_slide_targets();
+        self.slide_frames()
+    }
+
+    fn slide_frames(&self) -> Vec<(gtk4::Widget, Trajectory)> {
+        self.anim_trajectories
+            .borrow()
+            .iter()
+            .map(|(w, t)| (w.clone(), *t))
+            .collect()
     }
 
     fn paint_slide(&self, progress: f64) {
@@ -2068,12 +2125,8 @@ impl SuperDesktopWindow {
         let gen = self.slide.gen.get().wrapping_add(1);
         self.slide.gen.set(gen);
 
-        let frames: Vec<(gtk4::Widget, Trajectory)> = self
-            .anim_trajectories
-            .borrow()
-            .iter()
-            .map(|(w, t)| (w.clone(), *t))
-            .collect();
+        let frames = RefCell::new(self.slide_frames());
+        let this = self.this.get().cloned();
         let slide = Rc::clone(&self.slide);
         let canvas = self.canvas.clone();
         let on_hidden = Rc::clone(&self.on_slide_hidden);
@@ -2084,9 +2137,18 @@ impl SuperDesktopWindow {
         // Tick the window, not the canvas: the layer-shell surface owns the
         // GDK frame clock, which Hyprland drives at the monitor refresh rate.
         // `add_tick_callback` is vsync; a glib timeout would cap us at 10–16ms.
-        self.window.add_tick_callback(move |_, clock| {
+        self.window.add_tick_callback(move |window, clock| {
             if slide.gen.get() != gen {
                 return glib::ControlFlow::Break;
+            }
+            // A show starts before the window has a size: its first frame used
+            // provisional paths that keep every card off screen. Rebuild them
+            // for the real size as soon as it is known (and after an output
+            // change mid-slide), so each card enters from its own nearest edge.
+            if allocated_size(window).is_some_and(|size| size != slide.built_for.get()) {
+                if let Some(win) = this.as_ref().and_then(std::rc::Weak::upgrade) {
+                    *frames.borrow_mut() = win.rebuild_slide_frames();
+                }
             }
             slide.motion.borrow_mut().frame(clock);
             let now = clock.frame_time();
@@ -2116,7 +2178,7 @@ impl SuperDesktopWindow {
                 slide.progress.set(target);
                 slide.velocity.set(0.0);
                 slide.running.set(false);
-                for (widget, traj) in frames.iter() {
+                for (widget, traj) in frames.borrow().iter() {
                     paint_slide_widget(widget, *traj, target);
                 }
                 canvas.remove_css_class("sliding");
@@ -2134,7 +2196,7 @@ impl SuperDesktopWindow {
             }
             slide.progress.set(progress);
             slide.velocity.set(velocity);
-            for (widget, traj) in frames.iter() {
+            for (widget, traj) in frames.borrow().iter() {
                 paint_slide_widget(widget, *traj, progress);
             }
             glib::ControlFlow::Continue
@@ -3458,6 +3520,72 @@ mod tests {
         card.data.borrow_mut().x = 20;
         window.start_slide_in();
         assert_eq!(path(), out);
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn show_slides_cards_in_from_the_edges_of_the_real_size() {
+        crate::gtk_test::run_in_child_process("window::tests::show_slides_cards_in_from_the_edges_of_the_real_size_inner");
+    }
+
+    #[test]
+    fn show_slides_cards_in_from_the_edges_of_the_real_size_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-slide-in-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.SlideInTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        // Right of the middle of the 900px screen the overlay opens on, left of
+        // the middle of the wider monitor the paths are first built for.
+        let mut state = AppState::default();
+        state.terminals.push(serde_json::from_value(serde_json::json!({
+            "id":"sd_term_slide_in", "session_name":"sd_term_slide_in", "agent_type":"shell", "command":"/bin/false",
+            "x":380, "y":200, "width":160, "height":120, "created_at":0.0
+        })).unwrap());
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let card = window.any_terminal_card("sd_term_slide_in").unwrap();
+        let widget: gtk4::Widget = card.container.clone().upcast();
+        let path = || *window.anim_trajectories.borrow().get(&widget).unwrap();
+        let monitors = gdk::Display::default().unwrap().monitors();
+        let widest = (0..monitors.n_items())
+            .filter_map(|i| monitors.item(i).and_then(|m| m.downcast::<gdk::Monitor>().ok()))
+            .map(|m| m.geometry().width())
+            .max()
+            .unwrap();
+        assert!(widest > 2 * 460, "the test needs a monitor wider than 920px, got {widest}");
+
+        window.window.set_default_size(900, 600);
+        window.window.present();
+        // Shown again, the window has no size until its first frame is laid
+        // out: the first pose must be off screen on every monitor.
+        assert_eq!(allocated_size(&window.window), None);
+        window.start_slide_in();
+        let (sw, _) = window.slide.built_for.get();
+        assert!(sw >= widest, "provisional paths must cover the widest monitor, built for {sw} < {widest}");
+        let first = path();
+        assert!(first.sx < 0.0 || first.sx >= f64::from(widest), "first pose on screen: {}", first.sx);
+
+        // Broadway ticks slowly; the rebuild, not the settle, is what counts.
+        let rebuilt = || allocated_size(&window.window).is_some_and(|size| size == window.slide.built_for.get());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !rebuilt() && std::time::Instant::now() < deadline {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let size = allocated_size(&window.window).expect("the window was laid out");
+        assert_eq!(size.0, 900, "the window must take its requested width");
+        assert_eq!(window.slide.built_for.get(), size, "the paths must be rebuilt for the real size");
+        let entry = path();
+        assert_eq!(entry.sx, 940.0, "a right-half card must enter from the real right edge");
+        assert_eq!((entry.tx, entry.ty), (380.0, 200.0));
         window.window.close();
         let _ = std::fs::remove_dir_all(root);
     }
