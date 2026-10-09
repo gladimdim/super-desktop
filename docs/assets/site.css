@@ -67,6 +67,11 @@ code { font-family: var(--mono); font-size: .92em; }
 }
 .btn:hover { text-decoration: none; border-color: #36425c; transform: translateY(-1px); }
 .btn.primary { background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #071018; border: 0; }
+/* Google's official badge, unaltered: the same height as a .btn in the hero. */
+.play-badge { display: inline-flex; border-radius: 9px; transition: transform .15s; }
+.play-badge:hover { transform: translateY(-1px); }
+.play-badge img { display: block; height: 42px; width: auto; }
+.play-badge.large img { height: 56px; }
 
 /* ── Hero ─────────────────────────────────────────────────── */
 .hero { position: relative; padding: 40px 0 28px; text-align: center; }
@@ -191,6 +196,7 @@ footer { margin-top: 110px; padding: 34px 0 48px; border-top: 1px solid var(--bo
 footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 24px; align-items: center; }
 footer nav { display: flex; flex-wrap: wrap; gap: 18px; margin-left: auto; }
 footer a { color: var(--muted); }
+footer .legal { flex-basis: 100%; margin: 0; font-size: 12px; }
 
 .js .reveal-up { opacity: 0; transform: translateY(18px); transition: opacity .6s ease, transform .6s ease; }
 .js .reveal-up.in { opacity: 1; transform: none; }
