@@ -3,7 +3,8 @@ mod desktop_shell;
 mod macos_shortcut;
 #[cfg(target_os = "macos")]
 mod macos_diagnostics;
-use super_desktop::{cli, control};
+use super_desktop::cli_legacy::{self, Dial};
+use super_desktop::{cli, control, preload};
 use super_desktop::control_journal;
 mod control_launch;
 mod control_terminal;
@@ -42,7 +43,6 @@ mod folder_colors;
 mod frame_profile;
 mod harness_metadata;
 mod hidden_pause;
-mod preload;
 use super_desktop::{harness_record, platform, session_task, terminal_text};
 mod terminal_frame;
 mod asset_pdf;
@@ -401,12 +401,12 @@ fn ipc_request_with(
     remove_stale_socket: bool,
     connect: impl FnOnce(&std::path::Path) -> std::io::Result<UnixStream>,
 ) -> Ipc {
-    let mut stream = match connect(sock_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ipc::NoDaemon,
+    let mut stream = match cli_legacy::dial(connect(sock_path)) {
+        Dial::Connected(s) => s,
+        Dial::Missing => return Ipc::NoDaemon,
         // Connection refused: the file is a leftover from a daemon that is
         // gone. Clear it so the daemon we start can bind cleanly.
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+        Dial::Refused => {
             if remove_stale_socket {
                 let _ = fs::remove_file(sock_path);
             }
@@ -414,21 +414,17 @@ fn ipc_request_with(
         }
         // A sandbox denial or transient error says nothing about liveness.
         // Unlinking here makes the live daemon's ownership watcher exit.
-        Err(e) => {
+        Dial::Failed(e) => {
             eprintln!("SUPER DESKTOP: cannot connect to {}: {e}", sock_path.display());
             return Ipc::Stalled;
         }
     };
 
-    // Longer than the daemon's own 2s wait for the GTK thread, so a slow
-    // answer is never mistaken for "no daemon". The socket file is left alone
-    // here: the listener behind it is alive.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.write_all(format!("{}\n", cmd.trim()).as_bytes());
-
-    let mut resp = String::new();
-    match stream.take(1024 * 1024 + 1).read_to_string(&mut resp) {
-        Ok(_) if resp.len() <= 1024 * 1024 && !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
+    // The socket file is left alone here: the listener behind it is alive.
+    let _ = stream.set_read_timeout(Some(cli_legacy::TIMEOUT));
+    let _ = cli_legacy::send(&mut stream, cmd.trim());
+    match cli_legacy::receive(&mut stream, 1024 * 1024 + 1) {
+        Ok(resp) if resp.len() <= 1024 * 1024 && !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
         _ => Ipc::Stalled,
     }
 }
@@ -567,22 +563,13 @@ fn main() {
         Ipc::NoDaemon => None,
     };
     if let Some(resp) = resp {
-        if action == "status" {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
-                let vis = val["visible"].as_bool().unwrap_or(false);
-                let notes = val["notes_count"].as_i64().unwrap_or(0);
-                let terms = val["terminals_count"].as_i64().unwrap_or(0);
-                println!("SUPER DESKTOP (Rust): {}", if vis { "Visible" } else { "Hidden" });
-                println!("Notes: {}, Terminals: {}", notes, terms);
-            } else {
-                println!("{}", resp);
-            }
-        } else if action == "toggle" {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
-                let vis = val["visible"].as_bool().unwrap_or(false);
-                println!("SUPER DESKTOP (Rust): {}", if vis { "Shown" } else { "Hidden" });
-            } else {
-                println!("{}", resp);
+        if action == "status" || action == "toggle" {
+            match serde_json::from_str(&resp)
+                .ok()
+                .and_then(|value| cli_legacy::visibility_text(action, &value))
+            {
+                Some(text) => println!("{text}"),
+                None => println!("{}", resp),
             }
         } else if action == "reload-theme" || action == "refresh-theme" {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
@@ -819,7 +806,7 @@ fn run_daemon(start_visible: bool) {
     let _ = thread::Builder::new()
         .name("super-desktop-tmux-env".to_string())
         .spawn(|| {
-            preload::clean_tmux_global_env();
+            clean_tmux_global_env();
             tmux_clipboard::install_existing_sessions();
         });
 
@@ -926,12 +913,40 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     true
 }
 
-/// Snapshot the live window, if any, **without holding the `RefCell` borrow**.
-///
-/// Load-bearing detail: `if let Some(win) = ctx.borrow().window.clone() { … }`
-/// keeps the read borrow alive until the end of the whole `if let` block, so a
-/// `ctx.borrow_mut()` inside it panics with `BorrowMutError` — and release
-/// builds use `panic = "abort"`, so that panic kills the daemon.
+/// A tmux server started from a preloaded environment copies `LD_PRELOAD`
+/// into its global environment, and every new pane inherits it. Remove only
+/// the layer-shell entry there; blocking (runs tmux), so call it off the UI
+/// thread.
+fn clean_tmux_global_env() {
+    let tmux = crate::tmux::tmux_bin();
+    let Ok(output) = std::process::Command::new(&tmux)
+        .args(["show-environment", "-g", "LD_PRELOAD"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return; // No server, or the variable is not set.
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(value) = text.trim_end_matches('\n').strip_prefix("LD_PRELOAD=") else {
+        return; // `-LD_PRELOAD` (already removed) or unexpected output.
+    };
+    match preload::strip_layer_shell(value) {
+        None => {}
+        Some(None) => {
+            let _ = std::process::Command::new(&tmux)
+                .args(["set-environment", "-g", "-u", "LD_PRELOAD"])
+                .output();
+        }
+        Some(Some(rest)) => {
+            let _ = std::process::Command::new(&tmux)
+                .args(["set-environment", "-g", "LD_PRELOAD", &rest])
+                .output();
+        }
+    }
+}
+
 /// Channels from control workers to the GTK thread, which owns the workspace.
 struct ControlChannels {
     snapshot: futures_channel::mpsc::Sender<control_service::Query>,
@@ -1108,6 +1123,12 @@ fn serve_window<Q: WindowQuery>(
     });
 }
 
+/// Snapshot the live window, if any, **without holding the `RefCell` borrow**.
+///
+/// Load-bearing detail: `if let Some(win) = ctx.borrow().window.clone() { … }`
+/// keeps the read borrow alive until the end of the whole `if let` block, so a
+/// `ctx.borrow_mut()` inside it panics with `BorrowMutError` — and release
+/// builds use `panic = "abort"`, so that panic kills the daemon.
 fn live_window(ctx: &Rc<RefCell<AppContext>>) -> Option<Rc<SuperDesktopWindow>> {
     ctx.borrow().window.clone()
 }

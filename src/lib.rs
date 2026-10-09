@@ -34,5 +34,7 @@ pub mod control_output;
 
 mod cli_connection;
 mod cli_local;
+pub mod cli_legacy;
+pub mod preload;
 
 pub mod mcp_settings;

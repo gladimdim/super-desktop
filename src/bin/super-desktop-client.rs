@@ -1,33 +1,23 @@
 //! Small, GTK-free IPC entry point. Never replay a command after connecting:
 //! a timed-out toggle may already have been applied by the daemon.
-use std::io::{Read, Write};
 use std::os::unix::{net::UnixStream, process::CommandExt};
 use std::path::Path;
-use std::time::Duration;
-use super_desktop::{cli, harness_record, platform};
+use super_desktop::cli_legacy::{self, Dial};
+use super_desktop::{cli, harness_record, platform, preload};
 
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
-    let stream = match UnixStream::connect(path) {
-        Ok(stream) => stream,
-        Err(e)
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-            ) =>
-        {
-            return Ok(None)
-        }
-        Err(e) => return Err(e),
-    };
-    exchange(stream, command).map(Some)
+    match cli_legacy::dial(UnixStream::connect(path)) {
+        Dial::Connected(stream) => exchange(stream, command).map(Some),
+        Dial::Missing | Dial::Refused => Ok(None),
+        Dial::Failed(e) => Err(e),
+    }
 }
 
 fn exchange(mut stream: UnixStream, command: &str) -> std::io::Result<String> {
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.write_all(format!("{command}\n").as_bytes())?;
-    let mut reply = String::new();
-    stream.take(64 * 1024).read_to_string(&mut reply)?;
+    stream.set_read_timeout(Some(cli_legacy::TIMEOUT))?;
+    stream.set_write_timeout(Some(cli_legacy::TIMEOUT))?;
+    cli_legacy::send(&mut stream, command)?;
+    let reply = cli_legacy::receive(&mut stream, 64 * 1024)?;
     if reply.trim().is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
@@ -52,21 +42,11 @@ fn main() {
             Ok(Some(reply)) => {
                 if action == "kill" {
                     println!("SUPER DESKTOP: {}", reply.trim());
-                } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(&reply) {
-                    let visible = value["visible"].as_bool().unwrap_or(false);
-                    match action {
-                        "status" => println!(
-                            "SUPER DESKTOP (Rust): {}\nNotes: {}, Terminals: {}",
-                            if visible { "Visible" } else { "Hidden" },
-                            value["notes_count"].as_i64().unwrap_or(0),
-                            value["terminals_count"].as_i64().unwrap_or(0)
-                        ),
-                        "toggle" => println!(
-                            "SUPER DESKTOP (Rust): {}",
-                            if visible { "Shown" } else { "Hidden" }
-                        ),
-                        _ => println!("SUPER DESKTOP (Rust): {}", reply.trim()),
-                    }
+                } else if let Some(text) = serde_json::from_str(&reply)
+                    .ok()
+                    .and_then(|value| cli_legacy::visibility_text(action, &value))
+                {
+                    println!("{text}");
                 } else {
                     println!("SUPER DESKTOP (Rust): {}", reply.trim());
                 }
@@ -83,22 +63,7 @@ fn main() {
     let mut command = std::process::Command::new(exe.with_file_name("super-desktop"));
     command.args(args);
     #[cfg(target_os = "linux")]
-    {
-        let library = "/usr/lib/libgtk4-layer-shell.so";
-        if Path::new(library).exists() {
-            let preload = std::env::var("LD_PRELOAD").unwrap_or_default();
-            if !preload.split([':', ' ']).any(|item| item == library) {
-                command.env(
-                    "LD_PRELOAD",
-                    if preload.is_empty() {
-                        library.to_string()
-                    } else {
-                        format!("{library}:{preload}")
-                    },
-                );
-            }
-        }
-    }
+    preload::preload_layer_shell(&mut command);
     eprintln!(
         "SUPER DESKTOP: could not start application: {}",
         command.exec()
@@ -109,6 +74,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
 
     #[test]
     fn missing_socket_is_safe_to_delegate() {
