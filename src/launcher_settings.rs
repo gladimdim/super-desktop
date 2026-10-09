@@ -271,8 +271,8 @@ fn set_state_class(label: &Label, active: bool, yes: &str, no: &str) {
 }
 
 /// Each destination scrolls on its own; horizontal scrolling would only clip
-/// the panels, so labels wrap.
-fn page_scroll(content: &Box) -> ScrolledWindow {
+/// the panels, so labels wrap. Settings pages scroll the same way.
+pub(crate) fn page_scroll(content: &Box) -> ScrolledWindow {
     let scroll = ScrolledWindow::new();
     scroll.add_css_class("launcher-scroll");
     scroll.add_css_class("harness-page");

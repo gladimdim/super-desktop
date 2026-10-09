@@ -22,15 +22,15 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    pango, Align, Box, Button, EventControllerKey, Image, Label, Orientation, PolicyType,
-    PropagationPhase, ScrolledWindow,
+    pango, Align, Box, Button, EventControllerKey, Image, Label, Orientation,
+    PropagationPhase,
 };
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::launcher_settings::{chip, section_card, ConnectionHooks, ConnectionPage};
+use crate::launcher_settings::{chip, page_scroll, section_card, ConnectionHooks, ConnectionPage};
 use crate::shortcut::{Capture, CaptureGuard};
 use crate::state::{AppState, TopBarSize};
 use crate::tmux::{detect_harnesses, HarnessInfo};
@@ -311,17 +311,6 @@ pub(crate) fn settings_entry_with_summary(
     button.set_child(Some(&row));
 
     (button, description, trailing)
-}
-
-fn settings_scroll(content: &Box) -> ScrolledWindow {
-    let scroll = ScrolledWindow::new();
-    scroll.add_css_class("launcher-scroll");
-    scroll.add_css_class("harness-page");
-    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
-    scroll.set_child(Some(content));
-    scroll.set_vexpand(true);
-    scroll.set_hexpand(true);
-    scroll
 }
 
 fn suggested_harness_name(executable: &str) -> Option<String> {
@@ -1322,7 +1311,7 @@ pub fn build_harness_settings_panel(
     let mcp_root = Box::new(Orientation::Vertical, 10);
     mcp_root.add_css_class("launcher-body");
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
-    let mcp_view = settings_scroll(&mcp_root);
+    let mcp_view = page_scroll(&mcp_root);
     mcp_view.set_visible(false);
 
     let updates_root = Box::new(Orientation::Vertical, 10);
@@ -1335,14 +1324,14 @@ pub fn build_harness_settings_panel(
         move |_| check_updates(false)
     });
 
-    let home_view = settings_scroll(&home_root);
-    let shortcut_view = settings_scroll(&shortcut_root);
-    let harnesses_view = settings_scroll(&harnesses_root);
-    let custom_view = settings_scroll(&custom_root);
-    let args_view = settings_scroll(&args_root);
-    let top_bar_view = settings_scroll(&top_bar_root);
-    let sleep_view = settings_scroll(&sleep_root);
-    let updates_view = settings_scroll(&updates_root);
+    let home_view = page_scroll(&home_root);
+    let shortcut_view = page_scroll(&shortcut_root);
+    let harnesses_view = page_scroll(&harnesses_root);
+    let custom_view = page_scroll(&custom_root);
+    let args_view = page_scroll(&args_root);
+    let top_bar_view = page_scroll(&top_bar_root);
+    let sleep_view = page_scroll(&sleep_root);
+    let updates_view = page_scroll(&updates_root);
 
     // Connections is a family of destinations with its own overview. They
     // own their live bridge controls and refresh only while shown. `nav` is
