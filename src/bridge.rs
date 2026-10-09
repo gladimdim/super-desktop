@@ -417,11 +417,8 @@ impl PairState {
         // Legacy credentials travelled over HTTP; never accept them under v3.
         state.cfg.paired_tokens.clear();
         state.save();
-        let mtime = config_mtime();
-        Self {
-            cfg: state.cfg,
-            mtime,
-        }
+        state.mtime = config_mtime();
+        state
     }
 
     fn save(&self) -> bool {
@@ -1711,22 +1708,13 @@ fn health_body() -> serde_json::Value {
     })
 }
 
-/// True when a bridge answers on loopback (this laptop).
-pub fn bridge_running(port: u16) -> bool {
-    bridge_ping_body(port)
+/// True when this machine's bridge answers on its owner-only control socket.
+/// The socket is per user, not per port: `_port` is kept for callers.
+pub fn bridge_running(_port: u16) -> bool {
+    pairing::control_exchange(&format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"))
+        .ok()
         .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
         .is_some_and(|body| body["status"] == "ok" && body["service"] == SERVICE_NAME)
-}
-
-fn bridge_ping_body(_port: u16) -> Option<String> {
-    let mut s = std::os::unix::net::UnixStream::connect(security::control_path()).ok()?;
-    s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
-    s.set_write_timeout(Some(Duration::from_secs(3))).ok()?;
-    s.write_all(format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes())
-        .ok()?;
-    let mut resp = String::new();
-    s.read_to_string(&mut resp).ok()?;
-    resp.split_once("\r\n\r\n").map(|(_, b)| b.to_string())
 }
 
 /// Start `super-desktop harness-bridge` detached.

@@ -262,19 +262,27 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
 /// codes: the bridge's own, or `bridge_offline` / `bridge_not_responding` /
 /// `invalid_bridge_response` when it could not answer.
 pub(crate) fn local_request(method: &str, path: &str, body: Value) -> Result<Value, String> {
+    let body = body.to_string();
+    let response = control_exchange(&format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))?;
+    let result: Value = serde_json::from_str(&response)
+        .map_err(|_| "invalid_bridge_response".to_string())?;
+    if let Some(error) = result["error"].as_str() { return Err(error.to_string()); }
+    Ok(result)
+}
+
+/// Send one raw request over the bridge's control socket and return the body
+/// of its answer (empty without one), or `bridge_offline` /
+/// `bridge_not_responding`.
+pub(super) fn control_exchange(request: &str) -> Result<String, String> {
     let mut stream = std::os::unix::net::UnixStream::connect(security::control_path())
         .map_err(|_| "bridge_offline".to_string())?;
     let not_responding = |_| "bridge_not_responding".to_string();
     stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(not_responding)?;
     stream.set_write_timeout(Some(Duration::from_secs(3))).map_err(not_responding)?;
-    let body = body.to_string();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(not_responding)?;
+    stream.write_all(request.as_bytes()).map_err(not_responding)?;
     let mut response = String::new();
     stream.read_to_string(&mut response).map_err(not_responding)?;
-    let result: Value = serde_json::from_str(response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(""))
-        .map_err(|_| "invalid_bridge_response".to_string())?;
-    if let Some(error) = result["error"].as_str() { return Err(error.to_string()); }
-    Ok(result)
+    Ok(response.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default())
 }
 
 /// The bridge's config as last written, for lists shown while it is stopped.
