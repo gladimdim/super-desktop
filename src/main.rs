@@ -1516,7 +1516,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             show_window(ctx, app);
             if let Some(win) = &ctx.borrow().window {
                 let id = win.create_new_terminal_in(agent, None, None, None, Some(&directory));
-                return json!({"ok":tmux::session_alive(&id),"id":id}).to_string();
+                return json!({"ok":tmux::session_exists(&id),"id":id}).to_string();
             }
             json!({"ok":false,"error":"desktop_unavailable"}).to_string()
         }
@@ -1525,7 +1525,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let agent = parts.get(1).unwrap_or(&"shell");
             if let Some(win) = &ctx.borrow().window {
                 let id = win.create_new_terminal(agent, None, None, None);
-                return json!({ "ok": tmux::session_alive(&id), "id": id }).to_string();
+                return json!({ "ok": tmux::session_exists(&id), "id": id }).to_string();
             }
             json!({ "ok": false, "error": "desktop_unavailable" }).to_string()
         }
@@ -1549,7 +1549,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let before = state.terminals.len();
             state.terminals.retain(|t| t.session_name != *sess);
             let removed = state.terminals.len() != before;
-            if tmux::session_alive(sess) {
+            if tmux::session_exists(sess) {
                 tmux::kill_session(sess);
             }
             if removed {

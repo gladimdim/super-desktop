@@ -2144,7 +2144,7 @@ mod tests {
         }
         let Some(out) = std::env::var_os("SD_PAIRING_SHOTS").map(std::path::PathBuf::from) else { return };
         assert!(std::env::var_os("SUPER_DESKTOP_BRIDGE_STATE_DIR").is_some(), "only against a disposable bridge state dir");
-        assert!(crate::bridge::bridge_running(crate::bridge::BRIDGE_PORT), "start the disposable bridge first");
+        assert!(crate::bridge::bridge_running(), "start the disposable bridge first");
         gtk4::init().unwrap();
         gtk4::Settings::default().unwrap().set_gtk_application_prefer_dark_theme(true);
         crate::styles::apply_styles();

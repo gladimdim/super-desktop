@@ -508,7 +508,7 @@ pub fn submit(
         .iter()
         .find(|t| t.session_name == session)
         .ok_or("no_such_session")?;
-    if !crate::tmux::session_alive(session) {
+    if !crate::tmux::session_exists(session) {
         return Err("no_such_session".into());
     }
     let status = crate::tmux::inspect_status(session, &terminal.agent_type);
@@ -603,7 +603,7 @@ pub fn insert_local(session: &str, paths: &[PathBuf]) -> Result<usize, String> {
         .iter()
         .find(|t| t.session_name == session)
         .ok_or("no_such_session")?;
-    if !crate::tmux::session_alive(session) {
+    if !crate::tmux::session_exists(session) {
         return Err("no_such_session".into());
     }
     let status = crate::tmux::inspect_status(session, &terminal.agent_type);

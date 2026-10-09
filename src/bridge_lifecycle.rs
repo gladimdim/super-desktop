@@ -51,7 +51,7 @@ pub(super) static LIFECYCLE: Mutex<Lifecycle> = Mutex::new(Lifecycle::new());
 pub fn supervise() {
     loop {
         let result = LIFECYCLE.lock().unwrap().check(
-            || bridge_running(BRIDGE_PORT),
+            || bridge_running(),
             || {
                 eprintln!("SUPER DESKTOP: starting/recovering the bridge");
                 start_bridge_inner()

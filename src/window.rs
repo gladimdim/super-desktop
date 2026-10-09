@@ -2764,7 +2764,7 @@ impl SuperDesktopWindow {
             return Err("invalid_workspace");
         };
         let session = self.create_new_terminal_in(agent_type, None, None, None, Some(&directory));
-        if session.is_empty() || !crate::tmux::session_alive(&session) {
+        if session.is_empty() || !crate::tmux::session_exists(&session) {
             return Err("terminal_unavailable");
         }
         Ok(session)

@@ -900,11 +900,6 @@ pub fn send_keys(session_name: &str, agent: &str, text: &str, enter: bool) -> Re
     Ok(())
 }
 
-/// True when tmux still knows this session.
-pub fn session_alive(session_name: &str) -> bool {
-    session_exists(session_name)
-}
-
 pub fn preview_from_screen(screen: &str, lines: usize) -> String {
     let mut tail: Vec<&str> = screen
         .lines()

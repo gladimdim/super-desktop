@@ -273,12 +273,6 @@ fn plan(targets: &[Target], listing: &str) -> Vec<(i32, String)> {
     plans
 }
 
-/// The slave device name of a pty master: the tty tmux reports for
-/// the client running on it.
-pub fn pty_name(master: std::os::fd::BorrowedFd<'_>) -> Option<String> {
-    crate::platform::pty::name(master).ok()
-}
-
 fn run(tmux: &dyn Fn() -> Command, args: &[&str]) -> Option<String> {
     let output = tmux().args(args).output().ok()?;
     output
@@ -447,7 +441,7 @@ mod tests {
         /// own session (so its process group is orphaned, as under VTE).
         fn attach(&self, session: &str, columns: u16, rows: u16) -> Attached {
             let (master, slave) = crate::platform::pty::open(columns, rows).unwrap();
-            let tty = pty_name(master.as_fd()).expect("pty name");
+            let tty = crate::platform::pty::name(master.as_fd()).expect("pty name");
             let mut command = self.command();
             command
                 .args(["-2", "attach-session", "-t", &format!("={session}")])

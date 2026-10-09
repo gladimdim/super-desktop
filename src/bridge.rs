@@ -566,11 +566,6 @@ fn reply_json(stream: &mut Connection, code: u16, value: &serde_json::Value) {
 
 /// `reply_json` for callers that still name the reason phrase, which must be
 /// the one `reason_phrase` sends.
-fn respond(stream: &mut Connection, code: u16, reason: &str, value: &serde_json::Value) {
-    debug_assert_eq!(reason, reason_phrase(code));
-    reply_json(stream, code, value);
-}
-
 /// `reply_json` for an already serialized JSON body. The connection stays open
 /// for another request only when `stream.persist` allows it.
 fn reply_body(stream: &mut Connection, code: u16, body: &str) {
@@ -668,7 +663,7 @@ fn require_live_session(stream: &mut Connection, req: &Request, id: &str, envelo
     if !require_pairing(stream, &req.headers, envelope) {
         return false;
     }
-    if !crate::tmux::session_alive(id) {
+    if !crate::tmux::session_exists(id) {
         reply_error(stream, 404, envelope, "no_such_session");
         return false;
     }
@@ -1614,8 +1609,8 @@ fn health_body() -> serde_json::Value {
 }
 
 /// True when this machine's bridge answers on its owner-only control socket.
-/// The socket is per user, not per port: `_port` is kept for callers.
-pub fn bridge_running(_port: u16) -> bool {
+/// The socket is per user, not per port.
+pub fn bridge_running() -> bool {
     pairing::control_exchange(&format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"))
         .ok()
         .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
@@ -1644,14 +1639,14 @@ pub fn start_bridge() -> Result<(), String> {
 }
 
 fn start_bridge_inner() -> Result<(), String> {
-    if bridge_running(BRIDGE_PORT) {
+    if bridge_running() {
         return Ok(());
     }
     if port_taken(BRIDGE_PORT) {
         // Something is on our port: if it is a wedged bridge of ours, drop it
         // and take the port over; otherwise say who holds it.
         let _ = stop_bridge_inner();
-        if bridge_running(BRIDGE_PORT) {
+        if bridge_running() {
             return Ok(());
         }
         if port_taken(BRIDGE_PORT) {
@@ -1701,7 +1696,7 @@ fn start_bridge_inner() -> Result<(), String> {
     // The first start of a desktop session can be slow (cold binary, busy box).
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
-        if bridge_running(BRIDGE_PORT) {
+        if bridge_running() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(100));

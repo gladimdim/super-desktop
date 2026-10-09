@@ -2054,7 +2054,7 @@ impl MiniTerminalCard {
         let pty = self.vte.borrow().as_ref()?.pty()?;
         Some(crate::hidden_pause::Target {
             session: self.data.borrow().session_name.clone(),
-            tty: crate::hidden_pause::pty_name(pty.fd())?,
+            tty: crate::platform::pty::name(pty.fd()).ok()?,
         })
     }
 

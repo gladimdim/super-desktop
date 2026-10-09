@@ -143,7 +143,7 @@ struct Snapshot {
 
 impl Snapshot {
     fn collect() -> Self {
-        let online = bridge::bridge_running(bridge::BRIDGE_PORT);
+        let online = bridge::bridge_running();
         Self {
             online,
             harnesses: if online {

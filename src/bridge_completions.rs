@@ -273,7 +273,7 @@ pub(super) fn handle(stream: &mut Connection, body: &serde_json::Value, ids: &[S
             }
         }
     }
-    respond(stream, 200, "OK", &serde_json::json!({"terminals": terminals, "etag": current_etag}));
+    reply_json(stream, 200, &serde_json::json!({"terminals": terminals, "etag": current_etag}));
 }
 
 #[cfg(test)]
