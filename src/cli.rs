@@ -3,7 +3,6 @@
 #[path = "mcp.rs"]
 mod mcp;
 
-use crate::cli_extended::valid_id;
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -190,6 +189,16 @@ const ALIASES: &[(&str, &str)] = &[
     ("theme-reload", "reload-theme"),
 ];
 
+/// A first word shared by catalog commands, such as `terminal`.
+fn is_group(word: &str) -> bool {
+    COMMANDS.iter().any(|command| {
+        command
+            .name
+            .strip_prefix(word)
+            .is_some_and(|rest| rest.starts_with(' '))
+    })
+}
+
 fn lookup(name: &str) -> Option<&'static CommandSpec> {
     let name = ALIASES
         .iter()
@@ -344,7 +353,7 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     }
     if args.len() >= 2 && matches!(args.last().map(String::as_str), Some("--help" | "-h")) {
         let path = args[..args.len() - 1].join(" ");
-        if args.len() == 2 || action == "theme" || matches!(action, "mcp" | "connection" | "peer" | "updates" | "audit" | "access" | "doctor" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
+        if args.len() == 2 || is_group(action) || matches!(action, "doctor" | "events") {
             return Some(group_or_help(&path));
         }
     }
@@ -385,7 +394,8 @@ pub fn dispatch(args: &[String]) -> Option<Output> {
     if action == "doctor" {
         return None;
     }
-    if matches!(action, "mcp" | "connection" | "peer" | "updates" | "audit" | "access" | "events" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage") {
+    // `theme` alone is the legacy command.
+    if (is_group(action) && lookup(action).is_none()) || action == "events" {
         return if args.len() == 1 {
             Some(group_or_help(action))
         } else {
@@ -418,11 +428,12 @@ pub fn run(args: &[String]) -> Option<i32> {
         }
     }
     let output = offline.or_else(|| {
-        (args.first().is_some_and(|a| a=="theme") && args.len()>1 || matches!(
-            args.first().map(String::as_str),
-            Some("mcp" | "connection" | "peer" | "updates" | "audit" | "access" | "doctor" | "app" | "terminal" | "harness" | "request" | "note" | "workspace" | "settings" | "usage" | "capabilities")
-        ))
-        .then(|| live(args))
+        args.first()
+            .is_some_and(|action| {
+                (args.len() > 1 && is_group(action))
+                    || matches!(action.as_str(), "doctor" | "capabilities")
+            })
+            .then(|| live(args))
     });
     output.map(|output| {
         if io::stdout()
@@ -439,6 +450,106 @@ pub fn run(args: &[String]) -> Option<i32> {
             output.code
         }
     })
+}
+
+fn group_or_help(path: &str) -> Output {
+    if lookup(path).is_none() && COMMANDS.iter().any(|spec|spec.name.starts_with(&format!("{path} "))) {
+        let prefix = format!("{path} ");
+        let mut text = format!("Usage: super-desktop {path} COMMAND\n\n");
+        for spec in COMMANDS
+            .iter()
+            .filter(|spec| spec.name.starts_with(&prefix))
+        {
+            text.push_str(&format!("  {}  {}\n", spec.name, spec.summary));
+        }
+        text.push_str("\nUse help followed by the full command path for details.\n");
+        Output::text(text)
+    } else {
+        help(Some(path))
+    }
+}
+
+/// Structured local commands, each claimed by the first module that knows it.
+const LIVE: &[fn(&[String]) -> Option<Output>] = &[
+    crate::cli_connection::run,
+    crate::cli_peer::run,
+    crate::cli_application::run,
+    crate::cli_launch::run,
+    crate::cli_admin::run,
+    crate::cli_viewport::run,
+    crate::cli_extended::card,
+    crate::cli_files::run,
+    crate::cli_preferences::run,
+    crate::cli_workspace::run,
+    crate::cli_extended::observe,
+    crate::cli_extended::run,
+];
+
+fn live(args: &[String]) -> Output {
+    LIVE.iter()
+        .find_map(|route| route(args))
+        .unwrap_or_else(|| crate::cli_local::run(args))
+}
+
+pub(crate) fn render_reply(reply: crate::control::Reply, json_output: bool) -> Output {
+    let code = reply.exit_code();
+    // Escape C1 controls too: JSON itself only requires escaping U+0000..001F.
+    let safe = |text: String| {
+        text.chars()
+            .map(|c| {
+                if c.is_control() && !matches!(c, '\n' | '\t') {
+                    format!("\\u{:04x}", c as u32)
+                } else {
+                    c.to_string()
+                }
+            })
+            .collect::<String>()
+    };
+    if json_output {
+        Output {
+            code,
+            stdout: format!("{}\n", safe(serde_json::to_string_pretty(&reply).unwrap())),
+            stderr: String::new(),
+        }
+    } else if reply.ok {
+        Output {
+            code,
+            stdout: format!(
+                "{}\n",
+                safe(serde_json::to_string_pretty(&reply.data).unwrap())
+            ),
+            stderr: String::new(),
+        }
+    } else {
+        let error = reply.error.unwrap();
+        Output {
+            code,
+            stdout: String::new(),
+            stderr: safe(format!("{}: {}\n", error.code, error.message)),
+        }
+    }
+}
+
+fn bash_completion() -> String {
+    let mut groups = std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
+    for name in COMMANDS
+        .iter()
+        .map(|c| c.name)
+        .chain(ALIASES.iter().map(|(alias, _)| *alias))
+    {
+        let (root, child) = name.split_once(' ').unwrap_or((name, ""));
+        groups.entry("").or_default().insert(root);
+        if !child.is_empty() {
+            groups.entry(root).or_default().insert(child);
+        }
+    }
+    let mut script = String::from("_super_desktop_complete() {\n  local start=1 prefix='' words='' i\n  COMPREPLY=()\n  if [[ ${COMP_WORDS[1]} == help || ${COMP_WORDS[1]} == schema ]]; then start=2; fi\n  for ((i=start; i<COMP_CWORD; i++)); do\n    prefix+=${prefix:+ }${COMP_WORDS[i]}\n  done\n  case \"$prefix\" in\n");
+    for (prefix, words) in groups {
+        let words = words.into_iter().collect::<Vec<_>>().join(" ");
+        script.push_str(&format!("    '{prefix}') words='{words}' ;;\n"));
+    }
+    script.push_str("    *) words='--help' ;;\n  esac\n  mapfile -t COMPREPLY < <(compgen -W \"$words\" -- \"${COMP_WORDS[COMP_CWORD]}\")\n}\ncomplete -F _super_desktop_complete super-desktop\n");
+    script
 }
 
 #[cfg(test)]
@@ -511,522 +622,4 @@ mod tests {
             assert!(!out.stderr.contains('\x1b'));
         }
     }
-}
-
-fn group_or_help(path: &str) -> Output {
-    if lookup(path).is_none() && COMMANDS.iter().any(|spec|spec.name.starts_with(&format!("{path} "))) {
-        let prefix = format!("{path} ");
-        let mut text = format!("Usage: super-desktop {path} COMMAND\n\n");
-        for spec in COMMANDS
-            .iter()
-            .filter(|spec| spec.name.starts_with(&prefix))
-        {
-            text.push_str(&format!("  {}  {}\n", spec.name, spec.summary));
-        }
-        text.push_str("\nUse help followed by the full command path for details.\n");
-        Output::text(text)
-    } else {
-        help(Some(path))
-    }
-}
-
-fn live(args: &[String]) -> Output {
-    if let Some(output)=crate::cli_connection::run(args){return output;}
-    if let Some(output)=crate::cli_peer::run(args){return output;}
-    if let Some(output)=crate::cli_application::run(args){return output;}
-    if let Some(output)=crate::cli_launch::run(args){return output;}
-    if let Some(output)=crate::cli_admin::run(args){return output;}
-    if let Some(output) = crate::cli_viewport::run(args) { return output; }
-    if let Some(output) = crate::cli_extended::card(args) { return output; }
-    if let Some(output) = crate::cli_files::run(args) { return output; }
-    if let Some(output) = crate::cli_preferences::run(args) { return output; }
-    if let Some(output) = crate::cli_workspace::run(args) { return output; }
-    if let Some(output) = crate::cli_extended::observe(args) {
-        return output;
-    }
-    if let Some(output) = crate::cli_extended::run(args) {
-        return output;
-    }
-    use crate::control::{self, Command, Reply};
-    let json_output = args
-        .windows(2)
-        .any(|a| a[0] == "--format" && a[1] == "json")
-        || args.iter().any(|a| a == "--format=json");
-    let fail =
-        |code: &str, message: &str| render_reply(Reply::failure("", code, message), json_output);
-    let mut words = Vec::new();
-    let mut all = false;
-    let mut cwd = None;
-    let mut request_id = None;
-    let mut allow_unsafe = false;
-    let mut allow_download = false;
-    let mut seen_format = false;
-    let mut seen_target = false;
-    let mut geometry_options = std::collections::HashMap::new();
-    let mut clamp = false;
-    let mut capture_mode = None;
-    let mut capture_lines = None;
-    let mut index = 0;
-    while index < args.len() {
-        let word = args[index].as_str();
-        let flag = word.split('=').next().unwrap_or(word);
-        if matches!(
-            flag,
-            "--x"
-                | "--y"
-                | "--width"
-                | "--height"
-                | "--expect-epoch"
-                | "--expect-revision"
-                | "--expect-pane-identity"
-        ) {
-            let value = if let Some((_, value)) = word.split_once('=') {
-                Some(value)
-            } else {
-                index += 1;
-                args.get(index).map(String::as_str)
-            };
-            let Some(value) = value.filter(|v| !v.is_empty()) else {
-                return fail("invalid_arguments", "Missing geometry option value.");
-            };
-            if geometry_options.insert(flag, value).is_some() {
-                return fail("invalid_arguments", "Do not repeat geometry options.");
-            }
-            index += 1;
-            continue;
-        }
-        if word == "--clamp" && !clamp {
-            clamp = true;
-            index += 1;
-            continue;
-        }
-        if matches!(word, "--screen" | "--history") {
-            if capture_mode.replace(word == "--history").is_some() {
-                return fail("invalid_arguments", "Choose --screen or --history once.");
-            }
-            index += 1;
-            continue;
-        }
-        if word == "--lines" || word.starts_with("--lines=") {
-            let value = if let Some((_, value)) = word.split_once('=') {
-                Some(value)
-            } else {
-                index += 1;
-                args.get(index).map(String::as_str)
-            };
-            let parsed = value
-                .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
-                .and_then(|v| v.parse::<u32>().ok())
-                .filter(|n| (1..=2000).contains(n));
-            let Some(lines) = parsed else {
-                return fail(
-                    "invalid_arguments",
-                    "--lines requires an integer from 1 to 2000.",
-                );
-            };
-            if capture_lines.replace(lines).is_some() {
-                return fail("invalid_arguments", "Use --lines once.");
-            }
-            index += 1;
-            continue;
-        }
-        if word == "--allow-unsafe-harness" && !allow_unsafe {
-            allow_unsafe = true;
-            index += 1;
-            continue;
-        }
-        if word == "--allow-download" && !allow_download {
-            allow_download = true;
-            index += 1;
-            continue;
-        }
-        if word == "--cwd"
-            || word.starts_with("--cwd=")
-            || word == "--request-id"
-            || word.starts_with("--request-id=")
-        {
-            let (flag, value) = if let Some((flag, value)) = word.split_once('=') {
-                (flag, Some(value))
-            } else {
-                index += 1;
-                (word, args.get(index).map(String::as_str))
-            };
-            let Some(value) = value else {
-                return fail("invalid_arguments", "Missing option value.");
-            };
-            let slot = if flag == "--cwd" {
-                &mut cwd
-            } else {
-                &mut request_id
-            };
-            if slot.replace(value).is_some() {
-                return fail("invalid_arguments", "Do not repeat --cwd or --request-id.");
-            }
-            index += 1;
-            continue;
-        }
-        if word == "--all" && !all {
-            all = true;
-            index += 1;
-            continue;
-        }
-        if word == "--format"
-            || word.starts_with("--format=")
-            || word == "--target"
-            || word.starts_with("--target=")
-        {
-            let (flag, value) = if let Some((flag, value)) = word.split_once('=') {
-                (flag, Some(value))
-            } else {
-                index += 1;
-                (word, args.get(index).map(String::as_str))
-            };
-            let Some(value) = value else {
-                return fail("invalid_arguments", "Missing option value.");
-            };
-            if flag == "--format" {
-                if seen_format || !matches!(value, "text" | "json") {
-                    return fail(
-                        "invalid_arguments",
-                        "Use --format text or --format json once.",
-                    );
-                }
-                seen_format = true;
-            } else {
-                if seen_target {
-                    return fail("invalid_arguments", "Use --target once.");
-                }
-                if value != "local" {
-                    return fail("unsupported_target", "This command supports --target local only; no local fallback was attempted.");
-                }
-                seen_target = true;
-            }
-        } else if word.starts_with('-') {
-            return fail(
-                "invalid_arguments",
-                "Unknown option. Use this command's --help.",
-            );
-        } else {
-            words.push(word);
-        }
-        index += 1;
-    }
-    let launching = matches!(
-        words.as_slice(),
-        ["harness", "launch", _] | ["terminal", "create"]
-    );
-    let moving = matches!(words.as_slice(), ["terminal", "move", _]);
-    let resizing = matches!(words.as_slice(), ["terminal", "resize", _]);
-    let changing_geometry = moving || resizing;
-    let closing = matches!(words.as_slice(), ["terminal", "close", _]);
-    let changing_mode = matches!(
-        words.as_slice(),
-        [
-            "terminal",
-            "minimize" | "restore" | "expand" | "collapse",
-            _
-        ]
-    );
-    let guarded = changing_geometry || closing || changing_mode;
-    if (!guarded && !geometry_options.is_empty()) || (!changing_geometry && clamp) {
-        return fail(
-            "invalid_arguments",
-            "Guard options are for move/resize/close/mode changes; --clamp is only for move/resize.",
-        );
-    }
-    if !launching && !guarded && request_id.is_some() {
-        return fail(
-            "invalid_arguments",
-            "--request-id is only for mutation commands.",
-        );
-    }
-    if (launching || guarded) && !request_id.is_some_and(|id| valid_id(id, 64)) {
-        return fail(
-            "invalid_arguments",
-            "Mutation requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
-        );
-    }
-    if guarded {
-        let expected: &[&str] = if changing_mode {
-            &["--expect-epoch", "--expect-revision"]
-        } else if closing {
-            &[
-                "--expect-epoch",
-                "--expect-revision",
-                "--expect-pane-identity",
-            ]
-        } else if moving {
-            &["--x", "--y", "--expect-epoch", "--expect-revision"]
-        } else {
-            &["--width", "--height", "--expect-epoch", "--expect-revision"]
-        };
-        if geometry_options.len() != expected.len()
-            || expected
-                .iter()
-                .any(|flag| !geometry_options.contains_key(flag))
-        {
-            return fail("invalid_arguments", "Move/resize require both coordinates/dimensions. All guarded operations require epoch/revision from terminal geometry; close also requires pane identity from terminal runtime.");
-        }
-        if !valid_id(geometry_options["--expect-epoch"], 64)
-            || !crate::control::is_hex(geometry_options["--expect-revision"], 64)
-        {
-            return fail(
-                "invalid_arguments",
-                "Use the epoch and opaque revision returned by terminal geometry.",
-            );
-        }
-        if closing && !crate::control::is_hex(geometry_options["--expect-pane-identity"], 64) {
-            return fail(
-                "invalid_arguments",
-                "Copy paneIdentity from terminal runtime.",
-            );
-        }
-        for flag in if closing || changing_mode {
-            [].as_slice()
-        } else if moving {
-            ["--x", "--y"].as_slice()
-        } else {
-            ["--width", "--height"].as_slice()
-        } {
-            let value = geometry_options[flag];
-            let Some(number) = value
-                .parse::<i32>()
-                .ok()
-                .filter(|n| n.abs_diff(0) <= 32768 && (moving || *n > 0))
-            else {
-                return fail(
-                    "invalid_arguments",
-                    "Coordinates must be within -32768..32768; dimensions within 1..32768.",
-                );
-            };
-            if number.to_string() != value {
-                return fail(
-                    "invalid_arguments",
-                    "Use canonical decimal integers for geometry.",
-                );
-            }
-        }
-    }
-    let capturing = matches!(words.as_slice(), ["terminal", "capture", _]);
-    if (!capturing && (capture_mode.is_some() || capture_lines.is_some()))
-        || (capture_lines.is_some() && capture_mode != Some(true))
-    {
-        return fail(
-            "invalid_arguments",
-            "Screen/history options are only for terminal capture; --lines requires --history.",
-        );
-    }
-    if !launching && (cwd.is_some() || allow_unsafe || allow_download) {
-        return fail(
-            "invalid_arguments",
-            "Launch options are only accepted by launch/create commands.",
-        );
-    }
-    if launching {
-        if !request_id.is_some_and(|id| valid_id(id, 64)) {
-            return fail(
-                "invalid_arguments",
-                "Launch requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
-            );
-        }
-        if !cwd.is_some_and(|path| {
-            std::path::Path::new(path).is_absolute() && path.len() <= 4096 && !path.contains('\0')
-        }) {
-            return fail(
-                "invalid_arguments",
-                "Launch requires --cwd with an absolute directory path of at most 4096 bytes.",
-            );
-        }
-    }
-    let command = match words.as_slice() {
-        ["terminal", action @ ("minimize" | "restore" | "expand" | "collapse"), id]
-            if !all && valid_id(id, 128) =>
-        {
-            Command::Mode {
-                id: (*id).into(),
-                action: match *action {
-                    "minimize" => control::ModeAction::Minimize,
-                    "restore" => control::ModeAction::Restore,
-                    "expand" => control::ModeAction::Expand,
-                    _ => control::ModeAction::Collapse,
-                },
-                expect_epoch: geometry_options["--expect-epoch"].into(),
-                expect_revision: geometry_options["--expect-revision"].into(),
-            }
-        }
-        ["terminal", "close", id] if !all && valid_id(id, 128) => Command::Close {
-            id: (*id).into(),
-            expect_epoch: geometry_options["--expect-epoch"].into(),
-            expect_revision: geometry_options["--expect-revision"].into(),
-            expect_pane_identity: geometry_options["--expect-pane-identity"].into(),
-        },
-        ["terminal", "geometry", id] if !all && valid_id(id, 128) => {
-            Command::Geometry { id: (*id).into() }
-        }
-        ["terminal", "move", id] if !all && valid_id(id, 128) => Command::Move {
-            id: (*id).into(),
-            x: geometry_options["--x"].parse().unwrap(),
-            y: geometry_options["--y"].parse().unwrap(),
-            clamp,
-            expect_epoch: geometry_options["--expect-epoch"].into(),
-            expect_revision: geometry_options["--expect-revision"].into(),
-        },
-        ["terminal", "resize", id] if !all && valid_id(id, 128) => Command::Resize {
-            id: (*id).into(),
-            width: geometry_options["--width"].parse().unwrap(),
-            height: geometry_options["--height"].parse().unwrap(),
-            clamp,
-            expect_epoch: geometry_options["--expect-epoch"].into(),
-            expect_revision: geometry_options["--expect-revision"].into(),
-        },
-        ["terminal", "capture", id] if !all && valid_id(id, 128) => Command::Capture {
-            id: (*id).into(),
-            history: capture_mode.unwrap_or(false),
-            lines: capture_lines,
-        },
-        ["terminal", "runtime", id] if !all && valid_id(id, 128) => {
-            Command::Runtime { id: (*id).into() }
-        }
-        ["harness", "launch", id] if !all && valid_id(id, 128) => Command::Launch {
-            arguments: None,            harness: (*id).into(),
-            cwd: cwd.unwrap().into(),
-            allow_unsafe_harness: allow_unsafe,
-            allow_download,
-        },
-        ["terminal", "create"] if !all && !allow_download => Command::Launch {
-            arguments: None,            harness: "shell".into(),
-            cwd: cwd.unwrap().into(),
-            allow_unsafe_harness: allow_unsafe,
-            allow_download: false,
-        },
-        ["request", "inspect", id] if !all && valid_id(id, 64) => {
-            Command::InspectRequest { id: (*id).into() }
-        }
-        ["capabilities"] if !all => Command::Capabilities {},
-        ["app", "status"] if !all => Command::Status {},
-        ["terminal", "list"] if !all => Command::Terminals {},
-        ["terminal", "inspect", id] if !all && valid_id(id, 128) => {
-            Command::Terminal { id: (*id).into() }
-        }
-        ["harness", "list"] => Command::Harnesses { all },
-        ["harness", "inspect", id] if !all && valid_id(id, 128) => Command::Harness { id: (*id).into() },
-        _ => {
-            return fail(
-                "invalid_arguments",
-                "Invalid command or arguments. Use --help for accepted syntax.",
-            )
-        }
-    };
-    let mut request = match control::new_request(command) {
-        Ok(request) => request,
-        Err(_) => return fail("unavailable", "OS randomness is unavailable."),
-    };
-    if let Some(id) = request_id {
-        request.request_id = id.into();
-    }
-    // Methods newer than the first daemons are checked against capabilities.
-    let required_method = matches!(
-        &request.command,
-        Command::Launch { .. }
-            | Command::InspectRequest { .. }
-            | Command::Mode { .. }
-            | Command::Close { .. }
-            | Command::Geometry { .. }
-            | Command::Move { .. }
-            | Command::Resize { .. }
-            | Command::Runtime { .. }
-            | Command::Capture { .. }
-    )
-    .then(|| request.command.method());
-    if let Some(method) = required_method {
-        let probe = match control::new_request(Command::Capabilities {}) {
-            Ok(probe) => probe,
-            Err(_) => return fail("unavailable", "OS randomness is unavailable."),
-        };
-        let mut support = control::request_at(&control::runtime_dir(), &probe);
-        if !support.ok {
-            support.request_id = request.request_id.clone();
-            return render_reply(support, json_output);
-        }
-        if !support
-            .data
-            .as_ref()
-            .and_then(|data| data["methods"].as_array())
-            .is_some_and(|methods| methods.iter().any(|candidate| *candidate == method))
-        {
-            return render_reply(
-                Reply::failure(
-                    &request.request_id,
-                    "unsupported_command",
-                    "This daemon does not support this operation.",
-                ),
-                json_output,
-            );
-        }
-    }
-    render_reply(
-        control::request_at(&control::runtime_dir(), &request),
-        json_output,
-    )
-}
-
-pub(crate) fn render_reply(reply: crate::control::Reply, json_output: bool) -> Output {
-    let code = reply.exit_code();
-    // Escape C1 controls too: JSON itself only requires escaping U+0000..001F.
-    let safe = |text: String| {
-        text.chars()
-            .map(|c| {
-                if c.is_control() && !matches!(c, '\n' | '\t') {
-                    format!("\\u{:04x}", c as u32)
-                } else {
-                    c.to_string()
-                }
-            })
-            .collect::<String>()
-    };
-    if json_output {
-        Output {
-            code,
-            stdout: format!("{}\n", safe(serde_json::to_string_pretty(&reply).unwrap())),
-            stderr: String::new(),
-        }
-    } else if reply.ok {
-        Output {
-            code,
-            stdout: format!(
-                "{}\n",
-                safe(serde_json::to_string_pretty(&reply.data).unwrap())
-            ),
-            stderr: String::new(),
-        }
-    } else {
-        let error = reply.error.unwrap();
-        Output {
-            code,
-            stdout: String::new(),
-            stderr: safe(format!("{}: {}\n", error.code, error.message)),
-        }
-    }
-}
-
-fn bash_completion() -> String {
-    let mut groups = std::collections::BTreeMap::<&str, std::collections::BTreeSet<&str>>::new();
-    for name in COMMANDS
-        .iter()
-        .map(|c| c.name)
-        .chain(ALIASES.iter().map(|(alias, _)| *alias))
-    {
-        let (root, child) = name.split_once(' ').unwrap_or((name, ""));
-        groups.entry("").or_default().insert(root);
-        if !child.is_empty() {
-            groups.entry(root).or_default().insert(child);
-        }
-    }
-    let mut script = String::from("_super_desktop_complete() {\n  local start=1 prefix='' words='' i\n  COMPREPLY=()\n  if [[ ${COMP_WORDS[1]} == help || ${COMP_WORDS[1]} == schema ]]; then start=2; fi\n  for ((i=start; i<COMP_CWORD; i++)); do\n    prefix+=${prefix:+ }${COMP_WORDS[i]}\n  done\n  case \"$prefix\" in\n");
-    for (prefix, words) in groups {
-        let words = words.into_iter().collect::<Vec<_>>().join(" ");
-        script.push_str(&format!("    '{prefix}') words='{words}' ;;\n"));
-    }
-    script.push_str("    *) words='--help' ;;\n  esac\n  mapfile -t COMPREPLY < <(compgen -W \"$words\" -- \"${COMP_WORDS[COMP_CWORD]}\")\n}\ncomplete -F _super_desktop_complete super-desktop\n");
-    script
 }
