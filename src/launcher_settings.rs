@@ -290,7 +290,7 @@ fn page_root() -> Box {
     root
 }
 
-fn hint(text: &str) -> Label {
+pub(crate) fn hint(text: &str) -> Label {
     let label = Label::new(Some(text));
     label.add_css_class("launcher-hint");
     label.set_xalign(0.0);

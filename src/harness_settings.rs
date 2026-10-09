@@ -30,7 +30,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::launcher_settings::{chip, page_scroll, section_card, ConnectionHooks, ConnectionPage, ConnectionPages};
+use crate::launcher_settings::{chip, hint, page_scroll, section_card, ConnectionHooks, ConnectionPage, ConnectionPages};
 use crate::shortcut::{Capture, CaptureGuard};
 use crate::state::{AppState, TopBarSize};
 use crate::tmux::{detect_harnesses, HarnessInfo};
@@ -752,42 +752,42 @@ pub fn build_lazy_harness_settings_panel(
     HarnessSettingsPanel { widget: host.upcast(), refresh }
 }
 
-pub fn build_harness_settings_panel(
-    state: Rc<RefCell<AppState>>,
-    on_change: Rc<dyn Fn(Vec<String>)>,
-    on_detected: Rc<dyn Fn(Vec<String>)>,
-    on_shortcut_change: Rc<dyn Fn(String)>,
-    on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
-    connections: ConnectionHooks,
-) -> HarnessSettingsPanel {
-    let outer = Box::new(Orientation::Vertical, 0);
-    outer.add_css_class("mini-terminal");
-    outer.add_css_class("harness-panel");
-    outer.set_size_request(SETTINGS_PANEL_MIN_SIZE.0, SETTINGS_PANEL_MIN_SIZE.1);
+/// A settings destination's content, before `page_scroll` wraps it.
+fn settings_page_root() -> Box {
+    let root = Box::new(Orientation::Vertical, 10);
+    root.add_css_class("launcher-body");
+    root
+}
 
-    // ---- header: badge, title + subtitle, ← back, close ----
-    let badge = Label::new(Some("⚙"));
-    let header = crate::floating_panel::PanelHeader::new(&badge, "Settings", "Connections · shortcuts · top bar", true);
-    let (title, subtitle) = (header.title.clone(), header.subtitle.clone());
-    // Shown on every page after the settings hub (see `nav`).
-    let btn_back = header.button("←", Some("term-btn"), Some("Back to settings"));
-    btn_back.set_visible(false);
-    let btn_close = header.close_button("Close panel");
-    outer.append(&header.widget);
+/// Holds the harness list's refresh for the controls built before it. They
+/// keep the slot weakly; the panel's own refresh keeps it alive.
+type RefreshSlot = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
 
-    let weak_outer = outer.downgrade();
-    btn_close.connect_clicked(move |_| {
-        if let Some(o) = weak_outer.upgrade() {
-            o.set_visible(false);
-        }
-    });
+fn run_refresh(slot: &std::rc::Weak<RefCell<Option<Rc<dyn Fn()>>>>) {
+    if let Some(refresh) = slot.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
+}
 
-    // The landing page keeps the choices short. Each substantial setting gets
-    // its own scrollable destination below, so a user never has to hunt through
-    // an ever-growing stack of unrelated controls.
-    let home_root = Box::new(Orientation::Vertical, 10);
-    home_root.add_css_class("launcher-body");
-    home_root.add_css_class("settings-home");
+/// The settings hub. The landing page keeps the choices short: each
+/// substantial setting gets its own scrollable destination, so a user never
+/// has to hunt through an ever-growing stack of unrelated controls.
+struct HomePage {
+    root: Box,
+    /// Shows or hides the firewall warning from a fresh check.
+    firewall_refresh: Rc<dyn Fn()>,
+    btn_review_firewall: Button,
+    btn_shortcut: Button,
+    btn_harnesses: Button,
+    btn_top_bar: Button,
+    btn_mcp: Button,
+    btn_sleep_lock: Button,
+    btn_connections: Button,
+    btn_updates: Button,
+    updates_chip: Label,
+}
+
+fn home_page() -> HomePage {
+    let root = settings_page_root();
+    root.add_css_class("settings-home");
 
     let firewall_notice = Box::new(Orientation::Horizontal, 10);
     firewall_notice.add_css_class("settings-firewall-warning");
@@ -809,7 +809,7 @@ pub fn build_harness_settings_panel(
     btn_review_firewall.add_css_class("launcher-btn-primary");
     btn_review_firewall.set_valign(Align::Center);
     firewall_notice.append(&btn_review_firewall);
-    home_root.append(&firewall_notice);
+    root.append(&firewall_notice);
 
     // First, where a new user looks for help.
     let (btn_tour, _) = settings_entry(
@@ -820,58 +820,58 @@ pub fn build_harness_settings_panel(
     );
     btn_tour.set_tooltip_text(Some("Open the getting started guide"));
     btn_tour.connect_clicked(|_| crate::welcome_tour::replay());
-    home_root.append(&btn_tour);
+    root.append(&btn_tour);
 
-    let (btn_shortcut_page, _) = settings_entry(
+    let (btn_shortcut, _) = settings_entry(
         "⌨",
         "Keyboard shortcut",
         "Record the shortcut that shows or hides SUPER DESKTOP.",
         "settings-shortcut-entry",
     );
-    btn_shortcut_page.set_tooltip_text(Some("Change the overlay shortcut"));
-    home_root.append(&btn_shortcut_page);
+    btn_shortcut.set_tooltip_text(Some("Change the overlay shortcut"));
+    root.append(&btn_shortcut);
 
-    let (btn_harnesses_page, _) = settings_entry(
+    let (btn_harnesses, _) = settings_entry(
         "⌘",
         "Harness launchers",
         "Choose which installed coding agents appear in the top bar.",
         "settings-harnesses-entry",
     );
-    btn_harnesses_page.set_tooltip_text(Some("Manage harness launch buttons"));
-    home_root.append(&btn_harnesses_page);
+    btn_harnesses.set_tooltip_text(Some("Manage harness launch buttons"));
+    root.append(&btn_harnesses);
 
-    let (btn_top_bar_page, _) = settings_entry(
+    let (btn_top_bar, _) = settings_entry(
         "▤",
         "Top bar",
         "Choose the size of the desktop dock.",
         "settings-top-bar-entry",
     );
-    btn_top_bar_page.set_tooltip_text(Some("Change the top-bar size"));
-    home_root.append(&btn_top_bar_page);
+    btn_top_bar.set_tooltip_text(Some("Change the top-bar size"));
+    root.append(&btn_top_bar);
 
     let (btn_mcp, _) = settings_entry("⚙", "MCP", "Control local agent access and copy connection instructions.", "settings-mcp-entry");
-    home_root.append(&btn_mcp);
+    root.append(&btn_mcp);
 
     let (btn_sleep_lock, _) = settings_entry(
         "☀", "Sleep lock", "Keep the bridge and AI harnesses awake on external power.",
         "settings-sleep-lock-entry",
     );
-    home_root.append(&btn_sleep_lock);
+    root.append(&btn_sleep_lock);
 
-    let (btn_launcher, launcher_trailing) = settings_entry(
+    let (btn_connections, connections_trailing) = settings_entry(
         "▣",
         "Connections",
         "Add devices, review requests and manage PCs, phones and rejected devices.",
         "android-settings-entry",
     );
-    btn_launcher.set_tooltip_text(Some("Manage PCs, mobile devices and secure pairing"));
+    btn_connections.set_tooltip_text(Some("Manage PCs, mobile devices and secure pairing"));
     let counts = chip("…/…");
     counts.add_css_class("android-connection-count");
     counts.set_tooltip_text(Some(
         "Active / registered devices with access to this computer. Active means connected or seen in the last 60 seconds.",
     ));
-    launcher_trailing.prepend(&counts);
-    home_root.append(&btn_launcher);
+    connections_trailing.prepend(&counts);
+    root.append(&btn_connections);
     let count_refresh = crate::launcher_settings::background_refresh(
         crate::bridge::paired_devices,
         move |devices| {
@@ -882,12 +882,12 @@ pub fn build_harness_settings_panel(
             }
         },
     );
-    btn_launcher.connect_map({
+    btn_connections.connect_map({
         let refresh = Rc::clone(&count_refresh);
         move |_| refresh()
     });
     crate::launcher_settings::tick_while_mapped(
-        &[btn_launcher.clone().upcast()],
+        &[btn_connections.clone().upcast()],
         Duration::from_secs(2),
         move || count_refresh(),
     );
@@ -902,24 +902,53 @@ pub fn build_harness_settings_panel(
     let updates_chip = chip(&crate::updates::running().to_string());
     updates_chip.add_css_class("update-version");
     updates_trailing.prepend(&updates_chip);
-    home_root.append(&btn_updates);
+    root.append(&btn_updates);
 
     let home_footer = Label::new(Some("Settings are saved as you change them."));
     home_footer.add_css_class("launcher-footer");
     home_footer.set_xalign(0.5);
-    home_root.append(&home_footer);
+    root.append(&home_footer);
 
-    let shortcut_root = Box::new(Orientation::Vertical, 10);
-    shortcut_root.add_css_class("launcher-body");
+    let firewall_refresh = crate::launcher_settings::background_refresh(
+        crate::bridge::firewall_summary,
+        move |(summary, can_unlock)| {
+            firewall_notice.set_visible(can_unlock);
+            if can_unlock {
+                firewall_text.set_text(&format!(
+                    "{summary}. Allow {}/tcp so Android devices can reach this computer.",
+                    crate::bridge::BRIDGE_PORT,
+                ));
+            }
+        },
+    );
+    HomePage {
+        root,
+        firewall_refresh,
+        btn_review_firewall,
+        btn_shortcut,
+        btn_harnesses,
+        btn_top_bar,
+        btn_mcp,
+        btn_sleep_lock,
+        btn_connections,
+        btn_updates,
+        updates_chip,
+    }
+}
 
-    // ---- the overlay's own show / hide shortcut ----
-    //
-    // Recording seizes the keyboard for a few seconds (`shortcut::begin_capture`
-    // parks Hyprland in a throw-away submap so no global bind can eat the key),
-    // so every exit — Esc, the button turning into Cancel, the watchdog, the
-    // panel being closed, the panel being reopened — funnels through
-    // `stop_recording`, which is also the only thing that releases the guard.
-    let (_, body) = section_card(&shortcut_root, "", "Show / hide shortcut");
+/// Settings → Keyboard shortcut: the overlay's own show / hide combination.
+/// `wire_shortcut_recorder` makes it record.
+struct ShortcutPage {
+    root: Box,
+    combo_label: Label,
+    btn_record: Button,
+    note: Label,
+    hint: Label,
+}
+
+fn shortcut_page() -> ShortcutPage {
+    let root = settings_page_root();
+    let (_, body) = section_card(&root, "", "Show / hide shortcut");
     let combo_label = Label::new(None);
     combo_label.add_css_class("shortcut-combo");
     combo_label.set_valign(Align::Center);
@@ -940,23 +969,302 @@ pub fn build_harness_settings_panel(
     combo_row.append(&btn_record);
     body.append(&combo_row);
 
-    let shortcut_note = Label::new(None);
-    shortcut_note.add_css_class("launcher-note");
-    shortcut_note.set_xalign(0.0);
-    shortcut_note.set_wrap(true);
-    shortcut_note.set_visible(false);
-    body.append(&shortcut_note);
-    let shortcut_hint = Label::new(None);
-    shortcut_hint.add_css_class("launcher-hint");
-    shortcut_hint.set_xalign(0.0);
-    shortcut_hint.set_wrap(true);
+    let note = Label::new(None);
+    note.add_css_class("launcher-note");
+    note.set_xalign(0.0);
+    note.set_wrap(true);
+    note.set_visible(false);
+    body.append(&note);
+    let shortcut_hint = hint("");
     body.append(&shortcut_hint);
+    ShortcutPage { root, combo_label, btn_record, note, hint: shortcut_hint }
+}
 
-    let harnesses_root = Box::new(Orientation::Vertical, 10);
-    harnesses_root.add_css_class("launcher-body");
+/// The shortcut recorder.
+///
+/// Recording seizes the keyboard for a few seconds (`shortcut::begin_capture`
+/// parks Hyprland in a throw-away submap so no global bind can eat the key),
+/// so every exit — Esc, the button turning into Cancel, the watchdog, the
+/// panel being closed, the panel being reopened — funnels through
+/// `stop_recording`, which is also the only thing that releases the guard.
+/// Returns `stop_recording` and the painter of the combo and Record button.
+fn wire_shortcut_recorder(
+    panel: &Box,
+    page: &ShortcutPage,
+    state: &Rc<RefCell<AppState>>,
+    on_shortcut_change: &Rc<dyn Fn(String)>,
+) -> (StopRecording, Rc<dyn Fn()>) {
+    // `armed` holds the keymap guard for exactly as long as the listener is
+    // live: dropping it is what gives the user their global shortcuts back.
+    let recording = Rc::new(Cell::new(false));
+    let armed: Rc<RefCell<Option<CaptureGuard>>> = Rc::new(RefCell::new(None));
 
-    // ---- harnesses installed here, each with a show/hide toggle ----
-    let (head, body) = section_card(&harnesses_root, "", "Harnesses on this machine");
+    // Paint the combo and the Record/Cancel button from `recording`.
+    let paint_recorder: Rc<dyn Fn()> = {
+        let recording = Rc::clone(&recording);
+        let state = Rc::clone(state);
+        let combo_label = page.combo_label.clone();
+        let btn_record = page.btn_record.clone();
+        let shortcut_hint = page.hint.clone();
+        Rc::new(move || {
+            if recording.get() {
+                combo_label.set_text("Press your combination…");
+                combo_label.add_css_class("shortcut-recording");
+                btn_record.set_label("✕ Cancel");
+                btn_record.remove_css_class("launcher-btn-primary");
+                btn_record.add_css_class("launcher-btn-danger");
+                shortcut_hint.set_text(
+                    "Listening — global shortcuts are paused until you press one. \
+                     Esc keeps the current combination.",
+                );
+            } else {
+                combo_label.set_text(&crate::shortcut::current_combo(
+                    state.borrow().toggle_shortcut.as_deref(),
+                ));
+                combo_label.remove_css_class("shortcut-recording");
+                btn_record.set_label("⏺ Record");
+                btn_record.remove_css_class("launcher-btn-danger");
+                btn_record.add_css_class("launcher-btn-primary");
+                shortcut_hint.set_text(
+                    "Click Record, then press the combination you want — SUPER/CTRL/ALT \
+                     plus a key, or F1-F12 on their own. Global shortcuts pause while \
+                     recording, so any combination can be captured.",
+                );
+            }
+        })
+    };
+
+    // The one way out of a recording. `message` is the outcome to show (None
+    // keeps whatever is already there) — every cancel path calls this.
+    let stop_recording: StopRecording = {
+        let recording = Rc::clone(&recording);
+        let armed = Rc::clone(&armed);
+        let paint = Rc::clone(&paint_recorder);
+        let shortcut_note = page.note.clone();
+        Rc::new(move |message: Option<&str>| {
+            // Release first: this is what un-pauses the user's shortcuts.
+            if let Some(guard) = armed.borrow_mut().take() {
+                guard.end();
+            }
+            let was_recording = recording.replace(false);
+            if let Some(message) = message {
+                shortcut_note.remove_css_class("launcher-note-error");
+                shortcut_note.set_text(message);
+                shortcut_note.set_visible(true);
+            } else {
+                shortcut_note.set_visible(false);
+            }
+            if was_recording {
+                paint();
+            }
+        })
+    };
+
+    // A captured combination: leave the recording, then write it to Hyprland.
+    let commit_shortcut: CommitShortcut = {
+        let state = Rc::clone(state);
+        let on_shortcut_change = Rc::clone(on_shortcut_change);
+        let stop_recording = Rc::clone(&stop_recording);
+        let paint = Rc::clone(&paint_recorder);
+        let shortcut_note = page.note.clone();
+        Rc::new(move |combo: &str, keycode: u32| {
+            stop_recording(None);
+            let (message, failed) = match crate::shortcut::apply_combo(combo, Some(keycode)) {
+                Ok(applied) => {
+                    {
+                        let mut s = state.borrow_mut();
+                        s.toggle_shortcut = Some(applied.combo.clone());
+                    }
+                    let snapshot = state.borrow().clone();
+                    crate::state::save_state_async(snapshot);
+                    on_shortcut_change(applied.combo.clone());
+                    match (applied.warning, applied.conflict) {
+                        (Some(warning), _) => (format!("⚠ {warning}"), true),
+                        (None, Some(other)) => (
+                            format!("● {combo} toggles SUPER DESKTOP — it used to run “{other}”."),
+                            false,
+                        ),
+                        (None, None) => (format!("● {combo} toggles SUPER DESKTOP."), false),
+                    }
+                }
+                Err(e) => (format!("⚠ {e}"), true),
+            };
+            // Restyle from scratch: an outcome shown after an earlier failure
+            // must not inherit the red left over from it.
+            shortcut_note.remove_css_class("launcher-note-error");
+            if failed {
+                shortcut_note.add_css_class("launcher-note-error");
+            }
+            shortcut_note.set_text(&message);
+            shortcut_note.set_visible(true);
+            paint();
+        })
+    };
+
+    let recorder = Recorder { recording, armed, stop: Rc::clone(&stop_recording), paint: Rc::clone(&paint_recorder) };
+    arm_shortcut_recorder(panel, page, &recorder, commit_shortcut);
+    (stop_recording, paint_recorder)
+}
+
+/// A shortcut recording's state and its two ways to repaint or end it.
+struct Recorder {
+    recording: Rc<Cell<bool>>,
+    armed: Rc<RefCell<Option<CaptureGuard>>>,
+    stop: StopRecording,
+    paint: Rc<dyn Fn()>,
+}
+
+/// Starting a recording: the Record button, the key listener on `panel`, and
+/// the watchdog that ends a recording nobody finishes.
+fn arm_shortcut_recorder(panel: &Box, page: &ShortcutPage, recorder: &Recorder, commit_shortcut: CommitShortcut) {
+    // Two ways out of a recording nobody finishes: the panel/overlay going
+    // away, and the watchdog. Both matter because the recorder holds the
+    // keyboard — a stuck recording is a desktop with no working shortcuts.
+    // Every recording starts its own tick, which ends with that recording (or
+    // when a newer one replaces it), so none runs while nothing is recorded.
+    let watch_recording: Rc<dyn Fn()> = {
+        let recording = Rc::clone(&recorder.recording);
+        let stop_recording = Rc::clone(&recorder.stop);
+        let panel = panel.downgrade();
+        let generation = Rc::new(Cell::new(0u64));
+        Rc::new(move || {
+            generation.set(generation.get().wrapping_add(1));
+            let ticket = generation.get();
+            let generation = Rc::clone(&generation);
+            let recording = Rc::clone(&recording);
+            let stop_recording = Rc::clone(&stop_recording);
+            let panel = panel.clone();
+            let mut armed_ticks = 0u32;
+            let max_ticks = (RECORD_WATCHDOG.as_millis() / RECORD_TICK.as_millis()).max(1) as u32;
+            glib::timeout_add_local(RECORD_TICK, move || {
+                let Some(panel) = panel.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
+                if !recording.get() || generation.get() != ticket {
+                    return glib::ControlFlow::Break;
+                }
+                armed_ticks += 1;
+                // `is_mapped`, not `is_visible`: hiding the whole overlay unmaps the
+                // window without ever touching the panel's own visibility flag.
+                if !panel.is_mapped() {
+                    stop_recording(Some("Recording cancelled — the panel was closed."));
+                    return glib::ControlFlow::Break;
+                }
+                if armed_ticks >= max_ticks {
+                    stop_recording(Some("No combination captured — try again."));
+                    return glib::ControlFlow::Break;
+                }
+                glib::ControlFlow::Continue
+            });
+        })
+    };
+
+    let start_recording: Rc<dyn Fn()> = {
+        let recording = Rc::clone(&recorder.recording);
+        let armed = Rc::clone(&recorder.armed);
+        let watch_recording = Rc::clone(&watch_recording);
+        let paint = Rc::clone(&recorder.paint);
+        let shortcut_note = page.note.clone();
+        let btn_record = page.btn_record.clone();
+        Rc::new(move || {
+            if recording.get() {
+                return;
+            }
+            // The keys have to reach THIS surface: clicking Record focuses the
+            // button, and with it the panel the capture controller sits on.
+            btn_record.grab_focus();
+            let guard = crate::shortcut::begin_capture();
+            // Without the guard Hyprland keeps handling the shortcuts it owns
+            // before they ever reach this window, so say so instead of letting
+            // the user press a taken combination and watch nothing happen.
+            let unguarded = !guard.armed();
+            *armed.borrow_mut() = Some(guard);
+            recording.set(true);
+            watch_recording();
+            shortcut_note.set_visible(false);
+            if unguarded {
+                shortcut_note.add_css_class("launcher-note-error");
+                shortcut_note.set_text(
+                    "Could not pause Hyprland's own shortcuts — a combination that is \
+                     already bound will not reach this window.",
+                );
+                shortcut_note.set_visible(true);
+            }
+            paint();
+        })
+    };
+
+    // The listener. Capture phase, on the whole panel: it must see the keys
+    // before the widget the user last clicked, and before the window's own Esc
+    // handler — while recording, Esc cancels the recording, it does not hide
+    // the overlay.
+    let key_ctrl = EventControllerKey::new();
+    key_ctrl.set_propagation_phase(PropagationPhase::Capture);
+    {
+        let recording = Rc::clone(&recorder.recording);
+        let stop_recording = Rc::clone(&recorder.stop);
+        let shortcut_note = page.note.clone();
+        key_ctrl.connect_key_pressed(move |_, key, keycode, mods| {
+            if !recording.get() {
+                return glib::Propagation::Proceed;
+            }
+            if key == gdk::Key::Escape {
+                stop_recording(Some("Recording cancelled — the shortcut is unchanged."));
+                return glib::Propagation::Stop;
+            }
+            match crate::shortcut::interpret(key, mods) {
+                Capture::Combo(combo) => {
+                    commit_shortcut(&combo, keycode);
+                    glib::Propagation::Stop
+                }
+                Capture::NeedsModifier => {
+                    shortcut_note.add_css_class("launcher-note-error");
+                    shortcut_note.set_text(
+                        "Hold SUPER, CTRL or ALT with the key — or use F1-F12 on their own.",
+                    );
+                    shortcut_note.set_visible(true);
+                    glib::Propagation::Stop
+                }
+                Capture::Waiting => glib::Propagation::Stop,
+            }
+        });
+    }
+    panel.add_controller(key_ctrl);
+
+    page.btn_record.connect_clicked({
+        let recording = Rc::clone(&recorder.recording);
+        let stop_recording = Rc::clone(&recorder.stop);
+        move |_| {
+            if recording.get() {
+                stop_recording(Some("Recording cancelled — the shortcut is unchanged."));
+            } else {
+                start_recording();
+            }
+        }
+    });
+}
+
+/// Settings → Harness launchers: the harnesses installed here, each with a
+/// show/hide toggle, and the supported ones that are not installed.
+/// `wire_harness_list` fills it.
+struct HarnessesPage {
+    root: Box,
+    count_chip: Label,
+    btn_rescan: Button,
+    rows: Box,
+    empty: Label,
+    rescan_status: Label,
+    summary: Label,
+    btn_all: Button,
+    btn_none: Button,
+    btn_add_custom: Button,
+    missing_count: Label,
+    missing_rows: Box,
+}
+
+fn harnesses_page() -> HarnessesPage {
+    let root = settings_page_root();
+    let (head, body) = section_card(&root, "", "Harnesses on this machine");
     let count_chip = chip("…");
     head.append(&count_chip);
     let btn_rescan = Button::with_label("⟳ Rescan");
@@ -968,23 +1276,12 @@ pub fn build_harness_settings_panel(
     rows.add_css_class("harness-rows");
     body.append(&rows);
 
-    let empty = Label::new(None);
-    empty.add_css_class("launcher-hint");
-    empty.set_xalign(0.0);
-    empty.set_wrap(true);
+    let empty = hint("");
     body.append(&empty);
-
-    let detected_hint = Label::new(Some(
+    body.append(&hint(
         "Built-in harnesses appear when installed. Custom launchers remain editable if their executable goes missing.",
     ));
-    detected_hint.add_css_class("launcher-hint");
-    detected_hint.set_xalign(0.0);
-    detected_hint.set_wrap(true);
-    body.append(&detected_hint);
-    let rescan_status = Label::new(None);
-    rescan_status.add_css_class("launcher-hint");
-    rescan_status.set_xalign(0.0);
-    rescan_status.set_wrap(true);
+    let rescan_status = hint("");
     body.append(&rescan_status);
 
     let summary = Label::new(None);
@@ -1012,15 +1309,88 @@ pub fn build_harness_settings_panel(
         "settings-add-harness-entry",
     );
     body.append(&btn_add_custom);
-    let custom_root = Box::new(Orientation::Vertical, 10);
-    custom_root.add_css_class("launcher-body");
-    let (_, custom_body) = section_card(&custom_root, "", "Launcher details");
+    body.append(&hint(
+        "Hiding a launcher only removes its top-bar button; it does not remove the executable or saved configuration.",
+    ));
+
+    let (missing_head, missing_body) = section_card(&root, "", "More supported launchers");
+    let missing_count = chip("…");
+    missing_head.append(&missing_count);
+    missing_body.append(&hint("These are available once installed on this PC. Herder runs a job worker."));
+    let missing_rows = Box::new(Orientation::Vertical, 2);
+    missing_rows.add_css_class("harness-rows");
+    missing_body.append(&missing_rows);
+
+    let footer = Label::new(Some(
+        "Built-ins detected from PATH and common user bin folders · custom launchers stored in state.json",
+    ));
+    footer.add_css_class("launcher-footer");
+    footer.set_xalign(0.5);
+    root.append(&footer);
+
+    HarnessesPage {
+        root,
+        count_chip,
+        btn_rescan,
+        rows,
+        empty,
+        rescan_status,
+        summary,
+        btn_all,
+        btn_none,
+        btn_add_custom,
+        missing_count,
+        missing_rows,
+    }
+}
+
+/// The add / edit form of a custom launcher.
+#[derive(Clone)]
+struct CustomForm {
+    name: gtk4::Entry,
+    path: gtk4::Entry,
+    args: gtk4::Entry,
+    status: Label,
+    selected_icon: Rc<Cell<usize>>,
+    paint_icons: Rc<dyn Fn()>,
+    /// The launcher being edited; `None` adds a new one.
+    editing: Rc<RefCell<Option<String>>>,
+}
+
+impl CustomForm {
+    /// Open the form empty for a new launcher, or filled from `item`.
+    fn open(&self, item: Option<&crate::custom_harness::CustomHarness>, nav: &dyn Fn(SettingsPage)) {
+        *self.editing.borrow_mut() = item.map(|item| item.id.clone());
+        for entry in [&self.name, &self.path, &self.args] { entry.remove_css_class("ws-entry-invalid"); }
+        self.status.set_text(""); self.status.set_visible(false);
+        match item {
+            Some(item) => {
+                self.name.set_text(&item.name); self.path.set_text(&item.executable);
+                self.args.set_text(&item.arguments.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'"))).collect::<Vec<_>>().join(" "));
+                self.selected_icon.set(crate::custom_harness::ICONS.iter().position(|icon| *icon == item.icon).unwrap_or(0));
+            }
+            None => {
+                self.name.set_text(""); self.path.set_text(""); self.args.set_text("");
+                self.selected_icon.set(0);
+            }
+        }
+        (self.paint_icons)(); nav(SettingsPage::CustomHarness); self.name.grab_focus();
+    }
+}
+
+/// Settings → Harness launchers → Add a harness (or Edit).
+struct CustomPage {
+    root: Box,
+    form: CustomForm,
+    btn_save: Button,
+    btn_cancel: Button,
+}
+
+fn custom_page(subtitle: &Label) -> CustomPage {
+    let root = settings_page_root();
+    let (_, custom_body) = section_card(&root, "", "Launcher details");
     let custom_form = Box::new(Orientation::Vertical, 8);
-    let form_help = Label::new(Some("Choose an icon and an executable on this PC. The name defaults to the executable filename. Arguments are optional; use quotes to keep words together."));
-    form_help.set_wrap(true);
-    form_help.set_xalign(0.0);
-    form_help.add_css_class("launcher-hint");
-    custom_form.append(&form_help);
+    custom_form.append(&hint("Choose an icon and an executable on this PC. The name defaults to the executable filename. Arguments are optional; use quotes to keep words together."));
     let form_status = Label::new(None);
     form_status.add_css_class("launcher-note");
     form_status.add_css_class("launcher-note-error");
@@ -1053,43 +1423,35 @@ pub fn build_harness_settings_panel(
     }
     paint_icons();
     custom_form.append(&icon_choices);
-    let name_label = Label::new(Some("Name (defaults to executable name)"));
-    name_label.add_css_class("launcher-hint");
-    name_label.set_xalign(0.0);
-    custom_form.append(&name_label);
-    let custom_name = gtk4::Entry::new();
-    custom_name.set_placeholder_text(Some("Harness name"));
+    // Field captions stay on one line.
+    let field = |caption: &str, placeholder: &str| {
+        let label = hint(caption);
+        label.set_wrap(false);
+        custom_form.append(&label);
+        let entry = gtk4::Entry::new();
+        entry.set_placeholder_text(Some(placeholder));
+        entry
+    };
+    let custom_name = field("Name (defaults to executable name)", "Harness name");
     custom_name.set_max_length(48);
     custom_name.add_css_class("ws-entry");
     custom_form.append(&custom_name);
-    let path_label = Label::new(Some("Executable path"));
-    path_label.add_css_class("launcher-hint");
-    path_label.set_xalign(0.0);
-    custom_form.append(&path_label);
-    let custom_path = gtk4::Entry::new();
-    custom_path.set_placeholder_text(Some("/absolute/path/to/executable"));
+    let custom_path = field("Executable path", "/absolute/path/to/executable");
     custom_path.add_css_class("ws-entry");
     custom_form.append(&custom_path);
-    let args_label = Label::new(Some("Arguments (optional)"));
-    args_label.add_css_class("launcher-hint");
-    args_label.set_xalign(0.0);
-    custom_form.append(&args_label);
-    let custom_args = gtk4::Entry::new();
-    custom_args.set_placeholder_text(Some("Optional arguments, e.g. --model 'my model'"));
+    let custom_args = field("Arguments (optional)", "Optional arguments, e.g. --model 'my model'");
     custom_args.add_css_class("ws-entry");
     custom_form.append(&custom_args);
     let form_actions = Box::new(Orientation::Horizontal, 8);
-    let btn_save_custom = Button::with_label("Save harness");
-    btn_save_custom.add_css_class("launcher-btn");
-    btn_save_custom.add_css_class("launcher-btn-primary");
-    let btn_cancel_custom = Button::with_label("Cancel");
-    btn_cancel_custom.add_css_class("launcher-btn");
-    form_actions.append(&btn_save_custom);
-    form_actions.append(&btn_cancel_custom);
+    let btn_save = Button::with_label("Save harness");
+    btn_save.add_css_class("launcher-btn");
+    btn_save.add_css_class("launcher-btn-primary");
+    let btn_cancel = Button::with_label("Cancel");
+    btn_cancel.add_css_class("launcher-btn");
+    form_actions.append(&btn_save);
+    form_actions.append(&btn_cancel);
     custom_form.append(&form_actions);
     custom_body.append(&custom_form);
-    let editing_custom: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
-    let refresh_custom: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
     for entry in [&custom_name, &custom_path, &custom_args] {
         let status = form_status.clone();
         let subtitle = subtitle.clone();
@@ -1100,21 +1462,104 @@ pub fn build_harness_settings_panel(
             subtitle.set_label("Icon · name · executable · arguments");
         });
     }
+    let form = CustomForm {
+        name: custom_name,
+        path: custom_path,
+        args: custom_args,
+        status: form_status,
+        selected_icon,
+        paint_icons,
+        editing: Rc::new(RefCell::new(None)),
+    };
+    CustomPage { root, form, btn_save, btn_cancel }
+}
 
-    // ---- starting parameters of one built-in harness ----
-    let args_root = Box::new(Orientation::Vertical, 10);
-    args_root.add_css_class("launcher-body");
-    let (_, args_body) = section_card(&args_root, "", "Starting parameters");
-    let args_help = Label::new(None);
-    args_help.add_css_class("launcher-hint");
-    args_help.set_xalign(0.0);
-    args_help.set_wrap(true);
+/// Save and Cancel on the custom launcher form.
+fn wire_custom_page(
+    page: &CustomPage,
+    state: &Rc<RefCell<AppState>>,
+    subtitle: &Label,
+    nav: &Rc<dyn Fn(SettingsPage)>,
+    on_change: &Rc<dyn Fn(Vec<String>)>,
+    refresh: &RefreshSlot,
+) {
+    page.btn_cancel.connect_clicked({
+        let nav = Rc::clone(nav);
+        move |_| nav(SettingsPage::Harnesses)
+    });
+    page.btn_save.connect_clicked({
+        let state = Rc::clone(state); let name = page.form.name.clone();
+        let path = page.form.path.clone(); let args = page.form.args.clone();
+        let selected = Rc::clone(&page.form.selected_icon); let editing = Rc::clone(&page.form.editing);
+        let status = page.form.status.clone(); let subtitle = subtitle.clone(); let nav = Rc::clone(nav);
+        let on_change = Rc::clone(on_change); let refresh = Rc::downgrade(refresh);
+        move |_| {
+            let entered_name = name.text();
+            let effective_name = if entered_name.trim().is_empty() {
+                suggested_harness_name(&path.text()).unwrap_or_default()
+            } else {
+                entered_name.to_string()
+            };
+            let icon = crate::custom_harness::ICONS[selected.get()];
+            match crate::custom_harness::CustomHarness::create(&effective_name, icon, &path.text(), &args.text()) {
+                Ok(mut item) => {
+                    let mut s = state.borrow_mut();
+                    if let Some(id) = editing.borrow().as_ref() { item.id = id.clone(); }
+                    if s.custom_harnesses.iter().any(|old| old.id == item.id) {
+                        if let Some(old) = s.custom_harnesses.iter_mut().find(|old| old.id == item.id) { *old = item; }
+                    } else {
+                        let id = item.id.clone();
+                        s.custom_harnesses.push(item);
+                        if let Some(visible) = &mut s.visible_harnesses { visible.push(id); }
+                    }
+                    let selected = visible_keys(&s, &detect_harnesses());
+                    drop(s);
+                    on_change(selected);
+                    crate::state::flush_state_saves();
+                    status.set_text(""); status.set_visible(false);
+                    run_refresh(&refresh);
+                    nav(SettingsPage::Harnesses);
+                }
+                Err(error) => {
+                    status.set_text(&error);
+                    status.set_visible(true);
+                    subtitle.set_label(&error);
+                    subtitle.add_css_class("launcher-note-error");
+                    let invalid = match error.as_str() {
+                        "Enter a name of up to 48 characters" => &name,
+                        "Arguments have an unmatched quote" | "Use at most 32 arguments of up to 1024 characters each" => &args,
+                        _ => &path,
+                    };
+                    invalid.add_css_class("ws-entry-invalid");
+                    invalid.grab_focus();
+                }
+            }
+        }
+    });
+}
+
+/// Settings → Harness launchers → a built-in harness's starting parameters.
+struct ArgsPage {
+    root: Box,
+    help: Label,
+    default: Label,
+    status: Label,
+    entry: gtk4::Entry,
+    btn_save: Button,
+    btn_default: Button,
+    btn_cancel: Button,
+    /// The built-in harness whose parameters the page is showing.
+    editing: Rc<Cell<Option<&'static str>>>,
+    paint_preview: Rc<dyn Fn()>,
+}
+
+fn args_page(subtitle: &Label) -> ArgsPage {
+    let root = settings_page_root();
+    let (_, args_body) = section_card(&root, "", "Starting parameters");
+    let args_help = hint("");
     args_body.append(&args_help);
-    let args_default = Label::new(None);
-    args_default.add_css_class("launcher-hint");
+    let args_default = hint("");
     args_default.add_css_class("harness-args-default");
-    args_default.set_xalign(0.0);
-    args_default.set_wrap(true);
     args_default.set_selectable(true);
     args_body.append(&args_default);
     let args_status = Label::new(None);
@@ -1139,30 +1584,25 @@ pub fn build_harness_settings_panel(
     args_preview.set_selectable(true);
     args_body.append(&args_preview);
     let args_actions = Box::new(Orientation::Horizontal, 8);
-    let btn_save_args = Button::with_label("Save parameters");
-    btn_save_args.add_css_class("launcher-btn");
-    btn_save_args.add_css_class("launcher-btn-primary");
-    let btn_default_args = Button::with_label("Use built-in default");
-    btn_default_args.add_css_class("launcher-btn");
-    let btn_cancel_args = Button::with_label("Cancel");
-    btn_cancel_args.add_css_class("launcher-btn");
-    args_actions.append(&btn_save_args);
-    args_actions.append(&btn_default_args);
-    args_actions.append(&btn_cancel_args);
+    let btn_save = Button::with_label("Save parameters");
+    btn_save.add_css_class("launcher-btn");
+    btn_save.add_css_class("launcher-btn-primary");
+    let btn_default = Button::with_label("Use built-in default");
+    btn_default.add_css_class("launcher-btn");
+    let btn_cancel = Button::with_label("Cancel");
+    btn_cancel.add_css_class("launcher-btn");
+    args_actions.append(&btn_save);
+    args_actions.append(&btn_default);
+    args_actions.append(&btn_cancel);
     args_body.append(&args_actions);
-    let args_note = Label::new(Some(
+    args_body.append(&hint(
         "New cards started from the top bar, the phone or another PC use these parameters. Open cards keep their command; restored cards keep theirs and gain parameters added here. Built-in defaults include the display modes the phone needs for scrollback, such as Codex's --no-alt-screen: removing one can hide history on Android.",
     ));
-    args_note.add_css_class("launcher-hint");
-    args_note.set_xalign(0.0);
-    args_note.set_wrap(true);
-    args_body.append(&args_note);
-    // The built-in harness whose parameters the page is showing.
-    let editing_args: Rc<Cell<Option<&'static str>>> = Rc::new(Cell::new(None));
-    let paint_args_preview: Rc<dyn Fn()> = {
+    let editing: Rc<Cell<Option<&'static str>>> = Rc::new(Cell::new(None));
+    let paint_preview: Rc<dyn Fn()> = {
         let entry = args_entry.clone();
         let preview = args_preview.clone();
-        let editing = Rc::clone(&editing_args);
+        let editing = Rc::clone(&editing);
         Rc::new(move || {
             let Some(key) = editing.get() else { return };
             match crate::launch_args::parse(&entry.text()) {
@@ -1177,7 +1617,7 @@ pub fn build_harness_settings_panel(
     args_entry.connect_changed({
         let status = args_status.clone();
         let subtitle = subtitle.clone();
-        let paint = Rc::clone(&paint_args_preview);
+        let paint = Rc::clone(&paint_preview);
         move |entry| {
             entry.remove_css_class("ws-entry-invalid");
             status.set_visible(false);
@@ -1185,41 +1625,114 @@ pub fn build_harness_settings_panel(
             paint();
         }
     });
+    ArgsPage {
+        root,
+        help: args_help,
+        default: args_default,
+        status: args_status,
+        entry: args_entry,
+        btn_save,
+        btn_default,
+        btn_cancel,
+        editing,
+        paint_preview,
+    }
+}
 
-    let note = Label::new(Some(
-        "Hiding a launcher only removes its top-bar button; it does not remove the executable or saved configuration.",
-    ));
-    note.add_css_class("launcher-hint");
-    note.set_xalign(0.0);
-    note.set_wrap(true);
-    body.append(&note);
+/// The parameter page's buttons. Returns what opens the page for a harness.
+fn wire_args_page(
+    page: &ArgsPage,
+    state: &Rc<RefCell<AppState>>,
+    subtitle: &Label,
+    nav: &Rc<dyn Fn(SettingsPage)>,
+    refresh: &RefreshSlot,
+) -> Rc<dyn Fn(&'static str)> {
+    let open_args: Rc<dyn Fn(&'static str)> = {
+        let editing = Rc::clone(&page.editing);
+        let help = page.help.clone();
+        let default = page.default.clone();
+        let entry = page.entry.clone();
+        let status = page.status.clone();
+        let paint = Rc::clone(&page.paint_preview);
+        let nav = Rc::clone(nav);
+        Rc::new(move |key| {
+            editing.set(Some(key));
+            help.set_text(&format!(
+                "Added after the {} command when a new card starts. Quotes keep words together, and every word is passed as typed (no ~ or $VARIABLE expansion). An empty field starts it with no parameters.",
+                crate::tmux::get_agent_config(key).name,
+            ));
+            let builtin = crate::launch_args::builtin(key);
+            default.set_text(&if builtin.is_empty() {
+                "Built-in default: none".to_string()
+            } else {
+                format!("Built-in default: {}", crate::launch_args::display(&builtin))
+            });
+            entry.set_text(&crate::launch_args::display(&crate::launch_args::effective(key)));
+            entry.remove_css_class("ws-entry-invalid");
+            status.set_visible(false);
+            paint();
+            nav(SettingsPage::HarnessArgs);
+            entry.grab_focus();
+        })
+    };
+    page.btn_save.connect_clicked({
+        let state = Rc::clone(state);
+        let editing = Rc::clone(&page.editing);
+        let entry = page.entry.clone();
+        let status = page.status.clone();
+        let subtitle = subtitle.clone();
+        let nav = Rc::clone(nav);
+        let refresh = Rc::downgrade(refresh);
+        move |_| {
+            let Some(key) = editing.get() else { return };
+            match crate::launch_args::parse(&entry.text()) {
+                Ok(args) => {
+                    let snapshot = {
+                        let mut s = state.borrow_mut();
+                        crate::launch_args::store(&mut s.harness_args, key, args);
+                        crate::launch_args::install(&s.harness_args);
+                        s.clone()
+                    };
+                    crate::state::save_state_async(snapshot);
+                    run_refresh(&refresh);
+                    nav(SettingsPage::Harnesses);
+                }
+                Err(error) => {
+                    status.set_text(&error);
+                    status.set_visible(true);
+                    subtitle.set_label(&error);
+                    subtitle.add_css_class("launcher-note-error");
+                    entry.add_css_class("ws-entry-invalid");
+                    entry.grab_focus();
+                }
+            }
+        }
+    });
+    page.entry.connect_activate({
+        let save = page.btn_save.clone();
+        move |_| save.emit_clicked()
+    });
+    page.btn_default.connect_clicked({
+        let editing = Rc::clone(&page.editing);
+        let entry = page.entry.clone();
+        move |_| {
+            if let Some(key) = editing.get() {
+                entry.set_text(&crate::launch_args::display(&crate::launch_args::builtin(key)));
+            }
+        }
+    });
+    page.btn_cancel.connect_clicked({
+        let nav = Rc::clone(nav);
+        move |_| nav(SettingsPage::Harnesses)
+    });
+    open_args
+}
 
-    let (missing_head, missing_body) = section_card(&harnesses_root, "", "More supported launchers");
-    let missing_count = chip("…");
-    missing_head.append(&missing_count);
-    let missing_hint = Label::new(Some(
-        "These are available once installed on this PC. Herder runs a job worker."
-    ));
-    missing_hint.add_css_class("launcher-hint");
-    missing_hint.set_xalign(0.0);
-    missing_hint.set_wrap(true);
-    missing_body.append(&missing_hint);
-    let missing_rows = Box::new(Orientation::Vertical, 2);
-    missing_rows.add_css_class("harness-rows");
-    missing_body.append(&missing_rows);
-
-    let footer = Label::new(Some(
-        "Built-ins detected from PATH and common user bin folders · custom launchers stored in state.json",
-    ));
-    footer.add_css_class("launcher-footer");
-    footer.set_xalign(0.5);
-    harnesses_root.append(&footer);
-
-    let top_bar_root = Box::new(Orientation::Vertical, 10);
-    top_bar_root.add_css_class("launcher-body");
-
-    // ---- top-bar scale ----
-    let (_, body) = section_card(&top_bar_root, "", "Top bar");
+/// Settings → Top bar: the dock's scale. Returns the page and what repaints
+/// the size buttons from the state.
+fn top_bar_page(state: &Rc<RefCell<AppState>>, on_top_bar_size_change: &Rc<dyn Fn(TopBarSize)>) -> (Box, Rc<dyn Fn()>) {
+    let root = settings_page_root();
+    let (_, body) = section_card(&root, "", "Top bar");
     let size_label = Label::new(Some("Size"));
     size_label.add_css_class("launcher-status-text");
     size_label.set_xalign(0.0);
@@ -1243,7 +1756,7 @@ pub fn build_harness_settings_panel(
         (TopBarSize::Large, btn_large),
     ]);
     let paint_size: Rc<dyn Fn()> = {
-        let state = Rc::clone(&state);
+        let state = Rc::clone(state);
         let size_buttons = Rc::clone(&size_buttons);
         Rc::new(move || {
             let selected = state.borrow().top_bar_size;
@@ -1254,9 +1767,9 @@ pub fn build_harness_settings_panel(
     };
     for (size, button) in size_buttons.iter() {
         let size = *size;
-        let state = Rc::clone(&state);
+        let state = Rc::clone(state);
         let paint_size = Rc::clone(&paint_size);
-        let on_top_bar_size_change = Rc::clone(&on_top_bar_size_change);
+        let on_top_bar_size_change = Rc::clone(on_top_bar_size_change);
         button.connect_clicked(move |_| {
             state.borrow_mut().top_bar_size = size;
             paint_size();
@@ -1264,10 +1777,13 @@ pub fn build_harness_settings_panel(
         });
     }
     paint_size();
+    (root, paint_size)
+}
 
-    let sleep_root = Box::new(Orientation::Vertical, 10);
-    sleep_root.add_css_class("launcher-body");
-    let (_, sleep_body) = section_card(&sleep_root, "", "Stay awake on external power");
+/// Settings → Sleep lock: stay awake on external power.
+fn sleep_lock_page(state: &Rc<RefCell<AppState>>) -> Box {
+    let root = settings_page_root();
+    let (_, sleep_body) = section_card(&root, "", "Stay awake on external power");
     let sleep_row = Box::new(Orientation::Horizontal, 12);
     let sleep_label = Label::new(Some("Prevent sleep while plugged in"));
     sleep_label.set_hexpand(true);
@@ -1281,7 +1797,7 @@ pub fn build_harness_settings_panel(
     sleep_row.append(&sleep_label);
     sleep_row.append(&sleep_toggle);
     sleep_body.append(&sleep_row);
-    let sleep_help = Label::new(Some("Keeps this PC and its bridge awake while SUPER DESKTOP is running on mains or charger power, including with a laptop lid closed. Normal sleep behavior returns on battery. The screen can still turn off and lock. Turn this off before manually suspending."));
+    let sleep_help = hint("Keeps this PC and its bridge awake while SUPER DESKTOP is running on mains or charger power, including with a laptop lid closed. Normal sleep behavior returns on battery. The screen can still turn off and lock. Turn this off before manually suspending.");
     #[cfg(target_os = "macos")]
     {
         sleep_toggle.set_active(false);
@@ -1289,9 +1805,6 @@ pub fn build_harness_settings_panel(
         sleep_toggle.set_tooltip_text(Some("Stay-awake support is unavailable in this macOS build"));
         sleep_help.set_label("macOS currently manages sleep normally. Stay-awake support is unavailable in this build.");
     }
-    sleep_help.set_wrap(true);
-    sleep_help.set_xalign(0.0);
-    sleep_help.add_css_class("launcher-hint");
     sleep_body.append(&sleep_help);
     let sleep_status = Label::new(Some(&crate::sleep_lock::status()));
     sleep_status.set_wrap(true);
@@ -1299,7 +1812,7 @@ pub fn build_harness_settings_panel(
     sleep_status.add_css_class("sleep-lock-status");
     sleep_body.append(&sleep_status);
     sleep_toggle.connect_active_notify({
-        let state = Rc::clone(&state);
+        let state = Rc::clone(state);
         move |toggle| {
             let enabled = toggle.is_active();
             state.borrow_mut().sleep_lock_on_ac = enabled;
@@ -1326,17 +1839,286 @@ pub fn build_harness_settings_panel(
         Duration::from_secs(1),
         move || paint_status(),
     );
+    root
+}
 
-    let mcp_root = Box::new(Orientation::Vertical, 10);
-    mcp_root.add_css_class("launcher-body");
+/// The harness list's selection: what is shown, in detection order, and the
+/// rows' show/hide toggles.
+#[derive(Clone)]
+struct HarnessList {
+    selection: Rc<RefCell<Vec<String>>>,
+    order: Rc<RefCell<Vec<String>>>,
+    row_buttons: Rc<RefCell<Vec<(String, Button)>>>,
+    /// Single funnel for every selection change: repaint, then let the window
+    /// persist it and sync the top bar.
+    apply: Rc<dyn Fn(Vec<String>)>,
+}
+
+impl HarnessList {
+    /// A row's toggle shows or hides `key`.
+    fn connect_toggle(&self, button: &Button, key: String) {
+        let order = Rc::clone(&self.order);
+        let selection = Rc::clone(&self.selection);
+        let apply = Rc::clone(&self.apply);
+        button.connect_clicked(move |_| {
+            let mut sel = selection.borrow().clone();
+            toggle(&mut sel, &key, &order.borrow());
+            apply(sel);
+        });
+    }
+}
+
+/// What the harness list reaches outside its own page.
+struct HarnessListHooks {
+    state: Rc<RefCell<AppState>>,
+    on_change: Rc<dyn Fn(Vec<String>)>,
+    on_detected: Rc<dyn Fn(Vec<String>)>,
+    open_args: Rc<dyn Fn(&'static str)>,
+    custom: CustomForm,
+    nav: Rc<dyn Fn(SettingsPage)>,
+    refresh: std::rc::Weak<RefCell<Option<Rc<dyn Fn()>>>>,
+    /// Runs at the start of every refresh, before detection.
+    reset: Rc<dyn Fn()>,
+}
+
+/// Fill the harness page and connect its buttons. Returns the refresh that
+/// re-detects the harnesses and rebuilds the rows; the overlay runs it on
+/// every open.
+fn wire_harness_list(page: &HarnessesPage, hooks: HarnessListHooks) -> Rc<dyn Fn()> {
+    let selection: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let row_buttons: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
+
+    // Repaint every row + the counters from `selection`.
+    let paint: Rc<dyn Fn()> = {
+        let selection = Rc::clone(&selection);
+        let order = Rc::clone(&order);
+        let row_buttons = Rc::clone(&row_buttons);
+        let summary = page.summary.clone();
+        let count_chip = page.count_chip.clone();
+        let empty = page.empty.clone();
+        Rc::new(move || {
+            let selected = selection.borrow();
+            let total = order.borrow().len();
+            for (key, btn) in row_buttons.borrow().iter() {
+                paint_toggle(btn, selected.iter().any(|k| k == key));
+            }
+            summary.set_text(&summary_text(selected.len(), total));
+            count_chip.set_text(&format!("{} / {}", selected.len(), total));
+            if total == 0 {
+                empty.set_text("No harness CLIs found on this machine.");
+            }
+            empty.set_visible(total == 0);
+        })
+    };
+
+    let apply: Rc<dyn Fn(Vec<String>)> = {
+        let selection = Rc::clone(&selection);
+        let paint = Rc::clone(&paint);
+        let on_change = Rc::clone(&hooks.on_change);
+        Rc::new(move |keys: Vec<String>| {
+            *selection.borrow_mut() = keys.clone();
+            paint();
+            on_change(keys);
+        })
+    };
+    let list = HarnessList { selection, order, row_buttons, apply };
+
+    let refresh: Rc<dyn Fn()> = {
+        let rows = page.rows.clone();
+        let rescan_status = page.rescan_status.clone();
+        let missing_rows = page.missing_rows.clone();
+        let missing_count = page.missing_count.clone();
+        let list = list.clone();
+        Rc::new(move || {
+            rescan_status.set_text("");
+            (hooks.reset)();
+
+            let detected = detect_harnesses();
+            let light_theme = crate::theme::current_theme().mode == "light";
+
+            while let Some(child) = rows.first_child() {
+                rows.remove(&child);
+            }
+            while let Some(child) = missing_rows.first_child() {
+                missing_rows.remove(&child);
+            }
+            list.row_buttons.borrow_mut().clear();
+
+            missing_count.set_text(&fill_missing_rows(&missing_rows, &detected, light_theme).to_string());
+
+            for info in &detected {
+                let (row, params, btn) = harness_row(info, light_theme);
+                params.connect_clicked({
+                    let open = Rc::clone(&hooks.open_args);
+                    let key = info.key;
+                    move |_| open(key)
+                });
+                let key = info.key.to_string();
+                list.connect_toggle(&btn, key.clone());
+                rows.append(&row);
+                if info.key == "openclaw" {
+                    rows.append(&openclaw_plugin_notice(OpenClawActions::SYSTEM));
+                }
+                list.row_buttons.borrow_mut().push((key, btn));
+            }
+
+            for item in hooks.state.borrow().custom_harnesses.clone() {
+                let (row, btn) = custom_harness_row(item, &list, &hooks);
+                rows.append(&row);
+                list.row_buttons.borrow_mut().push(btn);
+            }
+
+            *list.order.borrow_mut() = detected_keys(&detected).into_iter()
+                .chain(hooks.state.borrow().custom_harnesses.iter().filter(|item| item.available()).map(|item| item.id.clone())).collect();
+            *list.selection.borrow_mut() = visible_keys(&hooks.state.borrow(), &detected);
+            paint();
+            (hooks.on_detected)(list.selection.borrow().clone());
+        })
+    };
+
+    page.btn_rescan.connect_clicked({
+        let refresh = Rc::clone(&refresh);
+        let order = Rc::clone(&list.order);
+        let status = page.rescan_status.clone();
+        move |_| {
+            let before = order.borrow().clone();
+            refresh();
+            let new: Vec<_> = order.borrow().iter()
+                .filter(|key| !before.contains(key) && crate::tmux::HARNESS_KEYS.contains(&key.as_str()))
+                .map(|key| crate::tmux::get_agent_config(key).name)
+                .collect();
+            let message = if new.is_empty() {
+                format!("Scan complete. {} installed launchers available.",
+                    order.borrow().iter().filter(|key| crate::tmux::HARNESS_KEYS.contains(&key.as_str())).count())
+            } else {
+                format!("Found: {}. The top bar is updated; use the toggles to change visibility.", new.join(", "))
+            };
+            status.set_text(&message);
+        }
+    });
+    page.btn_all.connect_clicked({
+        let order = Rc::clone(&list.order);
+        let apply = Rc::clone(&list.apply);
+        move |_| apply(order.borrow().clone())
+    });
+    page.btn_none.connect_clicked({
+        let apply = Rc::clone(&list.apply);
+        move |_| apply(Vec::new())
+    });
+    refresh
+}
+
+/// The supported harnesses that are not installed, as rows without controls.
+/// Returns how many there are.
+fn fill_missing_rows(missing_rows: &Box, detected: &[HarnessInfo], light_theme: bool) -> usize {
+    let mut missing = 0;
+    for key in crate::tmux::HARNESS_KEYS {
+        if detected.iter().any(|info| info.key == *key) { continue; }
+        let cfg = crate::tmux::get_agent_config(key);
+        let info = HarnessInfo {
+            key, name: cfg.name, icon: cfg.icon,
+            command: format!("Not installed · {}", cfg.commands[0]),
+        };
+        let (row, params, toggle) = harness_row(&info, light_theme);
+        row.remove(&params);
+        row.remove(&toggle);
+        missing_rows.append(&row);
+        missing += 1;
+    }
+    missing
+}
+
+/// A custom launcher's row, with its toggle, Edit and Remove connected.
+/// Returns the row and its toggle, keyed by the launcher's id.
+fn custom_harness_row(
+    item: crate::custom_harness::CustomHarness,
+    list: &HarnessList,
+    hooks: &HarnessListHooks,
+) -> (Box, (String, Button)) {
+    let (row, btn, edit, remove) = custom_row(&item);
+    let key = item.id.clone();
+    list.connect_toggle(&btn, key.clone());
+    edit.connect_clicked({
+        let form = hooks.custom.clone();
+        let nav = Rc::clone(&hooks.nav);
+        let item = item.clone();
+        move |_| form.open(Some(&item), &*nav)
+    });
+    remove.connect_clicked({
+        let state = Rc::clone(&hooks.state); let on_change = Rc::clone(&hooks.on_change);
+        let refresh = hooks.refresh.clone();
+        move |_| {
+            let mut s = state.borrow_mut();
+            s.custom_harnesses.retain(|item| item.id != key);
+            if let Some(visible) = &mut s.visible_harnesses { visible.retain(|id| id != &key); }
+            let selected = visible_keys(&s, &detect_harnesses());
+            drop(s);
+            on_change(selected);
+            run_refresh(&refresh);
+        }
+    });
+    (row, (item.id, btn))
+}
+
+/// The card and its header: badge, title + subtitle, ← back, close.
+struct PanelShell {
+    outer: Box,
+    badge: Label,
+    title: Label,
+    subtitle: Label,
+    btn_back: Button,
+}
+
+fn panel_shell() -> PanelShell {
+    let outer = Box::new(Orientation::Vertical, 0);
+    outer.add_css_class("mini-terminal");
+    outer.add_css_class("harness-panel");
+    outer.set_size_request(SETTINGS_PANEL_MIN_SIZE.0, SETTINGS_PANEL_MIN_SIZE.1);
+
+    let badge = Label::new(Some("⚙"));
+    let header = crate::floating_panel::PanelHeader::new(&badge, "Settings", "Connections · shortcuts · top bar", true);
+    let (title, subtitle) = (header.title.clone(), header.subtitle.clone());
+    // Shown on every page after the settings hub (see `nav`).
+    let btn_back = header.button("←", Some("term-btn"), Some("Back to settings"));
+    btn_back.set_visible(false);
+    let btn_close = header.close_button("Close panel");
+    outer.append(&header.widget);
+
+    let weak_outer = outer.downgrade();
+    btn_close.connect_clicked(move |_| {
+        if let Some(o) = weak_outer.upgrade() {
+            o.set_visible(false);
+        }
+    });
+    PanelShell { outer, badge, title, subtitle, btn_back }
+}
+
+pub fn build_harness_settings_panel(
+    state: Rc<RefCell<AppState>>,
+    on_change: Rc<dyn Fn(Vec<String>)>,
+    on_detected: Rc<dyn Fn(Vec<String>)>,
+    on_shortcut_change: Rc<dyn Fn(String)>,
+    on_top_bar_size_change: Rc<dyn Fn(TopBarSize)>,
+    connections: ConnectionHooks,
+) -> HarnessSettingsPanel {
+    let PanelShell { outer, badge, title, subtitle, btn_back } = panel_shell();
+    let home = home_page();
+    let shortcut = shortcut_page();
+    let harnesses = harnesses_page();
+    let custom = custom_page(&subtitle);
+    let args = args_page(&subtitle);
+    let (top_bar_root, paint_size) = top_bar_page(&state, &on_top_bar_size_change);
+    let sleep_root = sleep_lock_page(&state);
+
+    let mcp_root = settings_page_root();
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
 
-    let updates_root = Box::new(Orientation::Vertical, 10);
-    updates_root.add_css_class("launcher-body");
-    let check_updates = build_updates_page(&updates_root, &updates_chip);
+    let updates_root = settings_page_root();
+    let check_updates = build_updates_page(&updates_root, &home.updates_chip);
     // Opening Settings checks at most hourly, so the entry can name a newer
     // version; opening the page always checks.
-    btn_updates.connect_map({
+    home.btn_updates.connect_map({
         let check_updates = Rc::clone(&check_updates);
         move |_| check_updates(false)
     });
@@ -1363,10 +2145,10 @@ pub fn build_harness_settings_panel(
 
     // Every page, in the order the panel holds them; the hub shows first.
     let mut views: Vec<(SettingsPage, gtk4::Widget)> = vec![
-        (SettingsPage::Home, page_scroll(&home_root).upcast()),
-        (SettingsPage::Shortcut, page_scroll(&shortcut_root).upcast()),
-        (SettingsPage::Harnesses, page_scroll(&harnesses_root).upcast()),
-        (SettingsPage::CustomHarness, page_scroll(&custom_root).upcast()),
+        (SettingsPage::Home, page_scroll(&home.root).upcast()),
+        (SettingsPage::Shortcut, page_scroll(&shortcut.root).upcast()),
+        (SettingsPage::Harnesses, page_scroll(&harnesses.root).upcast()),
+        (SettingsPage::CustomHarness, page_scroll(&custom.root).upcast()),
         (SettingsPage::TopBar, page_scroll(&top_bar_root).upcast()),
         (SettingsPage::Mcp, page_scroll(&mcp_root).upcast()),
     ];
@@ -1374,7 +2156,7 @@ pub fn build_harness_settings_panel(
     views.extend([
         (SettingsPage::SleepLock, page_scroll(&sleep_root).upcast()),
         (SettingsPage::Updates, page_scroll(&updates_root).upcast()),
-        (SettingsPage::HarnessArgs, page_scroll(&args_root).upcast()),
+        (SettingsPage::HarnessArgs, page_scroll(&args.root).upcast()),
     ]);
     let pages = Box::new(Orientation::Vertical, 0);
     pages.add_css_class("harness-pages");
@@ -1394,8 +2176,8 @@ pub fn build_harness_settings_panel(
         let badge = badge.clone();
         let title = title.clone();
         let subtitle = subtitle.clone();
-        let editing_custom = Rc::clone(&editing_custom);
-        let editing_args = Rc::clone(&editing_args);
+        let editing_custom = Rc::clone(&custom.form.editing);
+        let editing_args = Rc::clone(&args.editing);
         let current_page = Rc::clone(&current_page);
         Rc::new(move |page| {
             current_page.set(page);
@@ -1437,19 +2219,19 @@ pub fn build_harness_settings_panel(
     };
 
     for (button, page) in [
-        (&btn_shortcut_page, SettingsPage::Shortcut),
-        (&btn_harnesses_page, SettingsPage::Harnesses),
-        (&btn_top_bar_page, SettingsPage::TopBar),
-        (&btn_mcp, SettingsPage::Mcp),
-        (&btn_launcher, SettingsPage::Connections(ConnectionPage::Overview)),
-        (&btn_sleep_lock, SettingsPage::SleepLock),
-        (&btn_updates, SettingsPage::Updates),
+        (&home.btn_shortcut, SettingsPage::Shortcut),
+        (&home.btn_harnesses, SettingsPage::Harnesses),
+        (&home.btn_top_bar, SettingsPage::TopBar),
+        (&home.btn_mcp, SettingsPage::Mcp),
+        (&home.btn_connections, SettingsPage::Connections(ConnectionPage::Overview)),
+        (&home.btn_sleep_lock, SettingsPage::SleepLock),
+        (&home.btn_updates, SettingsPage::Updates),
     ] {
         let nav = Rc::clone(&nav);
         button.connect_clicked(move |_| nav(page));
     }
     *nav_slot.borrow_mut() = Rc::downgrade(&nav);
-    btn_review_firewall.connect_clicked({
+    home.btn_review_firewall.connect_clicked({
         let nav = Rc::clone(&nav);
         move |_| nav(SettingsPage::Connections(ConnectionPage::Network))
     });
@@ -1464,18 +2246,7 @@ pub fn build_harness_settings_panel(
         }
     });
 
-    let firewall_notice_refresh = crate::launcher_settings::background_refresh(
-        crate::bridge::firewall_summary,
-        move |(summary, can_unlock)| {
-            firewall_notice.set_visible(can_unlock);
-            if can_unlock {
-                firewall_text.set_text(&format!(
-                    "{summary}. Allow {}/tcp so Android devices can reach this computer.",
-                    crate::bridge::BRIDGE_PORT,
-                ));
-            }
-        },
-    );
+    let firewall_notice_refresh = Rc::clone(&home.firewall_refresh);
     btn_back.connect_clicked({
         let nav = Rc::clone(&nav);
         let refresh = Rc::clone(&firewall_notice_refresh);
@@ -1492,610 +2263,38 @@ pub fn build_harness_settings_panel(
         }
     });
 
-    btn_add_custom.connect_clicked({
-        let name = custom_name.clone(); let path = custom_path.clone();
-        let args = custom_args.clone(); let status = form_status.clone();
-        let editing = Rc::clone(&editing_custom); let selected = Rc::clone(&selected_icon);
-        let paint = Rc::clone(&paint_icons); let nav = Rc::clone(&nav);
-        move |_| {
-            *editing.borrow_mut() = None;
-            for entry in [&name, &path, &args] { entry.remove_css_class("ws-entry-invalid"); }
-            name.set_text(""); path.set_text(""); args.set_text(""); status.set_text(""); status.set_visible(false);
-            selected.set(0); paint(); nav(SettingsPage::CustomHarness); name.grab_focus();
-        }
-    });
-    btn_cancel_custom.connect_clicked({
+    harnesses.btn_add_custom.connect_clicked({
+        let form = custom.form.clone();
         let nav = Rc::clone(&nav);
-        move |_| nav(SettingsPage::Harnesses)
+        move |_| form.open(None, &*nav)
     });
+    let refresh_slot: RefreshSlot = Rc::new(RefCell::new(None));
+    wire_custom_page(&custom, &state, &subtitle, &nav, &on_change, &refresh_slot);
+    let open_args = wire_args_page(&args, &state, &subtitle, &nav, &refresh_slot);
+    let (stop_recording, paint_recorder) = wire_shortcut_recorder(&outer, &shortcut, &state, &on_shortcut_change);
 
-    let open_args: Rc<dyn Fn(&'static str)> = {
-        let editing = Rc::clone(&editing_args);
-        let help = args_help.clone();
-        let default = args_default.clone();
-        let entry = args_entry.clone();
-        let status = args_status.clone();
-        let paint = Rc::clone(&paint_args_preview);
-        let nav = Rc::clone(&nav);
-        Rc::new(move |key| {
-            editing.set(Some(key));
-            help.set_text(&format!(
-                "Added after the {} command when a new card starts. Quotes keep words together, and every word is passed as typed (no ~ or $VARIABLE expansion). An empty field starts it with no parameters.",
-                crate::tmux::get_agent_config(key).name,
-            ));
-            let builtin = crate::launch_args::builtin(key);
-            default.set_text(&if builtin.is_empty() {
-                "Built-in default: none".to_string()
-            } else {
-                format!("Built-in default: {}", crate::launch_args::display(&builtin))
-            });
-            entry.set_text(&crate::launch_args::display(&crate::launch_args::effective(key)));
-            entry.remove_css_class("ws-entry-invalid");
-            status.set_visible(false);
-            paint();
-            nav(SettingsPage::HarnessArgs);
-            entry.grab_focus();
-        })
-    };
-    btn_save_args.connect_clicked({
-        let state = Rc::clone(&state);
-        let editing = Rc::clone(&editing_args);
-        let entry = args_entry.clone();
-        let status = args_status.clone();
-        let subtitle = subtitle.clone();
-        let nav = Rc::clone(&nav);
-        let refresh = Rc::downgrade(&refresh_custom);
-        move |_| {
-            let Some(key) = editing.get() else { return };
-            match crate::launch_args::parse(&entry.text()) {
-                Ok(args) => {
-                    let snapshot = {
-                        let mut s = state.borrow_mut();
-                        crate::launch_args::store(&mut s.harness_args, key, args);
-                        crate::launch_args::install(&s.harness_args);
-                        s.clone()
-                    };
-                    crate::state::save_state_async(snapshot);
-                    if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
-                    nav(SettingsPage::Harnesses);
-                }
-                Err(error) => {
-                    status.set_text(&error);
-                    status.set_visible(true);
-                    subtitle.set_label(&error);
-                    subtitle.add_css_class("launcher-note-error");
-                    entry.add_css_class("ws-entry-invalid");
-                    entry.grab_focus();
-                }
-            }
-        }
-    });
-    args_entry.connect_activate({
-        let save = btn_save_args.clone();
-        move |_| save.emit_clicked()
-    });
-    btn_default_args.connect_clicked({
-        let editing = Rc::clone(&editing_args);
-        let entry = args_entry.clone();
-        move |_| {
-            if let Some(key) = editing.get() {
-                entry.set_text(&crate::launch_args::display(&crate::launch_args::builtin(key)));
-            }
-        }
-    });
-    btn_cancel_args.connect_clicked({
-        let nav = Rc::clone(&nav);
-        move |_| nav(SettingsPage::Harnesses)
-    });
-
-    // ---- shortcut recorder ----
-    // `armed` holds the keymap guard for exactly as long as the listener is
-    // live: dropping it is what gives the user their global shortcuts back.
-    let recording = Rc::new(Cell::new(false));
-    let armed: Rc<RefCell<Option<CaptureGuard>>> = Rc::new(RefCell::new(None));
-
-    // Paint the combo and the Record/Cancel button from `recording`.
-    let paint_recorder: Rc<dyn Fn()> = {
-        let recording = Rc::clone(&recording);
-        let state = Rc::clone(&state);
-        let combo_label = combo_label.clone();
-        let btn_record = btn_record.clone();
-        let shortcut_hint = shortcut_hint.clone();
-        Rc::new(move || {
-            if recording.get() {
-                combo_label.set_text("Press your combination…");
-                combo_label.add_css_class("shortcut-recording");
-                btn_record.set_label("✕ Cancel");
-                btn_record.remove_css_class("launcher-btn-primary");
-                btn_record.add_css_class("launcher-btn-danger");
-                shortcut_hint.set_text(
-                    "Listening — global shortcuts are paused until you press one. \
-                     Esc keeps the current combination.",
-                );
-            } else {
-                combo_label.set_text(&crate::shortcut::current_combo(
-                    state.borrow().toggle_shortcut.as_deref(),
-                ));
-                combo_label.remove_css_class("shortcut-recording");
-                btn_record.set_label("⏺ Record");
-                btn_record.remove_css_class("launcher-btn-danger");
-                btn_record.add_css_class("launcher-btn-primary");
-                shortcut_hint.set_text(
-                    "Click Record, then press the combination you want — SUPER/CTRL/ALT \
-                     plus a key, or F1-F12 on their own. Global shortcuts pause while \
-                     recording, so any combination can be captured.",
-                );
-            }
-        })
-    };
-
-    // The one way out of a recording. `message` is the outcome to show (None
-    // keeps whatever is already there) — every cancel path calls this.
-    let stop_recording: StopRecording = {
-        let recording = Rc::clone(&recording);
-        let armed = Rc::clone(&armed);
-        let paint = Rc::clone(&paint_recorder);
-        let shortcut_note = shortcut_note.clone();
-        Rc::new(move |message: Option<&str>| {
-            // Release first: this is what un-pauses the user's shortcuts.
-            if let Some(guard) = armed.borrow_mut().take() {
-                guard.end();
-            }
-            let was_recording = recording.replace(false);
-            if let Some(message) = message {
-                shortcut_note.remove_css_class("launcher-note-error");
-                shortcut_note.set_text(message);
-                shortcut_note.set_visible(true);
-            } else {
-                shortcut_note.set_visible(false);
-            }
-            if was_recording {
-                paint();
-            }
-        })
-    };
-
-    // A captured combination: leave the recording, then write it to Hyprland.
-    let commit_shortcut: CommitShortcut = {
-        let state = Rc::clone(&state);
-        let on_shortcut_change = Rc::clone(&on_shortcut_change);
-        let stop_recording = Rc::clone(&stop_recording);
-        let paint = Rc::clone(&paint_recorder);
-        let shortcut_note = shortcut_note.clone();
-        Rc::new(move |combo: &str, keycode: u32| {
-            stop_recording(None);
-            let (message, failed) = match crate::shortcut::apply_combo(combo, Some(keycode)) {
-                Ok(applied) => {
-                    {
-                        let mut s = state.borrow_mut();
-                        s.toggle_shortcut = Some(applied.combo.clone());
-                    }
-                    let snapshot = state.borrow().clone();
-                    crate::state::save_state_async(snapshot);
-                    on_shortcut_change(applied.combo.clone());
-                    match (applied.warning, applied.conflict) {
-                        (Some(warning), _) => (format!("⚠ {warning}"), true),
-                        (None, Some(other)) => (
-                            format!("● {combo} toggles SUPER DESKTOP — it used to run “{other}”."),
-                            false,
-                        ),
-                        (None, None) => (format!("● {combo} toggles SUPER DESKTOP."), false),
-                    }
-                }
-                Err(e) => (format!("⚠ {e}"), true),
-            };
-            // Restyle from scratch: an outcome shown after an earlier failure
-            // must not inherit the red left over from it.
-            shortcut_note.remove_css_class("launcher-note-error");
-            if failed {
-                shortcut_note.add_css_class("launcher-note-error");
-            }
-            shortcut_note.set_text(&message);
-            shortcut_note.set_visible(true);
-            paint();
-        })
-    };
-
-    // Two ways out of a recording nobody finishes: the panel/overlay going
-    // away, and the watchdog. Both matter because the recorder holds the
-    // keyboard — a stuck recording is a desktop with no working shortcuts.
-    // Every recording starts its own tick, which ends with that recording (or
-    // when a newer one replaces it), so none runs while nothing is recorded.
-    let watch_recording: Rc<dyn Fn()> = {
-        let recording = Rc::clone(&recording);
-        let stop_recording = Rc::clone(&stop_recording);
-        let panel = outer.downgrade();
-        let generation = Rc::new(Cell::new(0u64));
-        Rc::new(move || {
-            generation.set(generation.get().wrapping_add(1));
-            let ticket = generation.get();
-            let generation = Rc::clone(&generation);
-            let recording = Rc::clone(&recording);
-            let stop_recording = Rc::clone(&stop_recording);
-            let panel = panel.clone();
-            let mut armed_ticks = 0u32;
-            let max_ticks = (RECORD_WATCHDOG.as_millis() / RECORD_TICK.as_millis()).max(1) as u32;
-            glib::timeout_add_local(RECORD_TICK, move || {
-                let Some(panel) = panel.upgrade() else {
-                    return glib::ControlFlow::Break;
-                };
-                if !recording.get() || generation.get() != ticket {
-                    return glib::ControlFlow::Break;
-                }
-                armed_ticks += 1;
-                // `is_mapped`, not `is_visible`: hiding the whole overlay unmaps the
-                // window without ever touching the panel's own visibility flag.
-                if !panel.is_mapped() {
-                    stop_recording(Some("Recording cancelled — the panel was closed."));
-                    return glib::ControlFlow::Break;
-                }
-                if armed_ticks >= max_ticks {
-                    stop_recording(Some("No combination captured — try again."));
-                    return glib::ControlFlow::Break;
-                }
-                glib::ControlFlow::Continue
-            });
-        })
-    };
-
-    let start_recording: Rc<dyn Fn()> = {
-        let recording = Rc::clone(&recording);
-        let armed = Rc::clone(&armed);
-        let watch_recording = Rc::clone(&watch_recording);
-        let paint = Rc::clone(&paint_recorder);
-        let shortcut_note = shortcut_note.clone();
-        let btn_record = btn_record.clone();
-        Rc::new(move || {
-            if recording.get() {
-                return;
-            }
-            // The keys have to reach THIS surface: clicking Record focuses the
-            // button, and with it the panel the capture controller sits on.
-            btn_record.grab_focus();
-            let guard = crate::shortcut::begin_capture();
-            // Without the guard Hyprland keeps handling the shortcuts it owns
-            // before they ever reach this window, so say so instead of letting
-            // the user press a taken combination and watch nothing happen.
-            let unguarded = !guard.armed();
-            *armed.borrow_mut() = Some(guard);
-            recording.set(true);
-            watch_recording();
-            shortcut_note.set_visible(false);
-            if unguarded {
-                shortcut_note.add_css_class("launcher-note-error");
-                shortcut_note.set_text(
-                    "Could not pause Hyprland's own shortcuts — a combination that is \
-                     already bound will not reach this window.",
-                );
-                shortcut_note.set_visible(true);
-            }
-            paint();
-        })
-    };
-
-    // The listener. Capture phase, on the whole panel: it must see the keys
-    // before the widget the user last clicked, and before the window's own Esc
-    // handler — while recording, Esc cancels the recording, it does not hide
-    // the overlay.
-    let key_ctrl = EventControllerKey::new();
-    key_ctrl.set_propagation_phase(PropagationPhase::Capture);
-    {
-        let recording = Rc::clone(&recording);
-        let stop_recording = Rc::clone(&stop_recording);
-        let commit_shortcut = Rc::clone(&commit_shortcut);
-        let shortcut_note = shortcut_note.clone();
-        key_ctrl.connect_key_pressed(move |_, key, keycode, mods| {
-            if !recording.get() {
-                return glib::Propagation::Proceed;
-            }
-            if key == gdk::Key::Escape {
-                stop_recording(Some("Recording cancelled — the shortcut is unchanged."));
-                return glib::Propagation::Stop;
-            }
-            match crate::shortcut::interpret(key, mods) {
-                Capture::Combo(combo) => {
-                    commit_shortcut(&combo, keycode);
-                    glib::Propagation::Stop
-                }
-                Capture::NeedsModifier => {
-                    shortcut_note.add_css_class("launcher-note-error");
-                    shortcut_note.set_text(
-                        "Hold SUPER, CTRL or ALT with the key — or use F1-F12 on their own.",
-                    );
-                    shortcut_note.set_visible(true);
-                    glib::Propagation::Stop
-                }
-                Capture::Waiting => glib::Propagation::Stop,
-            }
-        });
-    }
-    outer.add_controller(key_ctrl);
-
-    btn_record.connect_clicked({
-        let recording = Rc::clone(&recording);
-        let start_recording = Rc::clone(&start_recording);
-        let stop_recording = Rc::clone(&stop_recording);
-        move |_| {
-            if recording.get() {
-                stop_recording(Some("Recording cancelled — the shortcut is unchanged."));
-            } else {
-                start_recording();
-            }
-        }
-    });
-
-    // ---- shared state: selection, detection order, row buttons ----
-    let selection: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let row_buttons: Rc<RefCell<Vec<(String, Button)>>> = Rc::new(RefCell::new(Vec::new()));
-
-    // Repaint every row + the counters from `selection`.
-    let paint: Rc<dyn Fn()> = {
-        let selection = Rc::clone(&selection);
-        let order = Rc::clone(&order);
-        let row_buttons = Rc::clone(&row_buttons);
-        let summary = summary.clone();
-        let count_chip = count_chip.clone();
-        let empty = empty.clone();
-        Rc::new(move || {
-            let selected = selection.borrow();
-            let total = order.borrow().len();
-            for (key, btn) in row_buttons.borrow().iter() {
-                paint_toggle(btn, selected.iter().any(|k| k == key));
-            }
-            summary.set_text(&summary_text(selected.len(), total));
-            count_chip.set_text(&format!("{} / {}", selected.len(), total));
-            if total == 0 {
-                empty.set_text("No harness CLIs found on this machine.");
-            }
-            empty.set_visible(total == 0);
-        })
-    };
-
-    // Single funnel for every selection change: repaint, then let the window
-    // persist it and sync the top bar.
-    let apply: Rc<dyn Fn(Vec<String>)> = {
-        let selection = Rc::clone(&selection);
-        let paint = Rc::clone(&paint);
-        let on_change = Rc::clone(&on_change);
-        Rc::new(move |keys: Vec<String>| {
-            *selection.borrow_mut() = keys.clone();
-            paint();
-            on_change(keys);
-        })
-    };
-
-    // Re-detect and rebuild the rows; the overlay calls this on every open.
-    let refresh: Rc<dyn Fn()> = {
-        let open_args = Rc::clone(&open_args);
-        let rows = rows.clone();
-        let rescan_status = rescan_status.clone();
-        let missing_rows = missing_rows.clone();
-        let missing_count = missing_count.clone();
-        let order = Rc::clone(&order);
-        let row_buttons = Rc::clone(&row_buttons);
-        let selection = Rc::clone(&selection);
-        let paint = Rc::clone(&paint);
-        let apply = Rc::clone(&apply);
-        let state = Rc::clone(&state);
-        let custom_name = custom_name.clone();
-        let custom_path = custom_path.clone();
-        let custom_args = custom_args.clone();
-        let form_status = form_status.clone();
-        let selected_icon = Rc::clone(&selected_icon);
-        let paint_icons = Rc::clone(&paint_icons);
-        let editing_custom = Rc::clone(&editing_custom);
-        let nav = Rc::clone(&nav);
-        let refresh_custom = Rc::downgrade(&refresh_custom);
-        let on_change = Rc::clone(&on_change);
-        let on_detected = Rc::clone(&on_detected);
+    let refresh = wire_harness_list(&harnesses, HarnessListHooks {
+        state: Rc::clone(&state),
+        on_change: Rc::clone(&on_change),
+        on_detected: Rc::clone(&on_detected),
+        open_args,
+        custom: custom.form.clone(),
+        nav: Rc::clone(&nav),
+        refresh: Rc::downgrade(&refresh_slot),
         // Reopening (or restyling on a theme switch) must never leave a
         // recording armed with the keyboard held.
-        let stop_recording = Rc::clone(&stop_recording);
-        let paint_recorder = Rc::clone(&paint_recorder);
-        let paint_size = Rc::clone(&paint_size);
-        let firewall_notice_refresh = Rc::clone(&firewall_notice_refresh);
-        Rc::new(move || {
-            rescan_status.set_text("");
+        reset: Rc::new(move || {
             stop_recording(None);
             paint_recorder();
             paint_size();
             firewall_notice_refresh();
-
-            let detected = detect_harnesses();
-            let light_theme = crate::theme::current_theme().mode == "light";
-
-            while let Some(child) = rows.first_child() {
-                rows.remove(&child);
-            }
-            while let Some(child) = missing_rows.first_child() {
-                missing_rows.remove(&child);
-            }
-            row_buttons.borrow_mut().clear();
-
-            let mut missing = 0;
-            for key in crate::tmux::HARNESS_KEYS {
-                if detected.iter().any(|info| info.key == *key) { continue; }
-                let cfg = crate::tmux::get_agent_config(key);
-                let info = HarnessInfo {
-                    key, name: cfg.name, icon: cfg.icon,
-                    command: format!("Not installed · {}", cfg.commands[0]),
-                };
-                let (row, params, toggle) = harness_row(&info, light_theme);
-                row.remove(&params);
-                row.remove(&toggle);
-                missing_rows.append(&row);
-                missing += 1;
-            }
-            missing_count.set_text(&missing.to_string());
-
-            for info in &detected {
-                let (row, params, btn) = harness_row(info, light_theme);
-                params.connect_clicked({
-                    let open = Rc::clone(&open_args);
-                    let key = info.key;
-                    move |_| open(key)
-                });
-                let key = info.key.to_string();
-                let order = Rc::clone(&order);
-                let selection = Rc::clone(&selection);
-                let apply = Rc::clone(&apply);
-                btn.connect_clicked({
-                    let key = key.clone();
-                    move |_| {
-                        let mut sel = selection.borrow().clone();
-                        toggle(&mut sel, &key, &order.borrow());
-                        apply(sel);
-                    }
-                });
-                rows.append(&row);
-                if info.key == "openclaw" {
-                    rows.append(&openclaw_plugin_notice(OpenClawActions::SYSTEM));
-                }
-                row_buttons.borrow_mut().push((key, btn));
-            }
-
-            for item in state.borrow().custom_harnesses.clone() {
-                let (row, btn, edit, remove) = custom_row(&item);
-                let key = item.id.clone();
-                let order = Rc::clone(&order);
-                let selection = Rc::clone(&selection);
-                let apply = Rc::clone(&apply);
-                btn.connect_clicked({
-                    let key = key.clone();
-                    move |_| {
-                        let mut sel = selection.borrow().clone();
-                        toggle(&mut sel, &key, &order.borrow());
-                        apply(sel);
-                    }
-                });
-                edit.connect_clicked({
-                    let name = custom_name.clone();
-                    let path = custom_path.clone(); let args = custom_args.clone();
-                    let status = form_status.clone();
-                    let selected = Rc::clone(&selected_icon); let paint = Rc::clone(&paint_icons);
-                    let editing = Rc::clone(&editing_custom); let item = item.clone();
-                    let nav = Rc::clone(&nav);
-                    move |_| {
-                        *editing.borrow_mut() = Some(item.id.clone());
-                        for entry in [&name, &path, &args] { entry.remove_css_class("ws-entry-invalid"); }
-                        status.set_text(""); status.set_visible(false);
-                        name.set_text(&item.name); path.set_text(&item.executable);
-                        args.set_text(&item.arguments.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'"))).collect::<Vec<_>>().join(" "));
-                        selected.set(crate::custom_harness::ICONS.iter().position(|icon| *icon == item.icon).unwrap_or(0));
-                        paint(); nav(SettingsPage::CustomHarness); name.grab_focus();
-                    }
-                });
-                remove.connect_clicked({
-                    let state = Rc::clone(&state); let on_change = Rc::clone(&on_change);
-                    let refresh = refresh_custom.clone();
-                    move |_| {
-                        let mut s = state.borrow_mut();
-                        s.custom_harnesses.retain(|item| item.id != key);
-                        if let Some(visible) = &mut s.visible_harnesses { visible.retain(|id| id != &key); }
-                        let selected = visible_keys(&s, &detect_harnesses());
-                        drop(s);
-                        on_change(selected);
-                        if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
-                    }
-                });
-                rows.append(&row);
-                row_buttons.borrow_mut().push((item.id.clone(), btn));
-            }
-
-            *order.borrow_mut() = detected_keys(&detected).into_iter()
-                .chain(state.borrow().custom_harnesses.iter().filter(|item| item.available()).map(|item| item.id.clone())).collect();
-            *selection.borrow_mut() = visible_keys(&state.borrow(), &detected);
-            paint();
-            on_detected(selection.borrow().clone());
-        })
-    };
-
-    *refresh_custom.borrow_mut() = Some(Rc::clone(&refresh));
-    btn_rescan.connect_clicked({
-        let refresh = Rc::clone(&refresh);
-        let order = Rc::clone(&order);
-        let status = rescan_status.clone();
-        move |_| {
-            let before = order.borrow().clone();
-            refresh();
-            let new: Vec<_> = order.borrow().iter()
-                .filter(|key| !before.contains(key) && crate::tmux::HARNESS_KEYS.contains(&key.as_str()))
-                .map(|key| crate::tmux::get_agent_config(key).name)
-                .collect();
-            let message = if new.is_empty() {
-                format!("Scan complete. {} installed launchers available.",
-                    order.borrow().iter().filter(|key| crate::tmux::HARNESS_KEYS.contains(&key.as_str())).count())
-            } else {
-                format!("Found: {}. The top bar is updated; use the toggles to change visibility.", new.join(", "))
-            };
-            status.set_text(&message);
-        }
+        }),
     });
-    btn_save_custom.connect_clicked({
-        let state = Rc::clone(&state); let name = custom_name.clone();
-        let path = custom_path.clone(); let args = custom_args.clone();
-        let selected = Rc::clone(&selected_icon); let editing = Rc::clone(&editing_custom);
-        let status = form_status.clone(); let subtitle = subtitle.clone(); let nav = Rc::clone(&nav);
-        let on_change = Rc::clone(&on_change); let refresh = Rc::downgrade(&refresh_custom);
-        move |_| {
-            let entered_name = name.text();
-            let effective_name = if entered_name.trim().is_empty() {
-                suggested_harness_name(&path.text()).unwrap_or_default()
-            } else {
-                entered_name.to_string()
-            };
-            let icon = crate::custom_harness::ICONS[selected.get()];
-            match crate::custom_harness::CustomHarness::create(&effective_name, icon, &path.text(), &args.text()) {
-                Ok(mut item) => {
-                    let mut s = state.borrow_mut();
-                    if let Some(id) = editing.borrow().as_ref() { item.id = id.clone(); }
-                    if s.custom_harnesses.iter().any(|old| old.id == item.id) {
-                        if let Some(old) = s.custom_harnesses.iter_mut().find(|old| old.id == item.id) { *old = item; }
-                    } else {
-                        let id = item.id.clone();
-                        s.custom_harnesses.push(item);
-                        if let Some(visible) = &mut s.visible_harnesses { visible.push(id); }
-                    }
-                    let selected = visible_keys(&s, &detect_harnesses());
-                    drop(s);
-                    on_change(selected);
-                    crate::state::flush_state_saves();
-                    status.set_text(""); status.set_visible(false);
-                    if let Some(refresh) = refresh.upgrade().and_then(|slot| slot.borrow().clone()) { refresh(); }
-                    nav(SettingsPage::Harnesses);
-                }
-                Err(error) => {
-                    status.set_text(&error);
-                    status.set_visible(true);
-                    subtitle.set_label(&error);
-                    subtitle.add_css_class("launcher-note-error");
-                    let invalid = match error.as_str() {
-                        "Enter a name of up to 48 characters" => &name,
-                        "Arguments have an unmatched quote" | "Use at most 32 arguments of up to 1024 characters each" => &args,
-                        _ => &path,
-                    };
-                    invalid.add_css_class("ws-entry-invalid");
-                    invalid.grab_focus();
-                }
-            }
-        }
-    });
-
-    btn_all.connect_clicked({
-        let order = Rc::clone(&order);
-        let apply = Rc::clone(&apply);
-        move |_| apply(order.borrow().clone())
-    });
-    btn_none.connect_clicked({
-        let apply = Rc::clone(&apply);
-        move |_| apply(Vec::new())
-    });
-
+    *refresh_slot.borrow_mut() = Some(Rc::clone(&refresh));
     refresh();
 
     let refresh: Rc<dyn Fn()> = Rc::new({
-        let slot = Rc::clone(&refresh_custom);
+        let slot = Rc::clone(&refresh_slot);
         let run = Rc::clone(&refresh);
         move || { let _keep_alive = &slot; run(); }
     });
