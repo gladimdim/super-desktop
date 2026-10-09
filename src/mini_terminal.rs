@@ -755,18 +755,33 @@ impl MiniTerminalCard {
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
         // File previews read this machine's own sessions, so a remote card
-        // never gets that button.
+        // never gets that button. The panel buttons sit closer together than
+        // the rest of the header: it sets the card's minimum width, and these
+        // three must fit a default-size card without widening it.
         if !source.is_remote() {
-            header.append(&crate::asset_view::button(
+            let panels = gtk4::Box::new(Orientation::Horizontal, 0);
+            panels.add_css_class("term-panel-btns");
+            panels.append(&crate::asset_view::button(
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
             ));
+            // Attachments are files on this machine, typed into its own
+            // terminal. A card from before folders were recorded started in
+            // $HOME.
+            let folder = data.borrow().workspace_dir.clone()
+                .unwrap_or_else(crate::state::home_dir_string);
+            panels.append(&crate::attachment_view::button(
+                data.borrow().session_name.clone(),
+                display_name.to_string(),
+                folder,
+            ));
             // Prompt history reads this machine's journal and agent files too.
-            header.append(&crate::prompt_history_view::button(
+            panels.append(&crate::prompt_history_view::button(
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
                 &agent_type,
             ));
+            header.append(&panels);
         }
 
         // Iconify button: iconifies the window into 128x128 size
@@ -881,19 +896,6 @@ impl MiniTerminalCard {
         hint_label.set_hexpand(true);
         hint_label.set_halign(Align::End);
         footer.append(&hint_label);
-        // 📎 sits in the footer, under where the prompt is typed. The header
-        // already sets the card's minimum width; the footer has room to spare.
-        // Attachments are files on this machine, typed into its own terminal.
-        if !source.is_remote() {
-            // A card from before folders were recorded started in $HOME.
-            let folder = data.borrow().workspace_dir.clone()
-                .unwrap_or_else(crate::state::home_dir_string);
-            footer.append(&crate::attachment_view::button(
-                data.borrow().session_name.clone(),
-                display_name.to_string(),
-                folder,
-            ));
-        }
         body.append(&footer);
 
         root.set_child(Some(&body));

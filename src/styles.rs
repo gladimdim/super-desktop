@@ -883,6 +883,13 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     transition: background-color 150ms ease;
 }}
 
+/* A card's panel buttons (Files, 📎, history): tighter than the header's
+   other buttons, so all three fit a default-size card. */
+.term-panel-btns .term-btn {{
+    padding: 3px 4px;
+    min-width: 0;
+}}
+
 .term-btn:hover {{
     color: {bright_foreground};
     background-color: {btn_hover_bg};

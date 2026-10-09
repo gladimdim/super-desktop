@@ -1,7 +1,7 @@
 //! A card's 📎 attachments: files on this PC the user collects for the
 //! harness, then inserts into its prompt in one go.
 //!
-//! The 📎 button in a local card's footer opens a floating panel with the
+//! The 📎 button in a local card's header, next to Files, opens a floating panel with the
 //! files attached so far and a browser of this PC's folders, starting in the
 //! card's project folder. Files can also be dropped on the panel from a file
 //! manager or pasted with Ctrl+V. **Insert into prompt** types them into the
@@ -42,6 +42,10 @@ struct Open {
     session: String,
     panel: Rc<crate::floating_panel::MovablePanel>,
     generation: Rc<Cell<u64>>,
+    /// The panel's repaint. Its rows and buttons reach it only weakly (they
+    /// live inside the panel it redraws), so this keeps it for as long as
+    /// the panel is open.
+    paint: Rc<dyn Fn()>,
 }
 
 /// The files attached to `session`.
@@ -96,7 +100,7 @@ fn paint_button(button: &gtk4::Button, count: usize) {
         n => format!("{n} files attached; open to insert them into the prompt"),
     };
     button.set_tooltip_text(Some(&tip));
-    if let Some(label) = button.child().and_then(|row| row.last_child()).and_downcast::<gtk4::Label>() {
+    if let Some(label) = count_label(button) {
         label.set_text(&count.to_string());
         label.set_visible(count > 0);
     }
@@ -115,19 +119,29 @@ fn attach_icon() -> &'static str {
     if ours { "sd-attach-symbolic" } else { "mail-attachment-symbolic" }
 }
 
-/// The 📎 footer button of a local card. `folder` is where the browser
+/// The count badge on a 📎 button.
+fn count_label(button: &gtk4::Button) -> Option<gtk4::Label> {
+    button.child().and_then(|clip| clip.last_child()).and_downcast::<gtk4::Label>()
+}
+
+/// The 📎 header button of a local card. `folder` is where the browser
 /// starts: the card's project folder.
 pub fn button(session: String, title: String, folder: String) -> gtk4::Button {
-    // The paper clip, and how many files wait to be inserted.
-    let row = gtk4::Box::new(Orientation::Horizontal, 3);
+    // The paper clip, with how many files wait to be inserted drawn over its
+    // corner: the header sets the card's minimum width, so a count beside
+    // the clip would widen every card that has files waiting.
+    let clip = gtk4::Overlay::new();
     let image = gtk4::Image::from_icon_name(attach_icon());
-    image.set_pixel_size(14);
-    row.append(&image);
+    image.set_pixel_size(16);
+    clip.set_child(Some(&image));
     let count = gtk4::Label::new(None);
     count.add_css_class("attach-count");
-    row.append(&count);
+    count.set_halign(Align::End);
+    count.set_valign(Align::Start);
+    count.set_can_target(false);
+    clip.add_overlay(&count);
     let button = gtk4::Button::new();
-    button.set_child(Some(&row));
+    button.set_child(Some(&clip));
     button.update_property(&[gtk4::accessible::Property::Label("Attach files")]);
     button.add_css_class("term-btn");
     button.add_css_class("attach-btn");
@@ -183,6 +197,7 @@ fn open(session: &str, title: &str, folder: &str, origin: glib::WeakRef<gtk4::Bu
             session: session.to_string(),
             panel,
             generation: Rc::clone(&drawer.generation),
+            paint: Rc::clone(&drawer.paint),
         })
     });
 }
@@ -292,7 +307,7 @@ fn explain(error: &str) -> String {
     }
 }
 
-// The rest of the fields are for the tests.
+// `insert`, `status`, `add` and `browse` are for the tests.
 #[cfg_attr(not(test), allow(dead_code))]
 struct Drawer {
     widget: gtk4::Box,
@@ -300,7 +315,8 @@ struct Drawer {
     generation: Rc<Cell<u64>>,
     insert: gtk4::Button,
     status: gtk4::Label,
-    /// Repaints the attached list and the browser's checks.
+    /// Repaints the attached list and the browser's checks. Everything in
+    /// the panel holds it weakly: whoever shows the panel must keep this.
     paint: Rc<dyn Fn()>,
     /// Adds files, as a drop or a paste does.
     add: Rc<dyn Fn(Vec<PathBuf>)>,
@@ -816,15 +832,16 @@ pub fn css(theme: &OmarchyTheme) -> String {
     format!(
         r#"
 /* ================= Card attachments (📎) ================= */
-/* Compact, so the footer keeps its height and the terminal its rows. */
-.term-footer .term-btn.attach-btn {{
-    padding: 0 6px;
-    min-height: 0;
-    margin: -2px 0;
-}}
+/* A small badge on the clip's corner, so a count adds no width. */
 .attach-count {{
-    font-size: 10px;
+    font-size: 8px;
     font-weight: 800;
+    min-width: 6px;
+    padding: 0 2px;
+    margin: -3px -4px 0 0;
+    border-radius: 6px;
+    color: {bg};
+    background-color: {accent};
 }}
 .term-btn.attach-btn.has-attachments {{
     color: {accent};
@@ -879,6 +896,7 @@ button.attach-browse-row.attached .attach-check {{
 }}
 "#,
         accent = theme.accent,
+        bg = theme.background,
         fg = theme.foreground,
         bright_fg = theme.bright_foreground,
         dim_fg = theme.dark_foreground,
@@ -950,21 +968,8 @@ mod tests {
         std::fs::write(dir.join("screenshot.png"), b"png").unwrap();
         let session = "sd_term_attach_test";
         let card_button = button(session.into(), "Claude Code".into(), dir.to_string_lossy().into_owned());
-        let count = card_button.child().unwrap().last_child().unwrap().downcast::<gtk4::Label>().unwrap();
+        let count = count_label(&card_button).unwrap();
         assert!(!count.is_visible(), "no count while nothing is attached");
-        // In a card's footer it adds no height: the terminal keeps its rows.
-        let footer_height = |with_button: bool| {
-            let footer = gtk4::Box::new(Orientation::Horizontal, 6);
-            footer.add_css_class("term-footer");
-            let meta = gtk4::Label::new(Some("PID: 1 • Foot/Tmux"));
-            meta.add_css_class("term-meta");
-            footer.append(&meta);
-            if with_button {
-                footer.append(&button("sd_term_footer".into(), "Shell".into(), "/".into()));
-            }
-            footer.measure(Orientation::Vertical, -1).1
-        };
-        assert!(footer_height(true) <= footer_height(false), "{} > {}", footer_height(true), footer_height(false));
         assert!(!card_button.has_css_class("has-attachments"));
         let drawer = build(session, "Claude Code · ~/app", &dir, card_button.downgrade());
         let window = gtk4::Window::new();
@@ -1058,6 +1063,146 @@ mod tests {
         assert_eq!(staged(session).len(), 1);
         window.close();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn panel_opened_from_the_card_lists_clicked_files() {
+        crate::gtk_test::run_in_child_process("attachment_view::tests::opened_panel_inner");
+    }
+
+    /// Opened the way the app opens it, from the card's 📎: only the panel
+    /// itself keeps it alive, and a clicked file still shows in its list.
+    #[test]
+    fn opened_panel_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let dir = std::env::temp_dir().join(format!("sd-attach-opened-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("notes.md"), b"x").unwrap();
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&gtk4::Box::new(Orientation::Vertical, 0)));
+        let ceiling = gtk4::Box::new(Orientation::Vertical, 0);
+        overlay.add_overlay(&ceiling);
+        crate::asset_view::set_host(&overlay, Rc::new(|| 0), &ceiling);
+        let window = gtk4::Window::new();
+        window.set_default_size(900, 700);
+        window.set_child(Some(&overlay));
+        window.present();
+        let session = "sd_term_attach_opened";
+        let card_button = button(session.into(), "Claude Code".into(), dir.to_string_lossy().into_owned());
+        card_button.emit_clicked();
+        let find = |class: &str| {
+            let mut found = Vec::new();
+            let mut stack = vec![overlay.clone().upcast::<gtk4::Widget>()];
+            while let Some(widget) = stack.pop() {
+                if widget.has_css_class(class) {
+                    found.push(widget.clone());
+                }
+                let mut child = widget.first_child();
+                while let Some(next) = child {
+                    child = next.next_sibling();
+                    stack.push(next);
+                }
+            }
+            found
+        };
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while find("attach-browse-row").is_empty() {
+            assert!(std::time::Instant::now() < until, "the folder never listed");
+            crate::gtk_test::pump(20);
+        }
+        let row = find("attach-browse-row").pop().unwrap().downcast::<gtk4::Button>().unwrap();
+        row.emit_clicked();
+        assert_eq!(staged(session), [dir.join("notes.md")]);
+        assert_eq!(find("attach-row").len(), 1, "the clicked file is listed");
+        assert!(row.has_css_class("attached"), "and checked in the browser");
+        // Closing drops the panel and its repaint; the file stays attached.
+        let close_button = find("attach-panel").pop().unwrap()
+            .first_child().unwrap().last_child().unwrap().downcast::<gtk4::Button>().unwrap();
+        close_button.emit_clicked();
+        assert!(find("attach-panel").is_empty());
+        assert!(OPEN.with(|open| open.borrow().is_empty()));
+        assert_eq!(staged(session).len(), 1);
+        set_staged(session, Vec::new());
+        window.close();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn card_header_holds_the_attach_button() {
+        crate::gtk_test::run_in_child_process("attachment_view::tests::card_header_inner");
+    }
+
+    /// 📎 sits in a local card's header between Files and history, never in
+    /// its footer, and the header still fits a default-size card with every
+    /// status and a count showing: the header sets the card's minimum width.
+    #[test]
+    fn card_header_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let session = "sd_term_header";
+        let data = crate::state::TerminalData {
+            id: session.into(), session_name: session.into(),
+            agent_type: "claude".into(), command: "claude".into(),
+            x: 0, y: 0, width: 520, height: 300, restored_width: 520, restored_height: 300,
+            iconified: true, icon_x: None, icon_y: None, created_at: 0.0, tag: 0,
+            agent_session_id: None, workspace_dir: Some("/tmp".into()),
+        };
+        let card = crate::mini_terminal::MiniTerminalCard::new(
+            data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())),
+            crate::mini_terminal::HoverRaiseLock::new(), crate::card_source::CardSource::Local,
+        );
+        card.open_with_bare_terminal(520, 300);
+        let find = |root: &gtk4::Widget, class: &str| {
+            let mut found = Vec::new();
+            let mut stack = vec![root.clone()];
+            while let Some(widget) = stack.pop() {
+                if widget.has_css_class(class) {
+                    found.push(widget.clone());
+                }
+                let mut child = widget.last_child();
+                while let Some(next) = child {
+                    child = next.prev_sibling();
+                    stack.push(next);
+                }
+            }
+            found
+        };
+        let root = card.container.clone().upcast::<gtk4::Widget>();
+        let header = find(&root, "term-header").pop().expect("a header");
+        let footer = find(&root, "term-footer").pop().expect("a footer");
+        assert!(find(&footer, "attach-btn").is_empty(), "📎 left the footer");
+        let panels = find(&header, "term-panel-btns").pop().expect("panel buttons in the header");
+        let labels: Vec<String> = std::iter::successors(panels.first_child(), |w| w.next_sibling())
+            .map(|w| w.downcast::<gtk4::Button>().unwrap())
+            .map(|b| b.tooltip_text().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(labels.len(), 3, "{labels:?}");
+        assert!(labels[0].starts_with("Files"), "{labels:?}");
+        assert_eq!(labels[1], "Attach files to this harness");
+
+        set_staged(session, vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.md")]);
+        let button = find(&header, "attach-btn").pop().unwrap().downcast::<gtk4::Button>().unwrap();
+        assert_eq!(count_label(&button).unwrap().text(), "2");
+        let badge = find(&header, "term-status-badge").pop().unwrap().downcast::<gtk4::Label>().unwrap();
+        for status in ["● IDLE", "○ EXITED", "● WORKING"] {
+            badge.set_label(status);
+            // Its border puts the card a pixel or two outside the header.
+            let width = header.measure(Orientation::Horizontal, -1).0;
+            assert!(
+                width + 4 <= crate::mini_terminal::CARD_WIDTH,
+                "{status}: the header needs {width}px, a default card is {}px",
+                crate::mini_terminal::CARD_WIDTH
+            );
+        }
+        set_staged(session, Vec::new());
     }
 
     /// A picture of a card with its 📎, for a visual check:
