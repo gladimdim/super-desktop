@@ -752,293 +752,62 @@ fn run_daemon(start_visible: bool) {
     });
     startup::mark("IPC listening");
     // Independent owner-only CLI endpoint. Legacy bridge IPC remains unchanged.
-    let (control_tx, mut control_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
-    let (adopt_tx, mut adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
-    let (geometry_tx, mut geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
-    let (files_tx, mut files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
-    let (shortcut_tx, mut shortcut_rx)=futures_channel::mpsc::channel::<control_shortcut::Query>(8);
-    let (close_tx, mut close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
+    let (snapshot, snapshot_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
+    let (adopt, adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
+    let (geometry, geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
+    let (files, files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
+    let (shortcut, shortcut_rx) = futures_channel::mpsc::channel::<control_shortcut::Query>(8);
+    let (close, close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
+    let channels = ControlChannels { snapshot, adopt, geometry, files, shortcut, close };
     match control::Server::bind(&runtime_dir()) {
         Ok(server) => {
             let _ = thread::Builder::new()
                 .name("sd-control".into())
                 .spawn(move || {
-                    server.run(move |request, deadline| {
-                        if matches!(request.command, control::Command::Capabilities {}) {
-                            return control::Reply::success(
-                                &request.request_id,
-                                control::capabilities(),
-                            );
-                        }
-                        if matches!(request.command,control::Command::ConnectionRead {..}|control::Command::ConnectionInvite {..}|control::Command::ConnectionDecide {..}|control::Command::ConnectionRevoke {..}) {
-                            return control_connection::execute(&control_journal::root(), &request, deadline);
-                        }
-                        if matches!(request.command,control::Command::PeerAdd {..}|control::Command::PeerPairing {..}) {
-                            return control_pairing::execute(&control_journal::root(), &request);
-                        }
-                        if matches!(request.command,control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}) {
-                            return control_peer::execute(&control_journal::root(),&request,deadline);
-                        }
-                        if matches!(request.command,control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}) {
-                            return control_updates::execute(&control_journal::root(),&request);
-                        }
-                        if matches!(request.command,control::Command::Forget {..}|control::Command::Relaunch {..}) {
-                            return control_relaunch::execute(&control_journal::root(),&request,deadline,|action|{
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);close_tx.clone().try_send(control_close::Query {request:request.clone(),action,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
-                            },|data,deadline|{let (responder,response)=std::sync::mpsc::sync_channel(1);adopt_tx.clone().try_send(control_service::Adoption {data,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())?});
-                        }
-                        if matches!(request.command,control::Command::Shortcut {..}) {
-                            return control_shortcut::execute(&control_journal::root(),&request,deadline,|commit|{
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);
-                                shortcut_tx.clone().try_send(control_shortcut::Query {request:request.clone(),commit,responder,deadline}).map_err(|_|())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
-                            });
-                        }
-                        if let control::Command::Audit {after,limit,expect_revision}=&request.command {
-                            return control_journal::list(&control_journal::root(), &request.request_id,after.as_deref(),*limit,expect_revision.as_deref());
-                        }
-                        if let control::Command::InspectRequest { id } = &request.command {
-                            return control_journal::inspect(
-                                &control_journal::root(),
-                                &request.request_id,
-                                id,
-                            );
-                        }
-                        if matches!(
-                            request.command,
-                            control::Command::Files { .. } | control::Command::FilesEdit { .. }
-                        ) {
-                            return control_files::execute(
-                                &control_journal::root(),
-                                &request,
-                                deadline,
-                                || {
-                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                    files_tx
-                                        .clone()
-                                        .try_send(control_files::Query {
-                                            request: request.clone(),
-                                            responder,
-                                            deadline,
-                                        })
-                                        .map_err(|_| {
-                                            control::Reply::failure(
-                                                &request.request_id,
-                                                "busy",
-                                                "File inventory is busy.",
-                                            )
-                                        })?;
-                                    response
-                                        .recv_timeout(
-                                            deadline.saturating_duration_since(
-                                                std::time::Instant::now(),
-                                            ),
-                                        )
-                                        .map_err(|_| {
-                                            control::Reply::failure(
-                                                &request.request_id,
-                                                "timeout",
-                                                "File inventory timed out.",
-                                            )
-                                        })?
-                                },
-                            );
-                        }
-                        if matches!(request.command, control::Command::Attach { .. }) {
-                            return control_attach::execute(
-                                &control_journal::root(),
-                                &request,
-                                deadline,
-                                || {
-                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                    close_tx
-                                        .clone()
-                                        .try_send(control_close::Query {
-                                            request: request.clone(),
-                                            action: control_close::Action::Inspect,
-                                            responder,
-                                            deadline,
-                                        })
-                                        .map_err(|_| ())?;
-                                    response
-                                        .recv_timeout(
-                                            deadline.saturating_duration_since(
-                                                std::time::Instant::now(),
-                                            ),
-                                        )
-                                        .map_err(|_| ())
-                                },
-                            );
-                        }
-                        if matches!(request.command,control::Command::Viewport {..}|control::Command::Viewports {..}) {
-                            return control_viewport::execute(&control_journal::root(),&request,deadline,|| {
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);
-                                close_tx.clone().try_send(control_close::Query {request:request.clone(),action:control_close::Action::Inspect,responder,deadline}).map_err(|_|())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
-                            });
-                        }
-                        if matches!(request.command, control::Command::Input { .. }) {
-                            return control_input::execute(&control_journal::root(), &request, deadline, || {
-                                let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action: control_close::Action::Inspect, responder, deadline }).map_err(|_| ())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
-                            });
-                        }
-                        if matches!(request.command, control::Command::Close { .. }) {
-                            return control_close::execute(&control_journal::root(), &request, deadline, |action| {
-                                let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action, responder, deadline }).map_err(|_| ())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
-                            });
-                        }
-                        if matches!(request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::CardAction { .. } | control::Command::Mode { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. }) {
-                            return control_geometry::dispatch(&control_journal::root(), &request, deadline, |request| {
-                                let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                geometry_tx.clone().try_send(control_geometry::Query { request: request.clone(), responder, deadline }).map_err(|_| ())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
-                            });
-                        }
-                        let (responder, response) = std::sync::mpsc::sync_channel(1);
-                        if control_tx
-                            .clone()
-                            .try_send(control_service::Query {
-                                responder,
-                                deadline,
-                            })
-                            .is_err()
-                        {
-                            return control::Reply::failure(
-                                &request.request_id,
-                                "busy",
-                                "Local inventory is busy.",
-                            );
-                        }
-                        let wait = deadline.saturating_duration_since(std::time::Instant::now());
-                        match response.recv_timeout(wait) {
-                            Ok(snapshot)
-                                if matches!(request.command, control::Command::Launch { .. }) =>
-                            {
-                                control_launch::execute(
-                                    &control_journal::root(),
-                                    &request,
-                                    snapshot,
-                                    deadline,
-                                    |data, deadline| {
-                                        let (responder, response) =
-                                            std::sync::mpsc::sync_channel(1);
-                                        adopt_tx
-                                            .clone()
-                                            .try_send(control_service::Adoption {
-                                                data,
-                                                responder,
-                                                deadline,
-                                            })
-                                            .map_err(|_| ())?;
-                                        response
-                                            .recv_timeout(deadline.saturating_duration_since(
-                                                std::time::Instant::now(),
-                                            ))
-                                            .map_err(|_| ())?
-                                    },
-                                )
-                            }
-                            Ok(snapshot) if matches!(request.command, control::Command::Lifecycle { .. } | control::Command::Composer { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. }) => {
-                                control_terminal::execute(&request, &snapshot.state, deadline, |card| {
-                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                    control_tx.clone().try_send(control_service::Query { responder, deadline }).map_err(|_| ())?;
-                                    let current = response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())?;
-                                    Ok(current.state.terminals.iter().any(|candidate|
-                                        candidate.id == card.id && candidate.session_name == card.session_name
-                                        && candidate.created_at == card.created_at))
-                                })
-                            }
-                            Ok(snapshot) => control_service::answer(request, snapshot),
-                            Err(_) => control::Reply::failure(
-                                &request.request_id,
-                                "timeout",
-                                "Local inventory timed out.",
-                            ),
-                        }
-                    });
+                    server.run(move |request, deadline| control_handler(&channels, request, deadline));
                 });
         }
         Err(error) => eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}"),
     }
-    let close_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = close_rx.next().await {
-            let result = if std::time::Instant::now() >= query.deadline {
-                Err(control::Reply::failure(&query.request.request_id, "timeout", "Close expired before card removal."))
-            } else if let Some(window) = live_window(&close_context) {
-                let model = Rc::clone(&close_context.borrow().local_workspace);
-                window.cli_close(&model, &query.request, query.action)
-            } else {
-                Err(control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready."))
-            };
-            let _ = query.responder.send(result);
-        }
+    serve_window(&context, close_rx, "Close expired before card removal.", "Local desktop is not ready.", Err, |window, model, query| {
+        window.cli_close(model, &query.request, query.action)
     });
-    let files_context=Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query)=files_rx.next().await {
-            let result=if std::time::Instant::now()>=query.deadline {Err(control::Reply::failure(&query.request.request_id,"timeout","File request expired."))}
-                else if let Some(window)=live_window(&files_context) {let model=Rc::clone(&files_context.borrow().local_workspace);window.cli_file_target(&model,&query.request)}
-                else {Err(control::Reply::failure(&query.request.request_id,"unavailable","Local desktop is not ready."))};
-            let _=query.responder.send(result);
-        }
+    serve_window(&context, files_rx, "File request expired.", "Local desktop is not ready.", Err, |window, model, query| {
+        window.cli_file_target(model, &query.request)
     });
-    let shortcut_context=Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query)=shortcut_rx.next().await {
-            let reply=if std::time::Instant::now()>=query.deadline {control::Reply::failure(&query.request.request_id,"timeout","Shortcut request expired.")}
-                else if let Some(window)=live_window(&shortcut_context){let model=Rc::clone(&shortcut_context.borrow().local_workspace);window.cli_shortcut(&model,&query.request,query.commit)}
-                else{control::Reply::failure(&query.request.request_id,"unavailable","Desktop is not ready.")};
-            let _=query.responder.send(reply);
-        }
+    serve_window(&context, shortcut_rx, "Shortcut request expired.", "Desktop is not ready.", std::convert::identity, |window, model, query| {
+        window.cli_shortcut(model, &query.request, query.commit)
     });
-    let geometry_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = geometry_rx.next().await {
-            let reply = if std::time::Instant::now() >= query.deadline {
-                control::Reply::failure(&query.request.request_id, "timeout", "Geometry request expired before application.")
-            } else if let Some(window) = live_window(&geometry_context) {
-                let model = Rc::clone(&geometry_context.borrow().local_workspace);
-                if matches!(query.request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
-                    window.cli_workspace(&model, &query.request)
-                } else { window.cli_geometry(&model, &query.request) }
-            } else {
-                control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready.")
-            };
-            let _ = query.responder.send(reply);
+    serve_window(&context, geometry_rx, "Geometry request expired before application.", "Local desktop is not ready.", std::convert::identity, |window, model, query| {
+        if matches!(query.request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
+            window.cli_workspace(model, &query.request)
+        } else {
+            window.cli_geometry(model, &query.request)
         }
     });
     let adopt_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = adopt_rx.next().await {
-            let result = if std::time::Instant::now() >= query.deadline {
-                Err(())
-            } else {
-                live_window(&adopt_context)
-                    .ok_or(())
-                    .and_then(|window| window.adopt_cli_terminal(query.data))
-            };
-            let _ = query.responder.send(result);
-        }
+    serve(adopt_rx, move |query: control_service::Adoption| {
+        let result = if std::time::Instant::now() >= query.deadline {
+            Err(())
+        } else {
+            live_window(&adopt_context)
+                .ok_or(())
+                .and_then(|window| window.adopt_cli_terminal(query.data))
+        };
+        let _ = query.responder.send(result);
     });
-    let control_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = control_rx.next().await {
-            if std::time::Instant::now() >= query.deadline {
-                continue;
-            }
-            let ctx = control_context.borrow();
-            let state = ctx.local_workspace.state().borrow().clone();
-            let _ = query.responder.send(control_service::Snapshot {
-                state,
-                visible: ctx.shown,
-                ready: ctx.window.is_some(),
-            });
+    let snapshot_context = Rc::clone(&context);
+    serve(snapshot_rx, move |query: control_service::Query| {
+        if std::time::Instant::now() >= query.deadline {
+            return;
         }
+        let ctx = snapshot_context.borrow();
+        let state = ctx.local_workspace.state().borrow().clone();
+        let _ = query.responder.send(control_service::Snapshot {
+            state,
+            visible: ctx.shown,
+            ready: ctx.window.is_some(),
+        });
     });
     // A start that finishes an update from Settings → Updates says how it went.
     let _ = thread::Builder::new()
@@ -1163,6 +932,182 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
 /// keeps the read borrow alive until the end of the whole `if let` block, so a
 /// `ctx.borrow_mut()` inside it panics with `BorrowMutError` — and release
 /// builds use `panic = "abort"`, so that panic kills the daemon.
+/// Channels from control workers to the GTK thread, which owns the workspace.
+struct ControlChannels {
+    snapshot: futures_channel::mpsc::Sender<control_service::Query>,
+    adopt: futures_channel::mpsc::Sender<control_service::Adoption>,
+    geometry: futures_channel::mpsc::Sender<control_geometry::Query>,
+    files: futures_channel::mpsc::Sender<control_files::Query>,
+    shortcut: futures_channel::mpsc::Sender<control_shortcut::Query>,
+    close: futures_channel::mpsc::Sender<control_close::Query>,
+}
+
+/// Why the GTK thread did not answer a control worker's query.
+enum Unanswered {
+    /// The queue was full; the query was not sent.
+    Busy,
+    /// No answer before the deadline; the query may still be applied.
+    Timeout,
+}
+
+/// Queues a query for the GTK thread and waits for its answer until `deadline`.
+fn ask<Q, A>(
+    queue: &futures_channel::mpsc::Sender<Q>,
+    deadline: std::time::Instant,
+    query: impl FnOnce(std::sync::mpsc::SyncSender<A>) -> Q,
+) -> Result<A, Unanswered> {
+    let (responder, response) = std::sync::mpsc::sync_channel(1);
+    queue
+        .clone()
+        .try_send(query(responder))
+        .map_err(|_| Unanswered::Busy)?;
+    response
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .map_err(|_| Unanswered::Timeout)
+}
+
+/// Answers one local control request on a control worker, never on the GTK
+/// thread: work that needs the window is queued through `channels`.
+fn control_handler(
+    channels: &ControlChannels,
+    request: control::Request,
+    deadline: std::time::Instant,
+) -> control::Reply {
+    use control::Command as C;
+    let root = control_journal::root;
+    let close = |action| {
+        ask(&channels.close, deadline, |responder| control_close::Query {
+            request: request.clone(),
+            action,
+            responder,
+            deadline,
+        })
+        .map_err(|_| ())
+    };
+    let inspect = || close(control_close::Action::Inspect);
+    let adopt = |data, deadline| {
+        ask(&channels.adopt, deadline, |responder| control_service::Adoption { data, responder, deadline })
+            .map_err(|_| ())?
+    };
+    match &request.command {
+        C::Capabilities {} => control::Reply::success(&request.request_id, control::capabilities()),
+        C::ConnectionRead { .. } | C::ConnectionInvite { .. } | C::ConnectionDecide { .. } | C::ConnectionRevoke { .. } => {
+            control_connection::execute(&root(), &request, deadline)
+        }
+        C::PeerAdd { .. } | C::PeerPairing { .. } => control_pairing::execute(&root(), &request),
+        C::PeerRead { .. } | C::PeerCommand { .. } | C::PeerForget { .. } => control_peer::execute(&root(), &request, deadline),
+        C::UpdatesCheck {} | C::UpdatesInstall { .. } | C::UpdatesStatus { .. } => control_updates::execute(&root(), &request),
+        C::Forget { .. } | C::Relaunch { .. } => control_relaunch::execute(&root(), &request, deadline, close, adopt),
+        C::Shortcut { .. } => control_shortcut::execute(&root(), &request, deadline, |commit| {
+            ask(&channels.shortcut, deadline, |responder| control_shortcut::Query { request: request.clone(), commit, responder, deadline })
+                .map_err(|_| ())
+        }),
+        C::Audit { after, limit, expect_revision } => control_journal::list(&root(), &request.request_id, after.as_deref(), *limit, expect_revision.as_deref()),
+        C::InspectRequest { id } => control_journal::inspect(&root(), &request.request_id, id),
+        C::Files { .. } | C::FilesEdit { .. } => control_files::execute(&root(), &request, deadline, || {
+            ask(&channels.files, deadline, |responder| control_files::Query { request: request.clone(), responder, deadline })
+                .map_err(|error| match error {
+                    Unanswered::Busy => control::Reply::failure(&request.request_id, "busy", "File inventory is busy."),
+                    Unanswered::Timeout => control::Reply::failure(&request.request_id, "timeout", "File inventory timed out."),
+                })?
+        }),
+        C::Attach { .. } => control_attach::execute(&root(), &request, deadline, inspect),
+        C::Viewport { .. } | C::Viewports { .. } => control_viewport::execute(&root(), &request, deadline, inspect),
+        C::Input { .. } => control_input::execute(&root(), &request, deadline, inspect),
+        C::Close { .. } => control_close::execute(&root(), &request, deadline, close),
+        C::Preferences { .. } | C::PreferencesEdit { .. } | C::Workspace { .. } | C::WorkspaceEdit { .. } | C::CardAction { .. } | C::Mode { .. } | C::Geometry { .. } | C::Move { .. } | C::Resize { .. } => {
+            control_geometry::dispatch(&root(), &request, deadline, |request| {
+                ask(&channels.geometry, deadline, |responder| control_geometry::Query { request: request.clone(), responder, deadline })
+                    .map_err(|_| ())
+            })
+        }
+        _ => {
+            let inventory = |deadline| ask(&channels.snapshot, deadline, |responder| control_service::Query { responder, deadline });
+            let snapshot = match inventory(deadline) {
+                Ok(snapshot) => snapshot,
+                Err(Unanswered::Busy) => return control::Reply::failure(&request.request_id, "busy", "Local inventory is busy."),
+                Err(Unanswered::Timeout) => return control::Reply::failure(&request.request_id, "timeout", "Local inventory timed out."),
+            };
+            match request.command {
+                C::Launch { .. } => control_launch::execute(&root(), &request, snapshot, deadline, adopt),
+                C::Lifecycle { .. } | C::Composer { .. } | C::Runtime { .. } | C::Capture { .. } => {
+                    control_terminal::execute(&request, &snapshot.state, deadline, |card| {
+                        let current = inventory(deadline).map_err(|_| ())?;
+                        Ok(current.state.terminals.iter().any(|candidate| {
+                            candidate.id == card.id
+                                && candidate.session_name == card.session_name
+                                && candidate.created_at == card.created_at
+                        }))
+                    })
+                }
+                _ => control_service::answer(request, snapshot),
+            }
+        }
+    }
+}
+
+/// Runs `handle` on the GTK thread for each query control workers queue.
+fn serve<Q: 'static>(
+    mut queries: futures_channel::mpsc::Receiver<Q>,
+    mut handle: impl FnMut(Q) + 'static,
+) {
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query) = queries.next().await {
+            handle(query);
+        }
+    });
+}
+
+/// A control worker's query that the GTK thread answers with the window.
+trait WindowQuery: 'static {
+    type Answer: 'static;
+    fn parts(&self) -> (&control::Request, std::time::Instant, &std::sync::mpsc::SyncSender<Self::Answer>);
+}
+
+macro_rules! window_query {
+    ($($query:ty => $answer:ty;)*) => {$(
+        impl WindowQuery for $query {
+            type Answer = $answer;
+            fn parts(&self) -> (&control::Request, std::time::Instant, &std::sync::mpsc::SyncSender<$answer>) {
+                (&self.request, self.deadline, &self.responder)
+            }
+        }
+    )*};
+}
+
+window_query! {
+    control_close::Query => control_close::UiResult;
+    control_files::Query => Result<state::TerminalData, control::Reply>;
+    control_shortcut::Query => control::Reply;
+    control_geometry::Query => control::Reply;
+}
+
+/// Answers window queries on the GTK thread. An expired query, or one that
+/// arrives before the window exists, gets a failure reply wrapped by `failed`.
+fn serve_window<Q: WindowQuery>(
+    context: &Rc<RefCell<AppContext>>,
+    queries: futures_channel::mpsc::Receiver<Q>,
+    expired: &'static str,
+    unavailable: &'static str,
+    failed: fn(control::Reply) -> Q::Answer,
+    answer: impl Fn(&SuperDesktopWindow, &Rc<workspace_model::LocalWorkspace>, Q) -> Q::Answer + 'static,
+) {
+    let context = Rc::clone(context);
+    serve(queries, move |query: Q| {
+        let (request, deadline, responder) = query.parts();
+        let (id, responder) = (request.request_id.clone(), responder.clone());
+        let result = if std::time::Instant::now() >= deadline {
+            failed(control::Reply::failure(&id, "timeout", expired))
+        } else if let Some(window) = live_window(&context) {
+            let model = Rc::clone(&context.borrow().local_workspace);
+            answer(&window, &model, query)
+        } else {
+            failed(control::Reply::failure(&id, "unavailable", unavailable))
+        };
+        let _ = responder.send(result);
+    });
+}
+
 fn live_window(ctx: &Rc<RefCell<AppContext>>) -> Option<Rc<SuperDesktopWindow>> {
     ctx.borrow().window.clone()
 }
