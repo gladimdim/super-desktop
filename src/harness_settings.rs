@@ -30,7 +30,7 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::Duration;
 
-use crate::launcher_settings::{chip, page_scroll, section_card, ConnectionHooks, ConnectionPage};
+use crate::launcher_settings::{chip, page_scroll, section_card, ConnectionHooks, ConnectionPage, ConnectionPages};
 use crate::shortcut::{Capture, CaptureGuard};
 use crate::state::{AppState, TopBarSize};
 use crate::tmux::{detect_harnesses, HarnessInfo};
@@ -60,6 +60,25 @@ enum SettingsPage {
     SleepLock,
     Updates,
     Connections(ConnectionPage),
+}
+
+impl SettingsPage {
+    /// Badge, title and subtitle for the panel header. The pages that edit a
+    /// harness are titled by it in `nav`.
+    fn header(self, connections: &ConnectionPages) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Home => ("⚙", "Settings", "Choose a section"),
+            Self::Shortcut => ("⌨", "Keyboard shortcut", "Show or hide SUPER DESKTOP"),
+            Self::Harnesses => ("⌘", "Harness launchers", "Choose what appears in the top bar"),
+            Self::CustomHarness => ("＋", "Add a harness", "Icon · name · executable · arguments"),
+            Self::HarnessArgs => ("⌘", "Harness parameters", "What new cards start with"),
+            Self::TopBar => ("▤", "Top bar", "Choose the desktop dock size"),
+            Self::Mcp => ("⚙", "MCP", "Local agent access and connection setup"),
+            Self::SleepLock => ("☀", "Sleep lock", "Keep harnesses available on charger power"),
+            Self::Updates => ("⟳", "Updates", "Newer versions from GitHub"),
+            Self::Connections(page) => connections.header(page),
+        }
+    }
 }
 
 /// How long a check started by opening Settings stays good; the Updates page
@@ -1311,8 +1330,6 @@ pub fn build_harness_settings_panel(
     let mcp_root = Box::new(Orientation::Vertical, 10);
     mcp_root.add_css_class("launcher-body");
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
-    let mcp_view = page_scroll(&mcp_root);
-    mcp_view.set_visible(false);
 
     let updates_root = Box::new(Orientation::Vertical, 10);
     updates_root.add_css_class("launcher-body");
@@ -1323,15 +1340,6 @@ pub fn build_harness_settings_panel(
         let check_updates = Rc::clone(&check_updates);
         move |_| check_updates(false)
     });
-
-    let home_view = page_scroll(&home_root);
-    let shortcut_view = page_scroll(&shortcut_root);
-    let harnesses_view = page_scroll(&harnesses_root);
-    let custom_view = page_scroll(&custom_root);
-    let args_view = page_scroll(&args_root);
-    let top_bar_view = page_scroll(&top_bar_root);
-    let sleep_view = page_scroll(&sleep_root);
-    let updates_view = page_scroll(&updates_root);
 
     // Connections is a family of destinations with its own overview. They
     // own their live bridge controls and refresh only while shown. `nav` is
@@ -1353,44 +1361,34 @@ pub fn build_harness_settings_panel(
     );
     let connection_pages = Rc::new(connection_pages);
 
+    // Every page, in the order the panel holds them; the hub shows first.
+    let mut views: Vec<(SettingsPage, gtk4::Widget)> = vec![
+        (SettingsPage::Home, page_scroll(&home_root).upcast()),
+        (SettingsPage::Shortcut, page_scroll(&shortcut_root).upcast()),
+        (SettingsPage::Harnesses, page_scroll(&harnesses_root).upcast()),
+        (SettingsPage::CustomHarness, page_scroll(&custom_root).upcast()),
+        (SettingsPage::TopBar, page_scroll(&top_bar_root).upcast()),
+        (SettingsPage::Mcp, page_scroll(&mcp_root).upcast()),
+    ];
+    views.extend(connection_pages.widgets().map(|(page, view)| (SettingsPage::Connections(page), view.clone())));
+    views.extend([
+        (SettingsPage::SleepLock, page_scroll(&sleep_root).upcast()),
+        (SettingsPage::Updates, page_scroll(&updates_root).upcast()),
+        (SettingsPage::HarnessArgs, page_scroll(&args_root).upcast()),
+    ]);
     let pages = Box::new(Orientation::Vertical, 0);
     pages.add_css_class("harness-pages");
     pages.set_vexpand(true);
-    pages.append(&home_view);
-    pages.append(&shortcut_view);
-    pages.append(&harnesses_view);
-    pages.append(&custom_view);
-    pages.append(&top_bar_view);
-    pages.append(&mcp_view);
-    for (_, view) in connection_pages.widgets() {
+    for (page, view) in &views {
         pages.append(view);
-        view.set_visible(false);
+        view.set_visible(*page == SettingsPage::Home);
     }
-    pages.append(&sleep_view);
-    pages.append(&updates_view);
-    pages.append(&args_view);
-    args_view.set_visible(false);
-    shortcut_view.set_visible(false);
-    harnesses_view.set_visible(false);
-    custom_view.set_visible(false);
-    top_bar_view.set_visible(false);
-    sleep_view.set_visible(false);
-    updates_view.set_visible(false);
     outer.append(&pages);
 
     let current_page = Rc::new(Cell::new(SettingsPage::Home));
     let nav: Rc<dyn Fn(SettingsPage)> = {
-        let home_view = home_view.clone();
-        let shortcut_view = shortcut_view.clone();
-        let harnesses_view = harnesses_view.clone();
-        let custom_view = custom_view.clone();
-        let args_view = args_view.clone();
-        let top_bar_view = top_bar_view.clone();
-        let mcp_view = mcp_view.clone();
         let refresh_mcp = refresh_mcp.clone();
         let connection_pages = Rc::clone(&connection_pages);
-        let sleep_view = sleep_view.clone();
-        let updates_view = updates_view.clone();
         let check_updates = Rc::clone(&check_updates);
         let btn_back = btn_back.clone();
         let badge = badge.clone();
@@ -1402,18 +1400,9 @@ pub fn build_harness_settings_panel(
         Rc::new(move |page| {
             current_page.set(page);
             subtitle.remove_css_class("launcher-note-error");
-            home_view.set_visible(page == SettingsPage::Home);
-            shortcut_view.set_visible(page == SettingsPage::Shortcut);
-            harnesses_view.set_visible(page == SettingsPage::Harnesses);
-            custom_view.set_visible(page == SettingsPage::CustomHarness);
-            args_view.set_visible(page == SettingsPage::HarnessArgs);
-            top_bar_view.set_visible(page == SettingsPage::TopBar);
-            mcp_view.set_visible(page == SettingsPage::Mcp);
-            for (connection, view) in connection_pages.widgets() {
-                view.set_visible(page == SettingsPage::Connections(connection));
+            for (shown, view) in &views {
+                view.set_visible(page == *shown);
             }
-            sleep_view.set_visible(page == SettingsPage::SleepLock);
-            updates_view.set_visible(page == SettingsPage::Updates);
             // An invitation lives only while its page is shown.
             if page != SettingsPage::Connections(ConnectionPage::Invite) {
                 connection_pages.invite.stop();
@@ -1427,62 +1416,22 @@ pub fn build_harness_settings_panel(
                 _ => "Back to settings",
             }));
 
+            let (icon, heading, summary) = page.header(&connection_pages);
+            badge.set_label(icon);
             match page {
-                SettingsPage::Home => {
-                    badge.set_label("⚙");
-                    title.set_label("Settings");
-                    subtitle.set_label("Choose a section");
-                }
-                SettingsPage::Shortcut => {
-                    badge.set_label("⌨");
-                    title.set_label("Keyboard shortcut");
-                    subtitle.set_label("Show or hide SUPER DESKTOP");
-                }
-                SettingsPage::Harnesses => {
-                    badge.set_label("⌘");
-                    title.set_label("Harness launchers");
-                    subtitle.set_label("Choose what appears in the top bar");
-                }
-                SettingsPage::CustomHarness => {
-                    badge.set_label("＋");
-                    title.set_label(if editing_custom.borrow().is_some() { "Edit harness" } else { "Add a harness" });
-                    subtitle.set_label("Icon · name · executable · arguments");
-                }
+                SettingsPage::CustomHarness if editing_custom.borrow().is_some() => title.set_label("Edit harness"),
                 SettingsPage::HarnessArgs => {
                     let name = editing_args.get().map_or("Harness", |key| crate::tmux::get_agent_config(key).name);
-                    badge.set_label("⌘");
                     title.set_label(&format!("{name} parameters"));
-                    subtitle.set_label("What new cards start with");
                 }
-                SettingsPage::TopBar => {
-                    badge.set_label("▤");
-                    title.set_label("Top bar");
-                    subtitle.set_label("Choose the desktop dock size");
-                }
-                SettingsPage::Mcp => {
-                    badge.set_label("⚙");
-                    title.set_label("MCP");
-                    subtitle.set_label("Local agent access and connection setup");
-                    refresh_mcp();
-                }
-                SettingsPage::SleepLock => {
-                    badge.set_label("☀");
-                    title.set_label("Sleep lock");
-                    subtitle.set_label("Keep harnesses available on charger power");
-                }
-                SettingsPage::Updates => {
-                    badge.set_label("⟳");
-                    title.set_label("Updates");
-                    subtitle.set_label("Newer versions from GitHub");
-                    check_updates(true);
-                }
-                SettingsPage::Connections(connection) => {
-                    let (icon, heading, summary) = connection_pages.header(connection);
-                    badge.set_label(icon);
-                    title.set_label(heading);
-                    subtitle.set_label(summary);
-                    (connection_pages.refresh)();
-                }
+                _ => title.set_label(heading),
+            }
+            subtitle.set_label(summary);
+            match page {
+                SettingsPage::Mcp => refresh_mcp(),
+                SettingsPage::Updates => check_updates(true),
+                SettingsPage::Connections(_) => (connection_pages.refresh)(),
+                _ => {}
             }
         })
     };
@@ -1491,6 +1440,7 @@ pub fn build_harness_settings_panel(
         (&btn_shortcut_page, SettingsPage::Shortcut),
         (&btn_harnesses_page, SettingsPage::Harnesses),
         (&btn_top_bar_page, SettingsPage::TopBar),
+        (&btn_mcp, SettingsPage::Mcp),
         (&btn_launcher, SettingsPage::Connections(ConnectionPage::Overview)),
         (&btn_sleep_lock, SettingsPage::SleepLock),
         (&btn_updates, SettingsPage::Updates),
@@ -1526,10 +1476,6 @@ pub fn build_harness_settings_panel(
             }
         },
     );
-    btn_mcp.connect_clicked({
-        let nav = nav.clone();
-        move |_| nav(SettingsPage::Mcp)
-    });
     btn_back.connect_clicked({
         let nav = Rc::clone(&nav);
         let refresh = Rc::clone(&firewall_notice_refresh);
