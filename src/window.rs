@@ -404,6 +404,31 @@ fn provisional_slide_size(fallback: (i32, i32)) -> (i32, i32) {
         .fold(fallback, |(w, h), geo| (w.max(geo.width()), h.max(geo.height())))
 }
 
+/// How one CLI handler words its refusals of the card a request names. The
+/// checks are shared (`SuperDesktopWindow::guarded_card`); the wording, which
+/// scripts may read, stays each handler's own.
+struct CardRefusals {
+    unavailable: &'static str,
+    not_found: &'static str,
+    /// The request's expected epoch or revision is out of date.
+    stale: &'static str,
+    no_widget: &'static str,
+    /// The card, its widget and its session do not match one to one.
+    ambiguous: &'static str,
+    /// Refuse a card whose session is being closed, as ambiguous.
+    refuse_closing: bool,
+    /// Refuse a card in the middle of a drag or resize, with this message.
+    busy: Option<&'static str>,
+}
+
+/// The card a guarded CLI request names: its snapshot entry, its widget and
+/// that widget's data, all checked against one another.
+struct GuardedCard {
+    current: crate::desktop_protocol::DesktopCard,
+    card: Rc<MiniTerminalCard>,
+    data: TerminalData,
+}
+
 impl SuperDesktopWindow {
     fn screen_width(&self) -> i32 {
         allocated_workspace_size(&self.window, (self.screen_width, self.screen_height)).0
@@ -2153,21 +2178,96 @@ impl SuperDesktopWindow {
         model.snapshot(canvas, &presentation)
     }
 
-    pub(crate) fn cli_file_target(&self,model:&crate::workspace_model::LocalWorkspace,request:&crate::control::Request)->Result<crate::state::TerminalData,crate::control::Reply> {
-        use crate::control::{Command,Reply};
-        let fail=|code,message|Reply::failure(&request.request_id,code,message);
-        let id=match &request.command {Command::Files {id,..}|Command::FilesEdit {id,..}=>id,_=>return Err(fail("invalid_request","Expected terminal files request."))};
-        let snapshot=self.desktop_snapshot(model).map_err(|_|fail("unavailable","Workspace unavailable."))?;
-        let matches:Vec<_>=snapshot.cards.iter().filter(|c|c.card_id==*id).collect();
-        if matches.len()!=1{return Err(fail("not_found","No unique local terminal card has that ID."));}
-        let card=matches[0];
-        if let Command::FilesEdit {expect_epoch,expect_revision,..}=&request.command {
-            if expect_epoch!=&snapshot.epoch || expect_revision!=&crate::control_geometry::revision(&snapshot,card){return Err(fail("conflict","Card or display changed; read terminal geometry again."));}
+    /// The snapshot entry of the card a CLI request names.
+    fn cli_card_entry(
+        &self,
+        model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request,
+        card_id: &str,
+        refusals: &CardRefusals,
+    ) -> Result<(crate::desktop_protocol::LocalWorkspaceSnapshot, crate::desktop_protocol::DesktopCard), crate::control::Reply> {
+        let fail = |code, message| crate::control::Reply::failure(&request.request_id, code, message);
+        let snapshot = self.desktop_snapshot(model).map_err(|_| fail("unavailable", refusals.unavailable))?;
+        let current = snapshot.cards.iter().find(|card| card.card_id == card_id).cloned()
+            .ok_or_else(|| fail("not_found", refusals.not_found))?;
+        Ok((snapshot, current))
+    }
+
+    /// The live card behind a snapshot entry: exactly one widget and one
+    /// session must match it, and the handler decides whether a closing card
+    /// or one in the middle of a drag or resize is refused.
+    fn cli_card_widget(
+        &self,
+        request: &crate::control::Request,
+        snapshot: &crate::desktop_protocol::LocalWorkspaceSnapshot,
+        current: &crate::desktop_protocol::DesktopCard,
+        refusals: &CardRefusals,
+    ) -> Result<(Rc<MiniTerminalCard>, TerminalData), crate::control::Reply> {
+        let fail = |code, message| crate::control::Reply::failure(&request.request_id, code, message);
+        let card = self.any_terminal_card(&current.card_id).map_err(|_| fail("not_found", refusals.no_widget))?;
+        let data = card.data.borrow().clone();
+        let entries = |same: &dyn Fn(&crate::desktop_protocol::DesktopCard) -> bool| {
+            snapshot.cards.iter().filter(|card| same(card)).count()
+        };
+        let widgets = self.terminal_cards.borrow().iter()
+            .filter(|other| other.data.borrow().id == current.card_id).count();
+        if entries(&|card| card.card_id == current.card_id) != 1
+            || entries(&|card| card.session_name == current.session_name) != 1
+            || data.session_name != current.session_name
+            || widgets != 1
+            || (refusals.refuse_closing && card.cli_session_task().is_closed())
+        {
+            return Err(fail("conflict", refusals.ambiguous));
         }
-        let widget=self.any_terminal_card(id).map_err(|_|fail("not_found","Local terminal widget missing."))?;
-        let data=widget.data.borrow().clone();
-        if snapshot.cards.iter().filter(|c|c.session_name==data.session_name).count()!=1 || data.session_name!=card.session_name || widget.cli_session_task().is_closed(){return Err(fail("conflict","Terminal identity is ambiguous or closing."));}
-        Ok(data)
+        if let Some(message) = refusals.busy {
+            if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
+                return Err(fail("conflict", message));
+            }
+        }
+        Ok((card, data))
+    }
+
+    /// The card a guarded CLI request names, checked against the epoch and
+    /// revision the request expects, when it carries them.
+    fn guarded_card(
+        &self,
+        model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request,
+        card_id: &str,
+        expect: Option<(&String, &String)>,
+        refusals: &CardRefusals,
+    ) -> Result<GuardedCard, crate::control::Reply> {
+        let (snapshot, current) = self.cli_card_entry(model, request, card_id, refusals)?;
+        if let Some((epoch, revision)) = expect {
+            if epoch != &snapshot.epoch || revision != &crate::control_geometry::revision(&snapshot, &current) {
+                return Err(crate::control::Reply::failure(&request.request_id, "conflict", refusals.stale));
+            }
+        }
+        let (card, data) = self.cli_card_widget(request, &snapshot, &current, refusals)?;
+        Ok(GuardedCard { current, card, data })
+    }
+
+    pub(crate) fn cli_file_target(
+        &self,
+        model: &crate::workspace_model::LocalWorkspace,
+        request: &crate::control::Request,
+    ) -> Result<crate::state::TerminalData, crate::control::Reply> {
+        use crate::control::{Command, Reply};
+        let (id, expect) = match &request.command {
+            Command::Files { id, .. } => (id, None),
+            Command::FilesEdit { id, expect_epoch, expect_revision, .. } => (id, Some((expect_epoch, expect_revision))),
+            _ => return Err(Reply::failure(&request.request_id, "invalid_request", "Expected terminal files request.")),
+        };
+        let refusals = CardRefusals {
+            unavailable: "Workspace unavailable.",
+            not_found: "No unique local terminal card has that ID.",
+            stale: "Card or display changed; read terminal geometry again.",
+            no_widget: "Local terminal widget missing.",
+            ambiguous: "Terminal identity is ambiguous or closing.",
+            refuse_closing: true,
+            busy: None,
+        };
+        Ok(self.guarded_card(model, request, id, expect, &refusals)?.data)
     }
 
     /// Read actual note buffers, including edits waiting for autosave.
@@ -2317,39 +2417,74 @@ impl SuperDesktopWindow {
         Reply::success(&request.request_id,data)
     }
 
-    fn cli_card_action(&self,model:&crate::workspace_model::LocalWorkspace,request:&crate::control::Request)->crate::control::Reply {
-        use crate::control::{CardAction,Command,Reply};
-        let fail=|code,message|Reply::failure(&request.request_id,code,message);
-        let Command::CardAction {id,action,expect_epoch,expect_revision}=&request.command else {return fail("invalid_request","Expected a card action.");};
-        let snapshot=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return fail("unavailable","Workspace unavailable.")};
-        let Some(current)=snapshot.cards.iter().find(|c|c.card_id==*id)else{return fail("not_found","No local card has that ID.");};
-        if expect_epoch!=&snapshot.epoch||expect_revision!=&crate::control_geometry::revision(&snapshot,current){return fail("conflict","Card or display changed; read terminal geometry again.");}
-        let card=match self.any_terminal_card(id){Ok(c)=>c,Err(_)=>return fail("not_found","Card widget is unavailable.")};
-        if card.is_being_dragged()||card.container.has_css_class("term-resizing")||self.slide.running.get(){return fail("conflict","A local gesture or animation is in progress.");}
-        if snapshot.cards.iter().filter(|c|c.card_id==*id||c.session_name==current.session_name).count()!=1{return fail("conflict","Card identity is ambiguous.");}
+    fn cli_card_action(&self, model: &crate::workspace_model::LocalWorkspace, request: &crate::control::Request) -> crate::control::Reply {
+        use crate::control::{CardAction, Command, Reply};
+        let fail = |code, message| Reply::failure(&request.request_id, code, message);
+        let Command::CardAction { id, action, expect_epoch, expect_revision } = &request.command else {
+            return fail("invalid_request", "Expected a card action.");
+        };
+        const BUSY: &str = "A local gesture or animation is in progress.";
+        let refusals = CardRefusals {
+            unavailable: "Workspace unavailable.",
+            not_found: "No local card has that ID.",
+            stale: "Card or display changed; read terminal geometry again.",
+            no_widget: "Card widget is unavailable.",
+            ambiguous: "Card identity is ambiguous.",
+            refuse_closing: false,
+            busy: Some(BUSY),
+        };
+        let GuardedCard { current, card, .. } =
+            match self.guarded_card(model, request, id, Some((expect_epoch, expect_revision)), &refusals) {
+                Ok(guarded) => guarded,
+                Err(reply) => return reply,
+            };
+        if self.slide.running.get() {
+            return fail("conflict", BUSY);
+        }
         match action {
-            CardAction::Raise=>card.cli_raise(),
-            CardAction::Focus=>{
-                if !self.window.is_visible()||self.machine_view.is_remote()||current.layout.iconified && !current.expanded||self.overlay_panels.iter().any(|p|p.is_visible())||self.pairing_requests.is_open()||self.pairing_wizard.is_open(){return fail("invalid_state","Focus requires a visible local workspace, restored card and closed dialogs. Use show and terminal restore first.");}
-                if !card.cli_focus(){return Reply::unknown(&request.request_id);}
-            },
-            CardAction::Tag {value}=>{
-                if *value>8{return fail("invalid_arguments","Tag must be 0..8.");}
-                let before=card.data.borrow().clone();card.cli_set_tag(*value);let after=card.data.borrow().clone();
+            CardAction::Raise => card.cli_raise(),
+            CardAction::Focus => {
+                if !self.window.is_visible()
+                    || self.machine_view.is_remote()
+                    || current.layout.iconified && !current.expanded
+                    || self.overlay_panels.iter().any(|p| p.is_visible())
+                    || self.pairing_requests.is_open()
+                    || self.pairing_wizard.is_open()
+                {
+                    return fail("invalid_state", "Focus requires a visible local workspace, restored card and closed dialogs. Use show and terminal restore first.");
+                }
+                if !card.cli_focus() {
+                    return Reply::unknown(&request.request_id);
+                }
+            }
+            CardAction::Tag { value } => {
+                if *value > 8 {
+                    return fail("invalid_arguments", "Tag must be 0..8.");
+                }
+                let before = card.data.borrow().clone();
+                card.cli_set_tag(*value);
+                let after = card.data.borrow().clone();
                 persist(&self.state, |state| {
                     crate::folder_colors::note_card_saved(state, Some(&before), &after);
                     if let Some(saved) = state.terminals.iter_mut().find(|c| c.id == *id) {
                         saved.tag = *value;
                     }
                 });
-            },
+            }
         }
-        let after=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return Reply::unknown(&request.request_id)};
-        let Some(current)=after.cards.iter().find(|c|c.card_id==*id)else{return Reply::unknown(&request.request_id)};
-        let mut data=crate::control_geometry::describe(&after,current);
-        data["tag"]=serde_json::json!(card.data.borrow().tag);data["action"]=serde_json::json!(action);data["outcome"]=serde_json::json!("applied");
-        data["compositorFocusObserved"]=serde_json::json!(false);
-        Reply::success(&request.request_id,data)
+        let after = match self.desktop_snapshot(model) {
+            Ok(v) => v,
+            Err(_) => return Reply::unknown(&request.request_id),
+        };
+        let Some(current) = after.cards.iter().find(|c| c.card_id == *id) else {
+            return Reply::unknown(&request.request_id);
+        };
+        let mut data = crate::control_geometry::describe(&after, current);
+        data["tag"] = serde_json::json!(card.data.borrow().tag);
+        data["action"] = serde_json::json!(action);
+        data["outcome"] = serde_json::json!("applied");
+        data["compositorFocusObserved"] = serde_json::json!(false);
+        Reply::success(&request.request_id, data)
     }
 
     /// Local CLI geometry uses the live card and output on this GTK turn.
@@ -2360,41 +2495,39 @@ impl SuperDesktopWindow {
         use crate::control_geometry as geometry;
         let id = &request.request_id;
         let card_id = geometry::card_id(&request.command);
-        let snapshot = match self.desktop_snapshot(model) {
-            Ok(snapshot) => snapshot,
-            Err(_) => return Reply::failure(id, "unavailable", "Local geometry is unavailable."),
+        let refusals = CardRefusals {
+            unavailable: "Local geometry is unavailable.",
+            not_found: "No local terminal card has that ID.",
+            // `geometry::prepare` checks the expected epoch and revision.
+            stale: "",
+            no_widget: "No local terminal widget has that ID.",
+            ambiguous: "The card-to-session mapping is ambiguous or changed.",
+            refuse_closing: false,
+            busy: Some("A local geometry gesture is in progress."),
         };
-        let Some(current) = snapshot.cards.iter().find(|card| card.card_id == card_id) else {
-            return Reply::failure(id, "not_found", "No local terminal card has that ID.");
+        let (snapshot, current) = match self.cli_card_entry(model, request, card_id, &refusals) {
+            Ok(entry) => entry,
+            Err(reply) => return reply,
         };
         if matches!(request.command, Command::Geometry { .. }) {
-            return Reply::success(id, geometry::describe(&snapshot, current));
+            return Reply::success(id, geometry::describe(&snapshot, &current));
         }
         let mode_change = if matches!(request.command, Command::Mode { .. }) {
-            match geometry::prepare_mode(request, &snapshot, current) {
+            match geometry::prepare_mode(request, &snapshot, &current) {
                 Ok(changed) => Some(changed),
                 Err(reply) => return reply,
             }
         } else { None };
         let prepared = if mode_change.is_none() {
-            match geometry::prepare(request, &snapshot, current) {
+            match geometry::prepare(request, &snapshot, &current) {
                 Ok(prepared) => Some(prepared),
                 Err(reply) => return reply,
             }
         } else { None };
-        let card = match self.any_terminal_card(card_id) {
-            Ok(card) => card,
-            Err(_) => return Reply::failure(id, "not_found", "No local terminal widget has that ID."),
+        let card = match self.cli_card_widget(request, &snapshot, &current, &refusals) {
+            Ok((card, _)) => card,
+            Err(reply) => return reply,
         };
-        if snapshot.cards.iter().filter(|other| other.session_name == current.session_name).count() != 1
-            || self.terminal_cards.borrow().iter().filter(|other| other.data.borrow().id == card_id).count() != 1
-            || card.data.borrow().session_name != current.session_name
-        {
-            return Reply::failure(id, "conflict", "The card-to-session mapping is ambiguous or changed.");
-        }
-        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
-            return Reply::failure(id, "conflict", "A local geometry gesture is in progress.");
-        }
         let applied = match request.command {
             Command::Mode { action, .. } => {
                 if mode_change == Some(false) { true } else {
@@ -2453,54 +2586,25 @@ impl SuperDesktopWindow {
         use crate::control_close::{Action, Target};
         let fail = |code, message| Reply::failure(&request.request_id, code, message);
         let (id, expect_epoch, expect_revision) = match &request.command {
-            Command::Forget {id,expect_epoch,expect_revision} | Command::Relaunch {id,expect_epoch,expect_revision,..} | Command::Viewport {
-                id,
-                expect_epoch: Some(expect_epoch),
-                expect_revision: Some(expect_revision),
-                ..
-            }
-            | Command::Attach {
-                id,
-                expect_epoch,
-                expect_revision,
-                ..
-            }
-            | Command::Close {
-                id,
-                expect_epoch,
-                expect_revision,
-                ..
-            }
-            | Command::Input {
-                id,
-                expect_epoch,
-                expect_revision,
-                ..
-            } => (id, expect_epoch, expect_revision),
-            _ => {
-                return Err(fail(
-                    "invalid_request",
-                    "Expected a guarded terminal operation.",
-                ))
-            }
+            Command::Forget { id, expect_epoch, expect_revision }
+            | Command::Relaunch { id, expect_epoch, expect_revision, .. }
+            | Command::Viewport { id, expect_epoch: Some(expect_epoch), expect_revision: Some(expect_revision), .. }
+            | Command::Attach { id, expect_epoch, expect_revision, .. }
+            | Command::Close { id, expect_epoch, expect_revision, .. }
+            | Command::Input { id, expect_epoch, expect_revision, .. } => (id, expect_epoch, expect_revision),
+            _ => return Err(fail("invalid_request", "Expected a guarded terminal operation.")),
         };
-        let snapshot = self.desktop_snapshot(model).map_err(|_| fail("unavailable", "Local workspace is unavailable."))?;
-        let current = snapshot.cards.iter().find(|card| card.card_id == *id)
-            .ok_or_else(|| fail("not_found", "No local terminal card has that ID."))?;
-        if expect_epoch != &snapshot.epoch || expect_revision != &crate::control_geometry::revision(&snapshot, current) {
-            return Err(fail("conflict", "The card changed or the daemon restarted. Read terminal geometry again."));
-        }
-        let card = self.any_terminal_card(id).map_err(|_| fail("not_found", "No local terminal widget has that ID."))?;
-        let data = card.data.borrow().clone();
-        if snapshot.cards.iter().filter(|other| other.card_id == *id).count() != 1
-            || snapshot.cards.iter().filter(|other| other.session_name == data.session_name).count() != 1
-            || current.session_name != data.session_name || card.cli_session_task().is_closed()
-        {
-            return Err(fail("conflict", "The card-to-session mapping changed, is ambiguous, or is closing."));
-        }
-        if card.is_being_dragged() || card.container.has_css_class("term-resizing") {
-            return Err(fail("conflict", "A local geometry gesture is in progress; the card was not closed."));
-        }
+        let refusals = CardRefusals {
+            unavailable: "Local workspace is unavailable.",
+            not_found: "No local terminal card has that ID.",
+            stale: "The card changed or the daemon restarted. Read terminal geometry again.",
+            no_widget: "No local terminal widget has that ID.",
+            ambiguous: "The card-to-session mapping changed, is ambiguous, or is closing.",
+            refuse_closing: true,
+            busy: Some("A local geometry gesture is in progress; the card was not closed."),
+        };
+        let GuardedCard { card, data, .. } =
+            self.guarded_card(model, request, id, Some((expect_epoch, expect_revision)), &refusals)?;
         match action {
             Action::Inspect => Ok(Some(Target { data, task: card.cli_session_task() })),
             Action::Remove(expected) => {
