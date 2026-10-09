@@ -78,32 +78,7 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
     } else {
         agent
     };
-    if !native_agent(agent)
-        || exe_name != agent
-        || command.contains(['$', '`', '\n'])
-        || args.iter().any(|s| {
-            s.starts_with("--settings=")
-                || matches!(
-                    s.as_str(),
-                    "&&" | "||"
-                        | ";"
-                        | "|"
-                        | "&"
-                        | ">"
-                        | ">>"
-                        | "<"
-                        | "--"
-                        | "--settings"
-                        | "--pure"
-                        | "--bare"
-                        | "-p"
-                        | "--print"
-                        | "run"
-                        | "serve"
-                        | "attach"
-                )
-        })
-    {
+    if !native_agent(agent) || exe_name != agent || !plain_interactive(command, &args) {
         return unchanged();
     }
     let Some(root) = root else {
@@ -138,57 +113,17 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
     match agent {
         "claude" => {
             let reporter = format!("{} harness-event claude", shell_quote(&exe.to_string_lossy()));
-            let mut hooks = serde_json::Map::new();
-            for event in [
-                "SessionStart",
-                "UserPromptSubmit",
-                "PreToolUse",
-                "PermissionRequest",
-                "PostToolUse",
-                "PostToolUseFailure",
-                "Notification",
-                "Stop",
-                "StopFailure",
-                "SessionEnd",
-                "PreCompact",
-                "PostCompact",
-                "PostModelSwitch",
-            ] {
-                hooks.insert(
-                    event.into(),
-                    json!([{ "hooks": [{"type":"command", "command":reporter, "timeout":3}]}]),
-                );
-            }
-            // Main-screen rendering keeps Claude's output in tmux scrollback, which
-            // the phone snapshot reads (like Codex's --no-alt-screen). The flag
-            // outranks a user's "tui": "fullscreen" for this session only.
-            args.extend(["--settings".into(), json!({"tui":"default","hooks":hooks}).to_string()]);
+            args.extend(["--settings".into(), claude_settings(&reporter)]);
         }
         "pi" => args.extend([
             "--extension".into(),
             root.join("pi.mjs").to_string_lossy().into_owned(),
         ]),
         "opencode" => {
-            let mut config: Value = match std::env::var("OPENCODE_CONFIG_CONTENT") {
-                Ok(raw) => match serde_json::from_str(&raw) {
-                    Ok(v) => v,
-                    Err(_) => return unchanged(),
-                },
-                Err(_) => json!({}),
-            };
-            if !config.is_object() {
-                return unchanged();
-            }
-            let plugins = config
-                .as_object_mut()
-                .unwrap()
-                .entry("plugin")
-                .or_insert_with(|| json!([]));
-            let Some(plugins) = plugins.as_array_mut() else {
+            let raw = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
+            let Some(config) = opencode_config(raw.as_deref(), &root.join("opencode.mjs")) else {
                 return unchanged();
             };
-            let url = reqwest::Url::from_file_path(root.join("opencode.mjs")).unwrap();
-            plugins.push(json!(url.as_str()));
             envs.push(format!("OPENCODE_CONFIG_CONTENT={config}"));
         }
         "openclaw" => {
@@ -224,6 +159,84 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
         command,
         path: Some(path),
     }
+}
+
+/// Whether `command` (split into `args`) starts the harness on its own,
+/// interactively: no shell syntax, no settings of the user's own, and no
+/// one-shot or server mode the adapters do not follow.
+fn plain_interactive(command: &str, args: &[String]) -> bool {
+    !command.contains(['$', '`', '\n'])
+        && !args.iter().any(|s| {
+            s.starts_with("--settings=")
+                || matches!(
+                    s.as_str(),
+                    "&&" | "||"
+                        | ";"
+                        | "|"
+                        | "&"
+                        | ">"
+                        | ">>"
+                        | "<"
+                        | "--"
+                        | "--settings"
+                        | "--pure"
+                        | "--bare"
+                        | "-p"
+                        | "--print"
+                        | "run"
+                        | "serve"
+                        | "attach"
+                )
+        })
+}
+
+/// The Claude Code events whose hooks report the session's lifecycle.
+const CLAUDE_HOOK_EVENTS: [&str; 13] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "Notification",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+    "PreCompact",
+    "PostCompact",
+    "PostModelSwitch",
+];
+
+/// The `--settings` a Claude Code launch gets: every lifecycle hook runs
+/// `reporter`. Main-screen rendering keeps Claude's output in tmux
+/// scrollback, which the phone snapshot reads (like Codex's
+/// --no-alt-screen); the setting outranks a user's "tui": "fullscreen" for
+/// this session only.
+fn claude_settings(reporter: &str) -> String {
+    let mut hooks = serde_json::Map::new();
+    for event in CLAUDE_HOOK_EVENTS {
+        hooks.insert(
+            event.into(),
+            json!([{ "hooks": [{"type":"command", "command":reporter, "timeout":3}]}]),
+        );
+    }
+    json!({"tui":"default","hooks":hooks}).to_string()
+}
+
+/// OpenCode's inline config for a launch: the config the launching shell
+/// already holds (`raw`, its `OPENCODE_CONFIG_CONTENT`) with the reporting
+/// `plugin` added to its plugin list. `None` when that config is not a JSON
+/// object with a plugin list; the launch is then left unchanged.
+fn opencode_config(raw: Option<&str>, plugin: &Path) -> Option<String> {
+    let mut config: Value = match raw {
+        Some(raw) => serde_json::from_str(raw).ok()?,
+        None => json!({}),
+    };
+    let plugins = config.as_object_mut()?.entry("plugin").or_insert_with(|| json!([]));
+    let plugins = plugins.as_array_mut()?;
+    let url = reqwest::Url::from_file_path(plugin).unwrap();
+    plugins.push(json!(url.as_str()));
+    Some(config.to_string())
 }
 
 /// Hooks run `<exe> harness-event` once per agent tool call. Prefer the small
@@ -1247,4 +1260,75 @@ mod tests {
         assert_eq!(fs::read_dir(root.join("openclaw")).unwrap().count(), 4, "no temporary files remain");
         fs::remove_dir_all(root).unwrap();
     }
+
+    /// What a native launch runs and writes, with this run's paths replaced
+    /// by placeholders: the command, its metadata file and, for OpenClaw,
+    /// the gateway link.
+    fn launch_snapshot(root: &Path, agent: &str, command: &str) -> String {
+        let launch = prepare_with_root("sd_term_snap", agent, command, Some(root.to_path_buf()));
+        let meta = launch.path.clone().expect("native launch has metadata");
+        let exe = event_exe(std::env::current_exe().unwrap());
+        let normalize = |text: &str| {
+            text.replace(&meta.display().to_string(), "<meta>")
+                .replace(&root.display().to_string(), "<root>")
+                .replace(&exe.display().to_string(), "<exe>")
+        };
+        let mut written = vec![meta.clone()];
+        if agent == "openclaw" {
+            written.push(root.join("sd_term_snap.link.json"));
+        }
+        let mut out = format!("{}\n", normalize(&launch.command));
+        for path in written {
+            out += &format!("{}: {}\n", normalize(&path.display().to_string()), normalize(&fs::read_to_string(&path).unwrap()));
+        }
+        out
+    }
+
+    #[test]
+    fn native_launches_write_the_same_command_and_files() {
+        let root = std::env::temp_dir().join(format!("sd-launch-snapshot-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mut agents = vec![("claude", "claude"), ("pi", "pi"), ("openclaw", "openclaw tui")];
+        // A config the launching shell already holds is merged in; that has
+        // its own test.
+        if std::env::var_os("OPENCODE_CONFIG_CONTENT").is_none() {
+            agents.push(("opencode", "opencode"));
+        }
+        // A fresh root, then the same root with the adapters already there.
+        for pass in ["fresh", "existing"] {
+            for (agent, command) in &agents {
+                let got = launch_snapshot(&root, agent, command);
+                let want = match *agent {
+                    "claude" => CLAUDE_SNAPSHOT,
+                    "pi" => PI_SNAPSHOT,
+                    "openclaw" => OPENCLAW_SNAPSHOT,
+                    _ => OPENCODE_SNAPSHOT,
+                };
+                assert_eq!(got, want, "{agent} launch on a {pass} root");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opencode_config_adds_the_plugin_to_the_shells_config() {
+        let plugin = Path::new("/state/harness/opencode.mjs");
+        assert_eq!(opencode_config(None, plugin).as_deref(), Some(r#"{"plugin":["file:///state/harness/opencode.mjs"]}"#));
+        assert_eq!(
+            opencode_config(Some(r#"{"theme":"dark","plugin":["mine"]}"#), plugin).as_deref(),
+            Some(r#"{"plugin":["mine","file:///state/harness/opencode.mjs"],"theme":"dark"}"#)
+        );
+        assert_eq!(
+            opencode_config(Some(r#"{"model":"x"}"#), plugin).as_deref(),
+            Some(r#"{"model":"x","plugin":["file:///state/harness/opencode.mjs"]}"#)
+        );
+        for unusable in ["not json", "[]", r#""text""#, r#"{"plugin":"mine"}"#] {
+            assert_eq!(opencode_config(Some(unusable), plugin), None, "{unusable}");
+        }
+    }
+
+    const CLAUDE_SNAPSHOT: &str = "env 'SD_HARNESS_FILE=<meta>' 'SD_HARNESS_EXE=<exe>' 'SD_HARNESS_AGENT=claude' sh -c 'export SD_HARNESS_PID=$$; printf '\\''{}'\\'' | \"$SD_HARNESS_EXE\" harness-event init; exec \"$@\"' super-desktop-harness 'claude' '--settings' '{\"hooks\":{\"Notification\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PermissionRequest\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PostCompact\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PostModelSwitch\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PostToolUse\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PostToolUseFailure\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PreCompact\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"PreToolUse\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"SessionEnd\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"SessionStart\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"Stop\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"StopFailure\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}],\"UserPromptSubmit\":[{\"hooks\":[{\"command\":\"'\\''<exe>'\\'' harness-event claude\",\"timeout\":3,\"type\":\"command\"}]}]},\"tui\":\"default\"}'\n<meta>: {\"version\":1,\"agent\":\"claude\",\"launcher\":\"claude\",\"native_session\":\"\",\"title\":\"\",\"prompt\":\"\",\"status\":\"unknown\",\"model\":\"\",\"pid\":0,\"process_start\":\"\",\"emitter\":0,\"observed_at_ms\":0,\"completion_supported\":false,\"completion_id\":null,\"claude_turn\":0,\"claude_turn_active\":false,\"transcript\":\"\"}\n";
+    const PI_SNAPSHOT: &str = "env 'SD_HARNESS_FILE=<meta>' 'SD_HARNESS_EXE=<exe>' 'SD_HARNESS_AGENT=pi' sh -c 'export SD_HARNESS_PID=$$; printf '\\''{}'\\'' | \"$SD_HARNESS_EXE\" harness-event init; exec \"$@\"' super-desktop-harness 'pi' '--extension' '<root>/pi.mjs'\n<meta>: {\"version\":1,\"agent\":\"pi\",\"launcher\":\"pi\",\"native_session\":\"\",\"title\":\"\",\"prompt\":\"\",\"status\":\"unknown\",\"model\":\"\",\"pid\":0,\"process_start\":\"\",\"emitter\":0,\"observed_at_ms\":0,\"completion_supported\":false,\"completion_id\":null,\"claude_turn\":0,\"claude_turn_active\":false,\"transcript\":\"\"}\n";
+    const OPENCLAW_SNAPSHOT: &str = "env 'SD_HARNESS_FILE=<meta>' 'SD_HARNESS_EXE=<exe>' 'SD_HARNESS_AGENT=openclaw' sh -c 'export SD_HARNESS_PID=$$; printf '\\''{}'\\'' | \"$SD_HARNESS_EXE\" harness-event init; exec \"$@\"' super-desktop-harness 'openclaw' 'tui' '--session' 'sd_term_snap'\n<meta>: {\"version\":1,\"agent\":\"openclaw\",\"launcher\":\"openclaw\",\"native_session\":\"\",\"title\":\"\",\"prompt\":\"\",\"status\":\"unknown\",\"model\":\"\",\"pid\":0,\"process_start\":\"\",\"emitter\":0,\"observed_at_ms\":0,\"completion_supported\":false,\"completion_id\":null,\"claude_turn\":0,\"claude_turn_active\":false,\"transcript\":\"\"}\n<root>/sd_term_snap.link.json: {\"exe\":\"<exe>\",\"path\":\"<meta>\"}\n";
+    const OPENCODE_SNAPSHOT: &str = "env 'SD_HARNESS_FILE=<meta>' 'SD_HARNESS_EXE=<exe>' 'SD_HARNESS_AGENT=opencode' 'OPENCODE_CONFIG_CONTENT={\"plugin\":[\"file://<root>/opencode.mjs\"]}' sh -c 'export SD_HARNESS_PID=$$; printf '\\''{}'\\'' | \"$SD_HARNESS_EXE\" harness-event init; exec \"$@\"' super-desktop-harness 'opencode'\n<meta>: {\"version\":1,\"agent\":\"opencode\",\"launcher\":\"opencode\",\"native_session\":\"\",\"title\":\"\",\"prompt\":\"\",\"status\":\"unknown\",\"model\":\"\",\"pid\":0,\"process_start\":\"\",\"emitter\":0,\"observed_at_ms\":0,\"completion_supported\":false,\"completion_id\":null,\"claude_turn\":0,\"claude_turn_active\":false,\"transcript\":\"\"}\n";
 }
