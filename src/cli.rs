@@ -149,6 +149,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!("show", "Show the local overlay", "show", "Starts the daemon if absent and shows the overlay", "Desktop session", "Legacy status text", "super-desktop show", true),
     command!("hide", "Hide the local overlay", "hide", "Hides cards; keeps sessions running", "Running local daemon", "Legacy status text", "super-desktop hide", true),
     command!("toggle", "Toggle local overlay visibility", "toggle", "Starts and shows the daemon if absent; no arguments also toggles", "Desktop session", "Legacy status text", "super-desktop toggle", true),
+    command!("tour", "Show the overlay with the getting started guide", "tour", "Starts and shows the daemon if absent, then opens the welcome tour", "Desktop session", "Legacy status text", "super-desktop tour", true),
     command!("start", "Run the daemon with its overlay visible", "start", "Runs in the foreground; starts desktop integrations and bridge supervision", "Desktop session", "Process diagnostics", "super-desktop start", true),
     command!("daemon", "Run the daemon with its overlay hidden", "daemon", "Runs in the foreground; starts desktop integrations and bridge supervision", "Desktop session", "Process diagnostics", "super-desktop daemon", true),
     command!("kill", "Stop the local overlay daemon", "kill", "Stops the daemon; tmux harness sessions remain", "Local owner", "Legacy status text", "super-desktop kill", true),
@@ -487,6 +488,7 @@ mod tests {
             vec!["desktop-command", "{\"x\":1}"],
             vec!["bridge", "8759"],
             vec!["quit"],
+            vec!["tour"],
             vec!["peer-command", "abc"],
         ] {
             assert!(dispatch(&args(&input)).is_none(), "{input:?}");

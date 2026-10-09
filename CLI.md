@@ -980,6 +980,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `show` | Legacy | Show the local overlay |
 | `hide` | Legacy | Hide the local overlay |
 | `toggle` | Legacy | Toggle local overlay visibility |
+| `tour` | Legacy | Show the overlay with the getting started guide |
 | `start` | Legacy | Run the daemon with its overlay visible |
 | `daemon` | Legacy | Run the daemon with its overlay hidden |
 | `kill` | Legacy | Stop the local overlay daemon |
