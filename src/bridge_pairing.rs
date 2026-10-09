@@ -108,7 +108,7 @@ static INVITATION: Mutex<Option<Invitation>> = Mutex::new(None);
 pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: &str) {
     let local_only = !matches!(path, "/api/v1/pair" | "/api/v1/pair/poll");
     if local_only && !local {
-        return respond(stream, 403, "Forbidden", &json!({"error":"desktop_approval_only"}));
+        return reply_error(stream, 403, Envelope::Plain, "desktop_approval_only");
     }
     let body: Value = serde_json::from_str(&req.body).unwrap_or(Value::Null);
     let now = now_epoch();
@@ -118,14 +118,14 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
         ("POST", "/api/v1/pair/invitation") => {
             let secret = random_hex(24);
             *INVITATION.lock().unwrap() = Some(Invitation { secret: secret.clone(), expires: now + 300.0 });
-            respond(stream, 200, "OK", &json!({"v":3,"host":lan_ip(),"port":BRIDGE_PORT,
+            reply_json(stream, 200, &json!({"v":3,"host":lan_ip(),"port":BRIDGE_PORT,
                 "fingerprint":security::fingerprint(),"secret":secret,"expiresIn":300}));
         }
         ("GET", "/api/v1/pair/devices") => {
             let paired = pair_state().lock().unwrap();
             let devices: Vec<_> = paired.cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"deviceType":d.device_type,"expires":d.expires,
                 "active":d.expires > now && security::device_active(&d.token_hash)})).collect();
-            respond(stream, 200, "OK", &json!({"devices":devices}));
+            reply_json(stream, 200, &json!({"devices":devices}));
         }
         ("POST", "/api/v1/pair/revoke") => {
             let mut paired = pair_state().lock().unwrap();
@@ -135,18 +135,18 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             paired.cfg.devices.retain(|d| d.id != id);
             if !paired.save() {
                 paired.cfg.devices = previous;
-                return respond(stream, 500, "Internal Server Error", &json!({"error":"could_not_save_revocation"}));
+                return reply_error(stream, 500, Envelope::Plain, "could_not_save_revocation");
             }
             if let Some(hash) = hash {
                 security::disconnect(&hash);
                 state.entries.retain(|r| !r.token.as_ref().is_some_and(|t| security::equal(&security::digest(t.as_bytes()), &hash)));
             }
-            respond(stream, 200, "OK", &json!({"status":"revoked"}));
+            reply_json(stream, 200, &json!({"status":"revoked"}));
         }
         ("POST", "/api/v1/pair") => {
             let mut invitation = INVITATION.lock().unwrap();
             if !invitation.as_ref().is_some_and(|i| i.expires > now && security::equal(&i.secret, body["secret"].as_str().unwrap_or(""))) {
-                return respond(stream, 403, "Forbidden", &json!({"error":"scan_fresh_desktop_pairing_qr"}));
+                return reply_error(stream, 403, Envelope::Plain, "scan_fresh_desktop_pairing_qr");
             }
             let peer = stream.peer_addr().map(|p| p.ip().to_string()).unwrap_or_default();
             let device: String = body["deviceName"].as_str().unwrap_or("Device")
@@ -160,12 +160,12 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                 paired.cfg.rejected.iter().any(|r| r.matches(&device_id, &device, &peer))
             };
             if blocked {
-                return respond(stream, 403, "Forbidden", &json!({"error":"pairing_blocked"}));
+                return reply_error(stream, 403, Envelope::Plain, "pairing_blocked");
             }
             // Requests are rate-limited by source and globally bounded, including
             // decided requests until expiry, to limit notification spam.
             if state.entries.len() >= 8 || state.entries.iter().any(|p| p.peer == peer) {
-                return respond(stream, 429, "Too Many Requests", &json!({"error":"pairing_request_already_pending_or_rate_limited"}));
+                return reply_error(stream, 429, Envelope::Plain, "pairing_request_already_pending_or_rate_limited");
             }
             let id = random_hex(24);
             let code = format!("{:06}", u32::from_str_radix(&random_hex(4), 16).unwrap() % 1_000_000);
@@ -175,48 +175,48 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             if !cfg!(test) {
                 std::thread::spawn(announce_request);
             }
-            respond(stream, 202, "Accepted", &json!({"status":"pending","requestId":id,"code":code,"expiresIn":REQUEST_SECS as u64}));
+            reply_json(stream, 202, &json!({"status":"pending","requestId":id,"code":code,"expiresIn":REQUEST_SECS as u64}));
         }
         ("GET", "/api/v1/pair/state") => {
             let pending: Vec<_> = state.entries.iter().filter(|p| p.decision.is_none()).map(|p|
                 json!({"requestId":p.id,"code":p.code,"deviceName":p.device,"deviceType":p.device_type,
                     "address":p.peer,"identified":!p.device_id.is_empty(),
                     "expiresIn":(p.expires - now).max(0.0).ceil() as u64})).collect();
-            respond(stream, 200, "OK", &json!({"requests":pending}));
+            reply_json(stream, 200, &json!({"requests":pending}));
         }
         ("GET", "/api/v1/pair/rejected") => {
             let mut paired = pair_state().lock().unwrap();
             paired.refresh();
             let rejected: Vec<_> = paired.cfg.rejected.iter().map(RejectedDevice::to_json).collect();
-            respond(stream, 200, "OK", &json!({"rejected":rejected}));
+            reply_json(stream, 200, &json!({"rejected":rejected}));
         }
         ("POST", "/api/v1/pair/rejected/remove") => {
             let mut paired = pair_state().lock().unwrap();
             paired.refresh();
             let id = body["id"].as_str().unwrap_or("");
             let Some(removed) = paired.cfg.rejected.iter().find(|r| r.id == id).cloned() else {
-                return respond(stream, 404, "Not Found", &json!({"error":"not_rejected"}));
+                return reply_error(stream, 404, Envelope::Plain, "not_rejected");
             };
             let previous = paired.cfg.rejected.clone();
             paired.cfg.rejected.retain(|r| r.id != id);
             if !paired.save() {
                 paired.cfg.rejected = previous;
-                return respond(stream, 500, "Internal Server Error", &json!({"error":"could_not_save_rejected_list"}));
+                return reply_error(stream, 500, Envelope::Plain, "could_not_save_rejected_list");
             }
             // Its denied request would otherwise rate-limit an immediate retry.
             state.entries.retain(|r| !(r.decision == Some(false) && r.peer == removed.address));
-            respond(stream, 200, "OK", &json!({"status":"removed"}));
+            reply_json(stream, 200, &json!({"status":"removed"}));
         }
         ("POST", "/api/v1/pair/approve" | "/api/v1/pair/deny") => {
             let approve = path.ends_with("/approve");
             let Some(request) = state.decide(body["requestId"].as_str().unwrap_or(""), approve, now) else {
-                return respond(stream, 404, "Not Found", &json!({"error":"request_expired_or_already_decided"}));
+                return reply_error(stream, 404, Envelope::Plain, "request_expired_or_already_decided");
             };
             if !approve {
                 let mut paired = pair_state().lock().unwrap();
                 paired.refresh();
                 let remembered = remember_rejection(&mut paired, request, now);
-                return respond(stream, 200, "OK", &json!({"status":"denied","remembered":remembered}));
+                return reply_json(stream, 200, &json!({"status":"denied","remembered":remembered}));
             }
             {
                 let token = random_hex(24);
@@ -224,7 +224,7 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                 paired.refresh();
                 if paired.cfg.devices.len() >= 64 {
                     request.decision = None;
-                    return respond(stream, 409, "Conflict", &json!({"error":"revoke_old_devices_first"}));
+                    return reply_error(stream, 409, Envelope::Plain, "revoke_old_devices_first");
                 }
                 let device_id = random_hex(16);
                 paired.cfg.devices.push(PairedDevice { id: device_id.clone(), name: request.device.clone(), device_type: request.device_type.clone(),
@@ -232,15 +232,15 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                 if !paired.save() {
                     paired.cfg.devices.retain(|d| d.id != device_id);
                     request.decision = None;
-                    return respond(stream, 500, "Internal Server Error", &json!({"error":"could_not_save_pairing"}));
+                    return reply_error(stream, 500, Envelope::Plain, "could_not_save_pairing");
                 }
                 request.token = Some(token);
             }
-            respond(stream, 200, "OK", &json!({"status":"approved"}));
+            reply_json(stream, 200, &json!({"status":"approved"}));
         }
         ("POST", "/api/v1/pair/poll") => {
             let Some(request) = state.entries.iter().find(|p| Some(p.id.as_str()) == body["requestId"].as_str()) else {
-                return respond(stream, 404, "Not Found", &json!({"error":"request_expired"}));
+                return reply_error(stream, 404, Envelope::Plain, "request_expired");
             };
             let result = match request.decision {
                 None => json!({"status":"pending"}),
@@ -252,9 +252,9 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                     json!({"status":"paired","token":request.token,"expires":expires})
                 },
             };
-            respond(stream, 200, "OK", &result);
+            reply_json(stream, 200, &result);
         }
-        _ => respond(stream, 409, "Conflict", &json!({"error":"explicit_desktop_approval_required"})),
+        _ => reply_error(stream, 409, Envelope::Plain, "explicit_desktop_approval_required"),
     }
 }
 

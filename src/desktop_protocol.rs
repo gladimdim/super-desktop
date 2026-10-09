@@ -544,16 +544,16 @@ pub fn known_command_error(value: &str) -> Option<&'static str> {
 
 /// The HTTP status for one stable command code, for answers that carry no
 /// workspace snapshot of their own.
-pub fn command_status(error: &str) -> (u16, &'static str) {
+pub fn command_status(error: &str) -> u16 {
     match error {
-        "unknown_card" => (404, "Not Found"),
+        "unknown_card" => 404,
         "conflict" | "terminal_expanded" | "epoch_changed" | "unknown_outcome" | "wrong_machine"
-        | "too_many_desktop_cards" => (409, "Conflict"),
-        "desktop_unavailable" | "desktop_not_ready" => (503, "Service Unavailable"),
-        "desktop_timeout" => (504, "Gateway Timeout"),
+        | "too_many_desktop_cards" => 409,
+        "desktop_unavailable" | "desktop_not_ready" => 503,
+        "desktop_timeout" => 504,
         "invalid_layout" | "invalid_command" | "unsupported_command"
-        | "unsupported_harness" | "invalid_workspace" => (400, "Bad Request"),
-        _ => (502, "Bad Gateway"),
+        | "unsupported_harness" | "invalid_workspace" => 400,
+        _ => 502,
     }
 }
 
@@ -666,9 +666,9 @@ impl CommandOutcome {
     }
 
     /// The HTTP status a viewer sees for this answer.
-    pub fn status(&self) -> (u16, &'static str) {
+    pub fn status(&self) -> u16 {
         if self.ok {
-            return (200, "OK");
+            return 200;
         }
         command_status(self.error.as_deref().unwrap_or("invalid_command"))
     }
@@ -964,7 +964,7 @@ mod tests {
         assert_eq!(stale.card_id.as_deref(), Some("card-one"));
         assert_eq!(stale.card_revision, Some(1));
         assert_eq!(stale.layout.clone().unwrap().x, 100);
-        assert_eq!(stale.status(), (409, "Conflict"));
+        assert_eq!(stale.status(), 409);
 
         // A revision of zero is not "no expectation", it is a malformed command.
         assert_eq!(
@@ -990,7 +990,7 @@ mod tests {
         };
         let refusal = check_command(&snapshot, &unknown).err().unwrap();
         assert_eq!(refusal.error.as_deref(), Some("unknown_card"));
-        assert_eq!(refusal.status(), (404, "Not Found"));
+        assert_eq!(refusal.status(), 404);
 
         // A create may only name a harness this host offers, in the folder this
         // host published: the viewer never sends a command, a flag or a path.
@@ -1006,7 +1006,7 @@ mod tests {
         };
         let refusal = check_command(&snapshot, &create).err().unwrap();
         assert_eq!(refusal.error.as_deref(), Some("unsupported_harness"));
-        assert_eq!(refusal.status(), (400, "Bad Request"));
+        assert_eq!(refusal.status(), 400);
         create.command = WorkspaceCommand::CreateTerminal {
             agent_type: "shell".into(),
             workspace: "/etc".into(),
@@ -1041,7 +1041,7 @@ mod tests {
         };
         let stale = check_command(&snapshot, &folder).err().unwrap();
         assert_eq!(stale.error.as_deref(), Some("conflict"));
-        assert_eq!(stale.status(), (409, "Conflict"));
+        assert_eq!(stale.status(), 409);
         // A create may name any folder the host offers, not only the current
         // one, so picking a folder and launching straight away cannot race.
         let mut create_elsewhere = set_layout_request(1);
@@ -1142,7 +1142,7 @@ mod tests {
         snapshot.cards[0].revision = 7;
         snapshot.cards[0].layout.x = 700;
         let applied = CommandOutcome::applied(&snapshot, Some("card-one".into()));
-        assert_eq!(applied.status(), (200, "OK"));
+        assert_eq!(applied.status(), 200);
         let reply = applied.into_reply("machine-b", "r1");
         assert_eq!(
             serde_json::to_value(&reply).unwrap(),
@@ -1171,11 +1171,11 @@ mod tests {
         );
 
         let refusal = CommandOutcome::rejected(&snapshot, "conflict");
-        assert_eq!(refusal.status(), (409, "Conflict"));
+        assert_eq!(refusal.status(), 409);
         // Free-form text from a peer can never reach the user.
         let refusal = CommandOutcome::rejected(&snapshot, "rm -rf /");
         assert_eq!(refusal.error.as_deref(), Some("invalid_command"));
-        assert_eq!(refusal.status(), (400, "Bad Request"));
+        assert_eq!(refusal.status(), 400);
         assert_eq!(
             refusal.into_reply("machine-b", "r3").result,
             CommandResult::Rejected {

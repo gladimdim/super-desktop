@@ -52,23 +52,21 @@ struct DesktopReply {
     error: Option<String>,
 }
 
+/// An HTTP status and the stable error code sent with it.
 pub(super) struct WorkspaceError {
     pub(super) code: u16,
-    pub(super) reason: &'static str,
     pub(super) error: &'static str,
+}
+
+fn workspace_error(code: u16, error: &'static str) -> WorkspaceError {
+    WorkspaceError { code, error }
 }
 
 pub(super) fn workspace() -> Result<WorkspaceSnapshot, WorkspaceError> {
     let reply = match crate::ipc_request("desktop-workspace") {
         crate::Ipc::Reply(reply) => reply,
         crate::Ipc::NoDaemon => return Err(unavailable("desktop_unavailable")),
-        crate::Ipc::Stalled => {
-            return Err(WorkspaceError {
-                code: 504,
-                reason: "Gateway Timeout",
-                error: "desktop_timeout",
-            })
-        }
+        crate::Ipc::Stalled => return Err(workspace_error(504, "desktop_timeout")),
     };
     let local = decode_reply(&reply)?;
     let machine_id = pair_state().lock().unwrap().cfg.bridge_id.clone();
@@ -76,19 +74,11 @@ pub(super) fn workspace() -> Result<WorkspaceSnapshot, WorkspaceError> {
 }
 
 fn unavailable(error: &'static str) -> WorkspaceError {
-    WorkspaceError {
-        code: 503,
-        reason: "Service Unavailable",
-        error,
-    }
+    workspace_error(503, error)
 }
 
 fn decode_reply(reply: &str) -> Result<LocalWorkspaceSnapshot, WorkspaceError> {
-    let invalid = || WorkspaceError {
-        code: 502,
-        reason: "Bad Gateway",
-        error: "invalid_desktop_response",
-    };
+    let invalid = || workspace_error(502, "invalid_desktop_response");
     if reply.len() > 1024 * 1024 {
         return Err(invalid());
     }
@@ -140,7 +130,7 @@ mod dedup {
     #[derive(Clone)]
     pub(super) struct Answer {
         pub(super) code: u16,
-        pub(super) reason: &'static str,
+        /// The reply body exactly as it was first sent.
         pub(super) document: String,
     }
 
@@ -234,14 +224,7 @@ mod dedup {
 /// conflict with the owner's own geometry instead of overwriting a concurrent
 /// edit. Nothing here ever interpolates a shell command or a tmux target.
 pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
-    let invalid = |stream: &mut Connection| {
-        respond(
-            stream,
-            400,
-            "Bad Request",
-            &serde_json::json!({"error": "invalid_command"}),
-        )
-    };
+    let invalid = |stream: &mut Connection| reply_error(stream, 400, Envelope::Plain, "invalid_command");
     if body.len() > dedup::MAX_REQUEST_BODY {
         return invalid(stream);
     }
@@ -257,12 +240,7 @@ pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
     // A command addressed to another machine is refused before any dedup state
     // is touched, and always for the same reason a stale viewer sees elsewhere.
     if request.machine_id != machine_id {
-        return respond(
-            stream,
-            409,
-            "Conflict",
-            &serde_json::json!({"error": "wrong_machine"}),
-        );
+        return reply_error(stream, 409, Envelope::Plain, "wrong_machine");
     }
     if !crate::desktop_protocol::valid_request_id(&request.request_id) {
         return invalid(stream);
@@ -271,33 +249,15 @@ pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
     // command never costs an IPC round trip and never depends on one side's
     // validation staying correct. The viewer gets the same code either way.
     if let Some(error) = request.command.shape_error() {
-        return respond(
-            stream,
-            400,
-            "Bad Request",
-            &serde_json::json!({"error": error}),
-        );
+        return reply_error(stream, 400, Envelope::Plain, error);
     }
     match dedup::reserve(device, &request.expected_epoch, &request.request_id) {
-        dedup::Reservation::Cached(answer) => {
-            return respond(
-                stream,
-                answer.code,
-                answer.reason,
-                &serde_json::from_str(&answer.document).unwrap_or_default(),
-            )
-        }
+        // The answer is stored exactly as it was first sent.
+        dedup::Reservation::Cached(answer) => return reply_body(stream, answer.code, &answer.document),
         // The owner may or may not have applied this exact request. Reporting
         // an uncertain outcome is the only honest answer: it is never retried
         // on the viewer's behalf, and the viewer refreshes its state instead.
-        dedup::Reservation::Uncertain => {
-            return respond(
-                stream,
-                409,
-                "Conflict",
-                &serde_json::json!({"error": "unknown_outcome"}),
-            )
-        }
+        dedup::Reservation::Uncertain => return reply_error(stream, 409, Envelope::Plain, "unknown_outcome"),
         dedup::Reservation::Fresh => {}
     }
     let payload = match serde_json::to_string(&request) {
@@ -314,23 +274,11 @@ pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
             // "not applied": a retry after the daemon returns must be served,
             // not refused as uncertain.
             dedup::release(device, &request.expected_epoch, &request.request_id);
-            return respond(
-                stream,
-                503,
-                "Service Unavailable",
-                &serde_json::json!({"error": "desktop_unavailable"}),
-            )
+            return reply_error(stream, 503, Envelope::Plain, "desktop_unavailable");
         }
         // The request reached the owner but its answer did not; the outcome
         // stays unknown in the dedup cache.
-        crate::Ipc::Stalled => {
-            return respond(
-                stream,
-                504,
-                "Gateway Timeout",
-                &serde_json::json!({"error": "desktop_timeout"}),
-            )
-        }
+        crate::Ipc::Stalled => return reply_error(stream, 504, Envelope::Plain, "desktop_timeout"),
     };
     let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
     let outcome = match serde_json::from_value::<CommandOutcome>(parsed.clone()) {
@@ -342,35 +290,30 @@ pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
                 .as_str()
                 .and_then(crate::desktop_protocol::known_command_error)
                 .unwrap_or("invalid_desktop_response");
-            let (code, reason) = crate::desktop_protocol::command_status(error);
-            return respond(stream, code, reason, &serde_json::json!({"error": error}));
+            let code = crate::desktop_protocol::command_status(error);
+            return reply_error(stream, code, Envelope::Plain, error);
         }
     };
-    let (code, reason) = outcome.status();
+    let code = outcome.status();
     let document = serde_json::to_value(outcome.into_reply(&machine_id, &request.request_id))
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
     dedup::record(
         device,
         &request.expected_epoch,
         &request.request_id,
         dedup::Answer {
             code,
-            reason,
-            document: document.to_string(),
+            document: document.clone(),
         },
     );
-    respond(stream, code, reason, &document);
+    reply_body(stream, code, &document);
 }
 
 pub(super) fn get_workspace(stream: &mut Connection) {
     match workspace() {
-        Ok(snapshot) => respond(stream, 200, "OK", &serde_json::to_value(snapshot).unwrap()),
-        Err(error) => respond(
-            stream,
-            error.code,
-            error.reason,
-            &serde_json::json!({"error":error.error}),
-        ),
+        Ok(snapshot) => reply_json(stream, 200, &serde_json::to_value(snapshot).unwrap()),
+        Err(error) => reply_error(stream, error.code, Envelope::Plain, error.error),
     }
 }
 
@@ -405,41 +348,35 @@ pub(super) struct AttachTarget {
     _lease: AttachmentLease,
 }
 
-/// The host-owned grid, read before the upgrade so a viewer never receives a
-/// stream it could not be sized for.
-fn attach_error(code: u16, reason: &'static str, error: &'static str) -> WorkspaceError {
-    WorkspaceError { code, reason, error }
-}
-
 /// Resolve a card id to an attach target, or a typed error for the caller.
 pub(super) fn resolve_attach(
     card_id: &str,
     device: Option<&str>,
 ) -> std::result::Result<AttachTarget, WorkspaceError> {
     if !valid_card_id(card_id) {
-        return Err(attach_error(404, "Not Found", "unknown_card"));
+        return Err(workspace_error(404, "unknown_card"));
     }
     // Authorization happens first in the route; a request without a credential
     // identity must not consume the attachment budget either.
     let Some(device) = device else {
-        return Err(attach_error(401, "Unauthorized", "unknown_card"));
+        return Err(workspace_error(401, "unknown_card"));
     };
     let lease = AttachmentLease::acquire(device)
-        .ok_or_else(|| attach_error(429, "Too Many Requests", "attachment_limit"))?;
+        .ok_or_else(|| workspace_error(429, "attachment_limit"))?;
     let session = match resolve_session(card_id) {
         Ok(session) => session,
         Err(error) => {
             return Err(match error {
-                "terminal_exited" => attach_error(409, "Conflict", "terminal_exited"),
+                "terminal_exited" => workspace_error(409, "terminal_exited"),
                 "desktop_unavailable" | "desktop_not_ready" => {
-                    attach_error(503, "Service Unavailable", error)
+                    workspace_error(503, error)
                 }
-                _ => attach_error(404, "Not Found", "unknown_card"),
+                _ => workspace_error(404, "unknown_card"),
             })
         }
     };
     let grid = crate::terminal_transport::grid(&session)
-        .map_err(|_| attach_error(503, "Service Unavailable", "terminal_grid_unknown"))?;
+        .map_err(|_| workspace_error(503, "terminal_grid_unknown"))?;
     Ok(AttachTarget {
         card_id: card_id.to_string(),
         session,
@@ -750,7 +687,6 @@ mod tests {
             &request_id,
             dedup::Answer {
                 code: 409,
-                reason: "Conflict",
                 document: document.clone(),
             },
         );
