@@ -2678,21 +2678,17 @@ mod tests {
             assert!(agy_cmd.ends_with("--dangerously-skip-permissions"), "Antigravity must include --dangerously-skip-permissions, got: {}", agy_cmd);
         }
 
-        // Claude
-        let claude_cmd = resolve_command("claude", None);
-        assert!(claude_cmd.ends_with("--dangerously-skip-permissions"), "Claude must include --dangerously-skip-permissions, got: {}", claude_cmd);
-
-        // Codex
-        let codex_cmd = resolve_command("codex", None);
-        assert!(codex_cmd.ends_with("--dangerously-bypass-approvals-and-sandbox"), "Codex must include --dangerously-bypass-approvals-and-sandbox, got: {}", codex_cmd);
-
-        // OpenCode
-        let opencode_cmd = resolve_command("opencode", None);
-        assert!(opencode_cmd.ends_with("--auto"), "OpenCode must include --auto, got: {}", opencode_cmd);
-
-        // Grok
-        let grok_cmd = resolve_command("grok", None);
-        assert!(grok_cmd.ends_with("--dangerously-skip-permissions"), "Grok must include --dangerously-skip-permissions, got: {}", grok_cmd);
+        // The flags come from the harness defaults, not from which binaries
+        // happen to be on PATH (the release build container has none).
+        for (agent, path, flag) in [
+            ("claude", "/usr/bin/claude", "--dangerously-skip-permissions"),
+            ("codex", "/usr/bin/codex", "--dangerously-bypass-approvals-and-sandbox"),
+            ("opencode", "/usr/bin/opencode", "--auto"),
+            ("grok", "/usr/bin/grok", "--dangerously-skip-permissions"),
+        ] {
+            let cmd = resolve_command(agent, Some(path));
+            assert!(cmd.ends_with(flag), "{agent} must include {flag}, got: {cmd}");
+        }
 
         // Shell (must not have AI permission flags)
         let shell_cmd = resolve_command("shell", None);
