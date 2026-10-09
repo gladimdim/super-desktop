@@ -758,41 +758,14 @@ pub fn build_harness_settings_panel(
     outer.set_size_request(SETTINGS_PANEL_MIN_SIZE.0, SETTINGS_PANEL_MIN_SIZE.1);
 
     // ---- header: badge, title + subtitle, ← back, close ----
-    let header = Box::new(Orientation::Horizontal, 10);
-    header.add_css_class("term-header");
-
     let badge = Label::new(Some("⚙"));
-    badge.add_css_class("launcher-head-badge");
-    badge.set_valign(Align::Center);
-    header.append(&badge);
-
-    let titles = Box::new(Orientation::Vertical, 0);
-    titles.set_hexpand(true);
-    titles.set_valign(Align::Center);
-    let title = Label::new(Some("Settings"));
-    title.add_css_class("term-title");
-    title.set_halign(Align::Start);
-    let subtitle = Label::new(Some("Connections · shortcuts · top bar"));
-    subtitle.add_css_class("launcher-subtitle");
-    subtitle.set_halign(Align::Start);
-    titles.append(&title);
-    titles.append(&subtitle);
-    header.append(&titles);
-
+    let header = crate::floating_panel::PanelHeader::new(&badge, "Settings", "Connections · shortcuts · top bar", true);
+    let (title, subtitle) = (header.title.clone(), header.subtitle.clone());
     // Shown on every page after the settings hub (see `nav`).
-    let btn_back = Button::with_label("←");
-    btn_back.set_tooltip_text(Some("Back to settings"));
-    btn_back.add_css_class("term-btn");
-    btn_back.set_valign(Align::Center);
+    let btn_back = header.button("←", Some("term-btn"), Some("Back to settings"));
     btn_back.set_visible(false);
-    header.append(&btn_back);
-
-    let btn_close = Button::with_label("✕");
-    btn_close.set_tooltip_text(Some("Close panel"));
-    btn_close.add_css_class("term-btn");
-    btn_close.set_valign(Align::Center);
-    header.append(&btn_close);
-    outer.append(&header);
+    let btn_close = header.close_button("Close panel");
+    outer.append(&header.widget);
 
     let weak_outer = outer.downgrade();
     btn_close.connect_clicked(move |_| {

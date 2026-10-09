@@ -211,27 +211,14 @@ impl PairingRequestPanel {
         widget.set_valign(gtk4::Align::Center);
         widget.set_visible(false);
 
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-        header.add_css_class("term-header");
-        let badge = gtk4::Label::new(Some("⇄"));
-        badge.add_css_class("launcher-head-badge");
-        header.append(&badge);
-        let heading = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        heading.set_hexpand(true);
-        let title = gtk4::Label::new(Some("Connection request"));
-        title.add_css_class("term-title");
-        title.set_xalign(0.0);
-        let subtitle = gtk4::Label::new(Some("A device wants to connect to this PC"));
-        subtitle.add_css_class("launcher-subtitle");
-        subtitle.set_xalign(0.0);
-        heading.append(&title);
-        heading.append(&subtitle);
-        header.append(&heading);
-        let close = gtk4::Button::with_label("✕");
-        close.set_tooltip_text(Some("Close. The request keeps waiting until it expires."));
-        close.add_css_class("term-btn");
-        header.append(&close);
-        widget.append(&header);
+        let header = crate::floating_panel::PanelHeader::new(
+            &gtk4::Label::new(Some("⇄")),
+            "Connection request",
+            "A device wants to connect to this PC",
+            false,
+        );
+        let close = header.close_button("Close. The request keeps waiting until it expires.");
+        widget.append(&header.widget);
 
         let pages = gtk4::Stack::new();
         pages.set_transition_type(gtk4::StackTransitionType::Crossfade);

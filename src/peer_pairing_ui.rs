@@ -70,31 +70,13 @@ impl PairingWizard {
         widget.set_valign(gtk4::Align::Center);
         widget.set_visible(false);
 
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-        header.add_css_class("term-header");
-        let badge = gtk4::Label::new(Some("⌁"));
-        badge.add_css_class("launcher-head-badge");
-        header.append(&badge);
-        let heading = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        heading.set_hexpand(true);
-        let title = gtk4::Label::new(Some("Add a PC"));
-        title.add_css_class("term-title");
-        title.set_xalign(0.0);
-        let subtitle = gtk4::Label::new(Some("Connect SUPER DESKTOPs"));
-        subtitle.add_css_class("launcher-subtitle");
-        subtitle.set_xalign(0.0);
-        heading.append(&title);
-        heading.append(&subtitle);
-        header.append(&heading);
-        let back = gtk4::Button::with_label("← Back");
-        back.add_css_class("term-btn");
+        let header =
+            crate::floating_panel::PanelHeader::new(&gtk4::Label::new(Some("⌁")), "Add a PC", "Connect SUPER DESKTOPs", false);
+        let (title, subtitle) = (header.title.clone(), header.subtitle.clone());
+        let back = header.button("← Back", Some("term-btn"), None);
         back.set_visible(false);
-        header.append(&back);
-        let close = gtk4::Button::with_label("✕");
-        close.set_tooltip_text(Some("Close PC setup"));
-        close.add_css_class("term-btn");
-        header.append(&close);
-        widget.append(&header);
+        let close = header.close_button("Close PC setup");
+        widget.append(&header.widget);
 
         let pages = gtk4::Stack::new();
         pages.set_transition_type(gtk4::StackTransitionType::SlideLeftRight);

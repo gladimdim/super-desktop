@@ -212,49 +212,13 @@ fn show_links(content: &gtk4::Box, urls: &[String], collapsed: &Collapsed, statu
 const DEFAULT_SIZE: (i32, i32) = (760, 600);
 const MIN_SIZE: (i32, i32) = (460, 400);
 
-/// Where Files panels open: the desktop's overlay, how tall its top bar is,
-/// and the dialog they must stay under.
-struct Host {
-    overlay: glib::WeakRef<gtk4::Overlay>,
-    top: Rc<dyn Fn() -> i32>,
-    ceiling: glib::WeakRef<gtk4::Widget>,
-}
-
-/// An open Files panel. It belongs to no card: it stays until its own ✕.
-struct Open {
-    session: String,
-    panel: Rc<crate::floating_panel::MovablePanel>,
-    generation: Rc<Cell<u64>>,
-}
-
 thread_local! {
-    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
-    static OPEN: RefCell<Vec<Open>> = const { RefCell::new(Vec::new()) };
-    /// Where and how big the user last left a Files panel.
-    static LAST: Cell<(Option<(i32, i32)>, Option<(i32, i32)>)> = const { Cell::new((None, None)) };
+    static PANELS: crate::floating_panel::CardPanels = crate::floating_panel::CardPanels::new(DEFAULT_SIZE, MIN_SIZE);
 }
 
-/// Open Files panels in `overlay`, below its bar (`top` tall) and under
-/// `ceiling`, a dialog that stays above them.
-pub fn set_host(overlay: &gtk4::Overlay, top: Rc<dyn Fn() -> i32>, ceiling: &impl IsA<gtk4::Widget>) {
-    HOST.with(|host| {
-        host.replace(Some(Host {
-            overlay: overlay.downgrade(),
-            top,
-            ceiling: ceiling.upcast_ref::<gtk4::Widget>().downgrade(),
-        }))
-    });
-}
-
-/// The overlay, top-bar height and ceiling panels open in (shared with the
-/// prompt history panel).
-pub(crate) fn host() -> Option<(gtk4::Overlay, Rc<dyn Fn() -> i32>, Option<gtk4::Widget>)> {
-    HOST.with(|host| {
-        let host = host.borrow();
-        let host = host.as_ref()?;
-        Some((host.overlay.upgrade()?, Rc::clone(&host.top), host.ceiling.upgrade()))
-    })
-}
+/// Open Files panels, and a card's other panels, in an overlay below its bar
+/// and under a dialog that stays above them.
+pub use crate::floating_panel::set_host;
 
 /// Unsaved Markdown edits in a panel, and whether the user was warned once
 /// that leaving would lose them.
@@ -294,45 +258,10 @@ pub fn button(session: String, title: String) -> gtk4::Button {
 /// Show the Files panel of `session`, bringing it to the front when it is
 /// already open.
 fn open(session: &str, title: &str, collapsed: &Collapsed) {
-    let Some((overlay, top, ceiling)) = host() else {
+    if !PANELS.with(|panels| panels.wants_new(session)) {
         return;
-    };
-    let existing = OPEN.with(|open| {
-        open.borrow().iter().find(|o| o.session == session).map(|o| Rc::clone(&o.panel))
-    });
-    if let Some(panel) = existing {
-        if panel.is_in(&overlay) {
-            panel.raise(ceiling.as_ref());
-            return;
-        }
-        // Left in an overlay that is gone.
-        close(session);
     }
     let drawer = build_drawer(session, title, collapsed);
-    let (mut saved_pos, saved_size) = LAST.get();
-    // Another open panel would hide this one exactly.
-    let others = OPEN.with(|open| open.borrow().len()) as i32;
-    saved_pos = saved_pos.map(|(x, y)| (x + 32 * others, y + 32 * others));
-    let panel = crate::floating_panel::MovablePanel::install(
-        &overlay,
-        &drawer.widget,
-        crate::floating_panel::PanelLayout { default_size: DEFAULT_SIZE, min_size: MIN_SIZE, saved_pos, saved_size },
-        top,
-        Rc::new(|position, size| LAST.set((Some(position), Some(size)))),
-    );
-    panel.raise(ceiling.as_ref());
-    // A press anywhere in a panel brings it above the other panels.
-    let press = gtk4::GestureClick::new();
-    press.set_button(0);
-    press.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    let weak = Rc::downgrade(&panel);
-    let ceiling = ceiling.map(|c| c.downgrade());
-    press.connect_pressed(move |_, _, _, _| {
-        if let Some(panel) = weak.upgrade() {
-            panel.raise(ceiling.as_ref().and_then(|c| c.upgrade()).as_ref());
-        }
-    });
-    drawer.widget.add_controller(press);
     let target = session.to_string();
     let edits = drawer.edits.clone();
     let status = drawer.status.clone();
@@ -341,27 +270,13 @@ fn open(session: &str, title: &str, collapsed: &Collapsed) {
             close(&target);
         }
     });
-    OPEN.with(|open| {
-        open.borrow_mut().push(Open {
-            session: session.to_string(),
-            panel,
-            generation: Rc::clone(&drawer.generation),
-        })
-    });
+    PANELS.with(|panels| panels.show(session, &drawer.widget, Rc::clone(&drawer.generation), None));
     (drawer.reload)(None);
 }
 
 /// Close the Files panel of `session`; results still loading are dropped.
 fn close(session: &str) {
-    let closed = OPEN.with(|open| {
-        let mut open = open.borrow_mut();
-        let index = open.iter().position(|o| o.session == session)?;
-        Some(open.remove(index))
-    });
-    if let Some(closed) = closed {
-        closed.generation.set(closed.generation.get() + 1);
-        closed.panel.remove();
-    }
+    PANELS.with(|panels| panels.close(session));
 }
 
 struct Drawer {
@@ -381,37 +296,10 @@ fn clear(container: &gtk4::Box) {
 }
 
 fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawer {
-    let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    outer.add_css_class("mini-terminal");
-    outer.add_css_class("harness-panel");
-    outer.add_css_class("asset-drawer");
-    outer.set_size_request(MIN_SIZE.0, MIN_SIZE.1);
     // The header is where the panel is dragged from, like a terminal card's.
-    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-    header.add_css_class("term-header");
-    let badge = gtk4::Label::new(Some("📁"));
-    badge.add_css_class("launcher-head-badge");
-    badge.set_valign(gtk4::Align::Center);
-    header.append(&badge);
-    let titles = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    titles.set_hexpand(true);
-    titles.set_valign(gtk4::Align::Center);
-    let title = gtk4::Label::new(Some("Files & links"));
-    title.add_css_class("term-title");
-    title.set_halign(gtk4::Align::Start);
-    let subtitle = gtk4::Label::new(Some(card_title));
-    subtitle.add_css_class("launcher-subtitle");
-    subtitle.set_halign(gtk4::Align::Start);
-    subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    titles.append(&title);
-    titles.append(&subtitle);
-    header.append(&titles);
-    let close = gtk4::Button::with_label("✕");
-    close.set_tooltip_text(Some("Close Files & links"));
-    close.add_css_class("term-btn");
-    close.set_valign(gtk4::Align::Center);
-    header.append(&close);
-    outer.append(&header);
+    let (outer, header) =
+        crate::floating_panel::card_panel(&gtk4::Label::new(Some("📁")), "Files & links", card_title, MIN_SIZE);
+    let close = header.close_button("Close Files & links");
 
     let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     body.set_vexpand(true);
@@ -982,7 +870,7 @@ mod tests {
         overlay.add_overlay(&ceiling);
         set_host(&overlay, Rc::new(|| 46), &ceiling);
         let collapsed: Collapsed = Rc::new(RefCell::new(HashSet::new()));
-        let open_count = || OPEN.with(|open| open.borrow().len());
+        let open_count = || PANELS.with(crate::floating_panel::CardPanels::len);
         // Opened as its own panel in the overlay, under the dialog that stays on top.
         open("test_files_a", "Claude", &collapsed);
         assert_eq!(open_count(), 1);

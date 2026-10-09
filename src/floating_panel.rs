@@ -283,6 +283,225 @@ impl MovablePanel {
     }
 }
 
+/// Where card panels (Files, attachments, prompt history) open: the
+/// desktop's overlay, how tall its top bar is, and the dialog they must stay
+/// under.
+struct Host {
+    overlay: gtk4::glib::WeakRef<gtk4::Overlay>,
+    top: Rc<dyn Fn() -> i32>,
+    ceiling: gtk4::glib::WeakRef<gtk4::Widget>,
+}
+
+thread_local! {
+    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
+}
+
+/// Open card panels in `overlay`, below its bar (`top` tall) and under
+/// `ceiling`, a dialog that stays above them.
+pub fn set_host(overlay: &gtk4::Overlay, top: Rc<dyn Fn() -> i32>, ceiling: &impl IsA<gtk4::Widget>) {
+    HOST.with(|host| {
+        host.replace(Some(Host {
+            overlay: overlay.downgrade(),
+            top,
+            ceiling: ceiling.upcast_ref::<gtk4::Widget>().downgrade(),
+        }))
+    });
+}
+
+/// The overlay, top-bar height and ceiling card panels open in.
+fn host() -> Option<(gtk4::Overlay, Rc<dyn Fn() -> i32>, Option<gtk4::Widget>)> {
+    HOST.with(|host| {
+        let host = host.borrow();
+        let host = host.as_ref()?;
+        Some((host.overlay.upgrade()?, Rc::clone(&host.top), host.ceiling.upgrade()))
+    })
+}
+
+/// An open card panel.
+struct OpenPanel {
+    session: String,
+    panel: Rc<MovablePanel>,
+    generation: Rc<Cell<u64>>,
+    /// Whatever the panel's contents reach only weakly, kept for as long as
+    /// the panel is open.
+    _keep: Option<Box<dyn std::any::Any>>,
+}
+
+/// The open panels of one kind (Files, attachments, prompt history): at most
+/// one per card, by tmux session. A panel belongs to no card: it stays until
+/// its own ✕.
+pub struct CardPanels {
+    default_size: (i32, i32),
+    min_size: (i32, i32),
+    open: RefCell<Vec<OpenPanel>>,
+    /// Where and how big the user last left a panel of this kind.
+    last: Rc<Cell<(Option<(i32, i32)>, Option<(i32, i32)>)>>,
+}
+
+impl CardPanels {
+    /// Panels that open at `default_size` and may be dragged down to `min_size`.
+    pub fn new(default_size: (i32, i32), min_size: (i32, i32)) -> Self {
+        Self { default_size, min_size, open: RefCell::new(Vec::new()), last: Rc::new(Cell::new((None, None))) }
+    }
+
+    /// Whether `session` needs a new panel built: not when there is nowhere
+    /// to show one, nor when its panel is open (that one comes to the front).
+    /// A panel left in an overlay that is gone is closed.
+    pub fn wants_new(&self, session: &str) -> bool {
+        let Some((overlay, _, ceiling)) = host() else {
+            return false;
+        };
+        let existing = self.open.borrow().iter().find(|o| o.session == session).map(|o| Rc::clone(&o.panel));
+        if let Some(panel) = existing {
+            if panel.is_in(&overlay) {
+                panel.raise(ceiling.as_ref());
+                return false;
+            }
+            self.close(session);
+        }
+        true
+    }
+
+    /// Show `widget` as the panel of `session`, in front. `generation` is
+    /// bumped when it closes, so results still loading are dropped; `keep`
+    /// lives as long as the panel.
+    pub fn show(
+        &self,
+        session: &str,
+        widget: &impl IsA<gtk4::Widget>,
+        generation: Rc<Cell<u64>>,
+        keep: Option<Box<dyn std::any::Any>>,
+    ) {
+        let Some((overlay, top, ceiling)) = host() else {
+            return;
+        };
+        let (mut saved_pos, saved_size) = self.last.get();
+        // Another open panel would hide this one exactly.
+        let others = self.open.borrow().len() as i32;
+        saved_pos = saved_pos.map(|(x, y)| (x + 32 * others, y + 32 * others));
+        let last = Rc::clone(&self.last);
+        let panel = MovablePanel::install(
+            &overlay,
+            widget,
+            PanelLayout { default_size: self.default_size, min_size: self.min_size, saved_pos, saved_size },
+            top,
+            Rc::new(move |position, size| last.set((Some(position), Some(size)))),
+        );
+        panel.raise(ceiling.as_ref());
+        // A press anywhere in a panel brings it above the other panels.
+        let press = gtk4::GestureClick::new();
+        press.set_button(0);
+        press.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let weak = Rc::downgrade(&panel);
+        let ceiling = ceiling.map(|c| c.downgrade());
+        press.connect_pressed(move |_, _, _, _| {
+            if let Some(panel) = weak.upgrade() {
+                panel.raise(ceiling.as_ref().and_then(|c| c.upgrade()).as_ref());
+            }
+        });
+        widget.add_controller(press);
+        self.open.borrow_mut().push(OpenPanel { session: session.to_string(), panel, generation, _keep: keep });
+    }
+
+    /// Close the panel of `session`, dropping results still loading.
+    pub fn close(&self, session: &str) {
+        let closed = {
+            let mut open = self.open.borrow_mut();
+            open.iter().position(|o| o.session == session).map(|index| open.remove(index))
+        };
+        if let Some(closed) = closed {
+            closed.generation.set(closed.generation.get() + 1);
+            closed.panel.remove();
+        }
+    }
+
+    /// How many panels of this kind are open.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.open.borrow().len()
+    }
+}
+
+/// A panel's header, which a floating panel is dragged by (`term-header`):
+/// a badge, the title over a subtitle, then buttons at its end.
+pub struct PanelHeader {
+    pub widget: gtk4::Box,
+    pub title: gtk4::Label,
+    pub subtitle: gtk4::Label,
+    centered: bool,
+}
+
+impl PanelHeader {
+    /// `badge` is a label or an icon, given the badge style. `centered` lines
+    /// every part up on the header's middle with the titles at its start;
+    /// otherwise the parts fill the header's height and the titles' text
+    /// starts at the left.
+    pub fn new(badge: &impl IsA<gtk4::Widget>, title: &str, subtitle: &str, centered: bool) -> Self {
+        let widget = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
+        widget.add_css_class("term-header");
+        badge.add_css_class("launcher-head-badge");
+        widget.append(badge);
+        let titles = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        titles.set_hexpand(true);
+        let title = gtk4::Label::new(Some(title));
+        title.add_css_class("term-title");
+        let subtitle = gtk4::Label::new(Some(subtitle));
+        subtitle.add_css_class("launcher-subtitle");
+        if centered {
+            badge.set_valign(gtk4::Align::Center);
+            titles.set_valign(gtk4::Align::Center);
+            title.set_halign(gtk4::Align::Start);
+            subtitle.set_halign(gtk4::Align::Start);
+        } else {
+            title.set_xalign(0.0);
+            subtitle.set_xalign(0.0);
+        }
+        titles.append(&title);
+        titles.append(&subtitle);
+        widget.append(&titles);
+        Self { widget, title, subtitle, centered }
+    }
+
+    /// A button at the header's end, styled `class` when given.
+    pub fn button(&self, label: &str, class: Option<&str>, tooltip: Option<&str>) -> gtk4::Button {
+        let button = gtk4::Button::with_label(label);
+        button.set_tooltip_text(tooltip);
+        if let Some(class) = class {
+            button.add_css_class(class);
+        }
+        if self.centered {
+            button.set_valign(gtk4::Align::Center);
+        }
+        self.widget.append(&button);
+        button
+    }
+
+    /// The ✕ that closes the panel: the header's last button.
+    pub fn close_button(&self, tooltip: &str) -> gtk4::Button {
+        self.button("✕", Some("term-btn"), Some(tooltip))
+    }
+}
+
+/// The frame of a card's own panel (Files, attachments, prompt history),
+/// never smaller than `min_size`: a centered header whose subtitle names the
+/// card, `card_title`. Add the header's buttons, then the panel's body.
+pub fn card_panel(
+    badge: &impl IsA<gtk4::Widget>,
+    title: &str,
+    card_title: &str,
+    min_size: (i32, i32),
+) -> (gtk4::Box, PanelHeader) {
+    let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+    outer.add_css_class("mini-terminal");
+    outer.add_css_class("harness-panel");
+    outer.add_css_class("asset-drawer");
+    outer.set_size_request(min_size.0, min_size.1);
+    let header = PanelHeader::new(badge, title, card_title, true);
+    header.subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+    outer.append(&header.widget);
+    (outer, header)
+}
+
 /// A size no smaller than the panel's pages need.
 fn fit_min(size: (i32, i32), min: (i32, i32)) -> (i32, i32) {
     (size.0.max(min.0), size.1.max(min.1))

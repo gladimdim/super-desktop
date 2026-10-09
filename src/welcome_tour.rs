@@ -1002,31 +1002,12 @@ impl WelcomeTour {
         panel.set_vexpand(true);
         widget.append(&panel);
 
-        let header = gtk4::Box::new(Orientation::Horizontal, 10);
-        header.add_css_class("term-header");
-        let badge = label("⚡", "launcher-head-badge");
-        badge.set_valign(Align::Center);
-        header.append(&badge);
-        let titles = gtk4::Box::new(Orientation::Vertical, 0);
-        titles.set_hexpand(true);
-        titles.set_valign(Align::Center);
-        let title = label("Welcome to SUPER DESKTOP", "term-title");
-        title.set_halign(Align::Start);
-        titles.append(&title);
-        let step_label = label("", "launcher-subtitle");
-        step_label.set_halign(Align::Start);
-        titles.append(&step_label);
-        header.append(&titles);
-        let skip = gtk4::Button::with_label("Skip tour");
-        skip.add_css_class("launcher-btn");
-        skip.set_valign(Align::Center);
-        header.append(&skip);
-        let close = gtk4::Button::with_label("✕");
-        close.add_css_class("term-btn");
-        close.set_tooltip_text(Some("Close the tour [Esc]"));
-        close.set_valign(Align::Center);
-        header.append(&close);
-        panel.append(&header);
+        let header =
+            crate::floating_panel::PanelHeader::new(&gtk4::Label::new(Some("⚡")), "Welcome to SUPER DESKTOP", "", true);
+        let step_label = header.subtitle.clone();
+        let skip = header.button("Skip tour", Some("launcher-btn"), None);
+        let close = header.close_button("Close the tour [Esc]");
+        panel.append(&header.widget);
 
         let stack = gtk4::Stack::new();
         stack.set_transition_type(if animations_enabled() {

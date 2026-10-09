@@ -33,19 +33,7 @@ thread_local! {
     static STAGED: RefCell<HashMap<String, Vec<PathBuf>>> = RefCell::new(HashMap::new());
     /// Every card's 📎 button, repainted with its count.
     static BUTTONS: RefCell<Vec<(String, glib::WeakRef<gtk4::Button>)>> = const { RefCell::new(Vec::new()) };
-    static OPEN: RefCell<Vec<Open>> = const { RefCell::new(Vec::new()) };
-    /// Where and how big the user last left an attachments panel.
-    static LAST: Cell<(Option<(i32, i32)>, Option<(i32, i32)>)> = const { Cell::new((None, None)) };
-}
-
-struct Open {
-    session: String,
-    panel: Rc<crate::floating_panel::MovablePanel>,
-    generation: Rc<Cell<u64>>,
-    /// The panel's repaint. Its rows and buttons reach it only weakly (they
-    /// live inside the panel it redraws), so this keeps it for as long as
-    /// the panel is open.
-    _paint: Rc<dyn Fn()>,
+    static PANELS: crate::floating_panel::CardPanels = crate::floating_panel::CardPanels::new(DEFAULT_SIZE, MIN_SIZE);
 }
 
 /// The files attached to `session`.
@@ -154,65 +142,22 @@ pub fn button(session: String, title: String, folder: String) -> gtk4::Button {
 
 /// Show the attachments panel of `session`, in front, or bring it there.
 fn open(session: &str, title: &str, folder: &str, origin: glib::WeakRef<gtk4::Button>) {
-    let Some((overlay, top, ceiling)) = crate::asset_view::host() else {
+    if !PANELS.with(|panels| panels.wants_new(session)) {
         return;
-    };
-    let existing = OPEN.with(|open| {
-        open.borrow().iter().find(|o| o.session == session).map(|o| Rc::clone(&o.panel))
-    });
-    if let Some(panel) = existing {
-        if panel.is_in(&overlay) {
-            panel.raise(ceiling.as_ref());
-            return;
-        }
-        close(session);
     }
     let drawer = build(session, title, Path::new(folder), origin);
-    let (mut saved_pos, saved_size) = LAST.get();
-    let others = OPEN.with(|open| open.borrow().len()) as i32;
-    saved_pos = saved_pos.map(|(x, y)| (x + 32 * others, y + 32 * others));
-    let panel = crate::floating_panel::MovablePanel::install(
-        &overlay,
-        &drawer.widget,
-        crate::floating_panel::PanelLayout { default_size: DEFAULT_SIZE, min_size: MIN_SIZE, saved_pos, saved_size },
-        top,
-        Rc::new(|position, size| LAST.set((Some(position), Some(size)))),
-    );
-    panel.raise(ceiling.as_ref());
-    let press = gtk4::GestureClick::new();
-    press.set_button(0);
-    press.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    let weak = Rc::downgrade(&panel);
-    let ceiling = ceiling.map(|c| c.downgrade());
-    press.connect_pressed(move |_, _, _, _| {
-        if let Some(panel) = weak.upgrade() {
-            panel.raise(ceiling.as_ref().and_then(|c| c.upgrade()).as_ref());
-        }
-    });
-    drawer.widget.add_controller(press);
     let target = session.to_string();
     drawer.close.connect_clicked(move |_| close(&target));
-    OPEN.with(|open| {
-        open.borrow_mut().push(Open {
-            session: session.to_string(),
-            panel,
-            generation: Rc::clone(&drawer.generation),
-            _paint: Rc::clone(&drawer.paint),
-        })
-    });
+    // The panel's repaint. Its rows and buttons reach it only weakly (they
+    // live inside the panel it redraws), so the panel keeps it for as long
+    // as it is open.
+    let paint = Box::new(Rc::clone(&drawer.paint));
+    PANELS.with(|panels| panels.show(session, &drawer.widget, Rc::clone(&drawer.generation), Some(paint)));
 }
 
 /// Close the attachments panel of `session`. Its files stay attached.
 fn close(session: &str) {
-    let closed = OPEN.with(|open| {
-        let mut open = open.borrow_mut();
-        let index = open.iter().position(|o| o.session == session)?;
-        Some(open.remove(index))
-    });
-    if let Some(closed) = closed {
-        closed.generation.set(closed.generation.get() + 1);
-        closed.panel.remove();
-    }
+    PANELS.with(|panels| panels.close(session));
 }
 
 /// Give the keyboard to the terminal of the card `button` sits on.
@@ -333,38 +278,10 @@ fn small_button(label: &str, tooltip: &str) -> gtk4::Button {
 }
 
 fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<gtk4::Button>) -> Drawer {
-    let outer = gtk4::Box::new(Orientation::Vertical, 0);
-    outer.add_css_class("mini-terminal");
-    outer.add_css_class("harness-panel");
-    outer.add_css_class("asset-drawer");
+    let (outer, header) =
+        crate::floating_panel::card_panel(&gtk4::Image::from_icon_name(attach_icon()), "Attachments", card_title, MIN_SIZE);
     outer.add_css_class("attach-panel");
-    outer.set_size_request(MIN_SIZE.0, MIN_SIZE.1);
-
-    let header = gtk4::Box::new(Orientation::Horizontal, 10);
-    header.add_css_class("term-header");
-    let badge = gtk4::Image::from_icon_name(attach_icon());
-    badge.add_css_class("launcher-head-badge");
-    badge.set_valign(Align::Center);
-    header.append(&badge);
-    let titles = gtk4::Box::new(Orientation::Vertical, 0);
-    titles.set_hexpand(true);
-    titles.set_valign(Align::Center);
-    let title = gtk4::Label::new(Some("Attachments"));
-    title.add_css_class("term-title");
-    title.set_halign(Align::Start);
-    let subtitle = gtk4::Label::new(Some(card_title));
-    subtitle.add_css_class("launcher-subtitle");
-    subtitle.set_halign(Align::Start);
-    subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    titles.append(&title);
-    titles.append(&subtitle);
-    header.append(&titles);
-    let close_button = gtk4::Button::with_label("✕");
-    close_button.set_tooltip_text(Some("Close; attached files are kept"));
-    close_button.add_css_class("term-btn");
-    close_button.set_valign(Align::Center);
-    header.append(&close_button);
-    outer.append(&header);
+    let close_button = header.close_button("Close; attached files are kept");
 
     let body = gtk4::Box::new(Orientation::Vertical, 8);
     body.set_vexpand(true);
@@ -1124,7 +1041,7 @@ mod tests {
             .first_child().unwrap().last_child().unwrap().downcast::<gtk4::Button>().unwrap();
         close_button.emit_clicked();
         assert!(find("attach-panel").is_empty());
-        assert!(OPEN.with(|open| open.borrow().is_empty()));
+        assert_eq!(PANELS.with(crate::floating_panel::CardPanels::len), 0);
         assert_eq!(staged(session).len(), 1);
         set_staged(session, Vec::new());
         window.close();
