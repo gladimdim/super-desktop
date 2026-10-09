@@ -565,21 +565,15 @@ mod tests {
 
     #[test]
     fn completion_wait_wakes_on_hang_up_or_shutdown() {
-        let pair = || {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (server, _) = listener.accept().unwrap();
-            (client, server)
-        };
         // Nothing happens: the wait lasts until the deadline.
-        let (_client, server) = pair();
+        let (_client, server) = loopback_pair();
         let mut connection = Connection::plain(server);
         let start = Instant::now();
         assert!(!hung_up_before(&mut connection, start + Duration::from_millis(300)));
         assert!(start.elapsed() >= Duration::from_millis(300));
 
         // The next pipelined request is not a hang-up and stays readable.
-        let (mut client, server) = pair();
+        let (mut client, server) = loopback_pair();
         let mut connection = Connection::plain(server);
         client.write_all(b"GET").unwrap();
         assert!(!hung_up_before(&mut connection, Instant::now() + Duration::from_millis(300)));
@@ -588,7 +582,7 @@ mod tests {
         assert_eq!(&first, b"G");
 
         // The phone closes its socket: noticed at once, not at the deadline.
-        let (client, server) = pair();
+        let (client, server) = loopback_pair();
         let mut connection = Connection::plain(server);
         let closer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(100));
@@ -600,7 +594,7 @@ mod tests {
         closer.join().unwrap();
 
         // Revocation/expiry shut the socket down from another thread.
-        let (_client, server) = pair();
+        let (_client, server) = loopback_pair();
         let shutter = server.try_clone().unwrap();
         let mut connection = Connection::plain(server);
         let revoker = std::thread::spawn(move || {

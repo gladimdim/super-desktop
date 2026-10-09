@@ -1906,6 +1906,28 @@ fn loopback_server<T: Send + 'static>(
     (client, std::thread::spawn(move || serve(Connection::plain(server))))
 }
 
+/// A session on the test's private tmux server (see `test_isolation`),
+/// killed when dropped together with an optional script it runs.
+#[cfg(test)]
+struct TmuxSession(String, Option<PathBuf>);
+#[cfg(test)]
+impl TmuxSession {
+    fn start(name: &str, command: &[&str]) -> Self {
+        let made = Command::new("tmux").args(["new-session", "-d", "-s", name]).args(command).output().unwrap();
+        assert!(made.status.success());
+        Self(name.to_string(), None)
+    }
+}
+#[cfg(test)]
+impl Drop for TmuxSession {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+        if let Some(script) = &self.1 {
+            let _ = fs::remove_file(script);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1947,20 +1969,9 @@ mod tests {
     #[test]
     fn persistent_input_keeps_order_and_acknowledges_errors() {
         let id = format!("sd_perf_test_{}", std::process::id());
-        struct Session(String);
-        impl Drop for Session {
-            fn drop(&mut self) { let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output(); }
-        }
-        let result = Command::new("tmux").args(["new-session", "-d", "-s", &id, "cat"]).output().unwrap();
-        assert!(result.status.success());
-        let _session = Session(id.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            stream_keys(&mut Connection::plain(stream), &id);
-        });
+        let _session = TmuxSession::start(&id, &["cat"]);
+        let server_id = id.clone();
+        let (mut client, worker) = loopback_server(move |mut stream| stream_keys(&mut stream, &server_id));
         // Pipeline messages without waiting for each acknowledgement.
         ws_send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
         ws_send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
@@ -1970,29 +1981,23 @@ mod tests {
             assert_eq!(ack["sequence"], sequence);
             assert_eq!(ack["ok"], sequence < 3);
         }
-        assert_eq!(last_user_text(&_session.0, "codex", None).as_deref(), Some("beta"));
+        assert_eq!(last_user_text(&id, "codex", None).as_deref(), Some("beta"));
         // Draft input and rejected submissions must not replace the last prompt.
         ws_send(&mut client, serde_json::json!({"sequence":4,"text":"draft","enter":false}));
         assert_eq!(ws_receive(&mut client)["ok"], true);
         ws_send(&mut client, serde_json::json!({"sequence":5,"text":"x".repeat(4097),"enter":true}));
         assert_eq!(ws_receive(&mut client)["ok"], false);
-        assert_eq!(last_user_text(&_session.0, "codex", None).as_deref(), Some("beta"));
+        assert_eq!(last_user_text(&id, "codex", None).as_deref(), Some("beta"));
         ws_send(&mut client, serde_json::json!({"sequence":6,"text":"\nUnicode привіт ✓","enter":true}));
         assert_eq!(ws_receive(&mut client)["ok"], true);
-        assert_eq!(last_user_text(&_session.0, "codex", None).as_deref(), Some("Unicode привіт ✓"));
-        let screen = capture_pane_text(&_session.0).unwrap();
+        assert_eq!(last_user_text(&id, "codex", None).as_deref(), Some("Unicode привіт ✓"));
+        let screen = capture_pane_text(&id).unwrap();
         assert!(screen.find("alpha").unwrap() < screen.find("beta").unwrap());
-        let mut control = crate::tmux_control::Control::open(&_session.0).unwrap();
-        assert_eq!(control.capture().unwrap(), crate::tmux::capture_pane_ansi(&_session.0).unwrap());
+        let mut control = crate::tmux_control::Control::open(&id).unwrap();
+        assert_eq!(control.capture().unwrap(), crate::tmux::capture_pane_ansi(&id).unwrap());
         control.send("literal ' ; $() \\ Ukrainian: привіт", true).unwrap();
         let expected = "literal ' ; $() \\ Ukrainian: привіт";
-        let appeared = (0..20).any(|_| {
-            if control.capture().unwrap().contains(expected) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            false
-        });
+        let appeared = eventually(20, || control.capture().unwrap().contains(expected));
         assert!(appeared, "tmux never rendered the acknowledged input");
         drop(client);
         worker.join().unwrap();
@@ -2005,13 +2010,6 @@ mod tests {
         // draft. Return sent straight after the text used to land there, so
         // the prompt sat in the composer unsent.
         let id = format!("sd_paste_test_{}", std::process::id());
-        struct Session(String, std::path::PathBuf);
-        impl Drop for Session {
-            fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
-                let _ = std::fs::remove_file(&self.1);
-            }
-        }
         let script = std::env::temp_dir().join(format!("{id}.py"));
         std::fs::write(&script, r#"
 import os, select, tty
@@ -2028,32 +2026,18 @@ while True:
         draft += chunk.replace(b"\r", b"|")
         os.write(1, chunk.replace(b"\r", b"|"))
 "#).unwrap();
-        let result = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &id, "python3", &script.to_string_lossy()])
-            .output().unwrap();
-        assert!(result.status.success());
-        let session = Session(id.clone(), script);
+        let mut session = TmuxSession::start(&id, &["python3", &script.to_string_lossy()]);
+        session.1 = Some(script);
         // Let the harness put its terminal in raw mode before typing.
         std::thread::sleep(Duration::from_millis(300));
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            stream_keys_as(&mut Connection::plain(stream), &id, "claude");
-        });
+        let server_id = id.clone();
+        let (mut client, worker) = loopback_server(move |mut stream| stream_keys_as(&mut stream, &server_id, "claude"));
         for (sequence, prompt) in [(1, "first prompt"), (2, "second prompt")] {
             ws_send(&mut client, serde_json::json!({"sequence":sequence,"text":prompt,"enter":true}));
             assert_eq!(ws_receive(&mut client)["ok"], true);
             let expected = format!("SUBMIT:{prompt}");
-            let submitted = (0..40).any(|_| {
-                if capture_pane_text(&session.0).is_some_and(|screen| screen.contains(&expected)) {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-                false
-            });
-            let screen = capture_pane_text(&session.0).unwrap_or_default();
+            let submitted = eventually(40, || capture_pane_text(&id).is_some_and(|screen| screen.contains(&expected)));
+            let screen = capture_pane_text(&id).unwrap_or_default();
             assert!(submitted && !screen.contains('|'), "Return joined the paste: {screen:?}");
         }
         drop(client);
@@ -2066,25 +2050,14 @@ while True:
         // so every later phone input was refused with "tmux connection must
         // be reopened" until the phone dropped the socket.
         let id = format!("sd_reopen_test_{}", std::process::id());
-        struct Session(String);
-        impl Drop for Session {
-            fn drop(&mut self) { let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output(); }
-        }
-        let result = Command::new("tmux").args(["new-session", "-d", "-s", &id, "cat"]).output().unwrap();
-        assert!(result.status.success());
-        let session = Session(id.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let worker = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            stream_keys(&mut Connection::plain(stream), &id);
-        });
+        let _session = TmuxSession::start(&id, &["cat"]);
+        let server_id = id.clone();
+        let (mut client, worker) = loopback_server(move |mut stream| stream_keys(&mut stream, &server_id));
         ws_send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
         assert_eq!(ws_receive(&mut client)["ok"], true);
 
         // Drop the bridge's control client from under it, as a tmux hiccup would.
-        let detached = Command::new("tmux").args(["detach-client", "-s", &format!("={}", session.0)]).output().unwrap();
+        let detached = Command::new("tmux").args(["detach-client", "-s", &format!("={id}")]).output().unwrap();
         assert!(detached.status.success());
         ws_send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
         let failed = ws_receive(&mut client);
@@ -2094,17 +2067,11 @@ while True:
         let ack = ws_receive(&mut client);
         assert_eq!(ack["sequence"], 3);
         assert_eq!(ack["ok"], true, "input after a failed command must reopen tmux: {ack}");
-        let appeared = (0..40).any(|_| {
-            if capture_pane_text(&session.0).is_some_and(|screen| screen.contains("gamma")) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            false
-        });
+        let appeared = eventually(40, || capture_pane_text(&id).is_some_and(|screen| screen.contains("gamma")));
         assert!(appeared, "the reopened client never delivered the input");
         if failed["ok"] == false {
             // A failed input is reported, never replayed on the new client.
-            assert!(!capture_pane_text(&session.0).unwrap().contains("beta"));
+            assert!(!capture_pane_text(&id).unwrap().contains("beta"));
         }
         drop(client);
         worker.join().unwrap();
@@ -2136,25 +2103,6 @@ while True:
     }
 
     use super::*;
-
-    /// A session on the test's private tmux server (see `test_isolation`),
-    /// killed when dropped together with an optional script it runs.
-    struct TmuxSession(String, Option<std::path::PathBuf>);
-    impl TmuxSession {
-        fn start(name: &str, command: &[&str]) -> Self {
-            let made = Command::new("tmux").args(["new-session", "-d", "-s", name]).args(command).output().unwrap();
-            assert!(made.status.success());
-            Self(name.to_string(), None)
-        }
-    }
-    impl Drop for TmuxSession {
-        fn drop(&mut self) {
-            let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
-            if let Some(script) = &self.1 {
-                let _ = std::fs::remove_file(script);
-            }
-        }
-    }
 
     /// Whether `ready` holds within `tries` checks 25 ms apart.
     fn eventually(tries: usize, mut ready: impl FnMut() -> bool) -> bool {
@@ -2216,13 +2164,7 @@ while True:
     fn keep_alive_serves_pipelined_requests_and_honors_close() {
         // Browser-origin requests are refused before any pairing lookup, so
         // this exercises the connection loop without bridge credentials.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            serve_connection(Connection::plain(socket), None);
-        });
+        let (mut client, server) = loopback_server(|connection| serve_connection(connection, None));
         // Two requests in one write; the first has a body that must not leak
         // into the second request's parse.
         client.write_all(b"POST /api/v1/completions HTTP/1.1\r\nOrigin: https://x\r\nContent-Length: 5\r\n\r\nhello\
@@ -2244,13 +2186,7 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
 
     #[test]
     fn http10_requests_are_not_kept_alive() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            serve_connection(Connection::plain(socket), None);
-        });
+        let (mut client, server) = loopback_server(|connection| serve_connection(connection, None));
         client.write_all(b"GET /api/v1/ping HTTP/1.0\r\nOrigin: https://x\r\n\r\n").unwrap();
         assert_eq!(read_response(&mut client).1, "close");
         server.join().unwrap();
@@ -2366,15 +2302,28 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         assert!(BROWSE_TIMEOUT <= Duration::from_secs(3));
     }
 
-    /// One request on a connection served in-process: (status, body).
-    fn serve_one(connection: Connection, client: &mut impl Read, request: &str, writer: &mut impl Write) -> (u16, serde_json::Value) {
+    /// Everything the bridge writes back for `request` on a fresh connection.
+    fn raw_exchange(connection: Connection, mut client: impl Read + Write, request: &str) -> String {
         let server = std::thread::spawn(move || serve_connection(connection, None));
-        writer.write_all(request.as_bytes()).unwrap();
-        let mut response = String::new();
-        client.read_to_string(&mut response).unwrap();
+        client.write_all(request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
         server.join().unwrap();
+        reply
+    }
+
+    /// One request on a connection served in-process: (status, body).
+    fn serve_one(connection: Connection, client: impl Read + Write, request: &str) -> (u16, serde_json::Value) {
+        let response = raw_exchange(connection, client, request);
         let (head, body) = response.split_once("\r\n\r\n").unwrap();
         (head.split_whitespace().nth(1).unwrap().parse().unwrap(), serde_json::from_str(body).unwrap())
+    }
+
+    /// A client on the owner-only control socket, and the bridge's end of it.
+    fn control_pair() -> (std::os::unix::net::UnixStream, Connection) {
+        let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        (client, Connection::local(server))
     }
 
     #[test]
@@ -2382,22 +2331,16 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         let probe = format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\nConnection: close\r\n\r\n");
         // The daemon's probe over the owner-only socket: just what
         // `bridge_running` checks, with no addresses (no `ip` run).
-        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let mut writer = client.try_clone().unwrap();
-        let (status, body) = serve_one(Connection::local(server), &mut client, &probe, &mut writer);
+        let (client, server) = control_pair();
+        let (status, body) = serve_one(server, client, &probe);
         assert_eq!(status, 200);
         assert_eq!((body["status"].as_str(), body["service"].as_str()), (Some("ok"), Some(SERVICE_NAME)));
         for field in ["addresses", "lanIp", "tailscaleIp", "hostname", "time"] {
             assert!(body.get(field).is_none(), "{field} in {body}");
         }
         // Over the network the same query is the unchanged phone-facing ping.
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-        let (server, _) = listener.accept().unwrap();
-        let mut writer = client.try_clone().unwrap();
-        let (status, body) = serve_one(Connection::plain(server), &mut client, &probe, &mut writer);
+        let (client, server) = loopback_pair();
+        let (status, body) = serve_one(Connection::plain(server), client, &probe);
         assert_eq!(status, 200);
         for field in ["status", "service", "protocolVersion", "hostname", "lanIp", "bridgeId", "addresses", "tailscaleIp", "port", "time"] {
             assert!(body.get(field).is_some(), "{field} missing from {body}");
@@ -2428,16 +2371,6 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
     fn http(method: &str, path: &str, token: Option<&str>, body: &str) -> String {
         let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
         format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
-    }
-
-    /// Everything the bridge writes back for `request` on a fresh connection.
-    fn raw_exchange(connection: Connection, mut client: impl Read + Write, request: &str) -> String {
-        let server = std::thread::spawn(move || serve_connection(connection, None));
-        client.write_all(request.as_bytes()).unwrap();
-        let mut reply = String::new();
-        client.read_to_string(&mut reply).unwrap();
-        server.join().unwrap();
-        reply
     }
 
     fn json_reply(status: &str, body: &str) -> String {
@@ -2511,9 +2444,8 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
             (http("POST", "/api/v1/pair/rejected/remove", None, r#"{"id":"missing"}"#), "404 Not Found", r#"{"error":"not_rejected"}"#.into()),
         ];
         for (request, status, body) in local {
-            let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
-            client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-            let reply = raw_exchange(Connection::local(server), client, &request);
+            let (client, server) = control_pair();
+            let reply = raw_exchange(server, client, &request);
             assert_eq!(reply, json_reply(status, &body), "{request}");
         }
     }
