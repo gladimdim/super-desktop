@@ -47,6 +47,7 @@ use super_desktop::{harness_record, platform, session_task, terminal_text};
 mod terminal_frame;
 mod asset_pdf;
 mod asset_view;
+mod attachment_view;
 mod bridge;
 mod card_resize;
 mod arrange;

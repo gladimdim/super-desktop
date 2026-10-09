@@ -881,6 +881,19 @@ impl MiniTerminalCard {
         hint_label.set_hexpand(true);
         hint_label.set_halign(Align::End);
         footer.append(&hint_label);
+        // 📎 sits in the footer, under where the prompt is typed. The header
+        // already sets the card's minimum width; the footer has room to spare.
+        // Attachments are files on this machine, typed into its own terminal.
+        if !source.is_remote() {
+            // A card from before folders were recorded started in $HOME.
+            let folder = data.borrow().workspace_dir.clone()
+                .unwrap_or_else(crate::state::home_dir_string);
+            footer.append(&crate::attachment_view::button(
+                data.borrow().session_name.clone(),
+                display_name.to_string(),
+                folder,
+            ));
+        }
         body.append(&footer);
 
         root.set_child(Some(&body));

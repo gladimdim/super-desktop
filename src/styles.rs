@@ -10,6 +10,7 @@ thread_local! {
 pub fn generate_css(theme: &OmarchyTheme) -> String {
     let mut css = theme_css(theme);
     css.push_str(&icon_radius_css());
+    css.push_str(&crate::attachment_view::css(theme));
     css
 }
 

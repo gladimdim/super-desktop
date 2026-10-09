@@ -192,15 +192,15 @@ mod tests {
 
     #[test]
     fn test_vendored_icons_exist_and_parse() {
-        // Same rule as logos: only checked when running from a checkout that
-        // ships the files; an installed location without them is skipped.
-        let Some(root) = find_icons_root() else {
-            return;
-        };
+        // The repository's copy: an installed copy under ~/.config is only
+        // refreshed by the installer and `rebuild.sh`, so it can be older.
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
+        assert!(find_icons_root().is_some() || root.join("hicolor").is_dir());
         for name in [
             "sd-gears-symbolic.svg",
             "sd-arrange-symbolic.svg",
             "sd-hide-symbolic.svg",
+            "sd-attach-symbolic.svg",
         ] {
             let p = root.join("hicolor/scalable/actions").join(name);
             assert!(p.is_file(), "missing vendored HUD icon {name}");

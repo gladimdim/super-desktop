@@ -552,6 +552,101 @@ pub fn submit(
     Ok(())
 }
 
+/// At most this many files go into one desktop insert (a card's 📎 panel).
+pub const MAX_LOCAL_ATTACHMENTS: usize = 20;
+
+/// Whether a file on this PC is handed to a native harness as an image: the
+/// formats every native harness turns into an `[Image …]` attachment.
+pub fn local_kind(path: &Path) -> Kind {
+    let image = path.is_file()
+        && path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg"));
+    if image { Kind::Image } else { Kind::File }
+}
+
+/// What the desktop panel types after any native images: the paths of the
+/// other files, never submitted. Agents get `Attached:` first when nothing
+/// is in the composer yet (a leading `/` opens slash-command menus), and a
+/// space otherwise; a shell gets the quoted paths. A trailing space lets the
+/// user keep typing.
+pub fn local_insert_text(delivery: Delivery, items: &[(Kind, PathBuf)], composer_has_text: bool) -> String {
+    let paths: Vec<String> = items
+        .iter()
+        .filter(|(kind, _)| !(delivery == Delivery::Native && *kind == Kind::Image))
+        .map(|(_, path)| if delivery == Delivery::Shell { shell_quote(path) } else { prompt_path(path) })
+        .collect();
+    if paths.is_empty() {
+        return String::new();
+    }
+    let lead = match delivery {
+        Delivery::Shell => " ",
+        _ if composer_has_text => " ",
+        _ => "Attached: ",
+    };
+    format!("{lead}{} ", paths.join(" "))
+}
+
+/// Type files that are already on this PC into a local card's composer, as
+/// the 📎 panel's Insert does. Images go natively to the harnesses that take
+/// them; everything else is named by its path, where it is (nothing is
+/// copied). Nothing is submitted: the user finishes the prompt and presses
+/// Enter. Returns how many files were inserted.
+pub fn insert_local(session: &str, paths: &[PathBuf]) -> Result<usize, String> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    if paths.len() > MAX_LOCAL_ATTACHMENTS {
+        return Err("too_many_attachments".into());
+    }
+    if let Some(gone) = paths.iter().find(|path| !path.exists()) {
+        let name = gone.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return Err(format!("missing:{name}"));
+    }
+    let _input = input_guard(session)?;
+    let state = crate::state::load_state();
+    let terminal = state
+        .terminals
+        .iter()
+        .find(|t| t.session_name == session)
+        .ok_or("no_such_session")?;
+    if !crate::tmux::session_alive(session) {
+        return Err("no_such_session".into());
+    }
+    let status = crate::tmux::inspect_status(session, &terminal.agent_type);
+    if status.status == "EXITED" {
+        return Err("no_such_session".into());
+    }
+    let delivery = delivery(&terminal.agent_type, &status.cmd, &terminal.command);
+    let mut control = crate::tmux_control::Control::open(session)?;
+    // Scrolled back in the card: keys would drive copy mode, not the program.
+    if control.pane_format("#{pane_in_mode}")?.trim() == "1" {
+        control.cancel_copy_mode()?;
+    }
+    let items: Vec<(Kind, PathBuf)> = paths.iter().map(|p| (local_kind(p), p.clone())).collect();
+    let mut has_text = composer_has_draft(&status.cmd, &control.capture()?) == Some(true);
+    if delivery == Delivery::Native {
+        for (_, path) in items.iter().filter(|(kind, _)| *kind == Kind::Image) {
+            let before = image_markers(&control.capture()?);
+            paste(&mut control, &path.to_string_lossy())?;
+            let started = Instant::now();
+            while image_markers(&control.capture()?) <= before {
+                if started.elapsed() > ATTACH_TIMEOUT {
+                    return Err("image_not_confirmed".into());
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            has_text = true;
+        }
+    }
+    let text = local_insert_text(delivery, &items, has_text);
+    if !text.is_empty() {
+        paste(&mut control, &text)?;
+    }
+    Ok(items.len())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -824,5 +919,148 @@ mod tests {
         .unwrap();
         std::fs::remove_dir_all(&root).unwrap();
         prepared.unwrap();
+    }
+
+    #[test]
+    fn local_files_are_typed_by_path_or_natively_without_submitting() {
+        let dir = std::env::temp_dir().join(format!("sd-local-kind-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("shots.png")).unwrap();
+        std::fs::write(dir.join("Photo.JPG"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert_eq!(local_kind(&dir.join("Photo.JPG")), Kind::Image);
+        assert_eq!(local_kind(&dir.join("notes.txt")), Kind::File);
+        // A folder named like an image is still a folder.
+        assert_eq!(local_kind(&dir.join("shots.png")), Kind::File);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let items = vec![
+            (Kind::Image, PathBuf::from("/tmp/a.png")),
+            (Kind::File, PathBuf::from("/tmp/my notes.txt")),
+            (Kind::File, PathBuf::from("/tmp/it's.md")),
+        ];
+        // Native: images went in on their own; the rest follows a space.
+        assert_eq!(
+            local_insert_text(Delivery::Native, &items, true),
+            " \"/tmp/my notes.txt\" /tmp/it's.md "
+        );
+        // An empty composer never starts with a path.
+        assert_eq!(
+            local_insert_text(Delivery::Path, &items, false),
+            "Attached: /tmp/a.png \"/tmp/my notes.txt\" /tmp/it's.md "
+        );
+        assert_eq!(local_insert_text(Delivery::Path, &items[..1], true), " /tmp/a.png ");
+        // A shell gets every path quoted for the shell.
+        assert_eq!(
+            local_insert_text(Delivery::Shell, &items, false),
+            r#" '/tmp/a.png' '/tmp/my notes.txt' '/tmp/it'\''s.md' "#
+        );
+        assert_eq!(local_insert_text(Delivery::Native, &items[..1], false), "");
+    }
+
+    #[test]
+    fn local_insert_types_into_a_private_tmux_card() {
+        let root = std::env::temp_dir().join(format!("sd-local-insert-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("tmux")).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "prompt_attachments::tests::local_insert_tmux_inner", "--nocapture"])
+            .env("SD_LOCAL_INSERT_ROOT", &root)
+            .env("TMUX_TMPDIR", root.join("tmux"))
+            .env("HOME", &root)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET")
+            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn local_insert_tmux_inner() {
+        let Some(root) = std::env::var_os("SD_LOCAL_INSERT_ROOT").map(PathBuf::from) else {
+            return;
+        };
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux").arg("kill-server").output();
+            }
+        }
+        let _cleanup = Cleanup;
+        let tmux = |args: &[&str]| {
+            let output = std::process::Command::new("tmux").args(args).output().unwrap();
+            assert!(output.status.success(), "{args:?}: {}", String::from_utf8_lossy(&output.stderr));
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let wait = |what: &dyn Fn() -> bool, why: &str| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while !what() {
+                assert!(Instant::now() < until, "timed out: {why}");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        let quote = |path: &Path| shlex::try_quote(path.to_str().unwrap()).unwrap().into_owned();
+        let files = root.join("files");
+        std::fs::create_dir_all(&files).unwrap();
+        let doc = files.join("design notes.md");
+        let odd = files.join("it's.txt");
+        let shot = files.join("shot.png");
+        for path in [&doc, &odd, &shot] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        // A shell card: the quoted paths are typed, and nothing is run.
+        let shell_out = root.join("shell-received");
+        let shell = "sd_term_local_shell";
+        tmux(&["-f", "/dev/null", "new-session", "-d", "-s", shell,
+            &format!("stty raw -echo; printf READY; exec cat > {}", quote(&shell_out))]);
+        // A stand-in for Claude Code: a program named `claude` that shows its
+        // prompt, takes a pasted image path, answers with Claude's marker and
+        // keeps everything else it is sent.
+        let claude_out = root.join("claude-received");
+        let stub = root.join("claude");
+        std::fs::copy("/usr/bin/bash", &stub).unwrap();
+        let script = format!(
+            "stty raw -echo; printf '❯ '; IFS= read -r -d '~' a; IFS= read -r -d '~' b; \
+             printf '%s' \"$b\" > {out}; printf ' [Image #1] '; exec cat >> {out}",
+            out = quote(&claude_out)
+        );
+        let claude = "sd_term_local_claude";
+        tmux(&["new-session", "-d", "-s", claude, &format!("exec {} -c {}", quote(&stub), quote(Path::new(&script)))]);
+        let card = |session: &str, agent: &str| serde_json::json!({
+            "id": session, "session_name": session, "agent_type": agent,
+            "command": agent, "x": 0, "y": 0, "created_at": 1.0,
+        });
+        let state = serde_json::json!({"notes": [], "terminals": [card(shell, "shell"), card(claude, "claude")]});
+        std::fs::write(crate::state::get_state_path(), state.to_string()).unwrap();
+        wait(&|| tmux(&["capture-pane", "-p", "-t", shell]).contains("READY"), "shell ready");
+        wait(&|| tmux(&["display-message", "-p", "-t", claude, "#{pane_current_command}"]).trim() == "claude", "claude stub");
+
+        assert_eq!(insert_local(shell, &[doc.clone(), odd.clone()]), Ok(2));
+        let expected = format!("\x1b[200~ {} {} \x1b[201~", shell_quote(&doc), shell_quote(&odd));
+        wait(&|| std::fs::read(&shell_out).unwrap_or_default() == expected.as_bytes(), "shell paste");
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(std::fs::read(&shell_out).unwrap(), expected.as_bytes(), "no Enter, nothing else");
+
+        // Claude: the image first, natively; the document by path after it.
+        assert_eq!(insert_local(claude, &[shot.clone(), doc.clone()]), Ok(2));
+        let expected = format!("{}\x1b[201\x1b[200~ \"{}\" \x1b[201~", shot.display(), doc.display());
+        wait(&|| std::fs::read(&claude_out).unwrap_or_default() == expected.as_bytes(), "claude paste");
+
+        // Gone files and gone terminals are refused before anything is typed.
+        assert_eq!(insert_local(shell, &[files.join("missing.txt")]), Err("missing:missing.txt".into()));
+        assert_eq!(insert_local("sd_term_nope", &[doc.clone()]), Err("no_such_session".into()));
+        let many: Vec<PathBuf> = (0..=MAX_LOCAL_ATTACHMENTS).map(|_| doc.clone()).collect();
+        assert_eq!(insert_local(shell, &many), Err("too_many_attachments".into()));
+        assert_eq!(std::fs::read(&shell_out).unwrap(), format!("\x1b[200~ {} {} \x1b[201~", shell_quote(&doc), shell_quote(&odd)).as_bytes());
     }
 }
