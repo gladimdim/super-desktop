@@ -171,6 +171,15 @@ pub struct AppState {
     /// display in use, so a size from a larger screen still opens whole here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_panel_size: Option<(i32, i32)>,
+    /// Whether the welcome tour has been shown. Only a fresh install starts
+    /// with `false` (see `fresh_install_state`); a state file from before the
+    /// tour existed loads as `true`, so people upgrading never get it.
+    #[serde(default = "tour_already_seen")]
+    pub welcome_tour_seen: bool,
+}
+
+fn tour_already_seen() -> bool {
+    true
 }
 
 impl Default for AppState {
@@ -202,6 +211,7 @@ impl Default for AppState {
             folder_tags: std::collections::BTreeMap::new(),
             settings_panel_pos: None,
             settings_panel_size: None,
+            welcome_tour_seen: true,
         }
     }
 }
@@ -404,6 +414,7 @@ fn fresh_install_state(detected: &[crate::tmux::HarnessInfo]) -> AppState {
                 .map(|h| h.key.to_string())
                 .collect(),
         ),
+        welcome_tour_seen: false,
         ..AppState::default()
     }
 }
@@ -697,6 +708,21 @@ mod tests {
         };
         assert!(retire_harnesses(&mut state, |_| true));
         assert_eq!(state.visible_harnesses.as_deref().unwrap(), ["antigravity"]);
+    }
+
+    #[test]
+    fn only_a_fresh_install_gets_the_welcome_tour() {
+        let fresh = fresh_install_state(&harness_infos(&["claude"]));
+        assert!(!fresh.welcome_tour_seen);
+        let saved: AppState = serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert!(!saved.welcome_tour_seen, "a fresh install that has not opened yet keeps it");
+        // A state file from before the tour existed: an upgrade, not a new user.
+        let legacy: AppState = serde_json::from_str(r#"{"notes": [], "terminals": []}"#).unwrap();
+        assert!(legacy.welcome_tour_seen);
+        let mut seen = fresh;
+        seen.welcome_tour_seen = true;
+        let saved: AppState = serde_json::from_str(&serde_json::to_string(&seen).unwrap()).unwrap();
+        assert!(saved.welcome_tour_seen);
     }
 
     #[test]

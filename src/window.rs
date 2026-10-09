@@ -364,6 +364,9 @@ pub struct SuperDesktopWindow {
     /// the card goes and how big it is, and stretches the card over the whole
     /// screen once it is dropped.
     settings_layout: RefCell<Option<Rc<crate::floating_panel::MovablePanel>>>,
+    /// The welcome tour: opened once by the first show after a fresh install,
+    /// and again from ⚙ Settings or `super-desktop tour`.
+    welcome_tour: Rc<crate::welcome_tour::WelcomeTour>,
     /// This window, for the slide's frame tick, which rebuilds the paths once
     /// the window has its real size.
     this: std::cell::OnceCell<std::rc::Weak<Self>>,
@@ -698,6 +701,20 @@ impl SuperDesktopWindow {
             .borrow_mut()
             .extend(machine_view.brand_images());
 
+        let welcome_tour = crate::welcome_tour::WelcomeTour::new(
+            &crate::shortcut::current_combo(state.borrow().toggle_shortcut.as_deref()),
+            crate::welcome_tour::TourHooks {
+                top: Rc::new({
+                    let state = Rc::clone(&state);
+                    move || top_bar_height(state.borrow().top_bar_size)
+                }),
+                hide_overlay: Rc::new({
+                    let on_close = Rc::clone(&on_close_rc);
+                    move || on_close()
+                }),
+            },
+        );
+
         let win_rc = Rc::new(Self {
             window,
             canvas,
@@ -721,7 +738,7 @@ impl SuperDesktopWindow {
             brand_images: Rc::clone(&brand_images),
             settings_refresh: Rc::clone(&settings_panel.refresh),
             cli_harness_bar: Rc::clone(&harness_bar_for_settings),
-            overlay_panels: vec![settings_panel.widget.clone()],
+            overlay_panels: vec![settings_panel.widget.clone(), welcome_tour.widget.clone().upcast()],
             ws_popover: workspace_bar.popover.clone(),
             ws_bar: workspace_bar.clone(),
             show_token: std::cell::Cell::new(0),
@@ -729,6 +746,7 @@ impl SuperDesktopWindow {
             hover_raise_lock: HoverRaiseLock::new(),
             terminal_picker: RefCell::new(None),
             settings_layout: RefCell::new(None),
+            welcome_tour: Rc::clone(&welcome_tour),
             this: std::cell::OnceCell::new(),
         });
         let _ = win_rc.this.set(Rc::downgrade(&win_rc));
@@ -938,10 +956,12 @@ impl SuperDesktopWindow {
         let settings_w = settings_panel.widget.clone();
         let settings_refresh = Rc::clone(&settings_panel.refresh);
         let wizard_for_settings = Rc::clone(&win_rc.pairing_wizard);
+        let tour_for_settings = Rc::clone(&win_rc.welcome_tour);
         btn_settings.connect_clicked(move |_| {
             let show = !settings_w.is_visible();
             if show {
                 wizard_for_settings.close();
+                tour_for_settings.close();
             }
             settings_w.set_visible(show);
             if show {
@@ -1022,6 +1042,16 @@ impl SuperDesktopWindow {
                 }
             }),
         ));
+        // Over the cards and Settings, under the pairing dialogs.
+        root_overlay.add_overlay(&win_rc.welcome_tour.widget);
+        crate::welcome_tour::set_replay(Rc::new({
+            let owner = Rc::downgrade(&win_rc);
+            move || {
+                if let Some(owner) = owner.upgrade() {
+                    owner.open_welcome_tour();
+                }
+            }
+        }));
         root_overlay.add_overlay(&pairing_wizard.widget);
         // Files & links panels open as their own floating cards, under the
         // pairing dialogs.
@@ -1074,6 +1104,10 @@ impl SuperDesktopWindow {
                     }
                     if w.pairing_wizard.is_open() {
                         w.pairing_wizard.close();
+                        return glib::Propagation::Stop;
+                    }
+                    if w.welcome_tour.is_open() {
+                        w.welcome_tour.close();
                         return glib::Propagation::Stop;
                     }
                 }
@@ -2959,6 +2993,32 @@ impl SuperDesktopWindow {
         // Card statuses went stale while off screen (the periodic refresh is
         // paused then); this refreshes them on worker threads.
         self.periodic_refresh();
+        // A fresh install's first show introduces the app, once.
+        let first_show = !self.state.borrow().welcome_tour_seen;
+        if first_show {
+            self.open_welcome_tour();
+        }
+    }
+
+    /// Open the welcome tour over the local workspace and remember it was
+    /// shown, so it never opens by itself again.
+    pub fn open_welcome_tour(&self) {
+        // Settings (where a replay comes from) closes; the tour opens below.
+        for panel in &self.overlay_panels {
+            panel.set_visible(false);
+        }
+        self.pairing_wizard.close();
+        let (combo, snapshot) = {
+            let mut state = self.state.borrow_mut();
+            let combo = crate::shortcut::current_combo(state.toggle_shortcut.as_deref());
+            let changed = !state.welcome_tour_seen;
+            state.welcome_tour_seen = true;
+            (combo, changed.then(|| state.clone()))
+        };
+        if let Some(snapshot) = snapshot {
+            crate::state::save_state_async(snapshot);
+        }
+        self.welcome_tour.open(&combo);
     }
 
     /// Put waiting pairing requests in front of the user: the approval panel.

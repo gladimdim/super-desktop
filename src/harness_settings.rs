@@ -830,6 +830,17 @@ pub fn build_harness_settings_panel(
     firewall_notice.append(&btn_review_firewall);
     home_root.append(&firewall_notice);
 
+    // First, where a new user looks for help.
+    let (btn_tour, _) = settings_entry(
+        "✨",
+        "Getting started guide",
+        "A short animated tour: launch agents, hide them, use your phone and other PCs.",
+        "settings-tour-entry",
+    );
+    btn_tour.set_tooltip_text(Some("Open the getting started guide"));
+    btn_tour.connect_clicked(|_| crate::welcome_tour::replay());
+    home_root.append(&btn_tour);
+
     let (btn_shortcut_page, _) = settings_entry(
         "⌨",
         "Keyboard shortcut",
@@ -3115,6 +3126,34 @@ mod tests {
             .expect("card title is a Label")
             .label()
             .to_string()
+    }
+
+    #[test]
+    fn settings_opens_the_getting_started_guide() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process("harness_settings::tests::settings_opens_the_getting_started_guide");
+            return;
+        }
+        gtk4::init().unwrap();
+        let opened = Rc::new(Cell::new(0));
+        crate::welcome_tour::set_replay(Rc::new({
+            let opened = Rc::clone(&opened);
+            move || opened.set(opened.get() + 1)
+        }));
+        let panel = build_harness_settings_panel(
+            Rc::new(RefCell::new(AppState::default())),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        let entries = find_buttons(&panel.widget, "settings-entry");
+        let guide = find_buttons(&panel.widget, "settings-tour-entry");
+        assert_eq!(guide.len(), 1, "one Getting started guide entry");
+        assert_eq!(entries.first(), guide.first(), "it is the first entry on the Settings home");
+        let titles: Vec<String> = find_labels(guide[0].upcast_ref(), "settings-entry-title")
+            .iter().map(|label| label.text().to_string()).collect();
+        assert_eq!(titles, ["Getting started guide"]);
+        guide[0].emit_clicked();
+        assert_eq!(opened.get(), 1, "the entry opens the guide");
     }
 
     /// Every label carrying `class` in the subtree rooted at `w`.

@@ -96,6 +96,7 @@ mod tmux_control;
 mod phone_viewport;
 mod terminal_transport;
 mod usage;
+mod welcome_tour;
 mod window;
 mod workspace_bar;
 mod workspace_model;
@@ -561,7 +562,7 @@ fn main() {
     }
 
     // Daemon not running -> spawn it
-    if action == "toggle" || action == "show" || action == "pairing-review" {
+    if action == "toggle" || action == "show" || action == "pairing-review" || action == "tour" {
         // LaunchServices owns the no-argument app process. Keep that process
         // alive so reopening the app and its native shortcut reach the UI.
         #[cfg(target_os = "macos")]
@@ -570,7 +571,7 @@ fn main() {
             return;
         }
         // A clicked pairing notification must still end at the approval panel.
-        let first = if action == "pairing-review" { "pairing-review" } else { "show" };
+        let first = if matches!(action, "pairing-review" | "tour") { action } else { "show" };
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
         let mut command = std::process::Command::new(exe);
         // This child is the overlay itself: it needs the preload that `main`
@@ -1342,6 +1343,14 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let shown = ctx.borrow().shown;
             let presented = shown && live_window(ctx).is_some_and(|win| win.review_pairing_requests());
             json!({ "ok": true, "presented": presented }).to_string()
+        }
+        // `super-desktop tour`: show the overlay with the welcome tour open.
+        "tour" => {
+            let shown = show_window(ctx, app);
+            if let Some(win) = live_window(ctx).filter(|_| shown) {
+                win.open_welcome_tour();
+            }
+            json!({ "ok": shown, "visible": shown }).to_string()
         }
         // The pairing notification was clicked.
         "pairing-review" => {

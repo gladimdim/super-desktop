@@ -43,7 +43,9 @@ The installer needs nothing set up beforehand. It:
 Keep the source folder: the installed command runs the binaries built there.
 
 Then press **SUPER + SHIFT + Q** (SUPER is usually the Windows key), or run
-`super-desktop toggle`, to open the overlay. Choose a project folder and click
+`super-desktop toggle`, to open the overlay. The first time it opens, a short
+animated tour shows the basics; replay it any time from **⚙ Settings → Getting
+started guide** or with `super-desktop tour`. Choose a project folder and click
 an installed harness in the top bar. Install and sign in to your preferred AI
 CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
 
@@ -590,6 +592,7 @@ commands have the local user's authority; they are not an agent sandbox.
 super-desktop help agents
 super-desktop schema --format json
 super-desktop toggle          # show / hide
+super-desktop tour            # open the overlay with the getting started guide
 super-desktop status          # visible? how many notes / terminals
 super-desktop add-note "Buy milk"
 super-desktop add-term claude # see Settings → Harness launchers for installed types
