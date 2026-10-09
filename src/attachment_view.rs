@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use crate::launcher_settings::hint;
 use crate::prompt_attachments::{Kind, MAX_LOCAL_ATTACHMENTS};
 use crate::theme::OmarchyTheme;
 
@@ -277,18 +278,26 @@ fn small_button(label: &str, tooltip: &str) -> gtk4::Button {
     button
 }
 
-fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<gtk4::Button>) -> Drawer {
-    let (outer, header) =
-        crate::floating_panel::card_panel(&gtk4::Image::from_icon_name(attach_icon()), "Attachments", card_title, MIN_SIZE);
-    outer.add_css_class("attach-panel");
-    let close_button = header.close_button("Close; attached files are kept");
+/// The panel's widgets, before they are wired.
+struct Parts {
+    attached_title: gtk4::Label,
+    clear: gtk4::Button,
+    attached: gtk4::Box,
+    up: gtk4::Button,
+    project: gtk4::Button,
+    home: gtk4::Button,
+    place: gtk4::Label,
+    hidden: gtk4::CheckButton,
+    browser: gtk4::Box,
+    browse_note: gtk4::Label,
+    status: gtk4::Label,
+    insert: gtk4::Button,
+}
 
-    let body = gtk4::Box::new(Orientation::Vertical, 8);
-    body.set_vexpand(true);
-    body.set_margin_top(12);
-    body.set_margin_start(12);
-    body.set_margin_end(12);
-    outer.append(&body);
+/// The panel's body and footer, in `outer`: the attached files, this PC's
+/// folders, and the status with Insert.
+fn layout(outer: &gtk4::Box) -> Parts {
+    let body = crate::asset_view::panel_body(outer);
 
     // ---- attached so far ----
     let attached_head = gtk4::Box::new(Orientation::Horizontal, 8);
@@ -343,20 +352,14 @@ fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<g
     browser.add_css_class("attach-browser");
     browser_scroll.set_child(Some(&browser));
     body.append(&browser_scroll);
-    let browse_note = gtk4::Label::new(None);
-    browse_note.add_css_class("launcher-hint");
-    browse_note.set_xalign(0.0);
-    browse_note.set_wrap(true);
+    let browse_note = hint("");
     body.append(&browse_note);
 
     // ---- footer ----
     let footer = gtk4::Box::new(Orientation::Horizontal, 10);
     footer.add_css_class("attach-footer");
-    let status = gtk4::Label::new(Some("Drop files here or paste them with Ctrl+V."));
-    status.add_css_class("launcher-hint");
+    let status = hint("Drop files here or paste them with Ctrl+V.");
     status.set_hexpand(true);
-    status.set_xalign(0.0);
-    status.set_wrap(true);
     footer.append(&status);
     let insert = gtk4::Button::with_label("Insert into prompt");
     insert.add_css_class("launcher-btn");
@@ -366,76 +369,116 @@ fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<g
     footer.append(&insert);
     outer.append(&footer);
 
-    let session = session.to_string();
-    let generation = Rc::new(Cell::new(0u64));
-    let cwd = Rc::new(RefCell::new(folder.to_path_buf()));
-    // The browser's file rows, for their ✓.
-    let rows: Rc<RefCell<Vec<(PathBuf, gtk4::Button)>>> = Rc::new(RefCell::new(Vec::new()));
+    Parts {
+        attached_title,
+        clear,
+        attached,
+        up,
+        project,
+        home,
+        place,
+        hidden,
+        browser,
+        browse_note,
+        status,
+        insert,
+    }
+}
 
-    // The ✕ on an attached row repaints through a weak handle on `paint`.
-    let paint_slot: Rc<RefCell<Option<std::rc::Weak<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-    let paint: Rc<dyn Fn()> = Rc::new({
+/// The browser's file rows, for their ✓.
+type Rows = Rc<RefCell<Vec<(PathBuf, gtk4::Button)>>>;
+/// A closure the panel's own widgets reach only weakly.
+type WeakSlot<T> = Rc<RefCell<Option<std::rc::Weak<T>>>>;
+
+fn upgrade<T: ?Sized>(slot: &WeakSlot<T>) -> Option<Rc<T>> {
+    slot.borrow().as_ref().and_then(std::rc::Weak::upgrade)
+}
+
+/// What the panel's rows and buttons change: the card's attached files, and
+/// the status line. `repaint` reaches the panel's repaint weakly.
+#[derive(Clone)]
+struct Files {
+    session: String,
+    status: gtk4::Label,
+    /// Adds files, as a drop or a paste does.
+    add: Rc<dyn Fn(Vec<PathBuf>)>,
+    repaint: Rc<dyn Fn()>,
+}
+
+impl Files {
+    fn new(session: &str, status: &gtk4::Label, repaint: &Rc<dyn Fn()>) -> Self {
+        let add: Rc<dyn Fn(Vec<PathBuf>)> = Rc::new({
+            let session = session.to_string();
+            let status = status.clone();
+            let repaint = Rc::clone(repaint);
+            move |new: Vec<PathBuf>| {
+                let mut files = staged(&session);
+                let before = files.len();
+                let over = add_paths(&mut files, new);
+                let added = files.len() - before;
+                set_staged(&session, files);
+                status.set_text(&if over > 0 {
+                    format!("At most {MAX_LOCAL_ATTACHMENTS} files at a time; {over} left out.")
+                } else if added == 0 {
+                    "Already attached.".to_string()
+                } else {
+                    "Insert them into the prompt when you are ready.".to_string()
+                });
+                repaint();
+            }
+        });
+        Files { session: session.to_string(), status: status.clone(), add, repaint: Rc::clone(repaint) }
+    }
+
+    /// Take `path` off the attached files.
+    fn remove(&self, path: &Path) {
+        let mut files = staged(&self.session);
+        files.retain(|f| f != path);
+        set_staged(&self.session, files);
+    }
+}
+
+/// The repaint the panel's widgets use: it reaches the panel's repaint,
+/// which `painter` puts in the slot, only weakly.
+fn weak_repaint() -> (WeakSlot<dyn Fn()>, Rc<dyn Fn()>) {
+    let paint_slot: WeakSlot<dyn Fn()> = Rc::new(RefCell::new(None));
+    let repaint: Rc<dyn Fn()> = Rc::new({
         let paint_slot = Rc::clone(&paint_slot);
-        let session = session.clone();
-        let attached = attached.clone();
-        let attached_title = attached_title.clone();
-        let clear = clear.clone();
-        let insert = insert.clone();
-        let rows = Rc::clone(&rows);
         move || {
-            let files = staged(&session);
+            if let Some(paint) = upgrade(&paint_slot) {
+                paint();
+            }
+        }
+    });
+    (paint_slot, repaint)
+}
+
+/// The panel's repaint of the attached list and the browser's ✓, put in
+/// `slot` for `weak_repaint`.
+fn painter(parts: &Parts, rows: &Rows, files: &Files, slot: &WeakSlot<dyn Fn()>) -> Rc<dyn Fn()> {
+    let paint: Rc<dyn Fn()> = Rc::new({
+        let attached = parts.attached.clone();
+        let attached_title = parts.attached_title.clone();
+        let clear = parts.clear.clone();
+        let insert = parts.insert.clone();
+        let rows = Rc::clone(rows);
+        let shared = files.clone();
+        move || {
+            let files = staged(&shared.session);
             attached_title.set_text(&match files.len() {
                 0 => "Attached".to_string(),
                 n => format!("Attached ({n} of {MAX_LOCAL_ATTACHMENTS})"),
             });
             clear.set_sensitive(!files.is_empty());
             insert.set_sensitive(!files.is_empty());
-            while let Some(child) = attached.first_child() {
-                attached.remove(&child);
-            }
+            crate::asset_view::clear(&attached);
             if files.is_empty() {
-                let empty = gtk4::Label::new(Some(
+                attached.append(&hint(
                     "Nothing attached yet. Pick files below, drop them here from a file manager, or paste copied files with Ctrl+V.",
                 ));
-                empty.add_css_class("launcher-hint");
-                empty.set_wrap(true);
-                empty.set_xalign(0.0);
-                attached.append(&empty);
             }
             for path in &files {
-                let row = gtk4::Box::new(Orientation::Horizontal, 8);
-                row.add_css_class("attach-row");
-                row.append(&gtk4::Label::new(Some(file_icon(path))));
-                let words = gtk4::Box::new(Orientation::Vertical, 1);
-                words.set_hexpand(true);
-                let name = gtk4::Label::new(path.file_name().map(|n| n.to_string_lossy()).as_deref());
-                name.add_css_class("attach-name");
-                name.set_xalign(0.0);
-                name.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-                words.append(&name);
-                let detail = gtk4::Label::new(Some(&describe(path)));
-                detail.add_css_class("launcher-subtitle");
-                detail.set_xalign(0.0);
-                detail.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
-                words.append(&detail);
-                row.append(&words);
-                let remove = gtk4::Button::with_label("✕");
-                remove.add_css_class("term-btn");
-                remove.set_tooltip_text(Some("Remove from the attachments"));
-                remove.set_valign(Align::Center);
-                let session = session.clone();
-                let path = path.clone();
-                let slot = Rc::clone(&paint_slot);
-                remove.connect_clicked(move |_| {
-                    let mut files = staged(&session);
-                    files.retain(|f| f != &path);
-                    set_staged(&session, files);
-                    if let Some(paint) = slot.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
-                        paint();
-                    }
-                });
-                row.append(&remove);
-                attached.append(&row);
+                attached.append(&attached_row(path, &shared));
             }
             for (path, row) in rows.borrow().iter() {
                 if files.contains(path) {
@@ -446,160 +489,167 @@ fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<g
             }
         }
     });
-    *paint_slot.borrow_mut() = Some(Rc::downgrade(&paint));
-    let repaint: Rc<dyn Fn()> = Rc::new(move || {
-        if let Some(paint) = paint_slot.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
-            paint();
-        }
-    });
+    *slot.borrow_mut() = Some(Rc::downgrade(&paint));
+    paint
+}
 
-    let add: Rc<dyn Fn(Vec<PathBuf>)> = Rc::new({
-        let session = session.clone();
-        let status = status.clone();
-        let repaint = Rc::clone(&repaint);
-        move |new: Vec<PathBuf>| {
-            let mut files = staged(&session);
-            let before = files.len();
-            let over = add_paths(&mut files, new);
-            let added = files.len() - before;
-            set_staged(&session, files);
-            status.set_text(&if over > 0 {
-                format!("At most {MAX_LOCAL_ATTACHMENTS} files at a time; {over} left out.")
-            } else if added == 0 {
-                "Already attached.".to_string()
-            } else {
-                "Insert them into the prompt when you are ready.".to_string()
-            });
-            repaint();
-        }
+/// An attached file: its icon, name, folder and size, and ✕.
+fn attached_row(path: &Path, files: &Files) -> gtk4::Box {
+    let row = gtk4::Box::new(Orientation::Horizontal, 8);
+    row.add_css_class("attach-row");
+    row.append(&gtk4::Label::new(Some(file_icon(path))));
+    let words = gtk4::Box::new(Orientation::Vertical, 1);
+    words.set_hexpand(true);
+    let name = gtk4::Label::new(path.file_name().map(|n| n.to_string_lossy()).as_deref());
+    name.add_css_class("attach-name");
+    name.set_xalign(0.0);
+    name.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    words.append(&name);
+    let detail = gtk4::Label::new(Some(&describe(path)));
+    detail.add_css_class("launcher-subtitle");
+    detail.set_xalign(0.0);
+    detail.set_ellipsize(gtk4::pango::EllipsizeMode::Start);
+    words.append(&detail);
+    row.append(&words);
+    let remove = gtk4::Button::with_label("✕");
+    remove.add_css_class("term-btn");
+    remove.set_tooltip_text(Some("Remove from the attachments"));
+    remove.set_valign(Align::Center);
+    let files = files.clone();
+    let path = path.to_path_buf();
+    remove.connect_clicked(move |_| {
+        files.remove(&path);
+        (files.repaint)();
     });
+    row.append(&remove);
+    row
+}
 
-    let browse: Rc<dyn Fn(PathBuf)> = {
-        let generation = Rc::clone(&generation);
-        let cwd = Rc::clone(&cwd);
-        let hidden = hidden.clone();
-        let rows = Rc::clone(&rows);
-        let session = session.clone();
-        let add = Rc::clone(&add);
-        let repaint = Rc::clone(&repaint);
-        let status = status.clone();
-        let up = up.clone();
-        let place = place.clone();
-        let browser = browser.clone();
-        let browse_note = browse_note.clone();
-        let slot: Rc<RefCell<Option<std::rc::Weak<dyn Fn(PathBuf)>>>> = Rc::new(RefCell::new(None));
-        let browse: Rc<dyn Fn(PathBuf)> = Rc::new({
+/// The folder browser: opens a folder, lists it off GTK's thread, and fills
+/// the browser with its rows.
+fn browser(parts: &Parts, generation: &Rc<Cell<u64>>, cwd: &Rc<RefCell<PathBuf>>, rows: &Rows, files: &Files) -> Rc<dyn Fn(PathBuf)> {
+    let generation = Rc::clone(generation);
+    let cwd = Rc::clone(cwd);
+    let hidden = parts.hidden.clone();
+    let rows = Rc::clone(rows);
+    let files = files.clone();
+    let up = parts.up.clone();
+    let place = parts.place.clone();
+    let browser = parts.browser.clone();
+    let browse_note = parts.browse_note.clone();
+    let slot: WeakSlot<dyn Fn(PathBuf)> = Rc::new(RefCell::new(None));
+    let browse: Rc<dyn Fn(PathBuf)> = Rc::new({
+        let slot = Rc::clone(&slot);
+        move |target: PathBuf| {
+            generation.set(generation.get() + 1);
+            let ticket = generation.get();
+            *cwd.borrow_mut() = target.clone();
+            place.set_text(&crate::state::display_dir(&target.to_string_lossy()));
+            place.set_tooltip_text(Some(&target.to_string_lossy()));
+            up.set_sensitive(target.parent().is_some());
+            browse_note.set_text("Loading…");
+            let show_hidden = hidden.is_active();
+            let generation = Rc::clone(&generation);
+            let browser = browser.clone();
+            let browse_note = browse_note.clone();
+            let rows = Rc::clone(&rows);
+            let files = files.clone();
             let slot = Rc::clone(&slot);
-            move |target: PathBuf| {
-                generation.set(generation.get() + 1);
-                let ticket = generation.get();
-                *cwd.borrow_mut() = target.clone();
-                place.set_text(&crate::state::display_dir(&target.to_string_lossy()));
-                place.set_tooltip_text(Some(&target.to_string_lossy()));
-                up.set_sensitive(target.parent().is_some());
-                browse_note.set_text("Loading…");
-                let show_hidden = hidden.is_active();
-                let generation = Rc::clone(&generation);
-                let browser = browser.clone();
-                let browse_note = browse_note.clone();
-                let rows = Rc::clone(&rows);
-                let session = session.clone();
-                let add = Rc::clone(&add);
-                let repaint = Rc::clone(&repaint);
-                let status = status.clone();
-                let slot = Rc::clone(&slot);
-                glib::MainContext::default().spawn_local(async move {
-                    let folder = target.clone();
-                    let listing = gio::spawn_blocking(move || list_folder(&folder, show_hidden)).await;
-                    if generation.get() != ticket {
+            glib::MainContext::default().spawn_local(async move {
+                let folder = target.clone();
+                let listing = gio::spawn_blocking(move || list_folder(&folder, show_hidden)).await;
+                if generation.get() != ticket {
+                    return;
+                }
+                crate::asset_view::clear(&browser);
+                rows.borrow_mut().clear();
+                let (entries, cut) = match listing {
+                    Ok(Ok(listing)) => listing,
+                    _ => {
+                        browse_note.set_text("This folder cannot be opened.");
                         return;
                     }
-                    while let Some(child) = browser.first_child() {
-                        browser.remove(&child);
-                    }
-                    rows.borrow_mut().clear();
-                    let (entries, cut) = match listing {
-                        Ok(Ok(listing)) => listing,
-                        _ => {
-                            browse_note.set_text("This folder cannot be opened.");
-                            return;
-                        }
-                    };
-                    browse_note.set_text(&match (entries.len(), cut) {
-                        (0, _) => "This folder is empty.".to_string(),
-                        (_, true) => format!("Showing the first {LIST_CAP} entries. Click a file to attach it, a folder to open it."),
-                        _ => "Click a file to attach it, a folder to open it.".to_string(),
-                    });
-                    let attached_now = staged(&session);
-                    for entry in entries {
-                        let row = gtk4::Button::new();
-                        row.add_css_class("attach-browse-row");
-                        let line = gtk4::Box::new(Orientation::Horizontal, 8);
-                        line.append(&gtk4::Label::new(Some(file_icon(&entry.path))));
-                        let name = gtk4::Label::new(Some(&entry.name));
-                        name.set_hexpand(true);
-                        name.set_xalign(0.0);
-                        name.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-                        line.append(&name);
-                        let meta = gtk4::Label::new(Some(&if entry.is_dir {
-                            "›".to_string()
-                        } else {
-                            glib::format_size(entry.size).to_string()
-                        }));
-                        meta.add_css_class("launcher-subtitle");
-                        line.append(&meta);
-                        if !entry.is_dir {
-                            let check = gtk4::Label::new(Some("✓"));
-                            check.add_css_class("attach-check");
-                            line.append(&check);
-                        }
-                        row.set_child(Some(&line));
-                        if entry.is_dir {
-                            row.set_tooltip_text(Some("Open this folder"));
-                            let slot = Rc::clone(&slot);
-                            let path = entry.path.clone();
-                            row.connect_clicked(move |_| {
-                                if let Some(browse) = slot.borrow().as_ref().and_then(std::rc::Weak::upgrade) {
-                                    browse(path.clone());
-                                }
-                            });
-                        } else {
-                            row.set_tooltip_text(Some("Attach or remove this file"));
-                            if attached_now.contains(&entry.path) {
-                                row.add_css_class("attached");
-                            }
-                            let session = session.clone();
-                            let path = entry.path.clone();
-                            let add = Rc::clone(&add);
-                            let repaint = Rc::clone(&repaint);
-                            let status = status.clone();
-                            row.connect_clicked(move |_| {
-                                let mut files = staged(&session);
-                                if files.contains(&path) {
-                                    files.retain(|f| f != &path);
-                                    set_staged(&session, files);
-                                    status.set_text("Removed.");
-                                    repaint();
-                                } else {
-                                    add(vec![path.clone()]);
-                                }
-                            });
-                            rows.borrow_mut().push((entry.path.clone(), row.clone()));
-                        }
-                        browser.append(&row);
-                    }
+                };
+                browse_note.set_text(&match (entries.len(), cut) {
+                    (0, _) => "This folder is empty.".to_string(),
+                    (_, true) => format!("Showing the first {LIST_CAP} entries. Click a file to attach it, a folder to open it."),
+                    _ => "Click a file to attach it, a folder to open it.".to_string(),
                 });
+                let attached_now = staged(&files.session);
+                for entry in entries {
+                    let row = browse_row(&entry, &attached_now, &files, &slot);
+                    if !entry.is_dir {
+                        rows.borrow_mut().push((entry.path.clone(), row.clone()));
+                    }
+                    browser.append(&row);
+                }
+            });
+        }
+    });
+    *slot.borrow_mut() = Some(Rc::downgrade(&browse));
+    browse
+}
+
+/// A browser row: a folder opens through `open_folder`; a file is attached
+/// or removed, and shows ✓ while attached.
+fn browse_row(entry: &Entry, attached_now: &[PathBuf], files: &Files, open_folder: &WeakSlot<dyn Fn(PathBuf)>) -> gtk4::Button {
+    let row = gtk4::Button::new();
+    row.add_css_class("attach-browse-row");
+    let line = gtk4::Box::new(Orientation::Horizontal, 8);
+    line.append(&gtk4::Label::new(Some(file_icon(&entry.path))));
+    let name = gtk4::Label::new(Some(&entry.name));
+    name.set_hexpand(true);
+    name.set_xalign(0.0);
+    name.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    line.append(&name);
+    let meta = gtk4::Label::new(Some(&if entry.is_dir {
+        "›".to_string()
+    } else {
+        glib::format_size(entry.size).to_string()
+    }));
+    meta.add_css_class("launcher-subtitle");
+    line.append(&meta);
+    if !entry.is_dir {
+        let check = gtk4::Label::new(Some("✓"));
+        check.add_css_class("attach-check");
+        line.append(&check);
+    }
+    row.set_child(Some(&line));
+    if entry.is_dir {
+        row.set_tooltip_text(Some("Open this folder"));
+        let slot = Rc::clone(open_folder);
+        let path = entry.path.clone();
+        row.connect_clicked(move |_| {
+            if let Some(browse) = upgrade(&slot) {
+                browse(path.clone());
             }
         });
-        *slot.borrow_mut() = Some(Rc::downgrade(&browse));
-        browse
-    };
+    } else {
+        row.set_tooltip_text(Some("Attach or remove this file"));
+        if attached_now.contains(&entry.path) {
+            row.add_css_class("attached");
+        }
+        let files = files.clone();
+        let path = entry.path.clone();
+        row.connect_clicked(move |_| {
+            if staged(&files.session).contains(&path) {
+                files.remove(&path);
+                files.status.set_text("Removed.");
+                (files.repaint)();
+            } else {
+                (files.add)(vec![path.clone()]);
+            }
+        });
+    }
+    row
+}
 
-    // Navigation.
+/// ↑, Project, Home, Hidden and Clear.
+fn connect_navigation(parts: &Parts, folder: &Path, cwd: &Rc<RefCell<PathBuf>>, browse: &Rc<dyn Fn(PathBuf)>, files: &Files) {
     {
-        let browse = Rc::clone(&browse);
-        let cwd = Rc::clone(&cwd);
-        up.connect_clicked(move |_| {
+        let browse = Rc::clone(browse);
+        let cwd = Rc::clone(cwd);
+        parts.up.connect_clicked(move |_| {
             let parent = cwd.borrow().parent().map(Path::to_path_buf);
             if let Some(parent) = parent {
                 browse(parent);
@@ -607,49 +657,58 @@ fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<g
         });
     }
     {
-        let browse = Rc::clone(&browse);
+        let browse = Rc::clone(browse);
         let folder = folder.to_path_buf();
-        project.connect_clicked(move |_| browse(folder.clone()));
+        parts.project.connect_clicked(move |_| browse(folder.clone()));
     }
     {
-        let browse = Rc::clone(&browse);
-        home.connect_clicked(move |_| browse(crate::state::home_dir()));
+        let browse = Rc::clone(browse);
+        parts.home.connect_clicked(move |_| browse(crate::state::home_dir()));
     }
     {
-        let browse = Rc::clone(&browse);
-        let cwd = Rc::clone(&cwd);
-        hidden.connect_toggled(move |_| {
+        let browse = Rc::clone(browse);
+        let cwd = Rc::clone(cwd);
+        parts.hidden.connect_toggled(move |_| {
             let here = cwd.borrow().clone();
             browse(here);
         });
     }
     {
-        let session = session.clone();
-        let status = status.clone();
-        let repaint = Rc::clone(&repaint);
-        clear.connect_clicked(move |_| {
-            set_staged(&session, Vec::new());
-            status.set_text("Cleared.");
-            repaint();
+        let files = files.clone();
+        parts.clear.connect_clicked(move |_| {
+            set_staged(&files.session, Vec::new());
+            files.status.set_text("Cleared.");
+            (files.repaint)();
         });
     }
+}
 
-    // Drop files from a file manager anywhere on the panel.
+/// The local paths in a dropped or pasted file list.
+fn file_paths(list: &gdk::FileList) -> Vec<PathBuf> {
+    list.files().iter().filter_map(gio::prelude::FileExt::path).collect()
+}
+
+/// Drop files from a file manager anywhere on the panel.
+fn accept_dropped_files(panel: &gtk4::Box, add: &Rc<dyn Fn(Vec<PathBuf>)>) {
     let drop = gtk4::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
     {
-        let panel = outer.clone();
+        let panel = panel.clone();
         drop.connect_enter(move |_, _, _| {
             panel.add_css_class("attach-drop-hover");
             gdk::DragAction::COPY
         });
-        let panel = outer.clone();
+    }
+    {
+        let panel = panel.clone();
         drop.connect_leave(move |_| panel.remove_css_class("attach-drop-hover"));
-        let panel = outer.clone();
-        let add = Rc::clone(&add);
+    }
+    {
+        let panel = panel.clone();
+        let add = Rc::clone(add);
         drop.connect_drop(move |_, value, _, _| {
             panel.remove_css_class("attach-drop-hover");
             let Ok(list) = value.get::<gdk::FileList>() else { return false };
-            let paths: Vec<PathBuf> = list.files().iter().filter_map(gio::prelude::FileExt::path).collect();
+            let paths = file_paths(&list);
             if paths.is_empty() {
                 return false;
             }
@@ -657,91 +716,111 @@ fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<g
             true
         });
     }
-    outer.add_controller(drop);
+    panel.add_controller(drop);
+}
 
-    // Ctrl+V pastes files copied in a file manager.
+/// Ctrl+V pastes files copied in a file manager.
+fn accept_pasted_files(panel: &gtk4::Box, add: &Rc<dyn Fn(Vec<PathBuf>)>, status: &gtk4::Label) {
     let keys = gtk4::EventControllerKey::new();
-    {
+    let add = Rc::clone(add);
+    let status = status.clone();
+    keys.connect_key_pressed(move |_, key, _, modifiers| {
+        if !crate::asset_view::is_ctrl_letter(key, modifiers, gdk::Key::v) {
+            return glib::Propagation::Proceed;
+        }
+        let Some(display) = gdk::Display::default() else { return glib::Propagation::Proceed };
+        let clipboard = display.clipboard();
         let add = Rc::clone(&add);
         let status = status.clone();
-        keys.connect_key_pressed(move |_, key, _, modifiers| {
-            if !(modifiers.contains(gdk::ModifierType::CONTROL_MASK) && matches!(key, gdk::Key::v | gdk::Key::V)) {
-                return glib::Propagation::Proceed;
+        glib::MainContext::default().spawn_local(async move {
+            let value = clipboard.read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT).await;
+            let paths: Vec<PathBuf> = value
+                .ok()
+                .and_then(|value| value.get::<gdk::FileList>().ok())
+                .map(|list| file_paths(&list))
+                .unwrap_or_default();
+            if paths.is_empty() {
+                status.set_text("The clipboard holds no files.");
+            } else {
+                add(paths);
             }
-            let Some(display) = gdk::Display::default() else { return glib::Propagation::Proceed };
-            let clipboard = display.clipboard();
-            let add = Rc::clone(&add);
-            let status = status.clone();
-            glib::MainContext::default().spawn_local(async move {
-                let value = clipboard.read_value_future(gdk::FileList::static_type(), glib::Priority::DEFAULT).await;
-                let paths: Vec<PathBuf> = value
-                    .ok()
-                    .and_then(|value| value.get::<gdk::FileList>().ok())
-                    .map(|list| list.files().iter().filter_map(gio::prelude::FileExt::path).collect())
-                    .unwrap_or_default();
-                if paths.is_empty() {
-                    status.set_text("The clipboard holds no files.");
-                } else {
-                    add(paths);
-                }
-            });
-            glib::Propagation::Stop
         });
-    }
-    outer.add_controller(keys);
+        glib::Propagation::Stop
+    });
+    panel.add_controller(keys);
+}
 
-    // Insert: type the files into the harness's prompt, then hand the
-    // keyboard to its terminal so the user can finish the prompt.
-    {
+/// Insert: type the files into the harness's prompt, then hand the keyboard
+/// to its terminal so the user can finish the prompt.
+fn connect_insert(insert: &gtk4::Button, session: &str, status: &gtk4::Label, origin: glib::WeakRef<gtk4::Button>) {
+    let session = session.to_string();
+    let status = status.clone();
+    insert.connect_clicked(move |button| {
+        let files = staged(&session);
+        if files.is_empty() {
+            return;
+        }
+        button.set_sensitive(false);
+        status.set_text("Inserting…");
         let session = session.clone();
         let status = status.clone();
-        insert.connect_clicked(move |button| {
-            let files = staged(&session);
-            if files.is_empty() {
-                return;
-            }
-            button.set_sensitive(false);
-            status.set_text("Inserting…");
-            let session = session.clone();
-            let status = status.clone();
-            let button = button.clone();
-            let origin = origin.clone();
-            glib::MainContext::default().spawn_local(async move {
-                let target = session.clone();
-                let sent = files.clone();
-                let result = gio::spawn_blocking(move || crate::prompt_attachments::insert_local(&target, &sent))
-                    .await
-                    .unwrap_or_else(|_| Err("insert_failed".into()));
-                match result {
-                    Ok(_) => {
-                        // Files added while this ran stay attached.
-                        let mut left = staged(&session);
-                        left.retain(|f| !files.contains(f));
-                        let done = left.is_empty();
-                        set_staged(&session, left);
-                        if done {
-                            close(&session);
-                        } else {
-                            status.set_text("Inserted. Files added meanwhile are still attached.");
-                            button.set_sensitive(true);
-                        }
-                        if let Some(origin) = origin.upgrade() {
-                            focus_card_terminal(&origin);
-                        }
-                    }
-                    Err(error) => {
-                        status.set_text(&explain(&error));
+        let button = button.clone();
+        let origin = origin.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let target = session.clone();
+            let sent = files.clone();
+            let result = gio::spawn_blocking(move || crate::prompt_attachments::insert_local(&target, &sent))
+                .await
+                .unwrap_or_else(|_| Err("insert_failed".into()));
+            match result {
+                Ok(_) => {
+                    // Files added while this ran stay attached.
+                    let mut left = staged(&session);
+                    left.retain(|f| !files.contains(f));
+                    let done = left.is_empty();
+                    set_staged(&session, left);
+                    if done {
+                        close(&session);
+                    } else {
+                        status.set_text("Inserted. Files added meanwhile are still attached.");
                         button.set_sensitive(true);
                     }
+                    if let Some(origin) = origin.upgrade() {
+                        focus_card_terminal(&origin);
+                    }
                 }
-            });
+                Err(error) => {
+                    status.set_text(&explain(&error));
+                    button.set_sensitive(true);
+                }
+            }
         });
-    }
+    });
+}
+
+fn build(session: &str, card_title: &str, folder: &Path, origin: glib::WeakRef<gtk4::Button>) -> Drawer {
+    let (outer, header) =
+        crate::floating_panel::card_panel(&gtk4::Image::from_icon_name(attach_icon()), "Attachments", card_title, MIN_SIZE);
+    outer.add_css_class("attach-panel");
+    let close_button = header.close_button("Close; attached files are kept");
+    let parts = layout(&outer);
+
+    let generation = Rc::new(Cell::new(0u64));
+    let cwd = Rc::new(RefCell::new(folder.to_path_buf()));
+    let rows: Rows = Rc::new(RefCell::new(Vec::new()));
+    let (paint_slot, repaint) = weak_repaint();
+    let files = Files::new(session, &parts.status, &repaint);
+    let paint = painter(&parts, &rows, &files, &paint_slot);
+    let browse = browser(&parts, &generation, &cwd, &rows, &files);
+    connect_navigation(&parts, folder, &cwd, &browse, &files);
+    accept_dropped_files(&outer, &files.add);
+    accept_pasted_files(&outer, &files.add, &parts.status);
+    connect_insert(&parts.insert, session, &parts.status, origin);
 
     paint();
     browse(folder.to_path_buf());
-    let widget = outer;
-    Drawer { widget, close: close_button, generation, insert, status, paint, add, browse }
+    let Parts { insert, status, .. } = parts;
+    Drawer { widget: outer, close: close_button, generation, insert, status, paint, add: files.add, browse }
 }
 
 /// The panel's stylesheet, in the Omarchy palette.
