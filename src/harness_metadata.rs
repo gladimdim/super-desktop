@@ -15,7 +15,8 @@ use crate::harness_record::{atomic_bytes, atomic_write, now_ms, read, root, star
 
 const OPTION: &str = "@super_desktop_metadata";
 
-fn quote(value: &str) -> String {
+/// `value` as one POSIX shell word, always single-quoted.
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -57,7 +58,7 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
         command: command.into(),
         path: None,
     };
-    if !native_agent(agent) && !agent.starts_with("custom-") {
+    if !has_native_metadata(agent) {
         return unchanged();
     }
     let Some(mut args) = shlex::split(command) else {
@@ -136,7 +137,7 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
     ];
     match agent {
         "claude" => {
-            let reporter = format!("{} harness-event claude", quote(&exe.to_string_lossy()));
+            let reporter = format!("{} harness-event claude", shell_quote(&exe.to_string_lossy()));
             let mut hooks = serde_json::Map::new();
             for event in [
                 "SessionStart",
@@ -209,14 +210,14 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
     // Record the actual exec'd harness PID, not the short-lived hook child.
     let script = "export SD_HARNESS_PID=$$; printf '{}' | \"$SD_HARNESS_EXE\" harness-event init; exec \"$@\"";
     let command = std::iter::once("env".to_string())
-        .chain(envs.iter().map(|s| quote(s)))
+        .chain(envs.iter().map(|s| shell_quote(s)))
         .chain([
             "sh".into(),
             "-c".into(),
-            quote(script),
+            shell_quote(script),
             "super-desktop-harness".into(),
         ])
-        .chain(args.iter().map(|s| quote(s)))
+        .chain(args.iter().map(|s| shell_quote(s)))
         .collect::<Vec<_>>()
         .join(" ");
     Launch {
@@ -239,6 +240,8 @@ fn event_exe(exe: PathBuf) -> PathBuf {
 fn install(root: &Path) -> std::io::Result<()> {
     fs::create_dir_all(root)?;
     fs::set_permissions(root, fs::Permissions::from_mode(0o700))?;
+    // `openclaw/` is the gateway plugin `install_openclaw` registers.
+    fs::create_dir_all(root.join("openclaw"))?;
     for (name, content) in [
         ("report.mjs", include_str!("../assets/harness/report.mjs")),
         ("pi.mjs", include_str!("../assets/harness/pi.mjs")),
@@ -254,29 +257,27 @@ fn install(root: &Path) -> std::io::Result<()> {
             "openclaw.plugin.json",
             include_str!("../assets/harness/openclaw.plugin.json"),
         ),
+        (
+            "openclaw/index.mjs",
+            include_str!("../assets/harness/openclaw.mjs"),
+        ),
+        (
+            "openclaw/report.mjs",
+            include_str!("../assets/harness/report.mjs"),
+        ),
+        (
+            "openclaw/openclaw.plugin.json",
+            include_str!("../assets/harness/openclaw.plugin.json"),
+        ),
+        (
+            "openclaw/package.json",
+            r#"{"name":"super-desktop-metadata","version":"1.0.0","type":"module","openclaw":{"extensions":["./index.mjs"]}}"#,
+        ),
     ] {
         if fs::read_to_string(root.join(name)).ok().as_deref() != Some(content) {
             atomic_bytes(&root.join(name), content.as_bytes())?;
         }
     }
-    let plugin = root.join("openclaw");
-    fs::create_dir_all(&plugin)?;
-    atomic_bytes(
-        &plugin.join("index.mjs"),
-        include_bytes!("../assets/harness/openclaw.mjs"),
-    )?;
-    atomic_bytes(
-        &plugin.join("report.mjs"),
-        include_bytes!("../assets/harness/report.mjs"),
-    )?;
-    atomic_bytes(
-        &plugin.join("openclaw.plugin.json"),
-        include_bytes!("../assets/harness/openclaw.plugin.json"),
-    )?;
-    atomic_bytes(
-        &plugin.join("package.json"),
-        br#"{"name":"super-desktop-metadata","version":"1.0.0","type":"module","openclaw":{"extensions":["./index.mjs"]}}"#,
-    )?;
     Ok(())
 }
 
@@ -572,8 +573,14 @@ pub fn native_agent(agent: &str) -> bool {
     matches!(agent, "claude" | "opencode" | "pi" | "openclaw")
 }
 
+/// Launchers whose cards may carry launch metadata: the native adapters, and
+/// custom launchers, which may run one of them.
+pub fn has_native_metadata(agent: &str) -> bool {
+    native_agent(agent) || agent.starts_with("custom-")
+}
+
 pub fn inspect(session: &str, agent: &str) -> Option<Metadata> {
-    if !native_agent(agent) && !agent.starts_with("custom-") {
+    if !has_native_metadata(agent) {
         return None;
     }
     type Cache =
@@ -596,9 +603,6 @@ pub fn inspect(session: &str, agent: &str) -> Option<Metadata> {
 }
 
 fn inspect_uncached(session: &str, agent: &str) -> Option<Metadata> {
-    if !native_agent(agent) && !agent.starts_with("custom-") {
-        return None;
-    }
     inspect_option(agent, &metadata_option(session)?)
 }
 
@@ -620,7 +624,7 @@ fn metadata_option(session: &str) -> Option<String> {
 /// `inspect` for a value of the session's `@super_desktop_metadata` option
 /// that the caller already read (e.g. in one batched `list-panes -a`).
 pub fn inspect_option(agent: &str, option: &str) -> Option<Metadata> {
-    if !native_agent(agent) && !agent.starts_with("custom-") {
+    if !has_native_metadata(agent) {
         return None;
     }
     let path = Path::new(option.trim());
@@ -1209,6 +1213,38 @@ mod tests {
             assert_eq!(launch.command, command);
             assert!(launch.path.is_none());
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn adapter_files_are_rewritten_only_when_they_differ() {
+        use std::os::unix::fs::MetadataExt;
+        let root = std::env::temp_dir().join(format!("sd-adapter-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        install(&root).unwrap();
+        let names = [
+            "report.mjs",
+            "pi.mjs",
+            "opencode.mjs",
+            "openclaw.mjs",
+            "openclaw.plugin.json",
+            "openclaw/index.mjs",
+            "openclaw/report.mjs",
+            "openclaw/openclaw.plugin.json",
+            "openclaw/package.json",
+        ];
+        let inodes = || names.map(|name| fs::metadata(root.join(name)).unwrap().ino());
+        let first = inodes();
+        assert_eq!(
+            fs::read(root.join("openclaw/index.mjs")).unwrap(),
+            include_bytes!("../assets/harness/openclaw.mjs")
+        );
+        install(&root).unwrap();
+        assert_eq!(inodes(), first, "unchanged files are left in place");
+        fs::write(root.join("openclaw/package.json"), "{}").unwrap();
+        install(&root).unwrap();
+        assert!(fs::read_to_string(root.join("openclaw/package.json")).unwrap().contains("super-desktop-metadata"));
+        assert_eq!(fs::read_dir(root.join("openclaw")).unwrap().count(), 4, "no temporary files remain");
         fs::remove_dir_all(root).unwrap();
     }
 }

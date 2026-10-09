@@ -1303,7 +1303,7 @@ pub fn status_for_pane(
         }
     }
 
-    if crate::harness_metadata::native_agent(agent_type) || agent_type.starts_with("custom-") {
+    if crate::harness_metadata::has_native_metadata(agent_type) {
         // An adapter that never reported (an OpenClaw gateway without our
         // plugin, hooks that did not run) has no status to give: use the
         // screen like any other launcher rather than a permanent UNKNOWN.
@@ -1924,15 +1924,8 @@ fn sqlite_query_uncached(db: &std::path::Path, sql: &str, mode: &str) -> Option<
 /// Read `/proc/<pid>/cmdline` as a space-joined string (`None` when the
 /// process is gone or unreadable).
 fn read_cmdline(pid: u32) -> Option<String> {
-    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    if raw.is_empty() {
-        return None;
-    }
-    Some(
-        raw.iter()
-            .map(|b| if *b == 0 { ' ' } else { *b as char })
-            .collect(),
-    )
+    let args = crate::platform::process::cmdline(pid)?;
+    (!args.is_empty()).then(|| args.join(" "))
 }
 
 /// Pure helper: pull `--session <id>` / `--session=<id>` out of a cmdline

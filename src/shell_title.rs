@@ -90,21 +90,12 @@ pub fn last_from(
 }
 
 fn foreground_command(pid: u32) -> Option<String> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    let fields: Vec<_> = fields.split_whitespace().collect();
-    let foreground = fields.get(5)?.parse::<u32>().ok()?;
-    let group = fields.get(2)?.parse::<u32>().ok()?;
+    let (group, foreground) = crate::platform::process::terminal_groups(pid)?;
     if foreground == 0 {
         return None;
     }
     let target = if foreground != group { foreground } else { pid };
-    let raw = fs::read(format!("/proc/{target}/cmdline")).ok()?;
-    let args: Vec<_> = raw
-        .split(|byte| *byte == 0)
-        .filter(|arg| !arg.is_empty())
-        .map(|arg| String::from_utf8_lossy(arg).into_owned())
-        .collect();
+    let args = crate::platform::process::cmdline(target)?;
     let executable = Path::new(args.first()?)
         .file_name()?
         .to_str()?

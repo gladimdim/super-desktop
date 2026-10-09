@@ -44,15 +44,7 @@ const STORE_ENTRIES: usize = 1024;
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub fn route(path: &str) -> Option<&str> {
-    let id = path
-        .strip_prefix("/api/v1/harnesses/")?
-        .strip_suffix("/attachment-prompt")?;
-    (!id.is_empty()
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-    .then_some(id)
+    crate::prompt_image::harness_route(path, "/attachment-prompt")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -424,7 +416,7 @@ fn prompt_path(path: &Path) -> String {
 }
 
 fn shell_quote(path: &Path) -> String {
-    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    crate::harness_metadata::shell_quote(&path.to_string_lossy())
 }
 
 /// The text pasted into the composer after any native image attachments: the

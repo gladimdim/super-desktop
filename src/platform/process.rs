@@ -84,6 +84,30 @@ pub fn has_foreground_job(pid: u32) -> bool {
     })
 }
 
+/// The process group of `pid` and the foreground process group of its
+/// terminal (0 without one), from `/proc`; `None` where `/proc` is absent.
+pub fn terminal_groups(pid: u32) -> Option<(u32, u32)> {
+    terminal_groups_from_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+fn terminal_groups_from_stat(stat: &str) -> Option<(u32, u32)> {
+    let (_, fields) = stat.rsplit_once(')')?;
+    let fields: Vec<_> = fields.split_whitespace().collect();
+    Some((fields.get(2)?.parse().ok()?, fields.get(5)?.parse().ok()?))
+}
+
+/// The non-empty arguments of `pid`'s command line, from `/proc`; `None`
+/// where `/proc` is absent or the process is gone.
+pub fn cmdline(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    Some(
+        raw.split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
 /// Only a live, named child is eligible for a signal from its owner.
 pub fn is_live_child_named(pid: i32, parent: i32, prefix: &str) -> bool {
     if pid <= 0 || parent <= 0 {
@@ -211,6 +235,25 @@ mod tests {
         assert!(!start.is_empty());
         assert_eq!(start_time(pid).as_deref(), Some(start.as_str()));
         assert_eq!(parent_pid(pid), Some(unsafe { libc::getppid() } as u32));
+    }
+
+    #[test]
+    fn terminal_groups_come_after_the_command_name() {
+        assert_eq!(
+            terminal_groups_from_stat("77 (a ) b) S 1 40 40 34816 41 4194304"),
+            Some((40, 41))
+        );
+        assert_eq!(terminal_groups_from_stat("77 (bash) S 1 40 40 0 -1 0"), None);
+        assert_eq!(terminal_groups_from_stat("77 (bash) S 1 40"), None);
+        assert_eq!(terminal_groups_from_stat("no name"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn own_command_line_is_read_without_empty_arguments() {
+        let args = cmdline(std::process::id()).expect("own cmdline");
+        assert_eq!(args, std::env::args().filter(|arg| !arg.is_empty()).collect::<Vec<_>>());
+        assert_eq!(cmdline(u32::MAX), None);
     }
 
     #[test]

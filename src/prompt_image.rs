@@ -17,9 +17,15 @@ pub fn input_guard(session: &str) -> Result<MutexGuard<'static, ()>, String> {
 }
 
 pub fn route(path: &str) -> Option<&str> {
+    harness_route(path, "/image-prompt")
+}
+
+/// The terminal id in `/api/v1/harnesses/<id><suffix>`, when it is a plain id
+/// of at most 128 ASCII letters, digits, `_` and `-`.
+pub fn harness_route<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
     let id = path
         .strip_prefix("/api/v1/harnesses/")?
-        .strip_suffix("/image-prompt")?;
+        .strip_suffix(suffix)?;
     (!id.is_empty()
         && id.len() <= 128
         && id
