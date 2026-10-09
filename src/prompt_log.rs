@@ -209,15 +209,6 @@ fn native_records(records: Vec<PromptRecord>) -> Vec<(String, Option<i64>)> {
         .collect()
 }
 
-fn pane_pid(session: &str) -> Option<u32> {
-    let out = std::process::Command::new(crate::tmux::tmux_bin())
-        .args(["display-message", "-p", "-t", &format!("={session}:"), "#{pane_pid}"])
-        .output()
-        .ok()?;
-    out.status.success().then_some(())?;
-    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
-}
-
 /// Claude's transcript: the path its hooks reported, else `<session>.jsonl`
 /// in any project folder (the conversation may have moved folders).
 fn claude_transcript(metadata: &crate::harness_record::Metadata) -> Option<PathBuf> {
@@ -228,10 +219,7 @@ fn claude_transcript(metadata: &crate::harness_record::Metadata) -> Option<PathB
     if !metadata.transcript.is_empty() {
         return Some(PathBuf::from(&metadata.transcript));
     }
-    let root = std::env::var_os("CLAUDE_CONFIG_DIR")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude")))?;
+    let root = crate::harness_record::claude_config_dir()?;
     fs::read_dir(root.join("projects"))
         .ok()?
         .flatten()
@@ -243,7 +231,7 @@ fn claude_transcript(metadata: &crate::harness_record::Metadata) -> Option<PathB
 fn native(session: &str, agent: &str, persisted: Option<&str>) -> Option<(Vec<(String, Option<i64>)>, bool, &'static str)> {
     match agent {
         "codex" => {
-            let (records, cut) = crate::completion::user_prompts_for_pid(pane_pid(session)?, NATIVE_TAIL)?;
+            let (records, cut) = crate::completion::user_prompts_for_pid(crate::completion::pane_pid(session)?, NATIVE_TAIL)?;
             Some((native_records(records), cut, "codex"))
         }
         "claude" => {

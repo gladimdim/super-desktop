@@ -1,11 +1,12 @@
 //! Explicit agent completion metadata; never infer completion from terminal silence.
 //! Codex rollouts are an internal format: unknown versions fail closed.
+use crate::harness_record::{json_lines, read_jsonl_tail};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -35,13 +36,7 @@ fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
     let mut state = "unknown";
     let mut completed = None;
     // Ignore an unfinished final JSON line. Never scan text inside response bodies.
-    for line in bytes
-        .split_inclusive(|b| *b == b'\n')
-        .filter(|l| l.ends_with(b"\n"))
-    {
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
+    for record in json_lines(bytes) {
         if record["type"] != "event_msg" {
             continue;
         }
@@ -97,10 +92,6 @@ const ROLLOUT_REWALK: std::time::Duration = std::time::Duration::from_secs(5);
 /// card refresh asks up to three times: status, title and prompt).
 const ROLLOUT_NEGATIVE: std::time::Duration = std::time::Duration::from_secs(1);
 
-fn process_start(pid: u32) -> Option<String> {
-    crate::platform::process::start_time(pid)
-}
-
 /// Find only the nearest CLI's own open rollout, never "latest file in cwd".
 ///
 /// Cached per pane process: a hit is only reused while the pane process is the
@@ -108,7 +99,7 @@ fn process_start(pid: u32) -> Option<String> {
 /// and it is re-walked every few seconds regardless.
 fn rollout(pane_pid: u32) -> Option<(PathBuf, String)> {
     let cache = ROLLOUTS.get_or_init(Mutex::default);
-    let start = process_start(pane_pid);
+    let start = crate::harness_record::start_time(pane_pid);
     if let Some((at, cached_start, answer)) = cache.lock().unwrap().get(&pane_pid) {
         if *cached_start == start {
             match answer {
@@ -204,6 +195,13 @@ fn stamp(meta: &std::fs::Metadata) -> Stamp {
     (meta.dev(), meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec())
 }
 
+/// A regular file this user owns, opened with its metadata.
+fn open_owned(path: &Path) -> Option<(File, std::fs::Metadata)> {
+    let file = File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_file() && meta.uid() == unsafe { libc::geteuid() }).then_some((file, meta))
+}
+
 /// Memo of a value derived from a file's content, reused while the file's
 /// stamp is unchanged. Refreshes re-ask every second; files change rarely.
 fn memo<T: Clone>(
@@ -239,11 +237,7 @@ pub(crate) fn session_id(pane_pid: u32) -> Option<String> {
 
 /// The `session_meta` id of an interactive rollout.
 fn session_id_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
-    let file = File::open(fd).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
-        return None;
-    }
+    let (file, meta) = open_owned(fd)?;
     // Keyed on the whole stamp: a rewritten file may carry another header.
     memo(&SESSION_IDS, identity.to_string_lossy().into_owned(), stamp(&meta), || {
         let mut header = Vec::new();
@@ -264,68 +258,48 @@ fn title_for_rollout(fd: &Path, identity: &Path) -> Option<String> {
         path.file_name().is_some_and(|name| name == "sessions" || name == "archived_sessions")
     })?.parent()?;
     let index_path = home.join("session_index.jsonl");
-    let mut index = File::open(&index_path).ok()?;
-    let meta = index.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
+    let (mut index, meta) = open_owned(&index_path)?;
     let key = format!("{}\0{id}", index_path.display());
-    memo(&TITLES, key, stamp(&meta), move || title_from_index_file(&mut index, &meta, &id))
-}
-
-fn title_from_index_file(index: &mut File, meta: &std::fs::Metadata, id: &str) -> Option<String> {
     // The append-only index records names separately from raw first prompts.
     // Bound work per refresh, and never interpret an incomplete JSON record.
-    let start = meta.len().saturating_sub(4 * 1024 * 1024);
-    index.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    index.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
-    let tail = if start > 0 {
-        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
-    } else { &bytes };
-    title_from_index(tail, id)
+    memo(&TITLES, key, stamp(&meta), move || {
+        let (tail, _) = read_jsonl_tail(&mut index, &meta, 4 * 1024 * 1024)?;
+        title_from_index(&tail, &id)
+    })
 }
 
 fn title_from_index(bytes: &[u8], id: &str) -> Option<String> {
-    for line in bytes.split_inclusive(|b| *b == b'\n').rev() {
-        if !line.ends_with(b"\n") { continue; }
-        let Ok(record) = serde_json::from_slice::<Value>(line) else { continue; };
-        if record["id"].as_str() != Some(id) { continue; }
-        let name = record["thread_name"].as_str()?;
-        let clean = crate::tmux::strip_terminal_escapes(name)
-            .split_whitespace().collect::<Vec<_>>().join(" ");
-        return (!clean.is_empty()).then(|| clean.chars().take(240).collect());
-    }
-    None
+    let record = json_lines(bytes).rev().find(|record| record["id"].as_str() == Some(id))?;
+    let clean = crate::harness_record::clean(record["thread_name"].as_str()?);
+    (!clean.is_empty()).then(|| clean.chars().take(240).collect())
+}
+
+/// The process running in `session`'s pane. The exact `={session}:` target
+/// never falls back to tmux's prefix match on another session's name.
+pub(crate) fn pane_pid(session: &str) -> Option<u32> {
+    let out = std::process::Command::new(crate::tmux::tmux_bin())
+        .args(["display-message", "-p", "-t", &format!("={session}:"), "#{pane_pid}"])
+        .output()
+        .ok()?;
+    out.status.success().then_some(())?;
+    String::from_utf8(out.stdout).ok()?.trim().parse().ok()
 }
 
 /// Read explicit user-message records from the rollout owned by this pane.
 /// This is a fallback for sessions opened before input tracking was attached.
 pub fn last_user_prompt(session: &str) -> Option<String> {
-    let out = std::process::Command::new(crate::tmux::tmux_bin())
-        .args(["display-message", "-p", "-t", session, "#{pane_pid}"])
-        .output().ok()?;
-    if !out.status.success() { return None; }
-    last_user_prompt_for_pid(String::from_utf8(out.stdout).ok()?.trim().parse().ok()?)
+    last_user_prompt_for_pid(pane_pid(session)?)
 }
 
 /// `last_user_prompt` for a pane process the caller already knows.
 pub fn last_user_prompt_for_pid(pid: u32) -> Option<String> {
     let (fd, identity) = rollout(pid)?;
-    let mut file = File::open(fd).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
-    memo(&PROMPTS, identity, stamp(&meta), move || prompt_from_rollout(&mut file, &meta))
-}
-
-fn prompt_from_rollout(file: &mut File, meta: &std::fs::Metadata) -> Option<String> {
+    let (mut file, meta) = open_owned(&fd)?;
     // Bounded tail read; incomplete records and all response/tool records are ignored.
-    let start = meta.len().saturating_sub(1024 * 1024);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
-    let tail = if start > 0 {
-        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
-    } else { &bytes };
-    prompt_from_records(tail)
+    memo(&PROMPTS, identity, stamp(&meta), move || {
+        let (tail, _) = read_jsonl_tail(&mut file, &meta, 1024 * 1024)?;
+        prompt_from_records(&tail)
+    })
 }
 
 /// The text a person submitted, from either rollout shape: older Codex logs
@@ -354,9 +328,7 @@ fn user_message_text(record: &Value) -> Option<String> {
 }
 
 fn prompt_from_records(bytes: &[u8]) -> Option<String> {
-    bytes.split_inclusive(|b| *b == b'\n').rev().find_map(|line| {
-        if !line.ends_with(b"\n") { return None; }
-        let record: Value = serde_json::from_slice(line).ok()?;
+    json_lines(bytes).rev().find_map(|record| {
         let text = user_message_text(&record)?;
         (!text.trim().is_empty()).then(|| crate::tmux::truncate_prompt_title(&text))
     })
@@ -370,23 +342,13 @@ pub(crate) fn user_prompts_for_pid(
     limit: u64,
 ) -> Option<(Vec<crate::harness_record::PromptRecord>, bool)> {
     let (fd, _) = rollout(pid)?;
-    let mut file = File::open(fd).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } { return None; }
-    let start = meta.len().saturating_sub(limit);
-    file.seek(SeekFrom::Start(start)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(meta.len() - start).read_to_end(&mut bytes).ok()?;
-    let tail = if start > 0 {
-        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
-    } else { &bytes };
-    Some((prompt_records(tail), start > 0))
+    let (mut file, meta) = open_owned(&fd)?;
+    let (tail, cut) = read_jsonl_tail(&mut file, &meta, limit)?;
+    Some((prompt_records(&tail), cut))
 }
 
 fn prompt_records(bytes: &[u8]) -> Vec<crate::harness_record::PromptRecord> {
-    bytes.split_inclusive(|b| *b == b'\n').filter_map(|line| {
-        if !line.ends_with(b"\n") { return None; }
-        let record: Value = serde_json::from_slice(line).ok()?;
+    json_lines(bytes).filter_map(|record| {
         let text = user_message_text(&record)?;
         crate::harness_record::is_user_prompt(&text).then(|| crate::harness_record::PromptRecord {
             text: text.trim().to_owned(),
@@ -395,8 +357,9 @@ fn prompt_records(bytes: &[u8]) -> Vec<crate::harness_record::PromptRecord> {
     }).collect()
 }
 
-type Cached = (Stamp, (String, Option<String>));
-static CACHE: OnceLock<Mutex<HashMap<String, Cached>>> = OnceLock::new();
+/// A rollout's parsed tail, or `None` when it is not an interactive CLI rollout.
+type Inspected = Option<(String, Option<String>)>;
+static CACHE: OnceLock<Mutex<HashMap<String, (Stamp, Inspected)>>> = OnceLock::new();
 
 pub(crate) fn inspect(id: &str, pid: u32) -> Completion {
     inspect_rollout(id, rollout(pid))
@@ -408,89 +371,31 @@ fn inspect_rollout(id: &str, found: Option<(PathBuf, String)>) -> Completion {
     let Some((fd, identity)) = found else {
         return result;
     };
-    let Ok(mut file) = File::open(fd) else {
+    let Some((mut file, meta)) = open_owned(&fd) else {
         return result;
     };
-    let Ok(meta) = file.metadata() else {
-        return result;
-    };
-    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
-        return result;
-    }
-    let stamp = (
-        meta.dev(),
-        meta.ino(),
-        meta.len(),
-        meta.mtime(),
-        meta.mtime_nsec(),
-    );
-    let cache = CACHE.get_or_init(Mutex::default);
-    if let Some((_, (state, completion_id))) = cache
-        .lock()
-        .unwrap()
-        .get(&identity)
-        .filter(|(s, _)| *s == stamp)
-    {
+    let before = stamp(&meta);
+    let parsed = memo(&CACHE, identity.clone(), before, || {
+        let mut header = String::new();
+        BufReader::new((&mut file).take(64 * 1024))
+            .read_line(&mut header)
+            .ok()?;
+        let header = serde_json::from_str::<Value>(&header).ok()?;
+        if header["type"] != "session_meta" || header["payload"]["source"] != "cli" {
+            return None;
+        }
+        let (tail, _) = read_jsonl_tail(&mut file, &meta, 512 * 1024)?;
+        // A rollout that changed while it was read is read again next time.
+        if file.metadata().ok().map(|after| stamp(&after)) != Some(before) {
+            return None;
+        }
+        Some(parse_tail(&tail, &identity))
+    });
+    if let Some((state, completion_id)) = parsed {
         result.supported = true;
-        result.state = state.clone();
-        result.completion_id = completion_id.clone();
-        return result;
+        result.state = state;
+        result.completion_id = completion_id;
     }
-    let mut header = String::new();
-    if BufReader::new((&mut file).take(64 * 1024))
-        .read_line(&mut header)
-        .is_err()
-    {
-        return result;
-    }
-    let Ok(header) = serde_json::from_str::<Value>(&header) else {
-        return result;
-    };
-    if header["type"] != "session_meta" || header["payload"]["source"] != "cli" {
-        return result;
-    }
-    let start = meta.len().saturating_sub(512 * 1024);
-    if file.seek(SeekFrom::Start(start)).is_err() {
-        return result;
-    }
-    let mut bytes = Vec::new();
-    if (&mut file)
-        .take(meta.len() - start)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
-        return result;
-    }
-    let Ok(after) = file.metadata() else {
-        return result;
-    };
-    if (
-        after.dev(),
-        after.ino(),
-        after.len(),
-        after.mtime(),
-        after.mtime_nsec(),
-    ) != stamp
-    {
-        return result;
-    }
-    let tail = if start > 0 {
-        let Some(i) = bytes.iter().position(|b| *b == b'\n') else {
-            return result;
-        };
-        &bytes[i + 1..]
-    } else {
-        &bytes
-    };
-    let parsed = parse_tail(tail, &identity);
-    let mut cache = cache.lock().unwrap();
-    if cache.len() >= 64 {
-        cache.clear();
-    }
-    cache.insert(identity, (stamp, parsed.clone()));
-    result.supported = true;
-    result.state = parsed.0;
-    result.completion_id = parsed.1;
     result
 }
 
@@ -608,7 +513,7 @@ fn session_panes<'a>(listing: &'a str, id: &str) -> Vec<(u32, &'a str)> {
 }
 
 pub(crate) fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
-    if !matches!(metadata.agent.as_str(), "pi" | "opencode" | "claude") || !metadata.completion_supported {
+    if !crate::harness_record::reports_completion(&metadata.agent) || !metadata.completion_supported {
         return unknown(id);
     }
     let state = match metadata.status.as_str() {

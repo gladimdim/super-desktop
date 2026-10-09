@@ -467,7 +467,7 @@ fn conversation_exists(agent: &str, id: &str, cwd: Option<&str>) -> bool {
     };
     match agent {
         "claude" => {
-            let (Some(root), Some(cwd)) = (dir("CLAUDE_CONFIG_DIR", ".claude"), cwd) else {
+            let (Some(root), Some(cwd)) = (crate::harness_record::claude_config_dir(), cwd) else {
                 return false;
             };
             claude_transcript(&root, cwd, id).is_file()

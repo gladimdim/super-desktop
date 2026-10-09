@@ -59,6 +59,14 @@ pub fn root() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/state/super-desktop/harness"))
 }
 
+/// Claude Code's configuration folder: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+pub fn claude_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from(std::env::var_os("HOME")?).join(".claude")))
+}
+
 pub fn clean(value: &str) -> String {
     crate::terminal_text::strip_terminal_escapes(value)
         .split_whitespace()
@@ -272,7 +280,7 @@ pub fn apply(data: &mut Metadata, event: &Value) {
         data.completion_id = None;
         if state == "completed" {
             use sha2::{Digest, Sha256};
-            if matches!(data.agent.as_str(), "pi" | "opencode" | "claude")
+            if reports_completion(&data.agent)
                 && data.completion_supported
                 && !data.native_session.is_empty()
             {
@@ -299,9 +307,14 @@ pub fn apply(data: &mut Metadata, event: &Value) {
             data.status = state.into();
         }
     }
-    if matches!(data.agent.as_str(), "pi" | "opencode" | "claude") && event["completionSupported"] == true {
+    if reports_completion(&data.agent) && event["completionSupported"] == true {
         data.completion_supported = true;
     }
+}
+
+/// Native adapters that report explicit turn completions.
+pub fn reports_completion(agent: &str) -> bool {
+    matches!(agent, "pi" | "opencode" | "claude")
 }
 
 pub fn apply_claude(data: &mut Metadata, input: &Value) {
@@ -415,18 +428,42 @@ pub fn claude_transcript(path: &Path, session: &str) -> Option<TranscriptScan> {
     if !metadata.is_file() {
         return None;
     }
-    let offset = metadata.len().saturating_sub(256 * 1024);
+    let (bytes, _) = read_jsonl_tail(&mut file, &metadata, 256 * 1024)?;
+    Some(claude_transcript_scan(&bytes, session))
+}
+
+/// The last `limit` bytes of a JSON-lines file, from a line start: a read
+/// that starts mid-file drops its partial first line. The `bool` is true when
+/// older bytes were left unread. `None` when the file cannot be read, or a
+/// cut read holds no line break.
+pub fn read_jsonl_tail(file: &mut fs::File, meta: &fs::Metadata, limit: u64) -> Option<(Vec<u8>, bool)> {
+    let offset = meta.len().saturating_sub(limit);
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut bytes = Vec::new();
-    file.take(metadata.len() - offset)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    let bytes = if offset > 0 {
-        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
-    } else {
-        &bytes
-    };
-    Some(claude_transcript_scan(bytes, session))
+    file.take(meta.len() - offset).read_to_end(&mut bytes).ok()?;
+    if offset > 0 {
+        let start = bytes.iter().position(|b| *b == b'\n')? + 1;
+        bytes.drain(..start);
+    }
+    Some((bytes, offset > 0))
+}
+
+/// Each complete line of JSON-lines `bytes` that parses as JSON. An
+/// unfinished final line (still being written) and malformed lines are
+/// skipped.
+pub fn json_lines(bytes: &[u8]) -> impl DoubleEndedIterator<Item = Value> + '_ {
+    bytes
+        .split_inclusive(|b| *b == b'\n')
+        .filter(|line| line.ends_with(b"\n"))
+        .filter_map(|line| serde_json::from_slice(line).ok())
+}
+
+/// The records of `session`'s own conversation in a Claude transcript: never
+/// a sidechain (subagent) record or another session's.
+fn claude_session_records<'a>(bytes: &'a [u8], session: &'a str) -> impl Iterator<Item = Value> + 'a {
+    json_lines(bytes).filter(move |record| {
+        record["isSidechain"] != true && !record["sessionId"].as_str().is_some_and(|id| id != session)
+    })
 }
 
 #[cfg(test)]
@@ -437,18 +474,7 @@ pub fn claude_transcript_records(bytes: &[u8], session: &str) -> (Option<String>
 
 pub fn claude_transcript_scan(bytes: &[u8], session: &str) -> TranscriptScan {
     let mut scan = TranscriptScan::default();
-    for line in bytes
-        .split_inclusive(|b| *b == b'\n')
-        .filter(|l| l.ends_with(b"\n"))
-    {
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        if record["isSidechain"] == true
-            || record["sessionId"].as_str().is_some_and(|id| id != session)
-        {
-            continue;
-        }
+    for record in claude_session_records(bytes, session) {
         let text = || claude_record_text(&record);
         if claude_injected(&record) {
             if record["type"] == "user" {
@@ -530,31 +556,14 @@ pub fn claude_prompts(path: &Path, session: &str, limit: u64) -> Option<(Vec<Pro
     if !metadata.is_file() {
         return None;
     }
-    let offset = metadata.len().saturating_sub(limit);
-    file.seek(SeekFrom::Start(offset)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(metadata.len() - offset).read_to_end(&mut bytes).ok()?;
-    let bytes = if offset > 0 {
-        &bytes[bytes.iter().position(|b| *b == b'\n')? + 1..]
-    } else {
-        &bytes
-    };
-    Some((claude_prompt_records(bytes, session), offset > 0))
+    let (bytes, cut) = read_jsonl_tail(&mut file, &metadata, limit)?;
+    Some((claude_prompt_records(&bytes, session), cut))
 }
 
 pub fn claude_prompt_records(bytes: &[u8], session: &str) -> Vec<PromptRecord> {
     let mut prompts = Vec::new();
-    for line in bytes
-        .split_inclusive(|b| *b == b'\n')
-        .filter(|l| l.ends_with(b"\n"))
-    {
-        let Ok(record) = serde_json::from_slice::<Value>(line) else {
-            continue;
-        };
-        if record["type"] != "user"
-            || record["isSidechain"] == true
-            || record["sessionId"].as_str().is_some_and(|id| id != session)
-        {
+    for record in claude_session_records(bytes, session) {
+        if record["type"] != "user" {
             continue;
         }
         if claude_injected(&record) {
