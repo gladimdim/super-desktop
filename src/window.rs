@@ -2034,8 +2034,7 @@ impl SuperDesktopWindow {
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
 
-        let (hw, hh) = hud_measured_size(&self.hud);
-        let (tx, ty, sx, sy) = hud_slide_pose(hw, hh, sw as f64);
+        let (tx, ty, sx, sy) = hud_slide_pose(hud_measured_height(&self.hud));
         trajs.insert(self.hud.clone().upcast(), Trajectory { sx, sy, tx, ty });
         raise_canvas_child(&self.canvas, &self.hud);
     }
@@ -3296,17 +3295,14 @@ fn set_card_expanded(
     }
 }
 
-fn hud_measured_size(hud: &gtk4::Box) -> (f64, f64) {
-    let (_, nat_w, _, _) = hud.measure(Orientation::Horizontal, -1);
+fn hud_measured_height(hud: &gtk4::Box) -> f64 {
     let (_, nat_h, _, _) = hud.measure(Orientation::Vertical, -1);
-    let w = hud.width().max(nat_w).max(1) as f64;
-    let h = hud.height().max(nat_h).max(HUD_MIN_HEIGHT) as f64;
-    (w, h)
+    hud.height().max(nat_h).max(HUD_MIN_HEIGHT) as f64
 }
 
 /// Rest pose (flush with the top-left edge) and off-screen pose (same X, above
 /// the overlay) for the toolbar as a single translated widget.
-fn hud_slide_pose(_hud_w: f64, hud_h: f64, _screen_w: f64) -> (f64, f64, f64, f64) {
+fn hud_slide_pose(hud_h: f64) -> (f64, f64, f64, f64) {
     let tx = 0.0;
     let ty = 0.0;
     let sy = -hud_h - HUD_OFFSCREEN_PAD;
@@ -4013,7 +4009,7 @@ mod tests {
 
     #[test]
     fn test_hud_slides_straight_up_from_its_rest_pose() {
-        let (tx, ty, sx, sy) = hud_slide_pose(400.0, 48.0, 2560.0);
+        let (tx, ty, sx, sy) = hud_slide_pose(48.0);
         assert_eq!(sx, tx, "toolbar must not drift sideways");
         assert_eq!(ty, 0.0);
         assert!(sy <= -48.0, "hidden toolbar sits fully above the overlay, sy={sy}");
