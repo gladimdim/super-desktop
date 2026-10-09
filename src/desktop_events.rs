@@ -748,10 +748,6 @@ mod tests {
         drop(hub.subscribe("device").unwrap());
         // Wake the hub so it sees the empty list.
         fake.change(snapshot("e", 2, 0));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while hub.lock().running && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!hub.lock().running);
+        crate::test_isolation::wait_until("the hub to stop", || !hub.lock().running);
     }
 }

@@ -1901,28 +1901,6 @@ fn loopback_server<T: Send + 'static>(
     (client, std::thread::spawn(move || serve(Connection::plain(server))))
 }
 
-/// A session on the test's private tmux server (see `test_isolation`),
-/// killed when dropped together with an optional script it runs.
-#[cfg(test)]
-struct TmuxSession(String, Option<PathBuf>);
-#[cfg(test)]
-impl TmuxSession {
-    fn start(name: &str, command: &[&str]) -> Self {
-        let made = Command::new("tmux").args(["new-session", "-d", "-s", name]).args(command).output().unwrap();
-        assert!(made.status.success());
-        Self(name.to_string(), None)
-    }
-}
-#[cfg(test)]
-impl Drop for TmuxSession {
-    fn drop(&mut self) {
-        let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
-        if let Some(script) = &self.1 {
-            let _ = fs::remove_file(script);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1964,7 +1942,7 @@ mod tests {
     #[test]
     fn persistent_input_keeps_order_and_acknowledges_errors() {
         let id = format!("sd_perf_test_{}", std::process::id());
-        let _session = TmuxSession::start(&id, &["cat"]);
+        let _session = TmuxSession::start(&id, &[], &["cat"]);
         let server_id = id.clone();
         let (mut client, worker) = loopback_server(move |mut stream| stream_keys(&mut stream, &server_id));
         // Pipeline messages without waiting for each acknowledgement.
@@ -1992,8 +1970,7 @@ mod tests {
         assert_eq!(control.capture().unwrap(), crate::tmux::capture_pane_ansi(&id).unwrap());
         control.send("literal ' ; $() \\ Ukrainian: привіт", true).unwrap();
         let expected = "literal ' ; $() \\ Ukrainian: привіт";
-        let appeared = eventually(20, || control.capture().unwrap().contains(expected));
-        assert!(appeared, "tmux never rendered the acknowledged input");
+        wait_until("tmux to render the acknowledged input", || control.capture().unwrap().contains(expected));
         drop(client);
         worker.join().unwrap();
     }
@@ -2021,8 +1998,7 @@ while True:
         draft += chunk.replace(b"\r", b"|")
         os.write(1, chunk.replace(b"\r", b"|"))
 "#).unwrap();
-        let mut session = TmuxSession::start(&id, &["python3", &script.to_string_lossy()]);
-        session.1 = Some(script);
+        let _session = TmuxSession::start(&id, &[], &["python3", &script.to_string_lossy()]).removing(script);
         // Let the harness put its terminal in raw mode before typing.
         std::thread::sleep(Duration::from_millis(300));
         let server_id = id.clone();
@@ -2031,9 +2007,9 @@ while True:
             ws_send(&mut client, serde_json::json!({"sequence":sequence,"text":prompt,"enter":true}));
             assert_eq!(ws_receive(&mut client)["ok"], true);
             let expected = format!("SUBMIT:{prompt}");
-            let submitted = eventually(40, || capture_pane_text(&id).is_some_and(|screen| screen.contains(&expected)));
+            wait_until(&format!("{expected} on the screen"), || capture_pane_text(&id).is_some_and(|screen| screen.contains(&expected)));
             let screen = capture_pane_text(&id).unwrap_or_default();
-            assert!(submitted && !screen.contains('|'), "Return joined the paste: {screen:?}");
+            assert!(!screen.contains('|'), "Return joined the paste: {screen:?}");
         }
         drop(client);
         worker.join().unwrap();
@@ -2045,15 +2021,14 @@ while True:
         // so every later phone input was refused with "tmux connection must
         // be reopened" until the phone dropped the socket.
         let id = format!("sd_reopen_test_{}", std::process::id());
-        let _session = TmuxSession::start(&id, &["cat"]);
+        let _session = TmuxSession::start(&id, &[], &["cat"]);
         let server_id = id.clone();
         let (mut client, worker) = loopback_server(move |mut stream| stream_keys(&mut stream, &server_id));
         ws_send(&mut client, serde_json::json!({"sequence":1,"text":"alpha","enter":true}));
         assert_eq!(ws_receive(&mut client)["ok"], true);
 
         // Drop the bridge's control client from under it, as a tmux hiccup would.
-        let detached = Command::new("tmux").args(["detach-client", "-s", &format!("={id}")]).output().unwrap();
-        assert!(detached.status.success());
+        crate::test_isolation::tmux(&["detach-client", "-s", &format!("={id}")]);
         ws_send(&mut client, serde_json::json!({"sequence":2,"text":"beta","enter":true}));
         let failed = ws_receive(&mut client);
         assert_eq!(failed["sequence"], 2);
@@ -2062,8 +2037,9 @@ while True:
         let ack = ws_receive(&mut client);
         assert_eq!(ack["sequence"], 3);
         assert_eq!(ack["ok"], true, "input after a failed command must reopen tmux: {ack}");
-        let appeared = eventually(40, || capture_pane_text(&id).is_some_and(|screen| screen.contains("gamma")));
-        assert!(appeared, "the reopened client never delivered the input");
+        wait_until("the reopened client to deliver the input", || {
+            capture_pane_text(&id).is_some_and(|screen| screen.contains("gamma"))
+        });
         if failed["ok"] == false {
             // A failed input is reported, never replayed on the new client.
             assert!(!capture_pane_text(&id).unwrap().contains("beta"));
@@ -2098,17 +2074,7 @@ while True:
     }
 
     use super::*;
-
-    /// Whether `ready` holds within `tries` checks 25 ms apart.
-    fn eventually(tries: usize, mut ready: impl FnMut() -> bool) -> bool {
-        (0..tries).any(|_| {
-            if ready() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-            false
-        })
-    }
+    use crate::test_isolation::{wait_until, TmuxSession};
 
     /// A masked client text frame, as the phone sends one.
     fn ws_send(client: &mut TcpStream, body: serde_json::Value) {
@@ -2380,7 +2346,7 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         let pid = std::process::id();
         let live = format!("sd_term_reply_bytes_{pid}");
         let missing = format!("sd_term_reply_missing_{pid}");
-        let _session = TmuxSession::start(&live, &["cat"]);
+        let _session = TmuxSession::start(&live, &[], &["cat"]);
         let machine = pair_state().lock().unwrap().cfg.bridge_id.clone();
         // The epoch matches desktop_bridge's replay test: the dedup cache keeps
         // one epoch at a time, so a second one would evict that test's answer.

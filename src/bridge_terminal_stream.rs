@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn stream_pushes_output_promptly_and_ends_with_the_session() {
         let id = format!("sd_term_streamtest_{}", std::process::id());
-        let session = TmuxSession::start(&id, &["cat"]);
+        let session = crate::test_isolation::TmuxSession::start(&id, &[], &["cat"]);
         let server_id = id.clone();
         let (mut client, server) =
             loopback_server(move |mut socket| stream(&mut socket, &server_id, true, false));
@@ -424,8 +424,7 @@ mod tests {
         // Let the idle safety poll settle, then type.
         std::thread::sleep(Duration::from_millis(100));
         let typed = Instant::now();
-        let sent = Command::new("tmux").args(["send-keys", "-t", &id, "-l", "prompt-output-marker"]).output().unwrap();
-        assert!(sent.status.success());
+        crate::test_isolation::tmux(&["send-keys", "-t", &id, "-l", "prompt-output-marker"]);
         let latency = loop {
             let frame = read_text_frame(&mut client).expect("frame after output");
             if frame["tailAnsi"].as_str().is_some_and(|t| t.contains("prompt-output-marker")) {

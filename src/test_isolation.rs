@@ -169,6 +169,46 @@ impl Drop for TmuxServer {
     }
 }
 
+/// A session on this test process's own default tmux server, the one plain
+/// `tmux` reaches here (see the module docs), for code under test that runs
+/// plain `tmux`. Killed when dropped, together with a file it was given.
+#[cfg(test)]
+pub struct TmuxSession {
+    name: String,
+    file: Option<PathBuf>,
+}
+
+#[cfg(test)]
+impl TmuxSession {
+    /// `tmux new-session -d -s name`, then `options` (such as `-x 80`) and
+    /// the `command` to run. Fails the test when tmux does.
+    pub fn start(name: &str, options: &[&str], command: &[&str]) -> Self {
+        let args: Vec<&str> = ["new-session", "-d", "-s", name].iter().chain(options).chain(command).copied().collect();
+        tmux(&args);
+        Self { name: name.to_string(), file: None }
+    }
+
+    /// Also remove `file` when the session is killed.
+    pub fn removing(mut self, file: PathBuf) -> Self {
+        self.file = Some(file);
+        self
+    }
+}
+
+#[cfg(test)]
+impl Drop for TmuxSession {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .args(["kill-session", "-t", &self.name])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output();
+        if let Some(file) = &self.file {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+}
+
 /// Polls `done` until it holds, failing the test after five seconds.
 #[cfg(test)]
 pub fn wait_until(what: &str, mut done: impl FnMut() -> bool) {

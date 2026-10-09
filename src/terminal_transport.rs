@@ -566,21 +566,10 @@ mod tests {
         for byte in bytes {
             term.feed(&[byte]);
         }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
+        crate::test_isolation::wait_until("VTE to render raw PTY output", || {
             while gtk4::glib::MainContext::default().iteration(false) {}
-            if term
-                .text_format(vte4::Format::Text)
-                .is_some_and(|t| t.contains("SD_🦀"))
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "VTE did not render raw PTY output"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            term.text_format(vte4::Format::Text).is_some_and(|t| t.contains("SD_🦀"))
+        });
     }
 
     #[test]

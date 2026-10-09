@@ -564,21 +564,10 @@ mod tests {
     #[test]
     fn reused_captures_give_identical_documents() {
         let session = crate::tmux::unique_session_name();
-        struct Cleanup(String);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
-            }
-        }
         // A screen-status agent's footer and working line at the bottom of a
         // short pane, then silence.
         let script = "printf 'MODEL gpt-test EFFORT high\\n⠋ Responding… 3s\\n'; exec sleep 600";
-        let made = Command::new("tmux")
-            .args(["new-session", "-d", "-x", "80", "-y", "4", "-s", &session, script])
-            .output()
-            .unwrap();
-        assert!(made.status.success());
-        let _cleanup = Cleanup(session.clone());
+        let _session = crate::test_isolation::TmuxSession::start(&session, &["-x", "80", "-y", "4"], &[script]);
         let mut state = crate::state::AppState::default();
         state.terminals.push(
             serde_json::from_value(serde_json::json!({
