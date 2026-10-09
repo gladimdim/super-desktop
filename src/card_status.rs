@@ -268,12 +268,7 @@ fn legacy(request: &CardRequest) -> CardUpdate {
         crate::tmux::inspect_status_with_screen(session, agent, screen.as_deref().unwrap_or(""));
     let preview = request.preview_lines.map(|lines| preview_text(screen.as_deref(), &status, lines));
     let oc_id = resolve_oc_id(request);
-    let prompt = crate::bridge::last_user_text(
-        session,
-        agent,
-        oc_id.as_deref(),
-        screen.as_deref().unwrap_or(""),
-    );
+    let prompt = crate::bridge::last_user_text(session, agent, oc_id.as_deref());
     let notice = setup_notice(
         crate::harness_metadata::inspect(session, agent).as_ref(),
         crate::harness_metadata::openclaw_plugin,
@@ -631,7 +626,7 @@ mod tests {
                 assert!(matches!(snapshot.lookup(&session), PaneLookup::Row(_)));
                 // Per-session readers cache metadata for 250 ms; the UI refreshes once a second.
                 std::thread::sleep(std::time::Duration::from_millis(260));
-                let expected = crate::bridge::last_user_text(&session, agent, None, "");
+                let expected = crate::bridge::last_user_text(&session, agent, None);
                 assert_eq!(expected.as_deref(), (index < 2).then_some(*prompt));
                 assert_eq!(refresh_one(&request, Some(&snapshot)).prompt, expected, "batched {agent} {index}");
                 assert_eq!(legacy(&request).prompt, expected, "legacy {agent} {index}");

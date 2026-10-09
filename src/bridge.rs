@@ -65,7 +65,6 @@ mod completions;
 fn wake_terminal_streams(session: &str) {
     terminal_stream::wake(session);
 }
-type LauncherSessionMeta = (String, String, Option<String>, u8, Option<String>);
 
 fn utc_now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
@@ -105,18 +104,6 @@ fn theme_document() -> serde_json::Value {
         "brightMagenta": t.bright_magenta,
         "fontFamily": t.font_family,
         "fontSize": t.font_size,
-    })
-}
-
-/// The Android snapshot and its live stream share one document contract.
-/// One `state.json` read and one tmux inventory per document.
-fn harness_document() -> serde_json::Value {
-    serde_json::json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "timestamp": utc_now_iso(),
-        "harnesses": collect_harnesses(),
-        "usage": crate::usage::launcher_usage(),
-        "theme": theme_document(),
     })
 }
 
@@ -170,9 +157,8 @@ pub(crate) fn last_user_text(
     session: &str,
     agent_type: &str,
     persisted: Option<&str>,
-    _screen: &str,
 ) -> Option<String> {
-    if is_regular_terminal(agent_type) {
+    if crate::shell_title::is_regular(agent_type) {
         return crate::shell_title::last(session);
     }
     // A silent native adapter falls back to the typed prompt (same rule as
@@ -200,51 +186,12 @@ pub(crate) fn last_user_text(
     None
 }
 
-fn is_regular_terminal(agent_type: &str) -> bool {
-    crate::shell_title::is_regular(agent_type)
-}
-
 pub(crate) fn session_title(session: &str, agent_type: &str, pane_pid: &str) -> Option<String> {
     if let Some(title) = crate::harness_metadata::title(session, agent_type) {
         return Some(title);
     }
     if agent_type != "codex" { return None; }
     crate::completion::session_title(pane_pid.parse().ok()?)
-}
-
-/// Pick the directory the launcher should describe. Harness rows show the
-/// workspace they were launched in; regular terminals track the pane's live
-/// cwd so `cd` is reflected immediately.
-fn launcher_directory(
-    agent_type: &str,
-    harness_home: &str,
-    live_cwd: &str,
-) -> (String, &'static str) {
-    if is_regular_terminal(agent_type) && !live_cwd.trim().is_empty() {
-        (live_cwd.trim().to_string(), "cwd")
-    } else if is_regular_terminal(agent_type) {
-        (harness_home.to_string(), "cwd")
-    } else {
-        (harness_home.to_string(), "home")
-    }
-}
-
-/// Keep the directory as the final preview line because the current Android
-/// launcher renders the final three non-empty lines of this field.
-fn preview_with_directory(screen: &str, kind: &str, display_dir: &str) -> String {
-    let lines: Vec<&str> = screen
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .collect();
-    let start = lines.len().saturating_sub(11);
-    let mut preview = lines[start..].join("\n");
-    if !preview.is_empty() {
-        preview.push('\n');
-    }
-    preview.push_str(kind);
-    preview.push_str(" · ");
-    preview.push_str(display_dir);
-    preview
 }
 
 /// Hex colour of a super-desktop group tag (0 = untagged).
@@ -264,34 +211,6 @@ pub fn collect_harnesses() -> Vec<serde_json::Value> {
     let state = load_state();
     let snapshot = crate::tmux::pane_snapshot();
     harness_list::collect(&state, snapshot.as_ref())
-}
-
-/// Read only recognized status-footer formats from the current pane bottom.
-/// Never infer settings from global defaults or conversation history.
-fn harness_model_effort(agent: &str, screen: &str) -> (Option<String>, Option<String>) {
-    for line in screen.lines().rev().take(6).map(str::trim) {
-        if let Some(rest) = line.strip_prefix("MODEL ") {
-            if let Some((model, effort)) = rest.split_once("EFFORT ") {
-                let model = model.trim();
-                let effort = effort.split_whitespace().next().unwrap_or("");
-                if !model.is_empty() && !effort.is_empty() {
-                    return (Some(model.to_string()), Some(effort.to_string()));
-                }
-            }
-        }
-        if agent == "codex" {
-            if let Some((settings, _)) = line.split_once(" · ") {
-                let mut parts = settings.split_whitespace();
-                if let (Some(model), Some(effort), None) = (parts.next(), parts.next(), parts.next()) {
-                    if (model.starts_with("gpt-") || model.starts_with("o3") || model.starts_with("o4"))
-                        && matches!(effort, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra") {
-                        return (Some(model.to_string()), Some(effort.to_string()));
-                    }
-                }
-            }
-        }
-    }
-    (None, None)
 }
 
 // ---------- pairing state ----------
@@ -2065,16 +1984,16 @@ mod tests {
             assert_eq!(ack["sequence"], sequence);
             assert_eq!(ack["ok"], sequence < 3);
         }
-        assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("beta"));
+        assert_eq!(last_user_text(&_session.0, "codex", None).as_deref(), Some("beta"));
         // Draft input and rejected submissions must not replace the last prompt.
         ws_send(&mut client, serde_json::json!({"sequence":4,"text":"draft","enter":false}));
         assert_eq!(ws_receive(&mut client)["ok"], true);
         ws_send(&mut client, serde_json::json!({"sequence":5,"text":"x".repeat(4097),"enter":true}));
         assert_eq!(ws_receive(&mut client)["ok"], false);
-        assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("beta"));
+        assert_eq!(last_user_text(&_session.0, "codex", None).as_deref(), Some("beta"));
         ws_send(&mut client, serde_json::json!({"sequence":6,"text":"\nUnicode привіт ✓","enter":true}));
         assert_eq!(ws_receive(&mut client)["ok"], true);
-        assert_eq!(last_user_text(&_session.0, "codex", None, "").as_deref(), Some("Unicode привіт ✓"));
+        assert_eq!(last_user_text(&_session.0, "codex", None).as_deref(), Some("Unicode привіт ✓"));
         let screen = capture_pane_text(&_session.0).unwrap();
         assert!(screen.find("alpha").unwrap() < screen.find("beta").unwrap());
         let mut control = crate::tmux_control::Control::open(&_session.0).unwrap();
@@ -2230,15 +2149,6 @@ while True:
         }
     }
 
-    #[test]
-    fn settings_come_from_live_footer_only() {
-        assert_eq!(super::harness_model_effort("codex", "prompt\n  gpt-6-astra medium · ~/project · title"),
-            (Some("gpt-6-astra".into()), Some("medium".into())));
-        assert_eq!(super::harness_model_effort("reasonix", "MODEL deepseek-v4-flash   EFFORT auto\nstatus"),
-            (Some("deepseek-v4-flash".into()), Some("auto".into())));
-        assert_eq!(super::harness_model_effort("codex", &format!("gpt-6-astra high · old\n{}", "blank\n".repeat(8))), (None, None));
-        assert_eq!(super::harness_model_effort("shell", "gpt-6-astra high · text"), (None, None));
-    }
     use super::*;
 
     /// A session on the test's private tmux server (see `test_isolation`),
@@ -2415,45 +2325,11 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
     }
 
     #[test]
-    fn test_launcher_directory_tracks_shell_cwd_and_harness_home() {
-        assert_eq!(
-            launcher_directory("shell", "/home/me", "/tmp/project"),
-            ("/tmp/project".to_string(), "cwd")
-        );
-        assert_eq!(
-            launcher_directory("codex", "/home/me/Github/app", "/tmp/other"),
-            ("/home/me/Github/app".to_string(), "home")
-        );
-        assert_eq!(
-            launcher_directory("terminal", "/home/me", ""),
-            ("/home/me".to_string(), "cwd")
-        );
-    }
-
-    #[test]
-    fn test_launcher_preview_keeps_directory_visible_in_its_tail() {
-        let screen = (0..20)
-            .map(|n| format!("line {n}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let preview = preview_with_directory(&screen, "home", "~/Github/app");
-        let lines: Vec<_> = preview.lines().collect();
-        assert_eq!(lines.len(), 12);
-        assert_eq!(lines.first(), Some(&"line 9"));
-        assert_eq!(lines.last(), Some(&"home · ~/Github/app"));
-        assert!(lines.iter().rev().take(3).any(|line| line.starts_with("home · ")));
-    }
-
-    #[test]
     fn agent_response_markers_are_not_prompt_fallbacks() {
-        assert_eq!(last_user_text(
-            "sd_term_missing_prompt_test", "shell", None,
-            "Task output costs $5\n# Build summary\n> noisy output",
-        ), None);
-        assert_eq!(last_user_text(
-            "sd_term_missing_prompt_test", "claude", None,
-            "Answer costs $5\n# Summary\n> Last sentence of the response",
-        ), None);
+        // The pane's screen is not an input at all, so response text can
+        // never stand in for a session without a recorded prompt.
+        assert_eq!(last_user_text("sd_term_missing_prompt_test", "shell", None), None);
+        assert_eq!(last_user_text("sd_term_missing_prompt_test", "claude", None), None);
     }
 
     #[test]
