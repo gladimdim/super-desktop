@@ -489,6 +489,59 @@ impl CompactChrome {
     }
 }
 
+/// The parts of a card that change with its form: open, expanded or iconified.
+#[derive(Clone)]
+struct CardChrome {
+    root: Overlay,
+    header: gtk4::Box,
+    footer: gtk4::Box,
+    preview_label: Label,
+    /// Everything the card draws while iconified.
+    compact: CompactChrome,
+    expand_btn: Button,
+    hint_label: Label,
+    /// The last thing the source said about this card's session. A chrome
+    /// change of our own must not lose it.
+    source_message: Rc<RefCell<Option<String>>>,
+}
+
+impl CardChrome {
+    /// Show what the card's current form draws, for a card `width`×`height`.
+    fn apply(&self, expanded: bool, width: i32, height: i32, iconified: bool, vte_attached: bool) {
+        let compact = !expanded && iconified;
+        self.header.set_visible(!compact);
+        self.footer.set_visible(!compact);
+        self.preview_label.set_visible(!compact && !expanded && !vte_attached);
+        self.compact.icon_box.set_visible(compact);
+        self.compact.top_bar.set_visible(compact && !expanded);
+        crate::card_resize::set_resize_borders_visible(&self.root, !expanded && !compact);
+
+        if compact {
+            self.compact.fit(width.min(height));
+            self.root.add_css_class("term-compact");
+        } else {
+            self.root.remove_css_class("term-compact");
+        }
+    }
+
+    /// The card's class, expand button and footer hint for the expanded form
+    /// or the card's own.
+    fn paint_expanded(&self, expanded: bool) {
+        if expanded {
+            self.root.add_css_class("term-expanded");
+            self.expand_btn.set_label("❐");
+            self.expand_btn.set_tooltip_text(Some("Collapse back to overlay card"));
+            self.hint_label
+                .set_label(&card_hint_or(&self.source_message, "Double-click header to collapse"));
+        } else {
+            self.root.remove_css_class("term-expanded");
+            self.expand_btn.set_label("⛶");
+            self.expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
+            self.hint_label.set_label(&card_hint(&self.source_message));
+        }
+    }
+}
+
 /// One of the card's own actions, stored after construction so a remote command
 /// runs exactly the code the matching local button or gesture runs.
 type CardAction = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
@@ -498,10 +551,7 @@ pub struct MiniTerminalCard {
     pub container: Overlay,
     pub data: Rc<RefCell<TerminalData>>,
     expanded: Rc<RefCell<bool>>,
-    screen_w: i32,
-    _screen_h: i32,
-    header: gtk4::Box,
-    footer: gtk4::Box,
+    chrome: CardChrome,
     title_label: Label,
     title_prefix: String,
     brand_images: Vec<gtk4::Image>,
@@ -513,14 +563,7 @@ pub struct MiniTerminalCard {
     oc_recheck_at: Rc<RefCell<std::time::Instant>>,
     status_badge: Label,
     refresh_in_flight: Rc<Cell<bool>>,
-    preview_label: Label,
-    /// Everything the card draws while iconified.
-    compact: CompactChrome,
     meta_label: Label,
-    hint_label: Label,
-    _iconify_btn: Button,
-    expand_btn: Button,
-    compact_restore_btn: Button,
     /// A brief line about the last command this card sent to another PC
     /// (see `command_feedback`). Floats under the header, never takes input,
     /// never changes the card's size, and dismisses itself.
@@ -565,9 +608,6 @@ pub struct MiniTerminalCard {
     /// workspace as the view currently draws it, which changes with the
     /// Fit/100% mode and the zoom.
     workspace: Rc<Cell<(i32, i32)>>,
-    /// The last thing the source said about this card's session. A chrome
-    /// change of our own must not lose it.
-    source_message: Rc<RefCell<Option<String>>>,
     /// Set after construction: see [`CardAction`]. A remote layout command must
     /// not grow a second copy of an action that could drift from the button's.
     iconify_action: CardAction,
@@ -645,7 +685,7 @@ impl MiniTerminalCard {
         let on_toggle: Rc<dyn Fn(&TerminalData)> = Rc::new(on_toggle);
         let on_close = Rc::new(on_close);
         let on_drag_update = Rc::new(on_drag_update);
-        let on_drag_end = Rc::new(on_drag_end);
+        let on_drag_end: Rc<dyn Fn(gtk4::Widget, &TerminalData)> = Rc::new(on_drag_end);
         let on_resize_ghost = Rc::new(on_resize_ghost);
         let on_resize_end = Rc::new(on_resize_end);
         let on_raise_rc: Rc<dyn Fn(gtk4::Widget)> = Rc::new(on_raise);
@@ -712,22 +752,26 @@ impl MiniTerminalCard {
         // Click a dot -> 8-color picker popover, no text.
         let tag_sync: Rc<RefCell<Vec<glib::WeakRef<Button>>>> =
             Rc::new(RefCell::new(Vec::new()));
-        let tag_data = Rc::clone(&data);
-        let tag_root = root.downgrade();
-        let tag_save = Rc::clone(&on_drag_end);
-        let tag_sync_h = Rc::clone(&tag_sync);
-        let header_tag = crate::tag::make_tag_dot(data.borrow().tag, move |next| {
-            tag_data.borrow_mut().tag = next;
-            for w in tag_sync_h.borrow().iter() {
-                if let Some(b) = w.upgrade() {
-                    crate::tag::apply_tag(&b, next);
+        let synced_tag_dot = || {
+            let tag_data = Rc::clone(&data);
+            let tag_root = root.downgrade();
+            let tag_save = Rc::clone(&on_drag_end);
+            let tag_sync_dot = Rc::clone(&tag_sync);
+            let dot = crate::tag::make_tag_dot(data.borrow().tag, move |next| {
+                tag_data.borrow_mut().tag = next;
+                for w in tag_sync_dot.borrow().iter() {
+                    if let Some(b) = w.upgrade() {
+                        crate::tag::apply_tag(&b, next);
+                    }
                 }
-            }
-            if let Some(r) = tag_root.upgrade() {
-                tag_save(r.upcast(), &tag_data.borrow());
-            }
-        });
-        tag_sync.borrow_mut().push(header_tag.downgrade());
+                if let Some(r) = tag_root.upgrade() {
+                    tag_save(r.upcast(), &tag_data.borrow());
+                }
+            });
+            tag_sync.borrow_mut().push(dot.downgrade());
+            dot
+        };
+        let header_tag = synced_tag_dot();
         header.append(&header_tag);
 
         let logo = crate::brand::logo_path(&agent_type, crate::theme::current_theme().mode == "light");
@@ -914,23 +958,8 @@ impl MiniTerminalCard {
         compact_top_bar.append(&compact_status);
 
         // Group color tag dot for 128x128 icon mode (synced with header dot)
-        let tag_data_c = Rc::clone(&data);
-        let tag_root_c = root.downgrade();
-        let tag_save_c = Rc::clone(&on_drag_end);
-        let tag_sync_c = Rc::clone(&tag_sync);
-        let compact_tag = crate::tag::make_tag_dot(data.borrow().tag, move |next| {
-            tag_data_c.borrow_mut().tag = next;
-            for w in tag_sync_c.borrow().iter() {
-                if let Some(b) = w.upgrade() {
-                    crate::tag::apply_tag(&b, next);
-                }
-            }
-            if let Some(r) = tag_root_c.upgrade() {
-                tag_save_c(r.upcast(), &tag_data_c.borrow());
-            }
-        });
+        let compact_tag = synced_tag_dot();
         compact_tag.add_css_class("term-compact-tag");
-        tag_sync.borrow_mut().push(compact_tag.downgrade());
         compact_top_bar.append(&compact_tag);
 
         // Right-aligned by its own expansion: a spacer would add two gaps the
@@ -1059,13 +1088,19 @@ impl MiniTerminalCard {
 
         let card = Self {
             session_task: Arc::new(crate::session_task::SessionTask::default()),
+            chrome: CardChrome {
+                root: root.clone(),
+                header,
+                footer,
+                preview_label,
+                compact,
+                expand_btn,
+                hint_label,
+                source_message,
+            },
             container: root,
             data: Rc::clone(&data),
             expanded: Rc::clone(&expanded),
-            screen_w,
-            _screen_h: screen_h,
-            header,
-            footer,
             title_label: title.clone(),
             title_prefix,
             brand_images,
@@ -1075,13 +1110,7 @@ impl MiniTerminalCard {
             oc_recheck_at: Rc::new(RefCell::new(std::time::Instant::now())),
             status_badge,
             refresh_in_flight: Rc::new(Cell::new(false)),
-            preview_label,
-            compact,
             meta_label,
-            hint_label,
-            _iconify_btn: iconify_btn.clone(),
-            expand_btn,
-            compact_restore_btn: compact_restore_btn.clone(),
             notice,
             notice_label,
             notice_generation: Rc::new(Cell::new(0)),
@@ -1103,7 +1132,6 @@ impl MiniTerminalCard {
             fit,
             font_fit,
             workspace: Rc::new(Cell::new((screen_w, screen_h))),
-            source_message: Rc::clone(&source_message),
             iconify_action: Rc::new(RefCell::new(None)),
             restore_action: Rc::new(RefCell::new(None)),
             cli_mode_change: Rc::new(Cell::new(false)),
@@ -1157,26 +1185,14 @@ impl MiniTerminalCard {
             let data = Rc::clone(&data);
             let vte = Rc::clone(&card.vte);
             let preview_box = card.preview_box.clone();
-            let container = card.container.clone();
-            let header = card.header.clone();
-            let footer = card.footer.clone();
-            let preview_label = card.preview_label.clone();
-            let compact = card.compact.clone();
-            let expand_btn = card.expand_btn.clone();
-            let hint_label = card.hint_label.clone();
-            let source_message = Rc::clone(&source_message);
-            let compact_restore_btn = card.compact_restore_btn.clone();
+            let chrome = card.chrome.clone();
             let remote = card.remote.clone();
             let fit = Rc::clone(&card.fit);
             let on_save = Rc::clone(&on_drag_end);
             let jump = card.jump.clone();
             Rc::new(move || {
-                if *expanded.borrow() {
-                    *expanded.borrow_mut() = false;
-                    container.remove_css_class("term-expanded");
-                    expand_btn.set_label("⛶");
-                    expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
-                    hint_label.set_label(&card_hint(&source_message));
+                if expanded.replace(false) {
+                    chrome.paint_expanded(false);
                 }
                 remove_vte(&vte, &preview_box);
                 jump.hide();
@@ -1193,26 +1209,14 @@ impl MiniTerminalCard {
                     d.iconified = true;
                     // Minimizing returns to the remembered icon spot.
                     seed_icon_pos(&mut d);
-                    compact_restore_btn.set_tooltip_text(Some(&format!(
+                    chrome.compact.restore.set_tooltip_text(Some(&format!(
                         "Expand to larger size ({}×{})",
                         d.restored_width, d.restored_height
                     )));
                 }
-                container.set_size_request(side, side);
-                apply_layout(
-                    false,
-                    side,
-                    side,
-                    true,
-                    screen_w,
-                    &container,
-                    &header,
-                    &footer,
-                    &preview_label,
-                    &compact,
-                    false,
-                );
-                on_save(container.clone().upcast(), &data.borrow());
+                chrome.root.set_size_request(side, side);
+                chrome.apply(false, side, side, true, false);
+                on_save(chrome.root.clone().upcast(), &data.borrow());
                 // A remote icon is not a terminal: release the stream. The next
                 // snapshot reattaches if the host restores the card.
                 if let Some(session) = &remote {
@@ -1228,14 +1232,7 @@ impl MiniTerminalCard {
             let data = Rc::clone(&data);
             let vte = Rc::clone(&card.vte);
             let preview_box = card.preview_box.clone();
-            let container = card.container.clone();
-            let header = card.header.clone();
-            let footer = card.footer.clone();
-            let preview_label = card.preview_label.clone();
-            let compact = card.compact.clone();
-            let expand_btn = card.expand_btn.clone();
-            let hint_label = card.hint_label.clone();
-            let source_message = Rc::clone(&source_message);
+            let chrome = card.chrome.clone();
             let fit = Rc::clone(&card.fit);
             let font_fit = Rc::clone(&card.font_fit);
             let workspace = Rc::clone(&card.workspace);
@@ -1245,12 +1242,8 @@ impl MiniTerminalCard {
             let activity_restore = Rc::clone(&card.activity);
             let remote_restore = card.remote.clone();
             Rc::new(move || {
-                if *expanded.borrow() {
-                    *expanded.borrow_mut() = false;
-                    container.remove_css_class("term-expanded");
-                    expand_btn.set_label("⛶");
-                    expand_btn.set_tooltip_text(Some("Expand to 80% overlay"));
-                    hint_label.set_label(&card_hint(&source_message));
+                if expanded.replace(false) {
+                    chrome.paint_expanded(false);
                 }
                 let (min_w, min_h) = min_card_size(fit.get().2);
                 let (nw, nh) = {
@@ -1276,30 +1269,16 @@ impl MiniTerminalCard {
                     d.restored_width = nw;
                     d.restored_height = nh;
                 }
-                container.set_size_request(nw, nh);
+                chrome.root.set_size_request(nw, nh);
 
                 if vte.borrow().is_none() {
                     spawn_vte(&vte, &preview_box, &data, false, &on_toggle_restore, &expanded, &session_task, None, hover_lock_restore.clone(), &activity_restore, remote_restore.clone(), &fit, &font_fit, !cli_mode_change.get());
                 } else if let Some(term) = vte.borrow().as_ref() {
-                    let theme = crate::theme::current_theme();
-                    let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
-                    term.set_font(Some(&font));
+                    set_card_font(term, false);
                 }
 
-                apply_layout(
-                    false,
-                    nw,
-                    nh,
-                    false,
-                    screen_w,
-                    &container,
-                    &header,
-                    &footer,
-                    &preview_label,
-                    &compact,
-                    vte.borrow().is_some(),
-                );
-                on_save(container.clone().upcast(), &data.borrow());
+                chrome.apply(false, nw, nh, false, vte.borrow().is_some());
+                on_save(chrome.root.clone().upcast(), &data.borrow());
             })
         };
 
@@ -1334,7 +1313,7 @@ impl MiniTerminalCard {
                 on_toggle_header(&data_header.borrow());
             }
         });
-        card.header.add_controller(header_click);
+        card.chrome.header.add_controller(header_click);
 
         let preview_click = GestureClick::new();
         let on_toggle_preview = Rc::clone(&card.on_toggle);
@@ -1374,28 +1353,17 @@ impl MiniTerminalCard {
         // Move drag gestures:
         // When normal: drags from header bar.
         // When iconified: drags from anywhere on the 128x128 container.
-        attach_move_drag(
-            &card.header,
-            &card.container,
-            Rc::clone(&card.data),
-            Rc::clone(&card.expanded),
-            Rc::clone(&card.visual_pos),
-            Rc::clone(&on_drag_update),
-            Rc::clone(&on_drag_end),
-            Rc::clone(&on_raise_rc),
-            false,
-        );
-        attach_move_drag(
-            &card.container,
-            &card.container,
-            Rc::clone(&card.data),
-            Rc::clone(&card.expanded),
-            Rc::clone(&card.visual_pos),
-            Rc::clone(&on_drag_update),
-            Rc::clone(&on_drag_end),
-            Rc::clone(&on_raise_rc),
-            true,
-        );
+        let move_drag = MoveDrag {
+            root: card.container.downgrade(),
+            data: Rc::clone(&card.data),
+            expanded: Rc::clone(&card.expanded),
+            visual_pos: Rc::clone(&card.visual_pos),
+            on_update: on_drag_update,
+            on_end: Rc::clone(&on_drag_end),
+            on_raise: Rc::clone(&on_raise_rc),
+        };
+        move_drag.attach(&card.chrome.header, false);
+        move_drag.attach(&card.container, true);
 
         // Eight border/corner resize targets make every edge behave like a
         // conventional desktop window. Compact and expanded cards do not
@@ -1496,6 +1464,16 @@ impl MiniTerminalCard {
         card
     }
 
+    /// A local card on a 1024×768 screen whose overlay callbacks do nothing
+    /// but report saves to `on_save`.
+    #[cfg(test)]
+    pub fn for_test(data: TerminalData, on_save: impl Fn(gtk4::Widget, &TerminalData) + 'static) -> Self {
+        Self::new(
+            data, |_, _, _| {}, on_save, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
+            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
+        )
+    }
+
     pub fn desktop_presentation(&self) -> crate::workspace_model::CardPresentation {
         crate::workspace_model::CardPresentation {
             title: self.title_label.label().to_string(), expanded: self.is_expanded(),
@@ -1585,19 +1563,12 @@ impl MiniTerminalCard {
         let (x, y, w, h) = expanded_rect(screen_w, screen_h);
         *self.visual_pos.borrow_mut() = (x, y);
         self.container.set_size_request(w as i32, h as i32);
-        self.container.add_css_class("term-expanded");
-        self.expand_btn.set_label("❐");
-        self.expand_btn
-            .set_tooltip_text(Some("Collapse back to overlay card"));
-        self.hint_label
-            .set_label(&card_hint_or(&self.source_message, "Double-click header to collapse"));
+        self.chrome.paint_expanded(true);
 
         if self.vte.borrow().is_none() {
             self.attach_vte_with_policy(None, interactive);
         } else if let Some(term) = self.vte.borrow().as_ref() {
-            let theme = crate::theme::current_theme();
-            let font = gtk4::pango::FontDescription::from_string(&format!("{} 11", theme.font_family));
-            term.set_font(Some(&font));
+            set_card_font(term, true);
         }
 
         self.apply_chrome();
@@ -1616,20 +1587,13 @@ impl MiniTerminalCard {
         if iconified {
             self.detach_vte();
         } else if let Some(term) = self.vte.borrow().as_ref() {
-            let theme = crate::theme::current_theme();
-            let font = gtk4::pango::FontDescription::from_string(&format!("{} 10", theme.font_family));
-            term.set_font(Some(&font));
+            set_card_font(term, false);
         }
 
         let w = self.data.borrow().width;
         let h = self.data.borrow().height;
         self.container.set_size_request(w, h);
-        self.container.remove_css_class("term-expanded");
-        self.expand_btn.set_label("⛶");
-        self.expand_btn
-            .set_tooltip_text(Some("Expand to 80% overlay"));
-        self.hint_label
-            .set_label(&card_hint(&self.source_message));
+        self.chrome.paint_expanded(false);
         self.apply_chrome();
         self.refresh_status();
     }
@@ -1724,17 +1688,11 @@ impl MiniTerminalCard {
 
     fn apply_chrome(&self) {
         let vte_attached = self.vte.borrow().is_some();
-        apply_layout(
+        self.chrome.apply(
             self.is_expanded(),
             self.data.borrow().width,
             self.data.borrow().height,
             self.data.borrow().iconified,
-            self.screen_w,
-            &self.container,
-            &self.header,
-            &self.footer,
-            &self.preview_label,
-            &self.compact,
             vte_attached,
         );
     }
@@ -1743,7 +1701,7 @@ impl MiniTerminalCard {
     /// host's state reached the chrome.
     #[cfg(test)]
     pub fn footer_text(&self) -> String {
-        self.hint_label.label().to_string()
+        self.chrome.hint_label.label().to_string()
     }
 
     /// Show a brief, non-blocking line about a command's result, just under
@@ -1751,7 +1709,7 @@ impl MiniTerminalCard {
     pub fn show_notice(&self, notice: crate::command_feedback::Notice) {
         reveal_notice(
             (&self.notice, &self.notice_label, &self.notice_generation),
-            (&self.header, &self.compact.top_bar),
+            (&self.chrome.header, &self.chrome.compact.top_bar),
             notice,
         );
     }
@@ -1773,7 +1731,7 @@ impl MiniTerminalCard {
     /// Whether the header is on screen. A compact or expanded card is not
     /// showing it, and a view sizing a card's terminal has to know.
     pub fn header_visible(&self) -> bool {
-        self.header.is_visible()
+        self.chrome.header.is_visible()
     }
 
     pub fn remote_session(&self) -> Option<&Rc<RemoteSession>> {
@@ -1833,7 +1791,7 @@ impl MiniTerminalCard {
         }
         apply_status_view(
             &self.status_badge,
-            &self.compact.status,
+            &self.chrome.compact.status,
             match alive {
                 Some(false) => "EXITED",
                 // The host's session is alive but its state is the host's
@@ -1856,7 +1814,7 @@ impl MiniTerminalCard {
         if self.meta_label.label() != meta {
             self.meta_label.set_label(&meta);
         }
-        *self.source_message.borrow_mut() = message.map(str::to_string);
+        *self.chrome.source_message.borrow_mut() = message.map(str::to_string);
         self.paint_source_message();
     }
 
@@ -1896,14 +1854,14 @@ impl MiniTerminalCard {
         if !self.source.is_remote() {
             return;
         }
-        let message = self.source_message.borrow().clone();
+        let message = self.chrome.source_message.borrow().clone();
         if self.vte.borrow().is_none() && !self.is_compact() && !self.is_expanded() {
-            self.preview_label
+            self.chrome.preview_label
                 .set_text(message.as_deref().unwrap_or("Connecting…"));
-            self.preview_label.set_visible(true);
+            self.chrome.preview_label.set_visible(true);
         }
-        self.hint_label
-            .set_label(&card_hint_or(&self.source_message, CARD_HINT));
+        self.chrome.hint_label
+            .set_label(&card_hint_or(&self.chrome.source_message, CARD_HINT));
     }
 
     pub fn attach_vte(&self) {
@@ -2167,8 +2125,8 @@ impl MiniTerminalCard {
         };
 
         let status_badge = self.status_badge.downgrade();
-        let compact_status = self.compact.status.downgrade();
-        let preview_label = self.preview_label.downgrade();
+        let compact_status = self.chrome.compact.status.downgrade();
+        let preview_label = self.chrome.preview_label.downgrade();
         let meta_label = self.meta_label.downgrade();
         let title_label = self.title_label.downgrade();
         let title_prefix = self.title_prefix.clone();
@@ -2195,7 +2153,7 @@ impl MiniTerminalCard {
             }
         };
         let notice_parts = (self.notice.downgrade(), self.notice_label.downgrade(),
-            Rc::clone(&self.notice_generation), self.header.downgrade(), self.compact.top_bar.downgrade());
+            Rc::clone(&self.notice_generation), self.chrome.header.downgrade(), self.chrome.compact.top_bar.downgrade());
         let notice_session = sess_name.clone();
         let data_weak = Rc::downgrade(&self.data);
         let data_snapshot: Option<TerminalData> =
@@ -2427,6 +2385,17 @@ pub fn vte_font(family: &str, font_size: f64) -> gtk4::pango::FontDescription {
     font
 }
 
+/// A card's terminal font size: one point larger while it is expanded.
+fn card_font_size(expanded: bool) -> f64 {
+    if expanded { 11.0 } else { 10.0 }
+}
+
+/// Put the theme's font back on a card's terminal at its form's size.
+fn set_card_font(term: &VteTerminal, expanded: bool) {
+    let theme = crate::theme::current_theme();
+    term.set_font(Some(&vte_font(&theme.font_family, card_font_size(expanded))));
+}
+
 /// A theme's colors on a VTE terminal: foreground, background, palette and
 /// cursor.
 pub fn apply_vte_colors(term: &VteTerminal, theme: &crate::theme::OmarchyTheme) {
@@ -2597,8 +2566,7 @@ fn spawn_vte(
     crate::terminal_clipboard::install(&term, !shell_card);
     crate::terminal_links::install(&term);
 
-    let font_size = if is_expanded { 11.0 } else { 10.0 };
-    apply_vte_theme(&term, font_size);
+    apply_vte_theme(&term, card_font_size(is_expanded));
     // The font of a remote card follows the host's own grid instead of this
     // machine's theme: the emulator must line up with the columns and rows the
     // host decided. See below, where the grid is known.
@@ -2785,160 +2753,108 @@ fn spawn_vte(
     *vte.borrow_mut() = Some(term);
 }
 
-fn apply_layout(
-    expanded: bool,
-    width: i32,
-    height: i32,
-    iconified: bool,
-    _screen_w: i32,
-    root: &Overlay,
-    header: &gtk4::Box,
-    footer: &gtk4::Box,
-    preview_label: &Label,
-    chrome: &CompactChrome,
-    vte_attached: bool,
-) {
-    let compact = !expanded && iconified;
-    header.set_visible(!compact);
-    footer.set_visible(!compact);
-    preview_label.set_visible(!compact && !expanded && !vte_attached);
-    chrome.icon_box.set_visible(compact);
-    chrome.top_bar.set_visible(compact && !expanded);
-    crate::card_resize::set_resize_borders_visible(root, !expanded && !compact);
-
-    if compact {
-        chrome.fit(width.min(height));
-        root.add_css_class("term-compact");
-    } else {
-        root.remove_css_class("term-compact");
+/// Where a dragged card's origin is: under the pointer at the offset it was
+/// grabbed by, or the drag's start moved by the drag's offset when the event
+/// has no position.
+pub(crate) fn dragged_origin(
+    gesture: &GestureDrag,
+    grab_offset: Option<(f64, f64)>,
+    start: (f64, f64),
+    (offset_x, offset_y): (f64, f64),
+) -> (f64, f64) {
+    match (grab_offset, gesture.current_event().and_then(|e| e.position())) {
+        (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
+        _ => (start.0 + offset_x, start.1 + offset_y),
     }
 }
 
-fn attach_move_drag<FUpdate, FEnd, FRaise>(
-    source: &impl IsA<gtk4::Widget>,
-    root: &Overlay,
+/// What a card's move drags act on: its saved and drawn position, and the
+/// overlay's drag callbacks.
+#[derive(Clone)]
+struct MoveDrag {
+    root: glib::WeakRef<Overlay>,
     data: Rc<RefCell<TerminalData>>,
     expanded: Rc<RefCell<bool>>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
-    on_drag_update: Rc<FUpdate>,
-    on_drag_end: Rc<FEnd>,
-    on_raise: Rc<FRaise>,
-    iconified_only: bool,
-) where
-    FUpdate: Fn(gtk4::Widget, f64, f64) + 'static,
-    FEnd: Fn(gtk4::Widget, &TerminalData) + 'static,
-    FRaise: Fn(gtk4::Widget) + 'static + ?Sized,
-{
-    let drag = GestureDrag::new();
-    let start_pos = Rc::new(RefCell::new((0.0, 0.0)));
-    let grab_offset: Rc<RefCell<Option<(f64, f64)>>> = Rc::new(RefCell::new(None));
+    on_update: Rc<dyn Fn(gtk4::Widget, f64, f64)>,
+    on_end: Rc<dyn Fn(gtk4::Widget, &TerminalData)>,
+    on_raise: Rc<dyn Fn(gtk4::Widget)>,
+}
 
-    let data_begin = Rc::clone(&data);
-    let start_pos_begin = Rc::clone(&start_pos);
-    let grab_offset_begin = Rc::clone(&grab_offset);
-    let visual_begin = Rc::clone(&visual_pos);
-    let expanded_begin = Rc::clone(&expanded);
-    let root_weak_drag = root.downgrade();
-    let on_raise_drag = Rc::clone(&on_raise);
-    drag.connect_drag_begin(move |gesture, _, _| {
-        if iconified_only && !data_begin.borrow().iconified {
-            return;
-        }
-        if !iconified_only && data_begin.borrow().iconified {
-            return;
-        }
-        if let Some(r) = root_weak_drag.upgrade() {
-            on_raise_drag(r.upcast());
-        }
-        let (init_x, init_y) = if *expanded_begin.borrow() {
-            *visual_begin.borrow()
-        } else {
-            // Drag from wherever the card is actually drawn (icon spot when
-            // minimized), otherwise the icon would jump on first motion.
-            let d = data_begin.borrow();
-            displayed_pos(&d)
-        };
-        *start_pos_begin.borrow_mut() = (init_x, init_y);
-        *grab_offset_begin.borrow_mut() = gesture
-            .current_event()
-            .and_then(|e| e.position())
-            .map(|(mx, my)| (mx - init_x, my - init_y));
-    });
+impl MoveDrag {
+    /// Move the card by dragging `source`, while the card is iconified
+    /// (`iconified_only`) or while it is not.
+    fn attach(&self, source: &impl IsA<gtk4::Widget>, iconified_only: bool) {
+        let drag = GestureDrag::new();
+        let start_pos = Rc::new(Cell::new((0.0, 0.0)));
+        let grab_offset: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
 
-    let root_weak = root.downgrade();
-    let start_pos_update = Rc::clone(&start_pos);
-    let grab_offset_update = Rc::clone(&grab_offset);
-    let visual_update = Rc::clone(&visual_pos);
-    let on_update = Rc::clone(&on_drag_update);
-    let data_update = Rc::clone(&data);
-    let expanded_update = Rc::clone(&expanded);
-    drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-        if iconified_only && !data_update.borrow().iconified {
-            return;
-        }
-        if !iconified_only && data_update.borrow().iconified {
-            return;
-        }
-        if *expanded_update.borrow() {
-            return;
-        }
-        if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-        }
-        if let Some(c) = root_weak.upgrade() {
-            let (nx, ny) = match (
-                *grab_offset_update.borrow(),
-                gesture.current_event().and_then(|e| e.position()),
-            ) {
-                (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
-                _ => {
-                    let (sx, sy) = *start_pos_update.borrow();
-                    (sx + offset_x, sy + offset_y)
-                }
+        let this = self.clone();
+        let start_pos_begin = Rc::clone(&start_pos);
+        let grab_offset_begin = Rc::clone(&grab_offset);
+        drag.connect_drag_begin(move |gesture, _, _| {
+            if this.data.borrow().iconified != iconified_only {
+                return;
+            }
+            if let Some(r) = this.root.upgrade() {
+                (this.on_raise)(r.upcast());
+            }
+            let (init_x, init_y) = if *this.expanded.borrow() {
+                *this.visual_pos.borrow()
+            } else {
+                // Drag from wherever the card is actually drawn (icon spot when
+                // minimized), otherwise the icon would jump on first motion.
+                displayed_pos(&this.data.borrow())
             };
-            *visual_update.borrow_mut() = (nx, ny);
-            set_displayed_pos(&mut data_update.borrow_mut(), nx.round() as i32, ny.round() as i32);
-            on_update(c.upcast(), nx, ny);
-        }
-    });
+            start_pos_begin.set((init_x, init_y));
+            grab_offset_begin.set(
+                gesture
+                    .current_event()
+                    .and_then(|e| e.position())
+                    .map(|(mx, my)| (mx - init_x, my - init_y)),
+            );
+        });
 
-    let root_weak = root.downgrade();
-    let data_end = Rc::clone(&data);
-    let start_pos_end = Rc::clone(&start_pos);
-    let grab_offset_end = Rc::clone(&grab_offset);
-    let visual_end = Rc::clone(&visual_pos);
-    let expanded_end = Rc::clone(&expanded);
-    let on_end = Rc::clone(&on_drag_end);
-    drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-        if iconified_only && !data_end.borrow().iconified {
-            return;
-        }
-        if !iconified_only && data_end.borrow().iconified {
-            return;
-        }
-        if *expanded_end.borrow() {
-            return;
-        }
-        if let Some(c) = root_weak.upgrade() {
-            let (nx_f, ny_f) = match (
-                *grab_offset_end.borrow(),
-                gesture.current_event().and_then(|e| e.position()),
-            ) {
-                (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
-                _ => {
-                    let (sx, sy) = *start_pos_end.borrow();
-                    (sx + offset_x, sy + offset_y)
-                }
-            };
-            let nx = nx_f.round() as i32;
-            let ny = ny_f.round() as i32;
-            set_displayed_pos(&mut data_end.borrow_mut(), nx, ny);
-            *visual_end.borrow_mut() = (nx as f64, ny as f64);
-            on_end(c.upcast(), &data_end.borrow());
-        }
-    });
+        let this = self.clone();
+        let start_pos_update = Rc::clone(&start_pos);
+        let grab_offset_update = Rc::clone(&grab_offset);
+        drag.connect_drag_update(move |gesture, offset_x, offset_y| {
+            if this.data.borrow().iconified != iconified_only || *this.expanded.borrow() {
+                return;
+            }
+            if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+            }
+            if let Some(c) = this.root.upgrade() {
+                let (nx, ny) = dragged_origin(
+                    gesture,
+                    grab_offset_update.get(),
+                    start_pos_update.get(),
+                    (offset_x, offset_y),
+                );
+                *this.visual_pos.borrow_mut() = (nx, ny);
+                set_displayed_pos(&mut this.data.borrow_mut(), nx.round() as i32, ny.round() as i32);
+                (this.on_update)(c.upcast(), nx, ny);
+            }
+        });
 
-    source.add_controller(drag);
+        let this = self.clone();
+        drag.connect_drag_end(move |gesture, offset_x, offset_y| {
+            if this.data.borrow().iconified != iconified_only || *this.expanded.borrow() {
+                return;
+            }
+            if let Some(c) = this.root.upgrade() {
+                let (nx, ny) =
+                    dragged_origin(gesture, grab_offset.get(), start_pos.get(), (offset_x, offset_y));
+                let (nx, ny) = (nx.round() as i32, ny.round() as i32);
+                set_displayed_pos(&mut this.data.borrow_mut(), nx, ny);
+                *this.visual_pos.borrow_mut() = (nx as f64, ny as f64);
+                (this.on_end)(c.upcast(), &this.data.borrow());
+            }
+        });
+
+        source.add_controller(drag);
+    }
 }
 
 #[cfg(test)]
@@ -2976,10 +2892,7 @@ mod tests {
     fn cli_close_detach_inner() {
         if !crate::gtk_test::is_child() { return; }
         gtk4::init().unwrap();
-        let card = MiniTerminalCard::new(
-            term_data(true), |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
-            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
-        );
+        let card = MiniTerminalCard::for_test(term_data(true), |_, _| {});
         card.open_with_bare_terminal(480, 320);
         let task = card.cli_session_task();
         let before = std::time::Instant::now();
@@ -3030,10 +2943,7 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
         data.icon_x = Some(300); data.icon_y = Some(400);
         let saved = Rc::new(RefCell::new(None));
         let capture = Rc::clone(&saved);
-        let card = MiniTerminalCard::new(data, |_, _, _| {},
-            move |_, data| { *capture.borrow_mut() = Some(data.clone()); },
-            |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
-            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local);
+        let card = MiniTerminalCard::for_test(data, move |_, data| { *capture.borrow_mut() = Some(data.clone()); });
         let wait = |done: &dyn Fn() -> bool| {
             let deadline = Instant::now() + Duration::from_secs(8);
             while !done() {
@@ -3095,11 +3005,7 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
         gtk4::init().unwrap();
         let saved = Rc::new(RefCell::new(None));
         let capture = Rc::clone(&saved);
-        let card = MiniTerminalCard::new(
-            term_data(true), |_, _, _| {}, move |_, data| { *capture.borrow_mut() = Some(data.clone()); },
-            |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
-            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
-        );
+        let card = MiniTerminalCard::for_test(term_data(true), move |_, data| { *capture.borrow_mut() = Some(data.clone()); });
         card.open_with_bare_terminal(480, 320);
         assert!(card.apply_geometry(crate::card_resize::Rect { x: 40.0, y: 90.0, width: 640, height: 480 }));
         let data = saved.borrow();
@@ -3698,10 +3604,7 @@ exec "$SD_MODE_TMUX" -S "$SD_MODE_SOCKET" -f /dev/null "$@"
             agent_session_id: None,
             workspace_dir: None,
         };
-        let card = Rc::new(MiniTerminalCard::new(
-            data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
-            1024, 768, None, Some(Rc::new(Vec::new())), HoverRaiseLock::new(), CardSource::Local,
-        ));
+        let card = Rc::new(MiniTerminalCard::for_test(data, |_, _| {}));
         card.jump.use_scrollback(scrollback.clone());
         card.open_with_bare_terminal(480, 320);
         let window = gtk4::Window::new();

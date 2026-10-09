@@ -4085,30 +4085,8 @@ mod tests {
             tag: 0,
         };
 
-        let note1 = StickyNote::new(
-            note1_data,
-            |_, _, _| {},
-            |_, _| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_, _, _, _| {},
-            || {},
-            1920,
-            1080,
-        );
-        let note2 = StickyNote::new(
-            note2_data,
-            |_, _, _| {},
-            |_, _| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_, _, _, _| {},
-            || {},
-            1920,
-            1080,
-        );
+        let note1 = StickyNote::for_test(note1_data);
+        let note2 = StickyNote::for_test(note2_data);
 
         canvas.put(&note1.container, 50.0, 50.0);
         canvas.put(&note2.container, 100.0, 100.0);

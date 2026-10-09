@@ -1122,11 +1122,7 @@ mod tests {
             iconified: true, icon_x: None, icon_y: None, created_at: 0.0, tag: 0,
             agent_session_id: None, workspace_dir: Some("/tmp".into()),
         };
-        let card = crate::mini_terminal::MiniTerminalCard::new(
-            data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
-            1024, 768, None, Some(Rc::new(Vec::new())),
-            crate::mini_terminal::HoverRaiseLock::new(), crate::card_source::CardSource::Local,
-        );
+        let card = crate::mini_terminal::MiniTerminalCard::for_test(data, |_, _| {});
         card.open_with_bare_terminal(520, 300);
         let find = crate::gtk_test::find_all::<gtk4::Widget>;
         let root = card.container.clone().upcast::<gtk4::Widget>();
@@ -1186,11 +1182,7 @@ mod tests {
             agent_session_id: None, workspace_dir: Some("/tmp".into()),
         };
         set_staged("sd_term_shot", vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.md")]);
-        let card = Rc::new(crate::mini_terminal::MiniTerminalCard::new(
-            data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_, _, _, _, _| {}, || {}, |_| {}, |_| {}, || {},
-            1024, 768, None, Some(Rc::new(Vec::new())),
-            crate::mini_terminal::HoverRaiseLock::new(), crate::card_source::CardSource::Local,
-        ));
+        let card = Rc::new(crate::mini_terminal::MiniTerminalCard::for_test(data, |_, _| {}));
         card.open_with_bare_terminal(520, 300);
         let window = gtk4::Window::new();
         window.set_default_size(560, 340);
