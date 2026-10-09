@@ -1125,12 +1125,18 @@ fn exchange(runtime: &Path, request: &Request, attempted: &mut bool) -> io::Resu
     Ok(reply)
 }
 
+/// `bytes` bytes from the OS CSPRNG as lowercase hex (two characters each).
+/// Reads exactly that much: /dev/urandom never ends, so never `fs::read` it.
+pub fn random_hex(bytes: usize) -> io::Result<String> {
+    let mut buffer = vec![0; bytes];
+    File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    Ok(buffer.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 pub fn new_request(command: Command) -> io::Result<Request> {
-    let mut bytes = [0; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(Request {
         control_version: VERSION,
-        request_id: bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        request_id: random_hex(16)?,
         command,
     })
 }
@@ -1177,6 +1183,16 @@ mod tests {
         assert!(!is_hex(&"a".repeat(65), 64));
         assert!(!is_hex(&format!("{}g", "a".repeat(63)), 64));
         assert!(!is_hex("", 1));
+    }
+    #[test]
+    fn random_ids_are_lowercase_hex_of_the_requested_size() {
+        for bytes in [4, 8, 16, 24] {
+            let id = random_hex(bytes).unwrap();
+            assert_eq!(id.len(), bytes * 2);
+            assert!(id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{id}");
+        }
+        assert_ne!(random_hex(16).unwrap(), random_hex(16).unwrap());
+        assert_eq!(new_request(Command::Capabilities {}).unwrap().request_id.len(), 32);
     }
     #[test]
     fn administration_errors_preserve_documented_exit_categories() {

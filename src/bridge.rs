@@ -281,23 +281,9 @@ fn state_path() -> PathBuf {
     dir.join("config.json")
 }
 
-/// Exactly `n` bytes from the CSPRNG. Never `fs::read` /dev/urandom —
-/// it is an infinite stream and `read` would block forever.
-fn urandom_bytes(n: usize) -> Vec<u8> {
-    let mut buf = vec![0u8; n];
-    let ok = fs::File::open("/dev/urandom")
-        .ok()
-        .and_then(|mut f| {
-            use std::io::Read as _;
-            f.read_exact(&mut buf).ok()
-        })
-        .is_some();
-    assert!(ok, "OS randomness unavailable; refusing to generate pairing credentials");
-    buf
-}
-
 fn random_hex(bytes: usize) -> String {
-    urandom_bytes(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    crate::control::random_hex(bytes)
+        .expect("OS randomness unavailable; refusing to generate pairing credentials")
 }
 
 struct PairState {

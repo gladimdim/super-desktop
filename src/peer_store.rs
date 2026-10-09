@@ -21,11 +21,7 @@ struct Registry {
     peers: Vec<Peer>,
 }
 fn unique_name() -> String {
-    let mut bytes = [0u8; 16];
-    File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .expect("OS randomness unavailable");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    crate::control::random_hex(16).expect("OS randomness unavailable")
 }
 fn failure(_: std::io::Error) -> PeerError {
     PeerError("peer_store_io_error")
