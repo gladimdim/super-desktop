@@ -2010,19 +2010,24 @@ fn db_stamp(db: &std::path::Path) -> Option<DbStamp> {
 /// cards ask the same questions every second: an unchanged database (and
 /// WAL) answers from memory.
 fn sqlite_query(db: &std::path::Path, sql: &str) -> Option<String> {
-    type Cache = std::collections::HashMap<(std::path::PathBuf, String), (DbStamp, Option<String>)>;
+    sqlite_query_as(db, sql, "-list")
+}
+
+/// `sqlite_query` with an explicit `sqlite3` output mode (`-list` or `-json`).
+fn sqlite_query_as(db: &std::path::Path, sql: &str, mode: &'static str) -> Option<String> {
+    type Cache = std::collections::HashMap<(std::path::PathBuf, String, &'static str), (DbStamp, Option<String>)>;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    let key = (db.to_path_buf(), sql.to_string());
+    let key = (db.to_path_buf(), sql.to_string(), mode);
     let Some(before) = db_stamp(db) else {
-        return sqlite_query_uncached(db, sql);
+        return sqlite_query_uncached(db, sql, mode);
     };
     if let Some((stamp, value)) = cache.lock().unwrap().get(&key) {
         if *stamp == before {
             return value.clone();
         }
     }
-    let value = sqlite_query_uncached(db, sql);
+    let value = sqlite_query_uncached(db, sql, mode);
     // Only remember an answer that describes one unchanged database state.
     if db_stamp(db) == Some(before) {
         let mut cache = cache.lock().unwrap();
@@ -2040,14 +2045,14 @@ thread_local! {
     static SQLITE_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn sqlite_query_uncached(db: &std::path::Path, sql: &str) -> Option<String> {
+fn sqlite_query_uncached(db: &std::path::Path, sql: &str, mode: &str) -> Option<String> {
     #[cfg(test)]
     SQLITE_RUNS.with(|runs| runs.set(runs.get() + 1));
     let output = Command::new("sqlite3")
         .args([
             "-readonly",
             "-noheader",
-            "-list",
+            mode,
             db.to_str()?,
             sql,
         ])
@@ -2481,22 +2486,29 @@ pub fn get_opencode_last_user_text(session_name: &str) -> Option<String> {
     get_opencode_user_text_by_id(&sess_id)
 }
 
-/// Same as above but for an already-resolved opencode session id (lets
-/// callers cache the tmux-pane → opencode-session mapping).
+/// The last prompt the user submitted to an opencode session (an already
+/// resolved session id, so callers can cache the tmux-pane → opencode-session
+/// mapping), as a title-friendly snippet. Reads opencode's local database:
+/// synthetic and ignored parts and injected turns are skipped, exactly as in
+/// the prompt history.
 pub fn get_opencode_user_text_by_id(opencode_session_id: &str) -> Option<String> {
-    let db = opencode_db_path()?;
-    let sql = format!(
-        "SELECT p.data FROM part p JOIN message m ON m.id = p.message_id WHERE p.session_id = '{}' AND m.data LIKE '%\"role\":\"user\"%' AND p.data LIKE '%\"type\":\"text\"%' ORDER BY p.time_created DESC LIMIT 1;",
-        sql_escape(opencode_session_id)
-    );
-    let json = sqlite_query(&db, &sql)?;
-    let text = extract_text_from_part_json(&json)?;
+    opencode_last_prompt_in(&opencode_db_path()?, opencode_session_id)
+}
+
+fn opencode_last_prompt_in(db: &std::path::Path, opencode_session_id: &str) -> Option<String> {
+    // A few messages back, so a run of injected turns still finds the prompt.
+    let json = sqlite_query_as(db, &opencode_prompts_sql(opencode_session_id, 8), "-json")?;
+    let (text, _) = opencode_prompt_rows(&json).into_iter().next()?;
     let cleaned: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if cleaned.chars().count() >= 2 {
-        Some(truncate_prompt_title(&cleaned))
-    } else {
-        None
-    }
+    (cleaned.chars().count() >= 2).then(|| truncate_prompt_title(&cleaned))
+}
+
+fn opencode_prompts_sql(opencode_session_id: &str, limit: usize) -> String {
+    format!(
+        "SELECT m.id AS id, m.time_created AS t, p.data AS d FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = '{0}' AND m.id IN (SELECT id FROM message WHERE session_id = '{0}' AND data LIKE '%\"role\":\"user\"%' ORDER BY time_created DESC LIMIT {1}) AND p.data LIKE '%\"type\":\"text\"%' ORDER BY m.time_created DESC, m.id DESC, p.id ASC;",
+        sql_escape(opencode_session_id),
+        limit
+    )
 }
 
 /// Every prompt submitted to an opencode session, newest first (at most
@@ -2506,11 +2518,7 @@ pub fn get_opencode_user_text_by_id(opencode_session_id: &str) -> Option<String>
 /// asks rarely and the multi-row answer is not worth caching.
 pub fn get_opencode_user_prompts_by_id(opencode_session_id: &str, limit: usize) -> Option<Vec<(String, i64)>> {
     let db = opencode_db_path()?;
-    let sql = format!(
-        "SELECT m.id AS id, m.time_created AS t, p.data AS d FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = '{0}' AND m.id IN (SELECT id FROM message WHERE session_id = '{0}' AND data LIKE '%\"role\":\"user\"%' ORDER BY time_created DESC LIMIT {1}) AND p.data LIKE '%\"type\":\"text\"%' ORDER BY m.time_created DESC, m.id DESC, p.id ASC;",
-        sql_escape(opencode_session_id),
-        limit
-    );
+    let sql = opencode_prompts_sql(opencode_session_id, limit);
     let output = Command::new("sqlite3")
         .args(["-readonly", "-json", db.to_str()?, &sql])
         .output()
@@ -2627,6 +2635,31 @@ mod tests {
         let (session, command) = create_session(agent, None, workspace);
         let reply = serde_json::json!({"session": session, "command": command});
         std::fs::write(spec["out"].as_str().unwrap(), reply.to_string()).unwrap();
+    }
+
+    #[test]
+    fn card_title_opencode_skips_synthetic_parts_and_injected_turns() {
+        let dir = std::env::temp_dir().join(format!("sd-opencode-title-{}", unique_session_name()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("opencode.db");
+        let user = r#"{"role":"user"}"#;
+        let text = |t: &str, extra: &str| format!(r#"{{"type":"text","text":"{t}"{extra}}}"#);
+        let mut sql = String::from(
+            "CREATE TABLE message(id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+             CREATE TABLE part(id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+        );
+        for (message, at, parts) in [
+            ("m1", 1, vec![text("Fix the toolbar", ""), text("fn main() {}", r#","synthetic":true"#)]),
+            ("m2", 2, vec![text("<task-notification>done</task-notification>", "")]),
+        ] {
+            sql += &format!("INSERT INTO message VALUES('{message}','s',{at},'{user}');");
+            for (i, part) in parts.iter().enumerate() {
+                sql += &format!("INSERT INTO part VALUES('{message}p{i}','{message}','s',{at},'{part}');");
+            }
+        }
+        assert!(Command::new("sqlite3").arg(&db).arg(&sql).status().unwrap().success());
+        assert_eq!(opencode_last_prompt_in(&db, "s").as_deref(), Some("Fix the toolbar"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
