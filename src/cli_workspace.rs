@@ -1,7 +1,7 @@
 //! Structured workspace and note command parsing shared by both frontends.
 use crate::cli::{render_reply, Output};
-use crate::cli_extended::{json_requested, opaque, send, valid_id, Options};
-use crate::control::{Command, Reply, WorkspaceEdit as Edit, WorkspaceQuery as Query};
+use crate::cli_extended::{opaque, respond, send, valid_id, Options};
+use crate::control::{Command, WorkspaceEdit as Edit, WorkspaceQuery as Query};
 
 pub(crate) fn run(args: &[String]) -> Option<Output> {
     if !matches!(args.first().map(String::as_str), Some("note" | "workspace")) {
@@ -132,18 +132,8 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             options,
         ))
     };
-    Some(match build() {
-        Ok((command, options)) => {
-            let method = if command.is_mutation() {
-                "workspace.edit"
-            } else {
-                "workspace.read"
-            };
-            render_reply(send(command, &options, method), options.json)
-        }
-        Err(message) => render_reply(
-            Reply::failure("", "invalid_arguments", message),
-            json_requested(args),
-        ),
+    respond(args, || {
+        let (command, options) = build()?;
+        Ok(render_reply(send(command, &options), options.json))
     })
 }

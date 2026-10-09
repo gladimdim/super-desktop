@@ -387,7 +387,6 @@ fn execute(call: ToolCall) -> Value {
                     id: options.words[2].clone(),
                 },
                 &options,
-                "terminal.status",
             )
         }))
         .unwrap();
@@ -397,15 +396,10 @@ fn execute(call: ToolCall) -> Value {
             if let Some(id) = call.request_id {
                 request.request_id = id;
             }
-            let method = serde_json::to_value(&request.command).expect("command serializes")
-                ["method"]
-                .as_str()
-                .unwrap()
-                .to_owned();
-            if method == "capabilities" {
+            if matches!(request.command, Command::Capabilities {}) {
                 control::request_at(&control::runtime_dir(), &request)
             } else {
-                crate::cli_extended::send_request(&request, &method)
+                crate::cli_extended::send_request(&request)
             }
         }
         Err(_) => {

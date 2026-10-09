@@ -3,6 +3,7 @@
 #[path = "mcp.rs"]
 mod mcp;
 
+use crate::cli_extended::valid_id;
 use serde::Serialize;
 use serde_json::json;
 use std::io::{self, Write};
@@ -739,7 +740,7 @@ fn live(args: &[String]) -> Output {
             "--request-id is only for mutation commands.",
         );
     }
-    if (launching || guarded) && !request_id.is_some_and(|id| valid_id(id) && id.len() <= 64) {
+    if (launching || guarded) && !request_id.is_some_and(|id| valid_id(id, 64)) {
         return fail(
             "invalid_arguments",
             "Mutation requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
@@ -766,24 +767,15 @@ fn live(args: &[String]) -> Output {
         {
             return fail("invalid_arguments", "Move/resize require both coordinates/dimensions. All guarded operations require epoch/revision from terminal geometry; close also requires pane identity from terminal runtime.");
         }
-        if !valid_id(geometry_options["--expect-epoch"])
-            || geometry_options["--expect-epoch"].len() > 64
-            || geometry_options["--expect-revision"].len() != 64
-            || !geometry_options["--expect-revision"]
-                .bytes()
-                .all(|b| b.is_ascii_hexdigit())
+        if !valid_id(geometry_options["--expect-epoch"], 64)
+            || !crate::control::is_hex(geometry_options["--expect-revision"], 64)
         {
             return fail(
                 "invalid_arguments",
                 "Use the epoch and opaque revision returned by terminal geometry.",
             );
         }
-        if closing
-            && (geometry_options["--expect-pane-identity"].len() != 64
-                || !geometry_options["--expect-pane-identity"]
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit()))
-        {
+        if closing && !crate::control::is_hex(geometry_options["--expect-pane-identity"], 64) {
             return fail(
                 "invalid_arguments",
                 "Copy paneIdentity from terminal runtime.",
@@ -831,7 +823,7 @@ fn live(args: &[String]) -> Output {
         );
     }
     if launching {
-        if !request_id.is_some_and(|id| valid_id(id) && id.len() <= 64) {
+        if !request_id.is_some_and(|id| valid_id(id, 64)) {
             return fail(
                 "invalid_arguments",
                 "Launch requires --request-id with 1-64 ASCII letters, digits, '_' or '-'.",
@@ -848,7 +840,7 @@ fn live(args: &[String]) -> Output {
     }
     let command = match words.as_slice() {
         ["terminal", action @ ("minimize" | "restore" | "expand" | "collapse"), id]
-            if !all && valid_id(id) =>
+            if !all && valid_id(id, 128) =>
         {
             Command::Mode {
                 id: (*id).into(),
@@ -862,16 +854,16 @@ fn live(args: &[String]) -> Output {
                 expect_revision: geometry_options["--expect-revision"].into(),
             }
         }
-        ["terminal", "close", id] if !all && valid_id(id) => Command::Close {
+        ["terminal", "close", id] if !all && valid_id(id, 128) => Command::Close {
             id: (*id).into(),
             expect_epoch: geometry_options["--expect-epoch"].into(),
             expect_revision: geometry_options["--expect-revision"].into(),
             expect_pane_identity: geometry_options["--expect-pane-identity"].into(),
         },
-        ["terminal", "geometry", id] if !all && valid_id(id) => {
+        ["terminal", "geometry", id] if !all && valid_id(id, 128) => {
             Command::Geometry { id: (*id).into() }
         }
-        ["terminal", "move", id] if !all && valid_id(id) => Command::Move {
+        ["terminal", "move", id] if !all && valid_id(id, 128) => Command::Move {
             id: (*id).into(),
             x: geometry_options["--x"].parse().unwrap(),
             y: geometry_options["--y"].parse().unwrap(),
@@ -879,7 +871,7 @@ fn live(args: &[String]) -> Output {
             expect_epoch: geometry_options["--expect-epoch"].into(),
             expect_revision: geometry_options["--expect-revision"].into(),
         },
-        ["terminal", "resize", id] if !all && valid_id(id) => Command::Resize {
+        ["terminal", "resize", id] if !all && valid_id(id, 128) => Command::Resize {
             id: (*id).into(),
             width: geometry_options["--width"].parse().unwrap(),
             height: geometry_options["--height"].parse().unwrap(),
@@ -887,15 +879,15 @@ fn live(args: &[String]) -> Output {
             expect_epoch: geometry_options["--expect-epoch"].into(),
             expect_revision: geometry_options["--expect-revision"].into(),
         },
-        ["terminal", "capture", id] if !all && valid_id(id) => Command::Capture {
+        ["terminal", "capture", id] if !all && valid_id(id, 128) => Command::Capture {
             id: (*id).into(),
             history: capture_mode.unwrap_or(false),
             lines: capture_lines,
         },
-        ["terminal", "runtime", id] if !all && valid_id(id) => {
+        ["terminal", "runtime", id] if !all && valid_id(id, 128) => {
             Command::Runtime { id: (*id).into() }
         }
-        ["harness", "launch", id] if !all && valid_id(id) => Command::Launch {
+        ["harness", "launch", id] if !all && valid_id(id, 128) => Command::Launch {
             arguments: None,            harness: (*id).into(),
             cwd: cwd.unwrap().into(),
             allow_unsafe_harness: allow_unsafe,
@@ -907,17 +899,17 @@ fn live(args: &[String]) -> Output {
             allow_unsafe_harness: allow_unsafe,
             allow_download: false,
         },
-        ["request", "inspect", id] if !all && valid_id(id) && id.len() <= 64 => {
+        ["request", "inspect", id] if !all && valid_id(id, 64) => {
             Command::InspectRequest { id: (*id).into() }
         }
         ["capabilities"] if !all => Command::Capabilities {},
         ["app", "status"] if !all => Command::Status {},
         ["terminal", "list"] if !all => Command::Terminals {},
-        ["terminal", "inspect", id] if !all && valid_id(id) => {
+        ["terminal", "inspect", id] if !all && valid_id(id, 128) => {
             Command::Terminal { id: (*id).into() }
         }
         ["harness", "list"] => Command::Harnesses { all },
-        ["harness", "inspect", id] if !all && valid_id(id) => Command::Harness { id: (*id).into() },
+        ["harness", "inspect", id] if !all && valid_id(id, 128) => Command::Harness { id: (*id).into() },
         _ => {
             return fail(
                 "invalid_arguments",
@@ -932,18 +924,20 @@ fn live(args: &[String]) -> Output {
     if let Some(id) = request_id {
         request.request_id = id.into();
     }
-    let required_method = match &request.command {
-        Command::Launch { .. } => Some("harness.launch"),
-        Command::InspectRequest { .. } => Some("request.inspect"),
-        Command::Mode { .. } => Some("terminal.mode"),
-        Command::Close { .. } => Some("terminal.close"),
-        Command::Geometry { .. } => Some("terminal.geometry"),
-        Command::Move { .. } => Some("terminal.move"),
-        Command::Resize { .. } => Some("terminal.resize"),
-        Command::Runtime { .. } => Some("terminal.runtime"),
-        Command::Capture { .. } => Some("terminal.capture"),
-        _ => None,
-    };
+    // Methods newer than the first daemons are checked against capabilities.
+    let required_method = matches!(
+        &request.command,
+        Command::Launch { .. }
+            | Command::InspectRequest { .. }
+            | Command::Mode { .. }
+            | Command::Close { .. }
+            | Command::Geometry { .. }
+            | Command::Move { .. }
+            | Command::Resize { .. }
+            | Command::Runtime { .. }
+            | Command::Capture { .. }
+    )
+    .then(|| request.command.method());
     if let Some(method) = required_method {
         let probe = match control::new_request(Command::Capabilities {}) {
             Ok(probe) => probe,
@@ -958,7 +952,7 @@ fn live(args: &[String]) -> Output {
             .data
             .as_ref()
             .and_then(|data| data["methods"].as_array())
-            .is_some_and(|methods| methods.iter().any(|candidate| candidate == method))
+            .is_some_and(|methods| methods.iter().any(|candidate| *candidate == method))
         {
             return render_reply(
                 Reply::failure(
@@ -974,14 +968,6 @@ fn live(args: &[String]) -> Output {
         control::request_at(&control::runtime_dir(), &request),
         json_output,
     )
-}
-
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 pub(crate) fn render_reply(reply: crate::control::Reply, json_output: bool) -> Output {

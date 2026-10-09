@@ -1,6 +1,7 @@
 //! Blocking, certificate-pinned desktop bridge client. Use off the GTK thread.
 //! No cookies, environment proxies, redirects, credential URLs or automatic
 //! request retries. Error values never contain response bodies or credentials.
+use crate::control::is_hex;
 use base64::Engine;
 use reqwest::blocking::Client;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -109,7 +110,7 @@ impl Invitation {
         if wire.v != 3 {
             return Err(PeerError("unsupported_pairing_protocol"));
         }
-        if !(1..=300).contains(&wire.expires_in) || !hex(&wire.secret, 48) {
+        if !(1..=300).contains(&wire.expires_in) || !is_hex(&wire.secret, 48) {
             return Err(PeerError("invalid_pairing_invitation"));
         }
         parse_pin(&wire.fingerprint)?;
@@ -147,8 +148,8 @@ impl Peer {
     pub fn validate(&self) -> Result<()> {
         Endpoint::new(&self.endpoint.host, self.endpoint.port)?;
         parse_pin(&self.fingerprint)?;
-        if !hex(&self.machine_id, 32)
-            || !hex(&self.token, 48)
+        if !is_hex(&self.machine_id, 32)
+            || !is_hex(&self.token, 48)
             || self.label != label(&self.label)
             || self.label.is_empty()
             || self.expires_at.is_some_and(|t| !t.is_finite() || t <= 0.0)
@@ -184,12 +185,9 @@ pub fn now() -> f64 {
         .unwrap_or_default()
         .as_secs_f64()
 }
-fn hex(value: &str, length: usize) -> bool {
-    value.len() == length && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
 
 fn parse_pin(value: &str) -> Result<[u8; 32]> {
-    if !hex(value, 64) {
+    if !is_hex(value, 64) {
         return Err(PeerError("invalid_certificate_pin"));
     }
     let mut bytes = [0; 32];
@@ -527,7 +525,7 @@ impl PinnedClient {
         if identity.protocol_version != 3 {
             return Err(PeerError("unsupported_pairing_protocol"));
         }
-        if !hex(&identity.bridge_id, 32) {
+        if !is_hex(&identity.bridge_id, 32) {
             return Err(PeerError("invalid_peer_response"));
         }
         Ok(identity)
@@ -594,7 +592,7 @@ impl Pairing {
                     error
                 }
             })?;
-        if !hex(&pending.request_id, 48)
+        if !is_hex(&pending.request_id, 48)
             || pending.code.len() != 6
             || !pending.code.bytes().all(|b| b.is_ascii_digit())
             || !(1..=120).contains(&pending.expires_in)

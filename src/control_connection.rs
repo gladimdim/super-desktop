@@ -1,5 +1,5 @@
 //! Owner CLI adapters for the unchanged bridge pairing operations.
-use crate::control::{Command, Reply, Request};
+use crate::control::{is_hex, Command, Reply, Request};
 use serde_json::{json, Value};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -16,9 +16,6 @@ pub fn execute(root: &Path, request: &Request, deadline: Instant) -> Reply {
     )
 }
 
-fn hex(value: &str, len: usize) -> bool {
-    value.len() == len && value.bytes().all(|b| b.is_ascii_hexdigit())
-}
 fn bridge_error(request: &Request, error: &str, mutation: bool) -> Reply {
     // No raw response, invitation, token or arbitrary server text in receipts.
     if mutation && matches!(error, "bridge_not_responding" | "invalid_bridge_response") {
@@ -116,7 +113,7 @@ fn execute_with(
                     Err(e) => return bridge_error(request, &e, true),
                 };
                 if invite["v"] != 3
-                    || !invite["secret"].as_str().is_some_and(|s| hex(s, 48))
+                    || !invite["secret"].as_str().is_some_and(|s| is_hex(s, 48))
                     || invite["expiresIn"] != 300
                 {
                     return Reply::unknown(&request.request_id);
@@ -141,7 +138,7 @@ fn execute_with(
                 approve,
                 allow_access,
             } => {
-                if !hex(id, 48) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
+                if !is_hex(id, 48) || code.len() != 6 || !code.bytes().all(|b| b.is_ascii_digit()) {
                     return fail("invalid_arguments", "Copy the exact request ID and six-digit comparison code from connection pending.");
                 }
                 if *approve && !allow_access {
@@ -180,7 +177,7 @@ fn execute_with(
                 }
             }
             Command::ConnectionRevoke { id } => {
-                if !hex(id, 32) {
+                if !is_hex(id, 32) {
                     return fail(
                         "invalid_arguments",
                         "Copy an exact device ID from connection list.",

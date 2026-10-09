@@ -1,6 +1,6 @@
 use crate::cli::{render_reply, Output};
-use crate::cli_extended::{json_requested, seconds, send, valid_id, Options};
-use crate::control::{Command, Reply, ViewportAction as Action};
+use crate::cli_extended::{respond, seconds, send, valid_id, Options};
+use crate::control::{Command, ViewportAction as Action};
 pub(crate) fn run(args: &[String]) -> Option<Output> {
     if args.first().map(String::as_str) != Some("terminal")
         || args.get(1).map(String::as_str) != Some("viewport")
@@ -100,18 +100,8 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             options,
         ))
     };
-    Some(match build() {
-        Ok((command, options)) => {
-            let method = if command.is_mutation() {
-                "terminal.viewport"
-            } else {
-                "terminal.viewport.list"
-            };
-            render_reply(send(command, &options, method), options.json)
-        }
-        Err(message) => render_reply(
-            Reply::failure("", "invalid_arguments", message),
-            json_requested(args),
-        ),
+    respond(args, || {
+        let (command, options) = build()?;
+        Ok(render_reply(send(command, &options), options.json))
     })
 }

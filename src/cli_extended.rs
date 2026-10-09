@@ -124,6 +124,7 @@ impl Options {
         String::from_utf8(bytes).map_err(|_| "Input must be UTF-8.")
     }
 }
+/// 1 to `max` ASCII letters, digits, `_` and `-`: card, harness and request ids.
 pub(crate) fn valid_id(id: &str, max: usize) -> bool {
     !id.is_empty()
         && id.len() <= max
@@ -132,7 +133,7 @@ pub(crate) fn valid_id(id: &str, max: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 pub(crate) fn opaque(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+    control::is_hex(value, 64)
 }
 pub(crate) fn json_requested(args: &[String]) -> bool {
     args.iter().any(|a| a == "--format=json")
@@ -140,7 +141,63 @@ pub(crate) fn json_requested(args: &[String]) -> bool {
             .windows(2)
             .any(|a| a[0] == "--format" && a[1] == "json")
 }
-pub(crate) fn send(command: Command, options: &Options, method: &str) -> Reply {
+/// The command's output, or an `invalid_arguments` reply with the parse error.
+pub(crate) fn respond(
+    args: &[String],
+    build: impl FnOnce() -> Result<Output, &'static str>,
+) -> Option<Output> {
+    Some(build().unwrap_or_else(|message| {
+        render_reply(
+            Reply::failure("", "invalid_arguments", message),
+            json_requested(args),
+        )
+    }))
+}
+/// Streaming commands emit JSONL: `--format jsonl`, read by `Options` as
+/// json. Any other `--format` is refused by `jsonl_only`.
+pub(crate) fn jsonl_as_json(args: &[String]) -> Vec<String> {
+    let mut parsed = args.to_vec();
+    for i in 0..parsed.len() {
+        if parsed[i] == "--format=jsonl" {
+            parsed[i] = "--format=json".into();
+        } else if parsed[i] == "jsonl" && i > 0 && parsed[i - 1] == "--format" {
+            parsed[i] = "json".into();
+        }
+    }
+    parsed
+}
+/// No `--format` other than jsonl was given.
+pub(crate) fn jsonl_only(args: &[String]) -> bool {
+    !(args
+        .iter()
+        .any(|a| a.starts_with("--format=") && a != "--format=jsonl")
+        || args
+            .windows(2)
+            .any(|a| a[0] == "--format" && a[1] != "jsonl"))
+}
+/// Writes `value` as one JSONL line on stdout, every control character
+/// escaped, and returns the bytes written.
+pub(crate) fn emit_jsonl(value: &serde_json::Value) -> Result<usize, ()> {
+    use std::io::Write;
+    let line = serde_json::to_string(value)
+        .map_err(|_| ())?
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                format!("\\u{:04x}", c as u32)
+            } else {
+                c.to_string()
+            }
+        })
+        .collect::<String>()
+        + "\n";
+    let mut out = std::io::stdout().lock();
+    out.write_all(line.as_bytes())
+        .and_then(|_| out.flush())
+        .map_err(|_| ())?;
+    Ok(line.len())
+}
+pub(crate) fn send(command: Command, options: &Options) -> Reply {
     if options.values.get("--target").is_some_and(|t| t != "local") {
         return Reply::failure(
             "",
@@ -172,9 +229,11 @@ pub(crate) fn send(command: Command, options: &Options, method: &str) -> Reply {
             "--request-id is only for mutations.",
         );
     }
-    send_request(&request, method)
+    send_request(&request)
 }
-pub(crate) fn send_request(request: &Request, method: &str) -> Reply {
+/// Sends `request` once the daemon advertises its method.
+pub(crate) fn send_request(request: &Request) -> Reply {
+    let method = request.command.method();
     let probe = match control::new_request(Command::Capabilities {}) {
         Ok(r) => r,
         Err(_) => {
@@ -195,7 +254,7 @@ pub(crate) fn send_request(request: &Request, method: &str) -> Reply {
         .data
         .as_ref()
         .and_then(|d| d["methods"].as_array())
-        .is_some_and(|methods| methods.iter().any(|m| m == method))
+        .is_some_and(|methods| methods.iter().any(|m| *m == method))
     {
         return Reply::failure(
             &request.request_id,
@@ -277,9 +336,9 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             options,
         ))
     };
-    Some(match build() {
-        Ok((command, options)) => render_reply(send(command, &options, "terminal.input"), json),
-        Err(message) => render_reply(Reply::failure("", "invalid_arguments", message), json),
+    respond(args, || {
+        let (command, options) = build()?;
+        Ok(render_reply(send(command, &options), json))
     })
 }
 
@@ -327,7 +386,6 @@ fn wait_terminal(options: &Options) -> Reply {
                 id: options.words[2].clone(),
             },
             options,
-            "terminal.status",
         )
     })
 }
@@ -441,7 +499,6 @@ pub(crate) fn observe(args: &[String]) -> Option<Output> {
                         id: options.words[2].clone(),
                     },
                     &options,
-                    "terminal.status",
                 )
             },
             json,
@@ -452,37 +509,11 @@ pub(crate) fn observe(args: &[String]) -> Option<Output> {
 /// A bounded stream of replacement screen snapshots. Polling cannot promise
 /// every intervening output byte, so this never labels snapshots as deltas.
 pub(crate) fn stream(args: &[String]) -> Option<i32> {
-    use std::io::Write;
     if args.first()?.as_str() != "terminal" || args.get(1)?.as_str() != "follow" {
         return None;
     }
-    let mut parse_args = args.to_vec();
-    for i in 0..parse_args.len() {
-        if parse_args[i] == "--format=jsonl" {
-            parse_args[i] = "--format=json".into();
-        } else if parse_args[i] == "jsonl" && i > 0 && parse_args[i - 1] == "--format" {
-            parse_args[i] = "json".into();
-        }
-    }
-    let emit = |value: &serde_json::Value| -> Result<usize, ()> {
-        let line = serde_json::to_string(value)
-            .map_err(|_| ())?
-            .chars()
-            .map(|c| {
-                if c.is_control() {
-                    format!("\\u{:04x}", c as u32)
-                } else {
-                    c.to_string()
-                }
-            })
-            .collect::<String>()
-            + "\n";
-        let mut out = std::io::stdout().lock();
-        out.write_all(line.as_bytes())
-            .and_then(|_| out.flush())
-            .map_err(|_| ())?;
-        Ok(line.len())
-    };
+    let parse_args = jsonl_as_json(args);
+    let emit = emit_jsonl;
     let fail = |code, message| {
         let reply = Reply::failure("", code, message);
         if emit(&serde_json::to_value(&reply).unwrap()).is_err() {
@@ -508,13 +539,7 @@ pub(crate) fn stream(args: &[String]) -> Option<i32> {
             "Follow requires an exact card ID and no request ID.",
         ));
     }
-    if args
-        .iter()
-        .any(|a| a.starts_with("--format=") && a != "--format=jsonl")
-        || args
-            .windows(2)
-            .any(|a| a[0] == "--format" && a[1] != "jsonl")
-    {
+    if !jsonl_only(args) {
         return Some(fail(
             "invalid_arguments",
             "Follow emits JSONL screen snapshots.",
@@ -560,7 +585,6 @@ pub(crate) fn stream(args: &[String]) -> Option<i32> {
                 lines: None,
             },
             &options,
-            "terminal.capture",
         );
         if !reply.ok {
             return Some(if emit(&serde_json::to_value(&reply).unwrap()).is_ok() {
@@ -648,13 +672,8 @@ pub(crate) fn card(args: &[String]) -> Option<Output> {
             options,
         ))
     };
-    Some(match build() {
-        Ok((command, options)) => {
-            render_reply(send(command, &options, "terminal.card"), options.json)
-        }
-        Err(message) => render_reply(
-            Reply::failure("", "invalid_arguments", message),
-            json_requested(args),
-        ),
+    respond(args, || {
+        let (command, options) = build()?;
+        Ok(render_reply(send(command, &options), options.json))
     })
 }

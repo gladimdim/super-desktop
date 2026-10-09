@@ -42,7 +42,7 @@ pub fn validate_prompt(text: &str, request: &str) -> Result<(), String> {
     {
         return Err("invalid_prompt".into());
     }
-    if request.len() != 32 || !request.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !crate::control::is_hex(request, 32) {
         return Err("invalid_request_id".into());
     }
     Ok(())

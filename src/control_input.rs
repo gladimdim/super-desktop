@@ -33,9 +33,7 @@ pub fn execute(
         if let Err(message) = input.validate() {
             return fail(("invalid_arguments", message));
         }
-        if expect_pane_identity.len() != 64
-            || !expect_pane_identity.bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        if !crate::control::is_hex(expect_pane_identity, 64) {
             return fail((
                 "invalid_arguments",
                 "Copy paneIdentity from terminal runtime.",

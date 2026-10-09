@@ -342,7 +342,7 @@ pub fn start_update(status: &Status, paths: &Paths) -> Result<Child, String> {
 /// Pinned installs remain pinned; switching branches belongs to the existing UI.
 pub fn cli_commit(status:&Status)->Result<String,String>{
     let commit=run(&status.dir,&["rev-parse","--verify",&format!("{}^{{commit}}",status.upstream)])?;
-    if commit.len()!=40||!commit.bytes().all(|b|b.is_ascii_hexdigit()){return Err("Invalid upstream commit".into());}Ok(commit)
+    if !crate::control::is_hex(&commit,40){return Err("Invalid upstream commit".into());}Ok(commit)
 }
 pub fn start_cli_update(status:&Status,commit:&str,paths:&Paths)->Result<Child,String>{
     if status.pinned.is_some(){return Err("This install is pinned; switch to latest explicitly in Settings first.".into());}

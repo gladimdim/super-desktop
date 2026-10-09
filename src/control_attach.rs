@@ -71,8 +71,7 @@ pub fn execute(
             return fail("invalid_request", "Expected attach.");
         };
         if !(1..=300).contains(seconds)
-            || expect_pane_identity.len() != 64
-            || !expect_pane_identity.bytes().all(|b| b.is_ascii_hexdigit())
+            || !control::is_hex(expect_pane_identity, 64)
         {
             return fail(
                 "invalid_arguments",

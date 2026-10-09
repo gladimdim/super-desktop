@@ -1,7 +1,7 @@
 //! CLI frontend for typed settings and launcher preferences.
 use crate::cli::{render_reply, Output};
-use crate::cli_extended::{json_requested, opaque, send, valid_id, Options};
-use crate::control::{Command, PreferencesEdit as Edit, PreferencesQuery as Query, Reply};
+use crate::cli_extended::{opaque, respond, send, valid_id, Options};
+use crate::control::{Command, PreferencesEdit as Edit, PreferencesQuery as Query};
 
 pub(crate) fn run(args: &[String]) -> Option<Output> {
     let words: Vec<_> = args
@@ -26,9 +26,9 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             let combo=o.required("--combo")?;
             if !apply&&o.values.keys().any(|k|matches!(k.as_str(),"--preview"|"--request-id"|"--expect-epoch"|"--expect-revision")){return Err("Preview only takes --combo, --format and --target.");}
             let (preview,epoch,revision)=if apply {let p=o.required("--preview")?;let e=o.required("--expect-epoch")?;let r=o.required("--expect-revision")?;if !opaque(&p)||!valid_id(&e,64)||!opaque(&r){return Err("Copy preview, epoch and revision from the preview response.");}(Some(p),Some(e),Some(r))}else{(None,None,None)};
-            Ok(render_reply(send(Command::Shortcut {combo,preview,expect_epoch:epoch,expect_revision:revision},&o,"settings.shortcut"),o.json))
+            Ok(render_reply(send(Command::Shortcut {combo,preview,expect_epoch:epoch,expect_revision:revision},&o),o.json))
         };
-        return Some(build().unwrap_or_else(|m|render_reply(Reply::failure("","invalid_arguments",m),json_requested(args))));
+        return respond(args,build);
     }
     let build = || -> Result<(Command, Options), &'static str> {
         let read = matches!(
@@ -98,18 +98,8 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             options,
         ))
     };
-    Some(match build() {
-        Ok((command, options)) => {
-            let method = if command.is_mutation() {
-                "settings.edit"
-            } else {
-                "settings.read"
-            };
-            render_reply(send(command, &options, method), options.json)
-        }
-        Err(message) => render_reply(
-            Reply::failure("", "invalid_arguments", message),
-            json_requested(args),
-        ),
+    respond(args, || {
+        let (command, options) = build()?;
+        Ok(render_reply(send(command, &options), options.json))
     })
 }

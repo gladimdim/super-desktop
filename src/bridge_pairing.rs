@@ -27,7 +27,7 @@ fn device_type(body: &Value) -> &str {
 fn device_id(body: &Value) -> String {
     body["deviceId"]
         .as_str()
-        .filter(|id| id.len() == DEVICE_ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|id| crate::control::is_hex(id, DEVICE_ID_LEN))
         .map(str::to_ascii_lowercase)
         .unwrap_or_default()
 }

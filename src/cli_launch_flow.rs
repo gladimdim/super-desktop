@@ -367,7 +367,7 @@ fn execute(
                         let previous = &observed["completion"]["completionId"];
                         if !previous.is_null()
                             && !previous.as_str().is_some_and(|s| {
-                                s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+                                control::is_hex(s, 64)
                             })
                         {
                             return Err(Reply::failure(

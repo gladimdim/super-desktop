@@ -139,7 +139,7 @@ pub fn execute(
         }
         let Some(identity) = expect_pane_identity
             .as_ref()
-            .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .filter(|s| crate::control::is_hex(s, 64))
         else {
             return fail(
                 "invalid_arguments",

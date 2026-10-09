@@ -53,9 +53,7 @@ pub fn apply(request:&Request,deadline:Instant,mut ui:impl FnMut(Action)->Result
                 "Expected terminal close.",
             );
         };
-        if expect_pane_identity.len() != 64
-            || !expect_pane_identity.bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        if !crate::control::is_hex(expect_pane_identity, 64) {
             return Reply::failure(
                 &request.request_id,
                 "invalid_arguments",
