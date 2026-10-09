@@ -462,11 +462,7 @@ impl GhostLayer {
         }
         if self.buried(visible) {
             for outline in visible {
-                if let Some(last) = self.canvas.last_child() {
-                    if &last != outline {
-                        outline.insert_after(&self.canvas, Some(&last));
-                    }
-                }
+                crate::window::raise_canvas_child(&self.canvas, outline);
             }
         }
         // A new outline is `put` at the top of the canvas, which would leave it

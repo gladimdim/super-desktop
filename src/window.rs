@@ -544,18 +544,13 @@ impl SuperDesktopWindow {
                 let state = Rc::clone(&state);
                 let bar_slot = Rc::clone(&harness_bar_for_settings);
                 move |keys: Vec<String>| {
-                    let snapshot = {
-                        let mut s = state.borrow_mut();
-                        s.visible_harnesses = Some(keys.clone());
-                        s.clone()
-                    };
-                    crate::state::save_state_async(snapshot.clone());
+                    persist(&state, |s| s.visible_harnesses = Some(keys.clone()));
                     // The same call a remote view makes with a host's list: the
                     // bar only ever reflects what its owner says is offered.
                     if let Some(bar) = bar_slot.borrow().as_ref() {
                         bar.apply(&crate::harness_bar::HarnessState {
                             keys,
-                            custom: snapshot.custom_harnesses.iter().map(Into::into).collect(),
+                            custom: state.borrow().custom_harnesses.iter().map(Into::into).collect(),
                             ready: true,
                         });
                     }
@@ -583,13 +578,8 @@ impl SuperDesktopWindow {
                 let hint = hint.clone();
                 let btn_close = btn_close.clone();
                 move |combo: String| {
-                    let snapshot = {
-                        let mut s = state.borrow_mut();
-                        s.toggle_shortcut = Some(combo);
-                        s.clone()
-                    };
-                    paint_shortcut_hints(&hint, &btn_close, &snapshot);
-                    crate::state::save_state_async(snapshot);
+                    persist(&state, |s| s.toggle_shortcut = Some(combo));
+                    paint_shortcut_hints(&hint, &btn_close, &state.borrow());
                 }
             }),
             Rc::new({
@@ -597,18 +587,13 @@ impl SuperDesktopWindow {
                 let hud_for_settings = Rc::clone(&hud_for_settings);
                 let machine_for_settings = Rc::clone(&machine_for_settings);
                 move |size: TopBarSize| {
-                    let snapshot = {
-                        let mut s = state.borrow_mut();
-                        s.top_bar_size = size;
-                        s.clone()
-                    };
+                    persist(&state, |s| s.top_bar_size = size);
                     if let Some(hud) = hud_for_settings.borrow().as_ref() {
                         paint_top_bar_size(hud, size);
                     }
                     if let Some(view) = machine_for_settings.borrow().as_ref() {
                         view.paint_top_bar_size(size);
                     }
-                    crate::state::save_state_async(snapshot);
                 }
             }),
             connection_hooks,
@@ -1032,13 +1017,10 @@ impl SuperDesktopWindow {
             Rc::new({
                 let state = Rc::clone(&win_rc.state);
                 move |position, size| {
-                    let snapshot = {
-                        let mut s = state.borrow_mut();
+                    persist(&state, |s| {
                         s.settings_panel_pos = Some(position);
                         s.settings_panel_size = Some(size);
-                        s.clone()
-                    };
-                    crate::state::save_state_async(snapshot);
+                    });
                 }
             }),
         ));
@@ -1254,36 +1236,34 @@ impl SuperDesktopWindow {
         self.spawn_note_widget(data, true);
     }
 
-    fn spawn_note_widget(&self, note_data: NoteData, save: bool) {
+    /// A card's drag-motion callback, shared by notes and terminals: the
+    /// card's origin is clamped to the workspace and moved on the next frame,
+    /// so the motion events of one frame cost a single move. `after_move` runs
+    /// on every frame that moved a card.
+    fn card_drag_updater(&self, after_move: impl Fn() + 'static) -> impl Fn(gtk4::Widget, f64, f64) + 'static {
+        let pending = Rc::clone(&self.drag_pending);
+        let tick_active = Rc::clone(&self.drag_tick_active);
         let canvas = self.canvas.clone();
-        let state = Rc::clone(&self.state);
-        let note_cards = Rc::clone(&self.note_cards);
-
-        let drag_pending_update = Rc::clone(&self.drag_pending);
-        let drag_tick_active = Rc::clone(&self.drag_tick_active);
-        let sw = self.screen_width();
-        let sh = self.screen_height();
-
-        let canvas_for_tick = canvas.clone();
-        let drag_window = self.window.downgrade();
-        let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
-            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
+        let window = self.window.downgrade();
+        let fallback = (self.screen_width(), self.screen_height());
+        let after_move = Rc::new(after_move);
+        move |widget: gtk4::Widget, x: f64, y: f64| {
+            let size = live_workspace_size(&window, fallback);
             // Perf: .dragging disables hover transitions/shadows (see CSS)
-            // so the note paints cheaply while it moves at 120Hz.
+            // so the card paints cheaply while it moves at 120Hz.
             if !widget.has_css_class("dragging") {
                 widget.add_css_class("dragging");
             }
-            let cx = x.clamp(10.0, (sw - 80).max(10) as f64);
-            let cy = y.clamp(70.0, (sh - 60).max(70) as f64);
-            drag_pending_update.borrow_mut().insert(widget, (cx, cy));
+            pending.borrow_mut().insert(widget, clamp_card_origin(x, y, size));
 
-            if !*drag_tick_active.borrow() {
-                *drag_tick_active.borrow_mut() = true;
-                let dp = Rc::clone(&drag_pending_update);
-                let dta = Rc::clone(&drag_tick_active);
-                let c = canvas_for_tick.clone();
+            if !*tick_active.borrow() {
+                *tick_active.borrow_mut() = true;
+                let dp = Rc::clone(&pending);
+                let dta = Rc::clone(&tick_active);
+                let c = canvas.clone();
+                let after_move = Rc::clone(&after_move);
 
-                canvas_for_tick.add_tick_callback(move |_, _| {
+                canvas.add_tick_callback(move |_, _| {
                     if dp.borrow().is_empty() {
                         *dta.borrow_mut() = false;
                         return glib::ControlFlow::Break;
@@ -1292,34 +1272,42 @@ impl SuperDesktopWindow {
                     for (w, (px, py)) in items {
                         c.move_(&w, px, py);
                     }
+                    after_move();
                     glib::ControlFlow::Continue
                 });
             }
-        };
+        }
+    }
+
+    fn spawn_note_widget(&self, note_data: NoteData, save: bool) {
+        let canvas = self.canvas.clone();
+        let state = Rc::clone(&self.state);
+        let note_cards = Rc::clone(&self.note_cards);
+        let sw = self.screen_width();
+        let sh = self.screen_height();
+
+        let on_drag_update = self.card_drag_updater(|| {});
 
         let canvas_note_end = canvas.clone();
         let drag_pending_note_end = Rc::clone(&self.drag_pending);
         let state_end = Rc::clone(&state);
         let drag_window = self.window.downgrade();
         let on_drag_end = move |widget: gtk4::Widget, data: &NoteData| {
-            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
+            let size = live_workspace_size(&drag_window, (sw, sh));
             widget.remove_css_class("dragging");
             drag_pending_note_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
-            final_data.x = final_data.x.clamp(10, (sw - 80).max(10));
-            final_data.y = final_data.y.clamp(70, (sh - 60).max(70));
+            (final_data.x, final_data.y) = clamp_card_origin(final_data.x, final_data.y, size);
             canvas_note_end.move_(&widget, final_data.x as f64, final_data.y as f64);
-            let mut s = state_end.borrow_mut();
-            if let Some(n) = s.notes.iter_mut().find(|n| n.id == final_data.id) {
-                *n = final_data;
-            } else {
-                s.notes.push(final_data);
-            }
             // Perf: serialize + write the JSON off the main thread so the
             // drag-end frame completes within the 8.3ms 120Hz budget.
-            let snapshot = s.clone();
-            drop(s);
-            crate::state::save_state_async(snapshot);
+            persist(&state_end, |s| {
+                if let Some(n) = s.notes.iter_mut().find(|n| n.id == final_data.id) {
+                    *n = final_data;
+                } else {
+                    s.notes.push(final_data);
+                }
+            });
         };
 
         let canvas_del = canvas.clone();
@@ -1340,24 +1328,18 @@ impl SuperDesktopWindow {
             let Some(note) = note else { return };
 
             canvas_del.remove(&note.container);
-            let mut s = state_del.borrow_mut();
-            s.notes.retain(|n| n.id != id);
-            let snapshot = s.clone();
-            drop(s);
-            crate::state::save_state_async(snapshot);
+            persist(&state_del, |s| s.notes.retain(|n| n.id != id));
         };
 
         let state_change = Rc::clone(&state);
         let on_change = move |data: &NoteData| {
-            let mut s = state_change.borrow_mut();
-            if let Some(n) = s.notes.iter_mut().find(|n| n.id == data.id) {
-                *n = data.clone();
-            }
             // Perf: typing already debounces 300ms; the remaining JSON
             // serialize + file write goes to a worker thread.
-            let snapshot = s.clone();
-            drop(s);
-            crate::state::save_state_async(snapshot);
+            persist(&state_change, |s| {
+                if let Some(n) = s.notes.iter_mut().find(|n| n.id == data.id) {
+                    *n = data.clone();
+                }
+            });
         };
 
         let canvas_raise = canvas.clone();
@@ -1365,11 +1347,7 @@ impl SuperDesktopWindow {
         let note_cards_raise = Rc::clone(&note_cards);
         let note_id = note_data.id.clone();
         let on_raise = move |widget: gtk4::Widget| {
-            if let Some(last) = canvas_raise.last_child() {
-                if &last != &widget {
-                    widget.insert_after(&canvas_raise, Some(&last));
-                }
-            }
+            raise_canvas_child(&canvas_raise, &widget);
             raise_canvas_child(&canvas_raise, &hud_raise);
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
@@ -1388,8 +1366,7 @@ impl SuperDesktopWindow {
         let y = note_data.y;
 
         if save {
-            self.state.borrow_mut().notes.push(note_data.clone());
-            crate::state::save_state_async(self.state.borrow().clone());
+            persist(&self.state, |s| s.notes.push(note_data.clone()));
         }
 
         let ghost = self.ghost_box.clone();
@@ -1506,15 +1483,7 @@ impl SuperDesktopWindow {
             let fresh = crate::tmux::SessionInventory::fresh(&sess, agent_type, &cmd_run, &workspace_dir);
             (sess, cmd_run, Some(std::sync::Arc::new(fresh)))
         };
-        let idx = self.terminal_cards.borrow().len();
-
-        // Center on screen; cascade slightly so stacked harnesses don't overlap exactly.
-        let cascade = (idx as i32 % 5) * 32;
-        let cx = ((self.screen_width() - def_w) / 2 + cascade)
-            .clamp(10, (self.screen_width() - def_w - 10).max(10));
-        let cy = ((self.screen_height() - def_h) / 2 + cascade)
-            .clamp(70, (self.screen_height() - def_h - 10).max(70));
-
+        let (cx, cy) = self.new_card_origin(def_w, def_h);
         let nx = x.unwrap_or(cx);
         let ny = y.unwrap_or(cy);
         let now = SystemTime::now()
@@ -1546,6 +1515,17 @@ impl SuperDesktopWindow {
         sess
     }
 
+    /// Where a new card of this size opens: centered on screen, cascaded
+    /// slightly so stacked harnesses don't overlap exactly.
+    fn new_card_origin(&self, width: i32, height: i32) -> (i32, i32) {
+        let (sw, sh) = (self.screen_width(), self.screen_height());
+        let cascade = (self.terminal_cards.borrow().len() as i32 % 5) * 32;
+        (
+            ((sw - width) / 2 + cascade).clamp(10, (sw - width - 10).max(10)),
+            ((sh - height) / 2 + cascade).clamp(70, (sh - height - 10).max(70)),
+        )
+    }
+
     /// Adopt an already launched CLI session without mapping or focusing the overlay.
     pub(crate) fn adopt_cli_terminal(&self, mut data: TerminalData) -> Result<(), ()> {
         {
@@ -1565,26 +1545,20 @@ impl SuperDesktopWindow {
             self.screen_width(),
             self.screen_height(),
         );
-        let cascade = (self.terminal_cards.borrow().len() as i32 % 5) * 32;
-        data.x = ((self.screen_width() - width) / 2 + cascade)
-            .clamp(10, (self.screen_width() - width - 10).max(10));
-        data.y = ((self.screen_height() - height) / 2 + cascade)
-            .clamp(70, (self.screen_height() - height - 10).max(70));
+        (data.x, data.y) = self.new_card_origin(width, height);
         data.width = width;
         data.height = height;
         data.restored_width = width;
         data.restored_height = height;
-        {
-            let mut state = self.state.borrow_mut();
+        persist(&self.state, |state| {
             if let Some(directory) = &data.workspace_dir {
-                crate::state::remember_workspace_dir(&mut state, directory);
-                data.tag = crate::folder_colors::tag_for_new_card(&state, directory);
-                crate::folder_colors::remember(&mut state, directory, data.tag);
+                crate::state::remember_workspace_dir(state, directory);
+                data.tag = crate::folder_colors::tag_for_new_card(state, directory);
+                crate::folder_colors::remember(state, directory, data.tag);
             }
             state.terminals.push(data.clone());
-            crate::state::normalize_terminal_order(&mut state);
-            crate::state::save_state_async(state.clone());
-        }
+            crate::state::normalize_terminal_order(state);
+        });
         let inventory = std::sync::Arc::new(crate::tmux::SessionInventory::cli_created(
             &data.session_name,
         ));
@@ -1605,49 +1579,13 @@ impl SuperDesktopWindow {
         // This card's callbacks have no `Rc<Self>`, so they hold the ghost
         // layer directly and redraw the buried-card outlines themselves.
         let ghosts = Rc::clone(&self.ghosts);
-
-        let drag_pending_update = Rc::clone(&self.drag_pending);
-        let drag_tick_active = Rc::clone(&self.drag_tick_active);
         let sw = self.screen_width();
         let sh = self.screen_height();
 
-        let canvas_for_tick = canvas.clone();
+        // A card dragged over another one hides it: keep that card's ghost
+        // outline following the drag.
         let ghosts_drag = Rc::clone(&ghosts);
-        let drag_window = self.window.downgrade();
-        let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
-            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
-            // Perf: .dragging disables hover transitions/shadows (see CSS)
-            // so the card paints cheaply while it moves at 120Hz.
-            if !widget.has_css_class("dragging") {
-                widget.add_css_class("dragging");
-            }
-            let cx = x.clamp(10.0, (sw - 80).max(10) as f64);
-            let cy = y.clamp(70.0, (sh - 60).max(70) as f64);
-            drag_pending_update.borrow_mut().insert(widget, (cx, cy));
-
-            if !*drag_tick_active.borrow() {
-                *drag_tick_active.borrow_mut() = true;
-                let dp = Rc::clone(&drag_pending_update);
-                let dta = Rc::clone(&drag_tick_active);
-                let c = canvas_for_tick.clone();
-                let ghosts_tick = Rc::clone(&ghosts_drag);
-
-                canvas_for_tick.add_tick_callback(move |_, _| {
-                    if dp.borrow().is_empty() {
-                        *dta.borrow_mut() = false;
-                        return glib::ControlFlow::Break;
-                    }
-                    let items: Vec<(gtk4::Widget, (f64, f64))> = dp.borrow_mut().drain().collect();
-                    for (w, (px, py)) in items {
-                        c.move_(&w, px, py);
-                    }
-                    // A card dragged over another one hides it: keep that
-                    // card's ghost outline following the drag.
-                    ghosts_tick.refresh();
-                    glib::ControlFlow::Continue
-                });
-            }
-        };
+        let on_drag_update = self.card_drag_updater(move || ghosts_drag.refresh());
 
         let canvas_term_end = canvas.clone();
         let drag_pending_term_end = Rc::clone(&self.drag_pending);
@@ -1655,34 +1593,35 @@ impl SuperDesktopWindow {
         let ghosts_end = Rc::clone(&ghosts);
         let drag_window = self.window.downgrade();
         let on_drag_end = move |widget: gtk4::Widget, data: &TerminalData| {
-            let (sw, sh) = drag_window.upgrade().map(|w| allocated_workspace_size(&w, (sw, sh))).unwrap_or((sw, sh));
+            let size = live_workspace_size(&drag_window, (sw, sh));
             widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
             let mut final_data = data.clone();
             // The icon and the expanded card have separate remembered spots;
             // clamp and snap to whichever one this card is currently in.
             if final_data.iconified {
-                final_data.icon_x = Some(final_data.icon_x.unwrap_or(final_data.x).clamp(10, (sw - 80).max(10)));
-                final_data.icon_y = Some(final_data.icon_y.unwrap_or(final_data.y).clamp(70, (sh - 60).max(70)));
+                let (x, y) = clamp_card_origin(
+                    final_data.icon_x.unwrap_or(final_data.x),
+                    final_data.icon_y.unwrap_or(final_data.y),
+                    size,
+                );
+                (final_data.icon_x, final_data.icon_y) = (Some(x), Some(y));
             } else {
-                final_data.x = final_data.x.clamp(10, (sw - 80).max(10));
-                final_data.y = final_data.y.clamp(70, (sh - 60).max(70));
+                (final_data.x, final_data.y) = clamp_card_origin(final_data.x, final_data.y, size);
             }
             let (px, py) = displayed_pos(&final_data);
             canvas_term_end.move_(&widget, px, py);
-            let mut s = state_end.borrow_mut();
-            // A colour picked on the card's dot becomes its folder's colour.
-            let previous = s.terminals.iter().find(|t| t.session_name == final_data.session_name).cloned();
-            crate::folder_colors::note_card_saved(&mut s, previous.as_ref(), &final_data);
-            if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == final_data.session_name) {
-                *t = final_data;
-            } else {
-                s.terminals.push(final_data);
-            }
             // Perf: keep the drag-end frame inside the 8.3ms 120Hz budget.
-            let snapshot = s.clone();
-            drop(s);
-            crate::state::save_state_async(snapshot);
+            persist(&state_end, |s| {
+                // A colour picked on the card's dot becomes its folder's colour.
+                let previous = s.terminals.iter().find(|t| t.session_name == final_data.session_name).cloned();
+                crate::folder_colors::note_card_saved(s, previous.as_ref(), &final_data);
+                if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == final_data.session_name) {
+                    *t = final_data;
+                } else {
+                    s.terminals.push(final_data);
+                }
+            });
             // A card that just landed on another one buries it (and an iconify
             // or restore commit arrives through this same callback).
             ghosts_end.refresh();
@@ -1708,35 +1647,8 @@ impl SuperDesktopWindow {
         let state_del = Rc::clone(&state);
         let term_cards_del = Rc::clone(&term_cards);
         let ghosts_del = Rc::clone(&ghosts);
-
         let on_close = move |sess: String| {
-            // Pull the card out of the shared list and drop the borrow BEFORE
-            // touching GTK. `canvas.remove` unparents the whole card subtree
-            // (VTE included), and that unmap emits pointer/focus-enter signals
-            // which synchronously re-enter the raise handler of the remaining
-            // cards. Holding the list borrow across it aborted the daemon with
-            // "RefCell already borrowed" (see the field docs above).
-            let card = {
-                let mut cards = term_cards_del.borrow_mut();
-                cards
-                    .iter()
-                    .position(|c| c.data.borrow().session_name == sess)
-                    .map(|pos| cards.remove(pos))
-            };
-            let Some(card) = card else { return };
-
-            card.close_session();
-            canvas_del.remove(&card.container);
-            crate::desktop_shell::terminal_removed(&canvas_del);
-            let mut s = state_del.borrow_mut();
-            s.terminals.retain(|t| t.session_name != sess);
-            crate::state::normalize_terminal_order(&mut s);
-            let snapshot = s.clone();
-            drop(s);
-            crate::state::save_state_async(snapshot);
-            // The closed card's outline is dropped and the cards it used to
-            // hide become visible again.
-            ghosts_del.refresh();
+            close_session_card(&term_cards_del, &canvas_del, &state_del, &ghosts_del, &sess);
         };
 
         // Restored cards reappear wherever their current mode lives: an
@@ -1745,9 +1657,10 @@ impl SuperDesktopWindow {
         let (x, y) = displayed_pos(&term_data);
 
         if save {
-            self.state.borrow_mut().terminals.push(term_data.clone());
-            crate::state::normalize_terminal_order(&mut self.state.borrow_mut());
-            crate::state::save_state_async(self.state.borrow().clone());
+            persist(&self.state, |s| {
+                s.terminals.push(term_data.clone());
+                crate::state::normalize_terminal_order(s);
+            });
         }
 
         let ghost = self.ghost_box.clone();
@@ -1821,11 +1734,7 @@ impl SuperDesktopWindow {
         let state_raise = Rc::clone(&state);
         let ghosts_raise = Rc::clone(&ghosts);
         let on_raise = move |widget: gtk4::Widget| {
-            if let Some(last) = canvas_raise.last_child() {
-                if &last != &widget {
-                    widget.insert_after(&canvas_raise, Some(&last));
-                }
-            }
+            raise_canvas_child(&canvas_raise, &widget);
             raise_canvas_child(&canvas_raise, &hud_raise);
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
@@ -1840,18 +1749,15 @@ impl SuperDesktopWindow {
                 cards.push(card);
             }
             drop(cards);
-            let mut state = state_raise.borrow_mut();
-            let persisted = state.terminal_order.last() != Some(&card_id_raise)
-                && state.terminals.iter().any(|t| t.id == card_id_raise);
-            if persisted {
-                state.terminal_order.retain(|id| id != &card_id_raise);
-                state.terminal_order.push(card_id_raise.clone());
-                let snapshot = state.clone();
-                drop(state);
-                crate::state::save_state_async(snapshot);
-            } else {
-                drop(state);
-            }
+            persist_if(&state_raise, |state| {
+                let persisted = state.terminal_order.last() != Some(&card_id_raise)
+                    && state.terminals.iter().any(|t| t.id == card_id_raise);
+                if persisted {
+                    state.terminal_order.retain(|id| id != &card_id_raise);
+                    state.terminal_order.push(card_id_raise.clone());
+                }
+                persisted
+            });
             // A raise changes which card covers which: the buried ones may now
             // need an outline (or lost the one they had).
             ghosts_raise.refresh();
@@ -1859,19 +1765,15 @@ impl SuperDesktopWindow {
 
         let state_sess = Rc::clone(&state);
         let on_session_persist = move |updated: &TerminalData| {
-            let mut s = state_sess.borrow_mut();
-            if let Some(slot) = s
-                .terminals
-                .iter_mut()
-                .find(|t| t.session_name == updated.session_name)
-            {
+            persist_if(&state_sess, |s| {
+                let Some(slot) = s.terminals.iter_mut().find(|t| t.session_name == updated.session_name) else {
+                    return false;
+                };
                 // Only the agent mapping changed here; keep geometry from the
                 // live card to avoid clobbering an in-progress drag/resize.
                 slot.agent_session_id = updated.agent_session_id.clone();
-                let snapshot = s.clone();
-                drop(s);
-                crate::state::save_state_async(snapshot);
-            }
+                true
+            });
         };
 
         let hover_lock = self.hover_raise_lock.clone();
@@ -1926,9 +1828,7 @@ impl SuperDesktopWindow {
 
         for term in terms.iter() {
             if term.is_expanded() {
-                term.collapse();
-                let (px, py) = displayed_pos(&term.data.borrow());
-                self.canvas.move_(&term.container, px, py);
+                collapse_in_place(&self.canvas, term);
             }
         }
         set_overlay_keyboard_mode(&self.window, KeyboardMode::OnDemand);
@@ -1988,20 +1888,18 @@ impl SuperDesktopWindow {
             self.canvas.move_(&term.container, x, y);
         }
 
-        let mut s = self.state.borrow_mut();
-        for note in notes.iter() {
-            if let Some(n) = s.notes.iter_mut().find(|n| n.id == note.data.borrow().id) {
-                *n = note.data.borrow().clone();
+        persist(&self.state, |s| {
+            for note in notes.iter() {
+                if let Some(n) = s.notes.iter_mut().find(|n| n.id == note.data.borrow().id) {
+                    *n = note.data.borrow().clone();
+                }
             }
-        }
-        for term in terms.iter() {
-            if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == term.data.borrow().session_name) {
-                *t = term.data.borrow().clone();
+            for term in terms.iter() {
+                if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == term.data.borrow().session_name) {
+                    *t = term.data.borrow().clone();
+                }
             }
-        }
-        let snapshot = s.clone();
-        drop(s);
-        crate::state::save_state_async(snapshot);
+        });
         // Refresh outlines after every card has its final geometry.
         self.ghosts.refresh();
     }
@@ -2438,9 +2336,12 @@ impl SuperDesktopWindow {
             CardAction::Tag {value}=>{
                 if *value>8{return fail("invalid_arguments","Tag must be 0..8.");}
                 let before=card.data.borrow().clone();card.cli_set_tag(*value);let after=card.data.borrow().clone();
-                let mut state=self.state.borrow_mut();crate::folder_colors::note_card_saved(&mut state,Some(&before),&after);
-                if let Some(saved)=state.terminals.iter_mut().find(|c|c.id==*id){saved.tag=*value;}
-                let saved=state.clone();drop(state);crate::state::save_state_async(saved);
+                persist(&self.state, |state| {
+                    crate::folder_colors::note_card_saved(state, Some(&before), &after);
+                    if let Some(saved) = state.terminals.iter_mut().find(|c| c.id == *id) {
+                        saved.tag = *value;
+                    }
+                });
             },
         }
         let after=match self.desktop_snapshot(model){Ok(v)=>v,Err(_)=>return Reply::unknown(&request.request_id)};
@@ -2499,15 +2400,13 @@ impl SuperDesktopWindow {
                 if mode_change == Some(false) { true } else {
                     let changed = card.cli_set_mode(action, self.screen_width(), self.screen_height());
                     if changed {
-                        let rect = card.canvas_rect(self.screen_width(), self.screen_height());
                         // Minimize/restore already position and persist through
                         // the card's save callback, including display clamping.
                         match action {
                             crate::control::ModeAction::Expand => {
-                                self.canvas.remove(&card.container);
-                                self.canvas.put(&card.container, rect.x, rect.y);
+                                place_expanded(&self.canvas, &card, (self.screen_width(), self.screen_height()));
                             }
-                            crate::control::ModeAction::Collapse => self.canvas.move_(&card.container, rect.x, rect.y),
+                            crate::control::ModeAction::Collapse => place_at_rest(&self.canvas, &card),
                             _ => {}
                         }
                         self.ghosts.refresh();
@@ -2618,13 +2517,10 @@ impl SuperDesktopWindow {
                 self.terminal_cards.borrow_mut().retain(|other| other.data.borrow().id != *id);
                 self.drag_pending.borrow_mut().remove(card.container.upcast_ref::<gtk4::Widget>());
                 self.canvas.remove(&card.container);
-                let snapshot = {
-                    let mut state = self.state.borrow_mut();
+                persist(&self.state, |state| {
                     state.terminals.retain(|other| other.id != *id);
-                    crate::state::normalize_terminal_order(&mut state);
-                    state.clone()
-                };
-                crate::state::save_state_async(snapshot);
+                    crate::state::normalize_terminal_order(state);
+                });
                 self.ghosts.refresh();
                 Ok(None)
             }
@@ -2636,26 +2532,7 @@ impl SuperDesktopWindow {
     }
 
     pub fn close_terminal(&self, sess: &str) -> bool {
-        let card = {
-            let mut cards = self.terminal_cards.borrow_mut();
-            cards
-                .iter()
-                .position(|c| c.data.borrow().session_name == sess)
-                .map(|pos| cards.remove(pos))
-        };
-        let Some(card) = card else { return false };
-
-        card.close_session();
-        self.canvas.remove(&card.container);
-        crate::desktop_shell::terminal_removed(&self.canvas);
-        let mut s = self.state.borrow_mut();
-        s.terminals.retain(|t| t.session_name != sess);
-        crate::state::normalize_terminal_order(&mut s);
-        let snapshot = s.clone();
-        drop(s);
-        crate::state::save_state_async(snapshot);
-        self.ghosts.refresh();
-        true
+        close_session_card(&self.terminal_cards, &self.canvas, &self.state, &self.ghosts, sess)
     }
 
     /// Move one local card to a host-pixel origin and raise it.
@@ -2675,12 +2552,7 @@ impl SuperDesktopWindow {
         crate::mini_terminal::set_displayed_pos(&mut card.data.borrow_mut(), x, y);
         let (px, py) = crate::mini_terminal::displayed_pos(&card.data.borrow());
         self.canvas.move_(&card.container, px, py);
-        let widget = card.container.upcast_ref::<gtk4::Widget>();
-        if let Some(last) = self.canvas.last_child() {
-            if &last != widget {
-                widget.insert_after(&self.canvas, Some(&last));
-            }
-        }
+        raise_canvas_child(&self.canvas, &card.container);
         raise_canvas_child(&self.canvas, &self.hud);
         {
             let mut list = self.terminal_cards.borrow_mut();
@@ -2690,10 +2562,9 @@ impl SuperDesktopWindow {
             }
         }
         let data = card.data.borrow().clone();
-        let snapshot = {
-            let mut state = self.state.borrow_mut();
+        let saved = persist_if(&self.state, |state| {
             let Some(saved) = state.terminals.iter_mut().find(|t| t.id == card_id) else {
-                return Err("unknown_card");
+                return false;
             };
             saved.x = data.x;
             saved.y = data.y;
@@ -2701,9 +2572,11 @@ impl SuperDesktopWindow {
             saved.icon_y = data.icon_y;
             state.terminal_order.retain(|id| id != card_id);
             state.terminal_order.push(card_id.to_string());
-            state.clone()
-        };
-        crate::state::save_state_async(snapshot);
+            true
+        });
+        if !saved {
+            return Err("unknown_card");
+        }
         self.ghosts.refresh();
         Ok(())
     }
@@ -2787,14 +2660,11 @@ impl SuperDesktopWindow {
         let Some(directory) = crate::state::clean_dir(workspace) else {
             return Err("invalid_workspace");
         };
-        let snapshot = {
-            let mut state = self.state.borrow_mut();
+        persist(&self.state, |state| {
             state.workspace_dir = Some(directory.clone());
-            crate::state::remember_workspace_dir(&mut state, &directory);
-            state.clone()
-        };
+            crate::state::remember_workspace_dir(state, &directory);
+        });
         self.ws_bar.show_folder(&directory);
-        crate::state::save_state_async(snapshot);
         Ok(())
     }
 
@@ -2815,25 +2685,16 @@ impl SuperDesktopWindow {
         if card.is_expanded() == expanded {
             return Ok(());
         }
-        if expanded {
-            // At most one card is expanded, exactly like a local expand.
-            let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
-            for other in cards.iter() {
-                if other.is_expanded() && other.data.borrow().id != card.data.borrow().id {
-                    other.collapse();
-                    let (px, py) = displayed_pos(&other.data.borrow());
-                    self.canvas.move_(&other.container, px, py);
-                }
-            }
-            card.expand(self.screen_width(), self.screen_height());
-            let (x, y, _, _) = expanded_rect(self.screen_width(), self.screen_height());
-            self.canvas.remove(&card.container);
-            self.canvas.put(&card.container, x, y);
-        } else {
-            card.collapse();
-            let (px, py) = displayed_pos(&card.data.borrow());
-            self.canvas.move_(&card.container, px, py);
-        }
+        // At most one card is expanded, exactly like a local expand.
+        let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        set_card_expanded(
+            &cards,
+            &self.canvas,
+            Some(&card),
+            expanded,
+            (self.screen_width(), self.screen_height()),
+            false,
+        );
         // Cards the expanded one covers lose their outlines, and a collapse
         // sets them free again.
         self.ghosts.refresh();
@@ -3008,16 +2869,8 @@ impl SuperDesktopWindow {
             panel.set_visible(false);
         }
         self.pairing_wizard.close();
-        let (combo, snapshot) = {
-            let mut state = self.state.borrow_mut();
-            let combo = crate::shortcut::current_combo(state.toggle_shortcut.as_deref());
-            let changed = !state.welcome_tour_seen;
-            state.welcome_tour_seen = true;
-            (combo, changed.then(|| state.clone()))
-        };
-        if let Some(snapshot) = snapshot {
-            crate::state::save_state_async(snapshot);
-        }
+        let combo = crate::shortcut::current_combo(self.state.borrow().toggle_shortcut.as_deref());
+        persist_if(&self.state, |state| !std::mem::replace(&mut state.welcome_tour_seen, true));
         self.welcome_tour.open(&combo);
     }
 
@@ -3154,11 +3007,7 @@ impl SuperDesktopWindow {
 /// Short top-bar label + emoji fallback for a harness key.
 fn raise_notes_on_canvas(canvas: &gtk4::Fixed, notes: &[Rc<crate::sticky_note::StickyNote>]) {
     for note in notes {
-        if let Some(last) = canvas.last_child() {
-            if &last != &note.container {
-                note.container.insert_after(canvas, Some(&last));
-            }
-        }
+        raise_canvas_child(canvas, &note.container);
     }
 }
 
@@ -3216,6 +3065,133 @@ pub(crate) fn raise_canvas_child(canvas: &Fixed, widget: &impl gtk4::glib::objec
     }
 }
 
+/// The workspace size now, for a card callback that holds only a weak window.
+fn live_workspace_size(window: &glib::WeakRef<ApplicationWindow>, fallback: (i32, i32)) -> (i32, i32) {
+    window.upgrade().map(|w| allocated_workspace_size(&w, fallback)).unwrap_or(fallback)
+}
+
+/// Keep a dragged or dropped card's origin where its header can be grabbed
+/// again: past the left margin, below the top bar, and with its grip on screen.
+fn clamp_card_origin<T: PartialOrd + From<i32>>(x: T, y: T, (sw, sh): (i32, i32)) -> (T, T) {
+    let clamp = |value: T, low: i32, high: i32| {
+        let (low, high) = (T::from(low), T::from(high));
+        if value < low {
+            low
+        } else if value > high {
+            high
+        } else {
+            value
+        }
+    };
+    (clamp(x, 10, (sw - 80).max(10)), clamp(y, 70, (sh - 60).max(70)))
+}
+
+/// Change the saved state, then write it off the main thread. The borrow ends
+/// before the write is queued: GTK signals that follow may borrow it again.
+fn persist(state: &RefCell<AppState>, change: impl FnOnce(&mut AppState)) {
+    persist_if(state, |state| {
+        change(state);
+        true
+    });
+}
+
+/// [`persist`] for a change that may turn out to change nothing: the state is
+/// written only when `change` returns true, and that is returned.
+fn persist_if(state: &RefCell<AppState>, change: impl FnOnce(&mut AppState) -> bool) -> bool {
+    let snapshot = {
+        let mut state = state.borrow_mut();
+        change(&mut state).then(|| state.clone())
+    };
+    let changed = snapshot.is_some();
+    if let Some(snapshot) = snapshot {
+        crate::state::save_state_async(snapshot);
+    }
+    changed
+}
+
+/// Close one card's session and take the card off the canvas and out of the
+/// saved state; false when no card has that session.
+fn close_session_card(
+    cards: &RefCell<Vec<Rc<MiniTerminalCard>>>,
+    canvas: &Fixed,
+    state: &RefCell<AppState>,
+    ghosts: &GhostLayer,
+    sess: &str,
+) -> bool {
+    // Pull the card out of the shared list and drop the borrow BEFORE
+    // touching GTK. `canvas.remove` unparents the whole card subtree
+    // (VTE included), and that unmap emits pointer/focus-enter signals
+    // which synchronously re-enter the raise handler of the remaining
+    // cards. Holding the list borrow across it aborted the daemon with
+    // "RefCell already borrowed" (see `SuperDesktopWindow::terminal_cards`).
+    let card = {
+        let mut cards = cards.borrow_mut();
+        cards
+            .iter()
+            .position(|c| c.data.borrow().session_name == sess)
+            .map(|pos| cards.remove(pos))
+    };
+    let Some(card) = card else { return false };
+
+    card.close_session();
+    canvas.remove(&card.container);
+    crate::desktop_shell::terminal_removed(canvas);
+    persist(state, |s| {
+        s.terminals.retain(|t| t.session_name != sess);
+        crate::state::normalize_terminal_order(s);
+    });
+    // The closed card's outline is dropped and the cards it used to hide
+    // become visible again.
+    ghosts.refresh();
+    true
+}
+
+/// Put an expanded card on top of the canvas, at the expanded rectangle.
+fn place_expanded(canvas: &Fixed, card: &MiniTerminalCard, (sw, sh): (i32, i32)) {
+    let (x, y, _, _) = expanded_rect(sw, sh);
+    canvas.remove(&card.container);
+    canvas.put(&card.container, x, y);
+}
+
+/// Move a card to the spot of its current form (the icon spot when it is
+/// minimized).
+fn place_at_rest(canvas: &Fixed, card: &MiniTerminalCard) {
+    let (px, py) = displayed_pos(&card.data.borrow());
+    canvas.move_(&card.container, px, py);
+}
+
+fn collapse_in_place(canvas: &Fixed, card: &MiniTerminalCard) {
+    card.collapse();
+    place_at_rest(canvas, card);
+}
+
+/// Expand `target` or collapse it, and collapse any other expanded card: at
+/// most one card is expanded. `focus` gives the expanded card the keyboard
+/// again after it moved to the top of the canvas.
+fn set_card_expanded(
+    cards: &[Rc<MiniTerminalCard>],
+    canvas: &Fixed,
+    target: Option<&Rc<MiniTerminalCard>>,
+    expand: bool,
+    screen: (i32, i32),
+    focus: bool,
+) {
+    let is_target = |card: &Rc<MiniTerminalCard>| target.is_some_and(|target| Rc::ptr_eq(target, card));
+    for card in cards.iter().filter(|card| !is_target(card) && card.is_expanded()) {
+        collapse_in_place(canvas, card);
+    }
+    let Some(card) = target else { return };
+    if expand {
+        card.expand(screen.0, screen.1);
+        place_expanded(canvas, card, screen);
+        if focus {
+            card.focus_terminal();
+        }
+    } else {
+        collapse_in_place(canvas, card);
+    }
+}
+
 fn hud_measured_size(hud: &gtk4::Box) -> (f64, f64) {
     let (_, nat_w, _, _) = hud.measure(Orientation::Horizontal, -1);
     let (_, nat_h, _, _) = hud.measure(Orientation::Vertical, -1);
@@ -3252,35 +3228,9 @@ fn apply_terminal_expand(
     // focus-enter signals that re-enter the raise handlers, which would panic
     // if a list borrow were still alive.
     let cards: Vec<Rc<MiniTerminalCard>> = terminal_cards.borrow().clone();
-    let currently_expanded = cards
-        .iter()
-        .find(|c| c.data.borrow().session_name == session_name)
-        .map(|c| c.is_expanded())
-        .unwrap_or(false);
-    let will_expand = !currently_expanded;
-
-    for card in cards.iter() {
-        let sess = card.data.borrow().session_name.clone();
-        if sess == session_name {
-            if will_expand {
-                card.expand(sw, sh);
-                let (x, y, _, _) = expanded_rect(sw, sh);
-                canvas.remove(&card.container);
-                canvas.put(&card.container, x, y);
-                card.focus_terminal();
-            } else {
-                // Collapsing returns the card to the spot of its current form
-                // (the icon spot when it is minimized).
-                card.collapse();
-                let (px, py) = displayed_pos(&card.data.borrow());
-                canvas.move_(&card.container, px, py);
-            }
-        } else if card.is_expanded() {
-            card.collapse();
-            let (px, py) = displayed_pos(&card.data.borrow());
-            canvas.move_(&card.container, px, py);
-        }
-    }
+    let target = cards.iter().find(|c| c.data.borrow().session_name == session_name);
+    let will_expand = !target.is_some_and(|card| card.is_expanded());
+    set_card_expanded(&cards, canvas, target, will_expand, (sw, sh), true);
 
     set_overlay_keyboard_mode(window, if will_expand {
         KeyboardMode::Exclusive
@@ -4067,20 +4017,12 @@ mod tests {
         assert_eq!(canvas.last_child().as_ref(), Some(note2.container.upcast_ref::<gtk4::Widget>()));
 
         // Focus terminal 1! Focused terminal must be rendered above any other icon AND even sticky notes!
-        if let Some(last) = canvas.last_child() {
-            if &last != term1.upcast_ref::<gtk4::Widget>() {
-                term1.insert_after(&canvas, Some(&last));
-            }
-        }
+        raise_canvas_child(&canvas, &term1);
         // Terminal 1 is now the last child (topmost rendered widget)
         assert_eq!(canvas.last_child().as_ref(), Some(term1.upcast_ref::<gtk4::Widget>()));
 
         // Now focus terminal 2 (an icon/terminal)!
-        if let Some(last) = canvas.last_child() {
-            if &last != term2.upcast_ref::<gtk4::Widget>() {
-                term2.insert_after(&canvas, Some(&last));
-            }
-        }
+        raise_canvas_child(&canvas, &term2);
         // Terminal 2 is now on top of terminal 1 AND on top of all sticky notes!
         assert_eq!(canvas.last_child().as_ref(), Some(term2.upcast_ref::<gtk4::Widget>()));
 

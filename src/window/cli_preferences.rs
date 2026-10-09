@@ -26,7 +26,9 @@ impl SuperDesktopWindow {
             if expect_epoch.as_ref()!=Some(&snapshot.epoch)||expect_revision.as_ref()!=Some(&revision){return fail("conflict","Settings changed; preview the shortcut again.");}
             if self.overlay_panels.iter().any(|p|p.is_visible()){return fail("conflict","Close Settings before applying a CLI shortcut.");}
         }else if commit{return fail("invalid_request","Apply requires a preview.");}
-        if commit {let mut state=self.state.borrow_mut();state.toggle_shortcut=Some(combo.clone());crate::state::save_state_async(state.clone());}
+        if commit {
+            persist(&self.state, |s| s.toggle_shortcut = Some(combo.clone()));
+        }
         Reply::success(&request.request_id,json!({"epoch":snapshot.epoch,"revision":revision,"current":state.toggle_shortcut,"combo":combo,"stateSaved":commit}))
     }
 
