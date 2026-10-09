@@ -668,14 +668,7 @@ mod tests {
         // No page may need more than the smallest the panel can be dragged
         // to: it scrolls inside it instead.
         let state = Rc::new(std::cell::RefCell::new(crate::state::AppState::default()));
-        let panel = crate::harness_settings::build_harness_settings_panel(
-            state,
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            crate::launcher_settings::ConnectionHooks::inert(),
-        );
+        let panel = crate::harness_settings::inert_panel(state);
         let (width, height) = crate::harness_settings::SETTINGS_PANEL_MIN_SIZE;
         let min_width = panel.widget.measure(gtk4::Orientation::Horizontal, -1).0;
         let min_height = panel.widget.measure(gtk4::Orientation::Vertical, width).0;

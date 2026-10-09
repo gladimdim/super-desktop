@@ -159,6 +159,56 @@ pub mod gtk_test {
         }
     }
 
+    /// Run the main loop until `done`, failing after 5 s with `what` was
+    /// never seen.
+    pub fn pump_until(what: &str, done: impl Fn() -> bool) {
+        let context = gtk4::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            while context.iteration(false) {}
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// `root` and every widget below it, each before its children, children
+    /// in order.
+    pub fn descendants(root: &gtk4::Widget) -> Vec<gtk4::Widget> {
+        use gtk4::prelude::*;
+        let mut out = vec![root.clone()];
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            out.extend(descendants(&widget));
+            child = widget.next_sibling();
+        }
+        out
+    }
+
+    /// The first widget from `root` down (in `descendants` order) that passes `test`.
+    pub fn find_where(root: &gtk4::Widget, test: impl Fn(&gtk4::Widget) -> bool) -> Option<gtk4::Widget> {
+        descendants(root).into_iter().find(|widget| test(widget))
+    }
+
+    /// Every `T` carrying `class` from `root` down, in `descendants` order.
+    pub fn find_all<T: gtk4::prelude::IsA<gtk4::Widget>>(root: &gtk4::Widget, class: &str) -> Vec<T> {
+        use gtk4::prelude::*;
+        descendants(root)
+            .into_iter()
+            .filter(|widget| widget.has_css_class(class))
+            .filter_map(|widget| widget.downcast::<T>().ok())
+            .collect()
+    }
+
+    /// The first `T` carrying `class` from `root` down.
+    pub fn find_first<T: gtk4::prelude::IsA<gtk4::Widget>>(root: &gtk4::Widget, class: &str) -> Option<T> {
+        find_all(root, class).into_iter().next()
+    }
+
+    /// How many widgets carry `class` from `root` down.
+    pub fn count_class(root: &gtk4::Widget, class: &str) -> usize {
+        find_all::<gtk4::Widget>(root, class).len()
+    }
+
     pub fn run_in_child_process(inner_test: &str) {
         assert!(
             !is_child(),

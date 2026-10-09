@@ -2105,9 +2105,23 @@ pub fn build_harness_settings_panel(
     }
 }
 
+/// The settings panel with callbacks that do nothing.
+#[cfg(test)]
+pub(crate) fn inert_panel(state: Rc<RefCell<AppState>>) -> HarnessSettingsPanel {
+    build_harness_settings_panel(
+        state,
+        Rc::new(|_| {}),
+        Rc::new(|_| {}),
+        Rc::new(|_| {}),
+        Rc::new(|_| {}),
+        ConnectionHooks::inert(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::{count_class, find_all};
 
     /// The website's "connect your phone" screenshots of Settings →
     /// Connections → Add a device → Pair a phone, drawn by the real Settings
@@ -2134,14 +2148,7 @@ mod tests {
         gtk4::init().unwrap();
         gtk4::Settings::default().unwrap().set_gtk_application_prefer_dark_theme(true);
         crate::styles::apply_styles();
-        let panel = build_harness_settings_panel(
-            Rc::new(RefCell::new(AppState::default())),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            Rc::new(|_| {}),
-            ConnectionHooks::inert(),
-        );
+        let panel = inert_panel(Rc::new(RefCell::new(AppState::default())));
         let window = gtk4::Window::new();
         window.add_css_class("super-desktop");
         window.set_default_size(720, 760);
@@ -2279,7 +2286,7 @@ mod tests {
         std::fs::write(&kiro, "#!/bin/sh\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&kiro, std::fs::Permissions::from_mode(0o755)).unwrap();
-        find_buttons(&panel.widget, "launcher-btn").into_iter()
+        find_all::<Button>(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("⟳ Rescan"))
             .unwrap().emit_clicked();
         assert!(detected.borrow().contains(&"kiro".to_string()));
@@ -2359,9 +2366,9 @@ mod tests {
 
     /// Text, chip, Connect and Restart of one plugin line.
     fn plugin_line(line: &gtk4::Widget) -> (String, bool, Button, Button) {
-        let text = find_widgets(line, "harness-plugin-text")[0].clone().downcast::<Label>().unwrap();
-        let chip = find_widgets(line, "harness-plugin-connected")[0].clone();
-        let button = |label: &str| find_buttons(line, "launcher-btn").into_iter()
+        let text = find_all::<gtk4::Widget>(line, "harness-plugin-text")[0].clone().downcast::<Label>().unwrap();
+        let chip = find_all::<gtk4::Widget>(line, "harness-plugin-connected")[0].clone();
+        let button = |label: &str| find_all::<Button>(line, "launcher-btn").into_iter()
             .find(|b| b.label().as_deref() == Some(label)).unwrap();
         (text.text().to_string(), shown(&chip), button("Connect"), button("Restart gateway"))
     }
@@ -2379,7 +2386,7 @@ mod tests {
         let (text, chip, connect, restart) = plugin_line(&line);
         assert_eq!(text, "Status & titles need the SUPER DESKTOP plugin");
         assert!(!chip && shown(&connect) && !shown(&restart));
-        let text_label = find_widgets(&line, "harness-plugin-text")[0].clone();
+        let text_label = find_all::<gtk4::Widget>(&line, "harness-plugin-text")[0].clone();
         assert_eq!(text_label.tooltip_text().as_deref(), Some("the plugin is not registered"));
 
         // A failed registration explains itself and can be retried.
@@ -2464,13 +2471,9 @@ mod tests {
             std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::write(&config, r#"{"gateway":{"mode":"local"}}"#).unwrap();
-        let panel = build_harness_settings_panel(
-            Rc::new(RefCell::new(AppState::default())),
-            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
-            ConnectionHooks::inert(),
-        );
+        let panel = inert_panel(Rc::new(RefCell::new(AppState::default())));
         let line = || {
-            let lines = find_widgets(&panel.widget, "harness-plugin-notice");
+            let lines = find_all::<gtk4::Widget>(&panel.widget, "harness-plugin-notice");
             assert_eq!(lines.len(), 1, "one plugin line, for OpenClaw only");
             assert_eq!(lines[0].prev_sibling(), Some(harness_row_named(&panel.widget, "OpenClaw")));
             lines[0].clone()
@@ -2518,20 +2521,20 @@ mod tests {
             Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
             ConnectionHooks::inert(),
         );
-        find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
-        let pages = find_widgets(&panel.widget, "harness-page");
-        let add = find_buttons(&panel.widget, "settings-add-harness-entry").remove(0);
+        find_all::<Button>(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
+        let add = find_all::<Button>(&panel.widget, "settings-add-harness-entry").remove(0);
         add.emit_clicked();
         assert!(shown(&pages[3]));
         assert_eq!(title_text(&panel.widget), "Add a harness");
-        let buttons = find_buttons(&panel.widget, "launcher-btn");
+        let buttons = find_all::<Button>(&panel.widget, "launcher-btn");
         buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
         assert!(shown(&pages[3]), "invalid details keep the form open");
-        let error = find_widgets(&panel.widget, "custom-harness-error")[0].clone().downcast::<Label>().unwrap();
+        let error = find_all::<gtk4::Widget>(&panel.widget, "custom-harness-error")[0].clone().downcast::<Label>().unwrap();
         assert!(error.is_visible());
         assert_eq!(error.text().as_str(), "Enter a name of up to 48 characters");
         buttons.iter().find(|button| button.label().as_deref() == Some("🧭")).unwrap().emit_clicked();
-        let entries = find_widgets(&panel.widget, "ws-entry");
+        let entries = find_all::<gtk4::Widget>(&panel.widget, "ws-entry");
         for (placeholder, value) in [
             ("Harness name", "My Echo"),
             ("/absolute/path/to/executable", "/bin/echo"),
@@ -2549,7 +2552,7 @@ mod tests {
         assert_eq!(item.arguments, ["hello", "two words"]);
         assert_eq!(crate::state::load_state().custom_harnesses, vec![item.clone()]);
         assert_eq!(std::fs::metadata(crate::state::get_state_path()).unwrap().permissions().mode() & 0o777, 0o600);
-        let edit = find_buttons(&panel.widget, "launcher-btn").into_iter()
+        let edit = find_all::<Button>(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("Edit")).unwrap();
         edit.emit_clicked();
         assert!(shown(&pages[3]));
@@ -2566,7 +2569,7 @@ mod tests {
         buttons.iter().find(|button| button.label().as_deref() == Some("Cancel")).unwrap().emit_clicked();
         assert!(shown(&pages[2]), "cancel returns to the launcher list");
         assert_eq!(state.borrow().custom_harnesses.len(), 1);
-        let remove = find_buttons(&panel.widget, "launcher-btn").into_iter()
+        let remove = find_all::<Button>(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("Remove")).unwrap();
         remove.emit_clicked();
         crate::state::flush_state_saves();
@@ -2590,7 +2593,7 @@ mod tests {
         buttons.iter().find(|button| button.label().as_deref() == Some("Save harness")).unwrap().emit_clicked();
         assert!(shown(&pages[2]));
         assert_eq!(state.borrow().custom_harnesses[0].name, "echo");
-        find_buttons(&panel.widget, "launcher-btn").into_iter()
+        find_all::<Button>(&panel.widget, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some("Remove")).unwrap().emit_clicked();
         crate::state::flush_state_saves();
         assert!(state.borrow().custom_harnesses.is_empty());
@@ -2600,14 +2603,14 @@ mod tests {
     /// The Parameters button of the installed built-in harness called `name`.
     fn params_button(panel: &gtk4::Widget, name: &str) -> Button {
         let row = harness_row_named(panel, name);
-        find_buttons(&row, "harness-params").remove(0)
+        find_all::<Button>(&row, "harness-params").remove(0)
     }
 
     fn harness_row_named(panel: &gtk4::Widget, name: &str) -> gtk4::Widget {
-        find_widgets(panel, "harness-row")
+        find_all::<gtk4::Widget>(panel, "harness-row")
             .into_iter()
             .find(|row| {
-                find_widgets(row, "harness-name")
+                find_all::<gtk4::Widget>(row, "harness-name")
                     .iter()
                     .any(|label| label.downcast_ref::<Label>().is_some_and(|l| l.text() == name))
             })
@@ -2637,22 +2640,18 @@ mod tests {
         let aider = crate::tmux::detect_harness_command("aider").unwrap()
             .strip_suffix(" --yes-always").unwrap().to_string();
         let state = Rc::new(RefCell::new(AppState::default()));
-        let panel = build_harness_settings_panel(
-            Rc::clone(&state),
-            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
-            ConnectionHooks::inert(),
-        );
-        find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
-        let pages = find_widgets(&panel.widget, "harness-page");
+        let panel = inert_panel(Rc::clone(&state));
+        find_all::<Button>(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         let (harnesses, args_page) = (pages[2].clone(), pages.last().unwrap().clone());
-        let entry = find_widgets(&panel.widget, "harness-args-entry")[0].clone()
+        let entry = find_all::<gtk4::Widget>(&panel.widget, "harness-args-entry")[0].clone()
             .downcast::<gtk4::Entry>().unwrap();
-        let label = |class: &str| find_widgets(&panel.widget, class)[0].clone().downcast::<Label>().unwrap();
+        let label = |class: &str| find_all::<gtk4::Widget>(&panel.widget, class)[0].clone().downcast::<Label>().unwrap();
         let (preview, default, error) =
             (label("harness-args-preview"), label("harness-args-default"), label("harness-args-error"));
-        let button = |text: &str| find_buttons(&args_page, "launcher-btn").into_iter()
+        let button = |text: &str| find_all::<Button>(&args_page, "launcher-btn").into_iter()
             .find(|button| button.label().as_deref() == Some(text)).unwrap();
-        let row_command = || find_widgets(&harness_row_named(&panel.widget, "Aider"), "harness-cmd")[0]
+        let row_command = || find_all::<gtk4::Widget>(&harness_row_named(&panel.widget, "Aider"), "harness-cmd")[0]
             .clone().downcast::<Label>().unwrap().text().to_string();
 
         params_button(&panel.widget, "Aider").emit_clicked();
@@ -2790,7 +2789,7 @@ mod tests {
         // The hub is deliberately short. Each substantial setting has its own
         // page; Connections is an overview with a sub-page per kind of
         // connection, so none of them is a long scroll.
-        let pages = find_widgets(&panel.widget, "harness-page");
+        let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
             16,
@@ -2809,7 +2808,7 @@ mod tests {
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
-        let btn_back = find_buttons(&panel.widget, "term-btn")
+        let btn_back = find_all::<Button>(&panel.widget, "term-btn")
             .into_iter()
             .find(|b| b.label().as_deref() == Some("←"))
             .expect("the header must offer a back button");
@@ -2827,7 +2826,7 @@ mod tests {
             ("settings-sleep-lock-entry", 13, "Sleep lock"),
             ("settings-updates-entry", 14, "Updates"),
         ] {
-            let button = find_buttons(&panel.widget, class)
+            let button = find_all::<Button>(&panel.widget, class)
                 .into_iter()
                 .next()
                 .expect("each settings destination needs a navigation button");
@@ -2850,9 +2849,9 @@ mod tests {
         // A test binary is not a clone's release build, so the check says it
         // cannot update rather than asking git anything.
         let version = crate::updates::running().to_string();
-        assert!(find_labels(&panel.widget, "update-version").iter().any(|chip| chip.text() == version));
-        find_buttons(&panel.widget, "settings-updates-entry")[0].emit_clicked();
-        let status = find_labels(&panel.widget, "update-status").into_iter().next().expect("update status");
+        assert!(find_all::<Label>(&panel.widget, "update-version").iter().any(|chip| chip.text() == version));
+        find_all::<Button>(&panel.widget, "settings-updates-entry")[0].emit_clicked();
+        let status = find_all::<Label>(&panel.widget, "update-status").into_iter().next().expect("update status");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while status.text() == "Checking GitHub…" || status.text() == "Not checked yet." {
             assert!(std::time::Instant::now() < deadline, "the check never answered");
@@ -2861,15 +2860,15 @@ mod tests {
         }
         assert!(status.text().contains("cannot update itself"), "{}", status.text());
         assert!(status.has_css_class("launcher-note-error"));
-        let update = find_buttons(&panel.widget, "launcher-btn-primary")
+        let update = find_all::<Button>(&panel.widget, "launcher-btn-primary")
             .into_iter()
             .find(|button| button.label().is_some_and(|label| label.starts_with("⬇ Update")))
             .expect("the update button exists");
         assert!(!update.is_visible(), "nothing to update from here");
         btn_back.emit_clicked();
 
-        find_buttons(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
-        find_buttons(&panel.widget, "settings-add-harness-entry")[0].emit_clicked();
+        find_all::<Button>(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        find_all::<Button>(&panel.widget, "settings-add-harness-entry")[0].emit_clicked();
         assert!(shown(&pages[3]));
         assert_eq!(title_text(&panel.widget), "Add a harness");
         btn_back.emit_clicked();
@@ -2880,7 +2879,7 @@ mod tests {
 
         // Each Connections entry opens its own page; ← climbs back to the
         // overview, then to the hub.
-        find_buttons(&panel.widget, "android-settings-entry")[0].emit_clicked();
+        find_all::<Button>(&panel.widget, "android-settings-entry")[0].emit_clicked();
         for (class, page_index, page_title) in [
             ("connections-add-entry", 7, "Add a device"),
             ("connections-pcs-entry", 9, "PCs"),
@@ -2888,7 +2887,7 @@ mod tests {
             ("connections-rejected-entry", 11, "Rejected devices"),
             ("connections-network-entry", 12, "Network & firewall"),
         ] {
-            find_buttons(&panel.widget, class)[0].emit_clicked();
+            find_all::<Button>(&panel.widget, class)[0].emit_clicked();
             assert!(shown(&pages[page_index]), "{class}");
             assert_eq!(pages.iter().filter(|page| shown(*page)).count(), 1);
             assert_eq!(title_text(&panel.widget), page_title);
@@ -2900,7 +2899,7 @@ mod tests {
         assert!(shown(&pages[0]));
 
         // The firewall warning's Review goes straight to Network & firewall.
-        find_buttons(&panel.widget, "launcher-btn")
+        find_all::<Button>(&panel.widget, "launcher-btn")
             .into_iter()
             .find(|b| b.label().as_deref() == Some("Review") && b.ancestor(gtk4::Box::static_type()).is_some_and(|a| a.has_css_class("settings-firewall-warning")))
             .expect("the hub's firewall warning offers Review")
@@ -2911,7 +2910,7 @@ mod tests {
         assert!(shown(&pages[0]));
 
         // Reopening returns to the hub even when Connections was the last page.
-        let btn_launcher = find_buttons(&panel.widget, "android-settings-entry")
+        let btn_launcher = find_all::<Button>(&panel.widget, "android-settings-entry")
             .into_iter()
             .next()
             .expect("the Android destination must offer a navigation button");
@@ -2929,7 +2928,7 @@ mod tests {
         // this test must NOT do: click Record. That would arm the real keymap
         // guard and park the shortcuts of the machine running the tests (see
         // `shortcut::begin_capture`).
-        let record = find_buttons(&panel.widget, "launcher-btn")
+        let record = find_all::<Button>(&panel.widget, "launcher-btn")
             .into_iter()
             .find(|b| b.label().as_deref() == Some("⏺ Record"))
             .expect("the shortcut section must offer a Record button");
@@ -2943,7 +2942,7 @@ mod tests {
 
         // Large preserves the original toolbar scale. Choosing another size
         // updates state, selection styling and the live-dock callback.
-        let size_buttons = find_buttons(&panel.widget, "top-bar-size");
+        let size_buttons = find_all::<Button>(&panel.widget, "top-bar-size");
         assert_eq!(size_buttons.len(), 3);
         assert!(size_buttons[2].has_css_class("top-bar-size-active"));
         size_buttons[0].emit_clicked();
@@ -2953,7 +2952,7 @@ mod tests {
         assert!(!size_buttons[2].has_css_class("top-bar-size-active"));
 
         // One toggle row per detected harness, all ON by default.
-        let toggles = find_buttons(&panel.widget, "harness-toggle");
+        let toggles = find_all::<Button>(&panel.widget, "harness-toggle");
         assert_eq!(
             toggles.len(),
             detected.len(),
@@ -2977,7 +2976,7 @@ mod tests {
 
         app_state.borrow_mut().visible_harnesses = Some(expected.clone());
         (panel.refresh)();
-        let toggles = find_buttons(&panel.widget, "harness-toggle");
+        let toggles = find_all::<Button>(&panel.widget, "harness-toggle");
         assert_eq!(
             toggles[0].label().as_deref(),
             Some("OFF"),
@@ -2988,28 +2987,9 @@ mod tests {
             .all(|b| b.label().as_deref() == Some("ON")));
     }
 
-    /// Every widget carrying `class` in the subtree rooted at `w`.
-    fn find_widgets(w: &gtk4::Widget, class: &str) -> Vec<gtk4::Widget> {
-        let mut out = Vec::new();
-        if w.has_css_class(class) {
-            out.push(w.clone());
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            out.extend(find_widgets(&c, class));
-            child = c.next_sibling();
-        }
-        out
-    }
-
-    /// How many widgets carry `class` in the subtree rooted at `w`.
-    fn count_class(w: &gtk4::Widget, class: &str) -> usize {
-        find_widgets(w, class).len()
-    }
-
     /// The text of the recorder's combo label.
     fn combo_text(w: &gtk4::Widget) -> String {
-        let found = find_widgets(w, "shortcut-combo");
+        let found = find_all::<gtk4::Widget>(w, "shortcut-combo");
         assert_eq!(found.len(), 1, "exactly one combo label");
         found[0]
             .downcast_ref::<Label>()
@@ -3027,7 +3007,7 @@ mod tests {
 
     /// The card header's title, which follows the current page.
     fn title_text(w: &gtk4::Widget) -> String {
-        let found = find_widgets(w, "term-title");
+        let found = find_all::<gtk4::Widget>(w, "term-title");
         assert_eq!(found.len(), 1, "exactly one card title");
         found[0]
             .downcast_ref::<Label>()
@@ -3048,51 +3028,15 @@ mod tests {
             let opened = Rc::clone(&opened);
             move || opened.set(opened.get() + 1)
         }));
-        let panel = build_harness_settings_panel(
-            Rc::new(RefCell::new(AppState::default())),
-            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
-            ConnectionHooks::inert(),
-        );
-        let entries = find_buttons(&panel.widget, "settings-entry");
-        let guide = find_buttons(&panel.widget, "settings-tour-entry");
+        let panel = inert_panel(Rc::new(RefCell::new(AppState::default())));
+        let entries = find_all::<Button>(&panel.widget, "settings-entry");
+        let guide = find_all::<Button>(&panel.widget, "settings-tour-entry");
         assert_eq!(guide.len(), 1, "one Getting started guide entry");
         assert_eq!(entries.first(), guide.first(), "it is the first entry on the Settings home");
-        let titles: Vec<String> = find_labels(guide[0].upcast_ref(), "settings-entry-title")
+        let titles: Vec<String> = find_all::<Label>(guide[0].upcast_ref(), "settings-entry-title")
             .iter().map(|label| label.text().to_string()).collect();
         assert_eq!(titles, ["Getting started guide"]);
         guide[0].emit_clicked();
         assert_eq!(opened.get(), 1, "the entry opens the guide");
-    }
-
-    /// Every label carrying `class` in the subtree rooted at `w`.
-    fn find_labels(w: &gtk4::Widget, class: &str) -> Vec<Label> {
-        let mut out = Vec::new();
-        if w.has_css_class(class) {
-            if let Some(label) = w.downcast_ref::<Label>() {
-                out.push(label.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            out.extend(find_labels(&c, class));
-            child = c.next_sibling();
-        }
-        out
-    }
-
-    /// Every button carrying `class` in the subtree rooted at `w`.
-    fn find_buttons(w: &gtk4::Widget, class: &str) -> Vec<Button> {
-        let mut out = Vec::new();
-        if w.has_css_class(class) {
-            if let Some(b) = w.downcast_ref::<Button>() {
-                out.push(b.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            out.extend(find_buttons(&c, class));
-            child = c.next_sibling();
-        }
-        out
     }
 }

@@ -1139,6 +1139,7 @@ pub(crate) fn kv(parent: &Box, key: &str) -> Label {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::{count_class, find_all, find_first};
 
     #[test]
     #[ignore = "interactive visual preview; run explicitly with one test thread"]
@@ -1175,29 +1176,8 @@ mod tests {
         window.close();
     }
 
-    /// Every widget carrying `class` in the subtree rooted at `w`.
-    fn find(w: &gtk4::Widget, class: &str) -> Vec<gtk4::Widget> {
-        let mut out = Vec::new();
-        if w.has_css_class(class) {
-            out.push(w.clone());
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            out.extend(find(&c, class));
-            child = c.next_sibling();
-        }
-        out
-    }
-
-    fn count_class(w: &gtk4::Widget, class: &str) -> usize {
-        find(w, class).len()
-    }
-
     fn button(w: &gtk4::Widget, class: &str) -> Button {
-        find(w, class)
-            .into_iter()
-            .find_map(|w| w.downcast::<Button>().ok())
-            .unwrap_or_else(|| panic!("no button .{class}"))
+        find_first(w, class).unwrap_or_else(|| panic!("no button .{class}"))
     }
 
     #[test]
@@ -1333,12 +1313,12 @@ mod tests {
             button(overview, class).emit_clicked();
             assert_eq!(visited.borrow().last(), Some(&page));
         }
-        assert!(find(&pages.widget(ConnectionPage::Overview).clone(), "launcher-btn")
+        assert!(find_all::<gtk4::Widget>(&pages.widget(ConnectionPage::Overview).clone(), "launcher-btn")
             .iter()
             .filter_map(|w| w.downcast_ref::<Button>().and_then(|b| b.label()))
             .all(|label| label != "Approve" && label != "Deny"));
         // A waiting request is reviewed in the approval panel.
-        let review = find(overview, "connections-pending")[0]
+        let review = find_all::<gtk4::Widget>(overview, "connections-pending")[0]
             .last_child()
             .and_downcast::<Button>()
             .unwrap();
@@ -1363,7 +1343,7 @@ mod tests {
         // styled states, and every list says what to do when it is empty.
         (pages.refresh)();
         let context = glib::MainContext::default();
-        let chip = find(overview, "term-status-badge")[0].clone().downcast::<Label>().unwrap();
+        let chip = find_all::<gtk4::Widget>(overview, "term-status-badge")[0].clone().downcast::<Label>().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while chip.text() == "Checking…" {
             context.iteration(false);

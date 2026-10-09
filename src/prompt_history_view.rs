@@ -227,18 +227,10 @@ mod tests {
         gtk4::init().unwrap();
         crate::styles::apply_styles();
         let drawer = build("sd_term_1_a", "Codex · ~/project");
-        let mut labels = Vec::new();
-        let mut stack = vec![drawer.widget.clone().upcast::<gtk4::Widget>()];
-        while let Some(widget) = stack.pop() {
-            if let Some(label) = widget.downcast_ref::<gtk4::Label>() {
-                labels.push(label.text().to_string());
-            }
-            let mut child = widget.first_child();
-            while let Some(next) = child {
-                child = next.next_sibling();
-                stack.push(next);
-            }
-        }
+        let labels: Vec<String> = crate::gtk_test::descendants(drawer.widget.upcast_ref())
+            .iter()
+            .filter_map(|widget| widget.downcast_ref::<gtk4::Label>().map(|label| label.text().to_string()))
+            .collect();
         assert!(labels.iter().any(|l| l == "Prompt history"));
         assert!(labels.iter().any(|l| l == "Codex · ~/project"));
         let now = chrono::Local::now();

@@ -750,6 +750,7 @@ pub(crate) fn primary_button(text: &str) -> gtk4::Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::pump_until;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -836,16 +837,6 @@ mod tests {
     fn approval_panel_flow() {
         // GTK may only be used from one thread per process.
         crate::gtk_test::run_in_child_process("pairing_request_ui::tests::approval_panel_flow_child");
-    }
-
-    fn pump_until(what: &str, done: impl Fn() -> bool) {
-        let context = glib::MainContext::default();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            while context.iteration(false) {}
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     fn request(id: &str, name: &str, device_type: &str) -> Value {

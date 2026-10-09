@@ -1161,6 +1161,7 @@ fn row_name(dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::{count_class, find_first};
     use crate::state::{TerminalData, RECENT_DIRS_MAX};
 
     #[test]
@@ -1459,11 +1460,11 @@ mod tests {
         );
         let saved_persist = Rc::clone(&saved);
         let persist = Rc::new(move |s: AppState| saved_persist.borrow_mut().push(s));
-        let entry = find_entry(bar.widget.upcast_ref(), "ws-entry").expect("the field must exist");
+        let entry = find_first::<Entry>(bar.widget.upcast_ref(), "ws-entry").expect("the field must exist");
         assert!(bar.popover.child().is_none(), "empty until it is opened");
 
         let subtitle =
-            find_label(bar.widget.upcast_ref(), "ws-subtitle").expect("the subtitle must exist");
+            find_first::<Label>(bar.widget.upcast_ref(), "ws-subtitle").expect("the subtitle must exist");
         assert_eq!(subtitle.text().as_str(), "working directory for harness");
 
         // The field starts on the home directory, shown as the full path.
@@ -1533,7 +1534,7 @@ mod tests {
         let rows_before = count_class(&bar.popover.child().unwrap(), "ws-row");
         assert_eq!(rows_before, 2, "home and the project are both remembered");
 
-        let del = find_button(&bar.popover.child().unwrap(), "ws-del").expect("a delete button");
+        let del = find_first::<Button>(&bar.popover.child().unwrap(), "ws-del").expect("a delete button");
         del.emit_clicked();
         pump_idle();
         assert_eq!(
@@ -1585,7 +1586,7 @@ mod tests {
         rebuild_recent(&bar.popover, &state, &entry, Rc::clone(&persist), None);
         for _ in 0..RECENT_DIRS_MAX + 2 {
             let Some(child) = bar.popover.child() else { break };
-            let Some(del) = find_button(&child, "ws-del") else {
+            let Some(del) = find_first::<Button>(&child, "ws-del") else {
                 break;
             };
             del.emit_clicked();
@@ -1630,63 +1631,5 @@ mod tests {
         for _ in 0..10 {
             let _ = glib::MainContext::default().iteration(false);
         }
-    }
-
-    fn count_class(w: &gtk4::Widget, class: &str) -> usize {
-        let mut n = if w.has_css_class(class) { 1 } else { 0 };
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            n += count_class(&c, class);
-            child = c.next_sibling();
-        }
-        n
-    }
-
-    fn find_label(w: &gtk4::Widget, class: &str) -> Option<Label> {
-        if let Some(l) = w.downcast_ref::<Label>() {
-            if l.has_css_class(class) {
-                return Some(l.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(found) = find_label(&c, class) {
-                return Some(found);
-            }
-            child = c.next_sibling();
-        }
-        None
-    }
-
-    fn find_entry(w: &gtk4::Widget, class: &str) -> Option<Entry> {
-        if let Some(e) = w.downcast_ref::<Entry>() {
-            if e.has_css_class(class) {
-                return Some(e.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(found) = find_entry(&c, class) {
-                return Some(found);
-            }
-            child = c.next_sibling();
-        }
-        None
-    }
-
-    fn find_button(w: &gtk4::Widget, class: &str) -> Option<Button> {
-        if let Some(b) = w.downcast_ref::<Button>() {
-            if b.has_css_class(class) {
-                return Some(b.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(found) = find_button(&c, class) {
-                return Some(found);
-            }
-            child = c.next_sibling();
-        }
-        None
     }
 }

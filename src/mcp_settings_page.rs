@@ -193,25 +193,15 @@ mod tests {
                 }
             }),
         );
-        fn find(widget: &gtk4::Widget, name: &str) -> Option<Switch> {
-            if widget.widget_name() == name {
-                return widget.clone().downcast().ok();
-            }
-            let mut child = widget.first_child();
-            while let Some(w) = child {
-                if let Some(found) = find(&w, name) {
-                    return Some(found);
-                }
-                child = w.next_sibling();
-            }
-            None
-        }
-        let enabled = find(root.upcast_ref(), "mcp-enabled").unwrap();
-        let output = find(root.upcast_ref(), "mcp-output").unwrap();
-        let launch = find(root.upcast_ref(), "mcp-launch").unwrap();
-        let prompts = find(root.upcast_ref(), "mcp-prompts").unwrap();
-        let controls = find(root.upcast_ref(), "mcp-controls").unwrap();
-        let close = find(root.upcast_ref(), "mcp-close").unwrap();
+        let find = |name: &str| -> Option<Switch> {
+            crate::gtk_test::find_where(root.upcast_ref(), |w| w.widget_name() == name).and_then(|w| w.downcast().ok())
+        };
+        let enabled = find("mcp-enabled").unwrap();
+        let output = find("mcp-output").unwrap();
+        let launch = find("mcp-launch").unwrap();
+        let prompts = find("mcp-prompts").unwrap();
+        let controls = find("mcp-controls").unwrap();
+        let close = find("mcp-close").unwrap();
         assert!(!controls.is_active() && !close.is_active());
         controls.set_active(true);
         close.set_active(true);

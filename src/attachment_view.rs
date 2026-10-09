@@ -894,21 +894,7 @@ mod tests {
         window.set_child(Some(&drawer.widget));
         window.present();
 
-        let rows = |class: &str| {
-            let mut found = Vec::new();
-            let mut stack = vec![drawer.widget.clone().upcast::<gtk4::Widget>()];
-            while let Some(widget) = stack.pop() {
-                if widget.has_css_class(class) {
-                    found.push(widget.clone());
-                }
-                let mut child = widget.last_child();
-                while let Some(next) = child {
-                    child = next.prev_sibling();
-                    stack.push(next);
-                }
-            }
-            found
-        };
+        let rows = |class: &str| crate::gtk_test::find_all::<gtk4::Widget>(drawer.widget.upcast_ref(), class);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while rows("attach-browse-row").len() < 3 {
             assert!(std::time::Instant::now() < until, "the folder never listed");
@@ -1011,21 +997,7 @@ mod tests {
         let session = "sd_term_attach_opened";
         let card_button = button(session.into(), "Claude Code".into(), dir.to_string_lossy().into_owned());
         card_button.emit_clicked();
-        let find = |class: &str| {
-            let mut found = Vec::new();
-            let mut stack = vec![overlay.clone().upcast::<gtk4::Widget>()];
-            while let Some(widget) = stack.pop() {
-                if widget.has_css_class(class) {
-                    found.push(widget.clone());
-                }
-                let mut child = widget.first_child();
-                while let Some(next) = child {
-                    child = next.next_sibling();
-                    stack.push(next);
-                }
-            }
-            found
-        };
+        let find = |class: &str| crate::gtk_test::find_all::<gtk4::Widget>(overlay.upcast_ref(), class);
         let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while find("attach-browse-row").is_empty() {
             assert!(std::time::Instant::now() < until, "the folder never listed");
@@ -1077,21 +1049,7 @@ mod tests {
             crate::mini_terminal::HoverRaiseLock::new(), crate::card_source::CardSource::Local,
         );
         card.open_with_bare_terminal(520, 300);
-        let find = |root: &gtk4::Widget, class: &str| {
-            let mut found = Vec::new();
-            let mut stack = vec![root.clone()];
-            while let Some(widget) = stack.pop() {
-                if widget.has_css_class(class) {
-                    found.push(widget.clone());
-                }
-                let mut child = widget.last_child();
-                while let Some(next) = child {
-                    child = next.prev_sibling();
-                    stack.push(next);
-                }
-            }
-            found
-        };
+        let find = crate::gtk_test::find_all::<gtk4::Widget>;
         let root = card.container.clone().upcast::<gtk4::Widget>();
         let header = find(&root, "term-header").pop().expect("a header");
         let footer = find(&root, "term-footer").pop().expect("a footer");

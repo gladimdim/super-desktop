@@ -748,6 +748,7 @@ impl InviteFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::pump_until;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -765,16 +766,6 @@ mod tests {
     #[test]
     fn invite_flow() {
         crate::gtk_test::run_in_child_process("pairing_invite::tests::invite_flow_child");
-    }
-
-    fn pump_until(what: &str, done: impl Fn() -> bool) {
-        let context = glib::MainContext::default();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            while context.iteration(false) {}
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     fn checks(bridge: Result<(), String>, lan: &str, invitation: Option<Result<String, String>>) -> Preflight {
