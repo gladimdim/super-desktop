@@ -3,7 +3,7 @@
 //! and the request it produces is decided in the approval panel.
 use crate::{
     pairing_invite::{InviteFlow, InviteKind},
-    pairing_request_ui::RequestHooks,
+    pairing_request_ui::{headline, help, page_box, primary_button, RequestHooks},
     peer_client::{PeerError, PeerSummary},
     peer_pairing::{self, Event, Session},
 };
@@ -85,7 +85,7 @@ impl PairingWizard {
         pages.set_hexpand(true);
         widget.append(&pages);
 
-        let choose = page_box();
+        let choose = page_box(PAGE_SPACING);
         let question = headline("What would you like to do?");
         choose.append(&question);
         choose.append(&help(
@@ -105,7 +105,7 @@ impl PairingWizard {
         choose.append(&choose_share);
         pages.add_named(&choose, Some(Page::Choose.name()));
 
-        let connect_page = page_box();
+        let connect_page = page_box(PAGE_SPACING);
         connect_page.append(&headline("Connect to another PC"));
         connect_page.append(&help("1. On the other PC, open Settings → Connections → Add a device → Share this PC (or Add a PC → “Make this PC available”).\n2. Copy the link it shows and paste it below.\n3. Compare the six-digit code and approve on the other PC."));
         let invitation = field(
@@ -136,12 +136,12 @@ impl PairingWizard {
         connect_page.append(&connect);
         pages.add_named(&scroll_page(&connect_page), Some(Page::Connect.name()));
 
-        let share_page = page_box();
+        let share_page = page_box(PAGE_SPACING);
         let share = InviteFlow::new(requests);
         share_page.append(&share.widget);
         pages.add_named(&scroll_page(&share_page), Some(Page::Share.name()));
 
-        let verify_page = page_box();
+        let verify_page = page_box(PAGE_SPACING);
         verify_page.append(&headline("Verify the connection"));
         verify_page.append(&help("Compare this code with the one shown on the other PC. Approve the request there only if both codes match."));
         let verify_code = gtk4::Label::new(Some("…"));
@@ -355,12 +355,8 @@ impl PairingWizard {
 
 }
 
-fn page_box() -> gtk4::Box {
-    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
-    body.add_css_class("launcher-body");
-    body.add_css_class("pc-wizard-page");
-    body
-}
+/// Space between the parts of a wizard page.
+const PAGE_SPACING: i32 = 12;
 
 fn scroll_page(body: &gtk4::Box) -> gtk4::ScrolledWindow {
     let scroll = gtk4::ScrolledWindow::new();
@@ -368,21 +364,6 @@ fn scroll_page(body: &gtk4::Box) -> gtk4::ScrolledWindow {
     scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
     scroll.set_child(Some(body));
     scroll
-}
-
-fn headline(text: &str) -> gtk4::Label {
-    let label = gtk4::Label::new(Some(text));
-    label.add_css_class("settings-entry-title");
-    label.set_xalign(0.0);
-    label
-}
-
-fn help(text: &str) -> gtk4::Label {
-    let label = gtk4::Label::new(Some(text));
-    label.add_css_class("settings-entry-summary");
-    label.set_wrap(true);
-    label.set_xalign(0.0);
-    label
 }
 
 fn status_label() -> gtk4::Label {
@@ -402,14 +383,6 @@ fn field(panel: &gtk4::Box, label: &str, placeholder: &str) -> gtk4::Entry {
     entry.set_hexpand(true);
     panel.append(&entry);
     entry
-}
-
-fn primary_button(text: &str) -> gtk4::Button {
-    let button = gtk4::Button::with_label(text);
-    button.add_css_class("hud-button");
-    button.add_css_class("hud-action-primary");
-    button.set_halign(gtk4::Align::Start);
-    button
 }
 
 fn choice_button(icon: &str, title: &str, description: &str) -> gtk4::Button {
