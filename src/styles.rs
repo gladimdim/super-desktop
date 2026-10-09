@@ -39,6 +39,18 @@ fn icon_radius_css() -> String {
         .collect()
 }
 
+/// One `.tag-dot-N` class per group color in `tag::TAG_COLORS`.
+fn tag_dot_css() -> String {
+    crate::tag::TAG_COLORS
+        .iter()
+        .enumerate()
+        .map(|(index, color)| {
+            format!(".tag-dot-{} {{ background-color: {color}; border-color: {color}; }}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn theme_css(theme: &OmarchyTheme) -> String {
     format!(
 r#"
@@ -498,14 +510,7 @@ popover.ws-pop > contents {{
     opacity: 0.55;
 }}
 
-.tag-dot-1 {{ background-color: #f87171; border-color: #f87171; }}
-.tag-dot-2 {{ background-color: #fb923c; border-color: #fb923c; }}
-.tag-dot-3 {{ background-color: #facc15; border-color: #facc15; }}
-.tag-dot-4 {{ background-color: #4ade80; border-color: #4ade80; }}
-.tag-dot-5 {{ background-color: #22d3ee; border-color: #22d3ee; }}
-.tag-dot-6 {{ background-color: #60a5fa; border-color: #60a5fa; }}
-.tag-dot-7 {{ background-color: #c084fc; border-color: #c084fc; }}
-.tag-dot-8 {{ background-color: #f472b6; border-color: #f472b6; }}
+{tag_dots}
 
 .tag-pop-box {{
     padding: 8px;
@@ -1543,6 +1548,7 @@ separator.launcher-sep {{
         danger_hover_text = theme.readable_text(&theme.red, 0.40, &["#ffffff"]),
         primary_text = theme.readable_text(&theme.accent, 0.15, &[&theme.accent]),
         bright_red = theme.bright_red,
+        tag_dots = tag_dot_css(),
         danger_border = OmarchyTheme::hex_to_rgba(&theme.red, 0.40),
         note_bg = theme.rgba_dark_bg(0.94),
         note_border = theme.rgba_muted(0.35),

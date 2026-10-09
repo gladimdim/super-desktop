@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{Button, Orientation, Popover, PositionType};
 
 /// Fixed 8-color grouping palette. Index 1..=8, 0 = no tag.
-/// Canonical list of the colors also hardcoded as `.tag-dot-N` in styles.rs.
+/// styles.rs builds the `.tag-dot-N` classes from this list.
 pub const TAG_COLORS: [&str; 8] = [
     "#f87171", // red
     "#fb923c", // orange
@@ -38,14 +38,9 @@ pub fn tag_class(tag: u8) -> String {
 /// Swap the color class on a tag button to reflect `tag`.
 pub fn apply_tag(btn: &Button, tag: u8) {
     for n in 1..=TAG_COUNT {
-        let cls = format!("tag-dot-{n}");
-        if btn.has_css_class(&cls) {
-            btn.remove_css_class(&cls);
-        }
+        btn.remove_css_class(&format!("tag-dot-{n}"));
     }
-    if btn.has_css_class("tag-dot-none") {
-        btn.remove_css_class("tag-dot-none");
-    }
+    btn.remove_css_class("tag-dot-none");
     btn.add_css_class(&tag_class(tag));
 }
 
