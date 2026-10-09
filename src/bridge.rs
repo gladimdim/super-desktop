@@ -2023,6 +2023,26 @@ pub fn unlock_firewall() -> Result<String, String> {
     }
 }
 
+/// A connected loopback pair for tests: (client, accepted server socket).
+/// The client gives up reading after 10 s instead of hanging a failed test.
+#[cfg(test)]
+fn loopback_pair() -> (TcpStream, TcpStream) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let (server, _) = listener.accept().unwrap();
+    (client, server)
+}
+
+/// A loopback client whose server end `serve` handles on its own thread.
+#[cfg(test)]
+fn loopback_server<T: Send + 'static>(
+    serve: impl FnOnce(Connection) -> T + Send + 'static,
+) -> (TcpStream, std::thread::JoinHandle<T>) {
+    let (client, server) = loopback_pair();
+    (client, std::thread::spawn(move || serve(Connection::plain(server))))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -2262,6 +2282,36 @@ while True:
         assert_eq!(super::harness_model_effort("shell", "gpt-6-astra high · text"), (None, None));
     }
     use super::*;
+
+    /// A session on the test's private tmux server (see `test_isolation`),
+    /// killed when dropped together with an optional script it runs.
+    struct TmuxSession(String, Option<std::path::PathBuf>);
+    impl TmuxSession {
+        fn start(name: &str, command: &[&str]) -> Self {
+            let made = Command::new("tmux").args(["new-session", "-d", "-s", name]).args(command).output().unwrap();
+            assert!(made.status.success());
+            Self(name.to_string(), None)
+        }
+    }
+    impl Drop for TmuxSession {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+            if let Some(script) = &self.1 {
+                let _ = std::fs::remove_file(script);
+            }
+        }
+    }
+
+    /// Whether `ready` holds within `tries` checks 25 ms apart.
+    fn eventually(tries: usize, mut ready: impl FnMut() -> bool) -> bool {
+        (0..tries).any(|_| {
+            if ready() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+            false
+        })
+    }
 
     /// A masked client text frame, as the phone sends one.
     fn ws_send(client: &mut TcpStream, body: serde_json::Value) {
@@ -2531,6 +2581,120 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         assert_eq!(status, 200);
         for field in ["status", "service", "protocolVersion", "hostname", "lanIp", "bridgeId", "addresses", "tailscaleIp", "port", "time"] {
             assert!(body.get(field).is_some(), "{field} missing from {body}");
+        }
+    }
+
+    /// A device token the bridge accepts, registered once per test process
+    /// in the test-only credential store (`state_path`).
+    fn paired_token() -> &'static str {
+        static TOKEN: OnceLock<String> = OnceLock::new();
+        TOKEN.get_or_init(|| {
+            let token = random_hex(24);
+            let mut state = pair_state().lock().unwrap();
+            state.refresh();
+            state.cfg.devices.push(PairedDevice {
+                id: random_hex(16),
+                name: "reply bytes test".into(),
+                device_type: "android".into(),
+                token_hash: security::digest(token.as_bytes()),
+                expires: now_epoch() + 3600.0,
+            });
+            assert!(state.save());
+            token
+        })
+    }
+
+    /// One request, with or without a device token, that closes its connection.
+    fn http(method: &str, path: &str, token: Option<&str>, body: &str) -> String {
+        let auth = token.map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+        format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\n{auth}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    /// Everything the bridge writes back for `request` on a fresh connection.
+    fn raw_exchange(connection: Connection, mut client: impl Read + Write, request: &str) -> String {
+        let server = std::thread::spawn(move || serve_connection(connection, None));
+        client.write_all(request.as_bytes()).unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        server.join().unwrap();
+        reply
+    }
+
+    fn json_reply(status: &str, body: &str) -> String {
+        format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len())
+    }
+
+    /// The bytes on the wire are the protocol: released phones and PCs parse
+    /// these status lines, headers and bodies.
+    #[test]
+    fn replies_keep_their_exact_status_lines_headers_and_bodies() {
+        let token = Some(paired_token());
+        let pid = std::process::id();
+        let live = format!("sd_term_reply_bytes_{pid}");
+        let missing = format!("sd_term_reply_missing_{pid}");
+        let _session = TmuxSession::start(&live, &["cat"]);
+        let machine = pair_state().lock().unwrap().cfg.bridge_id.clone();
+        // The epoch matches desktop_bridge's replay test: the dedup cache keeps
+        // one epoch at a time, so a second one would evict that test's answer.
+        let command = |machine: &str| serde_json::json!({"requestId":format!("reply-bytes-{pid}"),"machineId":machine,
+            "expectedEpoch":"reply-test-epoch","command":{"type":"setExpanded","cardId":"card-1","expectedRevision":1,"expanded":true}}).to_string();
+        let browser = "GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\nConnection: close\r\n\r\n".to_string();
+        let browser_upload = format!("POST /api/v1/harnesses/{live}/image-prompt HTTP/1.1\r\nOrigin: https://x\r\nConnection: close\r\n\r\n");
+        let oversized = |route: &str| format!("POST /api/v1/harnesses/{live}/{route} HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n", paired_token());
+        let cases = [
+            (browser, "403 Forbidden", r#"{"error":"browser_access_disabled"}"#.to_string()),
+            (browser_upload, "403 Forbidden", r#"{"error":"browser_access_disabled"}"#.into()),
+            (http("GET", "/api/v1/desktop/capabilities", None, ""), "401 Unauthorized", r#"{"error":"not_paired"}"#.into()),
+            (http("GET", "/api/v1/harnesses", None, ""), "401 Unauthorized", r#"{"error":"not_paired","status":"error"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{live}/image-prompt"), None, "{}"), "401 Unauthorized", r#"{"error":"not_paired"}"#.into()),
+            (oversized("image-prompt"), "413 Payload Too Large", r#"{"error":"image_too_large"}"#.into()),
+            (oversized("attachment-prompt"), "413 Payload Too Large", r#"{"error":"attachments_too_large"}"#.into()),
+            (http("GET", "/api/v1/nope", None, ""), "404 Not Found", r#"{"error":"not found"}"#.into()),
+            (http("GET", "/api/v1/theme", token, ""), "200 OK", theme_document().to_string()),
+            (http("GET", "/api/v1/desktop/commands", token, ""), "405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#.into()),
+            (http("POST", "/api/v1/desktop/commands", token, "nope"), "400 Bad Request", r#"{"error":"invalid_command"}"#.into()),
+            (http("POST", "/api/v1/desktop/commands", token, &command("another-machine")), "409 Conflict", r#"{"error":"wrong_machine"}"#.into()),
+            (http("POST", "/api/v1/desktop/commands", token, &command(&machine)), "503 Service Unavailable", r#"{"error":"desktop_unavailable"}"#.into()),
+            (http("GET", "/api/v1/desktop/terminals/bad.id/attach", token, ""), "404 Not Found", r#"{"error":"unknown_card"}"#.into()),
+            (http("GET", "/api/v1/desktop/terminals/a/b/attach", token, ""), "404 Not Found", r#"{"error":"not_found"}"#.into()),
+            (http("GET", "/api/v1/desktop/workspace", token, ""), "503 Service Unavailable", r#"{"error":"desktop_unavailable"}"#.into()),
+            (http("GET", "/api/v1/workspaces", token, ""), "503 Service Unavailable", r#"{"error":"desktop_not_running"}"#.into()),
+            (http("POST", "/api/v1/harnesses", token, r#"{"agentType":"nope"}"#), "400 Bad Request", r#"{"error":"unsupported_harness"}"#.into()),
+            (http("POST", "/api/v1/completions", token, "{}"), "400 Bad Request", r#"{"error":"invalid_sessions"}"#.into()),
+            (http("GET", "/api/v1/harnesses/stream", token, ""), "400 Bad Request", r#"{"error":"expected_websocket","status":"error"}"#.into()),
+            (http("DELETE", "/api/v1/harnesses/other", token, ""), "404 Not Found", r#"{"error":"no_such_session","status":"error"}"#.into()),
+            (http("DELETE", &format!("/api/v1/harnesses/{missing}"), token, ""), "503 Service Unavailable", r#"{"error":"desktop_not_running","status":"error"}"#.into()),
+            (http("GET", &format!("/api/v1/harnesses/{missing}/prompts"), token, ""), "404 Not Found", r#"{"error":"no_such_session","status":"error"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{missing}/keys"), token, r#"{"text":"x"}"#), "404 Not Found", r#"{"error":"no_such_session","status":"error"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{missing}/editor-action"), token, "{}"), "404 Not Found", r#"{"error":"no_such_session","status":"error"}"#.into()),
+            (http("GET", &format!("/api/v1/harnesses/{missing}/input"), token, ""), "404 Not Found", r#"{"error":"no_such_session"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{live}/keys"), token, "nope"), "400 Bad Request", r#"{"error":"bad_json","status":"error"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{live}/keys"), token, &serde_json::json!({"text":"x".repeat(4097)}).to_string()),
+                "413 Payload Too Large", r#"{"error":"text_too_long","status":"error"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{live}/editor-action"), token, "nope"), "400 Bad Request", r#"{"error":"bad_json","status":"error"}"#.into()),
+            (http("POST", &format!("/api/v1/harnesses/{live}/editor-action"), token, "{}"), "400 Bad Request", r#"{"error":"invalid_request","status":"error"}"#.into()),
+            (http("GET", &format!("/api/v1/harnesses/{live}/input"), token, ""), "400 Bad Request", r#"{"error":"expected_websocket"}"#.into()),
+            (http("GET", &format!("/api/v1/harnesses/{live}/stream"), token, ""), "400 Bad Request", r#"{"error":"expected_websocket","status":"error"}"#.into()),
+            (http("GET", "/api/v1/pair/state", None, ""), "403 Forbidden", r#"{"error":"desktop_approval_only"}"#.into()),
+            (http("POST", "/api/v1/pair/poll", None, r#"{"requestId":"unknown"}"#), "404 Not Found", r#"{"error":"request_expired"}"#.into()),
+        ];
+        for (request, status, body) in cases {
+            let (client, server) = loopback_pair();
+            let reply = raw_exchange(Connection::plain(server), client, &request);
+            assert_eq!(reply, json_reply(status, &body), "{request}");
+        }
+        // The owner-only control socket.
+        let local = [
+            (format!("GET /api/v1/ping?{HEALTH_QUERY} HTTP/1.1\r\n\r\n"), "200 OK",
+                format!(r#"{{"port":{BRIDGE_PORT},"protocolVersion":{PROTOCOL_VERSION},"service":"{SERVICE_NAME}","status":"ok"}}"#)),
+            (http("POST", "/api/v1/pair/unknown", None, "{}"), "409 Conflict", r#"{"error":"explicit_desktop_approval_required"}"#.into()),
+            (http("POST", "/api/v1/pair/rejected/remove", None, r#"{"id":"missing"}"#), "404 Not Found", r#"{"error":"not_rejected"}"#.into()),
+        ];
+        for (request, status, body) in local {
+            let (client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+            client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+            let reply = raw_exchange(Connection::local(server), client, &request);
+            assert_eq!(reply, json_reply(status, &body), "{request}");
         }
     }
 

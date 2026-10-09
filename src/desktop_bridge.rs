@@ -719,4 +719,55 @@ mod tests {
         assert_eq!(error.code, 503);
         assert_eq!(error.error, "desktop_not_ready");
     }
+
+    #[test]
+    fn a_replayed_command_answer_is_resent_byte_for_byte() {
+        let machine = pair_state().lock().unwrap().cfg.bridge_id.clone();
+        let request_id = format!("replay-{}", std::process::id());
+        // The same epoch as the bridge's reply-bytes test: the cache keeps one
+        // epoch at a time.
+        let epoch = "reply-test-epoch";
+        let outcome = CommandOutcome {
+            ok: false,
+            epoch: epoch.into(),
+            revision: 7,
+            card_id: Some("card-1".into()),
+            card_revision: Some(3),
+            layout: None,
+            expanded: Some(true),
+            error: Some("conflict".into()),
+        };
+        let document = serde_json::to_value(outcome.into_reply(&machine, &request_id))
+            .unwrap()
+            .to_string();
+        assert!(matches!(
+            dedup::reserve("replay-device", epoch, &request_id),
+            dedup::Reservation::Fresh
+        ));
+        dedup::record(
+            "replay-device",
+            epoch,
+            &request_id,
+            dedup::Answer {
+                code: 409,
+                reason: "Conflict",
+                document: document.clone(),
+            },
+        );
+        let body = serde_json::json!({"requestId":request_id,"machineId":machine,"expectedEpoch":epoch,
+            "command":{"type":"setExpanded","cardId":"card-1","expectedRevision":1,"expanded":true}});
+        let (mut client, server) = loopback_pair();
+        let mut connection = Connection::plain(server);
+        command(&mut connection, "replay-device", &body.to_string());
+        drop(connection);
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).unwrap();
+        assert_eq!(
+            reply,
+            format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{document}",
+                document.len()
+            )
+        );
+    }
 }
