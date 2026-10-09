@@ -47,12 +47,7 @@ pub fn execute(
         let task = Arc::clone(&target.task);
         task.with_idle_until(deadline, || {
             let session = &target.data.session_name;
-            if !session.starts_with("sd_term_")
-                || session.len() > 128
-                || !session
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
-            {
+            if !crate::tmux::is_owned_session(session) {
                 return fail((
                     "unsupported_terminal",
                     "The saved card does not identify a supported local session.",
@@ -252,25 +247,14 @@ fn guarded(
     input: Option<&str>,
     deadline: Instant,
 ) -> Result<bool, Failure> {
-    let mut terms = vec![
-        format!("#{{==:#{{pid}},{}}}", pane.server_pid),
-        format!("#{{==:#{{session_name}},{session}}}"),
-        format!("#{{==:#{{session_id}},{}}}", pane.session_id),
-        format!("#{{==:#{{pane_id}},{}}}", pane.pane_id),
-        format!("#{{==:#{{pane_pid}},{}}}", pane.pid),
-        "#{==:#{pane_dead},0}".into(),
-        "#{==:#{pane_in_mode},0}".into(),
-        "#{==:#{session_windows},1}".into(),
-        "#{==:#{window_panes},1}".into(),
-        "#{==:#{window_linked},0}".into(),
-    ];
-    if input.is_some() {
-        terms.push(format!("#{{==:#{{{MARKER}}},{nonce}}}"));
-    }
-    let guard = terms
-        .into_iter()
-        .reduce(|a, b| format!("#{{&&:{a},{b}}}"))
-        .unwrap();
+    let marker = input.is_some().then(|| format!("#{{==:#{{{MARKER}}},{nonce}}}"));
+    let guard = crate::control_close::pane_guard(
+        session,
+        pane,
+        false,
+        &["#{==:#{pane_in_mode},0}"],
+        marker,
+    );
     let command = match input {
         Some(input) => format!("{input} ; display-message -p SD_INPUT"),
         None => format!(
@@ -303,15 +287,7 @@ mod tests {
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(3)
     }
-    fn run(args: &[&str]) -> String {
-        let output = Process::new("tmux").args(args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{args:?}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
+    use crate::test_isolation::tmux as run;
     fn inspect(target: &Target) -> Result<UiResult, ()> {
         Ok(Ok(Some(Target {
             data: target.data.clone(),
@@ -335,46 +311,21 @@ mod tests {
     }
     #[test]
     fn cli_input_private_tmux_integration() {
-        let root = std::env::temp_dir().join(format!("sd-input-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("tmux")).unwrap();
-        let output = Process::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "control_input::tests::cli_input_tmux_inner",
-                "--nocapture",
-            ])
-            .env("SD_CLI_INPUT_ROOT", &root)
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env("HOME", &root)
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("WAYLAND_SOCKET")
-            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(root);
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_isolation::rerun_in_private_root(
+            "control_input::tests::cli_input_tmux_inner",
+            "SD_CLI_INPUT_ROOT",
+            |root, child| {
+                child.env("XDG_STATE_HOME", root.join("state"));
+            },
         );
     }
+
     #[test]
     fn cli_input_tmux_inner() {
-        let Some(root) = std::env::var_os("SD_CLI_INPUT_ROOT").map(std::path::PathBuf::from) else {
+        let Some((root, _tmux)) = crate::test_isolation::private_root("SD_CLI_INPUT_ROOT")
+        else {
             return;
         };
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Process::new("tmux").arg("kill-server").output();
-            }
-        }
-        let _cleanup = Cleanup;
         let session = "sd_term_input_test";
         let output_file = root.join("received");
         let shell = format!(

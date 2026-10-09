@@ -88,6 +88,201 @@ extern "C" fn cleanup() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A private tmux server for one test: its own socket and no config, never
+/// the user's server. It starts with its first session and is stopped, and
+/// its directory removed, when dropped.
+#[cfg(test)]
+pub struct TmuxServer {
+    directory: PathBuf,
+    socket: String,
+    env: Vec<(String, String)>,
+}
+
+#[cfg(test)]
+impl TmuxServer {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+        // Not under the isolation root: GTK and re-run children have their
+        // own pid but keep the parent's root.
+        let directory =
+            std::env::temp_dir().join(format!("sd-tmux-{}-{serial}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        private_dir(&directory).unwrap();
+        let socket = directory.join("socket").to_str().unwrap().to_string();
+        Self { directory, socket, env: Vec::new() }
+    }
+
+    /// Also give every command, and so the server they start, `name=value`.
+    pub fn env(mut self, name: &str, value: &str) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+
+    /// A scratch directory that lives as long as the server.
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    pub fn socket(&self) -> &str {
+        &self.socket
+    }
+
+    /// `tmux` aimed at this server only.
+    pub fn command(&self) -> Command {
+        tmux_command(&self.socket, &self.env)
+    }
+
+    /// `command`, for code that keeps its own way to make tmux commands.
+    pub fn commands(&self) -> impl Fn() -> Command + Send + Sync + 'static {
+        let (socket, env) = (self.socket.clone(), self.env.clone());
+        move || tmux_command(&socket, &env)
+    }
+
+    /// Runs a tmux command that must succeed; its trimmed output.
+    pub fn run(&self, args: &[&str]) -> String {
+        let out = self.command().args(args).output().expect("tmux must be installed");
+        assert!(out.status.success(), "tmux {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+}
+
+#[cfg(test)]
+fn tmux_command(socket: &str, env: &[(String, String)]) -> Command {
+    let mut command = Command::new(crate::tmux::tmux_bin());
+    command
+        .args(["-S", socket, "-f", "/dev/null"])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE");
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    command
+}
+
+#[cfg(test)]
+impl Drop for TmuxServer {
+    fn drop(&mut self) {
+        let _ = self.command().arg("kill-server").output();
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// Polls `done` until it holds, failing the test after five seconds.
+#[cfg(test)]
+pub fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !done() {
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Environment the test binary's own display and preloads must not reach a
+/// re-run child through.
+#[cfg(test)]
+const DESKTOP_VARIABLES: [&str; 5] = [
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "WAYLAND_SOCKET",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "LD_PRELOAD",
+];
+
+/// Re-runs the test `test` (its full path) alone in a child of this binary,
+/// in a fresh private root: `root_env` names the root, `HOME` is the root and
+/// plain `tmux` reaches only the server in `root/tmux`. `configure` adds the
+/// test's own environment. Fails when the child does.
+#[cfg(test)]
+pub fn rerun_in_private_root(
+    test: &str,
+    root_env: &str,
+    configure: impl FnOnce(&Path, &mut Command),
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+    // /tmp, not $TMPDIR: tmux socket paths must stay short.
+    let root = PathBuf::from(format!("/tmp/sd-root-{}-{serial}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    private_dir(&root).unwrap();
+    private_dir(&root.join("tmux")).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child
+        .args(["--exact", test, "--nocapture"])
+        .env(root_env, &root)
+        .env("TMUX_TMPDIR", root.join("tmux"))
+        .env("HOME", &root);
+    for name in CARD_VARIABLES.iter().chain(&DESKTOP_VARIABLES) {
+        child.env_remove(name);
+    }
+    configure(&root, &mut child);
+    let output = child.output().unwrap();
+    // Also when the child died before its guard ran. $TMUX outranks
+    // TMUX_TMPDIR: left set, this would stop the user's own server.
+    let _ = Command::new("tmux")
+        .arg("kill-server")
+        .env("TMUX_TMPDIR", root.join("tmux"))
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = std::fs::remove_dir_all(&root);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // A misspelt test path would run nothing and pass.
+    assert!(stdout.contains("test result: ok. 1 passed"), "{test} did not run: {stdout}");
+}
+
+/// In the child `rerun_in_private_root` started: the private root, and a
+/// guard that stops the root's tmux server. `None` in any other run.
+#[cfg(test)]
+pub fn private_root(root_env: &str) -> Option<(PathBuf, StopTmuxServer)> {
+    let root = PathBuf::from(std::env::var_os(root_env)?);
+    Some((root, StopTmuxServer))
+}
+
+/// Stops the private root's tmux server when dropped.
+#[cfg(test)]
+pub struct StopTmuxServer;
+
+#[cfg(test)]
+impl Drop for StopTmuxServer {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .arg("kill-server")
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Runs plain `tmux` (the private root's server) and asserts it succeeded;
+/// its output.
+#[cfg(test)]
+pub fn tmux(args: &[&str]) -> String {
+    let output = Command::new("tmux")
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

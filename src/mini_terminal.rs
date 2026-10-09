@@ -2593,7 +2593,7 @@ fn spawn_vte(
     term.add_css_class("term-vte");
     term.set_can_focus(true);
     term.set_focusable(true);
-    let shell_card = matches!(data.borrow().agent_type.as_str(), "shell" | "bash" | "terminal");
+    let shell_card = crate::shell_title::is_regular(&data.borrow().agent_type);
     crate::terminal_clipboard::install(&term, !shell_card);
     crate::terminal_links::install(&term);
 
@@ -3000,25 +3000,16 @@ mod tests {
         use crate::control::ModeAction::*;
         use std::os::unix::fs::PermissionsExt;
         let tmux = crate::tmux::tmux_bin();
-        let root = std::env::temp_dir().join(format!("sd-mode-gtk-{}", std::process::id()));
+        let server = crate::test_isolation::TmuxServer::new();
+        let root = server.directory().to_path_buf();
         std::fs::create_dir_all(root.join("bin")).unwrap();
-        let socket = root.join("socket");
-        struct Cleanup { tmux: String, root: std::path::PathBuf }
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = std::process::Command::new(&self.tmux).arg("-S").arg(self.root.join("socket"))
-                    .arg("kill-server").output();
-                let _ = std::fs::remove_dir_all(&self.root);
-            }
-        }
-        let _cleanup = Cleanup { tmux: tmux.clone(), root: root.clone() };
+        let socket = server.socket();
         for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] {
             std::env::set_var(name, &root);
         }
         std::env::remove_var("TMUX");
         std::env::remove_var("TMUX_PANE");
-        let run = |args: &[&str]| std::process::Command::new(&tmux).arg("-S").arg(&socket)
-            .args(["-f", "/dev/null"]).args(args).output().unwrap();
+        let run = |args: &[&str]| server.command().args(args).output().unwrap();
         let session = "sd_term_mode_missing_suffix";
         assert!(run(&["new-session", "-d", "-s", session, "sleep 60"]).status.success());
         std::fs::write(root.join("bin/tmux"), r#"#!/bin/sh

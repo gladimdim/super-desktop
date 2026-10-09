@@ -285,56 +285,21 @@ mod tests {
     }
     #[test]
     fn cli_launch_tmux_integration() {
-        let root = std::env::temp_dir().join(format!("sd-launch-native-{}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(root.join("tmux")).unwrap();
-        let output = Process::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "control_launch::tests::cli_launch_tmux_inner",
-                "--nocapture",
-            ])
-            .env("SD_CLI_LAUNCH_TEST_ROOT", &root)
-            .env("HOME", &root)
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("WAYLAND_SOCKET")
-            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
-            .env_remove("LD_PRELOAD")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_isolation::rerun_in_private_root(
+            "control_launch::tests::cli_launch_tmux_inner",
+            "SD_CLI_LAUNCH_TEST_ROOT",
+            |root, child| {
+                child.env("XDG_STATE_HOME", root.join("state"));
+            },
         );
     }
 
     #[test]
     fn cli_launch_tmux_inner() {
-        let Some(root) = std::env::var_os("SD_CLI_LAUNCH_TEST_ROOT").map(std::path::PathBuf::from)
+        let Some((root, _tmux)) = crate::test_isolation::private_root("SD_CLI_LAUNCH_TEST_ROOT")
         else {
             return;
         };
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Process::new("tmux")
-                    .arg("kill-server")
-                    .env_remove("TMUX")
-                    .env_remove("TMUX_PANE")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        let _cleanup = Cleanup;
         let workspace = root.join("project with spaces");
         std::fs::create_dir(&workspace).unwrap();
         let script = root.join("stub harness.sh");

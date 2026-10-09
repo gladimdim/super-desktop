@@ -10,6 +10,7 @@
 //! Only text a person submitted is listed (`harness_record::is_user_prompt`,
 //! see "Card titles" in AGENTS.md).
 use crate::harness_record::{is_user_prompt, PromptRecord};
+use crate::tmux::is_owned_session as valid_session;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -90,13 +91,6 @@ fn same_text(a: &str, b: &str) -> bool {
 
 fn journal_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("HOME")?).join(".local/state/super-desktop/prompts"))
-}
-
-/// Session names become file names: only our own `sd_term_*` shape.
-fn valid_session(session: &str) -> bool {
-    session.starts_with("sd_term_")
-        && session.len() <= 128
-        && session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Record one submitted prompt in `session`'s journal.

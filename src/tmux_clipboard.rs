@@ -124,10 +124,20 @@ fn install_bindings_on(base: &[&str], copier: &str) {
     }
 }
 
+/// `set-hook` arguments installing `hook` on `session`'s pane.
+fn hook_args(session: &str, hook: &str) -> [String; 6] {
+    [
+        "set-hook".into(),
+        "-p".into(),
+        "-t".into(),
+        format!("={session}:"),
+        "pane-set-clipboard".into(),
+        hook.into(),
+    ]
+}
+
 fn install_pane_hook_on(base: &[&str], session: &str, hook: &str) {
-    let _ = tmux(base)
-        .args(["set-hook", "-p", "-t", &format!("={session}:"), "pane-set-clipboard", hook])
-        .output();
+    let _ = tmux(base).args(hook_args(session, hook)).output();
 }
 
 /// `install_pane_hook_on` for many sessions, chained with `;` into one tmux
@@ -140,7 +150,7 @@ fn install_pane_hooks_on(base: &[&str], sessions: &[&str], hook: &str) {
             if index > 0 {
                 command.arg(";");
             }
-            command.args(["set-hook", "-p", "-t", &format!("={session}:"), "pane-set-clipboard", hook]);
+            command.args(hook_args(session, hook));
         }
         if !command.output().is_ok_and(|out| out.status.success()) {
             for session in chunk {
@@ -165,16 +175,9 @@ pub fn install_session(session: &str) {
 /// The `set-hook` that `install_session` runs for `session`, as arguments to
 /// chain into the command that creates it. `None` for a session not ours.
 pub fn session_hook_args(session: &str) -> Option<[String; 6]> {
-    session.starts_with(SESSION_PREFIX).then(|| {
-        [
-            "set-hook".into(),
-            "-p".into(),
-            "-t".into(),
-            format!("={session}:"),
-            "pane-set-clipboard".into(),
-            pane_hook_with(CLIPBOARD_COMMAND),
-        ]
-    })
+    session
+        .starts_with(SESSION_PREFIX)
+        .then(|| hook_args(session, &pane_hook_with(CLIPBOARD_COMMAND)))
 }
 
 /// Wrap the copy bindings on the tmux server whose pid is `server`. Key tables
@@ -222,43 +225,27 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, Instant};
 
-    struct Server {
-        socket: String,
-    }
+    struct Server(crate::test_isolation::TmuxServer);
 
     impl Server {
-        fn start(tag: &str) -> Option<Self> {
-            let server = Server { socket: format!("sd-clip-{tag}-{}", std::process::id()) };
+        fn start() -> Option<Self> {
+            let server = Server(crate::test_isolation::TmuxServer::new());
             // Keep an idle session so the server survives between commands.
             let ok = server
                 .cmd()
-                .args(["-f", "/dev/null", "new-session", "-d", "-s", "keepalive", "sleep 60"])
+                .args(["new-session", "-d", "-s", "keepalive", "sleep 60"])
                 .status()
                 .ok()?;
             ok.success().then_some(server)
         }
         fn base(&self) -> [&str; 3] {
-            ["tmux", "-L", &self.socket]
+            ["tmux", "-S", self.0.socket()]
         }
         fn cmd(&self) -> Command {
-            let mut command = Command::new("tmux");
-            // An inherited TMUX/TMUX_PANE would leak into the test server's jobs.
-            command.env_remove("TMUX").env_remove("TMUX_PANE").args(["-L", &self.socket]);
-            command
+            self.0.command()
         }
         fn session(&self, name: &str, script: &str) {
-            let ok = self
-                .cmd()
-                .args(["new-session", "-d", "-s", name, "-x", "80", "-y", "10", script])
-                .status()
-                .unwrap();
-            assert!(ok.success());
-        }
-    }
-
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self.cmd().arg("kill-server").output();
+            self.0.run(&["new-session", "-d", "-s", name, "-x", "80", "-y", "10", script]);
         }
     }
 
@@ -302,7 +289,7 @@ mod tests {
 
     #[test]
     fn bindings_are_wrapped_once_and_keep_the_original_for_other_sessions() {
-        let Some(server) = Server::start("bind") else { return };
+        let Some(server) = Server::start() else { return };
         let base = server.base();
         let before = bound_command(&base, "copy-mode", "MouseDragEnd1Pane").expect("default binding");
         assert_eq!(before, "send-keys -X copy-pipe-and-cancel");
@@ -363,7 +350,7 @@ mod tests {
         if Command::new("script").arg("--version").output().is_err() {
             return;
         }
-        let Some(server) = Server::start("drag") else { return };
+        let Some(server) = Server::start() else { return };
         let dir = scratch("drag");
         let out = dir.join("copied");
         server.cmd().args(["set-option", "-g", "mouse", "on"]).status().unwrap();
@@ -383,7 +370,7 @@ mod tests {
 
     #[test]
     fn existing_card_sessions_are_covered_in_a_few_commands() {
-        let Some(server) = Server::start("existing") else { return };
+        let Some(server) = Server::start() else { return };
         for name in ["sd_term_one", "sd_term_two", "personal"] {
             server.session(name, "sleep 30");
         }
@@ -409,7 +396,7 @@ mod tests {
 
     #[test]
     fn app_osc52_copies_reach_the_clipboard_only_for_card_panes() {
-        let Some(server) = Server::start("osc") else { return };
+        let Some(server) = Server::start() else { return };
         let dir = scratch("osc");
         let out = dir.join("copied");
         // The hook saves tmux's newest buffer, so copies within milliseconds

@@ -200,43 +200,17 @@ fn same(a: &Target, b: &Target) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command as Process, Stdio};
+    use std::process::Command as Process;
     #[test]
     fn viewport_owns_only_its_client_and_expires() {
-        if std::env::var_os("SD_VIEWPORT_TEST").is_none() {
-            let root = std::env::temp_dir().join(format!("sd-viewport-{}", std::process::id()));
-            std::fs::create_dir_all(&root).unwrap();
-            let root = root.canonicalize().unwrap();
-            let output = Process::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "control_viewport::tests::viewport_owns_only_its_client_and_expires",
-                    "--nocapture",
-                ])
-                .env("SD_VIEWPORT_TEST", "1")
-                .env("HOME", &root)
-                .env("TMUX_TMPDIR", &root)
-                .env_remove("TMUX")
-                .env_remove("TMUX_PANE")
-                .env_remove("DISPLAY")
-                .env_remove("WAYLAND_DISPLAY")
-                .output()
-                .unwrap();
-            let _ = std::fs::remove_dir_all(root);
-            assert!(output.status.success(), "{output:?}");
+        let Some((_root, _tmux)) = crate::test_isolation::private_root("SD_VIEWPORT_TEST") else {
+            crate::test_isolation::rerun_in_private_root(
+                "control_viewport::tests::viewport_owns_only_its_client_and_expires",
+                "SD_VIEWPORT_TEST",
+                |_, _| {},
+            );
             return;
-        }
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Process::new("tmux")
-                    .args(["kill-server"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        let _cleanup = Cleanup;
+        };
         let tmux = |args: &[&str]| {
             let output = Process::new("tmux").args(args).output().unwrap();
             assert!(output.status.success(), "{args:?}: {output:?}");

@@ -292,12 +292,7 @@ impl Worker {
     /// so nothing but a card id can reach the request path.
     fn attach_path(&self) -> Result<String> {
         let card_id = &self.card_id;
-        if card_id.is_empty()
-            || card_id.len() > 128
-            || !card_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if !crate::desktop_protocol::valid_card_id(card_id) {
             return Err(PeerError("invalid_peer_response"));
         }
         Ok(format!("/api/v1/desktop/terminals/{card_id}/attach"))

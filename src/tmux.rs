@@ -13,124 +13,53 @@ pub struct AgentConfig {
     pub npx_package: Option<&'static str>,
 }
 
+/// A harness run from `commands` with `default_args`, with no npx fallback.
+const fn agent(
+    name: &'static str,
+    icon: &'static str,
+    commands: &'static [&'static str],
+    default_args: &'static [&'static str],
+) -> AgentConfig {
+    AgentConfig { name, icon, commands, default_args, npx_package: None }
+}
+
 pub fn get_agent_config(agent_type: &str) -> AgentConfig {
     match agent_type {
-        "antigravity" | "agy" => AgentConfig {
-            name: "Antigravity",
-            icon: "🌌",
-            commands: &["agy", "antigravity"],
-            default_args: &["--dangerously-skip-permissions"],
-            npx_package: None,
-        },
-        "claude" => AgentConfig {
-            name: "Claude Code",
-            icon: "⚡",
-            commands: &["claude"],
-            default_args: &["--dangerously-skip-permissions"],
-            npx_package: None,
-        },
-        "codex" => AgentConfig {
-            name: "OpenAI Codex",
-            icon: "🤖",
-            commands: &["codex"],
-            default_args: &["--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"],
-            npx_package: None,
-        },
-        "opencode" => AgentConfig {
-            name: "OpenCode",
-            icon: "🔮",
-            commands: &["opencode"],
-            default_args: &["--mini", "--auto"],
-            npx_package: None,
-        },
-        "grok" => AgentConfig {
-            name: "Grok CLI",
-            icon: "🚀",
-            commands: &["grok"],
-            // Native scrollback is required by the mobile snapshot viewer.
-            // Fullscreen Grok keeps history inside its alternate-screen UI.
-            default_args: &["--minimal", "--dangerously-skip-permissions"],
-            npx_package: None,
-        },
-        "aider" => AgentConfig {
-            name: "Aider",
-            icon: "🧠",
-            commands: &["aider"],
-            default_args: &["--yes-always"],
-            npx_package: None,
-        },
-        "gemini" => AgentConfig {
-            name: "Gemini CLI", icon: "✦", commands: &["gemini"],
-            default_args: &[], npx_package: None,
-        },
-        "hermes" => AgentConfig {
-            name: "Hermes Agent", icon: "🪽", commands: &["hermes"],
-            default_args: &["--cli"], npx_package: None,
-        },
-        "pi" => AgentConfig {
-            name: "Pi", icon: "🥧", commands: &["pi"],
-            default_args: &["--tui-mode", "regular"], npx_package: None,
-        },
-        "openclaw" => AgentConfig {
-            name: "OpenClaw", icon: "🦞", commands: &["openclaw"],
-            default_args: &["tui"], npx_package: None,
-        },
-        "goose" => AgentConfig {
-            name: "Goose", icon: "🪿", commands: &["goose"],
-            default_args: &["session"], npx_package: None,
-        },
-        "qwen" => AgentConfig {
-            name: "Qwen Code", icon: "🌟", commands: &["qwen"],
-            default_args: &[], npx_package: None,
-        },
-        "crush" => AgentConfig {
-            name: "Crush", icon: "💘", commands: &["crush"],
-            default_args: &[], npx_package: None,
-        },
-        "kimi" => AgentConfig {
-            name: "Kimi Code", icon: "🌙", commands: &["kimi"],
-            default_args: &[], npx_package: None,
-        },
-        "kiro" => AgentConfig {
-            name: "Kiro CLI", icon: "🧰", commands: &["kiro-cli"],
-            default_args: &[], npx_package: None,
-        },
-        "cursor" => AgentConfig {
-            name: "Cursor Agent", icon: "🎯", commands: &["cursor-agent"],
-            default_args: &[], npx_package: None,
-        },
+        "antigravity" | "agy" => agent("Antigravity", "🌌", &["agy", "antigravity"], &["--dangerously-skip-permissions"]),
+        "claude" => agent("Claude Code", "⚡", &["claude"], &["--dangerously-skip-permissions"]),
+        "codex" => agent("OpenAI Codex", "🤖", &["codex"], &["--no-alt-screen", "--dangerously-bypass-approvals-and-sandbox"]),
+        "opencode" => agent("OpenCode", "🔮", &["opencode"], &["--mini", "--auto"]),
+        // Native scrollback is required by the mobile snapshot viewer.
+        // Fullscreen Grok keeps history inside its alternate-screen UI.
+        "grok" => agent("Grok CLI", "🚀", &["grok"], &["--minimal", "--dangerously-skip-permissions"]),
+        "aider" => agent("Aider", "🧠", &["aider"], &["--yes-always"]),
+        "gemini" => agent("Gemini CLI", "✦", &["gemini"], &[]),
+        "hermes" => agent("Hermes Agent", "🪽", &["hermes"], &["--cli"]),
+        "pi" => agent("Pi", "🥧", &["pi"], &["--tui-mode", "regular"]),
+        "openclaw" => agent("OpenClaw", "🦞", &["openclaw"], &["tui"]),
+        "goose" => agent("Goose", "🪿", &["goose"], &["session"]),
+        "qwen" => agent("Qwen Code", "🌟", &["qwen"], &[]),
+        "crush" => agent("Crush", "💘", &["crush"], &[]),
+        "kimi" => agent("Kimi Code", "🌙", &["kimi"], &[]),
+        "kiro" => agent("Kiro CLI", "🧰", &["kiro-cli"], &[]),
+        "cursor" => agent("Cursor Agent", "🎯", &["cursor-agent"], &[]),
         // Useful alongside terminal agents, but not an interactive
         // coding-agent chat. Keep its actual role visible.
-        "herder" => AgentConfig {
-            name: "Herder worker", icon: "🐑", commands: &["herder"],
-            default_args: &["worker"], npx_package: None,
-        },
+        "herder" => agent("Herder worker", "🐑", &["herder"], &["worker"]),
         // `code` opens Reasonix' interactive coding session. Deliberately no
         // permission flag: Reasonix keeps its own `workspace-write` sandbox
         // (in-workspace writes approved, everything else asked in the card).
         "reasonix" => AgentConfig {
-            name: "Reasonix",
-            icon: "🧭",
-            commands: &["reasonix"],
-            default_args: &["code"],
             npx_package: Some("reasonix"),
+            ..agent("Reasonix", "🧭", &["reasonix"], &["code"])
         },
         // DeepSeek Harness (`dsh`) ships no terminal UI of its own; `dsh-tui`
         // (alias `dst`, both `dsh --profile dsh-tui`) is its community TUI.
         // No default arguments: permissions come from the dsh profile's
         // presets and there is no bypass flag. No npx fallback either: it
         // needs the global `@deepseek-ai/dsh` install and its dsh-tui profile.
-        "dsh" => AgentConfig {
-            name: "DeepSeek Harness", icon: "🐋", commands: &["dsh-tui", "dst"],
-            default_args: &[], npx_package: None,
-        },
-        _ => AgentConfig {
-            name: "Terminal",
-            icon: "💻",
-            commands: &["bash"],
-            default_args: &[],
-            npx_package: None,
-        },
+        "dsh" => agent("DeepSeek Harness", "🐋", &["dsh-tui", "dst"], &[]),
+        _ => agent("Terminal", "💻", &["bash"], &[]),
     }
 }
 
@@ -140,6 +69,14 @@ fn npx_fallback_command<S: AsRef<str>>(package: &str, args: &[S]) -> String {
     let mut parts = vec!["npx".to_string(), "-y".to_string(), package.to_string()];
     parts.extend(args.iter().map(|a| crate::launch_args::quote(a.as_ref())));
     parts.join(" ")
+}
+
+/// A session name of our own `sd_term_*` shape, safe to use in a tmux target
+/// and as a file name.
+pub fn is_owned_session(session: &str) -> bool {
+    session.starts_with("sd_term_")
+        && session.len() <= 128
+        && session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
 /// Harness types a card can be launched for, in top-bar order.
@@ -346,30 +283,22 @@ pub fn detect_harnesses() -> Vec<HarnessInfo> {
 /// The phone stream asks over its control connection (`tmux_control`).
 #[cfg(test)]
 pub fn pane_grid(session_name: &str) -> Option<crate::desktop_protocol::TerminalSize> {
-    if !session_name.starts_with("sd_term_")
-        || session_name.len() > 128
-        || !session_name
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
+    if !is_owned_session(session_name) {
         return None;
     }
-    let output = Command::new(tmux_bin())
-        .args([
-            "display-message",
-            "-p",
-            "-t",
-            &format!("={session_name}:"),
-            "#{pane_width} #{pane_height}",
-        ])
-        .env_remove("TMUX")
-        .env_remove("TMUX_PANE")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_pane_grid(&String::from_utf8_lossy(&output.stdout))
+    let output = command_stdout(
+        Command::new(tmux_bin())
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={session_name}:"),
+                "#{pane_width} #{pane_height}",
+            ])
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE"),
+    )?;
+    parse_pane_grid(&output)
 }
 
 /// `#{pane_width} #{pane_height}` as a validated grid.
@@ -709,18 +638,7 @@ fn session_state(session_name: &str) -> Option<bool> {
 }
 
 fn read_session_inventory() -> Option<std::collections::HashMap<String, bool>> {
-    let out = Command::new("tmux")
-        .args([
-            "list-sessions",
-            "-F",
-            "#{session_name}::#{detach-on-destroy}",
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = tmux_stdout(&["list-sessions", "-F", "#{session_name}::#{detach-on-destroy}"])?;
     Some(text.lines().filter_map(|line| {
         let (name, value) = line.split_once("::")?;
         Some((name.trim().to_string(), value.trim() == "on"))
@@ -910,7 +828,7 @@ pub fn ensure_session_with_inventory(
 /// inside it becomes a newline in the draft instead of submitting it. Shells
 /// take keys one at a time and submit at once.
 pub fn settles_before_enter(agent: &str) -> bool {
-    !matches!(agent, "shell" | "bash" | "terminal")
+    !crate::shell_title::is_regular(agent)
 }
 
 /// Shortest wait between typed text and Return: longer than the harnesses'
@@ -1201,43 +1119,36 @@ fn inspect_status_impl(
     agent_type: &str,
     screen: Option<&str>,
 ) -> SessionStatus {
-    if let Ok(output) = Command::new("tmux")
-        .args([
-            "list-panes",
-            "-t",
+    let listing = tmux_stdout(&[
+        "list-panes",
+        "-t",
+        session_name,
+        "-F",
+        "#{pane_pid}::#{pane_current_command}::#{pane_dead}::#{pane_height}::#{pane_current_path}",
+    ]);
+    if let Some(first_line) = listing.as_deref().and_then(|text| text.lines().next()) {
+        let mut parts = first_line.splitn(5, "::");
+        let row = PaneRow {
+            pid: parts.next().unwrap_or("").trim().to_string(),
+            cmd: parts.next().unwrap_or("").trim().to_string(),
+            dead: parts.next().unwrap_or("0").trim() == "1",
+            height: parts
+                .next()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(24),
+            cwd: parts.next().unwrap_or("").trim().to_string(),
+            ..Default::default()
+        };
+        return status_for_pane(
             session_name,
-            "-F",
-            "#{pane_pid}::#{pane_current_command}::#{pane_dead}::#{pane_height}::#{pane_current_path}",
-        ])
-        .output()
-    {
-        if output.status.success() {
-            let text = String::from_utf8_lossy(&output.stdout);
-            if let Some(first_line) = text.lines().next() {
-                let mut parts = first_line.splitn(5, "::");
-                let row = PaneRow {
-                    pid: parts.next().unwrap_or("").trim().to_string(),
-                    cmd: parts.next().unwrap_or("").trim().to_string(),
-                    dead: parts.next().unwrap_or("0").trim() == "1",
-                    height: parts
-                        .next()
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(24),
-                    cwd: parts.next().unwrap_or("").trim().to_string(),
-                    ..Default::default()
-                };
-                return status_for_pane(
-                    session_name,
-                    agent_type,
-                    &row,
-                    &|| crate::harness_metadata::inspect(session_name, agent_type),
-                    &mut || match screen {
-                        Some(screen) => Some(screen.to_string()),
-                        None => capture_visible_screen(session_name),
-                    },
-                );
-            }
-        }
+            agent_type,
+            &row,
+            &|| crate::harness_metadata::inspect(session_name, agent_type),
+            &mut || match screen {
+                Some(screen) => Some(screen.to_string()),
+                None => capture_visible_screen(session_name),
+            },
+        );
     }
     exited_status(agent_type)
 }
@@ -1268,16 +1179,12 @@ pub fn status_for_pane(
     let pid = row.pid.clone();
     let cmd = row.cmd.clone();
     let cwd = row.cwd.clone();
-    if row.dead || pid.is_empty() {
-        return SessionStatus { status: "EXITED", label: "○ EXITED", pid, cmd, cwd };
-    }
-
     let p_num = pid.parse::<u32>().unwrap_or(0);
-    if p_num != 0 && !crate::platform::process::exists(p_num) {
+    if row.dead || pid.is_empty() || (p_num != 0 && !crate::platform::process::exists(p_num)) {
         return SessionStatus { status: "EXITED", label: "○ EXITED", pid, cmd, cwd };
     }
 
-    let is_shell_agent = agent_type == "shell" || agent_type == "bash" || agent_type == "terminal";
+    let is_shell_agent = crate::shell_title::is_regular(agent_type);
     let effective_pid = resolve_effective_pid(p_num, is_shell_agent);
     let display_pid = if effective_pid != 0 {
         effective_pid.to_string()
@@ -1322,26 +1229,18 @@ pub fn status_for_pane(
         #[cfg(target_os = "macos")]
         let foreground = crate::platform::process::has_foreground_job(p_num);
         let busy = foreground || (!is_shell_cmd && !cmd.is_empty());
-        return SessionStatus {
-            status: if busy { "WORKING" } else { "IDLE" },
-            label: if busy { "● WORKING" } else { "● IDLE" },
-            pid: display_pid, cmd: display_cmd, cwd,
-        };
+        return working_or_idle(busy, display_pid, display_cmd, cwd);
     }
 
     // Other agents use conservative visible status indicators. Child
     // process existence alone says nothing about a response in progress.
-    if screen().is_some_and(|text| agent_screen_indicates_work(agent_type, &text, row.height)) {
-        return SessionStatus { status: "WORKING", label: "● WORKING", pid: display_pid, cmd: display_cmd, cwd };
-    }
+    let busy = screen().is_some_and(|text| agent_screen_indicates_work(agent_type, &text, row.height));
+    working_or_idle(busy, display_pid, display_cmd, cwd)
+}
 
-    SessionStatus {
-        status: "IDLE",
-        label: "● IDLE",
-        pid: display_pid,
-        cmd: display_cmd,
-        cwd,
-    }
+fn working_or_idle(busy: bool, pid: String, cmd: String, cwd: String) -> SessionStatus {
+    let (status, label) = if busy { ("WORKING", "● WORKING") } else { ("IDLE", "● IDLE") };
+    SessionStatus { status, label, pid, cmd, cwd }
 }
 
 /// One pane of `tmux list-panes -a`: the first pane of each session's active
@@ -1569,21 +1468,12 @@ pub fn capture_file_references(session_name: &str) -> Option<String> {
 }
 
 fn capture_file_references_with(mut command: Command, session_name: &str) -> Option<String> {
-    let output = command.args(["capture-pane", "-p", "-J", "-t", session_name, "-S", "-300"])
-        .output().ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    command_stdout(command.args(["capture-pane", "-p", "-J", "-t", session_name, "-S", "-300"]))
 }
 
 /// Visible rows only: the status fallback for screen-based agents.
 pub fn capture_visible_screen(session_name: &str) -> Option<String> {
-    let output = Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", session_name])
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+    tmux_stdout(&["capture-pane", "-p", "-t", session_name])
 }
 
 /// Capture tmux's real terminal styling as ANSI SGR sequences. The bridge
@@ -1601,20 +1491,13 @@ fn capture_pane(session_name: &str, ansi: bool, history: u32) -> Option<String> 
 
 /// `capture-pane` output, blank or not; `None` when tmux failed.
 fn capture_pane_raw(session_name: &str, ansi: bool, history: u32) -> Option<String> {
-    let mut command = Command::new("tmux");
-    command.arg("capture-pane");
-    if ansi {
-        command.arg("-e");
-    }
     let start = format!("-{history}");
-    let output = command
-        .args(["-p", "-t", session_name, "-S", &start])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
+    let mut args = vec!["capture-pane"];
+    if ansi {
+        args.push("-e");
     }
-    Some(String::from_utf8_lossy(&output.stdout).to_string())
+    args.extend(["-p", "-t", session_name, "-S", &start]);
+    tmux_stdout(&args)
 }
 
 /// `capture_pane_text` of a listed session, reusing the previous capture while
@@ -1804,20 +1687,28 @@ pub fn extract_composer_draft(captured: &str) -> Option<String> {
     }
 }
 
+/// Standard output of `command`; `None` when it could not run or failed.
+fn command_stdout(command: &mut Command) -> Option<String> {
+    let output = command.output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `command_stdout` of `tmux <args>`.
+fn tmux_stdout(args: &[&str]) -> Option<String> {
+    command_stdout(Command::new("tmux").args(args))
+}
+
+/// `stdout` trimmed; `None` when that leaves nothing.
+fn non_empty(stdout: String) -> Option<String> {
+    let trimmed = stdout.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
 fn tmux_display(session_name: &str, format: &str) -> Option<String> {
-    let output = Command::new("tmux")
-        .args(["display-message", "-p", "-t", session_name, format])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    tmux_stdout(&["display-message", "-p", "-t", session_name, format]).and_then(non_empty)
 }
 
 fn sql_escape(s: &str) -> String {
@@ -1900,25 +1791,14 @@ thread_local! {
 fn sqlite_query_uncached(db: &std::path::Path, sql: &str, mode: &str) -> Option<String> {
     #[cfg(test)]
     SQLITE_RUNS.with(|runs| runs.set(runs.get() + 1));
-    let output = Command::new("sqlite3")
-        .args([
-            "-readonly",
-            "-noheader",
-            mode,
-            db.to_str()?,
-            sql,
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    command_stdout(Command::new("sqlite3").args([
+        "-readonly",
+        "-noheader",
+        mode,
+        db.to_str()?,
+        sql,
+    ]))
+    .and_then(non_empty)
 }
 
 /// Read `/proc/<pid>/cmdline` as a space-joined string (`None` when the
@@ -2026,14 +1906,7 @@ fn state_terminal_info() -> std::collections::HashMap<String, (String, Option<St
 /// Panes unknown to `state.json` are kept (nothing proves they are not
 /// opencode).
 fn opencode_panes_live() -> Option<Vec<(String, i64)>> {
-    let list_out = Command::new("tmux")
-        .args(["list-sessions", "-F", "#{session_name}|#{session_created}"])
-        .output()
-        .ok()?;
-    if !list_out.status.success() {
-        return None;
-    }
-    let panes: Vec<(String, i64)> = String::from_utf8_lossy(&list_out.stdout)
+    let panes: Vec<(String, i64)> = tmux_stdout(&["list-sessions", "-F", "#{session_name}|#{session_created}"])?
         .lines()
         .filter_map(|l| {
             let mut p = l.splitn(2, '|');
@@ -2076,15 +1949,9 @@ fn opencode_sessions_since(cwd: &str, not_before: i64) -> Option<Vec<(String, i6
 
 /// `session_name -> pane_pid` for every live pane, in a single `tmux` call.
 fn live_pane_pids() -> Option<std::collections::HashMap<String, u32>> {
-    let out = Command::new("tmux")
-        .args(["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+    let listing = tmux_stdout(&["list-panes", "-a", "-F", "#{session_name} #{pane_pid}"])?;
     let mut map = std::collections::HashMap::new();
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
+    for line in listing.lines() {
         let mut p = line.split_whitespace();
         if let (Some(name), Some(pid)) = (p.next(), p.next()) {
             if name.starts_with("sd_term_") {
@@ -2324,14 +2191,8 @@ fn opencode_prompts_sql(opencode_session_id: &str, limit: usize) -> String {
 pub fn get_opencode_user_prompts_by_id(opencode_session_id: &str, limit: usize) -> Option<Vec<(String, i64)>> {
     let db = opencode_db_path()?;
     let sql = opencode_prompts_sql(opencode_session_id, limit);
-    let output = Command::new("sqlite3")
-        .args(["-readonly", "-json", db.to_str()?, &sql])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(opencode_prompt_rows(&String::from_utf8_lossy(&output.stdout)))
+    let json = command_stdout(Command::new("sqlite3").args(["-readonly", "-json", db.to_str()?, &sql]))?;
+    Some(opencode_prompt_rows(&json))
 }
 
 /// Pure helper: group `sqlite3 -json` rows (`id`, `t`, `d`) into prompts.
@@ -2400,6 +2261,41 @@ mod tests {
         ensure_session_with_agent_id(session, agent, custom, None, dir)
     }
     use super::*;
+    use crate::test_isolation::wait_until;
+
+    /// `tmux <args>` on this test process's own server (see `test_isolation`):
+    /// whether it ran and succeeded.
+    fn tmux(args: &[&str]) -> bool {
+        Command::new("tmux")
+            .args(args)
+            .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
+            .output()
+            .is_ok_and(|out| out.status.success())
+    }
+
+    fn has_tmux() -> bool {
+        tmux(&["-V"])
+    }
+
+    /// Kills the listed sessions on drop so a failing assertion cannot leak
+    /// harness sessions into the test's tmux server.
+    struct SessionCleanup(Vec<String>);
+
+    impl Drop for SessionCleanup {
+        fn drop(&mut self) {
+            for name in &self.0 {
+                tmux(&["kill-session", "-t", name]);
+            }
+        }
+    }
+
+    /// A fresh session on the test server, killed when the guard drops.
+    fn new_session(name: &str, args: &[&str]) -> SessionCleanup {
+        tmux(&["kill-session", "-t", name]);
+        tmux(&[&["new-session", "-d", "-s", name], args].concat());
+        SessionCleanup(vec![name.to_string()])
+    }
 
     #[test]
     fn harnesses_wait_before_return_and_shells_do_not() {
@@ -2679,18 +2575,13 @@ mod tests {
     #[test]
     fn test_shell_idle_and_working() {
         let sess = "test_sd_tmux_idle_test_session";
-        let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
-        let _ = Command::new("tmux").args(["new-session", "-d", "-s", sess, "bash", "--norc", "--noprofile"]).output();
+        let _session = new_session(sess, &["bash", "--norc", "--noprofile"]);
 
         let mut status_idle = inspect_status(sess, "bash");
-        for _ in 0..20 {
-            if status_idle.status == "IDLE" {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
+        wait_until("the shell at its prompt to be IDLE", || {
             status_idle = inspect_status(sess, "bash");
-        }
-        assert_eq!(status_idle.status, "IDLE", "Shell at prompt should be IDLE");
+            status_idle.status == "IDLE"
+        });
         assert!(
             std::path::Path::new(&status_idle.cwd).is_dir(),
             "tmux must expose its live pane cwd, got {:?}",
@@ -2700,7 +2591,7 @@ mod tests {
         assert_eq!(inspect_status_with_screen(sess, "bash", &screen).status, status_idle.status);
 
         // Send a sleep command
-        let _ = Command::new("tmux").args(["send-keys", "-t", sess, "sleep 1.5", "Enter"]).output();
+        tmux(&["send-keys", "-t", sess, "sleep 1.5", "Enter"]);
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         let status_busy = inspect_status(sess, "bash");
@@ -2709,25 +2600,16 @@ mod tests {
         assert_eq!(inspect_status_with_screen(sess, "bash", &screen).status, status_busy.status);
 
         // Wait for sleep to complete
-        let mut status_done = inspect_status(sess, "bash");
-        for _ in 0..30 {
-            if status_done.status == "IDLE" {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            status_done = inspect_status(sess, "bash");
-        }
-        assert_eq!(status_done.status, "IDLE", "Shell after command completes should return to IDLE");
-
-        let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
+        wait_until("the shell to return to IDLE after the command", || {
+            inspect_status(sess, "bash").status == "IDLE"
+        });
     }
 
     #[test]
     fn test_agent_idle_detection() {
         if which("agy").is_some() {
             let sess = "test_sd_tmux_agy_idle_test";
-            let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
-            let _ = Command::new("tmux").args(["new-session", "-d", "-s", sess, "agy"]).output();
+            let _session = new_session(sess, &["agy"]);
 
             // Wait for agent to finish initialization and arrive at the prompt
             let mut idle = false;
@@ -2742,7 +2624,6 @@ mod tests {
             }
 
             assert!(idle, "AI agent waiting at prompt must be detected as IDLE");
-            let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
         }
     }
 
@@ -2840,30 +2721,20 @@ mod tests {
     /// `set-option` probe on the window-build path.
     #[test]
     fn test_session_state_reports_existence_and_pin_in_one_call() {
-        let has_tmux = Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_tmux {
+        if !has_tmux() {
             return;
         }
         let sess = "test_sd_session_state_probe";
-        let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
-        let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", sess, "-c", "/tmp", "/bin/bash"])
-            .output();
+        let _session = new_session(sess, &["-c", "/tmp", "/bin/bash"]);
 
         assert_eq!(session_state("test_sd_session_state_missing"), None);
         // Inherits the server config until pinned.
-        let _ = Command::new("tmux")
-            .args(["set-option", "-t", sess, "detach-on-destroy", "off"])
-            .output();
+        tmux(&["set-option", "-t", sess, "detach-on-destroy", "off"]);
         assert_eq!(session_state(sess), Some(false));
         pin_client_exit(sess);
         assert_eq!(session_state(sess), Some(true));
 
-        let _ = Command::new("tmux").args(["kill-session", "-t", sess]).output();
+        tmux(&["kill-session", "-t", sess]);
         assert_eq!(session_state(sess), None);
     }
 
@@ -2873,42 +2744,21 @@ mod tests {
     /// Runs on a private tmux server in a child process.
     #[test]
     fn start_session_sets_up_a_card_in_one_tmux_process() {
-        let root = std::env::temp_dir().join(format!("sd-start-session-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("tmux")).unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tmux::tests::start_session_inner", "--nocapture"])
-            .env("SD_START_SESSION_ROOT", &root)
-            .env("HOME", &root)
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output()
-            .unwrap();
-        // $TMUX outranks TMUX_TMPDIR: left set (tests run inside a card), this
-        // would kill the user's own tmux server instead of the private one.
-        let _ = Command::new("tmux")
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .arg("kill-server")
-            .output();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_isolation::rerun_in_private_root(
+            "tmux::tests::start_session_inner",
+            "SD_START_SESSION_ROOT",
+            |root, child| {
+                child.env("XDG_STATE_HOME", root.join("state"));
+            },
         );
     }
 
     #[test]
     fn start_session_inner() {
-        let Some(root) = std::env::var_os("SD_START_SESSION_ROOT") else {
+        let Some((root, _tmux)) = crate::test_isolation::private_root("SD_START_SESSION_ROOT") else {
             return;
         };
-        let cwd = std::path::PathBuf::from(&root).to_string_lossy().into_owned();
+        let cwd = root.to_string_lossy().into_owned();
         let tmux = |args: &[&str]| {
             let out = Command::new("tmux").args(args).output().unwrap();
             String::from_utf8_lossy(&out.stdout).into_owned()
@@ -3560,65 +3410,32 @@ mod tests {
         );
     }
 
-    fn pane_cmdline(sess: &str) -> Option<String> {
-        let out = Command::new("tmux")
-            .args(["display-message", "-p", "-t", sess, "#{pane_pid}"])
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-        Some(
-            raw.iter()
-                .map(|b| if *b == 0 { ' ' } else { *b as char })
-                .collect(),
-        )
-    }
-
     #[test]
     fn test_ensure_session_recreates_with_resume_command() {
         // End-to-end reboot simulation: kill the tmux session, then verify
         // ensure_session() recreates it with the agent's resume command.
         // python3 tolerates trailing CLI flags (they land in sys.argv) and
         // sleeps, so the pane stays alive long enough to inspect.
-        let has_tmux = Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
         let has_py = which("python3").is_some();
-        if !has_tmux || !has_py {
+        if !has_tmux() || !has_py {
             return;
         }
         for (sess, agent, marker) in [
             ("test_sd_resume_claude", "claude", "--continue"),
             ("test_sd_resume_codex", "codex", "resume --last"),
         ] {
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", sess])
-                .output();
+            tmux(&["kill-session", "-t", sess]);
+            let _cleanup = SessionCleanup(vec![sess.to_string()]);
             ensure_session(
                 sess,
                 agent,
                 Some("python3 -c 'import time; time.sleep(30)'"),
                 None,
             );
-            let mut ok = false;
-            for _ in 0..40 {
-                if let Some(cmdline) = pane_cmdline(sess) {
-                    if cmdline.contains(marker) && cmdline.contains("sleep") {
-                        ok = true;
-                        break;
-                    }
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-            let _ = Command::new("tmux")
-                .args(["kill-session", "-t", sess])
-                .output();
-            assert!(ok, "recreated {sess} should run the resume command");
+            let pane_cmdline = || read_cmdline(tmux_display(sess, "#{pane_pid}")?.parse().ok()?);
+            wait_until(&format!("recreated {sess} to run the resume command"), || {
+                pane_cmdline().is_some_and(|cmdline| cmdline.contains(marker) && cmdline.contains("sleep"))
+            });
         }
     }
 
@@ -3637,32 +3454,13 @@ mod tests {
 
     /// Read tmux option output: `tmux show-options <args>`.
     fn show_option(args: &[&str]) -> String {
-        let out = Command::new("tmux")
-            .args(["show-options"])
-            .args(args)
-            .output()
-            .expect("tmux show-options");
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        tmux_stdout(&[&["show-options"], args].concat()).unwrap_or_default().trim().to_string()
     }
 
     /// Session-local value of `detach-on-destroy`; empty when the session has
     /// no override of its own (i.e. it inherits the user's global setting).
     fn session_detach_on_destroy(sess: &str) -> String {
         show_option(&["-t", sess, "-v", "detach-on-destroy"])
-    }
-
-    /// Kills the listed sessions on drop so a failing assertion cannot leak
-    /// harness sessions into the user's running tmux server.
-    struct SessionCleanup(Vec<String>);
-
-    impl Drop for SessionCleanup {
-        fn drop(&mut self) {
-            for name in &self.0 {
-                let _ = Command::new("tmux")
-                    .args(["kill-session", "-t", name])
-                    .output();
-            }
-        }
     }
 
     #[test]
@@ -3685,12 +3483,7 @@ mod tests {
         assert!(pane_grid("sd_term_bad name").is_none());
         assert!(pane_grid("").is_none());
 
-        let has_tmux = Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_tmux {
+        if !has_tmux() {
             return;
         }
         let (sess, _cmd) = create_session("shell", Some("/bin/bash"), None);
@@ -3711,12 +3504,7 @@ mod tests {
         // actually run in that folder, because every agent scopes its own
         // history/resume to the cwd — and Reasonix keys its workspace write
         // lease on it, which is what makes parallel cards collide at `$HOME`.
-        let has_tmux = Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        if !has_tmux {
+        if !has_tmux() {
             return;
         }
 
@@ -3755,9 +3543,7 @@ mod tests {
         // 2. The same card after a tmux server restart (reboot) resumes in that
         //    same folder — resuming in another cwd would attach the card to a
         //    different history.
-        let _ = Command::new("tmux")
-            .args(["kill-session", "-t", &sess])
-            .output();
+        tmux(&["kill-session", "-t", &sess]);
         ensure_session_with_agent_id(&sess, "shell", Some("/bin/bash"), None, Some(&dir_s));
         assert_eq!(
             pane_dir(&sess).as_deref(),
@@ -3810,9 +3596,7 @@ mod tests {
         // config) only exist once a session has been created.
         let probe = "test_sd_detach_on_destroy_probe";
         let mut cleanup = SessionCleanup(vec![probe.to_string()]);
-        let _ = Command::new("tmux")
-            .args(["new-session", "-d", "-s", probe, "-c", "/tmp", "/bin/bash"])
-            .output();
+        tmux(&["new-session", "-d", "-s", probe, "-c", "/tmp", "/bin/bash"]);
         let global_before = show_option(&["-gv", "detach-on-destroy"]);
         assert!(
             !global_before.is_empty(),
@@ -3822,9 +3606,7 @@ mod tests {
         // tmux < 3.2 kept detach-on-destroy as a server option, where the
         // per-session form is rejected; the fix is then a no-op (and so is
         // this test).
-        let _ = Command::new("tmux")
-            .args(["set-option", "-t", probe, "detach-on-destroy", "off"])
-            .output();
+        tmux(&["set-option", "-t", probe, "detach-on-destroy", "off"]);
         if session_detach_on_destroy(probe).is_empty() {
             eprintln!("skipping: this tmux has no session-scoped detach-on-destroy");
             return;
@@ -3845,9 +3627,7 @@ mod tests {
 
         // Restored/legacy sessions (or ones created before this fix) inherit
         // the config value; startup must re-pin them too.
-        let _ = Command::new("tmux")
-            .args(["set-option", "-t", &sess, "detach-on-destroy", "off"])
-            .output();
+        tmux(&["set-option", "-t", &sess, "detach-on-destroy", "off"]);
         assert_eq!(session_detach_on_destroy(&sess), "off");
         ensure_session_with_agent_id(&sess, "shell", Some("/bin/bash"), None, None);
         assert_eq!(
@@ -4037,32 +3817,18 @@ mod tests {
 
     #[test]
     fn file_references_capture_joins_real_terminal_soft_wraps() {
-        let socket = format!("sd-files-{}", unique_session_name());
-        struct Cleanup(String);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["-L", &self.0, "kill-server"]).output();
-            }
-        }
-        let _cleanup = Cleanup(socket.clone());
-        let made = Command::new("tmux").args([
-            "-L", &socket, "-f", "/dev/null", "new-session", "-d", "-x", "35", "-y", "10", "-s", "files",
+        let server = crate::test_isolation::TmuxServer::new();
+        server.run(&[
+            "new-session", "-d", "-x", "35", "-y", "10", "-s", "files",
             "printf '%s\\n' 'Created image (game/assets/art/menu/prisoners_at_dawn_v1.png).'; sleep 30",
-        ]).output().unwrap();
-        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
-        let start = std::time::Instant::now();
-        loop {
-            let mut command = Command::new("tmux");
-            command.args(["-L", &socket]);
-            let text = capture_file_references_with(command, "files").unwrap();
-            if text.contains("prisoners_at_dawn_v1.png") {
-                let paths = crate::asset_references::candidates(&text, |p| p.ends_with(".png"));
-                assert!(paths.contains(&"game/assets/art/menu/prisoners_at_dawn_v1.png".into()), "{paths:?}");
-                break;
-            }
-            assert!(start.elapsed() < std::time::Duration::from_secs(3), "{text}");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        ]);
+        let mut text = String::new();
+        wait_until("the wrapped path in the capture", || {
+            text = capture_file_references_with(server.command(), "files").unwrap();
+            text.contains("prisoners_at_dawn_v1.png")
+        });
+        let paths = crate::asset_references::candidates(&text, |p| p.ends_with(".png"));
+        assert!(paths.contains(&"game/assets/art/menu/prisoners_at_dawn_v1.png".into()), "{paths:?}");
     }
 
     /// What reuse relies on, against a real tmux server: an idle pane's row
@@ -4070,18 +3836,8 @@ mod tests {
     #[test]
     fn pane_stamp_changes_with_output_only() {
         let session = format!("test_sd_{}", unique_session_name());
-        struct Cleanup(String);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
-            }
-        }
-        let made = Command::new("tmux")
-            .args(["new-session", "-d", "-x", "80", "-y", "20", "-s", &session, "cat"])
-            .output()
-            .unwrap();
-        assert!(made.status.success());
-        let _cleanup = Cleanup(session.clone());
+        assert!(tmux(&["new-session", "-d", "-x", "80", "-y", "20", "-s", &session, "cat"]));
+        let _cleanup = SessionCleanup(vec![session.clone()]);
         let row = || match pane_snapshot().expect("tmux answers").lookup(&session) {
             PaneLookup::Row(row) => row.clone(),
             _ => panic!("session row missing"),
@@ -4111,8 +3867,7 @@ mod tests {
         assert_eq!(reused.as_deref(), Some(before.as_str()));
         // Output (the pty's echo and cat's copy) changes the stamp at once.
         let marker = "stamp-marker";
-        let sent = Command::new("tmux").args(["send-keys", "-t", &session, marker, "Enter"]).output().unwrap();
-        assert!(sent.status.success());
+        assert!(tmux(&["send-keys", "-t", &session, marker, "Enter"]));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         let mut screen = before.clone();
         while !screen.contains(marker) && std::time::Instant::now() < deadline {

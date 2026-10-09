@@ -37,15 +37,7 @@ impl PtyAttachment {
     /// caller reads it before the upgrade so a viewer can be told why it has no
     /// stream yet, and the returned grid is the one its emulator must match.
     pub fn open_at(session: &str, grid: TerminalSize) -> io::Result<(Self, TerminalSize)> {
-        Self::open_with(|| Command::new(crate::tmux::tmux_bin()), session, grid)
-    }
-
-    fn open_with(
-        tmux_command: impl Fn() -> Command,
-        session: &str,
-        grid: TerminalSize,
-    ) -> io::Result<(Self, TerminalSize)> {
-        Ok((Self::spawn(tmux_command, session, grid)?, grid))
+        Ok((Self::spawn(|| Command::new(crate::tmux::tmux_bin()), session, grid)?, grid))
     }
 
     /// Local CLI construction with a bounded preflight and no tmux autostart.
@@ -54,54 +46,15 @@ impl PtyAttachment {
         deadline: std::time::Instant,
     ) -> io::Result<(Self, TerminalSize)> {
         let size = Self::cli_grid(session, deadline)?;
-        let (master, slave) = open_pty(size)?;
-        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0
-            || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
         let mut command = Command::new(crate::tmux::tmux_bin());
-        command
-            .args([
-                "-N",
-                "-2",
-                "attach-session",
-                "-f",
-                "ignore-size",
-                "-t",
-                &format!("={session}"),
-            ])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env("TERM", "xterm-256color")
-            .env("COLORTERM", "truecolor")
-            .stdin(Stdio::from(slave.try_clone()?))
-            .stdout(Stdio::from(slave.try_clone()?))
-            .stderr(Stdio::from(slave));
-        crate::platform::pty::configure_child_session(&mut command);
-        let child = command.spawn()?;
-        Ok((
-            Self {
-                master,
-                child,
-                session: session.into(),
-                prompt_input: crate::prompt_history::InputTracker::default(),
-            },
-            size,
-        ))
+        command.arg("-N");
+        Ok((Self::attach(command, session, size)?, size))
     }
     pub(crate) fn cli_grid(
         session: &str,
         deadline: std::time::Instant,
     ) -> io::Result<TerminalSize> {
-        if !session.starts_with("sd_term_")
-            || session.len() > 128
-            || !session
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if !crate::tmux::is_owned_session(session) {
             return Err(invalid("invalid_owned_session_name"));
         }
         let mut command = Command::new(crate::tmux::tmux_bin());
@@ -145,12 +98,7 @@ impl PtyAttachment {
         size: TerminalSize,
     ) -> io::Result<Self> {
         size.validate().map_err(invalid)?;
-        if !session.starts_with("sd_term_")
-            || session.len() > 128
-            || !session
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if !crate::tmux::is_owned_session(session) {
             return Err(invalid("invalid_owned_session_name"));
         }
         // A tmux client whose terminal is exactly the grid the host already
@@ -162,15 +110,14 @@ impl PtyAttachment {
         if client_grid(&tmux_command, session)? != size {
             return Err(invalid("host_grid_mismatch"));
         }
-        let mut command = tmux_command();
+        Self::attach(tmux_command(), session, size)
+    }
+
+    /// A tmux client for `session` (already validated) on a new private PTY of
+    /// `size`.
+    fn attach(mut command: Command, session: &str, size: TerminalSize) -> io::Result<Self> {
         let (master, slave) = open_pty(size)?;
-        let flags = unsafe { libc::fcntl(master.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0
-            || unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) }
-                < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        set_nonblocking(master.as_raw_fd())?;
         command
             .args([
                 "-2",
@@ -277,12 +224,7 @@ pub fn grid(session: &str) -> io::Result<TerminalSize> {
 /// from the live window size, which is what makes attaching at it a no-op for
 /// the host's own grid. Reads no state and changes no option.
 fn client_grid(tmux_command: &impl Fn() -> Command, session: &str) -> io::Result<TerminalSize> {
-    if !session.starts_with("sd_term_")
-        || session.len() > 128
-        || !session
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
+    if !crate::tmux::is_owned_session(session) {
         return Err(invalid("invalid_owned_session_name"));
     }
     let output = tmux_command()
@@ -338,29 +280,29 @@ fn open_pty(size: TerminalSize) -> io::Result<(File, File)> {
     crate::platform::pty::open(size.columns, size.rows)
 }
 
+/// Put `fd` in non-blocking mode.
+pub(crate) fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use crate::test_isolation::TmuxServer;
     use std::time::Instant;
 
     const SESSION: &str = "sd_term_transport_probe";
 
     /// Every test gets its own server/socket/config. Never touches user tmux.
-    struct Server {
-        directory: PathBuf,
-    }
+    struct Server(TmuxServer);
 
     impl Server {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let directory =
-                std::env::temp_dir().join(format!("sd-pty-{}-{serial}", std::process::id()));
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let server = Self { directory };
+            let server = Self(TmuxServer::new().env("PS1", "SD_PROMPT> "));
             server.run(&[
                 "new-session",
                 "-d",
@@ -382,32 +324,11 @@ mod tests {
         }
 
         fn command(&self) -> Command {
-            let mut command = Command::new(crate::tmux::tmux_bin());
-            command
-                .args([
-                    "-S",
-                    self.directory.join("socket").to_str().unwrap(),
-                    "-f",
-                    "/dev/null",
-                ])
-                .env_remove("TMUX")
-                .env_remove("TMUX_PANE")
-                .env("PS1", "SD_PROMPT> ");
-            command
+            self.0.command()
         }
 
         fn run(&self, args: &[&str]) -> String {
-            let out = self
-                .command()
-                .args(args)
-                .output()
-                .expect("tmux must be installed for transport tests");
-            assert!(
-                out.status.success(),
-                "tmux {args:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            self.0.run(args)
         }
 
         fn attach(&self, columns: u16, rows: u16) -> PtyAttachment {
@@ -435,16 +356,6 @@ mod tests {
             self.run(&["list-clients", "-t", SESSION, "-F", "#{client_pid}"])
                 .lines()
                 .count()
-        }
-    }
-
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self
-                .command()
-                .args(["kill-session", "-t", SESSION])
-                .output();
-            let _ = std::fs::remove_dir_all(&self.directory);
         }
     }
 
@@ -484,14 +395,9 @@ mod tests {
     }
 
     fn wait_clients(server: &Server, expected: usize) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while server.clients() != expected {
-            assert!(
-                Instant::now() < deadline,
-                "tmux clients did not reach {expected}"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::test_isolation::wait_until(&format!("{expected} tmux clients"), || {
+            server.clients() == expected
+        });
     }
 
     #[test]
@@ -602,16 +508,7 @@ mod tests {
         assert_eq!(server.clients(), 0);
         assert_eq!(server.pane(), before);
         // The host's own grid is admitted, and attaching at it is a no-op.
-        let (attachment, grid) = PtyAttachment::open_with(
-            || server.command(),
-            SESSION,
-            TerminalSize {
-                columns: 120,
-                rows: 40,
-            },
-        )
-        .unwrap();
-        assert_eq!(grid, TerminalSize { columns: 120, rows: 40 });
+        let attachment = server.attach(120, 40);
         assert_eq!(server.pane(), before);
         drop(attachment);
         assert_eq!(server.pane(), before);

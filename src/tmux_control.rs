@@ -145,16 +145,7 @@ fn read_lines(output: impl std::io::Read, sender: SyncSender<String>, activity: 
 }
 
 fn hex_keys(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len().saturating_mul(3).saturating_sub(1));
-    for (i, &byte) in bytes.iter().enumerate() {
-        if i != 0 {
-            out.push(' ');
-        }
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 15) as usize] as char);
-    }
-    out
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join(" ")
 }
 
 impl Control {
@@ -292,11 +283,8 @@ impl Control {
     }
 
     pub fn send(&mut self, text: &str, enter: bool) -> Result<(), String> {
-        if !text.is_empty() {
-            // Hex bytes keep all user input out of the tmux command language.
-            let bytes = hex_keys(text.as_bytes());
-            self.command(&format!("send-keys -t {} -H {bytes}", self.pane))?;
-        }
+        // Hex bytes keep all user input out of the tmux command language.
+        self.send_bytes(text.as_bytes())?;
         if enter {
             self.command(&format!("send-keys -t {} Enter", self.pane))?;
         }
@@ -332,10 +320,7 @@ impl Control {
     /// Session names this client can address safely inside a quoted target.
     fn safe_session(&self) -> Option<&str> {
         let session = self.session.as_str();
-        (!session.is_empty()
-            && session.len() <= 128
-            && session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
-        .then_some(session)
+        crate::desktop_protocol::valid_card_id(session).then_some(session)
     }
 
     /// The same inventory row `tmux::pane_snapshot` reads for this session,

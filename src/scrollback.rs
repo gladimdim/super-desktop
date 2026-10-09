@@ -201,54 +201,30 @@ impl JumpButton {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::test_isolation::TmuxServer;
 
     /// Own server, socket and config per test. Never touches the user's tmux.
-    pub(crate) struct Server {
-        directory: PathBuf,
-    }
+    pub(crate) struct Server(TmuxServer);
 
     impl Server {
         /// A server with `session` holding far more output than its screen.
         pub(crate) fn with_history(session: &str) -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let directory =
-                std::env::temp_dir().join(format!("sd-scrollback-{}-{serial}", std::process::id()));
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let server = Self { directory };
+            let server = Self(TmuxServer::new());
             server.run(&["new-session", "-d", "-s", session, "-x", "80", "-y", "20",
                 "sh -c 'seq 1 400; exec sleep 60'"]);
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while server.run(&["display-message", "-p", "-t", &target(session), "#{history_size}"])
-                .parse::<u32>().unwrap_or(0) < 300
-            {
-                assert!(Instant::now() < deadline, "the output never reached the history");
-                std::thread::sleep(Duration::from_millis(20));
-            }
+            crate::test_isolation::wait_until("the output to reach the history", || {
+                server.run(&["display-message", "-p", "-t", &target(session), "#{history_size}"])
+                    .parse::<u32>().unwrap_or(0) >= 300
+            });
             server
         }
 
-        fn socket(&self) -> PathBuf {
-            self.directory.join("socket")
-        }
-
-        pub(crate) fn command(&self) -> Command {
-            command_for(&self.socket())
-        }
-
         pub(crate) fn run(&self, args: &[&str]) -> String {
-            let out = self.command().args(args).output().expect("tmux must be installed");
-            assert!(out.status.success(), "tmux {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            self.0.run(args)
         }
 
         pub(crate) fn scrollback(&self) -> Scrollback {
-            let socket = self.socket();
-            Scrollback::with(move || command_for(&socket))
+            Scrollback::with(self.0.commands())
         }
 
         /// Scroll `session`'s pane back, as the mouse wheel does over a card.
@@ -263,22 +239,6 @@ pub(crate) mod tests {
                 crate::tmux::PaneLookup::Row(row) => row.in_mode,
                 _ => panic!("{session} is not listed"),
             }
-        }
-    }
-
-    fn command_for(socket: &std::path::Path) -> Command {
-        let mut command = Command::new(crate::tmux::tmux_bin());
-        command
-            .args(["-S", socket.to_str().unwrap(), "-f", "/dev/null"])
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE");
-        command
-    }
-
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self.command().arg("kill-server").output();
-            let _ = std::fs::remove_dir_all(&self.directory);
         }
     }
 

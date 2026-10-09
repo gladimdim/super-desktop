@@ -309,31 +309,20 @@ fn serve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::{Command as Process, Stdio};
+    use std::process::Command as Process;
     use std::sync::Arc;
     #[test]
     fn local_attachment_is_guarded_bounded_and_never_kills_session() {
-        if std::env::var_os("SD_ATTACH_TEST").is_none() {
-            let root = PathBuf::from("/tmp").join(format!("sd-attach-{}", std::process::id()));
-            std::fs::create_dir_all(&root).unwrap();
-            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let root = root.canonicalize().unwrap();
-            let output=Process::new(std::env::current_exe().unwrap()).args(["--exact","control_attach::tests::local_attachment_is_guarded_bounded_and_never_kills_session","--nocapture"]).env("SD_ATTACH_TEST","1").env("HOME",&root).env("XDG_RUNTIME_DIR",&root).env("TMUX_TMPDIR",&root).env_remove("TMUX").env_remove("TMUX_PANE").env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").output().unwrap();
-            let _ = std::fs::remove_dir_all(root);
-            assert!(output.status.success(), "{output:?}");
+        let Some((_root, _tmux)) = crate::test_isolation::private_root("SD_ATTACH_TEST") else {
+            crate::test_isolation::rerun_in_private_root(
+                "control_attach::tests::local_attachment_is_guarded_bounded_and_never_kills_session",
+                "SD_ATTACH_TEST",
+                |root, child| {
+                    child.env("XDG_RUNTIME_DIR", root);
+                },
+            );
             return;
-        }
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Process::new("tmux")
-                    .args(["kill-server"])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        let _cleanup = Cleanup;
+        };
         let root = control::runtime_dir();
         let _server = control::Server::bind(&root).unwrap();
         let session = "sd_term_attach";

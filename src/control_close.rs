@@ -75,9 +75,7 @@ pub fn apply(request:&Request,deadline:Instant,mut ui:impl FnMut(Action)->Result
         task.with_idle_until(deadline, || {
             let fail = |(code, message)| Reply::failure(&request.request_id, code, message);
             let session = &target.data.session_name;
-            if !session.starts_with("sd_term_") || session.len() > 128
-                || !session.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            {
+            if !crate::tmux::is_owned_session(session) {
                 return fail(("unsupported_terminal", "The card does not identify a supported local session."));
             }
             let before = match probe(session, deadline) {
@@ -149,7 +147,31 @@ pub fn card_id(request: &Request) -> &str {
     }
 }
 
-fn all(terms: impl IntoIterator<Item = String>) -> String {
+/// A tmux `-F` condition that holds only while `pane` is still the probed
+/// pane of `session`: same server, session, pane and process, `pane_dead`
+/// equal to `dead`, then `also`, then alone in its window, then `marker`.
+pub(crate) fn pane_guard(
+    session: &str,
+    pane: &Pane,
+    dead: bool,
+    also: &[&str],
+    marker: Option<String>,
+) -> String {
+    let mut terms = vec![
+        format!("#{{==:#{{pid}},{}}}", pane.server_pid),
+        format!("#{{==:#{{session_name}},{session}}}"),
+        format!("#{{==:#{{session_id}},{}}}", pane.session_id),
+        format!("#{{==:#{{pane_id}},{}}}", pane.pane_id),
+        format!("#{{==:#{{pane_pid}},{}}}", pane.pid),
+        format!("#{{==:#{{pane_dead}},{}}}", u8::from(dead)),
+    ];
+    terms.extend(also.iter().map(|term| term.to_string()));
+    terms.extend([
+        "#{==:#{session_windows},1}".into(),
+        "#{==:#{window_panes},1}".into(),
+        "#{==:#{window_linked},0}".into(),
+    ]);
+    terms.extend(marker);
     terms
         .into_iter()
         .reduce(|left, right| format!("#{{&&:{left},{right}}}"))
@@ -166,20 +188,8 @@ fn guarded_command(
     kill: bool,
     deadline: Instant,
 ) -> Result<bool, Failure> {
-    let mut terms = vec![
-        format!("#{{==:#{{pid}},{}}}", pane.server_pid),
-        format!("#{{==:#{{session_name}},{session}}}"),
-        format!("#{{==:#{{session_id}},{}}}", pane.session_id),
-        format!("#{{==:#{{pane_id}},{}}}", pane.pane_id),
-        format!("#{{==:#{{pane_pid}},{}}}", pane.pid),
-        format!("#{{==:#{{pane_dead}},{}}}", u8::from(pane.dead)),
-        "#{==:#{session_windows},1}".into(),
-        "#{==:#{window_panes},1}".into(),
-        "#{==:#{window_linked},0}".into(),
-    ];
-    if kill {
-        terms.push(format!("#{{==:#{{{MARKER}}},{nonce}}}"));
-    }
+    let marker = kill.then(|| format!("#{{==:#{{{MARKER}}},{nonce}}}"));
+    let guard = pane_guard(session, pane, pane.dead, &[], marker);
     let command = if kill {
         format!(
             "kill-session -t '{}' ; display-message -p SD_CLOSED",
@@ -198,7 +208,7 @@ fn guarded_command(
         "-F",
         "-t",
         &pane.pane_id,
-        &all(terms),
+        &guard,
         &command,
         "display-message -p SD_CONFLICT",
     ]);
@@ -222,15 +232,7 @@ mod tests {
     fn deadline() -> Instant {
         Instant::now() + Duration::from_secs(3)
     }
-    fn run(args: &[&str]) -> String {
-        let output = Process::new("tmux").args(args).output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).unwrap()
-    }
+    use crate::test_isolation::tmux as run;
     fn alive(session: &str) -> bool {
         Process::new("tmux")
             .args(["has-session", "-t", &format!("={session}")])
@@ -276,52 +278,20 @@ mod tests {
     }
     #[test]
     fn cli_close_private_tmux_integration() {
-        let root = std::env::temp_dir().join(format!("sd-close-{}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(root.join("tmux")).unwrap();
-        let output = Process::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "control_close::tests::cli_close_tmux_inner",
-                "--nocapture",
-            ])
-            .env("SD_CLI_CLOSE_ROOT", &root)
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env("HOME", &root)
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("WAYLAND_SOCKET")
-            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
-            .env_remove("LD_PRELOAD")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_isolation::rerun_in_private_root(
+            "control_close::tests::cli_close_tmux_inner",
+            "SD_CLI_CLOSE_ROOT",
+            |root, child| {
+                child.env("XDG_STATE_HOME", root.join("state"));
+            },
         );
     }
     #[test]
     fn cli_close_tmux_inner() {
-        let Some(root) = std::env::var_os("SD_CLI_CLOSE_ROOT").map(std::path::PathBuf::from) else {
+        let Some((root, _tmux)) = crate::test_isolation::private_root("SD_CLI_CLOSE_ROOT")
+        else {
             return;
         };
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Process::new("tmux")
-                    .arg("kill-server")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        let _cleanup = Cleanup;
         let keeper = create("sd_term_keeper");
         let journal = root.join("journal");
 

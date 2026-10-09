@@ -503,12 +503,7 @@ pub(crate) fn bounded_output(mut command: Command) -> Option<Vec<u8>> {
             .ok()?,
     );
     let mut stdout = child.0.stdout.take()?;
-    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        return None;
-    }
+    crate::terminal_transport::set_nonblocking(stdout.as_raw_fd()).ok()?;
     let deadline = Instant::now() + Duration::from_millis(750);
     let mut output = Vec::new();
     while Instant::now() < deadline {

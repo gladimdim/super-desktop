@@ -113,21 +113,11 @@ mod tests {
 
     #[test]
     fn bash_records_submitted_commands_not_output_or_task_input() {
-        struct Server(String, std::path::PathBuf);
+        use crate::test_isolation::wait_until;
+        struct Server(crate::test_isolation::TmuxServer);
         impl Server {
             fn run(&self, args: &[&str]) -> String {
-                let out = Command::new(crate::tmux::tmux_bin())
-                    .args(["-L", &self.0, "-f", "/dev/null"])
-                    .args(args)
-                    .env_remove("TMUX")
-                    .output()
-                    .unwrap();
-                assert!(
-                    out.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-                String::from_utf8_lossy(&out.stdout).trim().to_owned()
+                self.0.run(args)
             }
             fn wait_title(&self, expected: &str) {
                 let deadline = Instant::now() + Duration::from_secs(4);
@@ -152,24 +142,13 @@ mod tests {
             fn wait_foreground(&self, expected: &str) {
                 let pid = self.run(&["display-message", "-p", "-t", "test", "#{pane_pid}"])
                     .parse().unwrap();
-                let deadline = Instant::now() + Duration::from_secs(4);
-                while foreground_command(pid).as_deref() != Some(expected) {
-                    assert!(Instant::now() < deadline, "foreground task {expected:?} did not start");
-                    std::thread::sleep(Duration::from_millis(25));
-                }
+                wait_until(&format!("foreground task {expected:?}"), || {
+                    foreground_command(pid).as_deref() == Some(expected)
+                });
             }
         }
-        impl Drop for Server {
-            fn drop(&mut self) {
-                let _ = Command::new(crate::tmux::tmux_bin())
-                    .args(["-L", &self.0, "kill-server"])
-                    .output();
-                let _ = fs::remove_dir_all(&self.1);
-            }
-        }
-        let name = format!("sd-shell-title-{}", std::process::id());
-        let root = std::env::temp_dir().join(&name);
-        fs::create_dir_all(&root).unwrap();
+        let server = Server(crate::test_isolation::TmuxServer::new());
+        let root = server.0.directory().to_path_buf();
         fs::write(
             root.join(".bashrc"),
             "PS1='READY> '; HISTCONTROL=; HISTIGNORE=; PROMPT_COMMAND='true'\n",
@@ -177,21 +156,15 @@ mod tests {
         .unwrap();
         let rc = root.join("init.bash");
         fs::write(&rc, include_str!("../assets/shell-title.bash")).unwrap();
-        let server = Server(name, root.clone());
         let launch = format!(
             "env HOME='{}' bash --noprofile --rcfile '{}'",
             root.display(),
             rc.display()
         );
         server.run(&["new-session", "-d", "-s", "test", &launch]);
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while !server
-            .run(&["capture-pane", "-p", "-t", "test"])
-            .contains("READY>")
-        {
-            assert!(Instant::now() < deadline);
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        wait_until("the prompt", || {
+            server.run(&["capture-pane", "-p", "-t", "test"]).contains("READY>")
+        });
         let task = "printf 'output $ gibberish\\n'; cat";
         server.run(&["send-keys", "-t", "test", "-l", task]);
         server.run(&["send-keys", "-t", "test", "Enter"]);
@@ -224,18 +197,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         server.run(&["send-keys", "-t", "test", "slee", "Tab", "30", "Enter"]);
         server.wait_title("sleep 30");
-        let pid = server
-            .run(&["display-message", "-p", "-t", "test", "#{pane_pid}"])
-            .parse()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while foreground_command(pid).as_deref() != Some("sleep 30") {
-            assert!(
-                Instant::now() < deadline,
-                "foreground task command was not resolved"
-            );
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        server.wait_foreground("sleep 30");
         server.run(&["send-keys", "-t", "test", "C-c"]);
         std::thread::sleep(Duration::from_millis(100));
         server.run(&[
