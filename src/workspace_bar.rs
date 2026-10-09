@@ -95,6 +95,122 @@ fn append_resize_handle(row: &GtkBox, entry: &Entry) {
     row.append(&handle);
 }
 
+/// The parts of a folder control, local or remote: the caption over 📁, the
+/// field, ▾ and the resize handle, and the ▾ list's popover on the field.
+struct FolderControl {
+    bar: GtkBox,
+    subtitle: Label,
+    icon: Label,
+    entry: Entry,
+    menu_btn: Button,
+    popover: Popover,
+}
+
+/// A folder control captioned `caption`, whose ▾ says `menu_tooltip`. The
+/// caller decides whether its field can be typed in.
+fn folder_control(caption: &str, menu_tooltip: &str) -> FolderControl {
+    let bar = GtkBox::new(Orientation::Vertical, 0);
+    bar.add_css_class("ws-bar");
+    bar.set_valign(Align::Center);
+    bar.set_hexpand(false);
+
+    let subtitle = Label::new(Some(caption));
+    subtitle.add_css_class("ws-subtitle");
+    subtitle.set_halign(Align::Start);
+    bar.append(&subtitle);
+
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.set_valign(Align::Center);
+    let icon = Label::new(Some("📁"));
+    icon.add_css_class("ws-icon");
+    row.append(&icon);
+
+    let entry = Entry::new();
+    entry.add_css_class("ws-entry");
+    // About 20% narrower than the original 18–42 character field.
+    entry.set_width_chars(FIELD_MIN_CHARS);
+    entry.set_max_width_chars(FIELD_MAX_CHARS);
+    entry.set_valign(Align::Center);
+    // GTK entries expand by default; the field claims its configured text
+    // width so the other dock controls keep their own space.
+    entry.set_hexpand(false);
+    // No hover tooltip of the path: on a layer-shell HUD the tooltip is its
+    // own popup and sits on top of this small field, so clicks never reach it.
+    entry.set_has_tooltip(false);
+    row.append(&entry);
+
+    let menu_btn = Button::with_label("▾");
+    menu_btn.add_css_class("ws-menu-btn");
+    menu_btn.set_valign(Align::Center);
+    menu_btn.set_tooltip_text(Some(menu_tooltip));
+    row.append(&menu_btn);
+    append_resize_handle(&row, &entry);
+    bar.append(&row);
+
+    let popover = Popover::new();
+    popover.add_css_class("ws-pop");
+    popover.set_position(PositionType::Bottom);
+    popover.set_has_arrow(false);
+    popover.set_offset(0, 6);
+    popover.set_can_focus(false);
+    popover.set_parent(&entry);
+
+    FolderControl { bar, subtitle, icon, entry, menu_btn, popover }
+}
+
+/// The box a ▾ list's rows go in.
+fn list_box() -> GtkBox {
+    let container = GtkBox::new(Orientation::Vertical, 2);
+    container.add_css_class("ws-pop-box");
+    container
+}
+
+/// A ▾ list with no folders in it, saying `text` instead.
+fn show_empty_list(popover: &Popover, text: &str) {
+    let container = list_box();
+    let empty = Label::new(Some(text));
+    empty.add_css_class("ws-empty");
+    empty.set_halign(Align::Start);
+    container.append(&empty);
+    popover.set_child(Some(&container));
+}
+
+/// One folder in a ▾ list, here or a host's: `[✓] name  path` on the button
+/// that picks it, checked when it is the folder in use. Returns the row and
+/// that button.
+fn folder_row(dir: &str, active: bool) -> (GtkBox, Button) {
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.add_css_class("ws-row");
+    row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
+
+    let pick = Button::new();
+    pick.add_css_class("ws-row-pick");
+    pick.set_hexpand(true);
+    pick.set_can_focus(false);
+    pick.set_focus_on_click(false);
+    pick.set_tooltip_text(Some(dir));
+
+    let label_row = GtkBox::new(Orientation::Horizontal, 8);
+    let mark = Label::new(Some(if active { "✓" } else { " " }));
+    mark.add_css_class("ws-row-mark");
+    label_row.append(&mark);
+
+    let name = Label::new(Some(&row_name(dir)));
+    name.add_css_class("ws-row-name");
+    label_row.append(&name);
+
+    let path = Label::new(Some(&display_dir(dir)));
+    path.add_css_class("ws-row-path");
+    path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    path.set_halign(Align::End);
+    path.set_hexpand(true);
+    label_row.append(&path);
+
+    pick.set_child(Some(&label_row));
+    row.append(&pick);
+    (row, pick)
+}
+
 /// The top bar field and the history popover it owns.
 #[derive(Clone)]
 pub struct WorkspaceBar {
@@ -162,53 +278,16 @@ impl RemoteFolderBar {
 /// Build the folder control for one remote workspace. `on_pick` is what asks
 /// that host to work in a folder: nothing here writes this machine's state.
 pub fn build_remote_folder_bar(on_pick: Rc<dyn Fn(String)>) -> RemoteFolderBar {
-    let bar = GtkBox::new(Orientation::Vertical, 0);
-    bar.add_css_class("ws-bar");
-    bar.set_valign(Align::Center);
-    bar.set_hexpand(false);
-
-    let subtitle = Label::new(Some("working directory on that PC"));
-    subtitle.add_css_class("ws-subtitle");
-    subtitle.set_halign(Align::Start);
-    bar.append(&subtitle);
-
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    row.set_valign(Align::Center);
-    let icon = Label::new(Some("📁"));
-    icon.add_css_class("ws-icon");
-    row.append(&icon);
-
+    let FolderControl { bar, subtitle, icon, entry, menu_btn, popover } =
+        folder_control("working directory on that PC", "Folders that PC offers");
     // The same field the local workspace shows, minus the typing: it is an
     // entry so it looks and spaces identically, but a remote path is not this
     // machine's to spell.
-    let entry = Entry::new();
-    entry.add_css_class("ws-entry");
-    entry.set_width_chars(FIELD_MIN_CHARS);
-    entry.set_max_width_chars(FIELD_MAX_CHARS);
-    entry.set_valign(Align::Center);
-    entry.set_hexpand(false);
     entry.set_editable(false);
     entry.set_can_focus(false);
     entry.set_focus_on_click(false);
-    entry.set_has_tooltip(false);
-    row.append(&entry);
-
-    let menu_btn = Button::with_label("▾");
-    menu_btn.add_css_class("ws-menu-btn");
-    menu_btn.set_valign(Align::Center);
-    menu_btn.set_tooltip_text(Some("Folders that PC offers"));
-    row.append(&menu_btn);
-    append_resize_handle(&row, &entry);
-    bar.append(&row);
 
     let folders: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let popover = Popover::new();
-    popover.add_css_class("ws-pop");
-    popover.set_position(PositionType::Bottom);
-    popover.set_has_arrow(false);
-    popover.set_offset(0, 6);
-    popover.set_can_focus(false);
-    popover.set_parent(&entry);
 
     {
         // The list is built from what the host last reported, so it is as fresh
@@ -260,45 +339,13 @@ fn paint_remote_rows(
     current: &str,
     on_pick: &Rc<dyn Fn(String)>,
 ) {
-    let container = GtkBox::new(Orientation::Vertical, 2);
-    container.add_css_class("ws-pop-box");
     if dirs.is_empty() {
-        let empty = Label::new(Some("That PC offers no other folder yet."));
-        empty.add_css_class("ws-empty");
-        empty.set_halign(Align::Start);
-        container.append(&empty);
-        popover.set_child(Some(&container));
+        show_empty_list(popover, "That PC offers no other folder yet.");
         return;
     }
+    let container = list_box();
     for dir in dirs {
-        let active = dir == current;
-        let row = GtkBox::new(Orientation::Horizontal, 4);
-        row.add_css_class("ws-row");
-        row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
-
-        let pick = Button::new();
-        pick.add_css_class("ws-row-pick");
-        pick.set_hexpand(true);
-        pick.set_can_focus(false);
-        pick.set_focus_on_click(false);
-        pick.set_tooltip_text(Some(dir));
-
-        let label_row = GtkBox::new(Orientation::Horizontal, 8);
-        let mark = Label::new(Some(if active { "✓" } else { " " }));
-        mark.add_css_class("ws-row-mark");
-        label_row.append(&mark);
-        let name = Label::new(Some(&row_name(dir)));
-        name.add_css_class("ws-row-name");
-        label_row.append(&name);
-        let path = Label::new(Some(&display_dir(dir)));
-        path.add_css_class("ws-row-path");
-        path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-        path.set_halign(Align::End);
-        path.set_hexpand(true);
-        label_row.append(&path);
-        pick.set_child(Some(&label_row));
-        row.append(&pick);
-
+        let (row, pick) = folder_row(dir, dir == current);
         {
             let dir = dir.clone();
             let pop = popover.clone();
@@ -381,58 +428,14 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<FChange>,
 ) -> WorkspaceBar {
-    let bar = GtkBox::new(Orientation::Vertical, 0);
-    bar.add_css_class("ws-bar");
-    bar.set_valign(Align::Center);
-    bar.set_hexpand(false);
-
-    let subtitle = Label::new(Some("working directory for harness"));
-    subtitle.add_css_class("ws-subtitle");
-    subtitle.set_halign(Align::Start);
-    bar.append(&subtitle);
-
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    row.set_valign(Align::Center);
-
-    let icon = Label::new(Some("📁"));
-    icon.add_css_class("ws-icon");
-    row.append(&icon);
-
-    let entry = Entry::new();
-    entry.add_css_class("ws-entry");
-    // About 20% narrower than the original 18–42 character field.
-    entry.set_width_chars(FIELD_MIN_CHARS);
-    entry.set_max_width_chars(FIELD_MAX_CHARS);
-    entry.set_valign(Align::Center);
-    // GTK entries expand by default; the field claims its configured text
-    // width so the other dock controls keep their own space.
-    entry.set_hexpand(false);
+    let FolderControl { bar, subtitle, icon, entry, menu_btn, popover } =
+        folder_control("working directory for harness", "Folders used before");
     entry.set_can_focus(true);
     entry.set_editable(true);
     entry.set_focus_on_click(true);
     let current_dir = effective_workspace_dir(&state.borrow());
     entry.set_placeholder_text(Some(&home_dir_string()));
     entry.set_text(&current_dir);
-    // No hover tooltip of the path: on a layer-shell HUD the tooltip is its
-    // own popup and sits on top of this small field, so clicks never reach it.
-    entry.set_has_tooltip(false);
-    row.append(&entry);
-
-    let menu_btn = Button::with_label("▾");
-    menu_btn.add_css_class("ws-menu-btn");
-    menu_btn.set_valign(Align::Center);
-    menu_btn.set_tooltip_text(Some("Folders used before"));
-    row.append(&menu_btn);
-    append_resize_handle(&row, &entry);
-    bar.append(&row);
-
-    let popover = Popover::new();
-    popover.add_css_class("ws-pop");
-    popover.set_position(PositionType::Bottom);
-    popover.set_has_arrow(false);
-    popover.set_offset(0, 6);
-    popover.set_can_focus(false);
-    popover.set_parent(&entry);
 
     let complete = Rc::new(RefCell::new(CompleteState {
         suggestions: Vec::new(),
@@ -444,21 +447,13 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
 
     // Clicks on the caption or folder icon land in the field, so the whole
     // control is a typing target — not only the (still compact) entry itself.
-    {
+    for widget in [subtitle.upcast::<gtk4::Widget>(), icon.upcast()] {
         let entry_focus = entry.clone();
         let click = GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
             entry_focus.grab_focus();
         });
-        subtitle.add_controller(click);
-    }
-    {
-        let entry_focus = entry.clone();
-        let click = GestureClick::new();
-        click.connect_pressed(move |_, _, _, _| {
-            entry_focus.grab_focus();
-        });
-        icon.add_controller(click);
+        widget.add_controller(click);
     }
 
     // ▾ opens the unfiltered history (with ✕). Typing switches the same
@@ -1065,18 +1060,12 @@ fn paint_rows<FChange: Fn(AppState) + 'static>(
     entry: &Entry,
     on_change: &Rc<FChange>,
 ) {
-    let container = GtkBox::new(Orientation::Vertical, 2);
-    container.add_css_class("ws-pop-box");
-
     if dirs.is_empty() {
-        let empty = Label::new(Some("No folders used yet — type a path above."));
-        empty.add_css_class("ws-empty");
-        empty.set_halign(Align::Start);
-        container.append(&empty);
-        popover.set_child(Some(&container));
+        show_empty_list(popover, "No folders used yet — type a path above.");
         return;
     }
 
+    let container = list_box();
     for (i, dir) in dirs.iter().enumerate() {
         container.append(&list_row(
             dir,
@@ -1104,38 +1093,10 @@ fn list_row<FChange: Fn(AppState) + 'static>(
     entry: Entry,
     on_change: Rc<FChange>,
 ) -> GtkBox {
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    row.add_css_class("ws-row");
-    row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
+    let (row, pick) = folder_row(dir, active);
     if selected {
         row.add_css_class("ws-row-selected");
     }
-
-    let pick = Button::new();
-    pick.add_css_class("ws-row-pick");
-    pick.set_hexpand(true);
-    pick.set_can_focus(false);
-    pick.set_focus_on_click(false);
-    pick.set_tooltip_text(Some(dir));
-
-    let label_row = GtkBox::new(Orientation::Horizontal, 8);
-    let mark = Label::new(Some(if active { "✓" } else { " " }));
-    mark.add_css_class("ws-row-mark");
-    label_row.append(&mark);
-
-    let name = Label::new(Some(&row_name(dir)));
-    name.add_css_class("ws-row-name");
-    label_row.append(&name);
-
-    let path = Label::new(Some(&display_dir(dir)));
-    path.add_css_class("ws-row-path");
-    path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-    path.set_halign(Align::End);
-    path.set_hexpand(true);
-    label_row.append(&path);
-
-    pick.set_child(Some(&label_row));
-    row.append(&pick);
 
     {
         let pick_dir = dir.to_string();
