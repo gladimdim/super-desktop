@@ -10,15 +10,12 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
+#[cfg(test)]
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
+/// Local attachments in progress, at most four.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-struct Slot;
-impl Drop for Slot {
-    fn drop(&mut self) {
-        ACTIVE.fetch_sub(1, Ordering::SeqCst);
-    }
-}
 struct Socket {
     path: PathBuf,
     device: u64,
@@ -94,15 +91,9 @@ pub fn execute(
         {
             return fail("conflict", "Pane identity changed or exited.");
         }
-        if ACTIVE
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
-                (n < 4).then_some(n + 1)
-            })
-            .is_err()
-        {
+        let Some(slot) = crate::platform::permit::Permit::try_acquire(&ACTIVE, 4) else {
             return fail("busy", "At most four local attachments may be active.");
-        }
-        let slot = Slot;
+        };
         let nonce = match control::new_request(Command::Status {}) {
             Ok(r) => r.request_id,
             Err(_) => return fail("unavailable", "OS randomness unavailable."),

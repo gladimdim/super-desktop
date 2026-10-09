@@ -16,21 +16,13 @@ const MAX_ASSETS: usize = 64;
 const MAX_SESSIONS: usize = 64;
 
 static TRANSFERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-pub struct Transfer;
+/// One of the four asset/job slots, released on drop.
+pub struct Transfer {
+    _permit: crate::platform::permit::Permit,
+}
 impl Transfer {
     pub fn acquire() -> Option<Self> {
-        use std::sync::atomic::Ordering;
-        TRANSFERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
-                (n < 4).then_some(n + 1)
-            })
-            .ok()
-            .map(|_| Self)
-    }
-}
-impl Drop for Transfer {
-    fn drop(&mut self) {
-        TRANSFERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        crate::platform::permit::Permit::try_acquire(&TRANSFERS, 4).map(|_permit| Self { _permit })
     }
 }
 

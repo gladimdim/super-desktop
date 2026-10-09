@@ -15,7 +15,7 @@
 use super::*;
 use crate::completion::{Completion, Watched};
 use std::os::unix::fs::MetadataExt;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 pub(super) const MAX_WAIT_MS: u64 = 25_000;
@@ -34,18 +34,13 @@ const MAX_SNAPSHOTS: usize = 16;
 
 static WAITERS: AtomicUsize = AtomicUsize::new(0);
 
-pub(super) struct WaitSlot;
+/// One of the `MAX_WAITERS` held-request slots, released on drop.
+pub(super) struct WaitSlot {
+    _permit: crate::platform::permit::Permit,
+}
 impl WaitSlot {
     pub(super) fn acquire() -> Option<Self> {
-        WAITERS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < MAX_WAITERS).then_some(n + 1))
-            .ok()
-            .map(|_| WaitSlot)
-    }
-}
-impl Drop for WaitSlot {
-    fn drop(&mut self) {
-        WAITERS.fetch_sub(1, Ordering::AcqRel);
+        crate::platform::permit::Permit::try_acquire(&WAITERS, MAX_WAITERS).map(|_permit| WaitSlot { _permit })
     }
 }
 
