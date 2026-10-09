@@ -74,7 +74,6 @@ mod remote_terminal;
 mod remote_workspace;
 mod harness_settings;
 mod hotcorner;
-mod jev;
 mod launch_args;
 mod launcher_settings;
 mod mini_terminal;
@@ -288,7 +287,6 @@ pub mod gtk_test {
 
 use gtk4::gio::prelude::{ApplicationExt, ApplicationExtManual};
 use gtk4::glib;
-use gtk4::prelude::*;
 use gtk4::Application;
 use futures_util::StreamExt;
 use serde_json::json;

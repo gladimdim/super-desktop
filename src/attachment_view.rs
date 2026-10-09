@@ -45,7 +45,7 @@ struct Open {
     /// The panel's repaint. Its rows and buttons reach it only weakly (they
     /// live inside the panel it redraws), so this keeps it for as long as
     /// the panel is open.
-    paint: Rc<dyn Fn()>,
+    _paint: Rc<dyn Fn()>,
 }
 
 /// The files attached to `session`.
@@ -197,7 +197,7 @@ fn open(session: &str, title: &str, folder: &str, origin: glib::WeakRef<gtk4::Bu
             session: session.to_string(),
             panel,
             generation: Rc::clone(&drawer.generation),
-            paint: Rc::clone(&drawer.paint),
+            _paint: Rc::clone(&drawer.paint),
         })
     });
 }

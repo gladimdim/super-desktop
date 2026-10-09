@@ -76,10 +76,8 @@ fn request_ids(requests: Vec<Value>) -> Vec<String> {
 /// `superdesktop://pair?data=…`, the form both the Android app and the
 /// Add-a-PC wizard accept.
 pub fn invitation_link(payload: &str) -> String {
-    let encoded = crate::ws::base64(payload.as_bytes())
-        .trim_end_matches('=')
-        .replace('+', "-")
-        .replace('/', "_");
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
     format!("superdesktop://pair?data={encoded}")
 }
 

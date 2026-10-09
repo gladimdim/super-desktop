@@ -4,8 +4,6 @@
 //! private PTY. This object only attaches an existing session, never
 //! creates a harness or resizes the host pane. Dropping it reaps exactly its
 //! tmux client, not the tmux server/session.
-#![allow(dead_code)] // The WSS adapter and its tests use this module.
-
 use crate::desktop_protocol::TerminalSize;
 use std::fs::File;
 use std::io::{self, Read, Write};

@@ -3,7 +3,6 @@ use gtk4::{Button, Orientation, Popover, PositionType};
 
 /// Fixed 8-color grouping palette. Index 1..=8, 0 = no tag.
 /// Canonical list of the colors also hardcoded as `.tag-dot-N` in styles.rs.
-#[allow(dead_code)]
 pub const TAG_COLORS: [&str; 8] = [
     "#f87171", // red
     "#fb923c", // orange

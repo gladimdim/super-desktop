@@ -541,22 +541,6 @@ fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
 /// reads one global `~/.dsh-tui/resume.txt` (the last session any dsh-tui
 /// process exited from, in any folder), not a session of the card's
 /// workspace, so it would attach every restored card to that one session.
-#[allow(dead_code)]
-pub fn resolve_resume_command(agent_type: &str, custom: Option<&str>) -> String {
-    resolve_resume_command_with_session(agent_type, custom, None)
-}
-
-/// Same as `resolve_resume_command` but honours a persisted per-card agent
-/// session id (currently used for opencode).
-pub fn resolve_resume_command_with_session(
-    agent_type: &str,
-    custom: Option<&str>,
-    agent_session_id: Option<&str>,
-) -> String {
-    resolve_resume_command_in(agent_type, custom, agent_session_id, None)
-}
-
-/// `resolve_resume_command_with_session` for a session recreated in `cwd`.
 ///
 /// CLAUDE / CODEX ISOLATION: a card's own conversation id is stored like
 /// OpenCode's (see `card_status::own_session`), and resumed exactly with
@@ -862,39 +846,14 @@ pub fn kill_session(session_name: &str) {
         .output();
 }
 
-#[allow(dead_code)]
-pub fn ensure_session(
-    session_name: &str,
-    agent_type: &str,
-    custom_command: Option<&str>,
-    workspace_dir: Option<&str>,
-) {
-    ensure_session_with_agent_id(
-        session_name,
-        agent_type,
-        custom_command,
-        None,
-        workspace_dir,
-    )
-}
-
-/// Same as `ensure_session` but resumes a persisted per-card agent session
-/// (opencode `--session <id>`) so rebooted cards stay isolated 1:1.
+/// (Re)create `session_name` unless it is alive, resuming a persisted per-card
+/// agent session (opencode `--session <id>`) so rebooted cards stay isolated 1:1.
 ///
 /// `workspace_dir` is the folder this card was created in (see
 /// `TerminalData::workspace_dir`), not the top bar's current value: resume is
 /// cwd-scoped for every harness, so a restored card must come back where it
 /// was working.
-pub fn ensure_session_with_agent_id(
-    session_name: &str,
-    agent_type: &str,
-    custom_command: Option<&str>,
-    agent_session_id: Option<&str>,
-    workspace_dir: Option<&str>,
-) {
-    ensure_session_with_inventory(session_name, agent_type, custom_command, agent_session_id, workspace_dir, None);
-}
-
+///
 /// Share an inventory only during the initial restoration batch, never across
 /// later attachments (which need to discover sessions closed in the meantime).
 pub fn ensure_session_with_inventory(
@@ -1215,7 +1174,6 @@ fn resolve_effective_pid(pid_num: u32, is_shell_agent: bool) -> u32 {
     pid_num
 }
 
-#[allow(dead_code)]
 pub struct SessionStatus {
     pub status: &'static str,
     pub label: &'static str,
@@ -1775,117 +1733,11 @@ fn retain_captures_in(cache: &std::sync::Mutex<CaptureCache>, snapshot: &PaneSna
 
 pub use crate::terminal_text::strip_terminal_escapes;
 
-/// Capture the last user prompt from a tmux session and return a short
-/// title-friendly snippet (first 10-30 chars of the prompt).
-///
-/// History heuristic for plain shells / simple TUIs: scans `capture-pane`
-/// bottom-up looking for prompt markers (`>`, `❯`, `›`, `➜`, `$`, `#`,
-/// `?`, `»`) on NON-bordered lines (e.g. `~ ❯ cmd`).
-/// Bordered lines (`┃ …`, `│ …`) belong to fullscreen-TUI tool/output areas
-/// (e.g. opencode renders agent tool calls as `┃  $ <cmd>`) and are NEVER
-/// treated as user prompts — that showed agent output as the title.
-/// Returns `None` when nothing prompt-like is found so callers keep the
-/// default `icon + agent name` title.
-#[allow(dead_code)]
-pub fn get_last_prompt(session_name: &str) -> Option<String> {
-    let text = capture_pane_text(session_name)?;
-    extract_last_prompt(&text).map(|s| truncate_prompt_title(&s))
-}
-
 /// Capture the in-progress composer draft (text the user typed into the
 /// prompt box but has not submitted yet) from an opencode-style TUI screen.
-#[allow(dead_code)]
 pub fn get_composer_draft(session_name: &str) -> Option<String> {
     let text = capture_pane_text(session_name)?;
     extract_composer_draft(&text)
-}
-
-/// Pure helper: extract last prompt from captured pane text (testable).
-pub fn extract_last_prompt(captured: &str) -> Option<String> {
-    for raw_line in captured.lines().rev() {
-        let line = raw_line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Skip spinner / progress UI lines - those are agent output, not prompts.
-        if line.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c)) {
-            continue;
-        }
-        let lower = line.to_lowercase();
-        if lower.contains("thinking")
-            || lower.contains("generating")
-            || lower.contains("streaming")
-            || lower.contains("working...")
-            || lower.contains("working…")
-            || lower.contains("esc to ")
-            || lower.contains("ctrl+c to ")
-            || lower.contains("ctrl-c to ")
-            || lower.contains("to interrupt")
-            || lower.contains("to cancel")
-            || lower.contains("press esc")
-        {
-            continue;
-        }
-        // Skip pure box-drawing borders.
-        let stripped_boxes: String = line
-            .chars()
-            .filter(|c| !"─│╭╮╰╯┌┐└┘┃━┃".contains(*c) && !c.is_whitespace())
-            .collect();
-        if stripped_boxes.is_empty() {
-            continue;
-        }
-
-        if let Some(candidate) = prompt_text_from_line(line) {
-            let cleaned: String = candidate
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if cleaned.chars().count() >= 2 {
-                return Some(cleaned);
-            }
-        }
-    }
-    None
-}
-
-/// Extract user-typed text from a single pane line, if it looks like a prompt.
-/// Returns None for plain agent output to avoid false-positive titles.
-///
-/// IMPORTANT: lines starting with TUI border glyphs (`┃`, `│`) are agent
-/// tool/output areas in fullscreen TUIs (opencode shows tool calls as
-/// `┃  $ <cmd>`) and are always rejected here — even when they contain
-/// `$`/`#`/`>` markers. Composer drafts are handled separately by
-/// `extract_composer_draft`, which is position-aware.
-fn prompt_text_from_line(line: &str) -> Option<String> {
-    let trimmed = line.trim();
-    // Bordered line = TUI-managed area, never a shell prompt.
-    if trimmed.starts_with(['┃', '│']) {
-        return None;
-    }
-    let no_border = trimmed.trim_start_matches(['|', '╭', '╰', '├', '└', '─', ' ']);
-
-    // Shell-style: text AFTER the last prompt glyph on the line ("~ ❯ cmd").
-    for marker in ['❯', '➜', '$', '#', '»'] {
-        if let Some(idx) = no_border.rfind(marker) {
-            let after: String = no_border[idx + marker.len_utf8()..].trim().to_string();
-            // Marker at end of line with nothing after = bare prompt, not a prompt WITH input.
-            if !after.is_empty() {
-                return Some(after);
-            }
-            return None;
-        }
-    }
-
-    // TUI-style: line STARTS with prompt glyph ("> hello", "› hello", "? hello").
-    let mut chars = no_border.chars();
-    let first = chars.next()?;
-    if matches!(first, '>' | '›' | '❯' | '?' | '»') {
-        let rest: String = chars.collect::<String>().trim().to_string();
-        if !rest.is_empty() {
-            return Some(rest);
-        }
-    }
-    None
 }
 
 /// Truncate a prompt to the title-friendly 10-30 char range.
@@ -2417,30 +2269,6 @@ pub fn resolve_own_opencode_id(
     }
 }
 
-/// Map a super-desktop tmux session to its opencode session id.
-///
-/// super-desktop launches the agent command at card creation, so the
-/// opencode session is born shortly AFTER the tmux session (TUI + provider
-/// init lag is typically 10-60s). Same-directory opencode cards are matched
-/// chronologically 1:1 (`assign_opencode_sessions`). Tolerance 10 min.
-/// Returns None when opencode storage is unavailable or nothing matches.
-///
-/// Only live OPENCODE panes participate (other harness types never consume a
-/// session), and pane/session pairs deterministically owned via `--session`
-/// flags leave the ranking entirely — otherwise closing one console shifted
-/// every surviving card onto its neighbour's session and its prompt showed
-/// in the wrong title.
-/// Prefer `resolve_own_opencode_id` when the card's persisted id is known: it
-/// adds the deterministic `--session` fast path plus a heal policy for stale
-/// guesses.
-///
-/// NOTE: `/new` inside opencode (or restarting the agent in the same pane),
-/// and sessions left behind by deleted cards, can skew the ranking; the
-/// live composer draft still works in those cases.
-pub fn get_opencode_session_id(session_name: &str) -> Option<String> {
-    resolve_own_opencode_id(session_name, None)
-}
-
 /// Pure helper: chronological 1:1 assignment of tmux panes to opencode
 /// sessions (both sorted oldest-first). Each pane claims the earliest
 /// still-unclaimed session born at/after the pane (30s grace for clock
@@ -2468,22 +2296,6 @@ pub fn assign_opencode_sessions(
             }
         })
         .collect()
-}
-
-/// Pure helper: pull the `text` field out of an opencode `part` JSON blob.
-pub fn extract_text_from_part_json(json: &str) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    v.get("text")?.as_str().map(|s| s.to_string())
-}
-
-/// Return the last message the USER submitted to an opencode session as a
-/// title-friendly snippet — i.e. exactly what was entered, even after it
-/// scrolled off the TUI screen. Reads opencode's local session database;
-/// falls back to None when unavailable.
-#[allow(dead_code)]
-pub fn get_opencode_last_user_text(session_name: &str) -> Option<String> {
-    let sess_id = get_opencode_session_id(session_name)?;
-    get_opencode_user_text_by_id(&sess_id)
 }
 
 /// The last prompt the user submitted to an opencode session (an already
@@ -2579,6 +2391,21 @@ pub(crate) fn opencode_db_title(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    fn resolve_resume_command(agent_type: &str, custom: Option<&str>) -> String {
+        resolve_resume_command_in(agent_type, custom, None, None)
+    }
+
+    fn resolve_resume_command_with_session(agent_type: &str, custom: Option<&str>, id: Option<&str>) -> String {
+        resolve_resume_command_in(agent_type, custom, id, None)
+    }
+
+    fn ensure_session_with_agent_id(session: &str, agent: &str, custom: Option<&str>, id: Option<&str>, dir: Option<&str>) {
+        ensure_session_with_inventory(session, agent, custom, id, dir, None)
+    }
+
+    fn ensure_session(session: &str, agent: &str, custom: Option<&str>, dir: Option<&str>) {
+        ensure_session_with_agent_id(session, agent, custom, None, dir)
+    }
     use super::*;
 
     #[test]
@@ -3342,45 +3169,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_last_prompt_tui_markers() {
-        // Plain (non-bordered) TUI prompt and shell prompt are user input.
-        let pane = "Welcome to Claude\n> fix the login bug please\n";
-        assert_eq!(
-            extract_last_prompt(pane).as_deref(),
-            Some("fix the login bug please")
-        );
-
-        let shell = "~/project ❯ cargo test --all\n";
-        assert_eq!(
-            extract_last_prompt(shell).as_deref(),
-            Some("cargo test --all")
-        );
-    }
-
-    #[test]
-    fn test_extract_last_prompt_ignores_bordered_tool_calls() {
-        // opencode renders AGENT tool calls as bordered `$`/`#` lines —
-        // these are agent output, never user input.
-        let pane = "Done — color tags are live.\n┃\n┃  $ grep -n \"tag\" src/state.rs\n┃\n┃  src/state.rs:17:    pub tag: u8,\n┃\n";
-        assert_eq!(extract_last_prompt(pane), None);
-
-        // Bordered `>` lines (TUI output area) are ignored too.
-        let pane2 = "some output\n│ > quoted markdown, not a prompt\n";
-        assert_eq!(extract_last_prompt(pane2), None);
-    }
-
-    #[test]
-    fn test_extract_last_prompt_skips_noise() {
-        // Bare prompt glyph with no input + spinner + cancel hint => None.
-        let pane = "❯\n⠋ Working...\nEsc to cancel\n";
-        assert_eq!(extract_last_prompt(pane), None);
-
-        // Plain agent output without prompt markers must not become a title.
-        let pane2 = "All tests passed in 3.2s\nDone.\n";
-        assert_eq!(extract_last_prompt(pane2), None);
-    }
-
-    #[test]
     fn test_truncate_prompt_title_caps_length() {
         let short = "fix bug";
         assert_eq!(truncate_prompt_title(short), "fix bug");
@@ -3436,17 +3224,6 @@ mod tests {
             extract_composer_draft(screen).as_deref(),
             Some("Build me a dashboard")
         );
-    }
-
-    #[test]
-    fn test_extract_text_from_part_json() {
-        let json = r#"{"type":"text","text":"go to Github/super-desktop. I want more"}"#;
-        assert_eq!(
-            extract_text_from_part_json(json).as_deref(),
-            Some("go to Github/super-desktop. I want more")
-        );
-        assert_eq!(extract_text_from_part_json(r#"{"type":"tool","x":1}"#), None);
-        assert_eq!(extract_text_from_part_json("not json"), None);
     }
 
     #[test]

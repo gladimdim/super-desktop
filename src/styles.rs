@@ -191,12 +191,7 @@ button.machine-peer-selected {{
     background-color: {badge_bg};
 }}
 
-/* ================= Remote PC live consoles =================
-   A remote card is the local `.mini-terminal` chrome with a distinct border, so
-   a streamed console is never mistaken for a local one. */
-.term-remote {{
-    border: 1.5px solid {bright_blue};
-}}
+/* ================= Remote PC live consoles ================= */
 
 .remote-canvas {{
     background-color: {darker_background};
@@ -1087,10 +1082,8 @@ button.term-jump-newest:hover {{
     border-color: {accent};
     background: {badge_bg};
 }}
-.settings-entry-icon,
-.android-entry-icon {{ color: {accent}; font-size: 24px; }}
-.settings-entry-title,
-.android-entry-title {{ color: {foreground}; font-weight: 700; font-size: 13px; }}
+.settings-entry-icon {{ color: {accent}; font-size: 24px; }}
+.settings-entry-title {{ color: {foreground}; font-weight: 700; font-size: 13px; }}
 .settings-entry-summary {{ color: {dark_foreground}; font-size: 10.5px; }}
 .settings-entry-arrow {{ color: {dark_foreground}; font-size: 22px; }}
 
@@ -1270,18 +1263,8 @@ button.term-jump-newest:hover {{
 .android-page .launcher-section-head {{ margin-bottom: 8px; }}
 .android-page .launcher-section-title {{ font-size: 13px; }}
 .android-page .launcher-btn {{ border-radius: 4px; padding: 7px 12px; }}
-.connection-link-popover {{
-    padding: 10px;
-    min-width: 300px;
-}}
-.connection-link-popover entry {{
-    min-width: 300px;
-}}
 .android-page .launcher-section-body {{ border-spacing: 8px; }}
 /* Flat device groups inherit the current Omarchy palette in both modes. */
-.connections-list {{ padding: 8px 0; }}
-.connections-icon {{ color: {accent}; min-width: 24px; }}
-.connections-group-title {{ color: {accent}; font-weight: 700; font-size: 12px; }}
 .connections-device {{
     padding: 12px 0;
     border-bottom: 1px solid {launcher_section_border};
@@ -1289,15 +1272,7 @@ button.term-jump-newest:hover {{
 .connections-device-name {{ color: {foreground}; font-weight: 600; font-size: 12px; }}
 .connections-device-detail {{ color: {dark_foreground}; font-size: 10px; }}
 .connections-device .launcher-btn {{ background: transparent; }}
-.android-device-row {{ padding: 9px 0; }}
 .android-empty {{ color: {dark_foreground}; padding: 12px 0; }}
-.android-request {{
-    border-left: 2px solid {accent};
-    padding: 10px 12px;
-    background: {badge_bg};
-}}
-.android-advanced {{ color: {dark_foreground}; padding: 8px 0; }}
-.android-advanced > box {{ margin-top: 10px; }}
 
 .launcher-section {{
     background-color: {launcher_section_bg};
@@ -1413,43 +1388,6 @@ separator.launcher-sep {{
     color: {danger_hover_text};
 }}
 
-/* The PIN is the one value the user retypes on the phone: own panel + accent */
-.launcher-pin-box {{
-    background-color: {launcher_pin_bg};
-    border: 1px dashed {accent};
-    border-radius: 10px;
-    padding: 6px 12px;
-}}
-
-.launcher-pin-label {{
-    color: {dark_foreground};
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.8px;
-}}
-
-.launcher-pin-value {{
-    color: {accent};
-    font-family: '{font_family}', monospace;
-    font-size: 27px;
-    font-weight: 800;
-    letter-spacing: 6px;
-}}
-
-.launcher-window-state {{
-    font-size: 11px;
-}}
-
-.launcher-window-open {{
-    color: {bright_yellow};
-    font-weight: 700;
-}}
-
-.launcher-window-closed {{
-    color: {dark_foreground};
-}}
-
-/* Bridge state chips, mirroring .status-active / .status-exited */
 .launcher-online {{
     background-color: {status_active_bg};
     color: {bright_green};
@@ -1583,26 +1521,6 @@ separator.launcher-sep {{
     border: 1px solid {status_exited_border};
 }}
 
-/* Numbered phone steps */
-.launcher-step {{
-    padding: 2px 0;
-}}
-
-.launcher-step-num {{
-    background-color: {launcher_step_bg};
-    color: {light_foreground};
-    border-radius: 9999px;
-    min-width: 16px;
-    min-height: 14px;
-    padding: 1px 0;
-    font-size: 9.5px;
-    font-weight: 700;
-}}
-
-.launcher-step-text {{
-    color: {foreground};
-    font-size: 11px;
-}}
 "#,
         // The Mac overlay uses an opaque native window: a translucent root
         // can leave black/stale regions when terminal surfaces disappear.
@@ -1659,7 +1577,6 @@ separator.launcher-sep {{
         launcher_section_bg = theme.rgba_darker_bg(0.35),
         launcher_section_border = theme.rgba_muted(0.25),
         launcher_pin_bg = theme.rgba_darker_bg(0.55),
-        launcher_step_bg = theme.rgba_muted(0.25),
         term_hdr_bg = theme.rgba_lighter_bg(0.85),
         term_hdr_divider = theme.rgba_muted(0.30),
         bright_green = theme.bright_green,
@@ -1824,9 +1741,6 @@ mod tests {
             "launcher-key",
             "launcher-value",
             "launcher-btn",
-            "launcher-pin-box",
-            "launcher-pin-value",
-            "launcher-step-num",
             "launcher-online",
             "launcher-offline",
             "launcher-note",
@@ -2086,7 +2000,7 @@ mod tests {
         renderer.realize(None::<&gdk::Surface>).unwrap();
         let mut failures = Vec::new();
         for (name, theme) in &themes {
-            let backdrop = crate::theme::OmarchyTheme::to_rgba_color(&theme.background)
+            let backdrop = gdk::RGBA::parse(theme.background.as_str()).ok()
                 .map(|c| [f64::from(c.red()), f64::from(c.green()), f64::from(c.blue())])
                 .unwrap();
             let matched = theme.mode != "light";

@@ -14,7 +14,6 @@ pub const MIN_NOTE_HEIGHT: i32 = 120;
 pub struct StickyNote {
     pub container: Overlay,
     pub data: Rc<RefCell<NoteData>>,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub text_view: TextView,
     pending_save: Rc<RefCell<Option<glib::SourceId>>>,
 }

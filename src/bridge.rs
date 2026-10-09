@@ -4,7 +4,7 @@
 //! workspace to paired SUPER DESKTOP PCs over LAN / Tailscale. The owning
 //! daemon remains authoritative for card layout and lifecycle.
 //!
-//! Endpoints (see OmarchyAILauncher/PROTOCOL.md, wire v1):
+//! Endpoints (protocol version `PROTOCOL_VERSION`):
 //!   GET  /api/v1/ping
 //!   GET  /api/v1/harnesses            (Bearer token)
 //!   GET  /api/v1/theme                 (Bearer token)
@@ -1415,7 +1415,7 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
             }
             respond(stream, 200, "OK", &theme_document());
         }
-        // PROTOCOL.md: full document on connect, then on every change (1s poll).
+        // Full document on connect, then on every change (1s poll).
         ("GET", "/api/v1/harnesses/stream") => {
             if !require_pairing(stream, req, AuthReply::StatusEnvelope) {
                 return;
@@ -1451,7 +1451,7 @@ pub fn serve(port: u16) {
     };
     security::serve_control().expect("Cannot start private desktop control socket");
     println!("{SERVICE_NAME} HTTPS on 0.0.0.0:{port} (lan {})", lan_ip());
-    // Advertise for the launcher's NSD lookup (OmarchyAILauncher/PROTOCOL.md).
+    // Advertise for the launcher's NSD lookup.
     // On a worker thread: confirming the record with `avahi-browse` takes a
     // moment, and discovery must never delay serving requests.
     std::thread::spawn(move || {
@@ -1478,10 +1478,10 @@ pub fn serve(port: u16) {
     }
 }
 
-/// mDNS service type the launcher browses for (OmarchyAILauncher/PROTOCOL.md).
+/// mDNS service type the launcher browses for.
 pub const MDNS_SERVICE_TYPE: &str = "_omarchy-harness._tcp";
 
-/// Protocol version advertised in the TXT record (`ver=1`).
+/// Protocol version advertised in the TXT record (`ver=<PROTOCOL_VERSION>`).
 const MDNS_PROTOCOL_TXT_VERSION: u32 = PROTOCOL_VERSION;
 
 /// Publish `_omarchy-harness._tcp` through the system Avahi daemon.

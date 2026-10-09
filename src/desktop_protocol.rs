@@ -3,8 +3,6 @@
 //! Wire types are deliberately explicit: exporting AppState would leak local
 //! preferences and eventually outgoing peer credentials. Unimplemented features
 //! must not be advertised by the bridge.
-#![allow(dead_code)] // Contracts consumed by the following implementation steps.
-
 use serde::{Deserialize, Serialize};
 
 pub const DESKTOP_API_VERSION: u32 = 1;
@@ -130,23 +128,11 @@ impl Capabilities {
 
 /// Remote object keys must include machine identity even when card IDs happen
 /// to match. Local selection never requires a running bridge or a peer token.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub enum MachineSelection {
+    #[default]
     Local,
     Remote(String),
-}
-
-impl Default for MachineSelection {
-    fn default() -> Self {
-        Self::Local
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CardKey {
-    pub machine_id: String,
-    pub card_id: String,
 }
 
 /// Logical pixels. Insets describe the dock within the canvas, not a second
@@ -922,16 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_does_not_alias_equal_card_ids_on_different_hosts() {
-        let a = CardKey {
-            machine_id: "a".into(),
-            card_id: "sd_term_1".into(),
-        };
-        let b = CardKey {
-            machine_id: "b".into(),
-            card_id: "sd_term_1".into(),
-        };
-        assert_ne!(a, b);
+    fn machine_selection_defaults_to_local() {
         assert_eq!(MachineSelection::default(), MachineSelection::Local);
     }
 

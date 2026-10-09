@@ -346,7 +346,7 @@ impl RemoteCanvas {
     }
 
     /// The current mode (Fit, or 100% with its zoom).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn mode(&self) -> ViewMode {
         self.mode.get()
     }

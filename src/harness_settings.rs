@@ -2399,7 +2399,7 @@ mod tests {
         let card = &state.terminals[0];
         assert_eq!(crate::tmux::get_agent_config(&card.agent_type).name, "Terminal");
         assert_eq!(
-            crate::tmux::resolve_resume_command_with_session(&card.agent_type, Some(card.command.as_str()), None),
+            crate::tmux::resolve_resume_command_in(&card.agent_type, Some(card.command.as_str()), None, None),
             "/usr/bin/t3 serve"
         );
         assert!(crate::brand::logo_path("t3code", false).is_none());

@@ -11,8 +11,6 @@ use std::{
 // Recording (`harness-event`) lives in a GTK-free module shared with the small
 // client binary; re-export it so existing callers keep their paths.
 pub use crate::harness_record::{status, Metadata};
-#[cfg_attr(not(test), allow(unused_imports))]
-use crate::harness_record::{apply, apply_claude};
 use crate::harness_record::{atomic_bytes, atomic_write, now_ms, read, root, start_time};
 
 const OPTION: &str = "@super_desktop_metadata";
@@ -683,6 +681,7 @@ pub fn title(session: &str, agent: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness_record::{apply, apply_claude};
     fn claude_transcript_records(bytes: &[u8], session: &str) -> (Option<String>, Option<String>) {
         let scan = crate::harness_record::claude_transcript_scan(bytes, session);
         (scan.title, scan.prompt)

@@ -649,6 +649,11 @@ pub fn insert_local(session: &str, paths: &[PathBuf]) -> Result<usize, String> {
 
 #[cfg(test)]
 mod tests {
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
     use super::*;
 
     fn png() -> String {
@@ -656,7 +661,7 @@ mod tests {
         let pixbuf =
             gtk4::gdk_pixbuf::Pixbuf::new(gtk4::gdk_pixbuf::Colorspace::Rgb, false, 8, 64, 64).unwrap();
         pixbuf.fill(0xff0000ff);
-        crate::ws::base64(&pixbuf.save_to_bufferv("png", &[]).unwrap())
+        b64(&pixbuf.save_to_bufferv("png", &[]).unwrap())
     }
 
     fn body(attachments: serde_json::Value) -> String {
@@ -675,7 +680,7 @@ mod tests {
     fn parses_images_and_files_and_refuses_the_rest() {
         let (text, request, attachments) = parse(&body(serde_json::json!([
             {"kind": "image", "name": "Screenshot 2026-09-26.jpg", "dataBase64": png()},
-            {"kind": "file", "name": "report.pdf", "dataBase64": crate::ws::base64(b"%PDF-1.7")},
+            {"kind": "file", "name": "report.pdf", "dataBase64": b64(b"%PDF-1.7")},
         ])))
         .unwrap();
         assert_eq!((text.as_str(), request.len()), ("Look", 32));
@@ -697,7 +702,7 @@ mod tests {
         );
         // An image must really be one; SVG and friends are refused.
         assert!(parse(&body(serde_json::json!([
-            {"kind": "image", "name": "x.svg", "dataBase64": crate::ws::base64(b"<svg/>")}
+            {"kind": "image", "name": "x.svg", "dataBase64": b64(b"<svg/>")}
         ])))
         .is_err());
         // Non-canonical or empty base64.
@@ -730,7 +735,7 @@ mod tests {
     fn decoding_accepts_only_canonical_bytes_including_all_tails() {
         for len in 1..=129 {
             let bytes: Vec<_> = (0..len).map(|i| (i * 197 + len) as u8).collect();
-            let encoded = crate::ws::base64(&bytes);
+            let encoded = b64(&bytes);
             assert_eq!(decode(&encoded).unwrap(), bytes);
         }
         // Check all ASCII substitutions, including padding, NUL, whitespace,
@@ -747,7 +752,7 @@ mod tests {
                         None
                     } else {
                         let decoded = gtk4::glib::base64_decode(&candidate);
-                        (crate::ws::base64(&decoded) == candidate).then_some(decoded)
+                        (b64(&decoded) == candidate).then_some(decoded)
                     };
                     assert_eq!(decode(&candidate).ok(), expected, "{candidate:?}");
                 }
@@ -889,7 +894,7 @@ mod tests {
             "requestId": "c".repeat(32), "text": "",
             "attachments": [
                 {"kind": "image", "name": "probe.png", "dataBase64": png()},
-                {"kind": "file", "name": "probe notes.txt", "dataBase64": crate::ws::base64(b"probe\n")},
+                {"kind": "file", "name": "probe notes.txt", "dataBase64": b64(b"probe\n")},
             ],
         }).to_string())
         .unwrap();
