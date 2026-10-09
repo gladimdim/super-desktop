@@ -1363,7 +1363,7 @@ button.tour-next {{
 }}
 button.tour-demo {{
     margin-top: 10px;
-    color: {accent};
+    color: {demo_text};
     border-color: {accent_soft};
 }}
 
@@ -1638,6 +1638,7 @@ button.tour-demo {{
 }}
 "#,
         accent = theme.accent,
+        demo_text = theme.readable_text(&theme.lighter_background, 0.85, &[&theme.accent]),
         magenta = theme.magenta,
         background = theme.background,
         darker = theme.darker_background,

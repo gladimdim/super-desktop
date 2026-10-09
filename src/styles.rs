@@ -7,6 +7,16 @@ thread_local! {
     static CSS_PROVIDER: RefCell<Option<CssProvider>> = RefCell::new(None);
 }
 
+/// Run GTK's own theme in the Omarchy theme's light or dark variant.
+/// Without a desktop settings portal GTK falls back to its light variant,
+/// whose white buttons, entries and popovers then show the dark palette's
+/// light text on white.
+fn match_gtk_variant(theme: &OmarchyTheme) {
+    if let Some(settings) = gtk4::Settings::default() {
+        settings.set_gtk_application_prefer_dark_theme(theme.mode != "light");
+    }
+}
+
 pub fn generate_css(theme: &OmarchyTheme) -> String {
     let mut css = theme_css(theme);
     css.push_str(&icon_radius_css());
@@ -51,6 +61,7 @@ r#"
 }}
 .asset-drawer button, .asset-drawer entry {{
     background-color: {btn_bg};
+    background-image: none;
     color: {foreground};
     border: 1px solid {btn_border};
     border-radius: 5px;
@@ -215,12 +226,12 @@ button.machine-peer-selected {{
 
 .hud-button-danger {{
     background-color: transparent;
-    color: {bright_red};
+    color: {red_text};
 }}
 
 .hud-button-danger:hover {{
     background-color: {danger_bg};
-    color: {bright_red};
+    color: {red_text};
     box-shadow: inset 0 -2px {bright_red};
 }}
 
@@ -280,7 +291,7 @@ entry.ws-entry:focus {{
    instead of starting cards somewhere the user did not ask for. */
 entry.ws-entry.ws-entry-invalid {{
     border-color: {bright_red};
-    color: {bright_red};
+    color: {red_text};
 }}
 
 .ws-menu-btn {{
@@ -391,7 +402,7 @@ popover.ws-pop > contents {{
 
 .ws-del:hover {{
     background-color: {danger_bg};
-    color: {bright_red};
+    color: {red_text};
 }}
 
 .ws-empty {{
@@ -1153,7 +1164,7 @@ button.term-jump-newest:hover {{
     font-size: 34px;
     font-weight: 800;
 }}
-.pairing-result-mark.pairing-result-rejected {{ color: {bright_red}; }}
+.pairing-result-mark.pairing-result-rejected {{ color: {red_text}; }}
 
 /* Invitation flow: a checklist of prerequisites, the invitation, then what
    happened to the request it produced. */
@@ -1181,7 +1192,7 @@ button.term-jump-newest:hover {{
     border: 1px solid {status_busy_border};
 }}
 .invite-step-mark.invite-fail {{
-    color: {bright_red};
+    color: {red_text};
     background-color: {danger_bg};
     border: 1px solid {danger_border};
 }}
@@ -1346,7 +1357,7 @@ separator.launcher-sep {{
 
 /* Failed start/stop: the overlay is the only place the user sees it */
 .launcher-note-error {{
-    color: {bright_red};
+    color: {red_text};
     font-weight: 700;
 }}
 
@@ -1362,8 +1373,14 @@ separator.launcher-sep {{
 }}
 
 /* Buttons keep the HUD pill language, sized for a panel */
+/* GTK's own theme paints buttons with a background image (white in its
+   light variant, which GTK uses when the desktop reports no dark
+   preference); it covers `background-color`, so clear it here. */
 .launcher-btn {{
     background-color: {btn_bg};
+    background-image: none;
+    box-shadow: none;
+    text-shadow: none;
     color: {foreground};
     border: 1px solid {btn_border};
     border-radius: 9px;
@@ -1381,19 +1398,19 @@ separator.launcher-sep {{
 
 .launcher-btn-primary {{
     background-color: {badge_bg};
-    color: {accent};
+    color: {primary_text};
     border-color: {accent};
 }}
 
 .launcher-btn-danger {{
     background-color: {danger_bg};
-    color: {bright_red};
+    color: {danger_text};
     border-color: {danger_border};
 }}
 
 .launcher-btn-danger:hover {{
     background-color: {danger_border};
-    color: #ffffff;
+    color: {danger_hover_text};
 }}
 
 /* The PIN is the one value the user retypes on the phone: own panel + accent */
@@ -1602,7 +1619,11 @@ separator.launcher-sep {{
         btn_bg = theme.rgba_lighter_bg(0.85),
         btn_border = theme.rgba_muted(0.35),
         btn_hover_bg = theme.rgba_muted(0.45),
+        red_text = theme.readable_text(&theme.background, 1.0, &[&theme.bright_red, &theme.red]),
         danger_bg = OmarchyTheme::hex_to_rgba(&theme.red, 0.20),
+        danger_text = theme.readable_text(&theme.red, 0.20, &[&theme.bright_red, &theme.red]),
+        danger_hover_text = theme.readable_text(&theme.red, 0.40, &["#ffffff"]),
+        primary_text = theme.readable_text(&theme.accent, 0.15, &[&theme.accent]),
         bright_red = theme.bright_red,
         danger_border = OmarchyTheme::hex_to_rgba(&theme.red, 0.40),
         note_bg = theme.rgba_dark_bg(0.94),
@@ -1688,6 +1709,7 @@ pub fn apply_styles() {
         });
 
         let theme = current_theme();
+        match_gtk_variant(&theme);
         let css = generate_css(&theme);
         provider.load_from_string(&css);
     });
@@ -1695,6 +1717,7 @@ pub fn apply_styles() {
 
 pub fn reload_styles() -> OmarchyTheme {
     let theme = reload_theme();
+    match_gtk_variant(&theme);
     let css = generate_css(&theme);
 
     CSS_PROVIDER.with(|cell| {
@@ -2001,5 +2024,152 @@ mod tests {
         for class in crate::command_feedback::TONE_CLASSES {
             assert!(css.contains(&format!(".{class}")), "missing CSS rule for {class}");
         }
+    }
+
+    #[test]
+    fn button_labels_are_readable_in_every_omarchy_theme() {
+        crate::gtk_test::run_in_child_process("styles::tests::button_contrast_inner");
+    }
+
+    /// WCAG relative luminance of an sRGB colour (0..=1 channels).
+    fn luminance([r, g, b]: [f64; 3]) -> f64 {
+        let lin = |c: f64| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Every installed Omarchy theme (and the built-in palette), with GTK's
+    /// own theme in the variant the app picks for it and in the other one
+    /// (a desktop without a settings portal, or a theme switch in flight):
+    /// each button's label must stand out from the button it is drawn on.
+    #[test]
+    fn button_contrast_inner() {
+        use gtk4::prelude::*;
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let mut themes = vec![("built-in".to_string(), OmarchyTheme::default())];
+        if let Ok(dirs) = std::fs::read_dir("/usr/share/omarchy/themes") {
+            let mut dirs: Vec<_> = dirs.filter_map(Result::ok).map(|d| d.path()).collect();
+            dirs.sort();
+            for dir in dirs {
+                if let Ok(colors) = std::fs::read_to_string(dir.join("colors.toml")) {
+                    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+                    themes.push((name, crate::theme::from_colors_toml(&colors)));
+                }
+            }
+        }
+        // (panel classes, button classes)
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["mini-terminal", "harness-panel"], &["launcher-btn"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "launcher-btn-primary"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "launcher-btn-danger"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "tour-next"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "tour-demo"]),
+            (&["mini-terminal", "harness-panel"], &["term-btn"]),
+            (&["mini-terminal", "harness-panel", "asset-drawer"], &[]),
+            (&["mini-terminal", "harness-panel", "asset-drawer"], &["attach-browse-row"]),
+            (&[], &["hud-button"]),
+            (&[], &["hud-button", "hud-button-danger"]),
+        ];
+        let provider = CssProvider::new();
+        let display = gdk::Display::default().unwrap();
+        style_context_add_provider_for_display(&display, &provider, STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let settings = gtk4::Settings::default().unwrap();
+        let shots = std::env::var_os("SD_CONTRAST_SHOTS").map(std::path::PathBuf::from);
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None::<&gdk::Surface>).unwrap();
+        let mut failures = Vec::new();
+        for (name, theme) in &themes {
+            let backdrop = crate::theme::OmarchyTheme::to_rgba_color(&theme.background)
+                .map(|c| [f64::from(c.red()), f64::from(c.green()), f64::from(c.blue())])
+                .unwrap();
+            let matched = theme.mode != "light";
+            for dark in [matched, !matched] {
+                provider.load_from_string(&generate_css(theme));
+                settings.set_gtk_application_prefer_dark_theme(dark);
+                // Fresh widgets for every palette: nothing styled earlier
+                // is measured.
+                let window = gtk4::Window::new();
+                let column = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+                let mut buttons = Vec::new();
+                for (panel_classes, button_classes) in cases {
+                    let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                    for class in *panel_classes {
+                        panel.add_css_class(class);
+                    }
+                    let button = gtk4::Button::with_label("Skip tour");
+                    for class in *button_classes {
+                        button.add_css_class(class);
+                    }
+                    button.set_halign(gtk4::Align::Start);
+                    button.set_margin_start(12);
+                    panel.append(&button);
+                    column.append(&panel);
+                    buttons.push((format!("{panel_classes:?} {button_classes:?}"), button));
+                }
+                window.set_child(Some(&column));
+                window.present();
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while column.width() == 0 {
+                    assert!(std::time::Instant::now() < until, "never laid out");
+                    crate::gtk_test::pump(20);
+                }
+                crate::gtk_test::pump(100);
+                let paintable = gtk4::WidgetPaintable::new(Some(&column));
+                let snapshot = gtk4::Snapshot::new();
+                paintable.snapshot(&snapshot, f64::from(column.width()), f64::from(column.height()));
+                let texture = renderer.render_texture(&snapshot.to_node().unwrap(), None);
+                let (w, h) = (texture.width() as usize, texture.height() as usize);
+                let mut bytes = vec![0u8; w * h * 4];
+                texture.download(&mut bytes, w * 4);
+                // Premultiplied BGRA over the theme's background.
+                let pixel = |x: usize, y: usize| -> [f64; 3] {
+                    let p = &bytes[(y * w + x) * 4..][..4];
+                    let a = f64::from(p[3]) / 255.0;
+                    let rgb = [p[2], p[1], p[0]];
+                    std::array::from_fn(|i| f64::from(rgb[i]) / 255.0 + backdrop[i] * (1.0 - a))
+                };
+                let variant = if dark { "dark" } else { "light" };
+                let before = failures.len();
+                for (case, button) in &buttons {
+                    let bounds = button.compute_bounds(&column).unwrap();
+                    let (x0, y0) = (bounds.x() as usize + 3, bounds.y() as usize + 3);
+                    let x1 = ((bounds.x() + bounds.width()) as usize).min(w) - 3;
+                    let y1 = ((bounds.y() + bounds.height()) as usize).min(h) - 3;
+                    // The button's fill is its most common colour; the label
+                    // is the pixel that differs from it most.
+                    let mut counts = std::collections::HashMap::new();
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let c = pixel(x, y).map(|v| (v * 255.0).round() as u8);
+                            *counts.entry(c).or_insert(0) += 1;
+                        }
+                    }
+                    let fill = counts.into_iter().max_by_key(|(_, n)| *n).unwrap().0.map(|v| f64::from(v) / 255.0);
+                    let mut best = 1.0f64;
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            best = best.max(contrast(fill, pixel(x, y)));
+                        }
+                    }
+                    if best < 3.0 {
+                        failures.push(format!("{name} (GTK {variant}): {case} label contrast {best:.2}"));
+                    }
+                }
+                if let Some(dir) = shots.as_ref().filter(|_| failures.len() > before) {
+                    std::fs::create_dir_all(dir).unwrap();
+                    texture.save_to_png(dir.join(format!("{name}-{variant}.png"))).unwrap();
+                }
+                window.destroy();
+            }
+        }
+        renderer.unrealize();
+        assert!(failures.is_empty(), "{} unreadable buttons:\n{}", failures.len(), failures.join("\n"));
     }
 }
