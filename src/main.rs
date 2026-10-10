@@ -83,6 +83,7 @@ mod terminal_links;
 mod overlap_ghost;
 mod shortcut;
 mod sleep_lock;
+mod screensaver;
 mod state;
 mod startup;
 mod sticky_note;
@@ -470,6 +471,9 @@ struct AppContext {
     /// corner surface while the overlay is hidden and by the overlay window
     /// itself while it is visible (see `hotcorner`).
     hot_inside: Rc<hotcorner::Zone>,
+    /// The screensaver hid the overlay, so it comes back when the screensaver
+    /// ends. Any show or toggle in between takes over.
+    restore_after_screensaver: bool,
 }
 
 fn main() {
@@ -679,6 +683,7 @@ fn run_daemon(start_visible: bool) {
         window: None,
         shown: false,
         hot_inside: Rc::new(hotcorner::Zone::default()),
+        restore_after_screensaver: false,
     }));
 
     // Older installs bound the shortcut on press (which repeats while held).
@@ -832,6 +837,9 @@ fn run_daemon(start_visible: bool) {
         });
     }
 
+    #[cfg(target_os = "linux")]
+    follow_screensaver(&context, &app);
+
     // The channel's waker schedules this future on GTK as soon as a command
     // arrives. No polling timer, idle CPU use, or extra wake-pipe descriptors.
     let ctx_ipc = Rc::clone(&context);
@@ -876,6 +884,7 @@ fn ensure_omarchy_theme_hook() {
 /// Returns whether the overlay is on screen afterwards. `false` only happens
 /// when there is no display to draw on.
 fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
+    ctx.borrow_mut().restore_after_screensaver = false;
     // No display (a daemon started from a bare shell, a test runner, a session
     // without Wayland): building widgets would dereference NULL deep inside
     // GTK. That is the one SIGSEGV this program has produced — see the
@@ -1185,6 +1194,7 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
 fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     // A tap during the slide-in reverses immediately. Duplicate IPC events
     // from the keysym and physical-key bindings are handled by ToggleGate.
+    ctx.borrow_mut().restore_after_screensaver = false;
     if ctx.borrow().shown {
         hide_window(ctx);
         false
@@ -1192,6 +1202,53 @@ fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
         show_window(ctx, app);
         true
     }
+}
+
+/// Hide the overlay while Omarchy's screensaver is up (the overlay's layer
+/// would draw over it) and bring it back afterwards if it was on screen.
+#[cfg(target_os = "linux")]
+fn follow_screensaver(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
+    let (tx, mut rx) = futures_channel::mpsc::unbounded::<screensaver::Change>();
+    if let Err(error) = thread::Builder::new()
+        .name("super-desktop-screensaver".to_string())
+        .spawn(move || screensaver::watch(|change| {
+            let _ = tx.unbounded_send(change);
+        }))
+    {
+        eprintln!("SUPER DESKTOP: could not follow the screensaver: {error}");
+        return;
+    }
+    let ctx = Rc::clone(ctx);
+    let app = app.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(change) = rx.next().await {
+            match change {
+                screensaver::Change::Started => {
+                    if ctx.borrow().shown {
+                        hide_window(&ctx);
+                        ctx.borrow_mut().restore_after_screensaver = true;
+                        // Hyprland gives the keyboard back to the window that
+                        // had it before the overlay: once as the hide starts
+                        // and again at the unmap.
+                        let _ = thread::Builder::new()
+                            .name("super-desktop-screensaver-focus".to_string())
+                            .spawn(|| {
+                                thread::sleep(Duration::from_millis(100));
+                                screensaver::focus_screensaver();
+                                thread::sleep(crate::window::HIDE_FALLBACK + Duration::from_millis(100));
+                                screensaver::focus_screensaver();
+                            });
+                    }
+                }
+                screensaver::Change::Ended => {
+                    let restore = std::mem::take(&mut ctx.borrow_mut().restore_after_screensaver);
+                    if restore && !ctx.borrow().shown {
+                        show_window(&ctx, &app);
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Hyprland can fire both the keysym and physical-key binding on one release.
