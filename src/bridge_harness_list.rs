@@ -28,6 +28,7 @@ fn harness_document() -> serde_json::Value {
         "harnesses": collect_harnesses(),
         "usage": crate::usage::launcher_usage(),
         "theme": theme_document(),
+        "wake": super::wake::wake_document(),
     })
 }
 

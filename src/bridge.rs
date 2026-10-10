@@ -56,6 +56,8 @@ mod desktop;
 mod desktop_events;
 #[path = "bridge_harness_list.rs"]
 mod harness_list;
+#[path = "bridge_wake.rs"]
+mod wake;
 #[path = "bridge_terminal_stream.rs"]
 mod terminal_stream;
 #[path = "bridge_completions.rs"]
@@ -2306,6 +2308,8 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         for field in ["status", "service", "protocolVersion", "hostname", "lanIp", "bridgeId", "addresses", "tailscaleIp", "port", "time"] {
             assert!(body.get(field).is_some(), "{field} missing from {body}");
         }
+        // Hardware addresses go only to paired phones, in the harness list.
+        assert!(body.get("wake").is_none(), "wake in the open ping: {body}");
     }
 
     /// A device token the bridge accepts, registered once per test process
