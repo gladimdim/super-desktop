@@ -346,6 +346,10 @@ pub const SETTINGS_PANEL_DEFAULT_SIZE: (i32, i32) = (1024, 768);
 /// page with more to show scrolls rather than pushing the card wider.
 pub const SETTINGS_PANEL_MIN_SIZE: (i32, i32) = (660, 620);
 
+/// On a screen narrower than 1200, the card takes at most this share of its
+/// width.
+pub const SETTINGS_PANEL_SMALL_SCREEN_SHARE: f64 = 0.8;
+
 /// Floating card + its refresh handle. The overlay adds `widget` centered and
 /// toggles visibility; `refresh` re-detects the harnesses on this machine and
 /// re-reads the stored selection.

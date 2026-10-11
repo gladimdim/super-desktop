@@ -1021,7 +1021,8 @@ impl SuperDesktopWindow {
 
         // Added after the HUD so the settings card floats above it. It moves
         // by its header and resizes by its edges like a terminal card, and
-        // never over the bar. Where and how big the user left it is kept.
+        // never over the bar. Where and how big the user left it is kept, but
+        // on a screen narrower than 1200 it is at most 80% of the width.
         let (saved_pos, saved_size) = {
             let state = win_rc.state.borrow();
             (state.settings_panel_pos, state.settings_panel_size)
@@ -1034,6 +1035,7 @@ impl SuperDesktopWindow {
                 min_size: crate::harness_settings::SETTINGS_PANEL_MIN_SIZE,
                 saved_pos,
                 saved_size,
+                small_screen_share: Some(crate::harness_settings::SETTINGS_PANEL_SMALL_SCREEN_SHARE),
             },
             Rc::new({
                 let state = Rc::clone(&win_rc.state);

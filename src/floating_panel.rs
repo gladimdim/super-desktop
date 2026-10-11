@@ -14,13 +14,35 @@ use std::rc::Rc;
 /// Space kept between the panel and the screen's edges.
 const MARGIN: i32 = 8;
 
+/// Screens narrower than this (logical pixels) are small: a panel with a
+/// `small_screen_share` takes at most that share of their width.
+const SMALL_SCREEN_WIDTH: i32 = 1200;
+
+/// The widest a panel may be on a screen `screen_width` wide: what fits
+/// between the margins, and on a small screen no more than `small_screen_share`
+/// of it.
+fn max_width(screen_width: i32, small_screen_share: Option<f64>) -> i32 {
+    let fits = screen_width - 2 * MARGIN;
+    match small_screen_share {
+        Some(share) if screen_width < SMALL_SCREEN_WIDTH => fits.min((screen_width as f64 * share) as i32),
+        _ => fits,
+    }
+}
+
 /// Where a panel of `size` goes on a `bounds` screen whose top bar ends at
 /// `top`, as `(x, y, width, height)`: at `wanted` (its top-left) or centered,
 /// kept whole on screen and below the bar. A screen smaller than the panel
-/// shrinks it to what fits.
-pub fn place(bounds: (i32, i32), size: (i32, i32), top: i32, wanted: Option<(i32, i32)>) -> (i32, i32, i32, i32) {
+/// shrinks it to what fits, and a small screen to `small_screen_share` of its
+/// width when given.
+pub fn place(
+    bounds: (i32, i32),
+    size: (i32, i32),
+    top: i32,
+    wanted: Option<(i32, i32)>,
+    small_screen_share: Option<f64>,
+) -> (i32, i32, i32, i32) {
     let (screen_width, screen_height) = bounds;
-    let width = size.0.min(screen_width - 2 * MARGIN).max(1);
+    let width = size.0.min(max_width(screen_width, small_screen_share)).max(1);
     let height = size.1.min(screen_height - top - 2 * MARGIN).max(1);
     let (x, y) = wanted.unwrap_or(((screen_width - width) / 2, (screen_height - height) / 2));
     let clamp = |value: i32, min: i32, max: i32| value.clamp(min, max.max(min));
@@ -64,6 +86,9 @@ pub struct PanelLayout {
     pub saved_pos: Option<(i32, i32)>,
     /// The size the user last dragged it to; `None` is `default_size`.
     pub saved_size: Option<(i32, i32)>,
+    /// On a screen narrower than 1200, the most of its width the panel takes;
+    /// `None` lets it fill the screen.
+    pub small_screen_share: Option<f64>,
 }
 
 /// A panel in `overlay` the user drags by its header and resizes by its
@@ -73,6 +98,7 @@ pub struct MovablePanel {
     /// The panel and its resize handles: the child `overlay` places.
     shell: gtk4::Overlay,
     min_size: (i32, i32),
+    small_screen_share: Option<f64>,
     /// The size the user chose, before it is fitted to this screen.
     size: Cell<(i32, i32)>,
     top: Rc<dyn Fn() -> i32>,
@@ -110,6 +136,7 @@ impl MovablePanel {
             overlay: overlay.clone(),
             shell: shell.clone(),
             min_size: layout.min_size,
+            small_screen_share: layout.small_screen_share,
             size: Cell::new(fit_min(layout.saved_size.unwrap_or(layout.default_size), layout.min_size)),
             top,
             wanted: Cell::new(layout.saved_pos),
@@ -204,7 +231,13 @@ impl MovablePanel {
     }
 
     fn rect(&self, overlay: &gtk4::Overlay) -> (i32, i32, i32, i32) {
-        place((overlay.width(), overlay.height()), self.size.get(), (self.top)(), self.wanted.get())
+        place(
+            (overlay.width(), overlay.height()),
+            self.size.get(),
+            (self.top)(),
+            self.wanted.get(),
+            self.small_screen_share,
+        )
     }
 
     /// Where a resize may take each edge, and how big the result may be: on
@@ -215,7 +248,7 @@ impl MovablePanel {
         Limits {
             min_width: self.min_size.0,
             min_height: self.min_size.1,
-            max_width: (screen_width - 2 * MARGIN).max(self.min_size.0),
+            max_width: max_width(screen_width, self.small_screen_share).max(self.min_size.0),
             max_height: (screen_height - top - 2 * MARGIN).max(self.min_size.1),
             left: MARGIN as f64,
             top: (top + MARGIN) as f64,
@@ -244,6 +277,7 @@ impl MovablePanel {
             size,
             (self.top)(),
             Some(position),
+            self.small_screen_share,
         );
         let moved = self.wanted.replace(Some((x, y))) != Some((x, y));
         let resized = self.size.replace(size) != size;
@@ -383,7 +417,13 @@ impl CardPanels {
         let panel = MovablePanel::install(
             &overlay,
             widget,
-            PanelLayout { default_size: self.default_size, min_size: self.min_size, saved_pos, saved_size },
+            PanelLayout {
+                default_size: self.default_size,
+                min_size: self.min_size,
+                saved_pos,
+                saved_size,
+                small_screen_share: None,
+            },
             top,
             Rc::new(move |position, size| last.set((Some(position), Some(size)))),
         );
@@ -530,22 +570,39 @@ mod tests {
         let screen = (1920, 1080);
         let size = (660, 620);
         // Centered by default.
-        assert_eq!(place(screen, size, 46, None), (630, 230, 660, 620));
+        assert_eq!(place(screen, size, 46, None, None), (630, 230, 660, 620));
         // Where the user left it.
-        assert_eq!(place(screen, size, 46, Some((100, 300))), (100, 300, 660, 620));
+        assert_eq!(place(screen, size, 46, Some((100, 300)), None), (100, 300, 660, 620));
         // Never past an edge, never over the top bar.
-        assert_eq!(place(screen, size, 46, Some((-500, -500))), (8, 54, 660, 620));
-        assert_eq!(place(screen, size, 46, Some((5000, 5000))), (1252, 452, 660, 620));
+        assert_eq!(place(screen, size, 46, Some((-500, -500)), None), (8, 54, 660, 620));
+        assert_eq!(place(screen, size, 46, Some((5000, 5000)), None), (1252, 452, 660, 620));
         // A larger bar pushes it down.
-        assert_eq!(place(screen, size, 80, Some((100, 60))).1, 88);
+        assert_eq!(place(screen, size, 80, Some((100, 60)), None).1, 88);
         // A screen smaller than the panel: whatever fits, still below the bar.
-        let (x, y, width, height) = place((600, 500), size, 46, Some((40, 40)));
+        let (x, y, width, height) = place((600, 500), size, 46, Some((40, 40)), None);
         assert_eq!((x, y, width, height), (8, 54, 584, 438));
         // The size never follows the position.
         for wanted in [None, Some((0, 0)), Some((9999, 9999)), Some((700, 400))] {
-            let (_, _, width, height) = place(screen, size, 46, wanted);
+            let (_, _, width, height) = place(screen, size, 46, wanted, None);
             assert_eq!((width, height), size);
         }
+    }
+
+    #[test]
+    fn a_panel_with_a_small_screen_share_takes_that_much_of_a_narrow_screen() {
+        let size = (1024, 768);
+        // Below 1200 wide: 80% of the width, centered, whatever height fits.
+        assert_eq!(place((1100, 800), size, 46, None, Some(0.8)), (110, 54, 880, 738));
+        assert_eq!(place((1000, 700), size, 46, None, Some(0.8)).2, 800);
+        // A narrower size the user chose is kept.
+        assert_eq!(place((1100, 800), (700, 600), 46, None, Some(0.8)).2, 700);
+        // From 1200 up, and for panels without a share, only the margins count.
+        assert_eq!(place((1200, 900), size, 46, None, Some(0.8)).2, 1024);
+        assert_eq!(place((1100, 800), size, 46, None, None).2, 1024);
+        // A resize stops at the same width the panel is placed at.
+        assert_eq!(max_width(1100, Some(0.8)), 880);
+        assert_eq!(max_width(1100, None), 1084);
+        assert_eq!(max_width(1920, Some(0.8)), 1904);
     }
 
     #[test]
@@ -583,6 +640,7 @@ mod tests {
             min_size: (200, 150),
             saved_pos: None,
             saved_size: None,
+            small_screen_share: None,
         };
         let movable = MovablePanel::install(&overlay, &panel, layout, Rc::new(|| 46), Rc::new({
             let saved = Rc::clone(&saved);
