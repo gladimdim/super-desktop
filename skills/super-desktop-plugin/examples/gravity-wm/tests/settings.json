@@ -1,0 +1,44 @@
+{
+  "description": "The settings change the sizes: 50% at the centre and 96 px icons.",
+  "settings": {
+    "maxWidth": 50,
+    "iconSize": 96
+  },
+  "renderer": {
+    "screen": {
+      "width": 1920,
+      "height": 1080,
+      "top": 46
+    },
+    "cards": [
+      {
+        "id": 1,
+        "x": 640,
+        "y": 300,
+        "width": 640,
+        "height": 300
+      },
+      {
+        "id": 2,
+        "x": 0,
+        "y": 600,
+        "width": 96,
+        "height": 96,
+        "iconified": true,
+        "iconX": 0,
+        "iconY": 600
+      }
+    ],
+    "expect": [
+      {
+        "card": 1,
+        "width": 960
+      },
+      {
+        "card": 2,
+        "mode": "icon",
+        "width": 96
+      }
+    ]
+  }
+}

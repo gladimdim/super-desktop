@@ -1,0 +1,103 @@
+{
+  "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
+  "manifestVersion": 1,
+  "id": "gravity-wm",
+  "name": "Gravity WM",
+  "version": "0.2.0",
+  "description": "Cards grow toward the horizontal centre, up to 70% of the screen width with more rows and columns, shrink toward the sides and become icons at the edges.",
+  "author": "SUPER DESKTOP examples",
+  "license": "MIT",
+  "engines": {
+    "superDesktop": ">=1.2.0",
+    "pluginApi": "1"
+  },
+  "permissions": [
+    "layout.renderer",
+    "ui.toolbar",
+    "shortcuts.overlay"
+  ],
+  "contributes": {
+    "renderer": {
+      "id": "gravity-wm.renderer",
+      "wasm": "renderer.wasm",
+      "params": [
+        "maxWidth",
+        "minWidth",
+        "edgeBand",
+        "iconSize",
+        "smoothing"
+      ]
+    },
+    "commands": [
+      {
+        "id": "gravity-wm.toggle",
+        "title": "Turn Gravity WM on or off",
+        "icon": "🪐",
+        "action": "renderer.toggle"
+      }
+    ],
+    "toolbar": [
+      {
+        "id": "gravity-wm.button",
+        "icon": "🪐",
+        "label": "Gravity",
+        "tooltip": "Gravity WM on/off (SUPER + ALT + M)",
+        "command": "gravity-wm.toggle"
+      }
+    ],
+    "shortcuts": [
+      {
+        "id": "gravity-wm.toggle-key",
+        "command": "gravity-wm.toggle",
+        "default": "SUPER + ALT + M",
+        "scope": "overlay"
+      }
+    ],
+    "settings": [
+      {
+        "key": "maxWidth",
+        "type": "number",
+        "title": "Width at the centre (% of the screen)",
+        "description": "How wide a card is at the centre of the screen. Its height grows with it, and the terminal gets the extra columns and rows.",
+        "min": 20,
+        "max": 95,
+        "default": 70
+      },
+      {
+        "key": "minWidth",
+        "type": "number",
+        "title": "Width near the edges (% of the screen)",
+        "description": "How wide a card is drawn just before it turns into an icon.",
+        "min": 5,
+        "max": 60,
+        "default": 22
+      },
+      {
+        "key": "edgeBand",
+        "type": "number",
+        "title": "Icon band at each side (% of half the screen)",
+        "description": "A card whose centre is this close to the left or right edge becomes an icon.",
+        "min": 2,
+        "max": 40,
+        "default": 12
+      },
+      {
+        "key": "iconSize",
+        "type": "number",
+        "title": "Icon size (px)",
+        "min": 48,
+        "max": 160,
+        "default": 72
+      },
+      {
+        "key": "smoothing",
+        "type": "number",
+        "title": "Animation smoothing (ms)",
+        "description": "Higher is softer and slower; 0 jumps.",
+        "min": 0,
+        "max": 1000,
+        "default": 90
+      }
+    ]
+  }
+}

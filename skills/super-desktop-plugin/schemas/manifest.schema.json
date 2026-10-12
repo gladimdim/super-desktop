@@ -1,0 +1,432 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gladimdim/super-desktop/skills/super-desktop-plugin/schemas/manifest.schema.json",
+  "title": "SUPER DESKTOP plugin manifest (super-desktop-plugin.json), manifestVersion 1, plugin API 1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifestVersion", "id", "name", "version", "description", "engines", "permissions", "contributes"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "manifestVersion": { "const": 1 },
+    "id": {
+      "description": "Plugin id. Lowercase letters, digits and hyphens; starts with a letter. Every contribution id is '<id>.<name>'.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]$"
+    },
+    "name": { "type": "string", "minLength": 1, "maxLength": 48 },
+    "version": {
+      "description": "Semantic version. A release is the git tag v<version> on a commit whose manifest has this version.",
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$"
+    },
+    "description": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "author": { "type": "string", "maxLength": 100 },
+    "license": { "type": "string", "maxLength": 64 },
+    "repository": { "type": "string", "pattern": "^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$" },
+    "engines": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["superDesktop", "pluginApi"],
+      "properties": {
+        "superDesktop": { "description": "Semver range of SUPER DESKTOP builds, e.g. '>=1.2.0'.", "type": "string", "minLength": 1 },
+        "pluginApi": { "const": "1" }
+      }
+    },
+    "main": {
+      "description": "Process component. Started in the plugin directory; speaks JSON-RPC 2.0 over stdin/stdout, one JSON object per line.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "description": "argv. command[0] is an interpreter on PATH (python3, node, bun, deno, bash, sh) or a path relative to the plugin directory.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "env": {
+          "description": "Extra environment variables for the process.",
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": { "pattern": "^[A-Z_][A-Z0-9_]{0,63}$" },
+          "additionalProperties": { "type": "string", "maxLength": 4096 }
+        }
+      }
+    },
+    "assets": {
+      "description": "Files downloaded at install time (usually GitHub Release assets), checked against sha256.",
+      "type": "object",
+      "maxProperties": 16,
+      "propertyNames": { "$ref": "#/$defs/relativePath" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["url", "sha256"],
+        "properties": {
+          "url": { "type": "string", "pattern": "^https://" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "arch": { "enum": ["x86_64", "aarch64"] }
+        }
+      }
+    },
+    "activation": {
+      "description": "When the process starts. Default: on first command. Required to include onStartup when 'titles' is contributed.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(onStartup|onOverlayShown|onCommand:[a-z][a-z0-9-]*\\.[A-Za-z0-9_.-]+)$"
+      }
+    },
+    "permissions": {
+      "description": "What the plugin may ask the host to do. Each contribution point and host method needs its permission.",
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/permission" }
+    },
+    "sandbox": {
+      "description": "Operating-system sandbox (bubblewrap) for the process component. 'none' runs it unsandboxed and is flagged at install.",
+      "oneOf": [
+        { "const": "none" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "network": { "type": "boolean", "default": false },
+            "read": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/sandboxPath" } },
+            "write": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/sandboxPath" } },
+            "env": {
+              "description": "Environment variables passed through from the session (HOME, PATH, LANG are always passed).",
+              "type": "array",
+              "maxItems": 32,
+              "items": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]{0,63}$" }
+            }
+          }
+        }
+      ]
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title"],
+            "properties": {
+              "id": { "$ref": "#/$defs/contributionId" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "icon": { "$ref": "#/$defs/icon" },
+              "action": {
+                "description": "A command the host carries out itself, with no process. renderer.toggle turns this plugin's renderer on or off (remembered; the plugin stays on). Needs contributes.renderer.",
+                "enum": ["renderer.toggle"]
+              }
+            }
+          }
+        },
+        "shortcuts": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "command", "default", "scope"],
+            "properties": {
+              "id": { "$ref": "#/$defs/contributionId" },
+              "command": { "$ref": "#/$defs/contributionId" },
+              "default": {
+                "description": "Hyprland spelling: modifiers and key joined by ' + ', e.g. 'SUPER + SHIFT + G', or a lone 'F1'..'F12'.",
+                "type": "string",
+                "pattern": "^((SUPER|CTRL|ALT|SHIFT) \\+ )*[A-Z0-9]+$|^F([1-9]|1[0-2])$"
+              },
+              "scope": { "enum": ["global", "overlay"] }
+            }
+          }
+        },
+        "toolbar": {
+          "type": "array",
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "icon", "tooltip"],
+            "properties": {
+              "id": { "$ref": "#/$defs/contributionId" },
+              "icon": { "$ref": "#/$defs/icon" },
+              "label": { "type": "string", "maxLength": 24 },
+              "tooltip": { "type": "string", "maxLength": 120 },
+              "command": { "$ref": "#/$defs/contributionId" },
+              "view": { "$ref": "#/$defs/contributionId" }
+            },
+            "oneOf": [{ "required": ["command"] }, { "required": ["view"] }]
+          }
+        },
+        "toolbarHide": {
+          "description": "Optional built-in top-bar items to hide. Arrange, Settings, Hide and the machine selector can never be hidden.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(brand|shortcutHint|newNote|usage|launcher:[a-z0-9.-]+)$"
+          }
+        },
+        "cardButtons": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "icon", "tooltip", "command"],
+            "properties": {
+              "id": { "$ref": "#/$defs/contributionId" },
+              "icon": { "$ref": "#/$defs/icon" },
+              "tooltip": { "type": "string", "maxLength": 120 },
+              "command": { "$ref": "#/$defs/contributionId" },
+              "showInIcon": { "type": "boolean", "default": false },
+              "when": { "$ref": "#/$defs/when" }
+            }
+          }
+        },
+        "cardControls": {
+          "description": "Exclusive: replaces the built-in minimize/expand/close group on local cards.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "controls"],
+          "properties": {
+            "id": { "$ref": "#/$defs/contributionId" },
+            "controls": { "$ref": "#/$defs/controlList" },
+            "iconControls": { "$ref": "#/$defs/controlList" }
+          }
+        },
+        "titles": {
+          "description": "The plugin sets card titles and chips with title.set. Requires activation onStartup.",
+          "const": true
+        },
+        "renderer": {
+          "description": "Exclusive: a WASM module that decides where and how big every local card is drawn. See references/renderer-abi.md.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "wasm"],
+          "properties": {
+            "id": { "$ref": "#/$defs/contributionId" },
+            "wasm": { "$ref": "#/$defs/relativePath" },
+            "params": {
+              "description": "Keys of number or bool settings passed to the renderer every frame, in this order, as f32 after the cards (bool: 1 or 0). See renderer-abi.md#params.",
+              "type": "array",
+              "maxItems": 16,
+              "uniqueItems": true,
+              "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9]{0,47}$" }
+            }
+          }
+        },
+        "harnesses": {
+          "type": "array",
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/harness" }
+        },
+        "settings": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "$ref": "#/$defs/setting" }
+        },
+        "views": {
+          "type": "array",
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "kind"],
+            "properties": {
+              "id": { "$ref": "#/$defs/contributionId" },
+              "title": { "type": "string", "minLength": 1, "maxLength": 64 },
+              "kind": { "enum": ["panel", "popover"] },
+              "width": { "type": "integer", "minimum": 240, "maximum": 1600 },
+              "height": { "type": "integer", "minimum": 160, "maximum": 1200 }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "permission": {
+      "enum": [
+        "ui.toolbar",
+        "ui.cardButtons",
+        "ui.cardControls",
+        "ui.titles",
+        "ui.popup",
+        "ui.notify",
+        "shortcuts.global",
+        "shortcuts.overlay",
+        "cards.read",
+        "cards.control",
+        "terminal.read",
+        "terminal.write",
+        "harness.provide",
+        "harness.launch",
+        "layout.renderer",
+        "llm"
+      ]
+    },
+    "contributionId": {
+      "description": "'<plugin id>.<name>'. The prefix must equal the manifest id.",
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{1,38}[a-z0-9]\\.[A-Za-z0-9_-]{1,48}$"
+    },
+    "relativePath": {
+      "description": "Path inside the plugin directory: no leading '/', no '..', no backslashes.",
+      "type": "string",
+      "maxLength": 256,
+      "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$))[A-Za-z0-9_.\\-/]+$"
+    },
+    "icon": {
+      "description": "One emoji, or a relative .svg/.png path inside the plugin (at most 256 KiB).",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "sandboxPath": {
+      "description": "Absolute path, '~/...', '${settings.<key>}' (a path or paths setting) or '${env:NAME}'.",
+      "type": "string",
+      "pattern": "^(/|~/|\\$\\{settings\\.[A-Za-z0-9_]+\\}|\\$\\{env:[A-Z_][A-Z0-9_]*\\})"
+    },
+    "when": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "agents": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 96 } },
+        "status": {
+          "type": "array",
+          "items": { "enum": ["working", "completed", "idle", "waiting", "error", "unknown"] }
+        },
+        "iconified": { "type": "boolean" }
+      }
+    },
+    "controlList": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 6,
+      "items": {
+        "oneOf": [
+          { "enum": ["builtin:iconify", "builtin:restore", "builtin:expand", "builtin:close"] },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "icon", "tooltip", "command"],
+            "properties": {
+              "id": { "$ref": "#/$defs/contributionId" },
+              "icon": { "$ref": "#/$defs/icon" },
+              "tooltip": { "type": "string", "maxLength": 120 },
+              "command": { "$ref": "#/$defs/contributionId" }
+            }
+          }
+        ]
+      }
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "type", "title"],
+      "properties": {
+        "key": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]{0,47}$" },
+        "type": { "enum": ["string", "secret", "bool", "number", "enum", "path", "paths", "color"] },
+        "title": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "description": { "type": "string", "maxLength": 300 },
+        "default": {},
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "values": { "type": "array", "minItems": 1, "maxItems": 32, "items": { "type": "string", "maxLength": 64 } },
+        "kind": { "enum": ["file", "directory"] }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "const": "enum" } } }, "then": { "required": ["values"] } },
+        { "if": { "properties": { "type": { "enum": ["path", "paths"] } } }, "then": { "required": ["kind"] } }
+      ]
+    },
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "glyph", "binaries", "adapter"],
+      "properties": {
+        "id": {
+          "description": "Local id. The harness key is 'p.<plugin id>.<id>'.",
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 32 },
+        "glyph": { "description": "One emoji, used where the logo is not shown.", "type": "string", "minLength": 1, "maxLength": 16 },
+        "logo": { "$ref": "#/$defs/relativePath" },
+        "binaries": {
+          "description": "Executable names looked up on PATH, or absolute / '~/' paths. The first one found is launched.",
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "launch": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "args": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 4096 } }
+          }
+        },
+        "resume": {
+          "description": "Arguments that resume a session. '${session}' is replaced with the reported native session id.",
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "string", "maxLength": 256 }
+        },
+        "adapter": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "enum": ["generic-report", "none"] },
+            "setup": {
+              "description": "Extra launch arguments that load the plugin's hook/extension. '${plugin}' is the plugin directory.",
+              "type": "array",
+              "maxItems": 16,
+              "items": { "type": "string", "maxLength": 4096 }
+            }
+          }
+        },
+        "status": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "work": {
+              "description": "Regular expressions (RE2 syntax, at most 200 characters each) matched against the last screen lines; a match means 'working'.",
+              "type": "array",
+              "maxItems": 8,
+              "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+            },
+            "shellFallback": { "type": "boolean", "default": true }
+          }
+        },
+        "prompts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "injectedPrefixes": {
+              "description": "Prompt prefixes the harness injects itself (system turns). Prompts starting with them are never treated as the user's.",
+              "type": "array",
+              "maxItems": 16,
+              "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+            },
+            "placeholderTitles": {
+              "type": "array",
+              "maxItems": 16,
+              "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+            }
+          }
+        },
+        "completion": { "type": "boolean", "default": false }
+      }
+    }
+  }
+}

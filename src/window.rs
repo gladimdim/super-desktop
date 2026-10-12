@@ -19,7 +19,6 @@ use crate::mini_terminal::{
 use crate::overlap_ghost::GhostLayer;
 use crate::state::{AppState, NoteData, TerminalData, TopBarSize};
 use crate::sticky_note::StickyNote;
-use crate::tmux::create_session;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Trajectory {
@@ -147,7 +146,7 @@ pub(crate) fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
     root
 }
 
-fn fit_top_bar(hud: &gtk4::Box, width: i32, brand: &Label, hint: &Label) {
+pub(crate) fn fit_top_bar(hud: &gtk4::Box, width: i32, brand: &Label, hint: &Label) {
     // An unmapped window has no allocation yet. Keep the initial monitor size
     // until the compositor supplies a positive logical width.
     if width <= 0 {
@@ -932,7 +931,18 @@ impl SuperDesktopWindow {
         brand_images
             .borrow_mut()
             .extend(harness_bar.brand_images());
-        hud.append(&top_bar_content(&hud_left, &harness_bar.group, &hud_right));
+        // Plugin toolbar items follow the launchers, inside the same scroller:
+        // never beside Arrange, Settings and Hide.
+        let plugin_bar = crate::plugin_ui::manager().toolbar();
+        let launch_row = gtk4::Box::new(Orientation::Horizontal, 10);
+        launch_row.set_halign(Align::Center);
+        launch_row.set_valign(Align::Center);
+        launch_row.append(&harness_bar.group);
+        if let Some(parent) = plugin_bar.group.parent().and_downcast::<gtk4::Box>() {
+            parent.remove(&plugin_bar.group);
+        }
+        launch_row.append(&plugin_bar.group);
+        hud.append(&top_bar_content(&hud_left, &launch_row, &hud_right));
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
         let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
@@ -991,6 +1001,11 @@ impl SuperDesktopWindow {
         hud_right.append(&btn_close);
 
         hud_right.append(&hint);
+        // Plugin item labels hide on narrow displays together with the hint.
+        hint.connect_visible_notify({
+            let plugin_bar = Rc::clone(&plugin_bar);
+            move |hint| plugin_bar.set_compact(!hint.is_visible())
+        });
 
         // Layer-shell chooses the output. Its allocated logical width is the
         // authority, including after a monitor or scale change.
@@ -1065,6 +1080,18 @@ impl SuperDesktopWindow {
         // Files & links panels open as their own floating cards, under the
         // pairing dialogs.
         crate::asset_view::set_host(
+            &root_overlay,
+            Rc::new({
+                let state = Rc::clone(&win_rc.state);
+                move || top_bar_height(state.borrow().top_bar_size)
+            }),
+            &pairing_wizard.widget,
+        );
+        // Plugins see and act on this PC's cards through the same commands a
+        // remote PC sends.
+        crate::plugin_ui::manager().set_workspace(Rc::new(PluginWorkspace(Rc::downgrade(&win_rc))));
+        // Plugin panels open the same way, under the same dialogs.
+        crate::plugin_ui::manager().set_view_host(
             &root_overlay,
             Rc::new({
                 let state = Rc::clone(&win_rc.state);
@@ -1152,6 +1179,16 @@ impl SuperDesktopWindow {
                     }
                 }
                 return glib::Propagation::Stop;
+            }
+            // Plugin shortcuts that work inside the overlay. A focused
+            // terminal keeps every combination without SUPER.
+            if let crate::shortcut::Capture::Combo(combo) = crate::shortcut::interpret(key, state) {
+                let in_terminal = win_w.upgrade().and_then(|w| gtk4::prelude::RootExt::focus(&w.window)).is_some_and(|focused| {
+                    focused.type_().name().contains("Terminal") || focused.has_css_class("term-vte")
+                });
+                if crate::plugin_ui::manager().overlay_shortcut(&combo, in_terminal) {
+                    return glib::Propagation::Stop;
+                }
             }
             glib::Propagation::Proceed
         });
@@ -1469,17 +1506,44 @@ impl SuperDesktopWindow {
     /// Create a card and its tmux session; the session exists on return, so
     /// callers can report it (IPC, a viewer's request).
     pub fn create_new_terminal_in(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>) -> String {
-        self.new_terminal_card(agent_type, cmd, x, y, directory, true)
+        self.new_terminal_card(agent_type, cmd, x, y, directory, true, &[])
     }
 
     /// The top bar's launch: the card is on screen at the next frame and its
     /// session is started by the card's first attach, on a worker. Creating it
     /// here held GTK for one tmux process (several, before they were chained).
     pub fn launch_new_terminal(&self, agent_type: &str) {
-        self.new_terminal_card(agent_type, None, None, None, None, false);
+        self.new_terminal_card(agent_type, None, None, None, None, false, &[]);
     }
 
-    fn new_terminal_card(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>, wait_for_session: bool) -> String {
+    /// A harness card for a plugin (`harness.launch`): a harness this PC
+    /// offers, in a folder that exists, optionally started with a first
+    /// prompt. The prompt is passed once, on the command line; the card's
+    /// saved command never contains it.
+    pub fn launch_for_plugin(&self, agent_type: &str, folder: &str, prompt: Option<&str>) -> Result<String, &'static str> {
+        if !crate::tmux::HARNESS_KEYS.contains(&agent_type)
+            && !self.state.borrow().custom_harnesses.iter().any(|item| item.id == agent_type && item.validate().is_ok())
+        {
+            return Err("unsupported_harness");
+        }
+        let directory = crate::state::clean_dir(folder).ok_or("invalid_workspace")?;
+        let initial = match prompt {
+            // A harness that is not installed would start a plain shell, which
+            // would take the prompt for a file to run.
+            Some(_) if crate::tmux::HARNESS_KEYS.contains(&agent_type) && crate::tmux::detect_harness_command(agent_type).is_none() => {
+                return Err("harness_not_installed");
+            }
+            Some(prompt) => crate::tmux::initial_prompt_args(agent_type, prompt).ok_or("no_initial_prompt")?,
+            None => Vec::new(),
+        };
+        let session = self.new_terminal_card(agent_type, None, None, None, Some(&directory), true, &initial);
+        if session.is_empty() || !crate::tmux::session_exists(&session) {
+            return Err("terminal_unavailable");
+        }
+        Ok(session)
+    }
+
+    fn new_terminal_card(&self, agent_type: &str, cmd: Option<&str>, x: Option<i32>, y: Option<i32>, directory: Option<&str>, wait_for_session: bool, initial: &[String]) -> String {
         crate::frame_profile::note_request("new terminal");
         // The folder from the top bar field: this card's harness starts there,
         // and keeps it for its whole life (see TerminalData::workspace_dir).
@@ -1501,8 +1565,8 @@ impl SuperDesktopWindow {
         let (def_w, def_h) =
             clamp_card_size(NEW_TERM_WIDTH, NEW_TERM_HEIGHT, self.screen_width(), self.screen_height());
         // A card too narrow to attach has no worker to start its session.
-        let (sess, cmd_run, inventory) = if wait_for_session || def_w < crate::mini_terminal::MIN_CARD_WIDTH {
-            let (sess, cmd_run) = create_session(agent_type, command, Some(&workspace_dir));
+        let (sess, cmd_run, inventory) = if wait_for_session || !initial.is_empty() || def_w < crate::mini_terminal::MIN_CARD_WIDTH {
+            let (sess, cmd_run) = crate::tmux::create_session_with(agent_type, command, Some(&workspace_dir), initial);
             (sess, cmd_run, None)
         } else {
             let cmd_run = crate::tmux::resolve_command(agent_type, command);
@@ -1612,7 +1676,16 @@ impl SuperDesktopWindow {
         // A card dragged over another one hides it: keep that card's ghost
         // outline following the drag.
         let ghosts_drag = Rc::clone(&ghosts);
-        let on_drag_update = self.card_drag_updater(move || ghosts_drag.refresh());
+let move_card = self.card_drag_updater(move || ghosts_drag.refresh());
+        let on_drag_update = move |widget: gtk4::Widget, x: f64, y: f64| {
+            // A window renderer draws the dragged card itself, every frame:
+            // moving it here as well would make the two fight.
+            if crate::plugin_ui::layout::drawing() {
+                crate::plugin_ui::layout::wake();
+                return;
+            }
+            move_card(widget, x, y);
+        };
 
         let canvas_term_end = canvas.clone();
         let drag_pending_term_end = Rc::clone(&self.drag_pending);
@@ -1623,6 +1696,7 @@ impl SuperDesktopWindow {
             let size = live_workspace_size(&drag_window, (sw, sh));
             widget.remove_css_class("dragging");
             drag_pending_term_end.borrow_mut().remove(&widget);
+            let rendered = crate::plugin_ui::layout::drawing();
             let mut final_data = data.clone();
             // The icon and the expanded card have separate remembered spots;
             // clamp and snap to whichever one this card is currently in.
@@ -1637,7 +1711,10 @@ impl SuperDesktopWindow {
                 (final_data.x, final_data.y) = clamp_card_origin(final_data.x, final_data.y, size);
             }
             let (px, py) = displayed_pos(&final_data);
-            canvas_term_end.move_(&widget, px, py);
+            let dropped_id = final_data.id.clone();
+            if !rendered {
+                canvas_term_end.move_(&widget, px, py);
+            }
             // Perf: keep the drag-end frame inside the 8.3ms 120Hz budget.
             persist(&state_end, |s| {
                 // A colour picked on the card's dot becomes its folder's colour.
@@ -1652,6 +1729,10 @@ impl SuperDesktopWindow {
             // A card that just landed on another one buries it (and an iconify
             // or restore commit arrives through this same callback).
             ghosts_end.refresh();
+            // The renderer may turn the drop into an icon, or open an icon.
+            if rendered {
+                crate::plugin_ui::layout::dropped(&dropped_id);
+            }
         };
 
         let terminal_cards_toggle = Rc::clone(&term_cards);
@@ -1763,6 +1844,8 @@ impl SuperDesktopWindow {
         let on_raise = move |widget: gtk4::Widget| {
             raise_canvas_child(&canvas_raise, &widget);
             raise_canvas_child(&canvas_raise, &hud_raise);
+            // Focus moved: a window renderer may draw the cards differently.
+            crate::plugin_ui::layout::wake();
             // GTK can call this while another handler is still holding the
             // list borrow (e.g. during a widget removal). The z-order above
             // already happened, so just skip the bookkeeping instead of
@@ -1840,6 +1923,8 @@ impl SuperDesktopWindow {
             card.focus_terminal();
         }
         term_cards.borrow_mut().push(Rc::clone(&card));
+        // Plugin buttons, controls and titles for the new card.
+        crate::plugin_ui::manager().decorate(&card);
         raise_canvas_child(&canvas, &self.hud);
         // A new card can land on top of an existing one (they cascade 32px):
         // its outline shows up right away while the user works in neither.
@@ -3788,6 +3873,26 @@ mod tests {
                 button
             })
             .collect();
+        // Plugin items share the launchers' scroller (the production bar wraps
+        // the harness group and the plugin group in one row the same way).
+        let plugin_bar = crate::plugin_ui::toolbar::PluginBar::new(Rc::new(|_: &str, _: &str| {}));
+        for plugin in 0..4 {
+            for item in 0..4 {
+                plugin_bar.add(
+                    &format!("plugin-{plugin}"),
+                    std::path::Path::new("/tmp"),
+                    &crate::plugin_host::manifest::ToolbarItem {
+                        id: format!("plugin-{plugin}.item-{item}"),
+                        icon: "🧪".into(),
+                        label: Some(format!("Plugin item with a long label {item}")),
+                        tooltip: "t".into(),
+                        command: Some(format!("plugin-{plugin}.run")),
+                        view: None,
+                    },
+                );
+            }
+        }
+        launchers.append(&plugin_bar.group);
         let right = gtk4::Box::new(Orientation::Horizontal, 10);
         right.set_valign(Align::Center);
         let actions: Vec<_> = [
@@ -3806,6 +3911,10 @@ mod tests {
         .collect();
         let hint = Label::new(Some("[SUPER + SHIFT + Q]"));
         right.append(&hint);
+        hint.connect_visible_notify({
+            let plugin_bar = Rc::clone(&plugin_bar);
+            move |hint| plugin_bar.set_compact(!hint.is_visible())
+        });
         let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
         hud.append(&top_bar_content(&left, &launchers, &right));
@@ -3820,6 +3929,8 @@ mod tests {
             for (index, button) in launcher_buttons.iter().enumerate() {
                 button.set_visible(index < count);
             }
+            // Empty and full plugin groups alike.
+            plugin_bar.group.set_visible(count > 0);
             for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
                 paint_top_bar_size(&hud, size);
                 // Shrink, enlarge, then shrink again, as with output/scale changes.
@@ -4111,5 +4222,47 @@ mod tests {
         canvas.put(&term1, 0.0, 0.0);
         // Expanded terminal 1 is at the top of the canvas, above any other icon and even sticky notes!
         assert_eq!(canvas.last_child().as_ref(), Some(term1.upcast_ref::<gtk4::Widget>()));
+    }
+}
+
+/// The local workspace as plugins see it (`plugin_ui::cards::Workspace`).
+struct PluginWorkspace(std::rc::Weak<SuperDesktopWindow>);
+
+impl crate::plugin_ui::cards::Workspace for PluginWorkspace {
+    fn cards(&self) -> Vec<Rc<MiniTerminalCard>> {
+        self.0.upgrade().map(|w| w.terminal_cards.borrow().clone()).unwrap_or_default()
+    }
+
+    fn screen(&self) -> (i32, i32, i32) {
+        self.0
+            .upgrade()
+            .map(|w| {
+                let bar = top_bar_height(w.state.borrow().top_bar_size);
+                (w.screen_width(), w.screen_height(), bar)
+            })
+            .unwrap_or((0, 0, 0))
+    }
+
+    fn command(&self, command: &crate::desktop_protocol::WorkspaceCommand) -> Result<Option<String>, &'static str> {
+        let window = self.0.upgrade().ok_or("desktop_not_ready")?;
+        window.apply_workspace_command(command)
+    }
+
+    fn canvas(&self) -> Option<Fixed> {
+        self.0.upgrade().map(|w| w.canvas.clone())
+    }
+
+    fn sliding(&self) -> bool {
+        self.0.upgrade().is_some_and(|w| w.slide.running.get())
+    }
+
+    fn refresh_ghosts(&self) {
+        if let Some(window) = self.0.upgrade() {
+            window.ghosts.refresh();
+        }
+    }
+
+    fn launch(&self, agent: &str, folder: &str, prompt: Option<&str>) -> Result<String, &'static str> {
+        self.0.upgrade().ok_or("desktop_not_ready")?.launch_for_plugin(agent, folder, prompt)
     }
 }

@@ -104,10 +104,44 @@ mobile terminal output and Linux performance notes.
   describe unreleased plans. Describe shipped, user-facing behavior only.
 - This repository's Markdown is limited to README.md, CLI.md (the public command
   reference), SECURITY.md, these
-  instructions, `assets/logos/` attribution and licenses, and
-  `docs/screenshots/README.md`.
+  instructions, `assets/logos/` attribution and licenses,
+  `docs/screenshots/README.md`, and the plugin skills under `skills/` (see
+  "Plugin API and skills").
 - If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
   the notes here.
+
+## Plugin API and skills
+
+`skills/` holds Agent Skills (a `SKILL.md` per folder) that teach coding agents
+to write and review SUPER DESKTOP plugins: `super-desktop-plugin` (authoring:
+references, an SDK, examples) and `super-desktop-plugin-review` (the review
+checklist). Plugin authors copy them into their own repositories, and other
+LLMs follow them, so they are the public contract of the plugin API.
+
+- The schemas in `skills/super-desktop-plugin/schemas/` are normative: the
+  manifest (`manifest.schema.json`), the JSON-RPC methods
+  (`host-api.openrpc.json`) and the view nodes (`ui.schema.json`). The
+  renderer byte layout is in `references/renderer-abi.md`. The host code must
+  match them, not the other way round.
+- Any change to the plugin host (manifest fields, permissions, contribution
+  points, host methods or notifications, errors, limits, the renderer ABI,
+  the `super-desktop plugin` commands) updates, in the same commit: the
+  schemas, the affected `references/` file, `SKILL.md` (rules, limits,
+  tables), the review checklist when a rule changes, and the examples.
+- Plugin API 1 only grows, like the bridge: new optional fields, methods and
+  contribution points. Never remove, rename or retype anything, tighten
+  validation, or change a limit downward within API 1. A breaking change is
+  API 2 and needs the user's agreement first.
+- Keep the examples working: `skills/super-desktop-plugin/examples/gravity-wm/build.sh`
+  must pass, and each example manifest must validate against the schema.
+  Keep each example's `sd_plugin.py` identical to `sdk/python/sd_plugin.py`.
+- Every host error carries `data.hint` and `data.docs` (a `references/` file
+  and section) so an agent can fix its own mistake. A new error needs both.
+- The skills describe the API contract only: no roadmap, no unreleased plans,
+  no links to the private notes. The plan lives in
+  `../OmarchyAILauncher/desktop-docs/PLUGINS_PLAN.md`.
+- Plugins never change the bridge or the PC-to-PC protocol (see the plan). A
+  skill must never suggest otherwise.
 
 ## The version changes only for a release
 
@@ -173,6 +207,14 @@ as "user" turns, and sends them to the `UserPromptSubmit` hook.
   land after the hook). Do not remove either step.
 - An injected turn still counts as a turn for status and completion tracking;
   it only must not replace the prompt.
+- Plugins may draw their own title text and chips on a card
+  (`plugin_ui::cards`, `MiniTerminalCard::set_plugin_title`). That text is
+  display-only on this PC: the card keeps its own title (`base_title`),
+  which is what `desktop_presentation`, the workspace snapshot, the phone's
+  `lastPrompt`/`sessionTitle` and the title's tooltip use, and plugins only
+  ever receive the vetted prompt. Never publish the drawn label's text.
+  `card_title_plugin_text_is_drawn_only` and `tests/plugin_cards_smoke.py`
+  (the published snapshot has no plugin title) cover it.
 - Any change to prompt/title capture, harness hooks or adapters must preserve
   and run `cargo test card_title_`. Those tests must fail if the filter is
   removed; add a case for every new injected-turn shape you see in the wild.
@@ -189,6 +231,14 @@ Every process a test starts inherits that. Do not remove it or work around it
 `cargo test test_isolation` passing; it fails if the isolation is gone. A test
 that re-runs itself in a private root must still clear `TMUX` for every tmux
 command it runs in the parent, including cleanup.
+
+## No system dialogs from the overlay
+
+SUPER DESKTOP is a layer-shell overlay, not a normal window. Never open a
+GTK `FileDialog`, `FileChooserNative` or any other portal dialog from it:
+requesting one ended the daemon (no panic, no core dump), and such a
+dialog would open underneath the overlay anyway. Pick files and folders
+inside the overlay (see `plugin_ui::settings_page::path_browser`).
 
 ## GTK tests never use the user's desktop
 

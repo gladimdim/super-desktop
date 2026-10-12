@@ -1,0 +1,31 @@
+{
+  "description": "An icon dragged toward the centre and dropped there opens as a card.",
+  "renderer": {
+    "screen": {
+      "width": 1920,
+      "height": 1080,
+      "top": 46
+    },
+    "cards": [
+      {
+        "id": 4,
+        "x": 900,
+        "y": 400,
+        "width": 640,
+        "height": 300,
+        "iconified": true,
+        "iconX": 900,
+        "iconY": 400,
+        "dropped": true
+      }
+    ],
+    "expect": [
+      {
+        "dropTarget": {
+          "card": 4,
+          "toIcon": false
+        }
+      }
+    ]
+  }
+}

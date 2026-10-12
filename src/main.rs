@@ -81,6 +81,8 @@ mod terminal_picker;
 mod terminal_clipboard;
 mod terminal_links;
 mod overlap_ghost;
+mod plugin_host;
+mod plugin_ui;
 mod shortcut;
 mod sleep_lock;
 mod screensaver;
@@ -514,6 +516,10 @@ fn main() {
         return;
     }
 
+    if action == "plugin" {
+        std::process::exit(plugin_host::cli::run(&args[2..]));
+    }
+
     if matches!(action, "peer-add" | "peer-list" | "peer-workspace" | "peer-attach" | "peer-events" | "peer-command" | "peer-forget") {
         if let Err(error) = peer_cli::run(action, &args[2..]) {
             eprintln!("{error}");
@@ -743,6 +749,21 @@ fn run_daemon(start_visible: bool) {
         "daemon"
     });
     startup::mark("IPC listening");
+    // Plugins: a view or shortcut may show the overlay; then turn on the
+    // ones that are active in plugins.json.
+    {
+        let ctx_show = Rc::clone(&context);
+        let app_show = app.clone();
+        let plugins = plugin_ui::manager();
+        plugins.set_show_overlay(Rc::new(move || {
+            show_window(&ctx_show, &app_show);
+        }));
+        if env::var_os("SUPER_DESKTOP_SAFE_MODE").is_some() {
+            eprintln!("SUPER DESKTOP: safe mode, plugins are not started");
+        } else {
+            plugins.sync();
+        }
+    }
     // Independent owner-only CLI endpoint. Legacy bridge IPC remains unchanged.
     let (snapshot, snapshot_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
     let (adopt, adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
@@ -819,11 +840,15 @@ fn run_daemon(start_visible: bool) {
     // off GTK's main thread. Start it only after this process owns the daemon
     // socket: a duplicate daemon exits in `start_ipc_thread` and must not
     // restart or disturb the bridge.
-    if let Err(error) = thread::Builder::new()
-        .name("super-desktop-bridge-watch".to_string())
-        .spawn(bridge::supervise_bridge)
-    {
-        eprintln!("SUPER DESKTOP: could not start bridge supervision: {error}");
+    // Isolated test daemons (tests/plugin_smoke.py) must never start or probe
+    // a bridge next to the user's own on port 8759.
+    if env::var_os("SUPER_DESKTOP_NO_BRIDGE").is_none() {
+        if let Err(error) = thread::Builder::new()
+            .name("super-desktop-bridge-watch".to_string())
+            .spawn(bridge::supervise_bridge)
+        {
+            eprintln!("SUPER DESKTOP: could not start bridge supervision: {error}");
+        }
     }
 
     // Warm the UI right after start, never on the startup path: startup stays
@@ -906,6 +931,7 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     if let Some(win) = live_window(ctx) {
         win.show_again();
         ctx.borrow_mut().shown = true;
+        plugin_ui::manager().overlay_shown();
         return true;
     }
 
@@ -919,6 +945,7 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     ctx.borrow_mut().window = Some(Rc::clone(&win));
     win.show_again();
     ctx.borrow_mut().shown = true;
+    plugin_ui::manager().overlay_shown();
     true
 }
 
@@ -1176,6 +1203,7 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
         None => return,
     };
     ctx.borrow_mut().shown = false;
+    plugin_ui::manager().overlay_hidden();
     // Slide out, then unmap: the widget tree, the VTE terminals and their tmux
     // attach clients stay alive, so the next show is instant. The token makes a
     // show that lands during the animation win over this unmap.
@@ -1449,6 +1477,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             })
             .to_string()
         }
+        "plugin" => plugin_ui::handle_ipc(cmd.strip_prefix("plugin").unwrap_or("").trim()),
         "add-note" => {
             show_window(ctx, app);
             let text = if parts.len() > 1 {

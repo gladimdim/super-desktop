@@ -430,6 +430,8 @@ struct CompactChrome {
     status: Label,
     tag: Button,
     actions: gtk4::Box,
+    /// Plugin buttons and a plugin's icon controls, sized like restore/close.
+    plugin_boxes: [gtk4::Box; 2],
     restore: Button,
     close: Button,
     icon_box: gtk4::Box,
@@ -473,6 +475,19 @@ impl CompactChrome {
         }
         self.restore.set_margin_start(px(2.0));
         self.close.set_margin_end(px(2.0));
+        for plugin_box in &self.plugin_boxes {
+            plugin_box.set_spacing(px(2.0));
+            let mut child = plugin_box.first_child();
+            while let Some(widget) = child {
+                if let Ok(button) = widget.clone().downcast::<Button>() {
+                    button.set_size_request(px(32.0), px(26.0));
+                    if let Some(label) = button.child().and_downcast::<Label>() {
+                        set_font_px(&label, 11.0 * k);
+                    }
+                }
+                child = widget.next_sibling();
+            }
+        }
         self.icon_box.set_spacing(px(2.0));
         if let Some(logo) = &self.logo {
             logo.set_pixel_size(px(48.0).max(1));
@@ -615,6 +630,93 @@ pub struct MiniTerminalCard {
     cli_mode_change: Rc<Cell<bool>>,
     cli_tag_buttons: Rc<RefCell<Vec<glib::WeakRef<Button>>>>,
     geometry_commit: GeometryAction,
+    /// Where plugins put their header buttons, controls and title chips
+    /// (`plugin_ui::cards`). Empty and invisible without plugins.
+    pub plugin_chrome: PluginChrome,
+    /// The title from the card's own data: the harness name and the user's
+    /// vetted prompt. This, never a plugin's text, is what other devices see
+    /// and what the title's tooltip shows.
+    base_title: Rc<RefCell<String>>,
+    /// The user's vetted prompt alone, for plugins that set titles.
+    last_prompt: Rc<RefCell<Option<String>>>,
+    /// The last status the refresh saw (`working`, `idle`, …).
+    last_status: Rc<RefCell<String>>,
+    /// A plugin's replacement for the drawn title.
+    plugin_title: Rc<RefCell<Option<String>>>,
+    /// Where a window renderer draws this card (`plugin_ui::layout`), if one
+    /// does. Never saved: the card's own data stays its saved layout.
+    presented: Rc<RefCell<Option<Presented>>>,
+    /// When a resizing renderer last laid the card out at a new size.
+    relaid_at: Cell<Option<std::time::Instant>>,
+    /// Drawn as an icon by a renderer, so the body drags like an icon's.
+    presented_icon: Rc<Cell<bool>>,
+}
+
+/// When a resizing renderer's card is laid out at its drawn size.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Relayout {
+    /// Only scaled (still moving).
+    Never,
+    /// Now (the layout settled).
+    Now,
+    /// Every `LIVE_RELAYOUT` at most (the card is being dragged).
+    Live,
+}
+
+/// While a card is dragged, its terminal is resized at most this often…
+pub const LIVE_RELAYOUT: std::time::Duration = std::time::Duration::from_millis(100);
+/// …and only when its size changed by at least this many pixels.
+const LIVE_RELAYOUT_PX: i32 = 6;
+
+/// Whether a resizing renderer's card should be laid out at `target` now,
+/// given the size it has and how long ago it was last laid out.
+fn relayout_due(relayout: Relayout, current: (i32, i32), target: (i32, i32), since_last: Option<std::time::Duration>) -> bool {
+    match relayout {
+        Relayout::Never => false,
+        Relayout::Now => true,
+        // A small change waits for the next one: no resize per pixel.
+        Relayout::Live => {
+            let changed = (current.0 - target.0).abs() >= LIVE_RELAYOUT_PX || (current.1 - target.1).abs() >= LIVE_RELAYOUT_PX;
+            changed && since_last.is_none_or(|elapsed| elapsed >= LIVE_RELAYOUT)
+        }
+    }
+}
+
+/// A renderer's drawing of a card: its rectangle on the canvas and its form.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Presented {
+    pub rect: crate::card_resize::Rect,
+    pub icon: bool,
+    /// The size a resizing renderer laid the card out at (more columns and
+    /// rows), or `None` while it keeps its own size and is only scaled.
+    pub sized: Option<(i32, i32)>,
+}
+
+/// The parts of a card's chrome plugins may fill. The built-in controls sit
+/// in their own boxes so a plugin's control set can stand in for them and
+/// step aside again without the card being rebuilt.
+#[derive(Clone)]
+pub struct PluginChrome {
+    pub header_buttons: gtk4::Box,
+    pub builtin_controls: gtk4::Box,
+    pub plugin_controls: gtk4::Box,
+    pub chips_before: gtk4::Box,
+    pub chips_after: gtk4::Box,
+    pub compact_buttons: gtk4::Box,
+    pub compact_builtin: gtk4::Box,
+    pub compact_plugin_controls: gtk4::Box,
+}
+
+/// The drawn title: a plugin's text when it set one, the card's own otherwise.
+fn paint_title(label: &Label, base: &str, plugin: Option<&str>) {
+    let shown = plugin.filter(|t| !t.is_empty()).unwrap_or(base);
+    if label.label().as_str() != shown {
+        label.set_label(shown);
+    }
+    // The real title (and so the prompt) is never lost under a plugin's text.
+    if label.tooltip_text().as_deref() != Some(base) {
+        label.set_tooltip_text(Some(base));
+    }
 }
 
 impl MiniTerminalCard {
@@ -791,7 +893,15 @@ impl MiniTerminalCard {
         // Take every spare pixel up to the status badge; overflow ellipsizes.
         title.set_hexpand(true);
         title.set_halign(Align::Start);
+        let chips_before = gtk4::Box::new(Orientation::Horizontal, 4);
+        chips_before.add_css_class("plugin-chips");
+        chips_before.set_visible(false);
+        let chips_after = gtk4::Box::new(Orientation::Horizontal, 4);
+        chips_after.add_css_class("plugin-chips");
+        chips_after.set_visible(false);
+        header.append(&chips_before);
         header.append(&title);
+        header.append(&chips_after);
 
         let status_badge = Label::new(Some("● IDLE"));
         status_badge.add_css_class("term-status-badge");
@@ -828,11 +938,21 @@ impl MiniTerminalCard {
             header.append(&panels);
         }
 
+        // Plugin buttons, then the window controls. The built-in controls have
+        // a box of their own so a plugin's control set can take their place.
+        let header_buttons = gtk4::Box::new(Orientation::Horizontal, 2);
+        header_buttons.set_visible(false);
+        header.append(&header_buttons);
+        let builtin_controls = gtk4::Box::new(Orientation::Horizontal, 6);
+        header.append(&builtin_controls);
+        let plugin_controls = gtk4::Box::new(Orientation::Horizontal, 2);
+        plugin_controls.set_visible(false);
+
         // Iconify button: iconifies the window into 128x128 size
         let iconify_btn = Button::with_label("🗕");
         iconify_btn.set_tooltip_text(Some("Iconify to 128×128"));
         iconify_btn.add_css_class("term-btn");
-        header.append(&iconify_btn);
+        builtin_controls.append(&iconify_btn);
 
         // Expand to 80% overlay button
         let expand_btn = Button::with_label("⛶");
@@ -844,7 +964,7 @@ impl MiniTerminalCard {
         expand_btn.connect_clicked(move |_| {
             on_toggle_btn(&data_expand.borrow());
         });
-        header.append(&expand_btn);
+        builtin_controls.append(&expand_btn);
 
         // Kill session button
         let kill_btn = Button::with_label("✕");
@@ -856,7 +976,8 @@ impl MiniTerminalCard {
         kill_btn.connect_clicked(move |_| {
             on_close_header(sess_name.clone());
         });
-        header.append(&kill_btn);
+        builtin_controls.append(&kill_btn);
+        header.append(&plugin_controls);
         body.append(&header);
 
         // Preview box
@@ -978,13 +1099,21 @@ impl MiniTerminalCard {
         )));
         compact_restore_btn.add_css_class("term-btn");
         compact_restore_btn.add_css_class("term-compact-btn");
-        compact_actions.append(&compact_restore_btn);
+        let compact_buttons = gtk4::Box::new(Orientation::Horizontal, 2);
+        compact_buttons.set_visible(false);
+        compact_actions.append(&compact_buttons);
+        let compact_builtin = gtk4::Box::new(Orientation::Horizontal, 2);
+        compact_builtin.append(&compact_restore_btn);
+        compact_actions.append(&compact_builtin);
 
         let compact_kill_btn = Button::with_label("✕");
         compact_kill_btn.set_tooltip_text(Some("Kill Session"));
         compact_kill_btn.add_css_class("term-btn");
         compact_kill_btn.add_css_class("term-compact-btn");
-        compact_actions.append(&compact_kill_btn);
+        compact_builtin.append(&compact_kill_btn);
+        let compact_plugin_controls = gtk4::Box::new(Orientation::Horizontal, 2);
+        compact_plugin_controls.set_visible(false);
+        compact_actions.append(&compact_plugin_controls);
 
         compact_top_bar.append(&compact_actions);
         root.add_overlay(&compact_top_bar);
@@ -994,6 +1123,7 @@ impl MiniTerminalCard {
             status: compact_status,
             tag: compact_tag,
             actions: compact_actions,
+            plugin_boxes: [compact_buttons.clone(), compact_plugin_controls.clone()],
             restore: compact_restore_btn.clone(),
             close: compact_kill_btn.clone(),
             icon_box,
@@ -1086,6 +1216,7 @@ impl MiniTerminalCard {
             CardSource::Local => None,
         };
 
+        let base_title = Rc::new(RefCell::new(title_prefix.clone()));
         let card = Self {
             session_task: Arc::new(crate::session_task::SessionTask::default()),
             chrome: CardChrome {
@@ -1137,6 +1268,23 @@ impl MiniTerminalCard {
             cli_mode_change: Rc::new(Cell::new(false)),
             cli_tag_buttons: Rc::clone(&tag_sync),
             geometry_commit: Rc::new(RefCell::new(None)),
+            plugin_chrome: PluginChrome {
+                header_buttons,
+                builtin_controls,
+                plugin_controls,
+                chips_before,
+                chips_after,
+                compact_buttons,
+                compact_builtin,
+                compact_plugin_controls,
+            },
+            base_title,
+            last_prompt: Rc::new(RefCell::new(None)),
+            last_status: Rc::new(RefCell::new("unknown".into())),
+            plugin_title: Rc::new(RefCell::new(None)),
+            presented: Rc::new(RefCell::new(None)),
+            relaid_at: Cell::new(None),
+            presented_icon: Rc::new(Cell::new(false)),
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -1303,6 +1451,10 @@ impl MiniTerminalCard {
         compact_kill_btn.connect_clicked(move |_| {
             on_close_compact(sess_compact.clone());
         });
+        card.attach_builtin_menu(Rc::clone(&iconify_action), Rc::clone(&restore_action), {
+            let on_close = Rc::clone(&on_close);
+            Rc::new(move |session: String| on_close(session))
+        });
 
         // Double-click gestures
         let header_click = GestureClick::new();
@@ -1358,6 +1510,7 @@ impl MiniTerminalCard {
             data: Rc::clone(&card.data),
             expanded: Rc::clone(&card.expanded),
             visual_pos: Rc::clone(&card.visual_pos),
+            presented_icon: Rc::clone(&card.presented_icon),
             on_update: on_drag_update,
             on_end: Rc::clone(&on_drag_end),
             on_raise: Rc::clone(&on_raise_rc),
@@ -1475,8 +1628,182 @@ impl MiniTerminalCard {
     }
 
     pub fn desktop_presentation(&self) -> crate::workspace_model::CardPresentation {
+        // The card's own title: a plugin's text is drawn on this PC only.
         crate::workspace_model::CardPresentation {
-            title: self.title_label.label().to_string(), expanded: self.is_expanded(),
+            title: self.base_title.borrow().clone(), expanded: self.is_expanded(),
+        }
+    }
+
+    /// The vetted user prompt, the harness name prefix and the last status,
+    /// for plugins that set titles.
+    pub fn title_inputs(&self) -> (String, Option<String>, String) {
+        (self.title_prefix.clone(), self.last_prompt.borrow().clone(), self.last_status.borrow().clone())
+    }
+
+    /// Draw a plugin's title (`None`: the card's own). Never published.
+    pub fn set_plugin_title(&self, text: Option<&str>) {
+        *self.plugin_title.borrow_mut() = text.map(str::to_string);
+        paint_title(&self.title_label, &self.base_title.borrow(), text);
+    }
+
+    pub fn drawn_title(&self) -> String {
+        self.title_label.label().to_string()
+    }
+
+    /// The size the card is laid out at for its full form: its own size, or
+    /// the size it opens at when it is saved as an icon.
+    fn full_size(&self) -> (i32, i32) {
+        let data = self.data.borrow();
+        if data.iconified {
+            (data.restored_width.max(1), data.restored_height.max(1))
+        } else {
+            (data.width.max(1), data.height.max(1))
+        }
+    }
+
+    /// Draw the card where a window renderer says, without changing its saved
+    /// layout. A full card keeps its own size (the terminal is not resized)
+    /// and is scaled to fit `rect`, centred in it; an icon is laid out as one.
+    pub fn present(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, opacity: f64) {
+        self.present_as(canvas, rect, icon, false, Relayout::Never, opacity);
+    }
+
+    /// Like `present`, but a full card is laid out at the rectangle's size
+    /// (its terminal gets more or fewer columns and rows): at once when
+    /// `Relayout::Now` (the layout settled), at most every
+    /// `LIVE_RELAYOUT` while `Relayout::Live` (the card is being dragged), and
+    /// in between it is scaled from the size it has, so the terminal is not
+    /// resized on every frame. The saved layout is untouched.
+    pub fn present_resized(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, relayout: Relayout, opacity: f64) {
+        self.present_as(canvas, rect, false, true, relayout, opacity);
+    }
+
+    fn present_as(&self, canvas: &gtk4::Fixed, rect: crate::card_resize::Rect, icon: bool, resize: bool, relayout: Relayout, opacity: f64) {
+        let previous = *self.presented.borrow();
+        let previous_sized = previous.and_then(|p| p.sized);
+        let mut sized = previous_sized;
+        let form_changed = previous.map(|p| p.icon) != Some(icon);
+        let vte_attached = self.vte.borrow().is_some();
+        if icon {
+            sized = None;
+            let side = rect.width.min(rect.height).max(1);
+            if form_changed || previous.is_some_and(|p| p.rect.width != side) {
+                self.container.set_size_request(side, side);
+                self.chrome.apply(false, side, side, true, vte_attached);
+            }
+            canvas.set_child_transform(&self.container, Some(&gtk4::gsk::Transform::new().translate(&gtk4::graphene::Point::new(rect.x as f32, rect.y as f32))));
+        } else {
+            let target = (rect.width.max(1), rect.height.max(1));
+            let due = relayout_due(relayout, sized.unwrap_or_else(|| self.full_size()), target, self.relaid_at.get().map(|at| at.elapsed()));
+            if !resize {
+                sized = None;
+            } else if due && sized != Some(target) {
+                sized = Some(target);
+                self.relaid_at.set(Some(std::time::Instant::now()));
+            }
+            let (w, h) = sized.unwrap_or_else(|| self.full_size());
+            if form_changed || sized != previous_sized {
+                self.container.set_size_request(w, h);
+                self.chrome.apply(false, w, h, false, vte_attached);
+            }
+            let scale = (f64::from(rect.width) / f64::from(w)).min(f64::from(rect.height) / f64::from(h)).max(0.05);
+            let x = rect.x as f64 + (f64::from(rect.width) - f64::from(w) * scale) / 2.0;
+            let y = rect.y as f64 + (f64::from(rect.height) - f64::from(h) * scale) / 2.0;
+            canvas.set_child_transform(
+                &self.container,
+                Some(&gtk4::gsk::Transform::new().translate(&gtk4::graphene::Point::new(x as f32, y as f32)).scale(scale as f32, scale as f32)),
+            );
+        }
+        if (self.container.opacity() - opacity).abs() > 0.001 {
+            self.container.set_opacity(opacity);
+        }
+        self.presented_icon.set(icon);
+        *self.presented.borrow_mut() = Some(Presented { rect, icon, sized });
+    }
+
+    /// Back to the card's own layout (the renderer stopped or skipped it).
+    pub fn unpresent(&self, canvas: &gtk4::Fixed) {
+        if self.presented.borrow_mut().take().is_none() {
+            return;
+        }
+        self.presented_icon.set(false);
+        let data = self.data.borrow().clone();
+        if !self.is_expanded() {
+            self.container.set_size_request(data.width, data.height);
+            let (x, y) = displayed_pos(&data);
+            canvas.move_(&self.container, x, y);
+        }
+        self.container.set_opacity(1.0);
+        self.apply_chrome();
+    }
+
+    pub fn presented(&self) -> Option<Presented> {
+        *self.presented.borrow()
+    }
+
+    pub fn is_remote(&self) -> bool {
+        self.source.is_remote()
+    }
+
+    /// Size plugin buttons in the icon form for the current icon side.
+    pub fn refit_compact(&self) {
+        let side = self.chrome.compact.side.replace(0);
+        if side > 0 {
+            self.chrome.compact.fit(side);
+        }
+    }
+
+    /// Right-click on the header or the icon bar: the built-in actions, always,
+    /// whatever controls a plugin put in the chrome.
+    fn attach_builtin_menu(&self, iconify: Rc<dyn Fn()>, restore: Rc<dyn Fn()>, on_close: Rc<dyn Fn(String)>) {
+        for target in [self.chrome.header.clone().upcast::<gtk4::Widget>(), self.chrome.compact.top_bar.clone().upcast()] {
+            let click = GestureClick::new();
+            click.set_button(3);
+            let (data, expanded, on_toggle) = (Rc::clone(&self.data), Rc::clone(&self.expanded), Rc::clone(&self.on_toggle));
+            let (iconify, restore, on_close) = (Rc::clone(&iconify), Rc::clone(&restore), Rc::clone(&on_close));
+            let anchor = target.clone();
+            click.connect_pressed(move |gesture, _, x, y| {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                let popover = gtk4::Popover::new();
+                popover.add_css_class("card-menu");
+                popover.set_has_arrow(false);
+                popover.set_pointing_to(Some(&gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+                let list = gtk4::Box::new(Orientation::Vertical, 2);
+                let iconified = data.borrow().iconified;
+                let is_expanded = *expanded.borrow();
+                let mut items: Vec<(&str, Rc<dyn Fn()>)> = Vec::new();
+                if iconified {
+                    items.push(("🗖  Restore", Rc::clone(&restore)));
+                } else {
+                    if !is_expanded {
+                        items.push(("🗕  Minimize to icon", Rc::clone(&iconify)));
+                    }
+                    let (toggle, d) = (Rc::clone(&on_toggle), Rc::clone(&data));
+                    items.push((if is_expanded { "⛶  Collapse" } else { "⛶  Expand" }, Rc::new(move || toggle(&d.borrow()))));
+                }
+                let (close, session) = (Rc::clone(&on_close), data.borrow().session_name.clone());
+                items.push(("✕  Close session", Rc::new(move || close(session.clone()))));
+                for (label, action) in items {
+                    let button = Button::with_label(label);
+                    button.add_css_class("flat");
+                    let pop = popover.downgrade();
+                    button.connect_clicked(move |_| {
+                        if let Some(pop) = pop.upgrade() {
+                            pop.popdown();
+                        }
+                        action();
+                    });
+                    list.append(&button);
+                }
+                popover.set_child(Some(&list));
+                popover.set_parent(&anchor);
+                popover.connect_closed(|pop| {
+                    let pop = pop.clone();
+                    glib::idle_add_local_once(move || pop.unparent());
+                });
+                popover.popup();
+            });
+            target.add_controller(click);
         }
     }
 
@@ -1513,6 +1840,12 @@ impl MiniTerminalCard {
     /// currently up: the 80% expanded card, the 128×128 icon, or the plain
     /// card. Shared by the slide animation and the overlap ghosts.
     pub fn canvas_rect(&self, screen_w: i32, screen_h: i32) -> crate::card_resize::Rect {
+        // What a renderer draws is what covers other cards.
+        if let Some(presented) = *self.presented.borrow() {
+            if !self.is_expanded() {
+                return presented.rect;
+            }
+        }
         let (width, height) = self.size(screen_w, screen_h);
         let (x, y) = if self.is_expanded() {
             let (x, y, _, _) = expanded_rect(screen_w, screen_h);
@@ -1786,9 +2119,10 @@ impl MiniTerminalCard {
     /// session is alive, and anything to say about the stream.
     pub fn apply_host_state(&self, title: &str, alive: Option<bool>, message: Option<&str>) {
         let title = title.trim();
-        if !title.is_empty() && self.title_label.label() != title {
-            self.title_label.set_label(title);
+        if !title.is_empty() && *self.base_title.borrow() != title {
+            *self.base_title.borrow_mut() = title.to_string();
         }
+        paint_title(&self.title_label, &self.base_title.borrow(), self.plugin_title.borrow().as_deref());
         apply_status_view(
             &self.status_badge,
             &self.chrome.compact.status,
@@ -2130,6 +2464,13 @@ impl MiniTerminalCard {
         let meta_label = self.meta_label.downgrade();
         let title_label = self.title_label.downgrade();
         let title_prefix = self.title_prefix.clone();
+        let (base_title, last_prompt, last_status, plugin_title) = (
+            Rc::clone(&self.base_title),
+            Rc::clone(&self.last_prompt),
+            Rc::clone(&self.last_status),
+            Rc::clone(&self.plugin_title),
+        );
+        let card_id = self.data.borrow().id.clone();
         let opencode_cache = Rc::clone(&self.opencode_session);
         let cached_oc_id: Option<String> = opencode_cache.borrow().clone();
         // Fall back to the persisted id (loaded from state.json at startup)
@@ -2197,15 +2538,25 @@ impl MiniTerminalCard {
                 }
             }
 
+            let status_changed = *last_status.borrow() != status_info.status.to_ascii_lowercase();
+            if status_changed {
+                *last_status.borrow_mut() = status_info.status.to_ascii_lowercase();
+            }
             if let Some(title) = title_label.upgrade() {
                 let user_text = prompt;
                 let new_title = format_card_title(&title_prefix, user_text.as_deref());
-                if title.label().as_str() != new_title {
-                    title.set_label(&new_title);
-                    title.set_tooltip_text(Some(&new_title));
+                let title_changed = *base_title.borrow() != new_title;
+                if title_changed {
+                    *base_title.borrow_mut() = new_title.clone();
+                    *last_prompt.borrow_mut() = user_text.filter(|p| !p.trim().is_empty());
                     // This refresh runs for local cards only; their title is
-                    // part of the published workspace.
+                    // part of the published workspace (the base title, never
+                    // a plugin's text: see `desktop_presentation`).
                     crate::workspace_model::notify_changed();
+                }
+                paint_title(&title, &new_title, plugin_title.borrow().as_deref());
+                if title_changed || status_changed {
+                    crate::plugin_ui::card_inputs_changed(&card_id);
                 }
             }
             // A setup hint shows once per session, and only on a card on screen.
@@ -2776,12 +3127,20 @@ struct MoveDrag {
     data: Rc<RefCell<TerminalData>>,
     expanded: Rc<RefCell<bool>>,
     visual_pos: Rc<RefCell<(f64, f64)>>,
+    /// Set while a window renderer draws this card as an icon. That drawn icon
+    /// drags by its body, the same as a card that is saved iconified.
+    presented_icon: Rc<Cell<bool>>,
     on_update: Rc<dyn Fn(gtk4::Widget, f64, f64)>,
     on_end: Rc<dyn Fn(gtk4::Widget, &TerminalData)>,
     on_raise: Rc<dyn Fn(gtk4::Widget)>,
 }
 
 impl MoveDrag {
+    /// A renderer-drawn icon drags like a saved one.
+    fn compact(&self) -> bool {
+        self.data.borrow().iconified || self.presented_icon.get()
+    }
+
     /// Move the card by dragging `source`, while the card is iconified
     /// (`iconified_only`) or while it is not.
     fn attach(&self, source: &impl IsA<gtk4::Widget>, iconified_only: bool) {
@@ -2793,7 +3152,9 @@ impl MoveDrag {
         let start_pos_begin = Rc::clone(&start_pos);
         let grab_offset_begin = Rc::clone(&grab_offset);
         drag.connect_drag_begin(move |gesture, _, _| {
-            if this.data.borrow().iconified != iconified_only {
+            // An icon drags by its body, whether saved as one or drawn as one by
+            // a window renderer; a card by its header.
+            if this.compact() != iconified_only {
                 return;
             }
             if let Some(r) = this.root.upgrade() {
@@ -2819,7 +3180,7 @@ impl MoveDrag {
         let start_pos_update = Rc::clone(&start_pos);
         let grab_offset_update = Rc::clone(&grab_offset);
         drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-            if this.data.borrow().iconified != iconified_only || *this.expanded.borrow() {
+            if this.compact() != iconified_only || *this.expanded.borrow() {
                 return;
             }
             if offset_x.abs() > 2.0 || offset_y.abs() > 2.0 {
@@ -2840,7 +3201,7 @@ impl MoveDrag {
 
         let this = self.clone();
         drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            if this.data.borrow().iconified != iconified_only || *this.expanded.borrow() {
+            if this.compact() != iconified_only || *this.expanded.borrow() {
                 return;
             }
             if let Some(c) = this.root.upgrade() {
@@ -2859,7 +3220,50 @@ impl MoveDrag {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn plugin_renderer_relayout_is_throttled_while_dragging() {
+        use std::time::Duration;
+        let (w, h) = (640, 480);
+        // Settled: always; still moving and not dragged: never.
+        assert!(relayout_due(Relayout::Now, (w, h), (w + 1, h), Some(Duration::ZERO)));
+        assert!(!relayout_due(Relayout::Never, (w, h), (w * 2, h * 2), None));
+        // Dragged: a real change, once the interval passed (or the first time).
+        assert!(relayout_due(Relayout::Live, (w, h), (w + 200, h + 150), None));
+        assert!(relayout_due(Relayout::Live, (w, h), (w + 200, h + 150), Some(LIVE_RELAYOUT)));
+        assert!(!relayout_due(Relayout::Live, (w, h), (w + 200, h + 150), Some(LIVE_RELAYOUT / 2)), "at most every LIVE_RELAYOUT");
+        assert!(!relayout_due(Relayout::Live, (w, h), (w + 3, h - 3), Some(LIVE_RELAYOUT * 10)), "not for a few pixels");
+        assert!(relayout_due(Relayout::Live, (w, h), (w, h - LIVE_RELAYOUT_PX), Some(LIVE_RELAYOUT * 10)));
+    }
+
     use super::*;
+
+    #[test]
+    fn card_title_plugin_text_is_drawn_only() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::card_title_plugin_text_inner");
+    }
+
+    /// A plugin's title replaces what the label draws; the tooltip keeps the
+    /// card's own title (and so the user's prompt), and clearing the plugin's
+    /// text brings the card's own title back. `desktop_presentation` reads
+    /// the card's own title, never the label (see tests/plugin_cards_smoke.py
+    /// for the published snapshot).
+    #[test]
+    fn card_title_plugin_text_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let label = Label::new(None);
+        let base = format_card_title("Claude", Some("fix the login form"));
+        paint_title(&label, &base, Some("⎇ main · fix login"));
+        assert_eq!(label.label(), "⎇ main · fix login");
+        assert_eq!(label.tooltip_text().as_deref(), Some(base.as_str()));
+        paint_title(&label, &base, Some(""));
+        assert_eq!(label.label(), base, "an empty plugin text draws the card's own title");
+        paint_title(&label, &base, None);
+        assert_eq!(label.label(), base);
+    }
 
     fn term_data(iconified: bool) -> TerminalData {
         TerminalData {

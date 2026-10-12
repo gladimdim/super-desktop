@@ -1,0 +1,1546 @@
+{
+  "openrpc": "1.3.2",
+  "info": {
+    "title": "SUPER DESKTOP plugin API",
+    "version": "1.0.0",
+    "description": "JSON-RPC 2.0 between SUPER DESKTOP (the host) and a plugin's process component, one JSON object per line on the process's stdin/stdout. Methods tagged 'host' are called by the plugin and answered by the host. Methods tagged 'plugin' are sent by the host to the plugin. A method without a result is a notification: send it without an id and expect no answer. The API only grows: new methods and new optional fields may appear in API 1, and a plugin must ignore fields it does not know."
+  },
+  "x-transport": {
+    "framing": "UTF-8 JSON, one message per line, '\\n' terminated, no embedded newlines, at most 1048576 bytes per message.",
+    "stdout": "Protocol only. Anything else written to stdout is a protocol error; write logs to stderr or use the 'log' method.",
+    "stderr": "Captured into the plugin's log (super-desktop plugin logs <id>).",
+    "timeouts": {
+      "activate": "10 s",
+      "deactivate": "1 s, then SIGTERM to the process group, SIGKILL after 2 s more",
+      "otherHostToPlugin": "2 s",
+      "pluginToHost": "answered asynchronously; llm.complete may take up to 120 s"
+    },
+    "ids": "Each side numbers its own requests; integers or strings. Answers to unknown ids are ignored."
+  },
+  "x-errors": {
+    "-32700": "parse_error: the line is not valid JSON",
+    "-32600": "invalid_request: not a JSON-RPC 2.0 object",
+    "-32601": "method_not_found: unknown method (check host.describe.methods)",
+    "-32602": "invalid_params: a parameter is missing, has the wrong type, or is out of range",
+    "-32001": "permission_denied: the permission is not in the manifest or was not granted",
+    "-32002": "not_found: no such card, view handle, contribution id or setting key",
+    "-32003": "limit_exceeded: a size, count or rate limit was hit (see host.describe.limits)",
+    "-32004": "unavailable: the feature cannot run now (no LLM provider set up, overlay showing another PC, ...)",
+    "-32005": "timeout",
+    "-32006": "cancelled: the plugin is being deactivated",
+    "data": "Every host error carries data: { reason: string, hint: string, docs: string } where docs names the reference file and section to read, for example 'references/host-api.md#llmcomplete'."
+  },
+  "methods": [
+    {
+      "name": "activate",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "First message after the process starts. Answer within 10 s with {}. Register nothing here: contributions come from the manifest.",
+      "params": [
+        {
+          "name": "apiVersion",
+          "required": true,
+          "schema": {
+            "const": 1
+          }
+        },
+        {
+          "name": "hostVersion",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "pluginId",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "pluginDir",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "dataDir",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "description": "Writable directory for this plugin's own files. Kept on deactivation, removed on uninstall unless the user keeps data."
+          }
+        },
+        {
+          "name": "settings",
+          "required": true,
+          "schema": {
+            "type": "object",
+            "description": "Current values, secrets excluded."
+          }
+        },
+        {
+          "name": "permissions",
+          "required": true,
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "deactivate",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "Stop timers and children, answer {} within 1 s. The host removes every contribution itself; the plugin must not try to restore host state.",
+      "params": [],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "command",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "A declared command was run.",
+      "params": [
+        {
+          "name": "command",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "context",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/CommandContext"
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.event",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "The user interacted with a node in an open view.",
+      "params": [
+        {
+          "name": "handle",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "view",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "node",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "event",
+          "required": true,
+          "schema": {
+            "enum": [
+              "click",
+              "change",
+              "submit"
+            ]
+          }
+        },
+        {
+          "name": "value",
+          "required": false,
+          "schema": {}
+        }
+      ]
+    },
+    {
+      "name": "view.opened",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "The host opened a view because the user clicked a toolbar item (or card button) that names it. The view shows a placeholder (a column with id 'root' holding a spinner) until the plugin fills it with ui.patch, for example {op: 'replace', id: 'root', node: {...}}.",
+      "params": [
+        {
+          "name": "handle",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "view",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "anchor",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "description": "The toolbar item or card button that opened it."
+          }
+        }
+      ]
+    },
+    {
+      "name": "view.closed",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "A view was closed by the user, by Hide, or by ui.close.",
+      "params": [
+        {
+          "name": "handle",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ]
+    },
+    {
+      "name": "settings.changed",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "params": [
+        {
+          "name": "values",
+          "required": true,
+          "schema": {
+            "type": "object"
+          }
+        }
+      ]
+    },
+    {
+      "name": "title.inputs",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "Sent to plugins that contribute 'titles' whenever a card's vetted prompt, status, agent or folder changes, and once after activate. Answer with title.set per card.",
+      "params": [
+        {
+          "name": "cards",
+          "required": true,
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "agent",
+                "folder",
+                "status",
+                "prefix",
+                "prompt",
+                "local"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "folder": {
+                  "type": "string"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "prefix": {
+                  "type": "string",
+                  "description": "The built-in title prefix (harness name)."
+                },
+                "prompt": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The vetted user prompt, or null."
+                },
+                "local": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "workspace.changed",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "summary": "Cards were added, removed, moved or changed status. At most 4 per second; not sent while the overlay is hidden. Call workspace.cards for details.",
+      "params": []
+    },
+    {
+      "name": "theme.changed",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "params": [
+        {
+          "name": "theme",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Theme"
+          }
+        }
+      ]
+    },
+    {
+      "name": "overlay.shown",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "params": []
+    },
+    {
+      "name": "overlay.hidden",
+      "tags": [
+        {
+          "name": "plugin"
+        }
+      ],
+      "params": []
+    },
+    {
+      "name": "host.describe",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "summary": "What this host supports, what was granted and the limits in force. Call it instead of guessing.",
+      "params": [],
+      "result": {
+        "name": "description",
+        "schema": {
+          "type": "object",
+          "required": [
+            "apiVersion",
+            "hostVersion",
+            "pluginId",
+            "permissions",
+            "methods",
+            "limits"
+          ],
+          "properties": {
+            "apiVersion": {
+              "const": 1
+            },
+            "hostVersion": {
+              "type": "string"
+            },
+            "pluginId": {
+              "type": "string"
+            },
+            "permissions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "methods": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "limits": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "number"
+              }
+            },
+            "llm": {
+              "type": [
+                "object",
+                "null"
+              ],
+              "properties": {
+                "provider": {
+                  "type": "string"
+                },
+                "model": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "log",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "params": [
+        {
+          "name": "level",
+          "required": true,
+          "schema": {
+            "enum": [
+              "debug",
+              "info",
+              "warn",
+              "error"
+            ]
+          }
+        },
+        {
+          "name": "message",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 4096
+          }
+        }
+      ]
+    },
+    {
+      "name": "contrib.update",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "summary": "Change the state of a contribution declared in the manifest (toolbar item, card button, command). Ids cannot be added at run time.",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "label",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "maxLength": 24
+          }
+        },
+        {
+          "name": "badge",
+          "required": false,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4
+          }
+        },
+        {
+          "name": "tooltip",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "maxLength": 120
+          }
+        },
+        {
+          "name": "icon",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "maxLength": 256
+          }
+        },
+        {
+          "name": "enabled",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        },
+        {
+          "name": "visible",
+          "required": false,
+          "schema": {
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "settings.get",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "summary": "This plugin's settings. Secrets are included only when asked for by key.",
+      "params": [
+        {
+          "name": "secret",
+          "required": false,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "values",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "settings.set",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "params": [
+        {
+          "name": "key",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "value",
+          "required": true,
+          "schema": {}
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "storage.get",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "params": [
+        {
+          "name": "key",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      ],
+      "result": {
+        "name": "entry",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "value": {}
+          }
+        }
+      }
+    },
+    {
+      "name": "storage.set",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "summary": "Small JSON key-value store, at most 1 MiB in total. value null deletes the key.",
+      "params": [
+        {
+          "name": "key",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        {
+          "name": "value",
+          "required": true,
+          "schema": {}
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "ui.open",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "ui.popup",
+      "summary": "Open a declared view with a node tree (see ui.schema.json). Opening a view while the overlay is hidden shows the overlay. Opening a view that is already open replaces its content with the new model, raises it and returns the same handle.",
+      "params": [
+        {
+          "name": "view",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "model",
+          "required": true,
+          "schema": {
+            "$ref": "ui.schema.json#/$defs/node"
+          }
+        },
+        {
+          "name": "anchor",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "description": "For popovers: a toolbar item or card button id."
+          }
+        }
+      ],
+      "result": {
+        "name": "view",
+        "schema": {
+          "type": "object",
+          "required": [
+            "handle"
+          ],
+          "properties": {
+            "handle": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "ui.patch",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "ui.popup",
+      "params": [
+        {
+          "name": "handle",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "ops",
+          "required": true,
+          "schema": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "ui.schema.json#/$defs/patchOp"
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      },
+      "summary": "Apply operations in order. 'set' changes only the props it names (none is required); 'replace' and 'append' take complete nodes. An op that names a missing node fails the patch with invalid_params naming the op."
+    },
+    {
+      "name": "ui.close",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "ui.popup",
+      "params": [
+        {
+          "name": "handle",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "ui.notify",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "ui.notify",
+      "summary": "Desktop notification. At most 6 per minute.",
+      "params": [
+        {
+          "name": "title",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 80
+          }
+        },
+        {
+          "name": "body",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "maxLength": 400
+          }
+        },
+        {
+          "name": "urgency",
+          "required": false,
+          "schema": {
+            "enum": [
+              "low",
+              "normal",
+              "critical"
+            ]
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "workspace.cards",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.read",
+      "summary": "The screen and the cards of this PC's workspace.",
+      "params": [],
+      "result": {
+        "name": "workspace",
+        "schema": {
+          "type": "object",
+          "required": [
+            "screen",
+            "cards"
+          ],
+          "properties": {
+            "screen": {
+              "$ref": "#/components/schemas/Screen"
+            },
+            "cards": {
+              "type": "array",
+              "items": {
+                "$ref": "#/components/schemas/CardInfo"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "card.iconify",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "summary": "Minimize to an icon; 'at' sets the icon spot.",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "at",
+          "required": false,
+          "schema": {
+            "$ref": "#/components/schemas/Point"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "card.restore",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "card.expand",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "card.collapse",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "card.focus",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "summary": "Raise the card and focus its terminal.",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "card.setRect",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "summary": "Move and resize an open card, saved like a user drag. The host clamps like a drag (on screen, below the bar, minimum size) and returns the rectangle applied. An expanded card refuses until card.collapse.",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "rect",
+          "required": true,
+          "schema": {
+            "$ref": "#/components/schemas/Rect"
+          }
+        }
+      ],
+      "result": {
+        "name": "applied",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "rect": {
+              "$ref": "#/components/schemas/Rect"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "card.close",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "cards.control",
+      "summary": "Ask to close the card. A small dialog on the card asks the person; the request waits for the answer (up to 2 minutes) and the result says what they chose.",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "outcome",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "closed": {
+              "type": "boolean"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "terminal.text",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "terminal.read",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "lines",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          }
+        }
+      ],
+      "result": {
+        "name": "screen",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "terminal.send",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "terminal.write",
+      "summary": "Type text into the card's terminal as if pasted; 'enter' presses Enter afterwards.",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "text",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 16384
+          }
+        },
+        {
+          "name": "enter",
+          "required": false,
+          "schema": {
+            "type": "boolean",
+            "default": false
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "harness.launch",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "harness.launch",
+      "summary": "Open a new, visible card running a harness in an existing folder. agent is a built-in key (claude, codex, opencode, gemini, ...) or a custom launcher key. With prompt, the harness starts working on it at once (passed once on its command line; claude, codex, grok, cursor, opencode, gemini and antigravity only, others answer unavailable). The prompt is never saved with the card and is not shown to other devices.",
+      "params": [
+        {
+          "name": "agent",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "folder",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "prompt",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "maxLength": 16384
+          }
+        }
+      ],
+      "result": {
+        "name": "card",
+        "schema": {
+          "type": "object",
+          "properties": {
+            "card": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "harness.writeConfig",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "harness.provide",
+      "summary": "Write a configuration file a plugin harness needs (for example a hook file under ~/.acme). Journaled: deactivation restores the previous content or removes the file. The path must be under $HOME and outside ~/.config/super-desktop and ~/.config/hypr.",
+      "params": [
+        {
+          "name": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "content",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 262144
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "llm.complete",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "llm",
+      "summary": "One completion from the AI provider the user chose in Settings -> Plugins -> AI provider (a signed-in harness CLI, or an API key). The plugin never sees credentials. Prompt at most 64 KiB; at most 2 calls at a time; 120 s timeout. With json:true the text is a JSON document.",
+      "params": [
+        {
+          "name": "prompt",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 65536
+          }
+        },
+        {
+          "name": "system",
+          "required": false,
+          "schema": {
+            "type": "string",
+            "maxLength": 16384
+          }
+        },
+        {
+          "name": "maxTokens",
+          "required": false,
+          "schema": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8192,
+            "default": 1024
+          }
+        },
+        {
+          "name": "json",
+          "required": false,
+          "schema": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        {
+          "name": "tier",
+          "required": false,
+          "schema": {
+            "enum": [
+              "default",
+              "fast"
+            ],
+            "default": "default"
+          }
+        }
+      ],
+      "result": {
+        "name": "completion",
+        "schema": {
+          "type": "object",
+          "required": [
+            "text",
+            "provider",
+            "model"
+          ],
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "model": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    {
+      "name": "title.set",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "ui.titles",
+      "summary": "Set what this PC draws as a card's title. Display only: never stored as the prompt and never sent to the phone or other PCs. Omitted fields keep their previous value; null clears one.",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        },
+        {
+          "name": "text",
+          "required": false,
+          "schema": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 200
+          }
+        },
+        {
+          "name": "chipsBefore",
+          "required": false,
+          "schema": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/Chip"
+            }
+          }
+        },
+        {
+          "name": "chipsAfter",
+          "required": false,
+          "schema": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/Chip"
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "name": "title.clear",
+      "tags": [
+        {
+          "name": "host"
+        }
+      ],
+      "x-permission": "ui.titles",
+      "params": [
+        {
+          "name": "card",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "ok",
+        "schema": {
+          "type": "object"
+        }
+      }
+    }
+  ],
+  "components": {
+    "schemas": {
+      "Status": {
+        "enum": [
+          "working",
+          "completed",
+          "idle",
+          "waiting",
+          "error",
+          "unknown"
+        ]
+      },
+      "Point": {
+        "type": "object",
+        "required": [
+          "x",
+          "y"
+        ],
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          }
+        }
+      },
+      "Rect": {
+        "type": "object",
+        "required": [
+          "x",
+          "y",
+          "w",
+          "h"
+        ],
+        "description": "Logical pixels in the overlay canvas; (0,0) is the top-left of the screen.",
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "w": {
+            "type": "number"
+          },
+          "h": {
+            "type": "number"
+          }
+        }
+      },
+      "Screen": {
+        "type": "object",
+        "required": [
+          "w",
+          "h",
+          "top"
+        ],
+        "properties": {
+          "w": {
+            "type": "number"
+          },
+          "h": {
+            "type": "number"
+          },
+          "top": {
+            "type": "number",
+            "description": "Bottom edge of the top bar; cards live below it."
+          }
+        }
+      },
+      "CardInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "session",
+          "agent",
+          "folder",
+          "status",
+          "prompt",
+          "rect",
+          "iconified",
+          "expanded",
+          "focused",
+          "local"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "session": {
+            "type": "string"
+          },
+          "agent": {
+            "type": "string"
+          },
+          "folder": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The vetted user prompt. Never another plugin's title."
+          },
+          "rect": {
+            "$ref": "#/components/schemas/Rect"
+          },
+          "icon": {
+            "$ref": "#/components/schemas/Point"
+          },
+          "iconified": {
+            "type": "boolean"
+          },
+          "expanded": {
+            "type": "boolean"
+          },
+          "focused": {
+            "type": "boolean"
+          },
+          "local": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CommandContext": {
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "source": {
+            "enum": [
+              "shortcut",
+              "toolbar",
+              "cardButton",
+              "cardControl",
+              "cli",
+              "view"
+            ]
+          },
+          "card": {
+            "$ref": "#/components/schemas/CardInfo"
+          },
+          "args": {
+            "description": "JSON given to 'super-desktop plugin run <id> <command> [json]'."
+          }
+        }
+      },
+      "Chip": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 24
+          },
+          "tone": {
+            "enum": [
+              "neutral",
+              "accent",
+              "success",
+              "warning",
+              "error"
+            ]
+          },
+          "tooltip": {
+            "type": "string",
+            "maxLength": 120
+          }
+        }
+      },
+      "Theme": {
+        "type": "object",
+        "properties": {
+          "dark": {
+            "type": "boolean"
+          },
+          "accent": {
+            "type": "string"
+          },
+          "background": {
+            "type": "string"
+          },
+          "foreground": {
+            "type": "string"
+          },
+          "font": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

@@ -59,6 +59,7 @@ enum SettingsPage {
     Mcp,
     SleepLock,
     Updates,
+    Plugins,
     Connections(ConnectionPage),
 }
 
@@ -76,6 +77,7 @@ impl SettingsPage {
             Self::Mcp => ("⚙", "MCP", "Local agent access and connection setup"),
             Self::SleepLock => ("☀", "Sleep lock", "Keep harnesses available on charger power"),
             Self::Updates => ("⟳", "Updates", "Newer versions from GitHub"),
+            Self::Plugins => ("🧩", "Plugins", "Extensions added to this PC"),
             Self::Connections(page) => connections.header(page),
         }
     }
@@ -785,8 +787,10 @@ struct HomePage {
     btn_mcp: Button,
     btn_sleep_lock: Button,
     btn_connections: Button,
+    btn_plugins: Button,
     btn_updates: Button,
     updates_chip: Label,
+    plugins_chip: Label,
 }
 
 fn home_page() -> HomePage {
@@ -896,6 +900,17 @@ fn home_page() -> HomePage {
         move || count_refresh(),
     );
 
+    let (btn_plugins, _, plugins_trailing) = settings_entry_with_summary(
+        "🧩",
+        "Plugins",
+        "Turn plugins on or off, change their settings, and choose the AI provider they use.",
+        "settings-plugins-entry",
+    );
+    btn_plugins.set_tooltip_text(Some("Plugins"));
+    let plugins_chip = chip(&crate::plugin_ui::settings_page::count_summary());
+    plugins_trailing.prepend(&plugins_chip);
+    root.append(&btn_plugins);
+
     let (btn_updates, updates_trailing) = settings_entry(
         "⟳",
         "Updates",
@@ -935,8 +950,10 @@ fn home_page() -> HomePage {
         btn_mcp,
         btn_sleep_lock,
         btn_connections,
+        btn_plugins,
         btn_updates,
         updates_chip,
+        plugins_chip,
     }
 }
 
@@ -2120,6 +2137,9 @@ pub fn build_harness_settings_panel(
 
     let updates_root = settings_page_root();
     let check_updates = build_updates_page(&updates_root, &home.updates_chip);
+    let plugins_page = crate::plugin_ui::settings_page::build();
+    let plugins_refresh = Rc::clone(&plugins_page.refresh);
+    let plugins_chip = home.plugins_chip.clone();
     // Opening Settings checks at most hourly, so the entry can name a newer
     // version; opening the page always checks.
     home.btn_updates.connect_map({
@@ -2160,6 +2180,7 @@ pub fn build_harness_settings_panel(
     views.extend([
         (SettingsPage::SleepLock, page_scroll(&sleep_root).upcast()),
         (SettingsPage::Updates, page_scroll(&updates_root).upcast()),
+        (SettingsPage::Plugins, page_scroll(&plugins_page.widget).upcast()),
         (SettingsPage::HarnessArgs, page_scroll(&args.root).upcast()),
     ]);
     let pages = Box::new(Orientation::Vertical, 0);
@@ -2176,6 +2197,8 @@ pub fn build_harness_settings_panel(
         let refresh_mcp = refresh_mcp.clone();
         let connection_pages = Rc::clone(&connection_pages);
         let check_updates = Rc::clone(&check_updates);
+        let plugins_refresh = Rc::clone(&plugins_refresh);
+        let plugins_chip = plugins_chip.clone();
         let btn_back = btn_back.clone();
         let badge = badge.clone();
         let title = title.clone();
@@ -2213,9 +2236,11 @@ pub fn build_harness_settings_panel(
                 _ => title.set_label(heading),
             }
             subtitle.set_label(summary);
+            plugins_chip.set_label(&crate::plugin_ui::settings_page::count_summary());
             match page {
                 SettingsPage::Mcp => refresh_mcp(),
                 SettingsPage::Updates => check_updates(true),
+                SettingsPage::Plugins => plugins_refresh(),
                 SettingsPage::Connections(_) => (connection_pages.refresh)(),
                 _ => {}
             }
@@ -2229,6 +2254,7 @@ pub fn build_harness_settings_panel(
         (&home.btn_mcp, SettingsPage::Mcp),
         (&home.btn_connections, SettingsPage::Connections(ConnectionPage::Overview)),
         (&home.btn_sleep_lock, SettingsPage::SleepLock),
+        (&home.btn_plugins, SettingsPage::Plugins),
         (&home.btn_updates, SettingsPage::Updates),
     ] {
         let nav = Rc::clone(&nav);
@@ -2995,8 +3021,8 @@ mod tests {
         let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            16,
-            "hub + five destinations + custom harness page + seven Connections pages + updates + harness parameters page"
+            17,
+            "hub + five destinations + custom harness page + seven Connections pages + updates + plugins + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
@@ -3004,10 +3030,10 @@ mod tests {
             .collect();
         // hub, shortcut, harnesses, custom, top bar, MCP,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
-        // updates, harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
+        // updates, plugins (AI provider, installed), harness parameters
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 1, 0, 2, 2, 3, 1, 2, 1, 1, 2, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 20);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 22);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -3028,6 +3054,7 @@ mod tests {
             ("android-settings-entry", 6, "Connections"),
             ("settings-sleep-lock-entry", 13, "Sleep lock"),
             ("settings-updates-entry", 14, "Updates"),
+            ("settings-plugins-entry", 15, "Plugins"),
         ] {
             let button = find_all::<Button>(&panel.widget, class)
                 .into_iter()

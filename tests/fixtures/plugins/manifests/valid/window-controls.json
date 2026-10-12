@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/gladimdim/super-desktop/master/skills/super-desktop-plugin/schemas/manifest.schema.json",
+  "manifestVersion": 1,
+  "id": "window-controls",
+  "name": "Window Controls",
+  "version": "0.1.0",
+  "description": "Card buttons to take the left or right half of the screen, maximize, or shrink to an icon at the nearest edge.",
+  "author": "SUPER DESKTOP examples",
+  "license": "MIT",
+  "engines": { "superDesktop": ">=1.2.0", "pluginApi": "1" },
+  "main": { "command": ["python3", "main.py"] },
+  "permissions": ["ui.cardControls", "cards.read", "cards.control"],
+  "sandbox": { "network": false },
+  "contributes": {
+    "commands": [
+      { "id": "window-controls.left", "title": "Take the left half" },
+      { "id": "window-controls.right", "title": "Take the right half" },
+      { "id": "window-controls.edge", "title": "Shrink to an icon at the nearest edge" }
+    ],
+    "cardControls": {
+      "id": "window-controls.set",
+      "controls": [
+        { "id": "window-controls.left-btn", "icon": "◧", "tooltip": "Left half", "command": "window-controls.left" },
+        { "id": "window-controls.right-btn", "icon": "◨", "tooltip": "Right half", "command": "window-controls.right" },
+        { "id": "window-controls.edge-btn", "icon": "⇥", "tooltip": "To an icon at the nearest edge", "command": "window-controls.edge" },
+        "builtin:expand",
+        "builtin:close"
+      ],
+      "iconControls": ["builtin:restore", "builtin:close"]
+    }
+  }
+}

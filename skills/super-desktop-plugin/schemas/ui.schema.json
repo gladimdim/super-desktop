@@ -1,0 +1,493 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gladimdim/super-desktop/skills/super-desktop-plugin/schemas/ui.schema.json",
+  "title": "SUPER DESKTOP plugin views: node tree and patch operations (plugin API 1)",
+  "description": "The host builds themed widgets from these nodes. No HTML, CSS or images from the network. At most 2000 nodes per view; every id unique within the view.",
+  "$ref": "#/$defs/node",
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_.:-]{1,64}$"
+    },
+    "text": {
+      "type": "string",
+      "maxLength": 65536
+    },
+    "children": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "type",
+        "id"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "group",
+            "column",
+            "row",
+            "scroll",
+            "list",
+            "label",
+            "markdown",
+            "code",
+            "badge",
+            "icon",
+            "button",
+            "toggle",
+            "checkbox",
+            "entry",
+            "textArea",
+            "select",
+            "progress",
+            "spinner",
+            "spacer",
+            "separator"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "group"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "title": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "subtitle": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "tone": {
+                "enum": [
+                  "neutral",
+                  "accent",
+                  "success",
+                  "warning",
+                  "error"
+                ]
+              },
+              "gap": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32
+              },
+              "children": {
+                "$ref": "#/$defs/children"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "column",
+                  "row",
+                  "list"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "gap": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 32
+              },
+              "children": {
+                "$ref": "#/$defs/children"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "scroll"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "maxHeight": {
+                "type": "integer",
+                "minimum": 40,
+                "maximum": 1200
+              },
+              "children": {
+                "$ref": "#/$defs/children"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "label"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "$ref": "#/$defs/text"
+              },
+              "style": {
+                "enum": [
+                  "title",
+                  "body",
+                  "muted",
+                  "error",
+                  "success",
+                  "mono"
+                ]
+              },
+              "wrap": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "markdown",
+                  "code"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "badge"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "text"
+            ],
+            "properties": {
+              "text": {
+                "type": "string",
+                "maxLength": 24
+              },
+              "tone": {
+                "enum": [
+                  "neutral",
+                  "accent",
+                  "success",
+                  "warning",
+                  "error"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "icon"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 8,
+                "maximum": 128
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "button"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "label"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "maxLength": 48
+              },
+              "icon": {
+                "type": "string",
+                "maxLength": 256
+              },
+              "tone": {
+                "enum": [
+                  "default",
+                  "primary",
+                  "danger"
+                ]
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "enum": [
+                  "toggle",
+                  "checkbox"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "value"
+            ],
+            "properties": {
+              "label": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "value": {
+                "type": "boolean"
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "entry"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "placeholder": {
+                "type": "string",
+                "maxLength": 120
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "textArea"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "$ref": "#/$defs/text"
+              },
+              "rows": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 40
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "select"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "options"
+            ],
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "options": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "value",
+                    "label"
+                  ],
+                  "properties": {
+                    "value": {
+                      "type": "string"
+                    },
+                    "label": {
+                      "type": "string",
+                      "maxLength": 80
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "progress"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "patchOp": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "id",
+            "props"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "set"
+            },
+            "id": {
+              "$ref": "#/$defs/id"
+            },
+            "props": {
+              "type": "object"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "id",
+            "node"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "enum": [
+                "replace",
+                "append"
+              ]
+            },
+            "id": {
+              "$ref": "#/$defs/id"
+            },
+            "node": {
+              "$ref": "#/$defs/node"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "op",
+            "id"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "const": "remove"
+            },
+            "id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

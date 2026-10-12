@@ -1,0 +1,33 @@
+{
+  "description": "Dropping a card in an edge band saves it as an icon there, so it stays an icon when the plugin is off.",
+  "renderer": {
+    "screen": {
+      "width": 1920,
+      "height": 1080,
+      "top": 46
+    },
+    "cards": [
+      {
+        "id": 5,
+        "x": 1700,
+        "y": 400,
+        "width": 640,
+        "height": 300,
+        "dropped": true
+      }
+    ],
+    "expect": [
+      {
+        "dropTarget": {
+          "card": 5,
+          "toIcon": true,
+          "x": 1840
+        }
+      },
+      {
+        "card": 5,
+        "mode": "icon"
+      }
+    ]
+  }
+}

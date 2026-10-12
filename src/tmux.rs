@@ -669,12 +669,52 @@ pub fn create_session(
     custom_command: Option<&str>,
     workspace_dir: Option<&str>,
 ) -> (String, String) {
+    create_session_with(agent_type, custom_command, workspace_dir, &[])
+}
+
+/// `cmd` followed by `initial`, each quoted for the shell tmux runs it in.
+fn launch_line(cmd: &str, initial: &[String]) -> String {
+    let mut line = cmd.to_string();
+    for arg in initial {
+        if let Ok(quoted) = shlex::try_quote(arg) {
+            line.push(' ');
+            line.push_str(&quoted);
+        }
+    }
+    line
+}
+
+/// The arguments that start `agent` with a first prompt it then works on,
+/// for the harnesses that have one. `None`: this harness cannot be started
+/// with a prompt.
+pub fn initial_prompt_args(agent: &str, prompt: &str) -> Option<Vec<String>> {
+    // Each from the harness's own `--help`: an interactive session that starts
+    // on this prompt, not a one-shot non-interactive run.
+    match agent {
+        "claude" | "codex" | "grok" | "cursor" => Some(vec![prompt.to_string()]),
+        "opencode" => Some(vec!["--prompt".into(), prompt.to_string()]),
+        "gemini" | "antigravity" => Some(vec!["-i".into(), prompt.to_string()]),
+        _ => None,
+    }
+}
+
+/// `create_session`, with `initial` arguments on this launch only (a first
+/// prompt). The returned command, which is saved with the card, resumed after
+/// a reboot and shown to the phone, never contains them: a prompt runs once.
+pub fn create_session_with(
+    agent_type: &str,
+    custom_command: Option<&str>,
+    workspace_dir: Option<&str>,
+    initial: &[String],
+) -> (String, String) {
     let cmd = resolve_command(agent_type, custom_command);
+    // The prompt is on this launch only. `start_session` wraps `launch`.
+    let launch = launch_line(&cmd, initial);
     // Names are unique within this process (see `session_id`). Only a session
     // left by an older process can collide, and tmux refuses that name.
     for _ in 0..20 {
         let session_name = super_desktop::session_id::candidate();
-        if start_session(&session_name, agent_type, &cmd, workspace_dir) != Started::Duplicate {
+        if start_session(&session_name, agent_type, &launch, workspace_dir) != Started::Duplicate {
             return (session_name, cmd);
         }
     }
@@ -2328,6 +2368,18 @@ mod tests {
         settle_before_enter_within(None, || unreachable!(), min, max);
         settle_before_enter_within(Some("> "), || None, min, max);
         assert!(started.elapsed() < max);
+    }
+
+    #[test]
+    fn plugin_launch_prompt_is_one_quoted_argument() {
+        let prompt = "Commit and push: 'quotes', $HOME, `ticks`; rm -rf /\nsecond line";
+        let line = launch_line("claude --model opus", &initial_prompt_args("claude", prompt).unwrap());
+        assert_eq!(shlex::split(&line).unwrap(), vec!["claude", "--model", "opus", prompt]);
+        let line = launch_line("opencode", &initial_prompt_args("opencode", "go").unwrap());
+        assert_eq!(line, "opencode --prompt go");
+        assert_eq!(initial_prompt_args("grok", "go").unwrap(), vec!["go"]);
+        assert_eq!(initial_prompt_args("antigravity", "go").unwrap(), vec!["-i", "go"]);
+        assert!(initial_prompt_args("aider", "x").is_none());
     }
 
     /// Driven by tests/harness_phone_matrix.py: launch one harness through the
