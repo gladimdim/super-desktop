@@ -1229,14 +1229,15 @@ fn follow_screensaver(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
                         ctx.borrow_mut().restore_after_screensaver = true;
                         // Hyprland gives the keyboard back to the window that
                         // had it before the overlay: once as the hide starts
-                        // and again at the unmap.
+                        // and again at the unmap. That focus can take
+                        // fullscreen away, so put it back after each one.
                         let _ = thread::Builder::new()
                             .name("super-desktop-screensaver-focus".to_string())
                             .spawn(|| {
                                 thread::sleep(Duration::from_millis(100));
-                                screensaver::focus_screensaver();
+                                screensaver::settle_screensaver();
                                 thread::sleep(crate::window::HIDE_FALLBACK + Duration::from_millis(100));
-                                screensaver::focus_screensaver();
+                                screensaver::settle_screensaver();
                             });
                     }
                 }

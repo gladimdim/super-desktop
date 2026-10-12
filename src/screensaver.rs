@@ -12,6 +12,12 @@
 //! window that opens while the overlay holds the keyboard never gets focus,
 //! and when the overlay lets go Hyprland focuses the window that had it
 //! before, so after hiding the daemon focuses the screensaver itself.
+//!
+//! Hyprland also skips the screensaver's fullscreen rule in that case
+//! (`noInitialFocus` while a layer surface holds the keyboard). The float
+//! rule still matches, so the terminal stays at its default size, about
+//! 700×500. The daemon sets fullscreen itself. `action = "set"` leaves a
+//! window that is already fullscreen alone.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
@@ -73,19 +79,113 @@ impl Tracker {
     }
 }
 
-/// Focus a screensaver window. Blocks on `hyprctl`; call it off the UI thread.
-pub fn focus_screensaver() {
+/// Address of a screensaver window this `openwindow` line opened.
+fn opened_address(line: &str) -> Option<&str> {
+    let (event, data) = line.split_once(">>")?;
+    if event != "openwindow" {
+        return None;
+    }
+    let mut fields = data.splitn(4, ',');
+    let address = fields.next()?;
+    let _workspace = fields.next()?;
+    let class = fields.next()?;
+    (class == SCREENSAVER_CLASS).then_some(address)
+}
+
+fn class_selector() -> String {
     // No escaped dots: a backslash is not a valid escape in the Lua string,
     // and an unescaped `.` still matches the class.
-    let window = format!("class:^({SCREENSAVER_CLASS})$");
-    let lua = format!("hl.dsp.focus({{ window = \"{window}\" }})");
-    let done = Command::new("hyprctl")
-        .args(["dispatch", &lua])
+    format!("class:^({SCREENSAVER_CLASS})$")
+}
+
+/// `address:0x…` for a Hyprland window address, with or without a `0x` prefix.
+fn address_selector(address: &str) -> Option<String> {
+    let bare = address.trim().trim_start_matches("0x");
+    if bare.is_empty() || !bare.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("address:0x{bare}"))
+}
+
+/// Force fullscreen. `action = "set"` does not toggle it back off.
+fn fullscreen_lua(window: &str) -> String {
+    format!("hl.dsp.window.fullscreen({{ mode = \"fullscreen\", action = \"set\", window = \"{window}\" }})")
+}
+
+fn dispatch_lua(expression: &str) -> bool {
+    Command::new("hyprctl")
+        .args(["dispatch", expression])
         .output()
-        .is_ok_and(|output| output.status.success());
-    // Hyprland before its Lua config takes the old dispatcher.
-    if !done {
+        .is_ok_and(|output| output.status.success())
+}
+
+fn fullscreen_selector(window: &str) {
+    if dispatch_lua(&fullscreen_lua(window)) {
+        return;
+    }
+    // Hyprland before its Lua config: focus that window, then set both the
+    // internal and the client mode to fullscreen (2). This is not a toggle.
+    let _ = Command::new("hyprctl").args(["dispatch", "focuswindow", window]).output();
+    let _ = Command::new("hyprctl").args(["dispatch", "fullscreenstate", "2", "2"]).output();
+}
+
+/// Fullscreen one screensaver window as soon as it opens. The screensaver
+/// measures the terminal once, at startup. Blocks on `hyprctl`.
+fn fullscreen_window(address: &str) {
+    // The class selector covers the usual one-monitor case even when the
+    // address is not selectable yet. The address covers every monitor.
+    fullscreen_selector(&class_selector());
+    if let Some(window) = address_selector(address) {
+        fullscreen_selector(&window);
+    }
+}
+
+/// Focus a screensaver window. Blocks on `hyprctl`; call it off the UI thread.
+pub fn focus_screensaver() {
+    let window = class_selector();
+    let lua = format!("hl.dsp.focus({{ window = \"{window}\" }})");
+    if !dispatch_lua(&lua) {
         let _ = Command::new("hyprctl").args(["dispatch", "focuswindow", &window]).output();
+    }
+}
+
+/// Addresses of screensaver windows, from `hyprctl clients`.
+fn screensaver_addresses() -> Vec<String> {
+    let Ok(output) = Command::new("hyprctl").args(["clients", "-j"]).output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return Vec::new();
+    };
+    let Some(clients) = value.as_array() else {
+        return Vec::new();
+    };
+    clients
+        .iter()
+        .filter_map(|client| {
+            if client.get("class")?.as_str()? != SCREENSAVER_CLASS {
+                return None;
+            }
+            Some(client.get("address")?.as_str()?.to_string())
+        })
+        .collect()
+}
+
+/// Focus the screensaver and force every one of its windows fullscreen.
+///
+/// Hiding the overlay hands focus back to the previous tiled window, and
+/// with `on_focus_under_fullscreen = 1` that window takes fullscreen away.
+/// Call again after the overlay has unmapped. Blocks on `hyprctl`.
+pub fn settle_screensaver() {
+    focus_screensaver();
+    fullscreen_selector(&class_selector());
+    for address in screensaver_addresses() {
+        if let Some(window) = address_selector(&address) {
+            fullscreen_selector(&window);
+        }
     }
 }
 
@@ -108,6 +208,11 @@ pub fn watch(notify: impl Fn(Change)) {
         if let Ok(stream) = UnixStream::connect(&path) {
             for line in BufReader::new(stream).lines() {
                 let Ok(line) = line else { break };
+                // Before the UI thread hides the overlay, so the screensaver
+                // measures a fullscreen terminal.
+                if let Some(address) = opened_address(&line) {
+                    fullscreen_window(address);
+                }
                 if let Some(change) = tracker.feed(&line) {
                     notify(change);
                 }
@@ -146,6 +251,30 @@ mod tests {
         assert_eq!(tracker.feed("garbage"), None);
         assert_eq!(tracker.feed("openwindow>>5a1f,1,org.omarchy.screensaver,Title, with, commas"), Some(Change::Started));
         assert_eq!(tracker.feed("closewindow>>77"), None);
+    }
+
+    #[test]
+    fn screensaver_open_line_yields_its_address() {
+        assert_eq!(opened_address("openwindow>>5a1f,1,org.omarchy.screensaver,Screensaver"), Some("5a1f"));
+        assert_eq!(opened_address("openwindow>>5a1f,1,org.omarchy.screensaver,Title, with, commas"), Some("5a1f"));
+        assert_eq!(opened_address("openwindow>>77,1,Alacritty,org.omarchy.screensaver"), None);
+        assert_eq!(opened_address("closewindow>>5a1f"), None);
+        assert_eq!(opened_address("garbage"), None);
+    }
+
+    #[test]
+    fn screensaver_fullscreen_set_targets_one_window_and_does_not_toggle() {
+        assert_eq!(address_selector("5a1f"), Some("address:0x5a1f".to_string()));
+        assert_eq!(address_selector("0x5a1f"), Some("address:0x5a1f".to_string()));
+        assert_eq!(address_selector("  0x5A1F "), Some("address:0x5A1F".to_string()));
+        assert_eq!(address_selector(""), None);
+        assert_eq!(address_selector("not hex"), None);
+        assert_eq!(address_selector("5a1f;dispatch"), None);
+        let lua = fullscreen_lua("address:0x5a1f");
+        assert!(lua.contains("action = \"set\""), "{lua}");
+        assert!(lua.contains("mode = \"fullscreen\""), "{lua}");
+        assert!(lua.contains("window = \"address:0x5a1f\""), "{lua}");
+        assert!(!lua.contains("toggle"), "{lua}");
     }
 
     #[test]
