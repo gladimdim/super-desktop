@@ -6,6 +6,7 @@ pub mod agent;
 pub mod api;
 pub mod cards;
 pub mod create;
+pub mod llm;
 pub mod settings_page;
 pub mod slots;
 pub mod surface;

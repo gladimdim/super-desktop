@@ -156,6 +156,7 @@ included, so GUI apps open normally.
 | `cards.text` | `{id, lines?}` of a terminal card (default 60, at most 300) | `{text}`: the end of its terminal, plain text. |
 | `cards.send` | `{id, text, enter?}` of a terminal card | `{}`; types `text` into it as if the user did (`enter: true` presses Enter after it; at most 64 KiB). **Only on the user's click**, and show what will be typed first. |
 | `notify` | `{title, body}` | `{}`; a desktop notification. |
+| `llm.complete` | `{prompt, system?, maxTokens? (default 1024), json? (answer is one JSON document), fast? (a smaller, quicker model)}`; prompt ≤ 64 KiB | `{text, provider, model}`, through the user's own Claude Code (else Codex) with all tools off. Takes seconds; at most two at once (`busy`); errors `unavailable`, `timeout`. **Send only what the task needs**: never secrets, keys or `.env` contents, and say in the plugin's description what it sends. |
 | `panel.open`, `panel.close`, `panel.toggle` | `{surface}`: one of **this plugin's** `panel` surfaces | `{open}`: whether it is open now. |
 | `card.open`, `card.close`, `card.toggle` | `{surface, instance?}`: one of this plugin's `card` surfaces; `instance` picks a copy of a `multiple` card (default: the caller's own copy when the caller is that card, else the first) | `{open}` |
 | `card.new` | `{surface}` of a `multiple` card | `{}`; opens one more copy. |
@@ -206,7 +207,8 @@ Full working examples, copy the closest one:
 - `examples/pomodoro/`: a `toolbar.item` that toggles a `panel`, and a
   `settings.page`, sharing state through `sd.values`.
 - `examples/agents-dock/`: a dock listing the agent cards with their status
-  (`cards.list`), a click jumps to one (`cards.focus`).
+  (`cards.list`), a click jumps to one (`cards.focus`), and ✦ summarizes what
+  an agent is doing (`cards.text` → `llm.complete`).
 - `examples/snake/`: a game on a `card`: a `Timer` game loop, arrow keys,
   focus handling, the best score in `sd.values`.
 - `examples/terminal/`: terminal cards made of `TerminalView` (a `multiple`

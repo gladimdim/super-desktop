@@ -12,6 +12,29 @@ Rectangle {
 
     property var cards: []
     property bool shown: true
+    property var summaries: ({})      // card id → one line, or "…" while asked
+
+    // The end of the card's terminal, summarized in one line by the AI.
+    function summarize(card) {
+        const next = Object.assign({}, summaries)
+        next[card.id] = "…"
+        summaries = next
+        sd.call("cards.text", { id: card.id, lines: 80 }, function (screen, err) {
+            if (err) { setSummary(card.id, err.message); return }
+            sd.call("llm.complete", {
+                system: "You summarize what a coding agent in a terminal is doing.",
+                prompt: "In one short sentence, what is this agent doing or waiting for?\n\n" + screen.text,
+                maxTokens: 60,
+                fast: true,
+            }, function (answer, err2) { setSummary(card.id, err2 ? err2.message : answer.text) })
+        })
+    }
+
+    function setSummary(id, text) {
+        const next = Object.assign({}, summaries)
+        next[id] = text
+        summaries = next
+    }
 
     function refresh() {
         sd.call("cards.list", {}, function (result, err) {
@@ -61,13 +84,25 @@ Rectangle {
             model: root.cards
             delegate: Rectangle {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 46
+                Layout.preferredHeight: 46 + (summary.visible ? summary.implicitHeight + 4 : 0)
                 radius: 8
                 color: area.containsMouse ? Qt.alpha(sd.theme.accent, 0.25) : Qt.alpha(sd.theme.surface, 0.8)
 
-                RowLayout {
+                MouseArea {
+                    id: area
                     anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: sd.call("cards.focus", { id: modelData.id })
+                }
+
+                RowLayout {
+                    id: row
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.top
                     anchors.margins: 8
+                    height: 30
                     spacing: 8
                     Rectangle {
                         width: 10; height: 10; radius: 5
@@ -91,13 +126,33 @@ Rectangle {
                             font.pixelSize: 10
                         }
                     }
+                    Text {
+                        text: "✦"
+                        color: sparkle.containsMouse ? sd.theme.accent : sd.theme.muted
+                        font.pixelSize: 14
+                        MouseArea {
+                            id: sparkle
+                            anchors.fill: parent
+                            anchors.margins: -6
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.summarize(modelData)
+                        }
+                    }
                 }
-                MouseArea {
-                    id: area
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: sd.call("cards.focus", { id: modelData.id })
+                Text {
+                    id: summary
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: row.bottom
+                    anchors.margins: 8
+                    anchors.topMargin: 2
+                    visible: (root.summaries[modelData.id] || "").length > 0
+                    text: root.summaries[modelData.id] || ""
+                    color: sd.theme.foreground
+                    wrapMode: Text.Wrap
+                    font.pixelSize: 10
+                    font.italic: true
                 }
             }
         }

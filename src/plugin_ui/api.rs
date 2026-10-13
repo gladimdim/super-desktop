@@ -58,6 +58,18 @@ const MAX_LINES: usize = 300;
 /// Like `call`, for every method; the ones that run tmux do it off the GTK
 /// thread and answer later through `done`.
 pub fn call_async(spec: &SurfaceSpec, method: &str, params: &Value, done: Box<dyn FnOnce(Result<Value, Value>)>) {
+    if method == "llm.complete" {
+        let request = match super::llm::Request::from_params(params) {
+            Ok(request) => request,
+            Err(e) => return done(Err(e)),
+        };
+        super_desktop::plugins::paths::append_log(&spec.plugin_id, &format!("[{}] call llm.complete ({} bytes)", spec.surface_id, request.prompt.len()));
+        let handle = gtk4::gio::spawn_blocking(move || super::llm::complete(&request));
+        gtk4::glib::spawn_future_local(async move {
+            done(handle.await.unwrap_or_else(|_| Err(error("unavailable", "the request failed", "Try again."))));
+        });
+        return;
+    }
     if !matches!(method, "cards.text" | "cards.send") {
         done(call(spec, method, params));
         return;
@@ -231,7 +243,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, llm.complete, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
         )),
     }
 }
