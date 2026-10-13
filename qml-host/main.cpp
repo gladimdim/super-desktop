@@ -267,6 +267,7 @@ class SdApi : public QObject {
     Q_PROPERTY(QString pluginDir READ pluginDir CONSTANT)
     Q_PROPERTY(QString pluginId READ pluginId CONSTANT)
     Q_PROPERTY(QString surfaceId READ surfaceId CONSTANT)
+    Q_PROPERTY(QString instanceId READ instanceId CONSTANT)
     Q_PROPERTY(bool connected READ connected CONSTANT)
     Q_PROPERTY(int apiVersion READ apiVersion CONSTANT)
     Q_PROPERTY(QVariantMap values READ values NOTIFY valuesChanged)
@@ -279,6 +280,8 @@ public:
     QString pluginDir() const { return m_pluginDir; }
     QString pluginId() const { return m_pluginId; }
     QString surfaceId() const { return m_surfaceId; }
+    QString instanceId() const { return m_instanceId; }
+    void setInstanceId(const QString &id) { m_instanceId = id; }
     bool connected() const { return m_connected; }
     int apiVersion() const { return 1; }
 
@@ -490,7 +493,7 @@ private:
     }
 
     QJSEngine *m_js;
-    QString m_pluginDir, m_pluginId, m_surfaceId;
+    QString m_pluginDir, m_pluginId, m_surfaceId, m_instanceId;
     bool m_connected;
     QVariantMap m_theme;
     QVariantMap m_values;
@@ -807,7 +810,7 @@ private:
 };
 
 struct Args {
-    QString mode, qml, pluginDir, pluginId, surfaceId, out, theme, data;
+    QString mode, qml, pluginDir, pluginId, surfaceId, instanceId, out, theme, data;
     int fd = -1, width = 0, height = 0, waitMs = 300;
     qreal scale = 1.0;
 };
@@ -843,6 +846,8 @@ static bool parseArgs(int argc, char **argv, Args &a) {
             if (!next(a.pluginId)) return false;
         } else if (arg == "--surface-id") {
             if (!next(a.surfaceId)) return false;
+        } else if (arg == "--instance-id") {
+            if (!next(a.instanceId)) return false;
         } else if (arg == "--out") {
             if (!next(a.out)) return false;
         } else if (arg == "--data") {
@@ -904,6 +909,7 @@ int main(int argc, char **argv) {
     Surface surface(QFileInfo(a.qml).absoluteFilePath(), QFileInfo(a.pluginDir).absoluteFilePath(),
                     a.pluginId, a.surfaceId, a.mode == "serve", theme);
     surface.api()->setDataFile(a.data);
+    surface.api()->setInstanceId(a.instanceId);
     const QJsonArray errors = surface.load();
 
     if (a.mode == "check") {

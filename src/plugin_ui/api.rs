@@ -149,6 +149,24 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             });
             Ok(json!({}))
         }
+        "card.new" => {
+            let Some(surface) = params.get("surface").and_then(Value::as_str) else {
+                return Err(error("bad_params", "card.new needs {surface}", "Pass the id of one of your plugin's \"card\" surfaces that has \"multiple\": true."));
+            };
+            let Some(slots) = super::slots::get() else {
+                return Err(error("unavailable", "the overlay is not ready", "Try again in a moment."));
+            };
+            slots.card_check(&spec.plugin_id, surface)
+                .map_err(|message| error("bad_params", message, "Declare the surface in plugin.json with \"slot\": \"card\"."))?;
+            if !slots.card_is_multiple(&spec.plugin_id, surface) {
+                return Err(error("bad_params", format!("{surface:?} is not \"multiple\""), "Add \"multiple\": true to the card surface, or use card.open."));
+            }
+            let (plugin, surface) = (spec.plugin_id.clone(), surface.to_owned());
+            gtk4::glib::idle_add_local_once(move || {
+                let _ = slots.new_card(&plugin, &surface);
+            });
+            Ok(json!({}))
+        }
         "panel.open" | "panel.close" | "panel.toggle" | "card.open" | "card.close" | "card.toggle"
         | "fullscreen.open" | "fullscreen.close" | "fullscreen.toggle" => {
             let (kind, action) = method.split_once('.').unwrap_or((method, ""));
@@ -160,9 +178,13 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             };
             let plugin = spec.plugin_id.clone();
             let surface = surface.to_owned();
+            // A card's copy: given, else the caller's own when it is that card.
+            let instance = params.get("instance").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| {
+                if spec.surface_id == surface { spec.instance.clone() } else { String::new() }
+            });
             let open = match kind {
                 "panel" => slots.is_panel_open(&plugin, &surface),
-                "card" => slots.is_card_open(&plugin, &surface),
+                "card" => slots.is_card_open(&plugin, &surface, &instance),
                 _ => slots.is_fullscreen_open(&plugin, &surface),
             };
             let want = match action {
@@ -183,7 +205,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             // the caller may be drawn in.
             let action = format!("{kind}.{}", if want { "open" } else { "close" });
             gtk4::glib::idle_add_local_once(move || {
-                let _ = slots.act(&plugin, &action, &surface);
+                let _ = slots.act(&plugin, &action, &surface, &instance);
             });
             Ok(json!({"open": want}))
         }
@@ -209,7 +231,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, notify, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
         )),
     }
 }
@@ -254,7 +276,7 @@ mod tests {
                 card_session: Rc::new(move |id| (id == "card-1").then(|| (target.clone(), "shell".to_owned()))),
             });
             let spec = SurfaceSpec {
-                plugin_id: "api-test".into(), plugin_name: "api-test".into(), surface_id: "main".into(),
+                plugin_id: "api-test".into(), plugin_name: "api-test".into(), surface_id: "main".into(), instance: String::new(),
                 qml: "/dev/null".into(), dir: std::env::temp_dir(),
             };
             let result: Rc<RefCell<Option<Result<Value, Value>>>> = Rc::new(RefCell::new(None));

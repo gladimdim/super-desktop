@@ -1,13 +1,13 @@
 {
   "id": "terminal",
   "name": "Terminal",
-  "description": "A terminal card made of TerminalView: your shell with colors; runs vim, htop and other full-screen programs.",
+  "description": "Terminal cards made of TerminalView: your shell with colors; runs vim, htop and other full-screen programs. Each click opens another one.",
   "api": 1,
   "surfaces": [
     { "id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 76 },
-    { "id": "term", "slot": "card", "qml": "Terminal.qml", "size": 760, "height": 460, "title": "Terminal" }
+    { "id": "term", "slot": "card", "qml": "Terminal.qml", "size": 760, "height": 460, "title": "Terminal", "multiple": true }
   ],
   "shortcuts": [
-    { "keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term" }
+    { "keys": "Ctrl+Alt+T", "action": "card.new", "surface": "term" }
   ]
 }

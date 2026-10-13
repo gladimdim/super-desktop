@@ -327,7 +327,9 @@ impl Page {
                 let (plugin, surface_id, slot) = (m.id.clone(), surface.id.clone(), surface.slot);
                 open.connect_clicked(move |_| {
                     let _ = match slot {
-                        Slot::Card => slots.open_card(&plugin, &surface_id),
+                        // A "multiple" card opens one more copy each time.
+                        Slot::Card if slots.card_is_multiple(&plugin, &surface_id) => slots.new_card(&plugin, &surface_id).map(|_| ()),
+                        Slot::Card => slots.open_card(&plugin, &surface_id, ""),
                         Slot::Fullscreen => slots.open_fullscreen(&plugin, &surface_id),
                         _ => slots.open_panel(&plugin, &surface_id),
                     };
@@ -390,7 +392,7 @@ impl Page {
                     let qml = QmlSurface::new(SurfaceSpec {
                         plugin_id: m.id.clone(),
                         plugin_name: m.name.clone(),
-                        surface_id: surface.id.clone(),
+                        surface_id: surface.id.clone(), instance: String::new(),
                         qml: m.qml_path(surface),
                         dir: m.dir.clone(),
                     });

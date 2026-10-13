@@ -100,6 +100,8 @@ pub struct Surface {
     pub height: i32,
     /// Panel header and settings section title; empty means the plugin name.
     pub title: String,
+    /// A card the user may open several times (`card.new`).
+    pub multiple: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -133,7 +135,7 @@ pub struct Shortcut {
 
 pub const MAX_SHORTCUTS: usize = 8;
 const SHORTCUT_ACTIONS: &[&str] = &[
-    "panel.open", "panel.close", "panel.toggle", "card.open", "card.close", "card.toggle",
+    "panel.open", "panel.close", "panel.toggle", "card.open", "card.close", "card.toggle", "card.new",
     "fullscreen.open", "fullscreen.close", "fullscreen.toggle",
 ];
 
@@ -350,8 +352,16 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
                         String::new()
                     }
                 };
+                let multiple = match entry.get("multiple") {
+                    None => false,
+                    Some(Value::Bool(m)) if !*m || slot == Some(Slot::Card) => *m,
+                    Some(_) => {
+                        problems.push(problem(field("multiple"), "\"multiple\" is true or false, and only for card surfaces", "Remove it, or use it on a \"card\" surface."));
+                        false
+                    }
+                };
                 if let Some(slot) = slot {
-                    surfaces.push(Surface { id: surface_id, slot, qml, size, height, title });
+                    surfaces.push(Surface { id: surface_id, slot, qml, size, height, title, multiple });
                 }
             }
         }

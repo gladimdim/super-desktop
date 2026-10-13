@@ -17,6 +17,8 @@ pub struct SpawnOptions<'a> {
     pub plugin_dir: &'a Path,
     pub plugin_id: &'a str,
     pub surface_id: &'a str,
+    /// Which copy of a card surface ("" for the first).
+    pub instance: &'a str,
     pub width: i32,
     pub height: i32,
     /// Device scale of the output (1, 1.25, 2…).
@@ -59,7 +61,7 @@ impl HostProcess {
             .arg(options.qml)
             .arg("--plugin-dir")
             .arg(options.plugin_dir)
-            .args(["--plugin-id", options.plugin_id, "--surface-id", options.surface_id])
+            .args(["--plugin-id", options.plugin_id, "--surface-id", options.surface_id, "--instance-id", options.instance])
             .args(["--width", &options.width.max(1).to_string()])
             .args(["--height", &options.height.max(1).to_string()])
             .args(["--theme", &options.theme.to_string()])
@@ -317,7 +319,7 @@ Rectangle {
 "#).unwrap();
         let theme = serde_json::json!({"accent": "#ff0000"});
         let host = HostProcess::spawn(&SpawnOptions {
-            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "test", surface_id: "main",
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "test", surface_id: "main", instance: "",
             width: 40, height: 30, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")), data: Some(dir.join("data.json")),
         }).unwrap();
         assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Ready),
@@ -381,7 +383,7 @@ Item {
         // The display variable stands in for WAYLAND_DISPLAY: it must reach the program.
         std::env::set_var("SD_TEST_DISPLAY", "wayland-test");
         let host = HostProcess::spawn(&SpawnOptions {
-            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "term", surface_id: "main",
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "term", surface_id: "main", instance: "",
             width: 10, height: 10, scale: 2.0, theme: &theme, log: Some(dir.join("host.log")), data: None,
         }).unwrap();
         let mut done = None;
@@ -426,7 +428,7 @@ Rectangle {
 "#).unwrap();
         let theme = serde_json::json!({});
         let host = HostProcess::spawn(&SpawnOptions {
-            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "keys", surface_id: "main",
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "keys", surface_id: "main", instance: "",
             width: 20, height: 20, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")), data: None,
         }).unwrap();
         assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Ready), "no ready");
@@ -479,7 +481,7 @@ Item {{
 "#)).unwrap();
         let theme = serde_json::json!({});
         let host = HostProcess::spawn(&SpawnOptions {
-            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "vt", surface_id: "main",
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "vt", surface_id: "main", instance: "",
             width: 400, height: 400, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")), data: None,
         }).unwrap();
         host.send(&protocol::resize(400, 400)).unwrap();
@@ -557,7 +559,7 @@ Rectangle {
         for (w, h) in [(400, 300), (1920, 1080), (3840, 2160)] {
             let theme = serde_json::json!({});
             let host = HostProcess::spawn(&SpawnOptions {
-                host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "fps", surface_id: "main",
+                host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "fps", surface_id: "main", instance: "",
                 width: w, height: h, scale: 1.0, theme: &theme, log: None, data: None,
             }).unwrap();
             assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Ready));

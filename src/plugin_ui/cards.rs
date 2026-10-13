@@ -63,6 +63,28 @@ pub fn save(plugin: &str, surface: &str, geometry: Geometry, open: bool) {
     let _ = std::fs::write(path, saved.to_string());
 }
 
+/// The key a card instance is saved under: its surface id, then `#n` for
+/// the second and later copies.
+pub fn card_key(surface: &str, instance: &str) -> String {
+    if instance.is_empty() { surface.to_owned() } else { format!("{surface}#{instance}") }
+}
+
+/// Every saved copy of a card surface: `(instance, geometry, open)`.
+pub fn saved_instances(plugin: &str, surface: &str) -> Vec<(String, Geometry, bool)> {
+    let saved = read_saved(plugin);
+    let Some(object) = saved.as_object() else { return Vec::new() };
+    let mut found: Vec<(String, Geometry, bool)> = object
+        .keys()
+        .filter_map(|key| {
+            let instance = if key == surface { String::new() } else { key.strip_prefix(&format!("{surface}#"))?.to_owned() };
+            let (geometry, open) = self::saved(plugin, key)?;
+            Some((instance, geometry, open))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.len().cmp(&b.0.len()).then(a.0.cmp(&b.0)));
+    found
+}
+
 /// What was saved for a card: its geometry and whether it was open.
 pub fn saved(plugin: &str, surface: &str) -> Option<(Geometry, bool)> {
     let saved = read_saved(plugin);
@@ -77,6 +99,9 @@ pub fn saved(plugin: &str, surface: &str) -> Option<(Geometry, bool)> {
 pub struct PluginCard {
     pub plugin: String,
     pub surface_id: String,
+    pub instance: String,
+    /// `card_key(surface_id, instance)`.
+    pub key: String,
     pub container: gtk4::Overlay,
     body: gtk4::Box,
     title: gtk4::Label,
@@ -115,6 +140,8 @@ impl PluginCard {
         let card = Rc::new(Self {
             plugin: spec.plugin_id.clone(),
             surface_id: spec.surface_id.clone(),
+            instance: spec.instance.clone(),
+            key: card_key(&spec.surface_id, &spec.instance),
             container,
             body,
             title: title_label,
@@ -156,7 +183,7 @@ impl PluginCard {
         self.geometry.set(geometry);
         self.container.set_size_request(geometry.width, geometry.height);
         host.canvas.move_(&self.container, f64::from(geometry.x), f64::from(geometry.y));
-        save(&self.plugin, &self.surface_id, geometry, true);
+        save(&self.plugin, &self.key, geometry, true);
     }
 
     /// Ends the QML and takes the card off the canvas.
@@ -221,7 +248,7 @@ impl PluginCard {
                 let (x, y) = (host.drag_end)(card.container.upcast_ref(), x.round() as i32, y.round() as i32);
                 let geometry = Geometry { x, y, ..card.geometry.get() };
                 card.geometry.set(geometry);
-                save(&card.plugin, &card.surface_id, geometry, true);
+                save(&card.plugin, &card.key, geometry, true);
             }
         });
         header.add_controller(drag);
@@ -271,7 +298,7 @@ impl PluginCard {
                 host.canvas.move_(&card.container, rect.x, rect.y);
                 if commit {
                     card.container.remove_css_class("resizing");
-                    save(&card.plugin, &card.surface_id, geometry, true);
+                    save(&card.plugin, &card.key, geometry, true);
                 }
             }
         };
@@ -318,6 +345,9 @@ mod tests {
         assert_eq!(saved(&game, "scores").map(|(_, open)| open), Some(false));
         assert_eq!(saved(&game, "missing"), None);
         assert_eq!(saved(&other, "board"), None);
+        save(&game, &card_key("board", "2"), g, true);
+        let instances: Vec<String> = saved_instances(&game, "board").into_iter().map(|(i, _, _)| i).collect();
+        assert_eq!(instances, ["", "2"]);
         let _ = std::fs::remove_file(cards_file(&game));
     }
 }

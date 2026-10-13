@@ -126,7 +126,7 @@ fn spec(manifest: &Manifest, surface: &Surface) -> SurfaceSpec {
     SurfaceSpec {
         plugin_id: manifest.id.clone(),
         plugin_name: manifest.name.clone(),
-        surface_id: surface.id.clone(),
+        surface_id: surface.id.clone(), instance: String::new(),
         qml: manifest.qml_path(surface),
         dir: manifest.dir.clone(),
     }
@@ -360,45 +360,94 @@ impl Slots {
         self.slot_surface(plugin, surface, Slot::Card).map(|_| ())
     }
 
-    pub fn is_card_open(&self, plugin: &str, surface: &str) -> bool {
-        self.open_cards.borrow().contains_key(&panel_key(plugin, surface))
+    /// Whether a `multiple` card surface.
+    pub fn card_is_multiple(&self, plugin: &str, surface: &str) -> bool {
+        self.slot_surface(plugin, surface, Slot::Card).is_ok_and(|(_, s)| s.multiple)
     }
 
-    /// Opens (or raises) a plugin's card on the canvas.
-    pub fn open_card(self: &Rc<Self>, plugin: &str, surface: &str) -> Result<(), String> {
+    fn card_slot_key(plugin: &str, surface: &str, instance: &str) -> String {
+        panel_key(plugin, &super::cards::card_key(surface, instance))
+    }
+
+    pub fn is_card_open(&self, plugin: &str, surface: &str, instance: &str) -> bool {
+        self.open_cards.borrow().contains_key(&Self::card_slot_key(plugin, surface, instance))
+    }
+
+    /// The open copies of a card surface.
+    pub fn card_instances(&self, plugin: &str, surface: &str) -> Vec<String> {
+        self.open_cards
+            .borrow()
+            .values()
+            .filter(|c| c.plugin == plugin && c.surface_id == surface)
+            .map(|c| c.instance.clone())
+            .collect()
+    }
+
+    /// Opens another copy of a `multiple` card; returns its instance id.
+    pub fn new_card(self: &Rc<Self>, plugin: &str, surface: &str) -> Result<String, String> {
+        let (_, found) = self.slot_surface(plugin, surface, Slot::Card)?;
+        if !found.multiple {
+            return Err(format!("{surface:?} is not \"multiple\": open it with card.open"));
+        }
+        let saved: Vec<String> = super::cards::saved_instances(plugin, surface).into_iter().map(|(i, _, _)| i).collect();
+        let open = self.card_instances(plugin, surface);
+        // The first copy that is neither open nor remembered somewhere else.
+        let instance = std::iter::once(String::new())
+            .chain((2..).map(|n: u32| n.to_string()))
+            .find(|i| !open.contains(i) && !saved.iter().any(|s| s == i && super::cards::saved(plugin, &super::cards::card_key(surface, i)).is_some_and(|(_, o)| o)))
+            .unwrap_or_default();
+        self.open_card(plugin, surface, &instance)?;
+        Ok(instance)
+    }
+
+    /// Opens (or raises) a copy of a plugin's card on the canvas.
+    pub fn open_card(self: &Rc<Self>, plugin: &str, surface: &str, instance: &str) -> Result<(), String> {
         let (manifest, found) = self.slot_surface(plugin, surface, Slot::Card)?;
+        if !instance.is_empty() && !found.multiple {
+            return Err(format!("{surface:?} is not \"multiple\": it has one copy"));
+        }
         let host = self.canvas.borrow().clone().ok_or("cards are not available in this window")?;
-        let key = panel_key(plugin, surface);
+        let key = Self::card_slot_key(plugin, surface, instance);
         if let Some(card) = self.open_cards.borrow().get(&key) {
             (host.raise)(card.container.upcast_ref());
             return Ok(());
         }
-        let saved = super::cards::saved(plugin, surface).map(|(g, _)| g);
-        let geometry = super::cards::initial_geometry(&host, saved, (found.size, found.height));
+        let saved_key = super::cards::card_key(surface, instance);
+        let saved = super::cards::saved(plugin, &saved_key).map(|(g, _)| g);
+        let mut geometry = super::cards::initial_geometry(&host, saved, (found.size, found.height));
+        if saved.is_none() && !instance.is_empty() {
+            // A new copy is offset from the first so both stay visible.
+            let step = 32 * instance.parse::<i32>().unwrap_or(2).saturating_sub(1).min(8);
+            geometry = super::cards::initial_geometry(&host, Some(super::cards::Geometry { x: geometry.x + step, y: geometry.y + step, ..geometry }), (found.size, found.height));
+        }
         let on_close: Rc<dyn Fn()> = Rc::new({
             let weak = Rc::downgrade(self);
-            let (plugin, surface) = (plugin.to_owned(), surface.to_owned());
+            let (plugin, surface, instance) = (plugin.to_owned(), surface.to_owned(), instance.to_owned());
             move || {
                 if let Some(slots) = weak.upgrade() {
                     // After this click handler returns: closing removes the button.
-                    let (plugin, surface) = (plugin.clone(), surface.clone());
-                    glib::idle_add_local_once(move || slots.close_card(&plugin, &surface, true));
+                    let (plugin, surface, instance) = (plugin.clone(), surface.clone(), instance.clone());
+                    glib::idle_add_local_once(move || slots.close_card(&plugin, &surface, &instance, true));
                 }
             }
         });
-        let card = super::cards::PluginCard::new(&host, spec(&manifest, &found), manifest.title_of(&found), geometry, on_close);
-        super::cards::save(plugin, surface, geometry, true);
+        let mut card_spec = spec(&manifest, &found);
+        card_spec.instance = instance.to_owned();
+        let title = if instance.is_empty() { manifest.title_of(&found).to_owned() } else { format!("{} {instance}", manifest.title_of(&found)) };
+        let card = super::cards::PluginCard::new(&host, card_spec, &title, geometry, on_close);
+        super::cards::save(plugin, &saved_key, geometry, true);
         self.open_cards.borrow_mut().insert(key, card);
         Ok(())
     }
 
     /// Closes a card; `forget` records it as closed so it does not open again
-    /// next time (a ✕ or the plugin's own request, not a reload).
-    pub fn close_card(&self, plugin: &str, surface: &str, forget: bool) {
-        let card = self.open_cards.borrow_mut().remove(&panel_key(plugin, surface));
+    /// next time (a ✕ or the plugin's own request, not a reload). A forgotten
+    /// extra copy is dropped from the saved places altogether.
+    pub fn close_card(&self, plugin: &str, surface: &str, instance: &str, forget: bool) {
+        let card = self.open_cards.borrow_mut().remove(&Self::card_slot_key(plugin, surface, instance));
         if let (Some(card), Some(host)) = (card, self.canvas.borrow().clone()) {
             if forget {
-                super::cards::save(plugin, surface, card.geometry(), false);
+                super::cards::save(plugin, &card.key, card.geometry(), false);
             }
             card.remove(&host);
         }
@@ -418,30 +467,28 @@ impl Slots {
             .map(|m| m.surfaces.iter().filter(|s| s.slot == Slot::Card).cloned().collect())
             .unwrap_or_default();
         for surface in surfaces {
-            if !self.is_card_open(plugin, &surface.id) && super::cards::saved(plugin, &surface.id).is_some_and(|(_, open)| open) {
-                let _ = self.open_card(plugin, &surface.id);
+            for (instance, _, open) in super::cards::saved_instances(plugin, &surface.id) {
+                if open && (instance.is_empty() || surface.multiple) && !self.is_card_open(plugin, &surface.id, &instance) {
+                    let _ = self.open_card(plugin, &surface.id, &instance);
+                }
             }
         }
     }
 
     /// Rebuilds the open cards of `plugin` after it reloads, or closes them.
     fn refresh_cards(&self, plugin: &str) {
-        let prefix = panel_key(plugin, "");
-        let open: Vec<(String, Rc<super::cards::PluginCard>)> = self
-            .open_cards
-            .borrow()
-            .iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(k, c)| (k.clone(), Rc::clone(c)))
-            .collect();
-        for (key, card) in open {
-            let surface_id = key[prefix.len()..].to_owned();
-            match self.slot_surface(plugin, &surface_id, Slot::Card) {
-                Ok((manifest, found)) => {
-                    card.set_title(manifest.title_of(&found));
-                    card.set_surface(spec(&manifest, &found));
+        let open: Vec<Rc<super::cards::PluginCard>> =
+            self.open_cards.borrow().values().filter(|c| c.plugin == plugin).cloned().collect();
+        for card in open {
+            match self.slot_surface(plugin, &card.surface_id, Slot::Card) {
+                Ok((manifest, found)) if card.instance.is_empty() || found.multiple => {
+                    let title = if card.instance.is_empty() { manifest.title_of(&found).to_owned() } else { format!("{} {}", manifest.title_of(&found), card.instance) };
+                    card.set_title(&title);
+                    let mut card_spec = spec(&manifest, &found);
+                    card_spec.instance = card.instance.clone();
+                    card.set_surface(card_spec);
                 }
-                Err(_) => self.close_card(plugin, &surface_id, false),
+                _ => self.close_card(plugin, &card.surface_id, &card.instance, false),
             }
         }
     }
@@ -522,12 +569,16 @@ impl Slots {
 
     // ── shortcuts ─────────────────────────────────────────────────────────
 
-    /// Runs "panel.toggle", "card.open", "fullscreen.close"… for `plugin`.
-    pub fn act(self: &Rc<Self>, plugin: &str, action: &str, surface: &str) -> Result<(), String> {
+    /// Runs "panel.toggle", "card.open", "card.new", "fullscreen.close"…
+    /// for `plugin`. `instance` picks a copy of a card ("" for the first).
+    pub fn act(self: &Rc<Self>, plugin: &str, action: &str, surface: &str, instance: &str) -> Result<(), String> {
         let (kind, verb) = action.split_once('.').ok_or("bad action")?;
+        if action == "card.new" {
+            return self.new_card(plugin, surface).map(|_| ());
+        }
         let open = match kind {
             "panel" => self.is_panel_open(plugin, surface),
-            "card" => self.is_card_open(plugin, surface),
+            "card" => self.is_card_open(plugin, surface, instance),
             "fullscreen" => self.is_fullscreen_open(plugin, surface),
             _ => return Err(format!("unknown action {action:?}")),
         };
@@ -542,9 +593,9 @@ impl Slots {
                 self.close_panel(plugin, surface);
                 Ok(())
             }
-            ("card", true) => self.open_card(plugin, surface),
+            ("card", true) => self.open_card(plugin, surface, instance),
             ("card", false) => {
-                self.close_card(plugin, surface, true);
+                self.close_card(plugin, surface, instance, true);
                 Ok(())
             }
             (_, true) => self.open_fullscreen(plugin, surface),
@@ -577,7 +628,7 @@ impl Slots {
         // After the key event: opening moves the keyboard focus.
         let slots = Rc::clone(self);
         glib::idle_add_local_once(move || {
-            if let Err(e) = slots.act(&plugin, &action, &surface) {
+            if let Err(e) = slots.act(&plugin, &action, &surface, "") {
                 paths::append_log(&plugin, &format!("shortcut failed: {e}"));
             }
         });
@@ -712,9 +763,10 @@ impl Slots {
         for key in keys {
             self.close_panel(id, &key[prefix.len()..]);
         }
-        let keys: Vec<String> = self.open_cards.borrow().keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
-        for key in keys {
-            self.close_card(id, &key[prefix.len()..], false);
+        let cards: Vec<(String, String)> = self.open_cards.borrow().values()
+            .filter(|c| c.plugin == id).map(|c| (c.surface_id.clone(), c.instance.clone())).collect();
+        for (surface, instance) in cards {
+            self.close_card(id, &surface, &instance, false);
         }
         if self.fullscreen.borrow().as_ref().is_some_and(|f| f.plugin == id) {
             self.close_fullscreen();
@@ -1013,7 +1065,7 @@ mod tests {
 
         // The item opens the panel through sd.call, as its QML would.
         let spec = SurfaceSpec {
-            plugin_id: "tool".into(), plugin_name: "tool".into(), surface_id: "button".into(),
+            plugin_id: "tool".into(), plugin_name: "tool".into(), surface_id: "button".into(), instance: String::new(),
             qml: plugins.join("tool/Button.qml"), dir: plugins.join("tool"),
         };
         crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks {
@@ -1107,7 +1159,7 @@ mod tests {
         window.set_child(Some(&overlay));
         window.present();
         let spec = SurfaceSpec {
-            plugin_id: "game".into(), plugin_name: "game".into(), surface_id: "board".into(),
+            plugin_id: "game".into(), plugin_name: "game".into(), surface_id: "board".into(), instance: String::new(),
             qml: plugins.join("game/Board.qml"), dir: plugins.join("game"),
         };
         crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks {
@@ -1170,6 +1222,34 @@ mod tests {
         close.emit_clicked();
         crate::gtk_test::pump_until("the card to go", || card().is_none());
         assert_eq!(super::super::cards::saved("game", "board"), Some((moved, false)));
+
+        // A "multiple" card opens one copy per card.new; each keeps its place.
+        let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["surfaces"][0]["multiple"] = serde_json::json!(true);
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
+        crate::gtk_test::pump_until("the multiple manifest", || slots.card_is_multiple("game", "board"));
+        assert_eq!(call("card.new", "board").unwrap(), serde_json::json!({}));
+        crate::gtk_test::pump_until("the first copy", || slots.cards().len() == 1);
+        call("card.new", "board").unwrap();
+        crate::gtk_test::pump_until("the second copy", || slots.cards().len() == 2);
+        let mut instances = slots.card_instances("game", "board");
+        instances.sort();
+        assert_eq!(instances, ["", "2"]);
+        // The second copy is offset from the first.
+        let first = slots.cards().into_iter().find(|c| c.instance.is_empty()).unwrap().geometry();
+        let second = slots.cards().into_iter().find(|c| c.instance == "2").unwrap().geometry();
+        assert_ne!((first.x, first.y), (second.x, second.y));
+        // Off and on: both come back.
+        crate::plugin_ui::settings_page::set_enabled(&plugins.join("game"), false).unwrap();
+        crate::gtk_test::pump_until("the copies to close", || slots.cards().is_empty());
+        crate::plugin_ui::settings_page::set_enabled(&plugins.join("game"), true).unwrap();
+        crate::gtk_test::pump_until("both copies back", || slots.cards().len() == 2);
+        // A copy closes by its instance.
+        crate::plugin_ui::api::call(&spec, "card.close", &serde_json::json!({"surface": "board", "instance": "2"})).unwrap();
+        crate::gtk_test::pump_until("the second copy to close", || slots.cards().len() == 1);
+        assert_eq!(super::super::cards::saved("game", "board#2").map(|(_, open)| open), Some(false));
+        crate::plugin_ui::api::call(&spec, "card.close", &serde_json::json!({"surface": "board"})).unwrap();
+        crate::gtk_test::pump_until("no copies", || slots.cards().is_empty());
 
         // Full screen covers the whole overlay until closed.
         assert_eq!(call("fullscreen.open", "big").unwrap()["open"], true);

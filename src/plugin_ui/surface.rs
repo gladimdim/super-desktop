@@ -81,6 +81,8 @@ pub struct SurfaceSpec {
     pub plugin_id: String,
     pub plugin_name: String,
     pub surface_id: String,
+    /// Which copy of a card surface ("" for the first).
+    pub instance: String,
     pub qml: PathBuf,
     pub dir: PathBuf,
 }
@@ -424,6 +426,7 @@ impl Inner {
             plugin_dir: &self.spec.dir,
             plugin_id: &self.spec.plugin_id,
             surface_id: &self.spec.surface_id,
+            instance: &self.spec.instance,
             width: width.max(1),
             height: height.max(1),
             scale: self.scale.get(),

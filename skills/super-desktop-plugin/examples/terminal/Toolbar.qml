@@ -15,6 +15,7 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: sd.call("card.toggle", { surface: "term" })
+        // Another terminal each time; each card closes with its own ✕.
+        onClicked: sd.call("card.new", { surface: "term" })
     }
 }

@@ -66,7 +66,8 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `surfaces[].size` | Width in logical pixels; range and default per slot (below). |
 | `surfaces[].height` | Height in logical pixels for `panel` and `settings.page`. |
 | `surfaces[].title` | Optional, ≤ 60 characters: the panel's header or the Settings section's title. Default: the plugin name. |
-| `shortcuts` | Optional, up to 8: `{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}`. Work while SUPER DESKTOP is shown, before any card gets the key. `keys`: Super, or two of Ctrl/Alt/Shift, plus one key (a letter, digit, punctuation, `F1`–`F12`, `Space`, `Return`, `Tab`, `Up`…). `action`: `panel`, `card` or `fullscreen` + `.open`/`.close`/`.toggle`, for one of this plugin's surfaces of that kind. The first plugin (by id) wins a combination two plugins share. |
+| `surfaces[].multiple` | Optional, `card` only: the user can open several copies (`card.new`), e.g. several terminals. Each copy is its own QML program with its own `sd.instanceId` and place. |
+| `shortcuts` | Optional, up to 8: `{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}`. Work while SUPER DESKTOP is shown, before any card gets the key. `keys`: Super, or two of Ctrl/Alt/Shift, plus one key (a letter, digit, punctuation, `F1`–`F12`, `Space`, `Return`, `Tab`, `Up`…). `action`: `panel`, `card` or `fullscreen` + `.open`/`.close`/`.toggle`, or `card.new`, for one of this plugin's surfaces of that kind. The first plugin (by id) wins a combination two plugins share. |
 
 ### Slots
 
@@ -121,7 +122,7 @@ through `sd.values` (and files or programs you run).
 | Member | Meaning |
 | --- | --- |
 | `sd.theme` | Theme map (above). |
-| `sd.pluginId`, `sd.surfaceId`, `sd.pluginDir`, `sd.apiVersion` | Who and where you are. |
+| `sd.pluginId`, `sd.surfaceId`, `sd.instanceId`, `sd.pluginDir`, `sd.apiVersion` | Who and where you are. `instanceId` is `""` for the first copy of a card, then `"2"`, `"3"`… |
 | `sd.connected` | `false` during `check` and `snapshot` (calls then fail with `not_connected`). |
 | `sd.call(method, params, function(result, error) {})` | Ask SUPER DESKTOP to do something (table below). |
 | `sd.exec([program, args…], function(r) {})` | Run a program; `r.code`, `r.stdout`, `r.stderr`. No shell: use `["sh", "-c", "…"]` when you need one. Working folder: the plugin folder. |
@@ -156,7 +157,8 @@ included, so GUI apps open normally.
 | `cards.send` | `{id, text, enter?}` of a terminal card | `{}`; types `text` into it as if the user did (`enter: true` presses Enter after it; at most 64 KiB). **Only on the user's click**, and show what will be typed first. |
 | `notify` | `{title, body}` | `{}`; a desktop notification. |
 | `panel.open`, `panel.close`, `panel.toggle` | `{surface}`: one of **this plugin's** `panel` surfaces | `{open}`: whether it is open now. |
-| `card.open`, `card.close`, `card.toggle` | `{surface}`: one of this plugin's `card` surfaces | `{open}` |
+| `card.open`, `card.close`, `card.toggle` | `{surface, instance?}`: one of this plugin's `card` surfaces; `instance` picks a copy of a `multiple` card (default: the caller's own copy when the caller is that card, else the first) | `{open}` |
+| `card.new` | `{surface}` of a `multiple` card | `{}`; opens one more copy. |
 | `fullscreen.open`, `fullscreen.close`, `fullscreen.toggle` | `{surface}`: one of this plugin's `fullscreen` surfaces | `{open}` |
 
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
@@ -207,8 +209,9 @@ Full working examples, copy the closest one:
   (`cards.list`), a click jumps to one (`cards.focus`).
 - `examples/snake/`: a game on a `card`: a `Timer` game loop, arrow keys,
   focus handling, the best score in `sd.values`.
-- `examples/terminal/`: a terminal card made of `TerminalView`, with the
-  program's title and Enter to restart.
+- `examples/terminal/`: terminal cards made of `TerminalView` (a `multiple`
+  card: each click or Ctrl+Alt+T opens another), with the program's title and
+  Enter to restart.
 
 A themed icon button:
 
