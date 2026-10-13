@@ -109,8 +109,66 @@ pub struct Manifest {
     pub description: String,
     pub enabled: bool,
     pub surfaces: Vec<Surface>,
+    pub shortcuts: Vec<Shortcut>,
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+/// A key combination that, while the overlay is shown, opens, closes or
+/// toggles one of the plugin's panels, cards or full-screen surfaces.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Shortcut {
+    /// As written, e.g. "Ctrl+Alt+T".
+    pub keys: String,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+    /// The key's name, lowercase for letters ("t", "f5", "space").
+    pub key: String,
+    /// "panel.toggle", "card.open", "fullscreen.toggle"…
+    pub action: String,
+    pub surface: String,
+}
+
+pub const MAX_SHORTCUTS: usize = 8;
+const SHORTCUT_ACTIONS: &[&str] = &[
+    "panel.open", "panel.close", "panel.toggle", "card.open", "card.close", "card.toggle",
+    "fullscreen.open", "fullscreen.close", "fullscreen.toggle",
+];
+
+/// Parses "Ctrl+Alt+T". A shortcut needs Super, or two of Ctrl/Alt/Shift
+/// (one of them Ctrl or Alt), so it never takes keys people type.
+pub fn parse_keys(text: &str) -> Result<(bool, bool, bool, bool, String), String> {
+    let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    let Some((key, modifiers)) = parts.split_last() else { return Err("empty".into()) };
+    let (mut ctrl, mut alt, mut shift, mut super_key) = (false, false, false, false);
+    for m in modifiers {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            "super" | "meta" | "win" => super_key = true,
+            other => return Err(format!("unknown modifier {other:?}")),
+        }
+    }
+    let mut key = key.to_ascii_lowercase();
+    if key == "enter" {
+        key = "return".into();
+    }
+    let named = ["space", "return", "enter", "tab", "backspace", "delete", "insert", "home", "end",
+        "page_up", "page_down", "up", "down", "left", "right"];
+    let valid_key = (key.chars().count() == 1 && key.chars().all(|c| c.is_ascii_alphanumeric() || ",.;'[]/\\-=`".contains(c)))
+        || named.contains(&key.as_str())
+        || key.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=12).contains(&n));
+    if !valid_key {
+        return Err(format!("unknown key {key:?}"));
+    }
+    let strong = super_key || (ctrl as u8 + alt as u8 + shift as u8 >= 2 && (ctrl || alt));
+    if !strong {
+        return Err("needs Super, or two of Ctrl, Alt and Shift".into());
+    }
+    Ok((ctrl, alt, shift, super_key, key))
 }
 
 impl Manifest {
@@ -299,8 +357,38 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
         }
     }
 
+    let mut shortcuts = Vec::new();
+    match object.get("shortcuts") {
+        None => {}
+        Some(Value::Array(list)) if list.len() <= MAX_SHORTCUTS => {
+            for (index, entry) in list.iter().enumerate() {
+                let field = |name: &str| format!("shortcuts[{index}].{name}");
+                let keys = entry.get("keys").and_then(Value::as_str).unwrap_or("").to_owned();
+                let action = entry.get("action").and_then(Value::as_str).unwrap_or("").to_owned();
+                let surface = entry.get("surface").and_then(Value::as_str).unwrap_or("").to_owned();
+                let parsed = parse_keys(&keys);
+                if let Err(e) = &parsed {
+                    problems.push(problem(field("keys"), format!("{keys:?}: {e}"), "Write it like \"Ctrl+Alt+T\" or \"Super+F5\": Super, or two of Ctrl/Alt/Shift, then one key."));
+                }
+                if !SHORTCUT_ACTIONS.contains(&action.as_str()) {
+                    problems.push(problem(field("action"), format!("unknown action {action:?}"), format!("Use one of: {}.", SHORTCUT_ACTIONS.join(", "))));
+                } else {
+                    let kind = action.split('.').next().unwrap_or("");
+                    let wanted = Slot::parse(kind).unwrap_or(Slot::Panel);
+                    if !surfaces.iter().any(|s: &Surface| s.id == surface && s.slot == wanted) {
+                        problems.push(problem(field("surface"), format!("no {kind} surface {surface:?}"), format!("Name one of this plugin's \"{kind}\" surfaces.")));
+                    }
+                }
+                if let Ok((ctrl, alt, shift, super_key, key)) = parsed {
+                    shortcuts.push(Shortcut { keys, ctrl, alt, shift, super_key, key, action, surface });
+                }
+            }
+        }
+        Some(_) => problems.push(problem("shortcuts", format!("\"shortcuts\" must be a list of at most {MAX_SHORTCUTS}"), "Use [{\"keys\": \"Ctrl+Alt+T\", \"action\": \"card.toggle\", \"surface\": \"main\"}].")),
+    }
+
     if problems.is_empty() {
-        Ok(Manifest { id, name, description, enabled, surfaces, dir: dir.to_path_buf() })
+        Ok(Manifest { id, name, description, enabled, surfaces, shortcuts, dir: dir.to_path_buf() })
     } else {
         Err(problems)
     }
@@ -412,6 +500,27 @@ mod tests {
         assert!(problems.iter().all(|p| !p.hint.is_empty()));
         let slot = problems.iter().find(|p| p.field == "surfaces[0].slot").unwrap();
         assert!(slot.hint.contains("dock.left"));
+    }
+
+    #[test]
+    fn plugins_manifest_shortcuts_need_strong_keys_and_a_target() {
+        assert_eq!(parse_keys("Ctrl+Alt+T").unwrap(), (true, true, false, false, "t".into()));
+        assert!(parse_keys("Super+F5").is_ok());
+        assert!(parse_keys("Ctrl+Shift+space").is_ok());
+        assert!(parse_keys("Ctrl+T").is_err(), "one modifier would take keys people type");
+        assert!(parse_keys("Shift+Alt+x").is_ok());
+        assert!(parse_keys("Alt+Hyper+x").is_err());
+        assert!(parse_keys("Ctrl+Alt+F13").is_err());
+        let dir = plugin_dir("keys", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "keys", "api": 1,
+            "surfaces": [{"id": "term", "slot": "card", "qml": "A.qml"}],
+            "shortcuts": [{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}]})).unwrap();
+        assert_eq!(m.shortcuts[0].key, "t");
+        let problems = validate(&dir, &json!({"id": "keys", "api": 1,
+            "surfaces": [{"id": "term", "slot": "card", "qml": "A.qml"}],
+            "shortcuts": [{"keys": "T", "action": "panel.toggle", "surface": "term"}, {"keys": "Ctrl+Alt+X", "action": "run", "surface": "term"}]})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, ["shortcuts[0].keys", "shortcuts[0].surface", "shortcuts[1].action"]);
     }
 
     #[test]

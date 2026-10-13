@@ -66,6 +66,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `surfaces[].size` | Width in logical pixels; range and default per slot (below). |
 | `surfaces[].height` | Height in logical pixels for `panel` and `settings.page`. |
 | `surfaces[].title` | Optional, ≤ 60 characters: the panel's header or the Settings section's title. Default: the plugin name. |
+| `shortcuts` | Optional, up to 8: `{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}`. Work while SUPER DESKTOP is shown, before any card gets the key. `keys`: Super, or two of Ctrl/Alt/Shift, plus one key (a letter, digit, punctuation, `F1`–`F12`, `Space`, `Return`, `Tab`, `Up`…). `action`: `panel`, `card` or `fullscreen` + `.open`/`.close`/`.toggle`, for one of this plugin's surfaces of that kind. The first plugin (by id) wins a combination two plugins share. |
 
 ### Slots
 

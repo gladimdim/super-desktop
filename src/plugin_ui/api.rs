@@ -181,21 +181,9 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             }
             // After this call returns: opening and closing change the widgets
             // the caller may be drawn in.
-            let kind = kind.to_owned();
+            let action = format!("{kind}.{}", if want { "open" } else { "close" });
             gtk4::glib::idle_add_local_once(move || {
-                let _ = match (kind.as_str(), want) {
-                    ("panel", true) => slots.open_panel(&plugin, &surface),
-                    ("panel", false) => { slots.close_panel(&plugin, &surface); Ok(()) }
-                    ("card", true) => slots.open_card(&plugin, &surface),
-                    ("card", false) => { slots.close_card(&plugin, &surface, true); Ok(()) }
-                    (_, true) => slots.open_fullscreen(&plugin, &surface),
-                    (_, false) => {
-                        if slots.is_fullscreen_open(&plugin, &surface) {
-                            slots.close_fullscreen();
-                        }
-                        Ok(())
-                    }
-                };
+                let _ = slots.act(&plugin, &action, &surface);
             });
             Ok(json!({"open": want}))
         }

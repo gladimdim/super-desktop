@@ -6,5 +6,8 @@
   "surfaces": [
     { "id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 76 },
     { "id": "term", "slot": "card", "qml": "Terminal.qml", "size": 760, "height": 460, "title": "Terminal" }
+  ],
+  "shortcuts": [
+    { "keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term" }
   ]
 }

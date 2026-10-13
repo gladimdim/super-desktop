@@ -263,6 +263,10 @@ impl Page {
             if !m.description.is_empty() {
                 card.append(&label(&m.description, "launcher-note"));
             }
+            if !m.shortcuts.is_empty() {
+                let keys: Vec<String> = m.shortcuts.iter().map(|s| format!("{} → {} {}", s.keys, s.action, s.surface)).collect();
+                card.append(&label(&format!("Shortcuts: {}", keys.join(", ")), "launcher-note"));
+            }
         }
         // Installed from elsewhere: where from, and the approval it needs.
         let places = super_desktop::plugins::install::Places::current();

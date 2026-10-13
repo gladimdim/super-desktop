@@ -1261,6 +1261,20 @@ impl SuperDesktopWindow {
         picker.connect_showing(move |showing| ghosts_picker.keep_all_drawing(showing));
         *win_rc.terminal_picker.borrow_mut() = Some(picker);
 
+        // Plugin shortcuts come before the cards: a terminal card with the
+        // keyboard must not swallow them. Plugins may only claim combinations
+        // with Super or two modifiers (see `manifest::parse_keys`).
+        let plugin_keys = EventControllerKey::new();
+        plugin_keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        plugin_keys.connect_key_pressed(|_, key, _, state| {
+            if crate::plugin_ui::slots::get().is_some_and(|slots| slots.handle_key(key, state)) {
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        win_rc.window.add_controller(plugin_keys);
+
         // Esc key
         let key_ctrl = EventControllerKey::new();
         let on_close_key = Rc::clone(&on_close_rc);

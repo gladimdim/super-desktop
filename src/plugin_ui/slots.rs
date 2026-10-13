@@ -105,6 +105,19 @@ fn edge_box(align: Align) -> gtk4::Box {
     edge
 }
 
+/// A key's name as manifests write it: "t", "5", ",", "f5", "space",
+/// "return", "page_up".
+pub fn key_name(keyval: gtk4::gdk::Key) -> String {
+    use gtk4::gdk::Key;
+    if keyval == Key::KP_Enter {
+        return "return".into();
+    }
+    match keyval.to_lower().to_unicode() {
+        Some(c) if !c.is_control() && c != ' ' => c.to_lowercase().to_string(),
+        _ => keyval.name().map(|n| n.to_lowercase()).unwrap_or_default(),
+    }
+}
+
 fn panel_key(plugin: &str, surface: &str) -> String {
     format!("plugin:{plugin}/{surface}")
 }
@@ -507,6 +520,70 @@ impl Slots {
         true
     }
 
+    // ── shortcuts ─────────────────────────────────────────────────────────
+
+    /// Runs "panel.toggle", "card.open", "fullscreen.close"… for `plugin`.
+    pub fn act(self: &Rc<Self>, plugin: &str, action: &str, surface: &str) -> Result<(), String> {
+        let (kind, verb) = action.split_once('.').ok_or("bad action")?;
+        let open = match kind {
+            "panel" => self.is_panel_open(plugin, surface),
+            "card" => self.is_card_open(plugin, surface),
+            "fullscreen" => self.is_fullscreen_open(plugin, surface),
+            _ => return Err(format!("unknown action {action:?}")),
+        };
+        let want = match verb {
+            "open" => true,
+            "close" => false,
+            _ => !open,
+        };
+        match (kind, want) {
+            ("panel", true) => self.open_panel(plugin, surface),
+            ("panel", false) => {
+                self.close_panel(plugin, surface);
+                Ok(())
+            }
+            ("card", true) => self.open_card(plugin, surface),
+            ("card", false) => {
+                self.close_card(plugin, surface, true);
+                Ok(())
+            }
+            (_, true) => self.open_fullscreen(plugin, surface),
+            (_, false) => {
+                if open {
+                    self.close_fullscreen();
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// A key press while the overlay is shown: runs the first plugin
+    /// shortcut (in plugin-id order) that matches. Whether one did.
+    pub fn handle_key(self: &Rc<Self>, keyval: gtk4::gdk::Key, state: gtk4::gdk::ModifierType) -> bool {
+        use gtk4::gdk::ModifierType as M;
+        let name = key_name(keyval);
+        let ctrl = state.contains(M::CONTROL_MASK);
+        let alt = state.contains(M::ALT_MASK);
+        let shift = state.contains(M::SHIFT_MASK);
+        let super_key = state.intersects(M::SUPER_MASK | M::META_MASK);
+        let found = self.plugins.borrow().iter().find_map(|(id, loaded)| {
+            let manifest = loaded.manifest.as_ref().ok().filter(|m| m.enabled && !loaded.waiting)?;
+            manifest.shortcuts.iter().find(|s| {
+                s.key == name && s.ctrl == ctrl && s.alt == alt && s.shift == shift && s.super_key == super_key
+            }).map(|s| (id.clone(), s.action.clone(), s.surface.clone()))
+        });
+        let Some((plugin, action, surface)) = found else { return false };
+        paths::append_log(&plugin, &format!("shortcut {action} {surface}"));
+        // After the key event: opening moves the keyboard focus.
+        let slots = Rc::clone(self);
+        glib::idle_add_local_once(move || {
+            if let Err(e) = slots.act(&plugin, &action, &surface) {
+                paths::append_log(&plugin, &format!("shortcut failed: {e}"));
+            }
+        });
+        true
+    }
+
     // ── watching ──────────────────────────────────────────────────────────
 
     fn watch_root(self: &Rc<Self>) {
@@ -867,6 +944,23 @@ mod tests {
     }
 
     #[test]
+    fn plugins_slots_key_names_match_manifests() {
+        use gtk4::gdk::Key;
+        assert_eq!(key_name(Key::t), "t");
+        assert_eq!(key_name(Key::T), "t");
+        assert_eq!(key_name(Key::_5), "5");
+        assert_eq!(key_name(Key::comma), ",");
+        assert_eq!(key_name(Key::F5), "f5");
+        assert_eq!(key_name(Key::space), "space");
+        assert_eq!(key_name(Key::Return), "return");
+        assert_eq!(key_name(Key::Page_Up), "page_up");
+        // Every name the manifest accepts is one GDK produces.
+        for name in ["space", "return", "tab", "backspace", "delete", "insert", "home", "end", "page_up", "page_down", "up", "down", "left", "right", "f1", "f12"] {
+            assert!(super_desktop::plugins::manifest::parse_keys(&format!("Ctrl+Alt+{name}")).is_ok(), "{name}");
+        }
+    }
+
+    #[test]
     fn plugins_slots_toolbar_items_and_panels() {
         if super_desktop::plugins::paths::qml_host_binary().is_none() {
             eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
@@ -985,6 +1079,11 @@ mod tests {
             {"id": "board", "slot": "card", "qml": "Board.qml", "size": 300, "height": 200, "title": "Board"},
             {"id": "big", "slot": "fullscreen", "qml": "Big.qml"}
         ]));
+        // The same plugin, with a shortcut for its card.
+        let manifest_path = plugins.join("game/plugin.json");
+        let mut manifest: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["shortcuts"] = serde_json::json!([{"keys": "Ctrl+Alt+B", "action": "card.toggle", "surface": "board"}]);
+        std::fs::write(&manifest_path, manifest.to_string()).unwrap();
         std::fs::write(plugins.join("game/Board.qml"), "import QtQuick\nRectangle { color: \"navy\" }\n").unwrap();
         std::fs::write(plugins.join("game/Big.qml"), "import QtQuick\nRectangle { color: \"black\" }\n").unwrap();
 
@@ -1054,6 +1153,14 @@ mod tests {
         crate::plugin_ui::settings_page::set_enabled(&plugins.join("game"), true).unwrap();
         crate::gtk_test::pump_until("the card to come back", || card().is_some());
         assert_eq!(card().unwrap().geometry(), moved);
+
+        // Its shortcut toggles it; a weaker combination does nothing.
+        use gtk4::gdk::{Key, ModifierType as M};
+        assert!(!slots.handle_key(Key::b, M::CONTROL_MASK));
+        assert!(slots.handle_key(Key::b, M::CONTROL_MASK | M::ALT_MASK));
+        crate::gtk_test::pump_until("the shortcut to close the card", || card().is_none());
+        assert!(slots.handle_key(Key::B, M::CONTROL_MASK | M::ALT_MASK));
+        crate::gtk_test::pump_until("the shortcut to open it again", || card().is_some());
 
         // ✕ closes it for good.
         let close = crate::gtk_test::descendants(card().unwrap().container.upcast_ref()).into_iter()
