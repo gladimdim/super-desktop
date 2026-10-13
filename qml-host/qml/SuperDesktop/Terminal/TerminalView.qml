@@ -82,6 +82,37 @@ Item {
         return priv.screen.cell(row, col);
     }
 
+    /// The selected text ("" when nothing is selected).
+    function selectedText() {
+        const sel = priv.normalized();
+        if (!sel) return "";
+        const out = [];
+        for (let row = sel.r0; row <= sel.r1; row++) {
+            const line = priv.screen.visibleLine(row, priv.offset);
+            if (!line) continue;
+            const from = row === sel.r0 ? sel.c0 : 0;
+            const to = row === sel.r1 ? sel.c1 + 1 : line.length;
+            out.push(line.slice(from, to).map(c => c.ch).join("").replace(/\s+$/, ""));
+        }
+        return out.join("\n");
+    }
+
+    /// Selects from (row, col) to (row, col), in visible cells.
+    function select(r0, c0, r1, c1) {
+        priv.selection = { r0: r0, c0: c0, r1: r1, c1: c1 };
+    }
+
+    function clearSelection() {
+        priv.selection = null;
+    }
+
+    /// Copies the selection to the clipboard (needs wl-copy).
+    function copy() {
+        const text = selectedText();
+        if (text) sd.run(["wl-copy", "--", text]);
+        return text;
+    }
+
     focus: true
     activeFocusOnTab: true
     clip: true
@@ -92,6 +123,23 @@ Item {
         property bool startPending: false
         property string title: ""
         property int offset: 0
+        property var selection: null      // {r0, c0, r1, c1} as dragged
+
+        // The selection with its start before its end, or null.
+        function normalized() {
+            const s = selection;
+            if (!s) return null;
+            const before = s.r0 < s.r1 || (s.r0 === s.r1 && s.c0 <= s.c1);
+            const n = before ? { r0: s.r0, c0: s.c0, r1: s.r1, c1: s.c1 } : { r0: s.r1, c0: s.c1, r1: s.r0, c1: s.c0 };
+            return n.r0 === n.r1 && n.c0 === n.c1 ? null : n;
+        }
+
+        function cellAt(x, y) {
+            return {
+                row: Math.max(0, Math.min(view.rows - 1, Math.floor(y / metrics.cellHeight))),
+                col: Math.max(0, Math.min(view.cols - 1, Math.floor(x / metrics.cellWidth))),
+            };
+        }
         property var palette: VT.themePalette(sd.theme)
         property var screen: new VT.Screen(80, 24, {
             scrollback: view.scrollbackLines,
@@ -193,6 +241,24 @@ Item {
         onItemAdded: priv.schedule()
     }
 
+    // The selection, one band per row.
+    Repeater {
+        model: view.rows
+        delegate: Rectangle {
+            readonly property var sel: priv.normalized()
+            readonly property bool inside: sel !== null && index >= sel.r0 && index <= sel.r1
+            readonly property int from: inside && index === sel.r0 ? sel.c0 : 0
+            readonly property int to: inside ? (index === sel.r1 ? sel.c1 + 1 : view.cols) : 0
+            visible: inside
+            x: from * metrics.cellWidth
+            y: index * metrics.cellHeight
+            width: Math.max(0, to - from) * metrics.cellWidth
+            height: metrics.cellHeight
+            color: view.cursorColor
+            opacity: 0.3
+        }
+    }
+
     Rectangle {
         id: cursor
         width: metrics.cellWidth
@@ -205,6 +271,11 @@ Item {
 
     Keys.onPressed: (event) => {
         const ctrlShift = (event.modifiers & Qt.ControlModifier) && (event.modifiers & Qt.ShiftModifier);
+        if (ctrlShift && event.key === Qt.Key_C) {
+            view.copy();
+            event.accepted = true;
+            return;
+        }
         if ((ctrlShift && event.key === Qt.Key_V) || ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Insert)) {
             sd.exec(["wl-paste", "--no-newline"], function (r) { if (r.code === 0) view.paste(r.stdout) });
             event.accepted = true;
@@ -237,7 +308,25 @@ Item {
         anchors.fill: parent
         cursorShape: Qt.IBeamCursor
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-        onPressed: view.forceActiveFocus()
+        onPressed: (mouse) => {
+            view.forceActiveFocus();
+            if (mouse.button === Qt.LeftButton) {
+                const at = priv.cellAt(mouse.x, mouse.y);
+                priv.selection = { r0: at.row, c0: at.col, r1: at.row, c1: at.col };
+            }
+        }
+        onPositionChanged: (mouse) => {
+            if (!(mouse.buttons & Qt.LeftButton) || !priv.selection) return;
+            const at = priv.cellAt(mouse.x, mouse.y);
+            priv.selection = { r0: priv.selection.r0, c0: priv.selection.c0, r1: at.row, c1: at.col };
+        }
+        onReleased: (mouse) => {
+            if (mouse.button !== Qt.LeftButton) return;
+            // Like other Linux terminals: the selection is the primary selection.
+            const text = view.selectedText();
+            if (text) sd.run(["wl-copy", "--primary", "--", text]);
+            else priv.selection = null;
+        }
         onClicked: (mouse) => {
             if (mouse.button === Qt.MiddleButton)
                 sd.exec(["wl-paste", "--primary", "--no-newline"], function (r) { if (r.code === 0) view.paste(r.stdout) });

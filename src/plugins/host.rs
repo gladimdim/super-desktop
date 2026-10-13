@@ -525,6 +525,10 @@ Item {{
             report({red: c(0).fg, bold: c(0).bold, indexed: c(1).fg, rgb: c(2).fg, bg: c(2).bg, plain: c(3).fg,
                     cursor: [t.cursorPosition().x, t.cursorPosition().y], title: t.title})"#).unwrap();
         assert_eq!(v, serde_json::json!({"red": 1, "bold": true, "indexed": "#ff0000", "rgb": "#010203", "bg": 4, "plain": -1, "cursor": [4, 0], "title": "my title"}));
+        // Selecting across rows gives the text, trailing blanks trimmed.
+        let v = terminal_run("select", r#"t.feed("first line\r\nsecond   \r\nthird"); t.select(0, 6, 2, 2); const a = t.selectedText();
+            t.select(2, 4, 0, 6); const b = t.selectedText(); t.clearSelection(); report([a, b, t.selectedText()])"#).unwrap();
+        assert_eq!(v, serde_json::json!(["line\nsecond\nthi", "line\nsecond\nthird", ""]));
     }
 
     /// Frames per second for a constantly animating surface, acked at once.

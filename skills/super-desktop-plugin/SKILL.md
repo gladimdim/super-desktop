@@ -184,14 +184,15 @@ TerminalView {
 | `command`, `workingDirectory` (default `$HOME`), `environment`, `autoStart` (default true) | What runs. |
 | `fontFamily` (default `monospace`), `fontPixelSize` (13), `foreground`, `background`, `cursorColor`, `scrollbackLines` (2000) | Look; colors default to the theme. |
 | `cols`, `rows`, `running`, `title` (the program's window title) | Read-only. |
-| `start()`, `stop()`, `send(text)` (type into it), `paste(text)`, `feed(text)` (draw as if printed), `lineText(row)`, `cursorPosition()`, `cellAt(row, col)` | Methods. |
+| `start()`, `stop()`, `send(text)` (type into it), `paste(text)`, `feed(text)` (draw as if printed), `lineText(row)`, `cursorPosition()`, `cellAt(row, col)`, `selectedText()`, `select(r0, c0, r1, c1)`, `clearSelection()`, `copy()` | Methods. |
 | `exited(code)`, `bell()` | Signals. |
 
-Click it to type. Ctrl+Shift+V or Shift+Insert pastes (needs `wl-paste`),
-middle click pastes the selection, Shift+PageUp/PageDown and the wheel
-scroll back. With no program running, keys go to your own `Keys` handlers
-(for example Enter to `start()` again). Wide characters (CJK, emoji) take
-one cell. Selecting text with the mouse is not supported yet.
+Click it to type. Drag to select (it becomes the primary selection),
+Ctrl+Shift+C copies, Ctrl+Shift+V or Shift+Insert pastes, middle click pastes
+the primary selection (these need `wl-clipboard`). Shift+PageUp/PageDown and
+the wheel scroll back. With no program running, keys go to your own `Keys`
+handlers (for example Enter to `start()` again). Wide characters (CJK,
+emoji) take one cell.
 
 ## Recipes
 
