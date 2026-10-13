@@ -98,6 +98,7 @@ mod terminal_transport;
 mod usage;
 mod welcome_tour;
 mod window;
+mod plugin_ui;
 mod workspace_bar;
 mod workspace_model;
 mod ws;

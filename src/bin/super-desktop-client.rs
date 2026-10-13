@@ -29,6 +29,9 @@ fn exchange(mut stream: UnixStream, command: &str) -> std::io::Result<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("plugin") {
+        std::process::exit(super_desktop::plugins::cli::run(&args[1..]));
+    }
     if let Some(code) = cli::run(&args) {
         std::process::exit(code);
     }

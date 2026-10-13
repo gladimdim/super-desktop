@@ -1,0 +1,9 @@
+{
+  "id": "launcher-dock",
+  "name": "Launcher dock",
+  "description": "A button per AI agent on the left edge; click to open a new card.",
+  "api": 1,
+  "surfaces": [
+    { "id": "main", "slot": "dock.left", "qml": "Dock.qml", "size": 64 }
+  ]
+}

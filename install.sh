@@ -431,6 +431,9 @@ build() {
     [[ -x "$SRC/target/release/super-desktop" && -x "$SRC/target/release/super-desktop-client" ]] ||
         die "The build produced no binaries in $SRC/target/release."
     say "✓ Built $SRC/target/release/super-desktop"
+    # QML plugin surfaces. Optional: without Qt Quick the overlay runs without them.
+    "$SRC/scripts/build-qml-host.sh" release </dev/null ||
+        say "    (the QML plugin host did not build; plugins stay off)"
 }
 
 configure() {

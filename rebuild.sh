@@ -66,6 +66,8 @@ if [[ "$CLEAN" -eq 1 ]]; then
 fi
 echo "--> cargo build --release..."
 cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+echo "--> QML plugin host..."
+"$SCRIPT_DIR/scripts/build-qml-host.sh" release || echo "WARNING: the QML plugin host did not build; plugins stay off" >&2
 
 if [[ ! -x "$RUST_BIN" ]]; then
   echo "ERROR: build produced no binary at $RUST_BIN" >&2

@@ -7,6 +7,7 @@ pub mod control_output;
 pub mod harness_record;
 pub mod mcp_settings;
 pub mod platform;
+pub mod plugins;
 pub mod preload;
 pub mod session_id;
 pub mod session_task;

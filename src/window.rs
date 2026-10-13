@@ -133,6 +133,77 @@ pub fn top_bar_content(
     content
 }
 
+/// What plugin QML may ask the overlay for (`sd.call`): the same actions as
+/// the user's own clicks.
+fn install_plugin_hooks(
+    owner: &Rc<SuperDesktopWindow>,
+    hide: Rc<dyn Fn()>,
+    detected: Vec<crate::tmux::HarnessInfo>,
+) {
+    let harnesses = {
+        let owner = Rc::downgrade(owner);
+        Rc::new(move || {
+            let Some(owner) = owner.upgrade() else { return serde_json::json!([]) };
+            let state = owner.state.borrow();
+            let light = crate::theme::current_theme().mode == "light";
+            let list: Vec<serde_json::Value> = crate::harness_settings::visible_keys(&state, &detected)
+                .into_iter()
+                .map(|key| {
+                    let custom = state.custom_harnesses.iter().find(|c| c.id == key);
+                    let name = custom.map(|c| c.name.clone())
+                        .unwrap_or_else(|| crate::harness_bar::harness_label(&key).0.to_owned());
+                    let icon = crate::brand::logo_path(&key, light)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default();
+                    serde_json::json!({"id": key, "name": name, "icon": icon})
+                })
+                .collect();
+            serde_json::Value::Array(list)
+        }) as Rc<dyn Fn() -> serde_json::Value>
+    };
+    let launch = {
+        let owner = Rc::downgrade(owner);
+        let harnesses = Rc::clone(&harnesses);
+        Rc::new(move |key: &str, folder: Option<&str>| {
+            let offered = harnesses();
+            if !offered.as_array().into_iter().flatten().any(|h| h["id"] == key) {
+                return Err(format!("{key:?} is not an agent offered in the top bar"));
+            }
+            let owner = owner.upgrade().ok_or("the overlay is closing")?;
+            match folder {
+                Some(folder) => { owner.create_new_terminal_in(key, None, None, None, Some(folder)); }
+                None => owner.launch_new_terminal(key),
+            }
+            Ok(())
+        }) as Rc<dyn Fn(&str, Option<&str>) -> Result<(), String>>
+    };
+    let cards = {
+        let owner = Rc::downgrade(owner);
+        Rc::new(move || {
+            let Some(owner) = owner.upgrade() else { return serde_json::json!([]) };
+            let mut list: Vec<serde_json::Value> = owner.terminal_cards.borrow().iter().map(|card| {
+                let data = card.data.borrow();
+                serde_json::json!({
+                    "id": data.id, "kind": "terminal",
+                    "title": card.desktop_presentation().title,
+                    "harness": data.agent_type,
+                    "folder": data.workspace_dir,
+                })
+            }).collect();
+            list.extend(owner.note_cards.borrow().iter().map(|note| {
+                let data = note.data.borrow();
+                serde_json::json!({
+                    "id": data.id, "kind": "note",
+                    "title": data.text.lines().next().unwrap_or("").chars().take(80).collect::<String>(),
+                    "harness": serde_json::Value::Null, "folder": serde_json::Value::Null,
+                })
+            }));
+            serde_json::Value::Array(list)
+        }) as Rc<dyn Fn() -> serde_json::Value>
+    };
+    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards });
+}
+
 /// Cards may extend past the output while being dragged, restored from a
 /// larger display, or animated off screen. Their extents must never become
 /// the layer-shell window's minimum size.
@@ -619,6 +690,7 @@ impl SuperDesktopWindow {
                     if let Some(view) = machine_for_settings.borrow().as_ref() {
                         view.paint_top_bar_size(size);
                     }
+                    crate::plugin_ui::docks::set_top_inset(top_bar_height(size));
                 }
             }),
             connection_hooks,
@@ -666,6 +738,9 @@ impl SuperDesktopWindow {
         machine_view.paint_top_bar_size(state.borrow().top_bar_size);
         *machine_for_settings.borrow_mut() = Some(Rc::clone(&machine_view));
         let root_overlay = desktop_overlay(&machine_view.stack);
+        // Plugin docks: first overlays, so Settings and dialogs float above.
+        crate::plugin_ui::apply_theme(&crate::theme::current_theme());
+        crate::plugin_ui::docks::Docks::install(&root_overlay, top_bar_height(state.borrow().top_bar_size));
         hud_left.append(&machine_view.local_button);
 
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
@@ -860,6 +935,7 @@ impl SuperDesktopWindow {
         // visible subset comes from the stored selection ∩ what is installed.
         let detected = crate::tmux::detect_harnesses();
         let visible_keys = crate::harness_settings::visible_keys(&win_rc.state.borrow(), &detected);
+        install_plugin_hooks(&win_rc, on_close_rc.clone(), detected.clone());
         let light_theme = crate::theme::current_theme().mode == "light";
         let harness_bar = crate::harness_bar::HarnessBar::new(
             Rc::new({
@@ -1863,7 +1939,9 @@ impl SuperDesktopWindow {
         let margin = 12;
         let gap = 12;
         let top = self.hud.height().max(top_bar_height(self.state.borrow().top_bar_size)) + gap;
-        let width = (self.screen_width() - 2 * margin).max(1);
+        // Plugin docks own the screen edges they sit on.
+        let (dock_left, dock_right) = crate::plugin_ui::docks::insets();
+        let width = (self.screen_width() - 2 * margin - dock_left - dock_right).max(1);
         let height = (self.screen_height() - top - margin).max(1);
         // Keep notes in their own lane; terminal geometry never depends on
         // saved card extents or a previously connected output.
@@ -1872,7 +1950,7 @@ impl SuperDesktopWindow {
                 .min(width / 3)
         };
         let note_area = crate::card_resize::Rect {
-            x: f64::from(margin), y: f64::from(top), width: note_width.max(1), height,
+            x: f64::from(margin + dock_left), y: f64::from(top), width: note_width.max(1), height,
         };
         for (note, rect) in notes.iter().zip(crate::arrange::terminal_grid(note_area, notes.len())) {
             let mut data = note.data.borrow_mut();
@@ -1884,10 +1962,10 @@ impl SuperDesktopWindow {
             note.container.set_size_request(rect.width, rect.height);
             self.canvas.move_(&note.container, rect.x, rect.y);
         }
-        let left = margin + if notes.is_empty() { 0 } else { note_width + gap };
+        let left = margin + dock_left + if notes.is_empty() { 0 } else { note_width + gap };
         let area = crate::card_resize::Rect {
             x: f64::from(left), y: f64::from(top),
-            width: (self.screen_width() - margin - left).max(1), height,
+            width: (self.screen_width() - margin - dock_right - left).max(1), height,
         };
         let icons: Vec<_> = terms.iter().filter(|term| term.is_compact()).collect();
         let terminals: Vec<_> = terms.iter().filter(|term| !term.is_compact()).collect();
@@ -2907,6 +2985,7 @@ impl SuperDesktopWindow {
 
     pub fn reload_theme(&self) {
         let theme = crate::styles::reload_styles();
+        crate::plugin_ui::apply_theme(&theme);
         // Snapshot before restyling: `apply_theme` touches VTE/fonts, which
         // can emit signals back into our handlers.
         let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();

@@ -1,0 +1,9 @@
+{
+  "id": "clock-dock",
+  "name": "Clock dock",
+  "description": "Time, date and battery in a narrow dock on the right edge.",
+  "api": 1,
+  "surfaces": [
+    { "id": "main", "slot": "dock.right", "qml": "Dock.qml", "size": 72 }
+  ]
+}

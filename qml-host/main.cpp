@@ -1,0 +1,642 @@
+// sd-qml-host: draws one plugin QML surface off screen for SUPER DESKTOP.
+//
+// SUPER DESKTOP is a GTK layer-shell overlay, so plugin QML never gets a
+// window of its own. This process loads the surface's QML file, renders it
+// into shared memory with Qt Quick's software renderer and hands each frame
+// to the overlay, which draws it in its slot and forwards pointer and key
+// events back. A plugin that crashes or hangs ends only this process.
+//
+// Modes:
+//   --serve --fd N --qml FILE --plugin-dir DIR --width W --height H
+//       Talk to SUPER DESKTOP over the SOCK_SEQPACKET socket N (protocol in
+//       src/plugins/host_protocol.rs).
+//   --check FILE [--plugin-dir DIR]
+//       Load the file, print {"ok":bool,"errors":[...],"warnings":[...]} on
+//       stdout and exit 0 when it loads.
+//   --snapshot FILE --out PNG --width W --height H [--scale S] [--theme JSON]
+//       [--wait MS]
+//       Render the surface once to a PNG, for agents to look at their work.
+
+#include <QGuiApplication>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQmlError>
+#include <QQuickItem>
+#include <QQuickRenderControl>
+#include <QQuickRenderTarget>
+#include <QQuickWindow>
+#include <QSocketNotifier>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QImage>
+#include <QTimer>
+#include <QProcess>
+#include <QFileInfo>
+#include <QDir>
+#include <QUrl>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QKeyEvent>
+#include <QFocusEvent>
+#include <QJSValue>
+#include <QJSEngine>
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <sys/mman.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+static const int kMaxMessage = 1 << 20;
+
+static int g_fd = -1;
+
+static bool sendMessage(const QJsonObject &obj, int passFd = -1) {
+    if (g_fd < 0) return false;
+    QByteArray data = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+    if (data.size() > kMaxMessage) return false;
+    struct iovec iov;
+    iov.iov_base = data.data();
+    iov.iov_len = data.size();
+    struct msghdr msg;
+    std::memset(&msg, 0, sizeof msg);
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    char control[CMSG_SPACE(sizeof(int))];
+    if (passFd >= 0) {
+        std::memset(control, 0, sizeof control);
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof control;
+        struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
+        cmsg->cmsg_level = SOL_SOCKET;
+        cmsg->cmsg_type = SCM_RIGHTS;
+        cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+        std::memcpy(CMSG_DATA(cmsg), &passFd, sizeof(int));
+    }
+    ssize_t n;
+    do {
+        n = ::sendmsg(g_fd, &msg, MSG_NOSIGNAL);
+    } while (n < 0 && errno == EINTR);
+    return n == (ssize_t)data.size();
+}
+
+static QJsonObject errorJson(const QQmlError &e) {
+    QJsonObject o;
+    o["file"] = e.url().isLocalFile() ? e.url().toLocalFile() : e.url().toString();
+    o["line"] = e.line();
+    o["column"] = e.column();
+    o["message"] = e.description();
+    return o;
+}
+
+static QJsonArray errorsJson(const QList<QQmlError> &errors) {
+    QJsonArray a;
+    for (const auto &e : errors) a.append(errorJson(e));
+    return a;
+}
+
+// The `sd` object every surface sees: the theme, logging, host calls.
+class SdApi : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(QVariantMap theme READ theme NOTIFY themeChanged)
+    Q_PROPERTY(QString pluginDir READ pluginDir CONSTANT)
+    Q_PROPERTY(QString pluginId READ pluginId CONSTANT)
+    Q_PROPERTY(QString surfaceId READ surfaceId CONSTANT)
+    Q_PROPERTY(bool connected READ connected CONSTANT)
+    Q_PROPERTY(int apiVersion READ apiVersion CONSTANT)
+public:
+    SdApi(QJSEngine *js, QString pluginDir, QString pluginId, QString surfaceId, bool connected)
+        : m_js(js), m_pluginDir(pluginDir), m_pluginId(pluginId), m_surfaceId(surfaceId),
+          m_connected(connected) {}
+
+    QVariantMap theme() const { return m_theme; }
+    QString pluginDir() const { return m_pluginDir; }
+    QString pluginId() const { return m_pluginId; }
+    QString surfaceId() const { return m_surfaceId; }
+    bool connected() const { return m_connected; }
+    int apiVersion() const { return 1; }
+
+    void setTheme(const QVariantMap &theme) {
+        m_theme = theme;
+        emit themeChanged();
+    }
+
+    // Calls a SUPER DESKTOP method; `callback(result, error)` runs later.
+    Q_INVOKABLE void call(const QString &method, const QVariant &params = QVariant(),
+                          const QJSValue &callback = QJSValue()) {
+        if (!m_connected) {
+            if (callback.isCallable()) {
+                QJSValue cb = callback;
+                QJSValue err = m_js->toScriptValue(QVariantMap{
+                    {"code", "not_connected"},
+                    {"message", "Not running inside SUPER DESKTOP (check or snapshot mode)."}});
+                cb.call({QJSValue(QJSValue::NullValue), err});
+            }
+            return;
+        }
+        const int id = ++m_nextId;
+        if (callback.isCallable()) m_pending.insert(id, callback);
+        QJsonObject msg{{"t", "call"}, {"id", id}, {"method", method}};
+        if (params.isValid()) msg["params"] = QJsonValue::fromVariant(params);
+        sendMessage(msg);
+    }
+
+    // Starts a program detached from this surface (argv list, no shell).
+    Q_INVOKABLE bool run(const QStringList &argv) {
+        if (argv.isEmpty()) return false;
+        return QProcess::startDetached(argv.first(), argv.mid(1), m_pluginDir);
+    }
+
+    // Runs a program and gives `callback({code, stdout, stderr})` when it ends.
+    Q_INVOKABLE void exec(const QStringList &argv, const QJSValue &callback = QJSValue()) {
+        if (argv.isEmpty()) return;
+        auto *p = new QProcess(this);
+        p->setWorkingDirectory(m_pluginDir);
+        QJSValue cb = callback;
+        connect(p, &QProcess::finished, this, [this, p, cb](int code, QProcess::ExitStatus) mutable {
+            if (cb.isCallable()) {
+                QJSValue r = m_js->toScriptValue(QVariantMap{
+                    {"code", code},
+                    {"stdout", QString::fromUtf8(p->readAllStandardOutput())},
+                    {"stderr", QString::fromUtf8(p->readAllStandardError())}});
+                cb.call({r});
+            }
+            p->deleteLater();
+        });
+        connect(p, &QProcess::errorOccurred, this, [this, p, cb](QProcess::ProcessError) mutable {
+            if (p->state() != QProcess::NotRunning) return;
+            if (cb.isCallable()) {
+                QJSValue r = m_js->toScriptValue(QVariantMap{
+                    {"code", -1}, {"stdout", ""}, {"stderr", p->errorString()}});
+                cb.call({r});
+            }
+            p->deleteLater();
+        });
+        p->start(argv.first(), argv.mid(1));
+    }
+
+    Q_INVOKABLE void log(const QString &text) {
+        if (m_connected) sendMessage(QJsonObject{{"t", "log"}, {"level", "info"}, {"message", text}});
+        else std::fprintf(stderr, "%s\n", text.toUtf8().constData());
+    }
+
+    void reply(int id, const QJsonValue &result, const QJsonValue &error) {
+        auto it = m_pending.find(id);
+        if (it == m_pending.end()) return;
+        QJSValue cb = it.value();
+        m_pending.erase(it);
+        cb.call({m_js->toScriptValue(result.toVariant()), m_js->toScriptValue(error.toVariant())});
+    }
+
+signals:
+    void themeChanged();
+    // Emitted when the overlay is shown or hidden.
+    void visibleChanged(bool visible);
+
+private:
+    QJSEngine *m_js;
+    QString m_pluginDir, m_pluginId, m_surfaceId;
+    bool m_connected;
+    QVariantMap m_theme;
+    int m_nextId = 0;
+    QHash<int, QJSValue> m_pending;
+};
+
+static QVariantMap defaultTheme() {
+    return QVariantMap{
+        {"name", "default"}, {"mode", "dark"},
+        {"accent", "#7aa2f7"}, {"background", "#1a1b26"}, {"foreground", "#c0caf5"},
+        {"muted", "#565f89"}, {"surface", "#24283b"}, {"selection", "#33467c"},
+        {"red", "#f7768e"}, {"green", "#9ece6a"}, {"yellow", "#e0af68"},
+        {"blue", "#7aa2f7"}, {"magenta", "#bb9af7"}, {"cyan", "#7dcfff"},
+        {"orange", "#ff9e64"}, {"fontFamily", "monospace"}, {"fontSize", 13},
+    };
+}
+
+static QVariantMap parseTheme(const QString &json) {
+    QVariantMap theme = defaultTheme();
+    if (json.isEmpty()) return theme;
+    auto doc = QJsonDocument::fromJson(json.toUtf8());
+    if (!doc.isObject()) return theme;
+    const auto obj = doc.object();
+    for (auto it = obj.begin(); it != obj.end(); ++it) theme.insert(it.key(), it.value().toVariant());
+    return theme;
+}
+
+class Surface : public QObject {
+    Q_OBJECT
+public:
+    Surface(const QString &qmlFile, const QString &pluginDir, const QString &pluginId,
+            const QString &surfaceId, bool connected, const QVariantMap &theme)
+        : m_qmlFile(qmlFile) {
+        m_control = new QQuickRenderControl(this);
+        m_window = new QQuickWindow(m_control);
+        m_window->setColor(Qt::transparent);
+        m_engine = new QQmlEngine(this);
+        m_engine->setOutputWarningsToStandardError(false);
+        connect(m_engine, &QQmlEngine::warnings, this, [this](const QList<QQmlError> &w) {
+            for (const auto &e : w) {
+                m_warnings.append(errorJson(e));
+                if (g_fd >= 0)
+                    sendMessage(QJsonObject{{"t", "log"}, {"level", "warning"}, {"error", errorJson(e)},
+                                            {"message", e.toString()}});
+            }
+        });
+        // Plugin-local QML modules and components resolve from the plugin folder.
+        m_engine->addImportPath(pluginDir);
+        m_api = new SdApi(m_engine, pluginDir, pluginId, surfaceId, connected);
+        m_api->setParent(this);
+        m_api->setTheme(theme);
+        m_engine->rootContext()->setContextProperty("sd", m_api);
+
+        connect(m_control, &QQuickRenderControl::renderRequested, this, &Surface::scheduleRender);
+        connect(m_control, &QQuickRenderControl::sceneChanged, this, &Surface::scheduleRender);
+        m_renderTimer.setSingleShot(true);
+        m_renderTimer.setInterval(0);
+        connect(&m_renderTimer, &QTimer::timeout, this, &Surface::render);
+    }
+
+    ~Surface() override {
+        delete m_root;
+        delete m_window;
+        if (m_map) munmap(m_map, m_mapSize);
+        if (m_memfd >= 0) ::close(m_memfd);
+    }
+
+    SdApi *api() const { return m_api; }
+    const QJsonArray &warnings() const { return m_warnings; }
+
+    // Loads the QML file. Returns the errors, empty when it loaded.
+    QJsonArray load() {
+        QQmlComponent component(m_engine, QUrl::fromLocalFile(m_qmlFile));
+        if (component.isError()) return errorsJson(component.errors());
+        QObject *obj = component.create();
+        if (!obj) return errorsJson(component.errors());
+        if (qobject_cast<QWindow *>(obj)) {
+            delete obj;
+            QJsonObject e{{"file", m_qmlFile}, {"line", 1}, {"column", 1},
+                          {"message", "The root of a surface must be an Item (Rectangle, Item, "
+                                      "ColumnLayout...), not a Window: SUPER DESKTOP gives each "
+                                      "surface its place."}};
+            return QJsonArray{e};
+        }
+        m_root = qobject_cast<QQuickItem *>(obj);
+        if (!m_root) {
+            delete obj;
+            QJsonObject e{{"file", m_qmlFile}, {"line", 1}, {"column", 1},
+                          {"message", "The root object of a surface must be a QtQuick Item."}};
+            return QJsonArray{e};
+        }
+        m_root->setParentItem(m_window->contentItem());
+        m_root->setFocus(true);
+        return {};
+    }
+
+    void resize(int w, int h) {
+        w = std::max(1, w);
+        h = std::max(1, h);
+        m_width = w;
+        m_height = h;
+        m_window->setGeometry(0, 0, w, h);
+        m_window->contentItem()->setSize(QSizeF(w, h));
+        if (m_root) m_root->setSize(QSizeF(w, h));
+        scheduleRender();
+    }
+
+    void setVisible(bool visible) {
+        m_visible = visible;
+        emit m_api->visibleChanged(visible);
+        if (visible) scheduleRender();
+    }
+
+    void ack() {
+        m_awaitingAck = false;
+        if (m_dirty) scheduleRender();
+    }
+
+    // Renders one frame. grabWindow() drives the render control's software
+    // renderer and returns the device-pixel image; a QQuickRenderTarget on a
+    // paint device left the image empty with Qt 6.12's software backend.
+    QImage renderFrame() {
+        QImage image = m_window->grabWindow();
+        if (image.format() != QImage::Format_ARGB32_Premultiplied)
+            image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        return image;
+    }
+
+    QQuickWindow *window() const { return m_window; }
+    QQuickItem *root() const { return m_root; }
+
+public slots:
+    void scheduleRender() {
+        m_dirty = true;
+        if (g_fd < 0 || !m_visible || m_awaitingAck) return;
+        if (!m_renderTimer.isActive()) m_renderTimer.start();
+    }
+
+private slots:
+    void render() {
+        if (!m_root || m_awaitingAck || !m_visible) return;
+        m_dirty = false;
+        const QImage image = renderFrame();
+        if (image.isNull()) {
+            sendMessage(QJsonObject{{"t", "log"}, {"level", "error"},
+                                    {"message", "Qt Quick rendered no image for this surface."}});
+            return;
+        }
+        const int pw = image.width(), ph = image.height();
+        if (!ensureBuffer(pw, ph, image.devicePixelRatio())) return;
+        for (int y = 0; y < ph; ++y)
+            std::memcpy(static_cast<uchar *>(m_map) + size_t(y) * pw * 4, image.constScanLine(y), size_t(pw) * 4);
+        m_awaitingAck = true;
+        sendMessage(QJsonObject{{"t", "frame"}, {"seq", ++m_seq}});
+    }
+
+private:
+    bool ensureBuffer(int pw, int ph, qreal scale) {
+        if (m_map && pw == m_bufW && ph == m_bufH) return true;
+        if (m_map) munmap(m_map, m_mapSize);
+        if (m_memfd >= 0) ::close(m_memfd);
+        m_map = nullptr;
+        m_memfd = memfd_create("sd-qml-surface", MFD_CLOEXEC);
+        if (m_memfd < 0) return false;
+        m_mapSize = size_t(pw) * size_t(ph) * 4;
+        if (ftruncate(m_memfd, m_mapSize) != 0) return false;
+        void *p = mmap(nullptr, m_mapSize, PROT_READ | PROT_WRITE, MAP_SHARED, m_memfd, 0);
+        if (p == MAP_FAILED) return false;
+        m_map = p;
+        m_bufW = pw;
+        m_bufH = ph;
+        sendMessage(QJsonObject{{"t", "buffer"}, {"width", pw}, {"height", ph}, {"stride", pw * 4},
+                                {"scale", scale}, {"format", "argb32-premultiplied"}},
+                    m_memfd);
+        return true;
+    }
+
+    QString m_qmlFile;
+    QQuickRenderControl *m_control = nullptr;
+    QQuickWindow *m_window = nullptr;
+    QQmlEngine *m_engine = nullptr;
+    QQuickItem *m_root = nullptr;
+    SdApi *m_api = nullptr;
+    QTimer m_renderTimer;
+    QJsonArray m_warnings;
+    bool m_visible = true;
+    bool m_awaitingAck = false;
+    bool m_dirty = true;
+    int m_width = 1, m_height = 1;
+    int m_seq = 0;
+    int m_memfd = -1;
+    void *m_map = nullptr;
+    size_t m_mapSize = 0;
+    int m_bufW = 0, m_bufH = 0;
+};
+
+// Reads messages from SUPER DESKTOP and turns them into Qt events.
+class Connection : public QObject {
+    Q_OBJECT
+public:
+    Connection(Surface *surface) : m_surface(surface) {
+        m_notifier = new QSocketNotifier(g_fd, QSocketNotifier::Read, this);
+        connect(m_notifier, &QSocketNotifier::activated, this, &Connection::readAll);
+    }
+
+private slots:
+    void readAll() {
+        QByteArray buf(kMaxMessage, Qt::Uninitialized);
+        for (;;) {
+            ssize_t n = ::recv(g_fd, buf.data(), buf.size(), MSG_DONTWAIT);
+            if (n == 0) {
+                QCoreApplication::exit(0);
+                return;
+            }
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return;
+                QCoreApplication::exit(0);
+                return;
+            }
+            auto doc = QJsonDocument::fromJson(QByteArray(buf.constData(), n));
+            if (doc.isObject()) handle(doc.object());
+        }
+    }
+
+private:
+    void handle(const QJsonObject &m) {
+        const QString t = m["t"].toString();
+        QQuickWindow *win = m_surface->window();
+        if (t == "ack") {
+            m_surface->ack();
+        } else if (t == "resize") {
+            m_surface->resize(m["width"].toInt(), m["height"].toInt());
+        } else if (t == "visible") {
+            m_surface->setVisible(m["value"].toBool());
+        } else if (t == "theme") {
+            m_surface->api()->setTheme(parseTheme(QString::fromUtf8(
+                QJsonDocument(m["theme"].toObject()).toJson(QJsonDocument::Compact))));
+        } else if (t == "reply") {
+            m_surface->api()->reply(m["id"].toInt(), m["result"], m["error"]);
+        } else if (t == "pointer") {
+            pointer(win, m);
+        } else if (t == "scroll") {
+            const QPointF pos(m["x"].toDouble(), m["y"].toDouble());
+            const QPoint angle(std::lround(-m["dx"].toDouble() * 120), std::lround(-m["dy"].toDouble() * 120));
+            QWheelEvent ev(pos, pos, QPoint(), angle, m_buttons, modifiers(m), Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(win, &ev);
+        } else if (t == "key") {
+            const bool press = m["kind"].toString() == "press";
+            QKeyEvent ev(press ? QEvent::KeyPress : QEvent::KeyRelease, m["key"].toInt(), modifiers(m),
+                         m["text"].toString(), m["repeat"].toBool());
+            QCoreApplication::sendEvent(win, &ev);
+        } else if (t == "focus") {
+            QFocusEvent ev(m["value"].toBool() ? QEvent::FocusIn : QEvent::FocusOut, Qt::OtherFocusReason);
+            QCoreApplication::sendEvent(win, &ev);
+        } else if (t == "quit") {
+            QCoreApplication::exit(0);
+        }
+    }
+
+    static Qt::KeyboardModifiers modifiers(const QJsonObject &m) {
+        return Qt::KeyboardModifiers(m["mods"].toInt());
+    }
+
+    void pointer(QQuickWindow *win, const QJsonObject &m) {
+        const QString kind = m["kind"].toString();
+        const QPointF pos(m["x"].toDouble(), m["y"].toDouble());
+        const Qt::MouseButton button = Qt::MouseButton(m["button"].toInt());
+        if (kind == "leave") {
+            QEvent ev(QEvent::Leave);
+            QCoreApplication::sendEvent(win, &ev);
+            return;
+        }
+        if (kind == "enter") {
+            QEnterEvent ev(pos, pos, pos);
+            QCoreApplication::sendEvent(win, &ev);
+            return;
+        }
+        QEvent::Type type = QEvent::MouseMove;
+        if (kind == "press") {
+            type = QEvent::MouseButtonPress;
+            m_buttons |= button;
+        } else if (kind == "release") {
+            type = QEvent::MouseButtonRelease;
+            m_buttons &= ~button;
+        } else if (kind == "double") {
+            type = QEvent::MouseButtonDblClick;
+        }
+        QMouseEvent ev(type, pos, pos, pos, kind == "move" ? Qt::NoButton : button, m_buttons,
+                       modifiers(m));
+        QCoreApplication::sendEvent(win, &ev);
+    }
+
+    Surface *m_surface;
+    QSocketNotifier *m_notifier;
+    Qt::MouseButtons m_buttons = Qt::NoButton;
+};
+
+struct Args {
+    QString mode, qml, pluginDir, pluginId, surfaceId, out, theme;
+    int fd = -1, width = 0, height = 0, waitMs = 300;
+    qreal scale = 1.0;
+};
+
+static void usage() {
+    std::fprintf(stderr,
+                 "usage:\n"
+                 "  sd-qml-host --check FILE.qml [--plugin-dir DIR]\n"
+                 "  sd-qml-host --snapshot FILE.qml --out FILE.png --width W --height H "
+                 "[--scale S] [--theme JSON] [--wait MS]\n"
+                 "  sd-qml-host --serve --fd N --qml FILE.qml --plugin-dir DIR --width W --height H\n");
+}
+
+static bool parseArgs(int argc, char **argv, Args &a) {
+    for (int i = 1; i < argc; ++i) {
+        const QString arg = QString::fromLocal8Bit(argv[i]);
+        auto next = [&](QString &out) {
+            if (i + 1 >= argc) return false;
+            out = QString::fromLocal8Bit(argv[++i]);
+            return true;
+        };
+        QString v;
+        if (arg == "--check" || arg == "--snapshot") {
+            a.mode = arg.mid(2);
+            if (!next(a.qml)) return false;
+        } else if (arg == "--serve") {
+            a.mode = "serve";
+        } else if (arg == "--qml") {
+            if (!next(a.qml)) return false;
+        } else if (arg == "--plugin-dir") {
+            if (!next(a.pluginDir)) return false;
+        } else if (arg == "--plugin-id") {
+            if (!next(a.pluginId)) return false;
+        } else if (arg == "--surface-id") {
+            if (!next(a.surfaceId)) return false;
+        } else if (arg == "--out") {
+            if (!next(a.out)) return false;
+        } else if (arg == "--theme") {
+            if (!next(a.theme)) return false;
+        } else if (arg == "--fd" && next(v)) {
+            a.fd = v.toInt();
+        } else if (arg == "--width" && next(v)) {
+            a.width = v.toInt();
+        } else if (arg == "--height" && next(v)) {
+            a.height = v.toInt();
+        } else if (arg == "--scale" && next(v)) {
+            a.scale = v.toDouble();
+        } else if (arg == "--wait" && next(v)) {
+            a.waitMs = v.toInt();
+        } else {
+            return false;
+        }
+    }
+    if (a.mode.isEmpty() || a.qml.isEmpty()) return false;
+    if (a.pluginDir.isEmpty()) a.pluginDir = QFileInfo(a.qml).absolutePath();
+    if (a.pluginId.isEmpty()) a.pluginId = QFileInfo(a.pluginDir).fileName();
+    if (a.width <= 0) a.width = 400;
+    if (a.height <= 0) a.height = 300;
+    if (a.mode == "snapshot" && a.out.isEmpty()) return false;
+    if (a.mode == "serve" && a.fd < 0) return false;
+    return true;
+}
+
+int main(int argc, char **argv) {
+    Args a;
+    if (!parseArgs(argc, argv, a)) {
+        usage();
+        return 64;
+    }
+    // Off screen, software rendering: no window, no GPU context, the same
+    // pixels on every machine. The host never opens a window of its own.
+    qputenv("QT_QPA_PLATFORM", "offscreen");
+    qputenv("QT_QUICK_BACKEND", "software");
+    // A desktop platform theme (gtk3, qt6ct, kde) wants a display, which the
+    // host does not have, and would make plugins look different per machine.
+    qunsetenv("QT_QPA_PLATFORMTHEME");
+    qunsetenv("QT_STYLE_OVERRIDE");
+    if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) qputenv("QT_QUICK_CONTROLS_STYLE", "Basic");
+    if (a.mode == "snapshot" && a.scale > 0 && a.scale != 1.0)
+        qputenv("QT_SCALE_FACTOR", QByteArray::number(a.scale));
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    QGuiApplication app(argc, argv);
+    app.setApplicationName("sd-qml-host");
+
+    if (a.mode == "serve") {
+        g_fd = a.fd;
+        ::fcntl(g_fd, F_SETFD, FD_CLOEXEC);
+    }
+    const QVariantMap theme = parseTheme(a.theme);
+    Surface surface(QFileInfo(a.qml).absoluteFilePath(), QFileInfo(a.pluginDir).absoluteFilePath(),
+                    a.pluginId, a.surfaceId, a.mode == "serve", theme);
+    const QJsonArray errors = surface.load();
+
+    if (a.mode == "check") {
+        QJsonObject r{{"ok", errors.isEmpty()}, {"errors", errors}, {"warnings", surface.warnings()}};
+        std::printf("%s\n", QJsonDocument(r).toJson(QJsonDocument::Compact).constData());
+        return errors.isEmpty() ? 0 : 1;
+    }
+
+    if (!errors.isEmpty()) {
+        if (a.mode == "serve") {
+            sendMessage(QJsonObject{{"t", "error"}, {"errors", errors}});
+        } else {
+            QJsonObject r{{"ok", false}, {"errors", errors}};
+            std::printf("%s\n", QJsonDocument(r).toJson(QJsonDocument::Compact).constData());
+        }
+        return 1;
+    }
+
+    surface.resize(a.width, a.height);
+
+    if (a.mode == "snapshot") {
+        // Let timers, bindings and short animations settle before the shot.
+        QTimer::singleShot(std::max(0, a.waitMs), &app, [&]() {
+            QImage image = surface.renderFrame();
+            const bool saved = image.save(a.out, "PNG");
+            // An all-transparent frame is almost always a mistake (zero size,
+            // no color, everything outside the root): say so.
+            qint64 painted = 0;
+            for (int y = 0; y < image.height(); ++y) {
+                const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+                for (int x = 0; x < image.width(); ++x) painted += qAlpha(line[x]) != 0;
+            }
+            QJsonObject r{{"ok", saved}, {"out", a.out}, {"width", image.width()},
+                          {"height", image.height()},
+                          {"paintedFraction", double(painted) / std::max<qint64>(1, qint64(image.width()) * image.height())},
+                          {"warnings", surface.warnings()}};
+            std::printf("%s\n", QJsonDocument(r).toJson(QJsonDocument::Compact).constData());
+            app.exit(saved ? 0 : 1);
+        });
+        return app.exec();
+    }
+
+    Connection connection(&surface);
+    sendMessage(QJsonObject{{"t", "ready"}, {"api", 1}});
+    surface.scheduleRender();
+    return app.exec();
+}
+
+#include "main.moc"
