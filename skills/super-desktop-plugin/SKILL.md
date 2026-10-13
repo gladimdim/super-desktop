@@ -103,7 +103,9 @@ through `sd.values` (and files or programs you run).
 5. **Don't block**: no busy loops; use `Timer` and the callbacks of `sd.exec`
    and `sd.call`.
 6. **Act only on a click or key**: anything that launches, sends or deletes
-   follows a user action.
+   follows a user action. `cards.send` types into the user's agents: never
+   call it from a timer or on load, and never with text from a program's
+   output or a web page.
 7. **Keyboard**: a `card` or `fullscreen` surface gets the keyboard when the
    user clicks it (full screen: at once). Put `focus: true` on the item that
    handles `Keys.onPressed`, call `forceActiveFocus()` on click, and show a
@@ -149,6 +151,8 @@ included, so GUI apps open normally.
 | `harness.launch` | `{harness, folder?}` | `{}`; opens a new terminal card for that agent, in `folder` or the folder chosen in the top bar. |
 | `cards.list` | none | `[{id, kind, title, harness, folder, status, minimized}]`; `kind` is `terminal` or `note`; `status` (terminals) is `working`, `waiting`, `finished`, `idle`, `error`, `exited`, `unknown` or `remote`. Poll it (every few seconds, only while `sd.visibleChanged` says shown). |
 | `cards.focus` | `{id}` from `cards.list` | `{}`; brings that card to the front with the keyboard (restores a minimized one). |
+| `cards.text` | `{id, lines?}` of a terminal card (default 60, at most 300) | `{text}`: the end of its terminal, plain text. |
+| `cards.send` | `{id, text, enter?}` of a terminal card | `{}`; types `text` into it as if the user did (`enter: true` presses Enter after it; at most 64 KiB). **Only on the user's click**, and show what will be typed first. |
 | `notify` | `{title, body}` | `{}`; a desktop notification. |
 | `panel.open`, `panel.close`, `panel.toggle` | `{surface}`: one of **this plugin's** `panel` surfaces | `{open}`: whether it is open now. |
 | `card.open`, `card.close`, `card.toggle` | `{surface}`: one of this plugin's `card` surfaces | `{open}` |

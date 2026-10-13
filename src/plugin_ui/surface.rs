@@ -543,8 +543,12 @@ impl Inner {
             }
             FromHost::Log { level, message } => self.log(&format!("{level}: {message}")),
             FromHost::Call { id, method, params } => {
-                let result = super::api::call(&self.spec, &method, &params);
-                self.send(&protocol::reply(id, result));
+                let weak = Rc::downgrade(self);
+                super::api::call_async(&self.spec, &method, &params, Box::new(move |result| {
+                    if let Some(inner) = weak.upgrade() {
+                        inner.send(&protocol::reply(id, result));
+                    }
+                }));
             }
             FromHost::Cursor { shape } => {
                 self.view.set_cursor_from_name(protocol::cursor_name(shape));

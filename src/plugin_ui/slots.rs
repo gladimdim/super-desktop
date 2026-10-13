@@ -928,6 +928,7 @@ mod tests {
             launch: Rc::new(|_, _| Ok(())),
             cards: Rc::new(|| serde_json::json!([])),
             focus_card: Rc::new(|_| Ok(())),
+            card_session: Rc::new(|_| None),
             open_card: Rc::new(|_, _| Err("no cards in tests".into())),
         });
         // cards.focus wants an id that cards.list has.
@@ -1016,6 +1017,7 @@ mod tests {
             launch: Rc::new(|_, _| Ok(())),
             cards: Rc::new(|| serde_json::json!([])),
             focus_card: Rc::new(|_| Ok(())),
+            card_session: Rc::new(|_| None),
             open_card: Rc::new(|_, _| Err("no cards in tests".into())),
         });
         let call = |method: &str, surface: &str| crate::plugin_ui::api::call(&spec, method, &serde_json::json!({"surface": surface}));

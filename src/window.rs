@@ -237,7 +237,17 @@ fn install_plugin_hooks(
             }
         }) as Rc<dyn Fn(&str) -> Result<(), String>>
     };
-    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards, open_card, focus_card });
+    let card_session = {
+        let owner = Rc::downgrade(owner);
+        Rc::new(move |id: &str| {
+            let owner = owner.upgrade()?;
+            let cards = owner.terminal_cards.borrow();
+            let card = cards.iter().find(|c| c.data.borrow().id == id)?;
+            let data = card.data.borrow();
+            Some((data.session_name.clone(), data.agent_type.clone()))
+        }) as Rc<dyn Fn(&str) -> Option<(String, String)>>
+    };
+    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards, open_card, focus_card, card_session });
 }
 
 /// Cards may extend past the output while being dragged, restored from a

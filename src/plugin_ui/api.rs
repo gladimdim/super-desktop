@@ -19,6 +19,8 @@ pub struct Hooks {
     pub open_card: Rc<dyn Fn(&str, &str) -> Result<String, String>>,
     /// Brings a card (by its id from `cards`) to the front with the keyboard.
     pub focus_card: Rc<dyn Fn(&str) -> Result<(), String>>,
+    /// A terminal card's tmux session and harness, by card id.
+    pub card_session: Rc<dyn Fn(&str) -> Option<(String, String)>>,
 }
 
 /// The hooks, if the overlay has set them.
@@ -31,6 +33,7 @@ pub fn hooks() -> Option<Hooks> {
             cards: Rc::clone(&h.cards),
             open_card: Rc::clone(&h.open_card),
             focus_card: Rc::clone(&h.focus_card),
+            card_session: Rc::clone(&h.card_session),
         })
     })
 }
@@ -45,6 +48,62 @@ pub fn set_hooks(hooks: Hooks) {
 
 fn error(code: &str, message: impl Into<String>, hint: &str) -> Value {
     json!({"code": code, "message": message.into(), "hint": hint})
+}
+
+/// Most text sent into a card at once.
+const MAX_SEND: usize = 64 * 1024;
+/// Most lines `cards.text` returns.
+const MAX_LINES: usize = 300;
+
+/// Like `call`, for every method; the ones that run tmux do it off the GTK
+/// thread and answer later through `done`.
+pub fn call_async(spec: &SurfaceSpec, method: &str, params: &Value, done: Box<dyn FnOnce(Result<Value, Value>)>) {
+    if !matches!(method, "cards.text" | "cards.send") {
+        done(call(spec, method, params));
+        return;
+    }
+    let Some(hooks) = hooks() else {
+        done(Err(error("unavailable", "SUPER DESKTOP is still starting", "Try again in a moment.")));
+        return;
+    };
+    let Some(id) = params.get("id").and_then(Value::as_str) else {
+        done(Err(error("bad_params", format!("{method} needs {{id}}"), "Pass the id of a terminal card from cards.list.")));
+        return;
+    };
+    let Some((session, harness)) = (hooks.card_session)(id) else {
+        done(Err(error("bad_params", format!("no terminal card {id:?}"), "Pass the id of a terminal card from cards.list (notes have no terminal).")));
+        return;
+    };
+    super_desktop::plugins::paths::append_log(&spec.plugin_id, &format!("[{}] call {method} {id}", spec.surface_id));
+    let work: Box<dyn FnOnce() -> Result<Value, Value> + Send> = if method == "cards.text" {
+        let lines = params.get("lines").and_then(Value::as_u64).map_or(60, |n| n as usize).clamp(1, MAX_LINES);
+        Box::new(move || {
+            let text = crate::tmux::capture_pane_history(&session)
+                .ok_or_else(|| error("unavailable", "the card's terminal could not be read", "The card may have just closed."))?;
+            let all: Vec<&str> = text.trim_end().lines().collect();
+            Ok(json!({"text": all[all.len().saturating_sub(lines)..].join("\n")}))
+        })
+    } else {
+        let Some(text) = params.get("text").and_then(Value::as_str).map(str::to_owned) else {
+            done(Err(error("bad_params", "cards.send needs {text}", "Pass the text to type; add enter: true to press Enter after it.")));
+            return;
+        };
+        if text.len() > MAX_SEND {
+            done(Err(error("bad_params", "text is longer than 64 KiB", "Send less at once.")));
+            return;
+        }
+        let enter = params.get("enter").and_then(Value::as_bool).unwrap_or(false);
+        Box::new(move || {
+            crate::tmux::send_keys(&session, &harness, &text, enter)
+                .map(|()| json!({}))
+                .map_err(|e| error("unavailable", format!("could not type into the card: {e}"), "The card may have just closed."))
+        })
+    };
+    let handle = gtk4::gio::spawn_blocking(work);
+    gtk4::glib::spawn_future_local(async move {
+        let result = handle.await.unwrap_or_else(|_| Err(error("unavailable", "the request failed", "Try again.")));
+        done(result);
+    });
 }
 
 pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, Value> {
@@ -162,7 +221,74 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, notify, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, notify, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    fn wait(context: &gtk4::glib::MainContext, result: &Rc<RefCell<Option<Result<Value, Value>>>>) -> Result<Value, Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while result.borrow().is_none() {
+            assert!(std::time::Instant::now() < deadline, "no answer");
+            context.iteration(false);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        result.borrow_mut().take().unwrap()
+    }
+
+    /// Runs against the private tmux server of the test run (test_isolation).
+    #[test]
+    fn plugins_cards_send_types_into_a_card_and_text_reads_it() {
+        if std::process::Command::new("tmux").arg("-V").output().is_err() {
+            eprintln!("skipped: tmux is not installed");
+            return;
+        }
+        let session = format!("sd_plugin_api_{}", std::process::id());
+        let made = std::process::Command::new("tmux")
+            .args(["-f", "/dev/null", "new-session", "-d", "-s", &session, "-x", "80", "-y", "20", "cat"])
+            .output().unwrap();
+        assert!(made.status.success(), "{made:?}");
+        let context = gtk4::glib::MainContext::new();
+        context.with_thread_default(|| {
+            let target = session.clone();
+            set_hooks(Hooks {
+                hide: Rc::new(|| {}),
+                harnesses: Rc::new(|| json!([])),
+                launch: Rc::new(|_, _| Ok(())),
+                cards: Rc::new(|| json!([])),
+                open_card: Rc::new(|_, _| Err("no".into())),
+                focus_card: Rc::new(|_| Ok(())),
+                card_session: Rc::new(move |id| (id == "card-1").then(|| (target.clone(), "shell".to_owned()))),
+            });
+            let spec = SurfaceSpec {
+                plugin_id: "api-test".into(), plugin_name: "api-test".into(), surface_id: "main".into(),
+                qml: "/dev/null".into(), dir: std::env::temp_dir(),
+            };
+            let result: Rc<RefCell<Option<Result<Value, Value>>>> = Rc::new(RefCell::new(None));
+            let ask = |method: &str, params: Value| {
+                let slot = Rc::clone(&result);
+                call_async(&spec, method, &params, Box::new(move |r| *slot.borrow_mut() = Some(r)));
+                wait(&context, &result)
+            };
+            assert_eq!(ask("cards.send", json!({"id": "card-9", "text": "x"})).unwrap_err()["code"], "bad_params");
+            assert_eq!(ask("cards.send", json!({"id": "card-1"})).unwrap_err()["code"], "bad_params");
+            ask("cards.send", json!({"id": "card-1", "text": "hello from a plugin", "enter": true})).unwrap();
+            // cat echoes the line back: it is on the screen twice.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let text = ask("cards.text", json!({"id": "card-1", "lines": 5})).unwrap()["text"].as_str().unwrap().to_owned();
+                if text.matches("hello from a plugin").count() >= 2 {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "not on screen: {text:?}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }).unwrap();
+        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &format!("={session}")]).output();
     }
 }
