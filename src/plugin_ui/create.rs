@@ -219,6 +219,7 @@ mod tests {
             ])),
             launch: Rc::new(|_, _| Ok(())),
             cards: Rc::new(|| serde_json::json!([])),
+            focus_card: Rc::new(|_| Ok(())),
             open_card: Rc::new({
                 let opened = Rc::clone(&opened);
                 move |harness: &str, folder: &str| {

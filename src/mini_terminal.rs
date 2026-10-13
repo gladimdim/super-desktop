@@ -1665,6 +1665,12 @@ impl MiniTerminalCard {
         true
     }
 
+    /// What the card's harness is doing, as its badge shows it: "working",
+    /// "waiting", "finished", "idle", "error", "exited", "unknown" or "remote".
+    pub fn status_word(&self) -> String {
+        self.status_badge.label().split_whitespace().last().unwrap_or("IDLE").to_lowercase()
+    }
+
     /// An explicit keyboard selection restores compact cards and protects the
     /// selected terminal from the pointer left over a different card.
     pub fn select_with_keyboard(&self) {

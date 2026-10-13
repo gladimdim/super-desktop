@@ -17,6 +17,8 @@ pub struct Hooks {
     pub cards: Rc<dyn Fn() -> Value>,
     /// Opens a card for a harness in `folder` and returns its tmux session.
     pub open_card: Rc<dyn Fn(&str, &str) -> Result<String, String>>,
+    /// Brings a card (by its id from `cards`) to the front with the keyboard.
+    pub focus_card: Rc<dyn Fn(&str) -> Result<(), String>>,
 }
 
 /// The hooks, if the overlay has set them.
@@ -28,6 +30,7 @@ pub fn hooks() -> Option<Hooks> {
             launch: Rc::clone(&h.launch),
             cards: Rc::clone(&h.cards),
             open_card: Rc::clone(&h.open_card),
+            focus_card: Rc::clone(&h.focus_card),
         })
     })
 }
@@ -72,6 +75,21 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 .map_err(|message| error("bad_params", message, "Use an id from harness.list."))
         }
         "cards.list" => Ok((hooks.cards)()),
+        "cards.focus" => {
+            let Some(id) = params.get("id").and_then(Value::as_str) else {
+                return Err(error("bad_params", "cards.focus needs {id}", "Pass an id from cards.list."));
+            };
+            // After this call returns: focusing moves the keyboard away from the caller.
+            let (focus, id) = (Rc::clone(&hooks.focus_card), id.to_owned());
+            let known = (hooks.cards)().as_array().is_some_and(|cards| cards.iter().any(|c| c["id"] == id.as_str()));
+            if !known {
+                return Err(error("bad_params", format!("no card {id:?}"), "Pass an id from cards.list; cards come and go."));
+            }
+            gtk4::glib::idle_add_local_once(move || {
+                let _ = focus(&id);
+            });
+            Ok(json!({}))
+        }
         "panel.open" | "panel.close" | "panel.toggle" | "card.open" | "card.close" | "card.toggle"
         | "fullscreen.open" | "fullscreen.close" | "fullscreen.toggle" => {
             let (kind, action) = method.split_once('.').unwrap_or((method, ""));
@@ -144,7 +162,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, notify, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, notify, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
         )),
     }
 }

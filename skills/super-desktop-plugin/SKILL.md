@@ -147,7 +147,8 @@ included, so GUI apps open normally.
 | `overlay.hide` | none | `{}` |
 | `harness.list` | none | `[{id, name, icon}]`: the agents offered in the top bar. `icon` is a file path or empty. |
 | `harness.launch` | `{harness, folder?}` | `{}`; opens a new terminal card for that agent, in `folder` or the folder chosen in the top bar. |
-| `cards.list` | none | `[{id, kind, title, harness, folder}]`, `kind` is `terminal` or `note`. |
+| `cards.list` | none | `[{id, kind, title, harness, folder, status, minimized}]`; `kind` is `terminal` or `note`; `status` (terminals) is `working`, `waiting`, `finished`, `idle`, `error`, `exited`, `unknown` or `remote`. Poll it (every few seconds, only while `sd.visibleChanged` says shown). |
+| `cards.focus` | `{id}` from `cards.list` | `{}`; brings that card to the front with the keyboard (restores a minimized one). |
 | `notify` | `{title, body}` | `{}`; a desktop notification. |
 | `panel.open`, `panel.close`, `panel.toggle` | `{surface}`: one of **this plugin's** `panel` surfaces | `{open}`: whether it is open now. |
 | `card.open`, `card.close`, `card.toggle` | `{surface}`: one of this plugin's `card` surfaces | `{open}` |
@@ -196,6 +197,8 @@ Full working examples, copy the closest one:
   (`harness.list`, `harness.launch`), hover states, tooltips, a component file.
 - `examples/pomodoro/`: a `toolbar.item` that toggles a `panel`, and a
   `settings.page`, sharing state through `sd.values`.
+- `examples/agents-dock/`: a dock listing the agent cards with their status
+  (`cards.list`), a click jumps to one (`cards.focus`).
 - `examples/snake/`: a game on a `card`: a `Timer` game loop, arrow keys,
   focus handling, the best score in `sd.values`.
 - `examples/terminal/`: a terminal card made of `TerminalView`, with the

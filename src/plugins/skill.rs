@@ -14,6 +14,8 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
     ("examples/launcher-dock/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/launcher-dock/plugin.json")),
     ("examples/launcher-dock/Dock.qml", include_str!("../../skills/super-desktop-plugin/examples/launcher-dock/Dock.qml")),
     ("examples/launcher-dock/DockButton.qml", include_str!("../../skills/super-desktop-plugin/examples/launcher-dock/DockButton.qml")),
+    ("examples/agents-dock/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/agents-dock/plugin.json")),
+    ("examples/agents-dock/Dock.qml", include_str!("../../skills/super-desktop-plugin/examples/agents-dock/Dock.qml")),
     ("examples/pomodoro/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/plugin.json")),
     ("examples/pomodoro/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Toolbar.qml")),
     ("examples/pomodoro/Panel.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Panel.qml")),
@@ -449,7 +451,7 @@ mod tests {
                 fs::write(path, contents).unwrap();
             }
         }
-        for example in ["clock-dock", "launcher-dock", "pomodoro", "snake", "terminal"] {
+        for example in ["clock-dock", "launcher-dock", "agents-dock", "pomodoro", "snake", "terminal"] {
             let m = manifest::load(&root.join(example)).unwrap_or_else(|p| panic!("{example}: {p:?}"));
             // Every QML file of an example loads cleanly, when the host is built.
             if let Some(host) = crate::plugins::paths::qml_host_binary() {
@@ -464,7 +466,7 @@ mod tests {
         // Every example file is in SKILL_FILES (and so reaches plugin folders).
         let on_disk = |dir: &str| std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples").join(dir))
             .unwrap().flatten().map(|e| format!("examples/{dir}/{}", e.file_name().to_string_lossy())).collect::<Vec<_>>();
-        for example in ["clock-dock", "launcher-dock", "pomodoro", "snake", "terminal"] {
+        for example in ["clock-dock", "launcher-dock", "agents-dock", "pomodoro", "snake", "terminal"] {
             for file in on_disk(example) {
                 assert!(SKILL_FILES.iter().any(|(path, _)| *path == file), "{file} is missing from SKILL_FILES");
             }

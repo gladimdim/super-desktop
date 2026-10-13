@@ -1,0 +1,9 @@
+{
+  "id": "agents-dock",
+  "name": "Agents",
+  "description": "A dock on the right with every agent card and what it is doing; click one to jump to it.",
+  "api": 1,
+  "surfaces": [
+    { "id": "main", "slot": "dock.right", "qml": "Dock.qml", "size": 200 }
+  ]
+}

@@ -188,6 +188,8 @@ fn install_plugin_hooks(
                     "title": card.desktop_presentation().title,
                     "harness": data.agent_type,
                     "folder": data.workspace_dir,
+                    "status": card.status_word(),
+                    "minimized": data.iconified,
                 })
             }).collect();
             list.extend(owner.note_cards.borrow().iter().map(|note| {
@@ -196,6 +198,7 @@ fn install_plugin_hooks(
                     "id": data.id, "kind": "note",
                     "title": data.text.lines().next().unwrap_or("").chars().take(80).collect::<String>(),
                     "harness": serde_json::Value::Null, "folder": serde_json::Value::Null,
+                    "status": serde_json::Value::Null, "minimized": false,
                 })
             }));
             serde_json::Value::Array(list)
@@ -213,7 +216,28 @@ fn install_plugin_hooks(
             if session.is_empty() { Err("the card could not be created".into()) } else { Ok(session) }
         }) as Rc<dyn Fn(&str, &str) -> Result<String, String>>
     };
-    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards, open_card });
+    let focus_card = {
+        let owner = Rc::downgrade(owner);
+        Rc::new(move |id: &str| {
+            let owner = owner.upgrade().ok_or("the overlay is closing")?;
+            let card = owner.terminal_cards.borrow().iter().find(|c| c.data.borrow().id == id).cloned();
+            if let Some(card) = card {
+                card.select_with_keyboard();
+                return Ok(());
+            }
+            let note = owner.note_cards.borrow().iter().find(|n| n.data.borrow().id == id).cloned();
+            match note {
+                Some(note) => {
+                    raise_canvas_child(&owner.canvas, &note.container);
+                    raise_canvas_child(&owner.canvas, &owner.hud);
+                    note.text_view.grab_focus();
+                    Ok(())
+                }
+                None => Err(format!("no card {id:?}")),
+            }
+        }) as Rc<dyn Fn(&str) -> Result<(), String>>
+    };
+    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards, open_card, focus_card });
 }
 
 /// Cards may extend past the output while being dragged, restored from a

@@ -919,8 +919,12 @@ mod tests {
             harnesses: Rc::new(|| serde_json::json!([])),
             launch: Rc::new(|_, _| Ok(())),
             cards: Rc::new(|| serde_json::json!([])),
+            focus_card: Rc::new(|_| Ok(())),
             open_card: Rc::new(|_, _| Err("no cards in tests".into())),
         });
+        // cards.focus wants an id that cards.list has.
+        assert_eq!(crate::plugin_ui::api::call(&spec, "cards.focus", &serde_json::json!({})).unwrap_err()["code"], "bad_params");
+        assert_eq!(crate::plugin_ui::api::call(&spec, "cards.focus", &serde_json::json!({"id": "gone"})).unwrap_err()["code"], "bad_params");
         let toggle = serde_json::json!({"surface": "win"});
         assert_eq!(crate::plugin_ui::api::call(&spec, "panel.toggle", &toggle).unwrap()["open"], true);
         let missing = crate::plugin_ui::api::call(&spec, "panel.open", &serde_json::json!({"surface": "button"})).unwrap_err();
@@ -1003,6 +1007,7 @@ mod tests {
             harnesses: Rc::new(|| serde_json::json!([])),
             launch: Rc::new(|_, _| Ok(())),
             cards: Rc::new(|| serde_json::json!([])),
+            focus_card: Rc::new(|_| Ok(())),
             open_card: Rc::new(|_, _| Err("no cards in tests".into())),
         });
         let call = |method: &str, surface: &str| crate::plugin_ui::api::call(&spec, method, &serde_json::json!({"surface": surface}));
