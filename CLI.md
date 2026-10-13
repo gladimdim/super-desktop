@@ -858,6 +858,31 @@ execute code on the remote PC. For a bounded output-only stream:
 super-desktop peer-attach PEER_ID CARD_ID --seconds 10 < /dev/null
 ```
 
+## Plugins
+
+Plugins add docks at the screen edges, top-bar items, floating panels and
+Settings sections to the overlay. A plugin is a folder of QML (Qt Quick) in
+`~/.config/super-desktop/plugins/<id>/` with a `plugin.json`; the overlay
+reloads it whenever one of its files is saved. These commands work without a
+running overlay, so an agent can check its own work:
+
+```sh
+super-desktop plugin new my-dock --slot dock.left      # a working start
+super-desktop plugin check my-dock --json               # QML errors with file:line
+super-desktop plugin snapshot my-dock --out /tmp/my-dock.png --json
+super-desktop plugin logs my-dock                       # runtime errors, sd.log
+super-desktop plugin list
+```
+
+`check` exits 0 only when every surface loads without errors or warnings.
+`snapshot` renders off screen with the current theme and the plugin's saved
+values and reports `paintedFraction` (0 means nothing visible was drawn).
+`plugin new` also writes the plugin skill into the folder
+(`.claude/skills/super-desktop-plugin/SKILL.md`) and an `AGENTS.md`, so any
+coding agent opened there knows the plugin API. ✨ in the top bar and
+Settings → Plugins do the same from the overlay and open an agent in the
+new folder. Drawing plugins needs Qt Quick (`qt6-declarative`).
+
 ## Complete public command syntax
 
 The catalog below lists all public commands. `--help` also works for each leaf
@@ -868,6 +893,12 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
 | `mcp serve` | Local MCP stdio | Serve desktop inspection, harness launch and guarded prompt tools |
+| `plugin list [--json]` | Offline | List QML plugins and whether they run |
+| `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
+| `plugin check ID\|DIR [--json]` | Offline | Check a plugin's manifest and QML |
+| `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
+| `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |
+| `plugin path` | Offline | Print the plugins folder |
 | `terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]` | Structured local | Attach a bounded local terminal stream |
 | `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
 | `terminal viewport acquire ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |

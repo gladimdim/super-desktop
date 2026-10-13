@@ -17,6 +17,7 @@ trap 'rm -rf "$sources"' EXIT
 python3 scripts/arch_sources.py --output "$sources/source"
 # Compile the exact source and asset manifest shipped alongside the binaries.
 (cd "$sources/source" && CARGO_TARGET_DIR="$sources/target" cargo build --release --locked --offline --bins)
+(cd "$sources/source" && CARGO_TARGET_DIR="$sources/target" SD_QML_HOST_REQUIRED=1 scripts/build-qml-host.sh release)
 python3 scripts/package-arch.py --release-tag "$RELEASE_TAG" --output "$output" --source-dir "$sources/source" --binary-dir "$sources/target/release"
 cp "$output"/*.tar.gz "$output/aur/"
 cd "$output/aur"

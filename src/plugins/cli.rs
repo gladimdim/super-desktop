@@ -8,7 +8,8 @@ use std::process::Command;
 const USAGE: &str = "usage: super-desktop plugin <command>
 
   list [--json]                       every plugin, valid or not, and its state
-  new <id> [--slot dock.left|dock.right] [--name NAME]
+  new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page]
+      [--name NAME] [--request TEXT]
                                       create a working plugin to start from
   check <id|dir> [--json]             manifest and QML errors (exit 0 when clean)
   snapshot <id|dir> [--surface ID] [--width W] [--height H] [--scale S]
@@ -73,7 +74,7 @@ pub fn run(args: &[String]) -> i32 {
             Ok(0)
         }
         "list" => Flags::parse(rest, &[]).map(|f| list(f.json)),
-        "new" => Flags::parse(rest, &["slot", "name"]).and_then(|f| new(&f)),
+        "new" => Flags::parse(rest, &["slot", "name", "request"]).and_then(|f| new(&f)),
         "check" => Flags::parse(rest, &[]).and_then(|f| check(&f)),
         "snapshot" => Flags::parse(rest, &["surface", "width", "height", "scale", "out", "wait"]).and_then(|f| snapshot(&f)),
         "logs" => Flags::parse(rest, &["lines"]).and_then(|f| logs(&f)),
@@ -139,15 +140,15 @@ fn new(flags: &Flags) -> Result<i32, String> {
         return Err("new needs exactly one plugin id".into());
     };
     let slot_text = flags.get("slot").unwrap_or("dock.right");
-    let slot = manifest::Slot::parse(slot_text)
-        .ok_or_else(|| format!("unknown slot {slot_text:?}; use {}", manifest::Slot::SUPPORTED.join(" or ")))?;
+    let template = skill::Template::parse(slot_text)
+        .ok_or_else(|| format!("unknown slot {slot_text:?}; use one of {}", skill::Template::NAMES.join(", ")))?;
     let root = paths::plugins_dir();
-    let dir = skill::new_plugin(&root, id, flags.get("name").unwrap_or(""), slot)?;
+    let dir = skill::new_plugin(&root, id, flags.get("name").unwrap_or(""), template, flags.get("request").unwrap_or(""))?;
     if flags.json {
         print_json(&json!({"ok": true, "id": id, "dir": dir}));
     } else {
         println!("Created {}", dir.display());
-        println!("It is live in SUPER DESKTOP now. Edit Dock.qml; check with: super-desktop plugin check {id}");
+        println!("It is live in SUPER DESKTOP now. Edit its QML; check with: super-desktop plugin check {id}");
     }
     Ok(0)
 }
@@ -243,7 +244,7 @@ fn snapshot(flags: &Flags) -> Result<i32, String> {
         None => &m.surfaces[0],
     };
     let host = host_or_error().map_err(|e| e["message"].as_str().unwrap_or("").to_owned())?;
-    let (default_w, default_h) = surface.slot.default_snapshot_size(surface.size);
+    let (default_w, default_h) = surface.slot.default_snapshot_size(surface.size, surface.height);
     let width: i32 = flags.number("width")?.unwrap_or(default_w);
     let height: i32 = flags.number("height")?.unwrap_or(default_h);
     let scale: f64 = flags.number("scale")?.unwrap_or(1.0);
@@ -259,7 +260,8 @@ fn snapshot(flags: &Flags) -> Result<i32, String> {
         .arg("--plugin-dir").arg(&dir)
         .args(["--plugin-id", &m.id, "--surface-id", &surface.id])
         .args(["--width", &width.to_string(), "--height", &height.to_string()])
-        .args(["--scale", &scale.to_string(), "--wait", &wait.to_string()]);
+        .args(["--scale", &scale.to_string(), "--wait", &wait.to_string()])
+        .arg("--data").arg(paths::data_path(&m.id));
     if !theme.trim().is_empty() {
         command.args(["--theme", theme.trim()]);
     }

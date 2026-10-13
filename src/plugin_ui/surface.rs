@@ -422,6 +422,7 @@ impl Inner {
             scale: self.scale.get(),
             theme: &theme,
             log: Some(log),
+            data: Some(paths::data_path(&self.spec.plugin_id)),
         };
         match HostProcess::spawn(&options) {
             Ok(host) => {
@@ -537,6 +538,9 @@ impl Inner {
             FromHost::Call { id, method, params } => {
                 let result = super::api::call(&self.spec, &method, &params);
                 self.send(&protocol::reply(id, result));
+            }
+            FromHost::Cursor { shape } => {
+                self.view.set_cursor_from_name(protocol::cursor_name(shape));
             }
             FromHost::Unknown => {}
         }

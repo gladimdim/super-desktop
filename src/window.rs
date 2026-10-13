@@ -201,7 +201,19 @@ fn install_plugin_hooks(
             serde_json::Value::Array(list)
         }) as Rc<dyn Fn() -> serde_json::Value>
     };
-    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards });
+    let open_card = {
+        let owner = Rc::downgrade(owner);
+        let harnesses = Rc::clone(&harnesses);
+        Rc::new(move |key: &str, folder: &str| {
+            if !harnesses().as_array().into_iter().flatten().any(|h| h["id"] == key) {
+                return Err(format!("{key:?} is not an agent offered in the top bar"));
+            }
+            let owner = owner.upgrade().ok_or("the overlay is closing")?;
+            let session = owner.create_new_terminal_in(key, None, None, None, Some(folder));
+            if session.is_empty() { Err("the card could not be created".into()) } else { Ok(session) }
+        }) as Rc<dyn Fn(&str, &str) -> Result<String, String>>
+    };
+    crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards, open_card });
 }
 
 /// Cards may extend past the output while being dragged, restored from a
@@ -690,7 +702,7 @@ impl SuperDesktopWindow {
                     if let Some(view) = machine_for_settings.borrow().as_ref() {
                         view.paint_top_bar_size(size);
                     }
-                    crate::plugin_ui::docks::set_top_inset(top_bar_height(size));
+                    crate::plugin_ui::slots::set_top_inset(top_bar_height(size));
                 }
             }),
             connection_hooks,
@@ -740,7 +752,7 @@ impl SuperDesktopWindow {
         let root_overlay = desktop_overlay(&machine_view.stack);
         // Plugin docks: first overlays, so Settings and dialogs float above.
         crate::plugin_ui::apply_theme(&crate::theme::current_theme());
-        crate::plugin_ui::docks::Docks::install(&root_overlay, top_bar_height(state.borrow().top_bar_size));
+        let plugin_slots = crate::plugin_ui::slots::Slots::install(&root_overlay, top_bar_height(state.borrow().top_bar_size));
         hud_left.append(&machine_view.local_button);
 
         let brand = Label::new(Some("⚡ SUPER DESKTOP"));
@@ -1008,7 +1020,12 @@ impl SuperDesktopWindow {
         brand_images
             .borrow_mut()
             .extend(harness_bar.brand_images());
-        hud.append(&top_bar_content(&hud_left, &harness_bar.group, &hud_right));
+        // Plugin toolbar items and ✨ Create Plugin scroll with the launchers;
+        // the actions on the right never move.
+        let launchers = gtk4::Box::new(Orientation::Horizontal, 10);
+        launchers.append(&harness_bar.group);
+        launchers.append(plugin_slots.toolbar());
+        hud.append(&top_bar_content(&hud_left, &launchers, &hud_right));
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
         let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
@@ -1940,7 +1957,7 @@ impl SuperDesktopWindow {
         let gap = 12;
         let top = self.hud.height().max(top_bar_height(self.state.borrow().top_bar_size)) + gap;
         // Plugin docks own the screen edges they sit on.
-        let (dock_left, dock_right) = crate::plugin_ui::docks::insets();
+        let (dock_left, dock_right) = crate::plugin_ui::slots::insets();
         let width = (self.screen_width() - 2 * margin - dock_left - dock_right).max(1);
         let height = (self.screen_height() - top - margin).max(1);
         // Keep notes in their own lane; terminal geometry never depends on

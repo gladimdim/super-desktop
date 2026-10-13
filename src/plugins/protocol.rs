@@ -16,6 +16,8 @@ pub enum FromHost {
     Frame { seq: u64 },
     Log { level: String, message: String },
     Call { id: u64, method: String, params: Value },
+    /// QML asked for another pointer shape (a Qt::CursorShape value).
+    Cursor { shape: i64 },
     Unknown,
 }
 
@@ -43,8 +45,36 @@ pub fn parse(bytes: &[u8]) -> FromHost {
             method: value.get("method").and_then(Value::as_str).unwrap_or("").to_owned(),
             params: value.get("params").cloned().unwrap_or(Value::Null),
         },
+        "cursor" => FromHost::Cursor { shape: int("shape") },
         _ => FromHost::Unknown,
     }
+}
+
+/// Qt::CursorShape → CSS cursor name for GDK. `None` means the default.
+pub fn cursor_name(shape: i64) -> Option<&'static str> {
+    Some(match shape {
+        1 => "n-resize",      // UpArrow
+        2 => "crosshair",
+        3 => "wait",
+        4 => "text",          // IBeam
+        5 => "ns-resize",     // SizeVer
+        6 => "ew-resize",     // SizeHor
+        7 => "nesw-resize",   // SizeBDiag
+        8 => "nwse-resize",   // SizeFDiag
+        9 => "move",          // SizeAll
+        10 => "none",         // Blank
+        11 => "row-resize",   // SplitV
+        12 => "col-resize",   // SplitH
+        13 => "pointer",      // PointingHand
+        14 => "not-allowed",  // Forbidden
+        15 => "help",         // WhatsThis
+        16 => "progress",     // Busy
+        17 => "grab",         // OpenHand
+        18 => "grabbing",     // ClosedHand
+        19 => "copy",         // DragCopy
+        20 => "alias",        // DragLink
+        _ => return None,
+    })
 }
 
 pub fn resize(width: i32, height: i32) -> Value {
@@ -182,6 +212,9 @@ mod tests {
         );
         assert!(matches!(parse(br#"{"t":"call","id":3,"method":"overlay.hide"}"#),
             FromHost::Call { id: 3, ref method, params: Value::Null } if method == "overlay.hide"));
+        assert_eq!(parse(br#"{"t":"cursor","shape":13}"#), FromHost::Cursor { shape: 13 });
+        assert_eq!(cursor_name(13), Some("pointer"));
+        assert_eq!(cursor_name(0), None);
         assert_eq!(parse(br#"{"t":"something-new"}"#), FromHost::Unknown);
         assert_eq!(parse(b"not json"), FromHost::Unknown);
     }

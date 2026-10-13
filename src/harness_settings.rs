@@ -57,6 +57,7 @@ enum SettingsPage {
     HarnessArgs,
     TopBar,
     Mcp,
+    Plugins,
     SleepLock,
     Updates,
     Connections(ConnectionPage),
@@ -68,6 +69,7 @@ impl SettingsPage {
     fn header(self, connections: &ConnectionPages) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::Home => ("⚙", "Settings", "Choose a section"),
+            Self::Plugins => ("🧩", "Plugins", "Widgets, docks and panels made by AI agents"),
             Self::Shortcut => ("⌨", "Keyboard shortcut", "Show or hide SUPER DESKTOP"),
             Self::Harnesses => ("⌘", "Harness launchers", "Choose what appears in the top bar"),
             Self::CustomHarness => ("＋", "Add a harness", "Icon · name · executable · arguments"),
@@ -416,7 +418,7 @@ fn summary_text(shown: usize, total: usize) -> String {
     }
 }
 
-fn paint_toggle(btn: &Button, shown: bool) {
+pub(crate) fn paint_toggle(btn: &Button, shown: bool) {
     btn.set_label(if shown { "ON" } else { "OFF" });
     for (class, active) in [
         ("harness-toggle-on", shown),
@@ -783,6 +785,7 @@ struct HomePage {
     btn_harnesses: Button,
     btn_top_bar: Button,
     btn_mcp: Button,
+    btn_plugins: Button,
     btn_sleep_lock: Button,
     btn_connections: Button,
     btn_updates: Button,
@@ -855,6 +858,8 @@ fn home_page() -> HomePage {
 
     let (btn_mcp, _) = settings_entry("⚙", "MCP", "Control local agent access and copy connection instructions.", "settings-mcp-entry");
     root.append(&btn_mcp);
+    let (btn_plugins, _) = settings_entry("🧩", "Plugins", "Create widgets, docks, panels and games with AI; turn plugins on or off.", "settings-plugins-entry");
+    root.append(&btn_plugins);
 
     let (btn_sleep_lock, _) = settings_entry(
         "☀", "Sleep lock", "Keep the bridge and AI harnesses awake on external power.",
@@ -933,6 +938,7 @@ fn home_page() -> HomePage {
         btn_harnesses,
         btn_top_bar,
         btn_mcp,
+        btn_plugins,
         btn_sleep_lock,
         btn_connections,
         btn_updates,
@@ -2118,6 +2124,10 @@ pub fn build_harness_settings_panel(
     let mcp_root = settings_page_root();
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
 
+    let plugins_root = settings_page_root();
+    // Refreshes itself whenever it is shown and when plugins change.
+    let _ = crate::plugin_ui::settings_page::build(&plugins_root);
+
     let updates_root = settings_page_root();
     let check_updates = build_updates_page(&updates_root, &home.updates_chip);
     // Opening Settings checks at most hourly, so the entry can name a newer
@@ -2155,6 +2165,7 @@ pub fn build_harness_settings_panel(
         (SettingsPage::CustomHarness, page_scroll(&custom.root).upcast()),
         (SettingsPage::TopBar, page_scroll(&top_bar_root).upcast()),
         (SettingsPage::Mcp, page_scroll(&mcp_root).upcast()),
+        (SettingsPage::Plugins, page_scroll(&plugins_root).upcast()),
     ];
     views.extend(connection_pages.widgets().map(|(page, view)| (SettingsPage::Connections(page), view.clone())));
     views.extend([
@@ -2227,6 +2238,7 @@ pub fn build_harness_settings_panel(
         (&home.btn_harnesses, SettingsPage::Harnesses),
         (&home.btn_top_bar, SettingsPage::TopBar),
         (&home.btn_mcp, SettingsPage::Mcp),
+        (&home.btn_plugins, SettingsPage::Plugins),
         (&home.btn_connections, SettingsPage::Connections(ConnectionPage::Overview)),
         (&home.btn_sleep_lock, SettingsPage::SleepLock),
         (&home.btn_updates, SettingsPage::Updates),
@@ -2995,17 +3007,17 @@ mod tests {
         let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            16,
-            "hub + five destinations + custom harness page + seven Connections pages + updates + harness parameters page"
+            17,
+            "hub + five destinations + plugins + custom harness page + seven Connections pages + updates + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        // hub, shortcut, harnesses, custom, top bar, MCP,
+        // hub, shortcut, harnesses, custom, top bar, MCP, plugins,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
         // updates, harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
         assert_eq!(count_class(&panel.widget, "launcher-section-title"), 20);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
@@ -3025,9 +3037,10 @@ mod tests {
             ("settings-harnesses-entry", 2, "Harness launchers"),
             ("settings-top-bar-entry", 4, "Top bar"),
             ("settings-mcp-entry", 5, "MCP"),
-            ("android-settings-entry", 6, "Connections"),
-            ("settings-sleep-lock-entry", 13, "Sleep lock"),
-            ("settings-updates-entry", 14, "Updates"),
+            ("settings-plugins-entry", 6, "Plugins"),
+            ("android-settings-entry", 7, "Connections"),
+            ("settings-sleep-lock-entry", 14, "Sleep lock"),
+            ("settings-updates-entry", 15, "Updates"),
         ] {
             let button = find_all::<Button>(&panel.widget, class)
                 .into_iter()
@@ -3084,18 +3097,18 @@ mod tests {
         // overview, then to the hub.
         find_all::<Button>(&panel.widget, "android-settings-entry")[0].emit_clicked();
         for (class, page_index, page_title) in [
-            ("connections-add-entry", 7, "Add a device"),
-            ("connections-pcs-entry", 9, "PCs"),
-            ("connections-phones-entry", 10, "Phones & other devices"),
-            ("connections-rejected-entry", 11, "Rejected devices"),
-            ("connections-network-entry", 12, "Network & firewall"),
+            ("connections-add-entry", 8, "Add a device"),
+            ("connections-pcs-entry", 10, "PCs"),
+            ("connections-phones-entry", 11, "Phones & other devices"),
+            ("connections-rejected-entry", 12, "Rejected devices"),
+            ("connections-network-entry", 13, "Network & firewall"),
         ] {
             find_all::<Button>(&panel.widget, class)[0].emit_clicked();
             assert!(shown(&pages[page_index]), "{class}");
             assert_eq!(pages.iter().filter(|page| shown(*page)).count(), 1);
             assert_eq!(title_text(&panel.widget), page_title);
             btn_back.emit_clicked();
-            assert!(shown(&pages[6]), "back from {page_title} returns to Connections");
+            assert!(shown(&pages[7]), "back from {page_title} returns to Connections");
             assert_eq!(title_text(&panel.widget), "Connections");
         }
         btn_back.emit_clicked();
@@ -3107,7 +3120,7 @@ mod tests {
             .find(|b| b.label().as_deref() == Some("Review") && b.ancestor(gtk4::Box::static_type()).is_some_and(|a| a.has_css_class("settings-firewall-warning")))
             .expect("the hub's firewall warning offers Review")
             .emit_clicked();
-        assert!(shown(&pages[12]));
+        assert!(shown(&pages[13]));
         btn_back.emit_clicked();
         btn_back.emit_clicked();
         assert!(shown(&pages[0]));
@@ -3119,7 +3132,7 @@ mod tests {
             .expect("the Android destination must offer a navigation button");
         panel.widget.set_visible(false);
         btn_launcher.emit_clicked();
-        assert!(shown(&pages[6]));
+        assert!(shown(&pages[7]));
         panel.widget.set_visible(true);
         assert!(shown(&pages[0]), "reopening resets to the settings hub");
         assert!(pages[1..].iter().all(|page| !shown(page)));

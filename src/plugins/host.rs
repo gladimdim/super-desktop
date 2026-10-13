@@ -24,6 +24,8 @@ pub struct SpawnOptions<'a> {
     pub theme: &'a Value,
     /// Host stderr goes here (the plugin log).
     pub log: Option<PathBuf>,
+    /// The plugin's saved values (`sd.values`).
+    pub data: Option<PathBuf>,
 }
 
 pub struct HostProcess {
@@ -61,6 +63,7 @@ impl HostProcess {
             .args(["--width", &options.width.max(1).to_string()])
             .args(["--height", &options.height.max(1).to_string()])
             .args(["--theme", &options.theme.to_string()])
+            .args(options.data.iter().flat_map(|d| [std::ffi::OsStr::new("--data"), d.as_os_str()]))
             .current_dir(options.plugin_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null());
@@ -306,13 +309,20 @@ mod tests {
         std::fs::write(&qml, r#"import QtQuick
 Rectangle {
     color: sd.theme.accent
-    MouseArea { anchors.fill: parent; onClicked: sd.call("overlay.hide", {"from": "test"}) }
+    MouseArea {
+        anchors.fill: parent
+        cursorShape: Qt.PointingHandCursor
+        onClicked: {
+            sd.setValue("clicks", (sd.values.clicks || 0) + 1)
+            sd.call("overlay.hide", {"from": "test", "clicks": sd.values.clicks})
+        }
+    }
 }
 "#).unwrap();
         let theme = serde_json::json!({"accent": "#ff0000"});
         let host = HostProcess::spawn(&SpawnOptions {
             host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "test", surface_id: "main",
-            width: 40, height: 30, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")),
+            width: 40, height: 30, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")), data: Some(dir.join("data.json")),
         }).unwrap();
         assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Ready),
             "no ready: {}", std::fs::read_to_string(dir.join("host.log")).unwrap_or_default());
@@ -328,12 +338,17 @@ Rectangle {
         // BGRA premultiplied: pure red, opaque.
         assert_eq!(&pixels.bytes()[..4], &[0, 0, 255, 255]);
         host.send(&protocol::ack(1)).unwrap();
+        host.send(&protocol::pointer("enter", 10.0, 10.0, 0, 0)).unwrap();
         host.send(&protocol::pointer("move", 10.0, 10.0, 0, 0)).unwrap();
+        assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Cursor { shape: 13 }),
+            "the hand cursor was not reported");
         host.send(&protocol::pointer("press", 10.0, 10.0, 1, 0)).unwrap();
         host.send(&protocol::pointer("release", 10.0, 10.0, 1, 0)).unwrap();
         assert!(wait_for(&host, Duration::from_secs(10), |m, _| matches!(m,
-            FromHost::Call { ref method, ref params, .. } if method == "overlay.hide" && params["from"] == "test")),
+            FromHost::Call { ref method, ref params, .. } if method == "overlay.hide" && params["from"] == "test" && params["clicks"] == 1)),
             "the click did not reach QML");
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
+        assert_eq!(saved, serde_json::json!({"clicks": 1}));
         drop(host);
         let _ = std::fs::remove_dir_all(&dir);
     }

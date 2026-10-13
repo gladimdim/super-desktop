@@ -36,6 +36,11 @@ pub fn status_path(id: &str) -> PathBuf {
     state_dir().join(format!("{id}.status.json"))
 }
 
+/// The plugin's saved values, shared by its surfaces (`sd.values`).
+pub fn data_path(id: &str) -> PathBuf {
+    state_dir().join(format!("{id}.data.json"))
+}
+
 /// The theme the overlay last applied, for `plugin snapshot`.
 pub fn theme_path() -> PathBuf {
     state_dir().join("theme.json")

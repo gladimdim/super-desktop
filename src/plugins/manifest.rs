@@ -8,8 +8,7 @@ pub const API_VERSION: u64 = 1;
 pub const MANIFEST_FILE: &str = "plugin.json";
 pub const MAX_SURFACES: usize = 8;
 pub const DOCK_SIZE_DEFAULT: i32 = 64;
-pub const DOCK_SIZE_MIN: i32 = 32;
-pub const DOCK_SIZE_MAX: i32 = 480;
+pub const MAX_TITLE: usize = 60;
 
 /// Where a surface is placed in the overlay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -18,15 +17,31 @@ pub enum Slot {
     DockLeft,
     #[serde(rename = "dock.right")]
     DockRight,
+    #[serde(rename = "toolbar.item")]
+    ToolbarItem,
+    #[serde(rename = "panel")]
+    Panel,
+    #[serde(rename = "settings.page")]
+    SettingsPage,
+}
+
+/// What `size` and `height` mean for a slot, and their limits.
+pub struct SlotSizes {
+    /// `(min, default, max)` of `size`, or `None` when the slot ignores it.
+    pub size: Option<(i32, i32, i32)>,
+    pub height: Option<(i32, i32, i32)>,
 }
 
 impl Slot {
-    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right"];
+    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page"];
 
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "dock.left" => Some(Self::DockLeft),
             "dock.right" => Some(Self::DockRight),
+            "toolbar.item" => Some(Self::ToolbarItem),
+            "panel" => Some(Self::Panel),
+            "settings.page" => Some(Self::SettingsPage),
             _ => None,
         }
     }
@@ -35,13 +50,28 @@ impl Slot {
         match self {
             Self::DockLeft => "dock.left",
             Self::DockRight => "dock.right",
+            Self::ToolbarItem => "toolbar.item",
+            Self::Panel => "panel",
+            Self::SettingsPage => "settings.page",
+        }
+    }
+
+    pub fn sizes(self) -> SlotSizes {
+        match self {
+            Self::DockLeft | Self::DockRight => SlotSizes { size: Some((32, DOCK_SIZE_DEFAULT, 480)), height: None },
+            Self::ToolbarItem => SlotSizes { size: Some((24, 96, 240)), height: None },
+            Self::Panel => SlotSizes { size: Some((200, 480, 1600)), height: Some((120, 360, 1200)) },
+            Self::SettingsPage => SlotSizes { size: None, height: Some((60, 240, 1200)) },
         }
     }
 
     /// The size `plugin snapshot` renders when none is given.
-    pub fn default_snapshot_size(self, size: i32) -> (i32, i32) {
+    pub fn default_snapshot_size(self, size: i32, height: i32) -> (i32, i32) {
         match self {
             Self::DockLeft | Self::DockRight => (size, 720),
+            Self::ToolbarItem => (size, 36),
+            Self::Panel => (size, height),
+            Self::SettingsPage => (560, height),
         }
     }
 }
@@ -52,7 +82,12 @@ pub struct Surface {
     pub slot: Slot,
     /// Relative to the plugin folder.
     pub qml: String,
+    /// Width in logical px (docks, toolbar items, panels); 0 when unused.
     pub size: i32,
+    /// Height in logical px (panels, settings pages); 0 when unused.
+    pub height: i32,
+    /// Panel header and settings section title; empty means the plugin name.
+    pub title: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -69,6 +104,15 @@ pub struct Manifest {
 impl Manifest {
     pub fn qml_path(&self, surface: &Surface) -> PathBuf {
         self.dir.join(&surface.qml)
+    }
+
+    pub fn surface(&self, id: &str) -> Option<&Surface> {
+        self.surfaces.iter().find(|s| s.id == id)
+    }
+
+    /// A surface's title, or the plugin name.
+    pub fn title_of<'a>(&'a self, surface: &'a Surface) -> &'a str {
+        if surface.title.is_empty() { &self.name } else { &surface.title }
     }
 }
 
@@ -208,22 +252,36 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
                 } else if !dir.join(&qml).is_file() {
                     problems.push(problem(field("qml"), format!("{qml} does not exist in the plugin folder"), "Create the file or fix the path."));
                 }
-                let size = match entry.get("size") {
-                    None => DOCK_SIZE_DEFAULT,
-                    Some(v) => match v.as_i64() {
-                        Some(n) if (i64::from(DOCK_SIZE_MIN)..=i64::from(DOCK_SIZE_MAX)).contains(&n) => n as i32,
-                        _ => {
-                            problems.push(problem(
-                                field("size"),
-                                format!("size {v} is out of range"),
-                                format!("Use a whole number of logical pixels from {DOCK_SIZE_MIN} to {DOCK_SIZE_MAX}."),
-                            ));
-                            DOCK_SIZE_DEFAULT
-                        }
-                    },
+                let mut number = |name: &str, range: Option<(i32, i32, i32)>| -> i32 {
+                    let Some((min, default, max)) = range else { return 0 };
+                    match entry.get(name) {
+                        None => default,
+                        Some(v) => match v.as_i64() {
+                            Some(n) if (i64::from(min)..=i64::from(max)).contains(&n) => n as i32,
+                            _ => {
+                                problems.push(problem(
+                                    field(name),
+                                    format!("{name} {v} is out of range for {}", slot.map_or("this slot", Slot::name)),
+                                    format!("Use a whole number of logical pixels from {min} to {max}."),
+                                ));
+                                default
+                            }
+                        },
+                    }
+                };
+                let sizes = slot.map(Slot::sizes);
+                let size = number("size", sizes.as_ref().and_then(|s| s.size));
+                let height = number("height", sizes.as_ref().and_then(|s| s.height));
+                let title = match entry.get("title") {
+                    None => String::new(),
+                    Some(Value::String(t)) if t.chars().count() <= MAX_TITLE => t.trim().to_owned(),
+                    Some(_) => {
+                        problems.push(problem(field("title"), "title must be text of at most 60 characters", "Shorten it."));
+                        String::new()
+                    }
                 };
                 if let Some(slot) = slot {
-                    surfaces.push(Surface { id: surface_id, slot, qml, size });
+                    surfaces.push(Surface { id: surface_id, slot, qml, size, height, title });
                 }
             }
         }
@@ -298,6 +356,28 @@ mod tests {
             {"id": "a", "slot": "dock.left", "qml": "A.qml"}
         ]})).unwrap();
         assert_eq!(m.surfaces[0].size, DOCK_SIZE_DEFAULT);
+        assert_eq!(m.surfaces[0].height, 0);
+    }
+
+    #[test]
+    fn plugins_manifest_sizes_follow_the_slot() {
+        let dir = plugin_dir("slots", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "slots", "api": 1, "name": "Slots", "surfaces": [
+            {"id": "bar", "slot": "toolbar.item", "qml": "A.qml"},
+            {"id": "win", "slot": "panel", "qml": "A.qml", "size": 640, "height": 400, "title": "Stats"},
+            {"id": "prefs", "slot": "settings.page", "qml": "A.qml", "size": 99999}
+        ]})).unwrap();
+        assert_eq!((m.surfaces[0].size, m.surfaces[0].height), (96, 0));
+        assert_eq!((m.surfaces[1].size, m.surfaces[1].height), (640, 400));
+        assert_eq!(m.title_of(&m.surfaces[1]), "Stats");
+        // A settings page ignores size; its height defaults.
+        assert_eq!((m.surfaces[2].size, m.surfaces[2].height), (0, 240));
+        assert_eq!(m.title_of(&m.surfaces[2]), "Slots");
+        let problems = validate(&dir, &json!({"id": "slots", "api": 1, "surfaces": [
+            {"id": "win", "slot": "panel", "qml": "A.qml", "height": 50}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "surfaces[0].height");
+        assert!(problems[0].hint.contains("120"));
     }
 
     #[test]
@@ -305,16 +385,18 @@ mod tests {
         let dir = plugin_dir("bad", &[]);
         let problems = validate(&dir, &json!({"id": "Other", "api": 2, "surfaces": [
             {"id": "x", "slot": "sidebar", "qml": "../evil.qml", "size": 9000},
-            {"id": "x", "slot": "dock.left", "qml": "Missing.qml"}
+            {"id": "x", "slot": "dock.left", "qml": "Missing.qml", "size": 9000, "title": 5}
         ]})).unwrap_err();
         let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
         assert!(fields.contains(&"id"));
         assert!(fields.contains(&"api"));
         assert!(fields.contains(&"surfaces[0].slot"));
         assert!(fields.contains(&"surfaces[0].qml"));
-        assert!(fields.contains(&"surfaces[0].size"));
+        assert!(!fields.contains(&"surfaces[0].size")); // unknown slot: nothing to check it against
         assert!(fields.contains(&"surfaces[1].id"));
         assert!(fields.contains(&"surfaces[1].qml"));
+        assert!(fields.contains(&"surfaces[1].size"));
+        assert!(fields.contains(&"surfaces[1].title"));
         assert!(problems.iter().all(|p| !p.hint.is_empty()));
         let slot = problems.iter().find(|p| p.field == "surfaces[0].slot").unwrap();
         assert!(slot.hint.contains("dock.left"));

@@ -1,0 +1,382 @@
+//! Settings → Plugins: ✨ Create Plugin, every plugin with its state, an
+//! on/off switch, Edit with AI, its log, Delete, and the plugin's own
+//! settings section (its `settings.page` surfaces).
+use super::surface::{QmlSurface, SurfaceSpec};
+use super_desktop::plugins::manifest::{Manifest, Problem, Slot};
+use super_desktop::plugins::paths;
+use gtk4::prelude::*;
+use gtk4::{Align, Orientation};
+use serde_json::Value;
+use std::cell::RefCell;
+use std::path::Path;
+use std::rc::Rc;
+
+fn label(text: &str, class: &str) -> gtk4::Label {
+    let label = gtk4::Label::new(Some(text));
+    label.add_css_class(class);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+    label
+}
+
+fn button(text: &str, tooltip: &str) -> gtk4::Button {
+    let button = gtk4::Button::with_label(text);
+    button.add_css_class("launcher-btn");
+    button.set_tooltip_text(Some(tooltip));
+    button
+}
+
+/// Sets `"enabled"` in a plugin.json, keeping everything else as written.
+pub fn set_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
+    let file = dir.join(super_desktop::plugins::manifest::MANIFEST_FILE);
+    let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    let mut value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let object = value.as_object_mut().ok_or("plugin.json is not an object")?;
+    object.insert("enabled".into(), Value::Bool(enabled));
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? + "\n";
+    std::fs::write(&file, text).map_err(|e| e.to_string())
+}
+
+fn last_lines(id: &str, count: usize) -> String {
+    let text = std::fs::read_to_string(paths::log_path(id)).unwrap_or_default();
+    let lines: Vec<&str> = text.lines().collect();
+    let tail = lines[lines.len().saturating_sub(count)..].join("\n");
+    if tail.is_empty() { "The log is empty.".into() } else { tail }
+}
+
+fn state_text(id: &str, manifest: &Result<Manifest, Vec<Problem>>) -> (String, bool) {
+    match manifest {
+        Err(problems) => (format!("plugin.json: {}", problems.first().map_or("", |p| p.message.as_str())), true),
+        Ok(m) if !m.enabled => ("Off".into(), false),
+        Ok(_) => {
+            let status = paths::read_status(id);
+            let state = status.as_ref().and_then(|s| s["state"].as_str()).unwrap_or("starting").to_owned();
+            if state == "error" {
+                let first = status.as_ref().and_then(|s| s["errors"].get(0).cloned()).unwrap_or(Value::Null);
+                let message = first["message"].as_str().unwrap_or("failed to load");
+                let line = first["line"].as_i64().map(|l| format!(" (line {l})")).unwrap_or_default();
+                (format!("Error: {message}{line}"), true)
+            } else {
+                (state, false)
+            }
+        }
+    }
+}
+
+struct Page {
+    list: gtk4::Box,
+    /// The settings sections shown now; they end when the page is left.
+    surfaces: RefCell<Vec<QmlSurface>>,
+}
+
+/// Builds the page in `root`; the returned closure refreshes it (call it
+/// when the page is shown).
+pub fn build(root: &gtk4::Box) -> Rc<dyn Fn()> {
+    let create = gtk4::Button::with_label("✨ Create a plugin with AI");
+    create.add_css_class("launcher-btn");
+    create.add_css_class("launcher-btn-primary");
+    create.set_halign(Align::Start);
+    create.set_tooltip_text(Some("Describe a widget, toolbar, panel or game; an AI agent builds it here"));
+    create.connect_clicked(|_| super::create::open());
+    root.append(&create);
+    root.append(&label(
+        &format!(
+            "Plugins are folders of QML in {}. A plugin reloads on screen whenever one of its files is saved.",
+            paths::plugins_dir().display()
+        ),
+        "launcher-note",
+    ));
+    let list = gtk4::Box::new(Orientation::Vertical, 10);
+    list.add_css_class("harness-rows");
+    root.append(&list);
+
+    let page = Rc::new(Page { list, surfaces: RefCell::new(Vec::new()) });
+    let refresh: Rc<dyn Fn()> = Rc::new({
+        let page = Rc::downgrade(&page);
+        let root = root.downgrade();
+        move || {
+            let (Some(page), Some(root)) = (page.upgrade(), root.upgrade()) else { return };
+            if root.is_mapped() {
+                page.fill();
+            }
+        }
+    });
+    // Settings sections run only while the page is in view.
+    root.connect_unmap({
+        let page = Rc::clone(&page);
+        move |_| page.clear()
+    });
+    root.connect_map({
+        let refresh = Rc::clone(&refresh);
+        move |_| refresh()
+    });
+    if let Some(slots) = super::slots::get() {
+        slots.on_change(Rc::clone(&refresh));
+    }
+    refresh
+}
+
+impl Page {
+    fn clear(&self) {
+        for surface in self.surfaces.borrow_mut().drain(..) {
+            surface.dispose();
+        }
+        while let Some(child) = self.list.first_child() {
+            self.list.remove(&child);
+        }
+    }
+
+    fn fill(self: &Rc<Self>) {
+        self.clear();
+        let Some(slots) = super::slots::get() else {
+            self.list.append(&label("Plugins are not available in this window.", "launcher-note"));
+            return;
+        };
+        let plugins = slots.plugins();
+        if plugins.is_empty() {
+            self.list.append(&label("No plugins yet. Create one above, or ask any agent to run `super-desktop plugin new <name>`.", "launcher-note"));
+        }
+        for (id, manifest) in plugins {
+            self.list.append(&self.row(&slots, &id, &manifest));
+        }
+    }
+
+    fn row(self: &Rc<Self>, slots: &Rc<super::slots::Slots>, id: &str, manifest: &Result<Manifest, Vec<Problem>>) -> gtk4::Box {
+        let dir = slots.root().join(id);
+        let card = gtk4::Box::new(Orientation::Vertical, 6);
+        card.add_css_class("plugin-settings-row");
+
+        let head = gtk4::Box::new(Orientation::Horizontal, 8);
+        head.add_css_class("harness-row");
+        let icon = gtk4::Label::new(Some("🧩"));
+        icon.add_css_class("harness-icon");
+        head.append(&icon);
+        let name = gtk4::Label::new(Some(manifest.as_ref().map_or(id, |m| m.name.as_str())));
+        name.add_css_class("harness-name");
+        head.append(&name);
+        let slots_text = manifest
+            .as_ref()
+            .map(|m| m.surfaces.iter().map(|s| s.slot.name()).collect::<Vec<_>>().join(", "))
+            .unwrap_or_default();
+        let (state, failed) = state_text(id, manifest);
+        let detail = gtk4::Label::new(Some(&if slots_text.is_empty() { state.clone() } else { format!("{slots_text} · {state}") }));
+        detail.add_css_class("harness-cmd");
+        if failed {
+            detail.add_css_class("launcher-note-error");
+        }
+        detail.set_xalign(0.0);
+        detail.set_hexpand(true);
+        detail.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+        detail.set_tooltip_text(Some(&state));
+        head.append(&detail);
+        if let Ok(m) = manifest {
+            let toggle = gtk4::Button::new();
+            toggle.add_css_class("harness-toggle");
+            crate::harness_settings::paint_toggle(&toggle, m.enabled);
+            toggle.set_tooltip_text(Some(if m.enabled { "Turn this plugin off" } else { "Turn this plugin on" }));
+            let enabled = m.enabled;
+            let dir = dir.clone();
+            let id = id.to_owned();
+            let slots = Rc::clone(slots);
+            toggle.connect_clicked(move |_| {
+                if set_enabled(&dir, !enabled).is_ok() {
+                    slots.reload_now(&id);
+                }
+            });
+            head.append(&toggle);
+        }
+        card.append(&head);
+
+        if let Ok(m) = manifest {
+            if !m.description.is_empty() {
+                card.append(&label(&m.description, "launcher-note"));
+            }
+        }
+
+        let actions = gtk4::Box::new(Orientation::Horizontal, 6);
+        actions.add_css_class("launcher-actions");
+        let edit = button("Edit with AI", "Open an agent in this plugin's folder; tell it what to change");
+        let note = label("", "launcher-note");
+        note.set_visible(false);
+        edit.connect_clicked({
+            let dir = dir.clone();
+            let note = note.clone();
+            move |_| {
+                let result = match super::create::preferred_harness() {
+                    Some(harness) => {
+                        let _ = super_desktop::plugins::skill::install(&dir);
+                        super::agent::open(&harness, &dir, None)
+                    }
+                    None => Err("No AI agent is offered in the top bar.".into()),
+                };
+                match result {
+                    Ok(()) => {
+                        note.remove_css_class("launcher-note-error");
+                        note.set_text("A new card is open in the plugin's folder: tell the agent what to change.");
+                    }
+                    Err(e) => {
+                        note.add_css_class("launcher-note-error");
+                        note.set_text(&e);
+                    }
+                }
+                note.set_visible(true);
+            }
+        });
+        actions.append(&edit);
+        if let Ok(m) = manifest.as_ref().map(Clone::clone) {
+            for surface in m.surfaces.iter().filter(|s| s.slot == Slot::Panel) {
+                let open = button(&format!("Open {}", m.title_of(surface)), "Open this plugin's panel");
+                open.set_sensitive(m.enabled);
+                let slots = Rc::clone(slots);
+                let (plugin, surface) = (m.id.clone(), surface.id.clone());
+                open.connect_clicked(move |_| {
+                    let _ = slots.open_panel(&plugin, &surface);
+                });
+                actions.append(&open);
+            }
+        }
+        let log = gtk4::Label::new(None);
+        log.add_css_class("harness-cmd");
+        log.set_xalign(0.0);
+        log.set_wrap(true);
+        log.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+        log.set_selectable(true);
+        log.set_visible(false);
+        let show_log = button("Log", "Show the end of this plugin's log");
+        show_log.connect_clicked({
+            let log = log.clone();
+            let id = id.to_owned();
+            move |_| {
+                let show = !log.is_visible();
+                if show {
+                    log.set_text(&last_lines(&id, 20));
+                }
+                log.set_visible(show);
+            }
+        });
+        actions.append(&show_log);
+        let delete = button("Delete", "Move this plugin's folder to the trash");
+        delete.add_css_class("launcher-btn-danger");
+        delete.connect_clicked({
+            let dir = dir.clone();
+            let note = note.clone();
+            let armed = std::cell::Cell::new(false);
+            move |button| {
+                if !armed.replace(true) {
+                    button.set_label("Delete for sure?");
+                    return;
+                }
+                if let Err(e) = gtk4::gio::File::for_path(&dir).trash(gtk4::gio::Cancellable::NONE) {
+                    note.add_css_class("launcher-note-error");
+                    note.set_text(&format!("Could not move it to the trash: {e}"));
+                    note.set_visible(true);
+                    armed.set(false);
+                    button.set_label("Delete");
+                }
+                // The folder watch unloads it and refreshes this page.
+            }
+        });
+        actions.append(&delete);
+        card.append(&actions);
+        card.append(&note);
+        card.append(&log);
+
+        // The plugin's own settings.
+        if let Ok(m) = manifest {
+            if m.enabled {
+                for surface in m.surfaces.iter().filter(|s| s.slot == Slot::SettingsPage) {
+                    let title = label(m.title_of(surface), "launcher-section-title");
+                    card.append(&title);
+                    let qml = QmlSurface::new(SurfaceSpec {
+                        plugin_id: m.id.clone(),
+                        plugin_name: m.name.clone(),
+                        surface_id: surface.id.clone(),
+                        qml: m.qml_path(surface),
+                        dir: m.dir.clone(),
+                    });
+                    qml.widget().set_size_request(-1, surface.height);
+                    qml.widget().set_hexpand(true);
+                    card.append(qml.widget());
+                    self.surfaces.borrow_mut().push(qml);
+                }
+            }
+        }
+        card
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin_ui::surface::SurfaceView;
+    use gtk4::subclass::prelude::ObjectSubclassIsExt;
+
+    #[test]
+    fn plugins_settings_page_lists_toggles_and_shows_plugin_settings() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::settings_page::tests::page_inner");
+    }
+
+    #[test]
+    fn page_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-page-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let dir = root.join("plugins/prefs");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), serde_json::json!({
+            "id": "prefs", "name": "Prefs", "description": "Has settings", "api": 1,
+            "custom": "kept",
+            "surfaces": [{"id": "s", "slot": "settings.page", "qml": "S.qml", "height": 90, "title": "Options"}]
+        }).to_string()).unwrap();
+        std::fs::write(dir.join("S.qml"), "import QtQuick\nRectangle { color: \"gold\" }\n").unwrap();
+        std::fs::create_dir_all(root.join("plugins/broken")).unwrap();
+
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let overlay = gtk4::Overlay::new();
+        let page_root = gtk4::Box::new(Orientation::Vertical, 10);
+        overlay.set_child(Some(&page_root));
+        let slots = crate::plugin_ui::slots::Slots::install(&overlay, 46);
+        let _refresh = build(&page_root);
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 700);
+        window.set_child(Some(&overlay));
+        window.present();
+
+        let labels = || crate::gtk_test::descendants(page_root.upcast_ref()).into_iter()
+            .filter_map(|w| w.downcast::<gtk4::Label>().ok())
+            .filter(|l| l.is_mapped())
+            .map(|l| l.text().to_string())
+            .collect::<Vec<_>>();
+        let settings_frame = || crate::gtk_test::descendants(page_root.upcast_ref()).into_iter()
+            .find_map(|w| w.downcast::<SurfaceView>().ok())
+            .is_some_and(|v| v.imp().texture.borrow().is_some());
+        crate::gtk_test::pump_until("the plugin's settings section", settings_frame);
+        let shown = labels();
+        assert!(shown.iter().any(|t| t == "Prefs"), "{shown:?}");
+        assert!(shown.iter().any(|t| t == "Options"));
+        assert!(shown.iter().any(|t| t.starts_with("plugin.json:")), "the broken plugin says why: {shown:?}");
+
+        // Turning it off keeps the rest of plugin.json and removes the section.
+        let toggle = crate::gtk_test::descendants(page_root.upcast_ref()).into_iter()
+            .filter_map(|w| w.downcast::<gtk4::Button>().ok())
+            .find(|b| b.label().as_deref() == Some("ON"))
+            .unwrap();
+        toggle.emit_clicked();
+        crate::gtk_test::pump_until("the section to go", || !settings_frame() && labels().iter().any(|t| t.contains("Off")));
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("plugin.json")).unwrap()).unwrap();
+        assert_eq!(saved["enabled"], false);
+        assert_eq!(saved["custom"], "kept");
+        drop(slots);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

@@ -22,6 +22,7 @@ pub fn generate_css(theme: &OmarchyTheme) -> String {
     css.push_str(&icon_radius_css());
     css.push_str(&crate::welcome_tour::css(theme));
     css.push_str(&crate::attachment_view::css(theme));
+    css.push_str(&crate::plugin_ui::css(theme));
     css
 }
 

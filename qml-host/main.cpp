@@ -42,6 +42,12 @@
 #include <QFocusEvent>
 #include <QJSValue>
 #include <QJSEngine>
+#include <QCursor>
+#include <QPalette>
+#include <QColor>
+#include <QFile>
+#include <QFileSystemWatcher>
+#include <QSaveFile>
 
 #include <cmath>
 #include <cstdio>
@@ -108,6 +114,7 @@ class SdApi : public QObject {
     Q_PROPERTY(QString surfaceId READ surfaceId CONSTANT)
     Q_PROPERTY(bool connected READ connected CONSTANT)
     Q_PROPERTY(int apiVersion READ apiVersion CONSTANT)
+    Q_PROPERTY(QVariantMap values READ values NOTIFY valuesChanged)
 public:
     SdApi(QJSEngine *js, QString pluginDir, QString pluginId, QString surfaceId, bool connected)
         : m_js(js), m_pluginDir(pluginDir), m_pluginId(pluginId), m_surfaceId(surfaceId),
@@ -122,7 +129,90 @@ public:
 
     void setTheme(const QVariantMap &theme) {
         m_theme = theme;
+        applyPalette(theme);
         emit themeChanged();
+    }
+
+    // Standard controls (QtQuick.Controls) draw with the application
+    // palette: give it the theme's colors so they match without styling.
+    static void applyPalette(const QVariantMap &theme) {
+        auto color = [&](const char *key, const char *fallback) {
+            QColor c(theme.value(key, theme.value(fallback)).toString());
+            return c.isValid() ? c : QColor(theme.value(fallback).toString());
+        };
+        const QColor bg = color("background", "background");
+        const QColor fg = color("foreground", "foreground");
+        const QColor surface = color("surface", "background");
+        const QColor dark = color("darkBackground", "background");
+        const QColor muted = color("muted", "foreground");
+        const QColor accent = color("accent", "foreground");
+        const bool light = theme.value("mode").toString() == "light";
+        QPalette p;
+        p.setColor(QPalette::Window, bg);
+        p.setColor(QPalette::WindowText, fg);
+        p.setColor(QPalette::Base, dark);
+        p.setColor(QPalette::AlternateBase, surface);
+        p.setColor(QPalette::Text, fg);
+        p.setColor(QPalette::Button, surface);
+        p.setColor(QPalette::ButtonText, fg);
+        p.setColor(QPalette::BrightText, light ? QColor(Qt::black) : QColor(Qt::white));
+        p.setColor(QPalette::Highlight, accent);
+        p.setColor(QPalette::HighlightedText, bg);
+        p.setColor(QPalette::Light, light ? surface.darker(110) : surface.lighter(130));
+        p.setColor(QPalette::Midlight, light ? surface.darker(105) : surface.lighter(115));
+        p.setColor(QPalette::Mid, muted);
+        p.setColor(QPalette::Dark, light ? muted : dark);
+        p.setColor(QPalette::Shadow, QColor(0, 0, 0, 120));
+        p.setColor(QPalette::PlaceholderText, muted);
+        p.setColor(QPalette::ToolTipBase, surface);
+        p.setColor(QPalette::ToolTipText, fg);
+        p.setColor(QPalette::Link, accent);
+        p.setColor(QPalette::Accent, accent);
+        QGuiApplication::setPalette(p);
+    }
+
+    // The plugin's saved values: one JSON object in a file every surface of
+    // the plugin shares. A change from any surface reaches all of them.
+    void setDataFile(const QString &path) {
+        m_dataFile = path;
+        if (path.isEmpty()) return;
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        m_watcher = new QFileSystemWatcher(this);
+        // The directory too: a save replaces the file, which ends a file watch.
+        m_watcher->addPath(QFileInfo(path).absolutePath());
+        if (QFileInfo::exists(path)) m_watcher->addPath(path);
+        auto reload = [this]() {
+            if (QFileInfo::exists(m_dataFile) && !m_watcher->files().contains(m_dataFile))
+                m_watcher->addPath(m_dataFile);
+            loadValues(true);
+        };
+        connect(m_watcher, &QFileSystemWatcher::fileChanged, this, reload);
+        connect(m_watcher, &QFileSystemWatcher::directoryChanged, this, reload);
+        loadValues(false);
+    }
+
+    QVariantMap values() const { return m_values; }
+
+    Q_INVOKABLE QVariant value(const QString &key, const QVariant &fallback = QVariant()) const {
+        return m_values.contains(key) ? m_values.value(key) : fallback;
+    }
+
+    // Saves `value` under `key` (any JSON value; undefined removes the key).
+    Q_INVOKABLE bool setValue(const QString &key, const QVariant &value) {
+        if (m_dataFile.isEmpty()) return false;
+        QVariantMap next = m_values;
+        if (!value.isValid() || value.isNull()) next.remove(key);
+        else next.insert(key, value.canConvert<QJSValue>() ? value.value<QJSValue>().toVariant() : value);
+        const QByteArray bytes = QJsonDocument(QJsonObject::fromVariantMap(next)).toJson(QJsonDocument::Compact);
+        if (bytes.size() > kMaxMessage) {
+            log("sd.setValue: the plugin's values would exceed 1 MiB; not saved");
+            return false;
+        }
+        QSaveFile file(m_dataFile);
+        if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) return false;
+        m_values = next;
+        emit valuesChanged();
+        return true;
     }
 
     // Calls a SUPER DESKTOP method; `callback(result, error)` runs later.
@@ -194,14 +284,30 @@ public:
 
 signals:
     void themeChanged();
+    void valuesChanged();
     // Emitted when the overlay is shown or hidden.
     void visibleChanged(bool visible);
 
 private:
+    void loadValues(bool notify) {
+        QFile file(m_dataFile);
+        QVariantMap loaded;
+        if (file.open(QIODevice::ReadOnly)) {
+            const auto doc = QJsonDocument::fromJson(file.read(kMaxMessage));
+            if (doc.isObject()) loaded = doc.object().toVariantMap();
+        }
+        if (loaded == m_values) return;
+        m_values = loaded;
+        if (notify) emit valuesChanged();
+    }
+
     QJSEngine *m_js;
     QString m_pluginDir, m_pluginId, m_surfaceId;
     bool m_connected;
     QVariantMap m_theme;
+    QVariantMap m_values;
+    QString m_dataFile;
+    QFileSystemWatcher *m_watcher = nullptr;
     int m_nextId = 0;
     QHash<int, QJSValue> m_pending;
 };
@@ -491,15 +597,25 @@ private:
         QMouseEvent ev(type, pos, pos, pos, kind == "move" ? Qt::NoButton : button, m_buttons,
                        modifiers(m));
         QCoreApplication::sendEvent(win, &ev);
+        reportCursor(win);
+    }
+
+    // The overlay draws the pointer: tell it when QML asks for another shape.
+    void reportCursor(QQuickWindow *win) {
+        const int shape = int(win->cursor().shape());
+        if (shape == m_cursor) return;
+        m_cursor = shape;
+        sendMessage(QJsonObject{{"t", "cursor"}, {"shape", shape}});
     }
 
     Surface *m_surface;
     QSocketNotifier *m_notifier;
     Qt::MouseButtons m_buttons = Qt::NoButton;
+    int m_cursor = int(Qt::ArrowCursor);
 };
 
 struct Args {
-    QString mode, qml, pluginDir, pluginId, surfaceId, out, theme;
+    QString mode, qml, pluginDir, pluginId, surfaceId, out, theme, data;
     int fd = -1, width = 0, height = 0, waitMs = 300;
     qreal scale = 1.0;
 };
@@ -509,8 +625,8 @@ static void usage() {
                  "usage:\n"
                  "  sd-qml-host --check FILE.qml [--plugin-dir DIR]\n"
                  "  sd-qml-host --snapshot FILE.qml --out FILE.png --width W --height H "
-                 "[--scale S] [--theme JSON] [--wait MS]\n"
-                 "  sd-qml-host --serve --fd N --qml FILE.qml --plugin-dir DIR --width W --height H\n");
+                 "[--scale S] [--theme JSON] [--wait MS] [--data FILE]\n"
+                 "  sd-qml-host --serve --fd N --qml FILE.qml --plugin-dir DIR --width W --height H [--data FILE]\n");
 }
 
 static bool parseArgs(int argc, char **argv, Args &a) {
@@ -537,6 +653,8 @@ static bool parseArgs(int argc, char **argv, Args &a) {
             if (!next(a.surfaceId)) return false;
         } else if (arg == "--out") {
             if (!next(a.out)) return false;
+        } else if (arg == "--data") {
+            if (!next(a.data)) return false;
         } else if (arg == "--theme") {
             if (!next(a.theme)) return false;
         } else if (arg == "--fd" && next(v)) {
@@ -591,6 +709,7 @@ int main(int argc, char **argv) {
     const QVariantMap theme = parseTheme(a.theme);
     Surface surface(QFileInfo(a.qml).absoluteFilePath(), QFileInfo(a.pluginDir).absoluteFilePath(),
                     a.pluginId, a.surfaceId, a.mode == "serve", theme);
+    surface.api()->setDataFile(a.data);
     const QJsonArray errors = surface.load();
 
     if (a.mode == "check") {
