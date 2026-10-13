@@ -67,15 +67,11 @@ impl HostProcess {
             .current_dir(options.plugin_dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null());
-        // Qt picks the device pixel ratio up from here; the host never sees
-        // the real output.
-        if options.scale > 0.0 && (options.scale - 1.0).abs() > f64::EPSILON {
-            command.env("QT_SCALE_FACTOR", format!("{}", options.scale));
-        } else {
-            command.env_remove("QT_SCALE_FACTOR");
-        }
-        for key in ["WAYLAND_DISPLAY", "DISPLAY", "QT_QPA_PLATFORM"] {
-            command.env_remove(key);
+        // The host sets QT_SCALE_FACTOR from this itself, and forces Qt off
+        // screen, so programs a plugin starts keep the user's environment
+        // (display included) unchanged.
+        if options.scale > 0.0 {
+            command.args(["--scale", &format!("{}", options.scale)]);
         }
         match options.log.as_deref().and_then(|path| OpenOptions::new().create(true).append(true).open(path).ok()) {
             Some(file) => command.stderr(Stdio::from(file)),
@@ -349,6 +345,108 @@ Rectangle {
             "the click did not reach QML");
         let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("data.json")).unwrap()).unwrap();
         assert_eq!(saved, serde_json::json!({"clicks": 1}));
+        drop(host);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugins_host_pty_runs_programs_with_the_users_environment() {
+        let Some(binary) = crate::plugins::paths::qml_host_binary() else {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sd-plugins-pty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let qml = dir.join("Term.qml");
+        std::fs::write(&qml, r#"import QtQuick
+Item {
+    property string printed: ""
+    property string echoed: ""
+    Component.onCompleted: {
+        // Programs see the user's display, not the host's offscreen Qt.
+        const p = sd.openPty(["sh", "-c", "printf '%s|%s|%s' \"$TERM\" \"$QT_QPA_PLATFORM\" \"$SD_TEST_DISPLAY\"; exit 3"], {cols: 100, rows: 30})
+        p.output.connect(function(text) { printed += text })
+        p.exited.connect(function(code) { sd.call("done", {printed: printed, code: code}) })
+        const cat = sd.openPty(["cat"])
+        cat.output.connect(function(text) {
+            echoed += text
+            if (echoed.indexOf("ping") >= 0 && echoed.indexOf("\n") >= 0) { sd.call("echo", {text: echoed}); cat.terminate() }
+        })
+        cat.write("ping\n")
+    }
+}
+"#).unwrap();
+        let theme = serde_json::json!({});
+        // The display variable stands in for WAYLAND_DISPLAY: it must reach the program.
+        std::env::set_var("SD_TEST_DISPLAY", "wayland-test");
+        let host = HostProcess::spawn(&SpawnOptions {
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "term", surface_id: "main",
+            width: 10, height: 10, scale: 2.0, theme: &theme, log: Some(dir.join("host.log")), data: None,
+        }).unwrap();
+        let mut done = None;
+        let mut echo = None;
+        assert!(wait_for(&host, Duration::from_secs(10), |m, _| {
+            if let FromHost::Call { method, params, .. } = m {
+                match method.as_str() {
+                    "done" => done = Some(params),
+                    "echo" => echo = Some(params),
+                    _ => {}
+                }
+            }
+            done.is_some() && echo.is_some()
+        }), "no pty results: {}", std::fs::read_to_string(dir.join("host.log")).unwrap_or_default());
+        let done = done.unwrap();
+        assert_eq!(done["code"], 3);
+        // The program gets the user's QT_QPA_PLATFORM (if any), never the
+        // host's own "offscreen".
+        let platform = std::env::var("QT_QPA_PLATFORM").unwrap_or_default();
+        assert_ne!(platform, "offscreen");
+        assert_eq!(done["printed"], format!("xterm-256color|{platform}|wayland-test"));
+        assert!(echo.unwrap()["text"].as_str().unwrap().contains("ping"));
+        drop(host);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plugins_host_keys_reach_the_focused_item() {
+        let Some(binary) = crate::plugins::paths::qml_host_binary() else {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sd-plugins-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let qml = dir.join("Game.qml");
+        std::fs::write(&qml, r#"import QtQuick
+Rectangle {
+    focus: true
+    Keys.onPressed: (event) => sd.call("key", {key: event.key, text: event.text, active: activeFocus, shift: (event.modifiers & Qt.ShiftModifier) !== 0})
+}
+"#).unwrap();
+        let theme = serde_json::json!({});
+        let host = HostProcess::spawn(&SpawnOptions {
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "keys", surface_id: "main",
+            width: 20, height: 20, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")), data: None,
+        }).unwrap();
+        assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Ready), "no ready");
+        host.send(&protocol::resize(20, 20)).unwrap();
+        host.send(&protocol::focus(true)).unwrap();
+        host.send(&protocol::key(true, protocol::qt_key(0xff52), "", 0)).unwrap(); // Up
+        host.send(&protocol::key(true, protocol::qt_key(u32::from(b'A')), "A", protocol::qt_modifiers(1))).unwrap();
+        let mut keys = Vec::new();
+        assert!(wait_for(&host, Duration::from_secs(10), |m, _| {
+            if let FromHost::Call { method, params, .. } = m {
+                if method == "key" {
+                    keys.push(params);
+                }
+            }
+            keys.len() == 2
+        }), "keys did not reach QML: {}", std::fs::read_to_string(dir.join("host.log")).unwrap_or_default());
+        assert_eq!(keys[0]["key"], 0x0100_0013);
+        assert_eq!(keys[0]["active"], true, "the focused item has active focus, so games can use activeFocus");
+        assert_eq!(keys[1]["text"], "A");
+        assert_eq!(keys[1]["shift"], true);
         drop(host);
         let _ = std::fs::remove_dir_all(&dir);
     }

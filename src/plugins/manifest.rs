@@ -23,6 +23,10 @@ pub enum Slot {
     Panel,
     #[serde(rename = "settings.page")]
     SettingsPage,
+    #[serde(rename = "card")]
+    Card,
+    #[serde(rename = "fullscreen")]
+    Fullscreen,
 }
 
 /// What `size` and `height` mean for a slot, and their limits.
@@ -33,7 +37,7 @@ pub struct SlotSizes {
 }
 
 impl Slot {
-    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page"];
+    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen"];
 
     pub fn parse(text: &str) -> Option<Self> {
         match text {
@@ -42,6 +46,8 @@ impl Slot {
             "toolbar.item" => Some(Self::ToolbarItem),
             "panel" => Some(Self::Panel),
             "settings.page" => Some(Self::SettingsPage),
+            "card" => Some(Self::Card),
+            "fullscreen" => Some(Self::Fullscreen),
             _ => None,
         }
     }
@@ -53,6 +59,8 @@ impl Slot {
             Self::ToolbarItem => "toolbar.item",
             Self::Panel => "panel",
             Self::SettingsPage => "settings.page",
+            Self::Card => "card",
+            Self::Fullscreen => "fullscreen",
         }
     }
 
@@ -62,6 +70,8 @@ impl Slot {
             Self::ToolbarItem => SlotSizes { size: Some((24, 96, 240)), height: None },
             Self::Panel => SlotSizes { size: Some((200, 480, 1600)), height: Some((120, 360, 1200)) },
             Self::SettingsPage => SlotSizes { size: None, height: Some((60, 240, 1200)) },
+            Self::Card => SlotSizes { size: Some((200, 640, 4000)), height: Some((120, 420, 3000)) },
+            Self::Fullscreen => SlotSizes { size: None, height: None },
         }
     }
 
@@ -72,6 +82,8 @@ impl Slot {
             Self::ToolbarItem => (size, 36),
             Self::Panel => (size, height),
             Self::SettingsPage => (560, height),
+            Self::Card => (size, height),
+            Self::Fullscreen => (1280, 720),
         }
     }
 }
@@ -84,7 +96,7 @@ pub struct Surface {
     pub qml: String,
     /// Width in logical px (docks, toolbar items, panels); 0 when unused.
     pub size: i32,
-    /// Height in logical px (panels, settings pages); 0 when unused.
+    /// Height in logical px (panels, cards, settings pages); 0 when unused.
     pub height: i32,
     /// Panel header and settings section title; empty means the plugin name.
     pub title: String,

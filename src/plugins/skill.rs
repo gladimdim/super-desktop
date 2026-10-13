@@ -18,6 +18,12 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
     ("examples/pomodoro/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Toolbar.qml")),
     ("examples/pomodoro/Panel.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Panel.qml")),
     ("examples/pomodoro/Settings.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Settings.qml")),
+    ("examples/snake/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/snake/plugin.json")),
+    ("examples/snake/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/snake/Toolbar.qml")),
+    ("examples/snake/Game.qml", include_str!("../../skills/super-desktop-plugin/examples/snake/Game.qml")),
+    ("examples/plain-terminal/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/plain-terminal/plugin.json")),
+    ("examples/plain-terminal/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/plain-terminal/Toolbar.qml")),
+    ("examples/plain-terminal/Terminal.qml", include_str!("../../skills/super-desktop-plugin/examples/plain-terminal/Terminal.qml")),
 ];
 
 /// Where the skill goes inside a plugin folder. Claude Code reads project
@@ -162,6 +168,58 @@ Rectangle {
 }
 "#;
 
+const CARD_QML: &str = r#"import QtQuick
+import QtQuick.Layouts
+
+// {name}: a card on the SUPER DESKTOP canvas (the user drags, resizes and
+// closes it). Click it to give it the keyboard.
+Rectangle {
+    id: root
+    color: sd.theme.background
+    focus: true
+
+    property int presses: 0
+    Keys.onPressed: (event) => { root.presses += 1; event.accepted = true }
+
+    ColumnLayout {
+        anchors.centerIn: parent
+        spacing: 8
+        Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: "{name}"
+            color: sd.theme.accent
+            font.family: sd.theme.fontFamily
+            font.pixelSize: 22
+        }
+        Text {
+            Layout.alignment: Qt.AlignHCenter
+            text: root.presses + " key presses"
+            color: sd.theme.muted
+            font.family: sd.theme.fontFamily
+        }
+    }
+}
+"#;
+
+const FULLSCREEN_QML: &str = r#"import QtQuick
+
+// {name}: full screen over SUPER DESKTOP; Esc goes back.
+Rectangle {
+    id: root
+    color: Qt.alpha(sd.theme.background, 0.96)
+    focus: true
+
+    Text {
+        anchors.centerIn: parent
+        text: "{name}\n\nEsc to leave"
+        horizontalAlignment: Text.AlignHCenter
+        color: sd.theme.foreground
+        font.family: sd.theme.fontFamily
+        font.pixelSize: 28
+    }
+}
+"#;
+
 const SETTINGS_QML: &str = r#"import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -199,10 +257,14 @@ pub enum Template {
     Panel,
     /// A section in Settings → Plugins.
     SettingsPage,
+    /// A top-bar item that opens a card on the canvas.
+    Card,
+    /// A top-bar item that shows a full-screen surface.
+    Fullscreen,
 }
 
 impl Template {
-    pub const NAMES: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page"];
+    pub const NAMES: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen"];
 
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
@@ -211,6 +273,8 @@ impl Template {
             "toolbar.item" => Self::ToolbarItem,
             "panel" => Self::Panel,
             "settings.page" => Self::SettingsPage,
+            "card" => Self::Card,
+            "fullscreen" => Self::Fullscreen,
             _ => return None,
         })
     }
@@ -246,6 +310,26 @@ impl Template {
             Self::SettingsPage => (
                 serde_json::json!([{"id": "settings", "slot": "settings.page", "qml": "Settings.qml", "height": 120}]),
                 vec![("Settings.qml", fill(SETTINGS_QML))],
+            ),
+            Self::Card => (
+                serde_json::json!([
+                    {"id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 120},
+                    {"id": "main", "slot": "card", "qml": "Card.qml", "size": 640, "height": 420}
+                ]),
+                vec![
+                    ("Toolbar.qml", fill(TOOLBAR_QML).replace("{CLICK}", "sd.call(\"card.toggle\", { surface: \"main\" })")),
+                    ("Card.qml", fill(CARD_QML)),
+                ],
+            ),
+            Self::Fullscreen => (
+                serde_json::json!([
+                    {"id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 120},
+                    {"id": "main", "slot": "fullscreen", "qml": "Fullscreen.qml"}
+                ]),
+                vec![
+                    ("Toolbar.qml", fill(TOOLBAR_QML).replace("{CLICK}", "sd.call(\"fullscreen.open\", { surface: \"main\" })")),
+                    ("Fullscreen.qml", fill(FULLSCREEN_QML)),
+                ],
             ),
         }
     }
@@ -338,7 +422,15 @@ mod tests {
         for (index, name) in Template::NAMES.iter().enumerate() {
             let template = Template::parse(name).unwrap();
             let dir = new_plugin(&root, &format!("t{index}"), "Quote \" name", template, "").unwrap();
-            manifest::load(&dir).unwrap_or_else(|p| panic!("{name}: {p:?}"));
+            let m = manifest::load(&dir).unwrap_or_else(|p| panic!("{name}: {p:?}"));
+            if let Some(host) = crate::plugins::paths::qml_host_binary() {
+                for surface in &m.surfaces {
+                    let out = std::process::Command::new(&host).arg("--check").arg(m.qml_path(surface)).output().unwrap();
+                    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+                    assert_eq!(report["ok"], true, "{name}/{}: {report}", surface.qml);
+                    assert_eq!(report["warnings"], serde_json::json!([]), "{name}/{}: {report}", surface.qml);
+                }
+            }
         }
         assert_eq!(unique_id(&root, "My Dock!"), "my-dock-2");
         assert_eq!(unique_id(&root, "  show CPU usage per core please "), "show-cpu-usage-per");
@@ -357,7 +449,7 @@ mod tests {
                 fs::write(path, contents).unwrap();
             }
         }
-        for example in ["clock-dock", "launcher-dock", "pomodoro"] {
+        for example in ["clock-dock", "launcher-dock", "pomodoro", "snake", "plain-terminal"] {
             let m = manifest::load(&root.join(example)).unwrap_or_else(|p| panic!("{example}: {p:?}"));
             // Every QML file of an example loads cleanly, when the host is built.
             if let Some(host) = crate::plugins::paths::qml_host_binary() {
@@ -372,7 +464,7 @@ mod tests {
         // Every example file is in SKILL_FILES (and so reaches plugin folders).
         let on_disk = |dir: &str| std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples").join(dir))
             .unwrap().flatten().map(|e| format!("examples/{dir}/{}", e.file_name().to_string_lossy())).collect::<Vec<_>>();
-        for example in ["clock-dock", "launcher-dock", "pomodoro"] {
+        for example in ["clock-dock", "launcher-dock", "pomodoro", "snake", "plain-terminal"] {
             for file in on_disk(example) {
                 assert!(SKILL_FILES.iter().any(|(path, _)| *path == file), "{file} is missing from SKILL_FILES");
             }

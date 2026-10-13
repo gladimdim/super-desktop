@@ -1,0 +1,10 @@
+{
+  "id": "plain-terminal",
+  "name": "Plain terminal",
+  "description": "A minimal terminal card built on sd.openPty: your shell, plain text, no colors.",
+  "api": 1,
+  "surfaces": [
+    { "id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 92 },
+    { "id": "term", "slot": "card", "qml": "Terminal.qml", "size": 720, "height": 420, "title": "Plain terminal" }
+  ]
+}

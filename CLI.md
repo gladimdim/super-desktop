@@ -860,8 +860,9 @@ super-desktop peer-attach PEER_ID CARD_ID --seconds 10 < /dev/null
 
 ## Plugins
 
-Plugins add docks at the screen edges, top-bar items, floating panels and
-Settings sections to the overlay. A plugin is a folder of QML (Qt Quick) in
+Plugins add docks at the screen edges, top-bar items, floating panels, cards
+on the desktop (games, tools, terminals), full-screen views and Settings
+sections to the overlay. A plugin is a folder of QML (Qt Quick) in
 `~/.config/super-desktop/plugins/<id>/` with a `plugin.json`; the overlay
 reloads it whenever one of its files is saved. These commands work without a
 running overlay, so an agent can check its own work:
@@ -894,7 +895,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | --- | --- | --- |
 | `mcp serve` | Local MCP stdio | Serve desktop inspection, harness launch and guarded prompt tools |
 | `plugin list [--json]` | Offline | List QML plugins and whether they run |
-| `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
+| `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page\|card\|fullscreen] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
 | `plugin check ID\|DIR [--json]` | Offline | Check a plugin's manifest and QML |
 | `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
 | `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |

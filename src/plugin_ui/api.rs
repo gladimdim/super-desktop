@@ -72,31 +72,54 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 .map_err(|message| error("bad_params", message, "Use an id from harness.list."))
         }
         "cards.list" => Ok((hooks.cards)()),
-        "panel.open" | "panel.close" | "panel.toggle" => {
+        "panel.open" | "panel.close" | "panel.toggle" | "card.open" | "card.close" | "card.toggle"
+        | "fullscreen.open" | "fullscreen.close" | "fullscreen.toggle" => {
+            let (kind, action) = method.split_once('.').unwrap_or((method, ""));
             let Some(surface) = params.get("surface").and_then(Value::as_str) else {
-                return Err(error("bad_params", format!("{method} needs {{surface}}"), "Pass the id of one of your plugin's \"panel\" surfaces, e.g. {surface: \"main\"}."));
+                return Err(error("bad_params", format!("{method} needs {{surface}}"), &format!("Pass the id of one of your plugin's \"{kind}\" surfaces, e.g. {{surface: \"main\"}}.")));
             };
             let Some(slots) = super::slots::get() else {
-                return Err(error("unavailable", "panels are not ready", "Try again in a moment."));
+                return Err(error("unavailable", "the overlay is not ready", "Try again in a moment."));
             };
             let plugin = spec.plugin_id.clone();
             let surface = surface.to_owned();
-            let open = slots.is_panel_open(&plugin, &surface);
-            let want = match method {
-                "panel.open" => true,
-                "panel.close" => false,
+            let open = match kind {
+                "panel" => slots.is_panel_open(&plugin, &surface),
+                "card" => slots.is_card_open(&plugin, &surface),
+                _ => slots.is_fullscreen_open(&plugin, &surface),
+            };
+            let want = match action {
+                "open" => true,
+                "close" => false,
                 _ => !open,
             };
             if want {
-                // Checked now, opened after this call returns.
-                slots.panel_check(&plugin, &surface)
-                    .map_err(|message| error("bad_params", message, "Declare the surface in plugin.json with \"slot\": \"panel\"."))?;
-                gtk4::glib::idle_add_local_once(move || {
-                    let _ = slots.open_panel(&plugin, &surface);
-                });
-            } else if open {
-                gtk4::glib::idle_add_local_once(move || slots.close_panel(&plugin, &surface));
+                let checked = match kind {
+                    "panel" => slots.panel_check(&plugin, &surface),
+                    "card" => slots.card_check(&plugin, &surface),
+                    _ => slots.fullscreen_check(&plugin, &surface),
+                };
+                let slot_name = if kind == "fullscreen" { "fullscreen" } else { kind };
+                checked.map_err(|message| error("bad_params", message, &format!("Declare the surface in plugin.json with \"slot\": \"{slot_name}\".")))?;
             }
+            // After this call returns: opening and closing change the widgets
+            // the caller may be drawn in.
+            let kind = kind.to_owned();
+            gtk4::glib::idle_add_local_once(move || {
+                let _ = match (kind.as_str(), want) {
+                    ("panel", true) => slots.open_panel(&plugin, &surface),
+                    ("panel", false) => { slots.close_panel(&plugin, &surface); Ok(()) }
+                    ("card", true) => slots.open_card(&plugin, &surface),
+                    ("card", false) => { slots.close_card(&plugin, &surface, true); Ok(()) }
+                    (_, true) => slots.open_fullscreen(&plugin, &surface),
+                    (_, false) => {
+                        if slots.is_fullscreen_open(&plugin, &surface) {
+                            slots.close_fullscreen();
+                        }
+                        Ok(())
+                    }
+                };
+            });
             Ok(json!({"open": want}))
         }
         "notify" => {
@@ -121,7 +144,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, notify, panel.open, panel.close, panel.toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, notify, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
         )),
     }
 }

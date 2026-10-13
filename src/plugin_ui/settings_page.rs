@@ -225,13 +225,22 @@ impl Page {
         });
         actions.append(&edit);
         if let Ok(m) = manifest.as_ref().map(Clone::clone) {
-            for surface in m.surfaces.iter().filter(|s| s.slot == Slot::Panel) {
-                let open = button(&format!("Open {}", m.title_of(surface)), "Open this plugin's panel");
+            for surface in m.surfaces.iter().filter(|s| matches!(s.slot, Slot::Panel | Slot::Card | Slot::Fullscreen)) {
+                let (label, tip) = match surface.slot {
+                    Slot::Card => (format!("Open {}", m.title_of(surface)), "Put this plugin's card on the desktop"),
+                    Slot::Fullscreen => (format!("▶ {}", m.title_of(surface)), "Show it full screen (Esc leaves)"),
+                    _ => (format!("Open {}", m.title_of(surface)), "Open this plugin's panel"),
+                };
+                let open = button(&label, tip);
                 open.set_sensitive(m.enabled);
                 let slots = Rc::clone(slots);
-                let (plugin, surface) = (m.id.clone(), surface.id.clone());
+                let (plugin, surface_id, slot) = (m.id.clone(), surface.id.clone(), surface.slot);
                 open.connect_clicked(move |_| {
-                    let _ = slots.open_panel(&plugin, &surface);
+                    let _ = match slot {
+                        Slot::Card => slots.open_card(&plugin, &surface_id),
+                        Slot::Fullscreen => slots.open_fullscreen(&plugin, &surface_id),
+                        _ => slots.open_panel(&plugin, &surface_id),
+                    };
                 });
                 actions.append(&open);
             }

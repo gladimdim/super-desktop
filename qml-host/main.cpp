@@ -44,12 +44,20 @@
 #include <QJSEngine>
 #include <QCursor>
 #include <QPalette>
+#include <QPointer>
 #include <QColor>
 #include <QFile>
 #include <QFileSystemWatcher>
 #include <QSaveFile>
 
+#include <QProcessEnvironment>
+#include <QStringDecoder>
+
 #include <cmath>
+#include <csignal>
+#include <pty.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <cstdio>
 #include <cstring>
 #include <sys/mman.h>
@@ -60,6 +68,153 @@
 static const int kMaxMessage = 1 << 20;
 
 static int g_fd = -1;
+
+// The environment the host was started with, before it switched Qt to the
+// offscreen platform: programs a plugin starts get this one, so a Qt or GTK
+// app opens on the user's desktop as usual.
+static QProcessEnvironment &childEnvironment() {
+    static QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    return env;
+}
+
+// A program on a pseudo-terminal, for plugins that are terminals: what it
+// prints arrives as `output(text)`, `write(text)` types into it.
+class Pty : public QObject {
+    Q_OBJECT
+    Q_PROPERTY(bool running READ running NOTIFY runningChanged)
+    Q_PROPERTY(int pid READ pid CONSTANT)
+public:
+    ~Pty() override { terminate(SIGHUP); closeMaster(); }
+
+    bool start(const QStringList &argv, const QString &cwd, int cols, int rows, const QVariantMap &env) {
+        if (argv.isEmpty()) return false;
+        struct winsize size;
+        std::memset(&size, 0, sizeof size);
+        size.ws_col = std::clamp(cols, 2, 1000);
+        size.ws_row = std::clamp(rows, 1, 1000);
+        QProcessEnvironment environment = childEnvironment();
+        environment.insert("TERM", "xterm-256color");
+        environment.insert("COLORTERM", "truecolor");
+        for (auto it = env.begin(); it != env.end(); ++it) environment.insert(it.key(), it.value().toString());
+        // Everything the child needs, prepared before fork.
+        QList<QByteArray> args, vars;
+        for (const auto &a : argv) args.append(a.toLocal8Bit());
+        for (const auto &key : environment.keys()) vars.append((key + "=" + environment.value(key)).toLocal8Bit());
+        std::vector<char *> cargs, cvars;
+        for (auto &a : args) cargs.push_back(a.data());
+        cargs.push_back(nullptr);
+        for (auto &v : vars) cvars.push_back(v.data());
+        cvars.push_back(nullptr);
+        const QByteArray dir = cwd.toLocal8Bit();
+        int master = -1;
+        const pid_t pid = forkpty(&master, nullptr, nullptr, &size);
+        if (pid < 0) return false;
+        if (pid == 0) {
+            if (!dir.isEmpty() && chdir(dir.constData()) != 0) _exit(127);
+            ::signal(SIGPIPE, SIG_DFL);
+            execvpe(cargs[0], cargs.data(), cvars.data());
+            _exit(127);
+        }
+        ::fcntl(master, F_SETFD, FD_CLOEXEC);
+        ::fcntl(master, F_SETFL, ::fcntl(master, F_GETFL) | O_NONBLOCK);
+        m_master = master;
+        m_pid = pid;
+        m_notifier = new QSocketNotifier(master, QSocketNotifier::Read, this);
+        connect(m_notifier, &QSocketNotifier::activated, this, &Pty::readable);
+        return true;
+    }
+
+    bool running() const { return m_pid > 0; }
+    int pid() const { return m_pid; }
+
+    // Types `text` (UTF-8) into the program.
+    Q_INVOKABLE bool write(const QString &text) {
+        if (m_master < 0) return false;
+        const QByteArray bytes = text.toUtf8();
+        qsizetype done = 0;
+        while (done < bytes.size()) {
+            const ssize_t n = ::write(m_master, bytes.constData() + done, bytes.size() - done);
+            if (n < 0) {
+                if (errno == EINTR) continue;
+                return false;
+            }
+            done += n;
+        }
+        return true;
+    }
+
+    Q_INVOKABLE void resize(int cols, int rows) {
+        if (m_master < 0) return;
+        struct winsize size;
+        std::memset(&size, 0, sizeof size);
+        size.ws_col = std::clamp(cols, 2, 1000);
+        size.ws_row = std::clamp(rows, 1, 1000);
+        ::ioctl(m_master, TIOCSWINSZ, &size);
+    }
+
+    // Sends a signal (default SIGTERM) to the program.
+    Q_INVOKABLE void terminate(int signal = SIGTERM) {
+        if (m_pid > 0) ::kill(m_pid, signal);
+    }
+
+signals:
+    void output(const QString &text);
+    void exited(int code);
+    void runningChanged();
+
+private slots:
+    void readable() {
+        char buffer[65536];
+        for (;;) {
+            const ssize_t n = ::read(m_master, buffer, sizeof buffer);
+            if (n > 0) {
+                const QString text = m_decoder.decode(QByteArrayView(buffer, n));
+                if (!text.isEmpty()) emit output(text);
+                continue;
+            }
+            if (n < 0 && errno == EINTR) continue;
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return;
+            finished();  // EOF or EIO: the program closed the terminal.
+            return;
+        }
+    }
+
+private:
+    void finished() {
+        closeMaster();
+        int status = 0, code = -1;
+        if (m_pid > 0) {
+            // The slave side is gone; the child is exiting. Reap it.
+            for (int i = 0; i < 200; ++i) {
+                const pid_t r = ::waitpid(m_pid, &status, WNOHANG);
+                if (r == m_pid) {
+                    code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+                    break;
+                }
+                if (r < 0) break;
+                ::usleep(5000);
+            }
+        }
+        m_pid = -1;
+        emit runningChanged();
+        emit exited(code);
+    }
+
+    void closeMaster() {
+        if (m_notifier) {
+            m_notifier->setEnabled(false);
+            m_notifier->deleteLater();
+            m_notifier = nullptr;
+        }
+        if (m_master >= 0) ::close(m_master);
+        m_master = -1;
+    }
+
+    int m_master = -1;
+    pid_t m_pid = -1;
+    QSocketNotifier *m_notifier = nullptr;
+    QStringDecoder m_decoder{QStringDecoder::Utf8};
+};
 
 static bool sendMessage(const QJsonObject &obj, int passFd = -1) {
     if (g_fd < 0) return false;
@@ -238,7 +393,39 @@ public:
     // Starts a program detached from this surface (argv list, no shell).
     Q_INVOKABLE bool run(const QStringList &argv) {
         if (argv.isEmpty()) return false;
-        return QProcess::startDetached(argv.first(), argv.mid(1), m_pluginDir);
+        QProcess process;
+        process.setProgram(argv.first());
+        process.setArguments(argv.mid(1));
+        process.setWorkingDirectory(m_pluginDir);
+        process.setProcessEnvironment(childEnvironment());
+        return process.startDetached();
+    }
+
+    // A variable of the user's environment (as programs see it), or "".
+    Q_INVOKABLE QString env(const QString &name) const {
+        return childEnvironment().value(name);
+    }
+
+    // Starts `argv` on a pseudo-terminal; returns the Pty or null. Options:
+    // {cols, rows, cwd, env: {NAME: value}}. At most 8 per surface.
+    Q_INVOKABLE QObject *openPty(const QStringList &argv, const QVariantMap &options = QVariantMap()) {
+        m_ptys.removeAll(nullptr);
+        if (m_ptys.size() >= 8) {
+            log("sd.openPty: at most 8 terminals per surface");
+            return nullptr;
+        }
+        auto *pty = new Pty();
+        const QString cwd = options.value("cwd", m_pluginDir).toString();
+        if (!pty->start(argv, cwd, options.value("cols", 80).toInt(), options.value("rows", 24).toInt(),
+                        options.value("env").toMap())) {
+            delete pty;
+            return nullptr;
+        }
+        // Owned here (it ends with the surface), not by the JS garbage collector.
+        QQmlEngine::setObjectOwnership(pty, QQmlEngine::CppOwnership);
+        pty->setParent(this);
+        m_ptys.append(pty);
+        return pty;
     }
 
     // Runs a program and gives `callback({code, stdout, stderr})` when it ends.
@@ -266,6 +453,7 @@ public:
             }
             p->deleteLater();
         });
+        p->setProcessEnvironment(childEnvironment());
         p->start(argv.first(), argv.mid(1));
     }
 
@@ -308,6 +496,7 @@ private:
     QVariantMap m_values;
     QString m_dataFile;
     QFileSystemWatcher *m_watcher = nullptr;
+    QList<QPointer<Pty>> m_ptys;
     int m_nextId = 0;
     QHash<int, QJSValue> m_pending;
 };
@@ -316,6 +505,7 @@ static QVariantMap defaultTheme() {
     return QVariantMap{
         {"name", "default"}, {"mode", "dark"},
         {"accent", "#7aa2f7"}, {"background", "#1a1b26"}, {"foreground", "#c0caf5"},
+        {"darkBackground", "#16161e"},
         {"muted", "#565f89"}, {"surface", "#24283b"}, {"selection", "#33467c"},
         {"red", "#f7768e"}, {"green", "#9ece6a"}, {"yellow", "#e0af68"},
         {"blue", "#7aa2f7"}, {"magenta", "#bb9af7"}, {"cyan", "#7dcfff"},
@@ -687,6 +877,8 @@ int main(int argc, char **argv) {
         usage();
         return 64;
     }
+    // Programs a plugin starts get the environment from before the changes below.
+    childEnvironment();
     // Off screen, software rendering: no window, no GPU context, the same
     // pixels on every machine. The host never opens a window of its own.
     qputenv("QT_QPA_PLATFORM", "offscreen");
@@ -696,7 +888,7 @@ int main(int argc, char **argv) {
     qunsetenv("QT_QPA_PLATFORMTHEME");
     qunsetenv("QT_STYLE_OVERRIDE");
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) qputenv("QT_QUICK_CONTROLS_STYLE", "Basic");
-    if (a.mode == "snapshot" && a.scale > 0 && a.scale != 1.0)
+    if (a.scale > 0 && a.scale != 1.0)
         qputenv("QT_SCALE_FACTOR", QByteArray::number(a.scale));
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     QGuiApplication app(argc, argv);

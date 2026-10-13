@@ -36,7 +36,16 @@ struct OpenPanel {
     surface: Option<QmlSurface>,
 }
 
+/// The open full-screen surface.
+struct Fullscreen {
+    plugin: String,
+    surface_id: String,
+    container: gtk4::Box,
+    surface: QmlSurface,
+}
+
 pub struct Slots {
+    overlay: gtk4::Overlay,
     left: gtk4::Box,
     right: gtk4::Box,
     toolbar: gtk4::Box,
@@ -46,6 +55,9 @@ pub struct Slots {
     panels: crate::floating_panel::CardPanels,
     open_panels: RefCell<BTreeMap<String, OpenPanel>>,
     listeners: RefCell<Vec<Rc<dyn Fn()>>>,
+    canvas: RefCell<Option<Rc<super::cards::CanvasHost>>>,
+    open_cards: RefCell<BTreeMap<String, Rc<super::cards::PluginCard>>>,
+    fullscreen: RefCell<Option<Fullscreen>>,
     item_height: Cell<i32>,
     root_monitor: RefCell<Option<gio::FileMonitor>>,
     pending: RefCell<BTreeSet<String>>,
@@ -126,6 +138,7 @@ impl Slots {
         toolbar.append(&create);
 
         let slots = Rc::new(Slots {
+            overlay: overlay.clone(),
             left: edge_box(Align::Start),
             right: edge_box(Align::End),
             toolbar,
@@ -135,6 +148,9 @@ impl Slots {
             panels: crate::floating_panel::CardPanels::new((480, 360), (200, 120)),
             open_panels: RefCell::new(BTreeMap::new()),
             listeners: RefCell::new(Vec::new()),
+            canvas: RefCell::new(None),
+            open_cards: RefCell::new(BTreeMap::new()),
+            fullscreen: RefCell::new(None),
             item_height: Cell::new(26),
             root_monitor: RefCell::new(None),
             pending: RefCell::new(BTreeSet::new()),
@@ -213,6 +229,11 @@ impl Slots {
     // ── panels ────────────────────────────────────────────────────────────
 
     fn panel_surface(&self, plugin: &str, surface: &str) -> Result<(Manifest, Surface), String> {
+        self.slot_surface(plugin, surface, Slot::Panel)
+    }
+
+    /// `surface` of a loaded, enabled `plugin`, if it is in `slot`.
+    fn slot_surface(&self, plugin: &str, surface: &str, slot: Slot) -> Result<(Manifest, Surface), String> {
         let plugins = self.plugins.borrow();
         let manifest = plugins
             .get(plugin)
@@ -223,8 +244,8 @@ impl Slots {
         }
         let found = manifest
             .surface(surface)
-            .filter(|s| s.slot == Slot::Panel)
-            .ok_or_else(|| format!("{plugin:?} has no panel surface {surface:?}"))?;
+            .filter(|s| s.slot == slot)
+            .ok_or_else(|| format!("{plugin:?} has no {} surface {surface:?}", slot.name()))?;
         Ok((manifest.clone(), found.clone()))
     }
 
@@ -301,6 +322,186 @@ impl Slots {
                 Err(_) => self.close_panel(plugin, &surface_id),
             }
         }
+    }
+
+    // ── cards ─────────────────────────────────────────────────────────────
+
+    /// Where cards go; called by the window once its canvas exists. Cards
+    /// that were open when the overlay last ran open again.
+    pub fn set_canvas_host(self: &Rc<Self>, host: super::cards::CanvasHost) {
+        *self.canvas.borrow_mut() = Some(Rc::new(host));
+        let ids: Vec<String> = self.plugins.borrow().keys().cloned().collect();
+        for id in ids {
+            self.restore_cards(&id);
+        }
+    }
+
+    /// Whether `surface` is a card `plugin` can open.
+    pub fn card_check(&self, plugin: &str, surface: &str) -> Result<(), String> {
+        if self.canvas.borrow().is_none() {
+            return Err("cards are not available in this window".into());
+        }
+        self.slot_surface(plugin, surface, Slot::Card).map(|_| ())
+    }
+
+    pub fn is_card_open(&self, plugin: &str, surface: &str) -> bool {
+        self.open_cards.borrow().contains_key(&panel_key(plugin, surface))
+    }
+
+    /// Opens (or raises) a plugin's card on the canvas.
+    pub fn open_card(self: &Rc<Self>, plugin: &str, surface: &str) -> Result<(), String> {
+        let (manifest, found) = self.slot_surface(plugin, surface, Slot::Card)?;
+        let host = self.canvas.borrow().clone().ok_or("cards are not available in this window")?;
+        let key = panel_key(plugin, surface);
+        if let Some(card) = self.open_cards.borrow().get(&key) {
+            (host.raise)(card.container.upcast_ref());
+            return Ok(());
+        }
+        let saved = super::cards::saved(plugin, surface).map(|(g, _)| g);
+        let geometry = super::cards::initial_geometry(&host, saved, (found.size, found.height));
+        let on_close: Rc<dyn Fn()> = Rc::new({
+            let weak = Rc::downgrade(self);
+            let (plugin, surface) = (plugin.to_owned(), surface.to_owned());
+            move || {
+                if let Some(slots) = weak.upgrade() {
+                    // After this click handler returns: closing removes the button.
+                    let (plugin, surface) = (plugin.clone(), surface.clone());
+                    glib::idle_add_local_once(move || slots.close_card(&plugin, &surface, true));
+                }
+            }
+        });
+        let card = super::cards::PluginCard::new(&host, spec(&manifest, &found), manifest.title_of(&found), geometry, on_close);
+        super::cards::save(plugin, surface, geometry, true);
+        self.open_cards.borrow_mut().insert(key, card);
+        Ok(())
+    }
+
+    /// Closes a card; `forget` records it as closed so it does not open again
+    /// next time (a ✕ or the plugin's own request, not a reload).
+    pub fn close_card(&self, plugin: &str, surface: &str, forget: bool) {
+        let card = self.open_cards.borrow_mut().remove(&panel_key(plugin, surface));
+        if let (Some(card), Some(host)) = (card, self.canvas.borrow().clone()) {
+            if forget {
+                super::cards::save(plugin, surface, card.geometry(), false);
+            }
+            card.remove(&host);
+        }
+    }
+
+    /// Opens the cards of `plugin` saved as open; refreshes the open ones.
+    fn restore_cards(self: &Rc<Self>, plugin: &str) {
+        if self.canvas.borrow().is_none() {
+            return;
+        }
+        let surfaces: Vec<Surface> = self
+            .plugins
+            .borrow()
+            .get(plugin)
+            .and_then(|loaded| loaded.manifest.as_ref().ok())
+            .filter(|m| m.enabled)
+            .map(|m| m.surfaces.iter().filter(|s| s.slot == Slot::Card).cloned().collect())
+            .unwrap_or_default();
+        for surface in surfaces {
+            if !self.is_card_open(plugin, &surface.id) && super::cards::saved(plugin, &surface.id).is_some_and(|(_, open)| open) {
+                let _ = self.open_card(plugin, &surface.id);
+            }
+        }
+    }
+
+    /// Rebuilds the open cards of `plugin` after it reloads, or closes them.
+    fn refresh_cards(&self, plugin: &str) {
+        let prefix = panel_key(plugin, "");
+        let open: Vec<(String, Rc<super::cards::PluginCard>)> = self
+            .open_cards
+            .borrow()
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(k, c)| (k.clone(), Rc::clone(c)))
+            .collect();
+        for (key, card) in open {
+            let surface_id = key[prefix.len()..].to_owned();
+            match self.slot_surface(plugin, &surface_id, Slot::Card) {
+                Ok((manifest, found)) => {
+                    card.set_title(manifest.title_of(&found));
+                    card.set_surface(spec(&manifest, &found));
+                }
+                Err(_) => self.close_card(plugin, &surface_id, false),
+            }
+        }
+    }
+
+    /// Open cards, for Arrange.
+    pub fn cards(&self) -> Vec<Rc<super::cards::PluginCard>> {
+        self.open_cards.borrow().values().cloned().collect()
+    }
+
+    pub fn canvas_host(&self) -> Option<Rc<super::cards::CanvasHost>> {
+        self.canvas.borrow().clone()
+    }
+
+    // ── full screen ───────────────────────────────────────────────────────
+
+    pub fn fullscreen_check(&self, plugin: &str, surface: &str) -> Result<(), String> {
+        self.slot_surface(plugin, surface, Slot::Fullscreen).map(|_| ())
+    }
+
+    pub fn is_fullscreen_open(&self, plugin: &str, surface: &str) -> bool {
+        self.fullscreen.borrow().as_ref().is_some_and(|f| f.plugin == plugin && f.surface_id == surface)
+    }
+
+    /// Shows a plugin's full-screen surface above everything; Esc closes it.
+    pub fn open_fullscreen(self: &Rc<Self>, plugin: &str, surface: &str) -> Result<(), String> {
+        let (manifest, found) = self.slot_surface(plugin, surface, Slot::Fullscreen)?;
+        self.close_fullscreen();
+        let container = gtk4::Box::new(Orientation::Vertical, 0);
+        container.add_css_class("plugin-fullscreen");
+        container.set_halign(Align::Fill);
+        container.set_valign(Align::Fill);
+        let qml = QmlSurface::new(spec(&manifest, &found));
+        qml.widget().set_hexpand(true);
+        qml.widget().set_vexpand(true);
+        container.append(qml.widget());
+        // Esc leaves full screen instead of hiding the overlay.
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed({
+            let weak = Rc::downgrade(self);
+            move |_, key, _, _| {
+                if key == gtk4::gdk::Key::Escape {
+                    if let Some(slots) = weak.upgrade() {
+                        glib::idle_add_local_once(move || { slots.close_fullscreen(); });
+                    }
+                    return glib::Propagation::Stop;
+                }
+                glib::Propagation::Proceed
+            }
+        });
+        container.add_controller(keys);
+        self.overlay.add_overlay(&container);
+        self.overlay.set_measure_overlay(&container, false);
+        self.overlay.set_clip_overlay(&container, true);
+        let view = qml.widget().child();
+        *self.fullscreen.borrow_mut() = Some(Fullscreen {
+            plugin: plugin.to_owned(),
+            surface_id: surface.to_owned(),
+            container,
+            surface: qml,
+        });
+        // Keys go to the game at once.
+        if let Some(view) = view {
+            glib::idle_add_local_once(move || {
+                view.grab_focus();
+            });
+        }
+        Ok(())
+    }
+
+    /// Closes the full-screen surface; whether one was open.
+    pub fn close_fullscreen(&self) -> bool {
+        let Some(open) = self.fullscreen.borrow_mut().take() else { return false };
+        open.surface.dispose();
+        self.overlay.remove_overlay(&open.container);
+        true
     }
 
     // ── watching ──────────────────────────────────────────────────────────
@@ -431,6 +632,13 @@ impl Slots {
         for key in keys {
             self.close_panel(id, &key[prefix.len()..]);
         }
+        let keys: Vec<String> = self.open_cards.borrow().keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+        for key in keys {
+            self.close_card(id, &key[prefix.len()..], false);
+        }
+        if self.fullscreen.borrow().as_ref().is_some_and(|f| f.plugin == id) {
+            self.close_fullscreen();
+        }
     }
 
     fn reload(self: &Rc<Self>, id: &str) {
@@ -492,6 +700,19 @@ impl Slots {
         };
         self.plugins.borrow_mut().insert(id.to_owned(), Loaded { manifest, surfaces, _monitors: monitors });
         self.refresh_panels(id);
+        self.refresh_cards(id);
+        self.refresh_fullscreen(id);
+        self.restore_cards(id);
+    }
+
+    /// Rebuilds the open full-screen surface of `plugin`, or closes it.
+    fn refresh_fullscreen(self: &Rc<Self>, plugin: &str) {
+        let open = self.fullscreen.borrow().as_ref().filter(|f| f.plugin == plugin).map(|f| f.surface_id.clone());
+        if let Some(surface) = open {
+            if self.open_fullscreen(plugin, &surface).is_err() {
+                self.close_fullscreen();
+            }
+        }
     }
 
     /// Puts every running surface in its place, in plugin-id order.
@@ -507,7 +728,7 @@ impl Slots {
                     Slot::DockLeft => &self.left,
                     Slot::DockRight => &self.right,
                     Slot::ToolbarItem => &self.toolbar_items,
-                    Slot::Panel | Slot::SettingsPage => continue,
+                    Slot::Panel | Slot::SettingsPage | Slot::Card | Slot::Fullscreen => continue,
                 };
                 target.append(widget.widget());
             }
@@ -725,6 +946,118 @@ mod tests {
         crate::gtk_test::pump_until("the panel to open again", || slots.is_panel_open("tool", "win"));
         crate::plugin_ui::settings_page::set_enabled(&plugins.join("tool"), false).unwrap();
         crate::gtk_test::pump_until("the plugin to turn off", || !slots.is_panel_open("tool", "win") && !slots.toolbar_items.is_visible());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_slots_cards_and_fullscreen() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::cards_and_fullscreen_inner");
+    }
+
+    #[test]
+    fn cards_and_fullscreen_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-cards-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let plugins = root.join("plugins");
+        write_manifest(&plugins, "game", serde_json::json!([
+            {"id": "board", "slot": "card", "qml": "Board.qml", "size": 300, "height": 200, "title": "Board"},
+            {"id": "big", "slot": "fullscreen", "qml": "Big.qml"}
+        ]));
+        std::fs::write(plugins.join("game/Board.qml"), "import QtQuick\nRectangle { color: \"navy\" }\n").unwrap();
+        std::fs::write(plugins.join("game/Big.qml"), "import QtQuick\nRectangle { color: \"black\" }\n").unwrap();
+
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let overlay = gtk4::Overlay::new();
+        let canvas = gtk4::Fixed::new();
+        overlay.set_child(Some(&canvas));
+        let slots = Slots::install(&overlay, 46);
+        let host_canvas = canvas.clone();
+        slots.set_canvas_host(super::super::cards::CanvasHost {
+            canvas: canvas.clone(),
+            raise: Rc::new(|_| {}),
+            drag: Rc::new(move |w, x, y| host_canvas.move_(&w, x, y)),
+            drag_end: Rc::new(|_, x, y| (x, y)),
+            size: Rc::new(|| (1000, 700)),
+            top: Rc::new(|| 46),
+        });
+        let window = gtk4::Window::new();
+        window.set_default_size(1000, 700);
+        window.set_child(Some(&overlay));
+        window.present();
+        let spec = SurfaceSpec {
+            plugin_id: "game".into(), plugin_name: "game".into(), surface_id: "board".into(),
+            qml: plugins.join("game/Board.qml"), dir: plugins.join("game"),
+        };
+        crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks {
+            hide: Rc::new(|| {}),
+            harnesses: Rc::new(|| serde_json::json!([])),
+            launch: Rc::new(|_, _| Ok(())),
+            cards: Rc::new(|| serde_json::json!([])),
+            open_card: Rc::new(|_, _| Err("no cards in tests".into())),
+        });
+        let call = |method: &str, surface: &str| crate::plugin_ui::api::call(&spec, method, &serde_json::json!({"surface": surface}));
+
+        // A card opens centered below the bar, at its declared size.
+        assert_eq!(call("card.toggle", "board").unwrap()["open"], true);
+        assert_eq!(call("card.open", "big").unwrap_err()["code"], "bad_params");
+        let card = || slots.cards().into_iter().next();
+        crate::gtk_test::pump_until("the card's frame", || card().is_some_and(|c| view_frame(c.container.upcast_ref()).is_some()));
+        let g = card().unwrap().geometry();
+        assert_eq!((g.width, g.height), (300, 200));
+        assert_eq!((g.x, g.y), ((1000 - 300) / 2, 58 + (700 - 58 - 200) / 2));
+        assert!(canvas.first_child().is_some());
+        assert_eq!(super::super::cards::saved("game", "board"), Some((g, true)));
+
+        // Arrange-style placement is kept.
+        let moved = super::super::cards::Geometry { x: 20, y: 80, width: 400, height: 250 };
+        card().unwrap().set_geometry(&slots.canvas_host().unwrap(), moved);
+        assert_eq!(super::super::cards::saved("game", "board"), Some((moved, true)));
+
+        // Saving its QML rebuilds it in place.
+        let before = view_frame(card().unwrap().container.upcast_ref()).unwrap();
+        std::fs::write(plugins.join("game/Board.qml"), "import QtQuick\nRectangle { color: \"maroon\" }\n").unwrap();
+        crate::gtk_test::pump_until("the reloaded card", || {
+            card().and_then(|c| view_frame(c.container.upcast_ref())).is_some_and(|f| f != before)
+        });
+        assert_eq!(card().unwrap().geometry(), moved);
+
+        // Turning the plugin off closes the card but remembers it was open;
+        // turning it on again brings it back where it was.
+        crate::plugin_ui::settings_page::set_enabled(&plugins.join("game"), false).unwrap();
+        crate::gtk_test::pump_until("the card to close", || card().is_none());
+        assert!(canvas.first_child().is_none());
+        crate::plugin_ui::settings_page::set_enabled(&plugins.join("game"), true).unwrap();
+        crate::gtk_test::pump_until("the card to come back", || card().is_some());
+        assert_eq!(card().unwrap().geometry(), moved);
+
+        // ✕ closes it for good.
+        let close = crate::gtk_test::descendants(card().unwrap().container.upcast_ref()).into_iter()
+            .filter_map(|w| w.downcast::<gtk4::Button>().ok())
+            .find(|b| b.label().as_deref() == Some("✕"))
+            .unwrap();
+        close.emit_clicked();
+        crate::gtk_test::pump_until("the card to go", || card().is_none());
+        assert_eq!(super::super::cards::saved("game", "board"), Some((moved, false)));
+
+        // Full screen covers the whole overlay until closed.
+        assert_eq!(call("fullscreen.open", "big").unwrap()["open"], true);
+        crate::gtk_test::pump_until("the full-screen frame", || {
+            slots.fullscreen.borrow().as_ref().is_some_and(|f| view_frame(f.container.upcast_ref()).is_some())
+        });
+        let bounds = slots.fullscreen.borrow().as_ref().unwrap().container.compute_bounds(&overlay).unwrap();
+        assert_eq!((bounds.width() as i32, bounds.height() as i32), (overlay.width(), overlay.height()));
+        assert!(slots.close_fullscreen());
+        assert!(!slots.close_fullscreen());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

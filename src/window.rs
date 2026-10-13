@@ -1112,6 +1112,41 @@ impl SuperDesktopWindow {
         win_rc.canvas.put(&hud, 0.0, 0.0);
         raise_canvas_child(&win_rc.canvas, &hud);
 
+        // Plugin cards share the canvas, its drag handling and its edges.
+        {
+            let fallback = (win_rc.screen_width, win_rc.screen_height);
+            let window = win_rc.window.downgrade();
+            plugin_slots.set_canvas_host(crate::plugin_ui::cards::CanvasHost {
+                canvas: win_rc.canvas.clone(),
+                raise: Rc::new({
+                    let canvas = win_rc.canvas.clone();
+                    let hud = hud.clone();
+                    move |widget: &gtk4::Widget| {
+                        raise_canvas_child(&canvas, widget);
+                        raise_canvas_child(&canvas, &hud);
+                    }
+                }),
+                drag: Rc::new(win_rc.card_drag_updater(|| {})),
+                drag_end: Rc::new({
+                    let canvas = win_rc.canvas.clone();
+                    let pending = Rc::clone(&win_rc.drag_pending);
+                    let window = window.clone();
+                    move |widget: &gtk4::Widget, x: i32, y: i32| {
+                        widget.remove_css_class("dragging");
+                        pending.borrow_mut().remove(widget);
+                        let (x, y) = clamp_card_origin(x, y, live_workspace_size(&window, fallback));
+                        canvas.move_(widget, f64::from(x), f64::from(y));
+                        (x, y)
+                    }
+                }),
+                size: Rc::new(move || live_workspace_size(&window, fallback)),
+                top: Rc::new({
+                    let state = Rc::clone(&win_rc.state);
+                    move || top_bar_height(state.borrow().top_bar_size)
+                }),
+            });
+        }
+
         // Added after the HUD so the settings card floats above it. It moves
         // by its header and resizes by its edges like a terminal card, and
         // never over the bar. Where and how big the user left it is kept, but
@@ -1212,6 +1247,10 @@ impl SuperDesktopWindow {
                         w.welcome_tour.close();
                         return glib::Propagation::Stop;
                     }
+                }
+                // A plugin's full-screen surface is the innermost thing.
+                if crate::plugin_ui::slots::get().is_some_and(|slots| slots.close_fullscreen()) {
+                    return glib::Propagation::Stop;
                 }
                 if win_w.upgrade().is_some_and(|w| w.machine_view.dismiss_if_open()) {
                     return glib::Propagation::Stop;
@@ -1998,9 +2037,20 @@ impl SuperDesktopWindow {
         let terminal_area = crate::card_resize::Rect {
             height: (area.height - icon_height).max(1), ..area
         };
-        for (term, rect) in terminals.iter().zip(crate::arrange::terminal_grid(terminal_area, terminals.len())) {
+        // Plugin cards take the places after the terminals.
+        let plugin_slots = crate::plugin_ui::slots::get();
+        let plugin_cards = plugin_slots.as_ref().map(|s| s.cards()).unwrap_or_default();
+        let mut grid = crate::arrange::terminal_grid(terminal_area, terminals.len() + plugin_cards.len()).into_iter();
+        for (term, rect) in terminals.iter().zip(grid.by_ref()) {
             term.apply_geometry(rect);
             self.canvas.move_(&term.container, rect.x, rect.y);
+        }
+        if let Some(host) = plugin_slots.as_ref().and_then(|s| s.canvas_host()) {
+            for (card, rect) in plugin_cards.iter().zip(grid) {
+                card.set_geometry(&host, crate::plugin_ui::cards::Geometry {
+                    x: rect.x.round() as i32, y: rect.y.round() as i32, width: rect.width, height: rect.height,
+                });
+            }
         }
         for (index, term) in icons.iter().enumerate() {
             let x = area.x + ((index % icon_columns) as i32 * (icon_side + gap)) as f64;
@@ -2129,6 +2179,12 @@ impl SuperDesktopWindow {
             let (tx, ty, w, _) = terminal_slide_geom(term, sw, sh);
             let (sx, sy) = card_slide_offscreen(tx, ty, w, sw as f64);
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
+        }
+        for card in crate::plugin_ui::slots::get().map(|s| s.cards()).unwrap_or_default() {
+            let g = card.geometry();
+            let (tx, ty) = (f64::from(g.x), f64::from(g.y));
+            let (sx, sy) = card_slide_offscreen(tx, ty, f64::from(g.width), sw as f64);
+            trajs.insert(card.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
 
         let (tx, ty, sx, sy) = hud_slide_pose(hud_measured_height(&self.hud));

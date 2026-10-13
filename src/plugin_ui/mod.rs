@@ -4,6 +4,7 @@
 //! (`settings_page`). The display-free half is `super_desktop::plugins`.
 pub mod agent;
 pub mod api;
+pub mod cards;
 pub mod create;
 pub mod settings_page;
 pub mod slots;

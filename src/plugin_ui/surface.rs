@@ -105,6 +105,7 @@ struct Inner {
     crashes: RefCell<Vec<Instant>>,
     restart: RefCell<Option<glib::SourceId>>,
     disposed: Cell<bool>,
+    keeps_escape: Cell<bool>,
 }
 
 pub struct QmlSurface {
@@ -175,6 +176,7 @@ impl QmlSurface {
             crashes: RefCell::new(Vec::new()),
             restart: RefCell::new(None),
             disposed: Cell::new(false),
+            keeps_escape: Cell::new(false),
         });
         LIVE.with(|live| live.borrow_mut().push(Rc::downgrade(&inner)));
         Inner::bind(&inner);
@@ -183,6 +185,11 @@ impl QmlSurface {
 
     pub fn widget(&self) -> &gtk4::Overlay {
         &self.inner.container
+    }
+
+    /// Whether Esc goes to the QML instead of closing the overlay.
+    pub fn set_keeps_escape(&self, keep: bool) {
+        self.inner.keeps_escape.set(keep);
     }
 
     /// Ends the host. The widget can be dropped afterwards.
@@ -312,13 +319,13 @@ impl Inner {
                     let text = keyval.to_unicode().filter(|ch| !ch.is_control()).map(String::from).unwrap_or_default();
                     inner.send(&protocol::key(true, protocol::qt_key(keyval.into_glib()), &text, protocol::qt_modifiers(state.bits())));
                     let _ = c;
+                    // A card keeps Esc (vim, a game's pause), like a terminal
+                    // card; elsewhere Esc still closes the overlay.
+                    if keyval == gdk::Key::Escape && !inner.keeps_escape.get() {
+                        return glib::Propagation::Proceed;
+                    }
                 }
-                // Escape still closes the overlay.
-                if keyval == gdk::Key::Escape {
-                    glib::Propagation::Proceed
-                } else {
-                    glib::Propagation::Stop
-                }
+                glib::Propagation::Stop
             }
         });
         keys.connect_key_released({

@@ -2,11 +2,12 @@
 name: super-desktop-plugin
 description: >
   Create, change or fix a SUPER DESKTOP plugin: a folder of QML (Qt Quick) that
-  adds docks at the screen edges, items in the top bar, floating panels and
-  Settings sections to the SUPER DESKTOP overlay on Linux (Hyprland/Omarchy).
-  Covers plugin.json, the `sd` object in QML (theme, saved values, calls into
-  SUPER DESKTOP, running programs), and the check/snapshot loop that lets you
-  see your work. Use when the folder has a plugin.json for
+  adds docks at the screen edges, items in the top bar, floating panels, cards
+  on the desktop (games, tools, terminals), full-screen views and Settings
+  sections to the SUPER DESKTOP overlay on Linux (Hyprland/Omarchy). Covers
+  plugin.json, the `sd` object in QML (theme, saved values, calls into SUPER
+  DESKTOP, programs and pseudo-terminals), and the check/snapshot loop that
+  lets you see your work. Use when the folder has a plugin.json for
   SUPER DESKTOP, or when asked for a SUPER DESKTOP widget, dock, toolbar or
   plugin.
 ---
@@ -74,6 +75,8 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `toolbar.item` | An item in the top bar, after the agent launchers. The bar's height (about 26–50 px, it follows the user's top-bar size). Keep it short: the launcher row scrolls when full. | 24–240, default 96 | the bar's |
 | `panel` | A floating card the user can move, resize and close (✕). Not shown until opened with `sd.call("panel.open"/"panel.toggle", {surface})`, usually from a `toolbar.item` or dock button, or from Settings → Plugins. Runs only while open. | 200–1600, default 480 | 120–1200, default 360 |
 | `settings.page` | A section under the plugin in Settings → Plugins, as wide as the page. Runs only while that page is shown. Use it for options, saved with `sd.setValue`. | ignored | 60–1200, default 240 |
+| `card` | A card on the desktop next to notes and terminals, with a header (title, ✕). The user drags and resizes it; Arrange places it; it slides in and out with the other cards. Opened with `sd.call("card.open"/"card.toggle", {surface})` or from Settings → Plugins; reopens where it was after a restart if it was open. Games, tools and terminals go here. | 200–4000, default 640 | 120–3000, default 420 |
+| `fullscreen` | Covers the whole overlay until **Esc** (or `fullscreen.close`). Opened with `sd.call("fullscreen.open", {surface})`. One at a time. Games, screensavers, presentations. | the screen's | the screen's |
 
 Each surface is its own QML program: surfaces of one plugin share data only
 through `sd.values` (and files or programs you run).
@@ -101,7 +104,11 @@ through `sd.values` (and files or programs you run).
    and `sd.call`.
 6. **Act only on a click or key**: anything that launches, sends or deletes
    follows a user action.
-7. Available modules: everything in Qt 6 (`QtQuick`, `QtQuick.Controls`,
+7. **Keyboard**: a `card` or `fullscreen` surface gets the keyboard when the
+   user clicks it (full screen: at once). Put `focus: true` on the item that
+   handles `Keys.onPressed`, call `forceActiveFocus()` on click, and show a
+   "Click to play" hint while `!activeFocus`. Esc always leaves full screen.
+8. Available modules: everything in Qt 6 (`QtQuick`, `QtQuick.Controls`,
    `QtQuick.Layouts`, `QtQuick.Shapes`…). Put your own components next to the
    main file (`Button.qml` beside `Dock.qml` is usable as `Button {}`), or in
    subfolders imported with `import "parts"`.
@@ -120,6 +127,17 @@ through `sd.values` (and files or programs you run).
 | `sd.values` | The plugin's saved values (an object), shared by all its surfaces and kept across restarts. Bind to it: `checked: sd.values.dark === true`. Updates live (`sd.valuesChanged`) when any surface saves. |
 | `sd.setValue(key, value)` | Save a JSON value (`null` removes it). At most 1 MiB in total. |
 | `sd.value(key, fallback)` | Read one value (not a binding: prefer `sd.values.key`). |
+| `sd.env(name)` | A variable of the user's environment, e.g. `sd.env("SHELL")`, `sd.env("HOME")`. |
+| `sd.openPty([program, args…], {cols, rows, cwd, env})` | Start a program on a pseudo-terminal (for terminal plugins); returns a **Pty** or `null`. At most 8 per surface; they end with the surface. |
+
+A **Pty** has `output(text)` and `exited(code)` signals, `write(text)` (keys
+as the program expects them: `"\r"` for Enter, `"\x7f"` for Backspace,
+`"\x1b[A"` for Up, Ctrl+C is `"\x03"`), `resize(cols, rows)`,
+`terminate(signal)` and the `running` and `pid` properties. `TERM` is
+`xterm-256color`: the output holds escape sequences, which a terminal plugin
+interprets (or strips, like `examples/plain-terminal`). Programs started with
+`sd.run`, `sd.exec` and `sd.openPty` get the user's environment, display
+included, so GUI apps open normally.
 | `sd.visibleChanged(visible)` | Signal: the overlay was shown or hidden (`Connections { target: sd; function onVisibleChanged(v) {} }`). |
 
 ### `sd.call` methods
@@ -132,6 +150,8 @@ through `sd.values` (and files or programs you run).
 | `cards.list` | none | `[{id, kind, title, harness, folder}]`, `kind` is `terminal` or `note`. |
 | `notify` | `{title, body}` | `{}`; a desktop notification. |
 | `panel.open`, `panel.close`, `panel.toggle` | `{surface}`: one of **this plugin's** `panel` surfaces | `{open}`: whether it is open now. |
+| `card.open`, `card.close`, `card.toggle` | `{surface}`: one of this plugin's `card` surfaces | `{open}` |
+| `fullscreen.open`, `fullscreen.close`, `fullscreen.toggle` | `{surface}`: one of this plugin's `fullscreen` surfaces | `{open}` |
 
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
 `unavailable`, `not_connected`. Show them in the UI where they happen.
@@ -145,6 +165,10 @@ Full working examples, copy the closest one:
   (`harness.list`, `harness.launch`), hover states, tooltips, a component file.
 - `examples/pomodoro/`: a `toolbar.item` that toggles a `panel`, and a
   `settings.page`, sharing state through `sd.values`.
+- `examples/snake/`: a game on a `card`: a `Timer` game loop, arrow keys,
+  focus handling, the best score in `sd.values`.
+- `examples/plain-terminal/`: a minimal terminal on a `card` with
+  `sd.openPty`: keys in, plain text out.
 
 A themed icon button:
 
@@ -174,9 +198,9 @@ Rectangle {
 
 ## Other commands
 
-- `super-desktop plugin new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page] [--name "…"]`:
-  a working plugin to start from (`panel` makes a top-bar item that opens a
-  panel).
+- `super-desktop plugin new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page|card|fullscreen] [--name "…"]`:
+  a working plugin to start from (`panel`, `card` and `fullscreen` also make
+  the top-bar item that opens it).
 - `super-desktop plugin list [--json]`: every plugin, whether it is valid and
   whether it is running.
 - To turn a plugin off: `"enabled": false` in `plugin.json` (the user has an

@@ -15,6 +15,8 @@ const PLACES: &[(&str, &str)] = &[
     ("toolbar.item", "Item in the top bar"),
     ("panel", "Panel opened from the top bar"),
     ("settings.page", "Section in Settings → Plugins"),
+    ("card", "Card on the desktop (a game, tool or terminal)"),
+    ("fullscreen", "Full screen, opened from the top bar (a game, a screensaver)"),
 ];
 
 thread_local! {
