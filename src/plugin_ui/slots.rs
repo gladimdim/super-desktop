@@ -27,6 +27,8 @@ struct Loaded {
     manifest: Result<Manifest, Vec<Problem>>,
     /// Docks and toolbar items: they run as long as the plugin is loaded.
     surfaces: Vec<(Surface, QmlSurface)>,
+    /// Installed from elsewhere and not approved yet: nothing of it runs.
+    waiting: bool,
     _monitors: Vec<gio::FileMonitor>,
 }
 
@@ -235,10 +237,11 @@ impl Slots {
     /// `surface` of a loaded, enabled `plugin`, if it is in `slot`.
     fn slot_surface(&self, plugin: &str, surface: &str, slot: Slot) -> Result<(Manifest, Surface), String> {
         let plugins = self.plugins.borrow();
-        let manifest = plugins
-            .get(plugin)
-            .and_then(|loaded| loaded.manifest.as_ref().ok())
-            .ok_or_else(|| format!("plugin {plugin:?} is not loaded"))?;
+        let loaded = plugins.get(plugin).ok_or_else(|| format!("plugin {plugin:?} is not loaded"))?;
+        if loaded.waiting {
+            return Err(format!("plugin {plugin:?} was installed and waits for the user's approval"));
+        }
+        let manifest = loaded.manifest.as_ref().map_err(|_| format!("plugin {plugin:?} has an invalid plugin.json"))?;
         if !manifest.enabled {
             return Err(format!("plugin {plugin:?} is turned off"));
         }
@@ -658,12 +661,17 @@ impl Slots {
         }
         let monitors = self.watch_plugin(id, &dir);
         let manifest = manifest::load(&dir);
+        let waiting = !super_desktop::plugins::install::approved(&super_desktop::plugins::install::Places::current(), id);
         let surfaces = match &manifest {
             Err(problems) => {
                 for p in problems {
                     paths::append_log(id, &format!("plugin.json: {}: {} (hint: {})", p.field, p.message, p.hint));
                 }
                 paths::write_status(id, "error", &serde_json::to_value(problems).unwrap_or_default());
+                Vec::new()
+            }
+            Ok(_) if waiting => {
+                paths::write_status(id, "waiting-approval", &json!([]));
                 Vec::new()
             }
             Ok(manifest) if !manifest.enabled => {
@@ -698,7 +706,7 @@ impl Slots {
                 surfaces
             }
         };
-        self.plugins.borrow_mut().insert(id.to_owned(), Loaded { manifest, surfaces, _monitors: monitors });
+        self.plugins.borrow_mut().insert(id.to_owned(), Loaded { manifest, surfaces, waiting, _monitors: monitors });
         self.refresh_panels(id);
         self.refresh_cards(id);
         self.refresh_fullscreen(id);
@@ -1063,6 +1071,47 @@ mod tests {
         assert_eq!((bounds.width() as i32, bounds.height() as i32), (overlay.width(), overlay.height()));
         assert!(slots.close_fullscreen());
         assert!(!slots.close_fullscreen());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_slots_installed_plugins_wait_for_approval() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::approval_inner");
+    }
+
+    #[test]
+    fn approval_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-approval-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        // Installed from a folder: recorded as not approved.
+        let upstream = root.join("upstream/shared");
+        write_plugin(&root.join("upstream"), "shared", "dock.left", 60, "import QtQuick\nRectangle { color: \"red\" }\n");
+        let places = super_desktop::plugins::install::Places::current();
+        super_desktop::plugins::install::install(&places, upstream.to_str().unwrap()).unwrap();
+
+        gtk4::init().unwrap();
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&gtk4::Box::new(Orientation::Vertical, 0)));
+        let slots = Slots::install(&overlay, 46);
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 600);
+        window.set_child(Some(&overlay));
+        window.present();
+        crate::gtk_test::pump(400);
+        assert!(!slots.left.is_visible(), "nothing of an unapproved plugin runs");
+        assert_eq!(super_desktop::plugins::paths::read_status("shared").unwrap()["state"], "waiting-approval");
+
+        super_desktop::plugins::install::approve(&places, "shared").unwrap();
+        crate::gtk_test::pump_until("the approved dock", || has_frame(&slots.left));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

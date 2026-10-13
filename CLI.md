@@ -885,6 +885,12 @@ coding agent opened there knows the plugin API. ✨ in the top bar and
 Settings → Plugins do the same from the overlay and open an agent in the
 new folder. Drawing plugins needs Qt Quick (`qt6-declarative`).
 
+Plugins shared by others are installed with `plugin install <git url>`. An
+installed plugin does not run until you approve it (Settings → Plugins or
+`plugin approve <id>`), because its QML can run programs as you;
+`plugin update <id>` fast-forwards it and `plugin remove <id>` moves it to the
+trash. Plugins made on your PC run without approval.
+
 ## Complete public command syntax
 
 The catalog below lists all public commands. `--help` also works for each leaf
@@ -901,6 +907,10 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
 | `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |
 | `plugin doctor [--json]` | Offline | Check what plugins need |
+| `plugin install GIT_URL\|DIR [--json]` | Offline | Install a shared plugin from git or a folder |
+| `plugin approve ID [--json]` | Offline | Let an installed plugin run |
+| `plugin update ID [--json]` | Offline | Update an installed plugin from git |
+| `plugin remove ID [--json]` | Offline | Move a plugin to the trash |
 | `plugin path` | Offline | Print the plugins folder |
 | `terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]` | Structured local | Attach a bounded local terminal stream |
 | `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |

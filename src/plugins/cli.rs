@@ -1,6 +1,6 @@
 //! `super-desktop plugin …`: the commands an agent uses to make a plugin and
 //! check its own work. None of them needs a running overlay.
-use super::{manifest, paths, skill};
+use super::{install, manifest, paths, skill};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,6 +16,10 @@ const USAGE: &str = "usage: super-desktop plugin <command>
            [--out FILE.png] [--json]  render a surface to a PNG off screen
   logs <id> [--lines N]               the end of the plugin's log
   doctor [--json]                     what works and what is missing for plugins
+  install <git-url|folder> [--json]   install a shared plugin; it runs once approved
+  approve <id> [--json]               let an installed plugin run
+  update <id> [--json]                fast-forward an installed plugin from its git source
+  remove <id> [--json]                move a plugin's folder to the trash
   path                                print the plugins folder
 
 Plugins are folders in the plugins folder; SUPER DESKTOP reloads one on
@@ -80,6 +84,27 @@ pub fn run(args: &[String]) -> i32 {
         "snapshot" => Flags::parse(rest, &["surface", "width", "height", "scale", "out", "wait"]).and_then(|f| snapshot(&f)),
         "logs" => Flags::parse(rest, &["lines"]).and_then(|f| logs(&f)),
         "doctor" => Flags::parse(rest, &[]).map(|f| doctor(f.json)),
+        "install" => Flags::parse(rest, &[]).and_then(|f| install_command(&f)),
+        "approve" => Flags::parse(rest, &[]).and_then(|f| one_id(&f).and_then(|id| {
+            install::approve(&install::Places::current(), &id)?;
+            report(f.json, json!({"ok": true, "id": id}), &format!("Approved {id}: it runs in SUPER DESKTOP now."));
+            Ok(0)
+        })),
+        "update" => Flags::parse(rest, &[]).and_then(|f| one_id(&f).and_then(|id| {
+            let updated = install::update(&install::Places::current(), &id)?;
+            let text = if updated.from == updated.to {
+                format!("{id} is up to date ({}).", short(&updated.to))
+            } else {
+                format!("Updated {id} {}..{}:\n{}", short(&updated.from), short(&updated.to), updated.changes)
+            };
+            report(f.json, json!({"ok": true, "id": id, "from": updated.from, "to": updated.to, "changes": updated.changes}), &text);
+            Ok(0)
+        })),
+        "remove" => Flags::parse(rest, &[]).and_then(|f| one_id(&f).and_then(|id| {
+            let trashed = install::remove(&install::Places::current(), &id, &install::user_trash())?;
+            report(f.json, json!({"ok": true, "id": id, "trash": trashed}), &format!("Moved {id} to the trash ({}).", trashed.display()));
+            Ok(0)
+        })),
         other => Err(format!("unknown plugin command {other:?}")),
     };
     match result {
@@ -105,6 +130,8 @@ fn list(as_json: bool) -> i32 {
             match &f.manifest {
                 Ok(m) => json!({
                     "id": m.id, "name": m.name, "valid": true, "enabled": m.enabled,
+                    "approved": install::approved(&install::Places::current(), &m.id),
+                    "source": install::source(&install::Places::current(), &m.id).map(|s| s["source"].clone()),
                     "slots": m.surfaces.iter().map(|s| s.slot.name()).collect::<Vec<_>>(),
                     "state": status.as_ref().and_then(|s| s.get("state").cloned()).unwrap_or(Value::Null),
                     "dir": f.dir,
@@ -127,7 +154,7 @@ fn list(as_json: bool) -> i32 {
             let state = row["state"].as_str().unwrap_or("not loaded");
             if row["valid"] == true {
                 let slots: Vec<&str> = row["slots"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-                let enabled = if row["enabled"] == true { "" } else { " (disabled)" };
+                let enabled = if row["approved"] != true { " (waiting for approval)" } else if row["enabled"] == true { "" } else { " (disabled)" };
                 println!("{id:<24} {:<22} {state}{enabled}", slots.join(","));
             } else {
                 println!("{id:<24} invalid: {}", row["problems"][0]["message"].as_str().unwrap_or(""));
@@ -380,4 +407,45 @@ fn doctor(as_json: bool) -> i32 {
         }
     }
     if ok { 0 } else { 1 }
+}
+
+fn one_id(flags: &Flags) -> Result<String, String> {
+    match flags.positional.as_slice() {
+        [id] => Ok(id.clone()),
+        _ => Err("give one plugin id".into()),
+    }
+}
+
+fn short(commit: &str) -> &str {
+    &commit[..commit.len().min(8)]
+}
+
+fn report(as_json: bool, value: Value, text: &str) {
+    if as_json {
+        print_json(&value);
+    } else {
+        println!("{text}");
+    }
+}
+
+fn install_command(flags: &Flags) -> Result<i32, String> {
+    let [source] = flags.positional.as_slice() else {
+        return Err("install needs one git URL or folder".into());
+    };
+    let installed = install::install(&install::Places::current(), source)?;
+    let surfaces: Vec<Value> = installed.manifest.surfaces.iter()
+        .map(|s| json!({"id": s.id, "slot": s.slot.name(), "qml": s.qml}))
+        .collect();
+    if flags.json {
+        print_json(&json!({"ok": true, "id": installed.id, "dir": installed.dir, "commit": installed.commit,
+            "approved": false, "surfaces": surfaces}));
+    } else {
+        println!("Installed {} ({}) in {}", installed.manifest.name, installed.id, installed.dir.display());
+        for s in &installed.manifest.surfaces {
+            println!("  {:<14} {}", s.slot.name(), s.qml);
+        }
+        println!("It does not run yet: its QML can run programs as you. Read it (or ask an agent to review it),");
+        println!("then turn it on in Settings → Plugins or run: super-desktop plugin approve {}", installed.id);
+    }
+    Ok(0)
 }
