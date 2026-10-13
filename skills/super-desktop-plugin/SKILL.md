@@ -234,6 +234,8 @@ Rectangle {
   the top-bar item that opens it).
 - `super-desktop plugin list [--json]`: every plugin, whether it is valid and
   whether it is running.
+- `super-desktop plugin doctor`: when nothing appears at all, this says what
+  is missing (the QML host, Qt Quick, the overlay) and how to fix it.
 - To turn a plugin off: `"enabled": false` in `plugin.json` (the user has an
   ON/OFF switch in Settings → Plugins), or move the folder out of the plugins
   folder.

@@ -873,6 +873,7 @@ super-desktop plugin check my-dock --json               # QML errors with file:l
 super-desktop plugin snapshot my-dock --out /tmp/my-dock.png --json
 super-desktop plugin logs my-dock                       # runtime errors, sd.log
 super-desktop plugin list
+super-desktop plugin doctor                             # what is missing, with fixes
 ```
 
 `check` exits 0 only when every surface loads without errors or warnings.
@@ -899,6 +900,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `plugin check ID\|DIR [--json]` | Offline | Check a plugin's manifest and QML |
 | `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
 | `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |
+| `plugin doctor [--json]` | Offline | Check what plugins need |
 | `plugin path` | Offline | Print the plugins folder |
 | `terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]` | Structured local | Attach a bounded local terminal stream |
 | `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |

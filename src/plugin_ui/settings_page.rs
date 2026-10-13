@@ -80,6 +80,14 @@ pub fn build(root: &gtk4::Box) -> Rc<dyn Fn()> {
     create.set_tooltip_text(Some("Describe a widget, toolbar, panel or game; an AI agent builds it here"));
     create.connect_clicked(|_| super::create::open());
     root.append(&create);
+    if paths::qml_host_binary().is_none() {
+        let missing = label(
+            "Plugins cannot be drawn: the QML host (sd-qml-host) is not installed. Install qt6-declarative, then update SUPER DESKTOP. `super-desktop plugin doctor` says more.",
+            "launcher-note",
+        );
+        missing.add_css_class("launcher-note-error");
+        root.append(&missing);
+    }
     root.append(&label(
         &format!(
             "Plugins are folders of QML in {}. A plugin reloads on screen whenever one of its files is saved.",

@@ -15,6 +15,7 @@ const USAGE: &str = "usage: super-desktop plugin <command>
   snapshot <id|dir> [--surface ID] [--width W] [--height H] [--scale S]
            [--out FILE.png] [--json]  render a surface to a PNG off screen
   logs <id> [--lines N]               the end of the plugin's log
+  doctor [--json]                     what works and what is missing for plugins
   path                                print the plugins folder
 
 Plugins are folders in the plugins folder; SUPER DESKTOP reloads one on
@@ -78,6 +79,7 @@ pub fn run(args: &[String]) -> i32 {
         "check" => Flags::parse(rest, &[]).and_then(|f| check(&f)),
         "snapshot" => Flags::parse(rest, &["surface", "width", "height", "scale", "out", "wait"]).and_then(|f| snapshot(&f)),
         "logs" => Flags::parse(rest, &["lines"]).and_then(|f| logs(&f)),
+        "doctor" => Flags::parse(rest, &[]).map(|f| doctor(f.json)),
         other => Err(format!("unknown plugin command {other:?}")),
     };
     match result {
@@ -303,4 +305,79 @@ fn logs(flags: &Flags) -> Result<i32, String> {
             Ok(0)
         }
     }
+}
+
+fn command_exists(name: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
+}
+
+const DOCTOR_QML: &str = "import QtQuick\nimport QtQuick.Controls\nimport SuperDesktop.Terminal\nRectangle { color: \"#ff0000\"; Button { text: \"ok\" } }\n";
+
+/// Checks everything plugins depend on and says how to fix what is missing.
+fn doctor(as_json: bool) -> i32 {
+    let mut checks: Vec<Value> = Vec::new();
+    let mut add = |name: &str, ok: bool, detail: String, hint: &str| {
+        checks.push(json!({"check": name, "ok": ok, "detail": detail, "hint": if ok { "" } else { hint }}));
+    };
+
+    let host = paths::qml_host_binary();
+    add("qml-host", host.is_some(),
+        host.as_ref().map_or("sd-qml-host not found".into(), |p| p.display().to_string()),
+        "Install qt6-declarative, then update SUPER DESKTOP (or run scripts/build-qml-host.sh in its folder).");
+    if let Some(host) = &host {
+        // Draw something real: Qt Quick, Controls and the built-in terminal module.
+        let dir = std::env::temp_dir().join(format!("sd-plugin-doctor-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let qml = dir.join("Doctor.qml");
+        let png = dir.join("doctor.png");
+        let rendered = std::fs::write(&qml, DOCTOR_QML).ok().and_then(|()| {
+            Command::new(host).arg("--snapshot").arg(&qml).arg("--out").arg(&png)
+                .args(["--width", "64", "--height", "32", "--wait", "50"]).output().ok()
+        });
+        let report: Value = rendered.as_ref().and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or(Value::Null);
+        let ok = report["ok"] == true && report["paintedFraction"].as_f64().unwrap_or(0.0) > 0.5;
+        let detail = if ok { "draws QML off screen".to_owned() } else {
+            report["errors"][0]["message"].as_str().map(str::to_owned).unwrap_or_else(|| {
+                rendered.map(|o| String::from_utf8_lossy(&o.stderr).trim().to_owned()).unwrap_or_else(|| "did not run".into())
+            })
+        };
+        add("qml-render", ok, detail, "Qt Quick could not draw: check that qt6-declarative is installed and matches qt6-base.");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    let root = paths::plugins_dir();
+    let found = manifest::discover(&root);
+    let invalid: Vec<&str> = found.iter().filter(|f| f.manifest.is_err()).map(|f| f.folder.as_str()).collect();
+    add("plugins-folder", root.is_dir(),
+        format!("{} ({} plugins{})", root.display(), found.len(),
+            if invalid.is_empty() { String::new() } else { format!(", invalid: {}", invalid.join(", ")) }),
+        "It is created when SUPER DESKTOP starts, or by `super-desktop plugin new <id>`.");
+
+    let socket = crate::platform::runtime::socket_path();
+    let running = std::os::unix::net::UnixStream::connect(&socket).is_ok();
+    add("overlay", running,
+        if running { "SUPER DESKTOP is running".into() } else { "SUPER DESKTOP is not running".into() },
+        "Start it (super-desktop show); plugins appear in the overlay, and check/snapshot work without it.");
+    let theme = paths::theme_path().is_file();
+    add("theme", theme,
+        if theme { "the overlay has shared its theme with plugins".into() } else { "no theme saved for plugins yet".into() },
+        "Open SUPER DESKTOP once with this version; snapshots use a default theme until then.");
+
+    for (tool, why) in [("wl-paste", "pasting into TerminalView"), ("notify-send", "the notify call"), ("git", "plugin install and update")] {
+        add(tool, command_exists(tool), why.into(), "Install it with pacman (wl-clipboard, libnotify, git).");
+    }
+
+    let ok = checks.iter().take(2).all(|c| c["ok"] == true);
+    if as_json {
+        print_json(&json!({"ok": ok, "checks": checks}));
+    } else {
+        for c in &checks {
+            let mark = if c["ok"] == true { "✓" } else { "✗" };
+            println!("{mark} {:<15} {}", c["check"].as_str().unwrap_or(""), c["detail"].as_str().unwrap_or(""));
+            if c["ok"] != true {
+                println!("  {:<15} {}", "", c["hint"].as_str().unwrap_or(""));
+            }
+        }
+    }
+    if ok { 0 } else { 1 }
 }
