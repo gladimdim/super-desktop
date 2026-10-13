@@ -526,4 +526,62 @@ Item {{
                     cursor: [t.cursorPosition().x, t.cursorPosition().y], title: t.title})"#).unwrap();
         assert_eq!(v, serde_json::json!({"red": 1, "bold": true, "indexed": "#ff0000", "rgb": "#010203", "bg": 4, "plain": -1, "cursor": [4, 0], "title": "my title"}));
     }
+
+    /// Frames per second for a constantly animating surface, acked at once.
+    /// `cargo test --release --lib plugins_host_frame_rate -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn plugins_host_frame_rate() {
+        let Some(binary) = crate::plugins::paths::qml_host_binary() else { return };
+        let dir = std::env::temp_dir().join(format!("sd-plugins-fps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let qml = dir.join("Anim.qml");
+        std::fs::write(&qml, r##"import QtQuick
+Rectangle {
+    color: "#202030"
+    Repeater {
+        model: 40
+        Rectangle {
+            width: 80; height: 80; radius: 20; color: Qt.hsla(index / 40, 0.6, 0.5, 1)
+            x: (index % 10) * 180 + 40; y: Math.floor(index / 10) * 220 + 60
+            RotationAnimation on rotation { from: 0; to: 360; duration: 2000; loops: Animation.Infinite }
+        }
+    }
+}
+"##).unwrap();
+        for (w, h) in [(400, 300), (1920, 1080), (3840, 2160)] {
+            let theme = serde_json::json!({});
+            let host = HostProcess::spawn(&SpawnOptions {
+                host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "fps", surface_id: "main",
+                width: w, height: h, scale: 1.0, theme: &theme, log: None, data: None,
+            }).unwrap();
+            assert!(wait_for(&host, Duration::from_secs(10), |m, _| m == FromHost::Ready));
+            host.send(&protocol::resize(w, h)).unwrap();
+            let start = Instant::now();
+            let mut frames = 0u32;
+            let mut buffer: Option<SharedBuffer> = None;
+            while start.elapsed() < Duration::from_secs(3) {
+                if let Ok(Some((bytes, fd))) = host.receive() {
+                    match protocol::parse(&bytes) {
+                        FromHost::Buffer { width, height, stride, scale } => {
+                            buffer = Some(SharedBuffer::map(fd.unwrap(), width, height, stride, scale).unwrap());
+                        }
+                        FromHost::Frame { seq } => {
+                            // The overlay's copy into a texture.
+                            let copy = buffer.as_ref().map(|b| b.bytes().to_vec());
+                            std::hint::black_box(copy);
+                            frames += 1;
+                            host.send(&protocol::ack(seq)).unwrap();
+                        }
+                        _ => {}
+                    }
+                } else {
+                    std::thread::sleep(Duration::from_micros(200));
+                }
+            }
+            eprintln!("{w}x{h}: {:.1} frames/s", f64::from(frames) / start.elapsed().as_secs_f64());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
