@@ -1,0 +1,8 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/">
+    <file>qml/SuperDesktop/Terminal/qmldir</file>
+    <file>qml/SuperDesktop/Terminal/TerminalView.qml</file>
+    <file>qml/SuperDesktop/Terminal/vt.mjs</file>
+  </qresource>
+</RCC>

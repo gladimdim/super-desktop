@@ -544,6 +544,8 @@ public:
         });
         // Plugin-local QML modules and components resolve from the plugin folder.
         m_engine->addImportPath(pluginDir);
+        // Components that ship with SUPER DESKTOP (import SuperDesktop.Terminal).
+        m_engine->addImportPath("qrc:/qml");
         m_api = new SdApi(m_engine, pluginDir, pluginId, surfaceId, connected);
         m_api->setParent(this);
         m_api->setTheme(theme);

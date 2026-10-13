@@ -5,7 +5,7 @@ Rectangle {
     color: area.containsMouse ? sd.theme.accent : Qt.alpha(sd.theme.surface, 0.9)
     Text {
         anchors.centerIn: parent
-        text: ">_ Plain"
+        text: ">_ Term"
         color: area.containsMouse ? sd.theme.background : sd.theme.foreground
         font.family: sd.theme.fontFamily
         font.pixelSize: Math.max(10, parent.height * 0.42)

@@ -450,4 +450,80 @@ Rectangle {
         drop(host);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// Runs `body` (QML statements using `t`, a TerminalView of 20×6 cells
+    /// fed by hand) in the real host and returns what it reports with
+    /// `report(value)`.
+    fn terminal_run(name: &str, body: &str) -> Option<serde_json::Value> {
+        let binary = crate::plugins::paths::qml_host_binary()?;
+        let dir = std::env::temp_dir().join(format!("sd-plugins-vt-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let qml = dir.join("T.qml");
+        std::fs::write(&qml, format!(r#"import QtQuick
+import SuperDesktop.Terminal
+Item {{
+    width: 400; height: 400
+    TerminalView {{
+        id: t
+        autoStart: false
+        width: 20 * cellWidth; height: 6 * cellHeight
+        property real cellWidth: fm.advanceWidth("M")
+        property real cellHeight: Math.ceil(fm.height)
+        FontMetrics {{ id: fm; font.family: t.fontFamily; font.pixelSize: t.fontPixelSize }}
+    }}
+    function report(value) {{ sd.call("report", {{value: value}}) }}
+    function rows() {{ const out = []; for (let r = 0; r < 6; r++) out.push(t.lineText(r).replace(/ +$/, "")); return out }}
+    Timer {{ interval: 150; running: true; onTriggered: {{ {body} }} }}
+}}
+"#)).unwrap();
+        let theme = serde_json::json!({});
+        let host = HostProcess::spawn(&SpawnOptions {
+            host: &binary, qml: &qml, plugin_dir: &dir, plugin_id: "vt", surface_id: "main",
+            width: 400, height: 400, scale: 1.0, theme: &theme, log: Some(dir.join("host.log")), data: None,
+        }).unwrap();
+        host.send(&protocol::resize(400, 400)).unwrap();
+        let mut value = None;
+        let got = wait_for(&host, Duration::from_secs(10), |m, _| {
+            if let FromHost::Call { method, params, .. } = m {
+                if method == "report" {
+                    value = Some(params["value"].clone());
+                }
+            }
+            value.is_some()
+        });
+        assert!(got, "{name}: no report: {}", std::fs::read_to_string(dir.join("host.log")).unwrap_or_default());
+        drop(host);
+        let _ = std::fs::remove_dir_all(&dir);
+        value
+    }
+
+    #[test]
+    fn plugins_terminal_view_emulates_the_screen() {
+        if crate::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        let rows = |v: serde_json::Value| -> Vec<String> {
+            v.as_array().unwrap().iter().map(|r| r.as_str().unwrap().to_owned()).collect()
+        };
+        // Text, CR/LF, cursor addressing, erase to end of line.
+        let v = terminal_run("basic", r#"t.feed("hello\r\nworld\x1b[1;3Hxx\x1b[2;3H\x1b[K"); report(rows())"#).unwrap();
+        assert_eq!(rows(v), ["hexxo", "wo", "", "", "", ""]);
+        // Wrapping at the last column and scrolling at the bottom.
+        let v = terminal_run("wrap", r#"t.feed("abcdefghijklmnopqrstuvwxyz\r\n2\r\n3\r\n4\r\n5\r\n6"); report(rows())"#).unwrap();
+        assert_eq!(rows(v), ["uvwxyz", "2", "3", "4", "5", "6"]);
+        // The alternate screen is cleared on entry and the main one comes back.
+        let v = terminal_run("alt", r#"t.feed("main\x1b[?1049h\x1b[2Jfull screen\x1b[?1049l"); report(rows())"#).unwrap();
+        assert_eq!(rows(v), ["main", "", "", "", "", ""]);
+        // A scroll region moves only its own lines; insert and delete characters.
+        let v = terminal_run("region", r#"t.feed("1\r\n2\r\n3\r\n4\r\n5\r\n6\x1b[2;4r\x1b[4;1H\n\x1b[1;1Habc\x1b[1;2H\x1b[P\x1b[1;1H\x1b[2@"); report(rows())"#).unwrap();
+        assert_eq!(rows(v), ["  ac", "3", "4", "", "5", "6"]);
+        // Colors and attributes, the cursor position, the window title.
+        let v = terminal_run("sgr", r#"t.feed("\x1b]0;my title\x07\x1b[1;31mR\x1b[38;5;196mX\x1b[38;2;1;2;3;48;5;4mT\x1b[0mn");
+            const c = (col) => t.cellAt(0, col).attr;
+            report({red: c(0).fg, bold: c(0).bold, indexed: c(1).fg, rgb: c(2).fg, bg: c(2).bg, plain: c(3).fg,
+                    cursor: [t.cursorPosition().x, t.cursorPosition().y], title: t.title})"#).unwrap();
+        assert_eq!(v, serde_json::json!({"red": 1, "bold": true, "indexed": "#ff0000", "rgb": "#010203", "bg": 4, "plain": -1, "cursor": [4, 0], "title": "my title"}));
+    }
 }

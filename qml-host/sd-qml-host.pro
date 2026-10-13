@@ -5,3 +5,4 @@ CONFIG += c++17 release
 CONFIG -= app_bundle
 SOURCES += main.cpp
 LIBS += -lutil
+RESOURCES += qml.qrc

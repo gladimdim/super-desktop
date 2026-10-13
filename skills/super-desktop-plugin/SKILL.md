@@ -134,8 +134,8 @@ A **Pty** has `output(text)` and `exited(code)` signals, `write(text)` (keys
 as the program expects them: `"\r"` for Enter, `"\x7f"` for Backspace,
 `"\x1b[A"` for Up, Ctrl+C is `"\x03"`), `resize(cols, rows)`,
 `terminate(signal)` and the `running` and `pid` properties. `TERM` is
-`xterm-256color`: the output holds escape sequences, which a terminal plugin
-interprets (or strips, like `examples/plain-terminal`). Programs started with
+`xterm-256color`: the output holds escape sequences. **To show a terminal,
+use `TerminalView` (below)** instead of handling them yourself. Programs started with
 `sd.run`, `sd.exec` and `sd.openPty` get the user's environment, display
 included, so GUI apps open normally.
 | `sd.visibleChanged(visible)` | Signal: the overlay was shown or hidden (`Connections { target: sd; function onVisibleChanged(v) {} }`). |
@@ -156,6 +156,37 @@ included, so GUI apps open normally.
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
 `unavailable`, `not_connected`. Show them in the UI where they happen.
 
+## Terminals: `TerminalView`
+
+`import SuperDesktop.Terminal` gives `TerminalView`, a complete terminal
+(pty, escape sequences, 16/256/true colors, the alternate screen, scroll
+regions, scrollback, keys, paste). vim, htop, btop and shells run in it.
+
+```qml
+import QtQuick
+import SuperDesktop.Terminal
+
+TerminalView {
+    anchors.fill: parent
+    command: ["btop"]          // empty (default): the user's $SHELL
+    onExited: (code) => sd.log("btop ended: " + code)
+}
+```
+
+| Member | Meaning |
+| --- | --- |
+| `command`, `workingDirectory` (default `$HOME`), `environment`, `autoStart` (default true) | What runs. |
+| `fontFamily` (default `monospace`), `fontPixelSize` (13), `foreground`, `background`, `cursorColor`, `scrollbackLines` (2000) | Look; colors default to the theme. |
+| `cols`, `rows`, `running`, `title` (the program's window title) | Read-only. |
+| `start()`, `stop()`, `send(text)` (type into it), `paste(text)`, `feed(text)` (draw as if printed), `lineText(row)`, `cursorPosition()`, `cellAt(row, col)` | Methods. |
+| `exited(code)`, `bell()` | Signals. |
+
+Click it to type. Ctrl+Shift+V or Shift+Insert pastes (needs `wl-paste`),
+middle click pastes the selection, Shift+PageUp/PageDown and the wheel
+scroll back. With no program running, keys go to your own `Keys` handlers
+(for example Enter to `start()` again). Wide characters (CJK, emoji) take
+one cell. Selecting text with the mouse is not supported yet.
+
 ## Recipes
 
 Full working examples, copy the closest one:
@@ -167,8 +198,8 @@ Full working examples, copy the closest one:
   `settings.page`, sharing state through `sd.values`.
 - `examples/snake/`: a game on a `card`: a `Timer` game loop, arrow keys,
   focus handling, the best score in `sd.values`.
-- `examples/plain-terminal/`: a minimal terminal on a `card` with
-  `sd.openPty`: keys in, plain text out.
+- `examples/terminal/`: a terminal card made of `TerminalView`, with the
+  program's title and Enter to restart.
 
 A themed icon button:
 
