@@ -271,10 +271,8 @@ mod tests {
             return;
         }
         let session = format!("sd_plugin_api_{}", std::process::id());
-        let made = std::process::Command::new("tmux")
-            .args(["-f", "/dev/null", "new-session", "-d", "-s", &session, "-x", "80", "-y", "20", "cat"])
-            .output().unwrap();
-        assert!(made.status.success(), "{made:?}");
+        // The shared helper: the same server settings as every other tmux test.
+        let _session = crate::test_isolation::TmuxSession::start(&session, &["-x", "80", "-y", "20"], &["cat"]);
         let context = gtk4::glib::MainContext::new();
         context.with_thread_default(|| {
             let target = session.clone();
@@ -311,6 +309,5 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }).unwrap();
-        let _ = std::process::Command::new("tmux").args(["kill-session", "-t", &format!("={session}")]).output();
     }
 }
