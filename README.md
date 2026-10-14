@@ -137,6 +137,7 @@ follows the `master` branch instead, until you install a release again with
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
+| `v1.6.0` | 3 |
 | `v1.5.0` | 3 |
 | `v1.4.0` | 3 |
 | `v1.3.1` | 3 |
