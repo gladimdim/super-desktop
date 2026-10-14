@@ -66,6 +66,7 @@ mod pairing_request_ui;
 mod card_source;
 mod command_feedback;
 mod harness_bar;
+mod toolbar_reorder;
 mod connection_panel;
 mod machine_selector;
 mod markdown_view;

@@ -144,6 +144,10 @@ pub struct Slots {
     pending: RefCell<BTreeSet<String>>,
     rescan: Cell<bool>,
     debounce: RefCell<Option<glib::SourceId>>,
+    /// The toolbar items' keys (`plugin:<id>/<surface>`) in the order the
+    /// user dragged them to, and who saves a new one.
+    toolbar_order: RefCell<Vec<String>>,
+    on_toolbar_reordered: RefCell<Option<Rc<dyn Fn(Vec<String>)>>>,
 }
 
 thread_local! {
@@ -253,7 +257,18 @@ impl Slots {
             pending: RefCell::new(BTreeSet::new()),
             rescan: Cell::new(false),
             debounce: RefCell::new(None),
+            toolbar_order: RefCell::new(Vec::new()),
+            on_toolbar_reordered: RefCell::new(None),
         });
+        // The user drags toolbar items into another order, like the launchers.
+        crate::toolbar_reorder::attach(&slots.toolbar_items, Rc::new({
+            let weak = Rc::downgrade(&slots);
+            move || {
+                if let Some(slots) = weak.upgrade() {
+                    slots.toolbar_reordered();
+                }
+            }
+        }));
         for edge in [&slots.left, &slots.right] {
             overlay.add_overlay(edge);
             overlay.set_measure_overlay(edge, false);
@@ -269,6 +284,46 @@ impl Slots {
 
     /// The top-bar row: plugin toolbar items, then ✨ Create Plugin. It goes
     /// in the launcher group, which scrolls when the bar is full.
+    /// Show the toolbar items in `order` (see `toolbar_order`); `on_reordered`
+    /// saves the order the user drags them to.
+    pub fn set_toolbar_order(&self, order: Vec<String>, on_reordered: Rc<dyn Fn(Vec<String>)>) {
+        *self.toolbar_order.borrow_mut() = order;
+        *self.on_toolbar_reordered.borrow_mut() = Some(on_reordered);
+        self.sort_toolbar_items();
+    }
+
+    /// The order of the toolbar items now, by key.
+    pub fn toolbar_item_keys(&self) -> Vec<String> {
+        crate::toolbar_reorder::children(&self.toolbar_items)
+            .iter()
+            .filter_map(|item| self.toolbar_key(item))
+            .collect()
+    }
+
+    fn toolbar_key(&self, item: &gtk4::Widget) -> Option<String> {
+        self.plugins.borrow().iter().find_map(|(id, loaded)| {
+            loaded.surfaces.iter()
+                .find(|(surface, widget)| surface.slot == Slot::ToolbarItem && widget.widget().upcast_ref::<gtk4::Widget>() == item)
+                .map(|(surface, _)| panel_key(id, &surface.id))
+        })
+    }
+
+    fn sort_toolbar_items(&self) {
+        let order = self.toolbar_order.borrow().clone();
+        crate::toolbar_reorder::sort(&self.toolbar_items, &order, |item| self.toolbar_key(item));
+    }
+
+    /// A drag ended: keep the new order, with the places of items that are
+    /// off now, and save it.
+    fn toolbar_reordered(&self) {
+        let order = crate::toolbar_reorder::merged(self.toolbar_item_keys(), &self.toolbar_order.borrow());
+        *self.toolbar_order.borrow_mut() = order.clone();
+        let callback = self.on_toolbar_reordered.borrow().clone();
+        if let Some(on_reordered) = callback {
+            on_reordered(order);
+        }
+    }
+
     pub fn toolbar(&self) -> &gtk4::Box {
         &self.toolbar
     }
@@ -1177,6 +1232,7 @@ impl Slots {
         self.left.set_visible(self.left.first_child().is_some());
         self.right.set_visible(self.right.first_child().is_some());
         self.toolbar_items.set_visible(self.toolbar_items.first_child().is_some());
+        self.sort_toolbar_items();
     }
 }
 #[cfg(test)]
@@ -1314,6 +1370,125 @@ mod tests {
         for name in ["space", "return", "tab", "backspace", "delete", "insert", "home", "end", "page_up", "page_down", "up", "down", "left", "right", "f1", "f12"] {
             assert!(super_desktop::plugins::manifest::parse_keys(&format!("Ctrl+Alt+{name}")).is_ok(), "{name}");
         }
+    }
+
+    #[test]
+    fn toolbar_plugin_items_rearrange_by_dragging() {
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::toolbar_items_rearrange_inner");
+    }
+
+    #[test]
+    fn toolbar_items_rearrange_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-reorder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let plugins = root.join("plugins");
+        for id in ["alpha", "beta", "gamma"] {
+            write_manifest(&plugins, id, serde_json::json!([
+                {"id": "button", "slot": "toolbar.item", "qml": "Button.qml", "size": 80}
+            ]));
+            std::fs::write(plugins.join(id).join("Button.qml"), "import QtQuick\nRectangle { color: \"orange\" }\n").unwrap();
+        }
+        gtk4::init().unwrap();
+        let overlay = gtk4::Overlay::new();
+        let top = gtk4::Box::new(Orientation::Vertical, 0);
+        overlay.set_child(Some(&top));
+        let slots = Slots::install(&overlay, 46);
+        top.append(slots.toolbar());
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 200);
+        window.set_child(Some(&overlay));
+        window.present();
+        let saved = Rc::new(RefCell::new(None::<Vec<String>>));
+        // A plugin that is off keeps its place in the saved order.
+        slots.set_toolbar_order(vec!["plugin:off/button".into()], Rc::new({
+            let saved = Rc::clone(&saved);
+            move |order| *saved.borrow_mut() = Some(order)
+        }));
+        let row = slots.toolbar_items.clone();
+        crate::gtk_test::pump_until("three toolbar items", || crate::toolbar_reorder::children(&row).len() == 3);
+        crate::toolbar_reorder::wait_for_layout(&row);
+        assert_eq!(slots.toolbar_item_keys(), ["plugin:alpha/button", "plugin:beta/button", "plugin:gamma/button"]);
+
+        // Alpha dropped just right of beta goes after it.
+        let item = |n: usize| crate::toolbar_reorder::children(&row)[n].clone();
+        let beta = item(1).compute_bounds(&row).unwrap();
+        let drag = crate::toolbar_reorder::drag_to(&row, &item(0), f64::from(beta.x() + beta.width()) + 2.0);
+        assert!(drag.marked && drag.outlines && drag.line.is_some());
+        let order = vec!["plugin:beta/button".to_string(), "plugin:alpha/button".into(), "plugin:gamma/button".into()];
+        assert_eq!(slots.toolbar_item_keys(), order);
+        let mut expected = order.clone();
+        expected.push("plugin:off/button".into());
+        assert_eq!(saved.borrow().clone(), Some(expected));
+
+        // A reload lays the items out again, in the saved order.
+        slots.relayout();
+        assert_eq!(slots.toolbar_item_keys(), order);
+        window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolbar_plugin_item_press_taken_by_a_drag_is_no_click() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::press_taken_inner");
+    }
+
+    #[test]
+    fn press_taken_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-press-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let plugins = root.join("plugins");
+        write_manifest(&plugins, "tap", serde_json::json!([
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml", "size": 80}
+        ]));
+        // Like the plugins people write: a click is `onClicked` of a MouseArea.
+        std::fs::write(plugins.join("tap/Button.qml"), "import QtQuick\nRectangle {\n    color: \"orange\"\n    \
+            MouseArea {\n        anchors.fill: parent\n        hoverEnabled: true\n        \
+            onPressed: sd.log(\"pressed\")\n        onClicked: sd.log(\"clicked\")\n    }\n}\n").unwrap();
+        gtk4::init().unwrap();
+        let overlay = gtk4::Overlay::new();
+        let top = gtk4::Box::new(Orientation::Vertical, 0);
+        overlay.set_child(Some(&top));
+        let slots = Slots::install(&overlay, 46);
+        top.append(slots.toolbar());
+        let window = gtk4::Window::new();
+        window.set_default_size(600, 200);
+        window.set_child(Some(&overlay));
+        window.present();
+        crate::gtk_test::pump_until("the toolbar item's frame", || view_frame(slots.toolbar_items.upcast_ref()).is_some());
+        let log = || std::fs::read_to_string(paths::log_path("tap")).unwrap_or_default();
+        let count = |word: &str| log().lines().filter(|line| line.ends_with(word)).count();
+        let plugins_ref = slots.plugins.borrow();
+        let surface = &plugins_ref["tap"].surfaces[0].1;
+
+        // Pressed, then taken by the bar's drag: no click, though the
+        // pointer was over the item all along.
+        surface.send_pointer("move", 20.0, 10.0, 0);
+        surface.send_pointer("press", 20.0, 10.0, 1);
+        surface.take_press(1);
+        // A plain click after it does click, so the first one would have shown.
+        surface.send_pointer("move", 20.0, 10.0, 0);
+        surface.send_pointer("press", 20.0, 10.0, 1);
+        surface.send_pointer("release", 20.0, 10.0, 1);
+        crate::gtk_test::pump_until("the click", || count("clicked") > 0);
+        assert_eq!(count("pressed"), 2, "{}", log());
+        assert_eq!(count("clicked"), 1, "a press taken by the bar must not click:\n{}", log());
+        drop(plugins_ref);
+        window.close();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

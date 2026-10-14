@@ -68,6 +68,8 @@ pub fn harness_tooltip(key: &str) -> &'static str {
 
 /// Launch one harness on whichever machine owns it.
 type LaunchAction = Rc<dyn Fn(&str)>;
+/// Every launcher's key, offered or not, in the order the user dragged them to.
+type ReorderAction = Rc<dyn Fn(Vec<String>)>;
 /// Attach a hover card to one harness button, and report whether it did: a
 /// button with one keeps the native tooltip off, so the two never render on top
 /// of each other.
@@ -139,6 +141,9 @@ pub struct HarnessBar {
     busy: Cell<bool>,
     /// A refusal is explained until the user tries again.
     failed: Cell<bool>,
+    /// Set when the user may drag launchers into another order (the local
+    /// bar only): told the new order once a drag ends.
+    on_reordered: RefCell<Option<ReorderAction>>,
     /// Bumped by every new line, so a self-dismissing notice only clears the
     /// line it put there.
     note_generation: Cell<u64>,
@@ -197,6 +202,7 @@ impl HarnessBar {
             ready: Cell::new(false),
             busy: Cell::new(false),
             failed: Cell::new(false),
+            on_reordered: RefCell::new(None),
             note_generation: Cell::new(0),
         });
         for (key, button) in bar.buttons.borrow().iter() {
@@ -253,6 +259,42 @@ impl HarnessBar {
         }
         self.ready.set(state.ready);
         self.paint_sensitivity();
+    }
+
+    /// Let the user drag launchers into another order (`toolbar_reorder`):
+    /// pressing one and moving it rearranges instead of launching.
+    /// `on_reordered` gets every key, offered or not, in the new order when
+    /// the drag ends.
+    pub fn enable_reorder(self: &Rc<Self>, on_reordered: ReorderAction) {
+        *self.on_reordered.borrow_mut() = Some(on_reordered);
+        let weak = Rc::downgrade(self);
+        crate::toolbar_reorder::attach(&self.group, Rc::new(move || {
+            let Some(bar) = weak.upgrade() else { return };
+            let shown = crate::toolbar_reorder::children(&bar.group);
+            bar.buttons.borrow_mut().sort_by_key(|(_, button)| shown.iter().position(|w| w == button));
+            let callback = bar.on_reordered.borrow().clone();
+            if let Some(on_reordered) = callback {
+                on_reordered(bar.order());
+            }
+        }));
+    }
+
+    /// Put the launchers in `order`. Keys it does not name (a launcher added
+    /// since) follow, in the order they had.
+    pub fn set_order(&self, order: &[String]) {
+        let mut buttons = self.buttons.borrow().clone();
+        buttons.sort_by_key(|(key, _)| order.iter().position(|named| named == key).unwrap_or(usize::MAX));
+        let mut previous: Option<gtk4::Button> = None;
+        for (_, button) in &buttons {
+            self.group.reorder_child_after(button, previous.as_ref());
+            previous = Some(button.clone());
+        }
+        *self.buttons.borrow_mut() = buttons;
+    }
+
+    /// Every launcher's key, offered or not, in the order shown.
+    pub fn order(&self) -> Vec<String> {
+        self.buttons.borrow().iter().map(|(key, _)| key.clone()).collect()
     }
 
     /// Say something under the bar, or clear it with an empty string. A launch
@@ -518,6 +560,114 @@ mod tests {
             parent.set_visible(true);
             assert!(!bar.sensitive("shell"), "an unavailable target stays disabled");
         }
+    }
+
+    #[test]
+    fn toolbar_launchers_rearrange_by_dragging() {
+        crate::gtk_test::run_in_child_process("harness_bar::tests::toolbar_rearrange_inner");
+    }
+
+    #[test]
+    fn toolbar_rearrange_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let launches = Rc::new(RefCell::new(Vec::<String>::new()));
+        let bar = HarnessBar::new(
+            Rc::new({
+                let launches = Rc::clone(&launches);
+                move |key: &str| launches.borrow_mut().push(key.to_string())
+            }),
+            Rc::new(|_: &gtk4::Button, _: &str| false),
+        );
+        let custom = CustomButton { id: "custom-test".into(), name: "My CLI".into(), icon: "💻".into() };
+        let offered = HarnessState {
+            keys: vec!["claude".into(), "codex".into(), "shell".into(), "custom-test".into()],
+            custom: vec![custom.clone()],
+            ready: true,
+        };
+        bar.apply(&offered);
+        let saved = Rc::new(RefCell::new(None::<Vec<String>>));
+        bar.enable_reorder(Rc::new({
+            let saved = Rc::clone(&saved);
+            move |order| *saved.borrow_mut() = Some(order)
+        }));
+        let window = gtk4::Window::new();
+        window.set_child(Some(&bar.group));
+        window.present();
+        let button = |key: &str| bar.buttons().into_iter().find(|(k, _)| k == key).unwrap().1;
+        let shown = || bar.order().into_iter().filter(|key| bar.offered(key)).collect::<Vec<_>>();
+        use crate::toolbar_reorder::{drag_to, press_point, wait_for_layout};
+        wait_for_layout(&bar.group);
+        assert_eq!(shown(), ["claude", "codex", "shell", "custom-test"]);
+        let middle_of = |key: &str| {
+            let bounds = button(key).compute_bounds(&bar.group).unwrap();
+            f64::from(bounds.x() + bounds.width() / 2.0)
+        };
+
+        // A wiggle below the threshold is still a click: nothing moves or shows.
+        let (x, _) = press_point(&bar.group, &button("claude"));
+        let wiggle = drag_to(&bar.group, &button("claude"), x + 5.0);
+        assert!(!wiggle.marked && !wiggle.outlines && wiggle.line.is_none());
+        assert_eq!(shown(), ["claude", "codex", "shell", "custom-test"]);
+        assert!(saved.borrow().is_none());
+
+        // Nearer the gap after "shell": while dragged, the outlines show and
+        // the line stands in that gap; on release Claude goes there, and
+        // every key is saved.
+        let gap = {
+            let shell = button("shell").compute_bounds(&bar.group).unwrap();
+            let custom = button("custom-test").compute_bounds(&bar.group).unwrap();
+            f64::from(shell.x() + shell.width() + custom.x()) / 2.0 - 1.0
+        };
+        let drag = drag_to(&bar.group, &button("claude"), middle_of("shell") + 4.0);
+        assert!(drag.marked && drag.outlines, "the dragged launcher and the row are marked");
+        assert_eq!(drag.line, Some(gap), "the drop line stands between shell and My CLI");
+        assert_eq!(shown(), ["codex", "shell", "claude", "custom-test"]);
+        let order = saved.borrow().clone().expect("the order is saved when the drag ends");
+        assert_eq!(order, bar.order());
+        assert_eq!(order.len(), crate::tmux::HARNESS_KEYS.len() + 1, "hidden launchers keep a place too");
+        assert!(launches.borrow().is_empty(), "rearranging never launches");
+
+        // Back to the front, past the left edge: the line at the row's start.
+        wait_for_layout(&bar.group);
+        assert_eq!(drag_to(&bar.group, &button("claude"), -40.0).line, Some(0.0));
+        assert_eq!(shown(), ["claude", "codex", "shell", "custom-test"]);
+        wait_for_layout(&bar.group);
+        drag_to(&bar.group, &button("custom-test"), middle_of("codex") - 4.0);
+        assert_eq!(shown(), ["claude", "custom-test", "codex", "shell"]);
+
+        // Dropped next to where it is, nothing moves and nothing is saved.
+        wait_for_layout(&bar.group);
+        *saved.borrow_mut() = None;
+        drag_to(&bar.group, &button("codex"), middle_of("codex") + 20.0);
+        assert_eq!(shown(), ["claude", "custom-test", "codex", "shell"]);
+        assert!(saved.borrow().is_none());
+
+        // A bar built again takes the saved order; a launcher it does not name
+        // (added since) follows.
+        let saved_order = bar.order();
+        let again = HarnessBar::new(Rc::new(|_| {}), Rc::new(|_: &gtk4::Button, _: &str| false));
+        let newer = CustomButton { id: "custom-new".into(), name: "New".into(), icon: "🆕".into() };
+        again.apply(&HarnessState {
+            keys: vec!["claude".into(), "codex".into(), "shell".into(), "custom-test".into(), "custom-new".into()],
+            custom: vec![custom, newer],
+            ready: true,
+        });
+        again.set_order(&saved_order);
+        let order = again.order();
+        assert_eq!(&order[..order.len() - 1], saved_order.as_slice());
+        assert_eq!(order.last().map(String::as_str), Some("custom-new"));
+        let mut children = Vec::new();
+        let mut child = again.group.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            children.push(widget);
+        }
+        let buttons: Vec<gtk4::Widget> = again.buttons().into_iter().map(|(_, b)| b.upcast()).collect();
+        assert_eq!(children, buttons, "the bar shows the launchers in that order");
+        window.close();
     }
 
     #[test]

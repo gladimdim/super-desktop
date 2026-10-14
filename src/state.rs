@@ -178,6 +178,16 @@ pub struct AppState {
     /// where it is and brings back only those hanging past an edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout_size: Option<(i32, i32)>,
+    /// The top bar's launch buttons (harness keys and custom launcher ids),
+    /// in the order the user dragged them to. Empty = never rearranged: the
+    /// built-in order. Launchers it does not name follow those it does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launcher_order: Vec<String>,
+    /// Plugin toolbar items (`plugin:<id>/<surface>`), in the order the user
+    /// dragged them to. Empty = never rearranged: plugin id order. Items it
+    /// does not name follow those it does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolbar_item_order: Vec<String>,
     /// Whether the welcome tour has been shown. Only a fresh install starts
     /// with `false` (see `fresh_install_state`); a state file from before the
     /// tour existed loads as `true`, so people upgrading never get it.
@@ -219,6 +229,8 @@ impl Default for AppState {
             settings_panel_pos: None,
             settings_panel_size: None,
             layout_size: None,
+            launcher_order: Vec::new(),
+            toolbar_item_order: Vec::new(),
             welcome_tour_seen: true,
         }
     }

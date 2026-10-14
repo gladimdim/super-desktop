@@ -189,6 +189,18 @@ impl QmlSurface {
         &self.inner.container
     }
 
+    /// Send the QML a pointer event as the view's own input handlers do.
+    #[cfg(test)]
+    pub fn send_pointer(&self, kind: &str, x: f64, y: f64, button: u32) {
+        self.inner.send(&protocol::pointer(kind, x, y, button, 0));
+    }
+
+    /// What the view does when the top bar takes a press away.
+    #[cfg(test)]
+    pub fn take_press(&self, button: u32) {
+        self.inner.press_taken(button);
+    }
+
     /// Whether Esc goes to the QML instead of closing the overlay.
     pub fn set_keeps_escape(&self, keep: bool) {
         self.inner.keeps_escape.set(keep);
@@ -240,6 +252,17 @@ impl Inner {
         Self::bind_input(this);
     }
 
+    /// Someone else took the press of `button` (the top bar, to rearrange its
+    /// items): let go of it off the item, so it is not a click. Qt decides a
+    /// click by whether the pointer is still over the item (a MouseArea's
+    /// `containsMouse`), not by where the release is, so the pointer leaves
+    /// first.
+    fn press_taken(&self, button: u32) {
+        let (x, y) = (-1.0e4, -1.0e4);
+        self.send(&protocol::pointer("move", x, y, 0, 0));
+        self.send(&protocol::pointer("release", x, y, button, 0));
+    }
+
     fn bind_input(this: &Rc<Self>) {
         let weak = Rc::downgrade(this);
         let mods = |controller: &gtk4::EventController| {
@@ -278,12 +301,16 @@ impl Inner {
 
         let click = gtk4::GestureClick::new();
         click.set_button(0);
+        // The button held down, for a press the top bar takes away.
+        let held = Rc::new(Cell::new(0u32));
         click.connect_pressed({
             let weak = weak.clone();
+            let held = Rc::clone(&held);
             move |gesture, n_press, x, y| {
                 if let Some(inner) = weak.upgrade() {
                     inner.view.grab_focus();
                     let button = protocol::qt_button(gesture.current_button());
+                    held.set(button);
                     let kind = if n_press == 2 { "double" } else { "press" };
                     inner.send(&protocol::pointer(kind, x, y, button, mods(gesture.upcast_ref())));
                 }
@@ -295,6 +322,15 @@ impl Inner {
                 if let Some(inner) = weak.upgrade() {
                     let button = protocol::qt_button(gesture.current_button());
                     inner.send(&protocol::pointer("release", x, y, button, mods(gesture.upcast_ref())));
+                }
+            }
+        });
+        // The top bar took the press to rearrange its items (`toolbar_reorder`).
+        click.connect_cancel({
+            let weak = weak.clone();
+            move |_, _| {
+                if let Some(inner) = weak.upgrade() {
+                    inner.press_taken(held.get());
                 }
             }
         });

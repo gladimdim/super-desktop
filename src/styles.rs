@@ -178,6 +178,24 @@ menubutton.machine-selector > button:checked {{
     box-shadow: inset 0 -2px {accent};
 }}
 
+/* A top-bar item being dragged to another place (toolbar_reorder): every
+   item of its row shows its outline and the dragged one is dimmed. The line
+   in the gap it will be dropped in is the row's background, drawn there. */
+.toolbar-rearranging {{
+    /* Room for the line before the first item and after the last. */
+    padding-left: 6px;
+    padding-right: 6px;
+}}
+.toolbar-rearranging > * {{
+    outline: 1px dashed alpha({light_foreground}, 0.5);
+    outline-offset: -1px;
+    border-radius: 6px;
+}}
+.toolbar-rearranging > .toolbar-reordering {{
+    outline: 1.5px dashed {accent};
+    opacity: 0.45;
+}}
+
 .hud-action-primary {{
     color: {accent};
     font-weight: 700;

@@ -1023,7 +1023,12 @@ impl SuperDesktopWindow {
                     emoji,
                     light_theme,
                 };
+                let hovered = button.downgrade();
                 motion.connect_enter(move |_, _, _| {
+                    // Not while the button is dragged to another place.
+                    if hovered.upgrade().is_some_and(|b| b.has_css_class(crate::toolbar_reorder::CLASS)) {
+                        return;
+                    }
                     // Rebuilt on every hover so numbers are fresh from disk.
                     let content = crate::usage::build_usage_content(&card);
                     pop_enter.set_child(Some(&content));
@@ -1048,6 +1053,18 @@ impl SuperDesktopWindow {
             custom: win_rc.state.borrow().custom_harnesses.iter().map(Into::into).collect(),
             ready: true,
         });
+        // The launchers stay in the order the user dragged them to.
+        harness_bar.set_order(&win_rc.state.borrow().launcher_order);
+        harness_bar.enable_reorder(Rc::new({
+            let state = Rc::clone(&win_rc.state);
+            move |order: Vec<String>| {
+                persist_if(&state, |s| {
+                    let changed = s.launcher_order != order;
+                    s.launcher_order = order;
+                    changed
+                });
+            }
+        }));
         *harness_bar_for_settings.borrow_mut() = Some(Rc::clone(&harness_bar));
         // The same brand logos the remote bar draws, so a light/dark switch
         // swaps both from the one list.
@@ -1059,6 +1076,17 @@ impl SuperDesktopWindow {
         let launchers = gtk4::Box::new(Orientation::Horizontal, 10);
         launchers.append(&harness_bar.group);
         launchers.append(plugin_slots.toolbar());
+        // Plugin toolbar items stay in the order the user dragged them to.
+        plugin_slots.set_toolbar_order(win_rc.state.borrow().toolbar_item_order.clone(), Rc::new({
+            let state = Rc::clone(&win_rc.state);
+            move |order: Vec<String>| {
+                persist_if(&state, |s| {
+                    let changed = s.toolbar_item_order != order;
+                    s.toolbar_item_order = order;
+                    changed
+                });
+            }
+        }));
         hud.append(&top_bar_content(&hud_left, &launchers, &hud_right));
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
@@ -4097,6 +4125,52 @@ mod tests {
         assert_eq!((corner.data.borrow().x, corner.data.borrow().y), (350, 210));
         assert_at(icon.container.upcast_ref(), (862.0, 562.0));
         assert_at(note.container.upcast_ref(), (690.0, 460.0));
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn toolbar_launcher_order_is_restored_and_saved() {
+        crate::gtk_test::run_in_child_process("window::tests::toolbar_launcher_order_inner");
+    }
+
+    #[test]
+    fn toolbar_launcher_order_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-launcher-order-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.LauncherOrderTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state = AppState::default();
+        state.launcher_order = vec!["shell".into(), "codex".into(), "claude".into()];
+        // Shown on any machine, like the shell.
+        state.custom_harnesses = vec![crate::custom_harness::CustomHarness {
+            id: "custom-test".into(), name: "Test".into(), icon: "💻".into(),
+            executable: "/bin/sh".into(), arguments: Vec::new(),
+        }];
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let bar = window.cli_harness_bar.borrow().clone().expect("the local launchers");
+        let order = bar.order();
+        assert_eq!(&order[..3], ["shell", "codex", "claude"], "the saved order comes back");
+        assert_eq!(order.len(), crate::tmux::HARNESS_KEYS.len() + 1, "every launcher keeps a place");
+        assert_eq!(order.last().map(String::as_str), Some("custom-test"), "one added since comes last");
+
+        // A drag on a launcher of the local bar saves the order it leaves.
+        window.window.set_default_size(1000, 700);
+        window.window.present();
+        crate::toolbar_reorder::wait_for_layout(&bar.group);
+        let (_, custom) = bar.buttons().into_iter().find(|(key, _)| key == "custom-test").unwrap();
+        assert!(custom.is_visible(), "a valid custom launcher is offered");
+        assert!(crate::toolbar_reorder::drag_to(&bar.group, &custom, -40.0).marked);
+        assert_eq!(bar.order().first().map(String::as_str), Some("custom-test"));
+        assert_eq!(window.state.borrow().launcher_order, bar.order());
         window.window.close();
         let _ = std::fs::remove_dir_all(root);
     }
