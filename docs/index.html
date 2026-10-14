@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>SUPER DESKTOP — your AI workspace for Omarchy</title>
-<meta name="description" content="SUPER DESKTOP: every AI coding agent on every PC, one shortcut away on Omarchy, and on your Android phone. Direct and encrypted, with no accounts or servers.">
+<meta name="description" content="SUPER DESKTOP: every AI coding agent on every PC, one shortcut away on Omarchy, and on your Android phone. Your AI can add plugins to it. Direct and encrypted, with no accounts or servers.">
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
@@ -28,6 +28,7 @@
 <script>document.documentElement.className = "js";</script>
 <script src="assets/demo-model.js" defer></script>
 <script src="assets/demo-stage.js" defer></script>
+<script src="assets/demo-plugins.js" defer></script>
 <script src="assets/demo-phone.js" defer></script>
 <script src="assets/main.js" defer></script>
 </head>
@@ -40,6 +41,7 @@
       <a href="#agents">Agents</a>
       <a href="#phone">Phone</a>
       <a href="#remote">Other PCs</a>
+      <a href="#plugins">Plugins</a>
       <a href="#cli">For agents</a>
       <a href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </nav>
@@ -50,6 +52,7 @@
 <main id="top">
   <section class="hero">
     <div class="wrap">
+      <a class="announce" href="#plugins"><b>New in 1.6.0</b>Plugins: your AI makes SUPER DESKTOP yours <span aria-hidden="true">→</span></a>
       <h1>Every AI agent.<br><span class="grad">One shortcut away.</span></h1>
       <p class="lede">A hidden workspace for Omarchy. Your coding agents live in it, on every PC, and in your pocket.</p>
       <div class="cta">
@@ -208,6 +211,68 @@
           </div>
           <p class="caption">Real recording: a second, paired PC opened over the local network.</p>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature wide reveal-up" id="plugins">
+    <div class="wrap">
+      <div class="copy">
+        <p class="eyebrow"><span class="new-badge">NEW IN 1.6.0</span>Plugins</p>
+        <h2>Use your AI to make it yours.</h2>
+        <p>Say what you want: a dock, a timer, a game. <strong>Your own AI agent writes the plugin</strong>, and you watch it appear on your desktop as it works.</p>
+        <p>Then ask for more. Every save reloads it on screen, in your theme’s colors.</p>
+      </div>
+      <div class="media">
+        <div class="tabs" role="tablist" aria-label="Plugins demo">
+          <button role="tab" type="button" aria-selected="true" aria-controls="plugins-try" id="plugins-try-tab">✋ Try it</button>
+          <button role="tab" type="button" aria-selected="false" aria-controls="plugins-real" id="plugins-real-tab">📷 Real plugins</button>
+        </div>
+        <div class="panel" id="plugins-try" role="tabpanel" aria-labelledby="plugins-try-tab">
+          <div class="try-hints" aria-label="Things to try">
+            <span data-step="form">Click ✨ in the top bar</span>
+            <span data-step="create">Create a plugin</span>
+            <span data-step="enhance">Ask its agent for a change</span>
+            <span data-step="use">Use it: play Snake, start a timer</span>
+          </div>
+          <div class="sd-stage" data-stage="try" data-pulse=".create" id="plugins-stage"></div>
+          <p class="caption">A simulation: the agent’s output is sample text, and it builds one of four sample plugins. In the app, your agent writes the plugin you ask for.</p>
+        </div>
+        <div class="panel" id="plugins-real" role="tabpanel" aria-labelledby="plugins-real-tab" hidden>
+          <div class="plug-gallery">
+            <figure>
+              <img src="media/plugin-clock.webp" loading="lazy" width="144" height="660" alt="A clock dock: hours, minutes, weekday, date and battery">
+              <figcaption><code>dock</code></figcaption>
+            </figure>
+            <figure>
+              <img src="media/plugin-snake.webp" loading="lazy" width="840" height="920" alt="The Snake plugin on a card, with its score and best score">
+              <figcaption><code>card</code> Snake, played with the arrow keys</figcaption>
+            </figure>
+            <div class="col">
+              <figure>
+                <div class="items">
+                  <img src="media/plugin-pomodoro-item.webp" loading="lazy" width="184" height="72" alt="A Pomodoro item in the top bar showing 17:40 left">
+                  <img src="media/plugin-bell.webp" loading="lazy" width="104" height="72" alt="A reminder bell in the top bar">
+                </div>
+                <figcaption><code>toolbar.item</code> A Pomodoro timer and a reminder bell</figcaption>
+              </figure>
+              <figure>
+                <img src="media/plugin-reminder.webp" loading="lazy" width="840" height="632" alt="The Reminder plugin's popup: when, with quick presets, and what">
+                <figcaption><code>popup</code> Reminder: a quick form under its bell</figcaption>
+              </figure>
+            </div>
+          </div>
+          <p class="caption">Real plugins, drawn by SUPER DESKTOP’s plugin host with <code>super-desktop plugin snapshot</code>: the same check agents run to see their work.</p>
+        </div>
+      </div>
+      <div class="plug-ways">
+        <div><b>✨</b><h3>Create with AI</h3><p>Click ✨ in the top bar, say what it should do and where it goes. Claude Code, Codex or another agent builds it.</p></div>
+        <div><b>🪄</b><h3>Edit &amp; Enhance</h3><p>Open an agent on any plugin to change it. A plugin from someone else becomes your own copy first.</p></div>
+        <div><b>🧭</b><h3>Discover</h3><p><strong>Settings → Plugins → Discover</strong> lists shared plugins. One runs only after you approve it, and AI can review it for you first.</p></div>
+        <div><b>📤</b><h3>Share yours</h3><p><code>super-desktop plugin publish</code> checks it is ready for the <a href="https://github.com/gladimdim/super-desktop-plugins">public plugin list</a>.</p></div>
+      </div>
+      <div class="slots" aria-label="Where plugins go">
+        <span>Docks at the edges</span><span>Top-bar items</span><span>Popups</span><span>Panels</span><span>Cards on the desktop</span><span>Full-screen views</span><span>Settings sections</span>
       </div>
     </div>
   </section>

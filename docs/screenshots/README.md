@@ -98,6 +98,25 @@ audio. Each has a WebP poster taken from a frame inside it.
 The captions in the clips come from the trailer. The interactive demos on the
 page are a simulation in `../assets/` with sample data, labeled as such.
 
+## Plugin pictures (`../media/plugin-*.webp`)
+
+The "Real plugins" tab of the Plugins section. Each is one plugin surface
+drawn off screen by SUPER DESKTOP 1.6.0's plugin host with `super-desktop
+plugin snapshot --scale 2`, on 2026-10-14 in the Tokyo Night theme, from the
+example plugins in `skills/super-desktop-plugin/examples/` copied to a
+scratch plugins folder (`SD_PLUGINS_DIR`, `SD_PLUGINS_STATE_DIR`).
+
+- `plugin-snake.webp` (840 × 920): `snake --surface game`, with a saved best
+  score of 27 (`--values`), after clicking the board and steering with the
+  arrow keys (`--do`).
+- `plugin-reminder.webp` (840 × 632): `reminder --surface add` after picking
+  "30 min" and typing the text (`--do`).
+- `plugin-bell.webp` (104 × 72) and `plugin-pomodoro-item.webp` (184 × 72): the
+  `reminder` and `pomodoro` top-bar items at `--height 36`, the timer running.
+- `plugin-clock.webp` (144 × 660): `clock-dock --surface main --height 330`.
+
+Converted from PNG to WebP at quality 88 with ImageMagick, without resizing.
+
 ## Social preview card (`../media/social-card.jpg`)
 
 The 1200 × 630 image that link previews show (Open Graph and X/Twitter

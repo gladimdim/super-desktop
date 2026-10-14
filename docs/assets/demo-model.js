@@ -106,6 +106,7 @@
         pid: 2000 + Math.floor(Math.random() * 60000), x: 0, y: 0, w: 560, h: 330, z: n, mini: false, timers: [],
       };
       Object.assign(s, opts.geom || this.place(pc, s.w, s.h));
+      if (opts.extra) Object.assign(s, opts.extra);
       a.banner(folder).forEach(([t, c]) => s.lines.push([t, c]));
       if (a.shell) s.lines.push(["", ""]);
       this.sessions.push(s);
