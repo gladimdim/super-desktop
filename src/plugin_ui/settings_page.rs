@@ -143,7 +143,7 @@ pub fn build(root: &gtk4::Box) -> Rc<dyn Fn()> {
         }
     });
     let root = &installed;
-    let list = gtk4::Box::new(Orientation::Vertical, 10);
+    let list = gtk4::Box::new(Orientation::Vertical, 12);
     list.add_css_class("harness-rows");
     root.append(&list);
     let folder = label(&format!("Your plugins are folders of QML in {}; a plugin reloads whenever one of its files is saved.", paths::plugins_dir().display()), "plugin-subtle");
@@ -264,7 +264,7 @@ impl Page {
     fn row(self: &Rc<Self>, slots: &Rc<super::slots::Slots>, id: &str, manifest: &Result<Manifest, Vec<Problem>>) -> gtk4::Box {
         let dir = slots.root().join(id);
         let card = gtk4::Box::new(Orientation::Vertical, 6);
-        card.add_css_class("plugin-settings-row");
+        card.add_css_class("plugin-installed-card");
 
         let head = gtk4::Box::new(Orientation::Horizontal, 8);
         head.add_css_class("harness-row");

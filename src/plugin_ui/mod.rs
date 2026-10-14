@@ -84,7 +84,8 @@ pub fn css(theme: &crate::theme::OmarchyTheme) -> String {
 .plugin-chip:hover {{ border-color: {accent_line}; color: {foreground}; }}
 .plugin-chip:checked {{ background-color: {accent}; color: {on_accent}; }}
 .plugin-group-title {{ color: {foreground}; font-size: 13px; font-weight: 800; margin-top: 4px; }}
-.plugin-card {{ background-color: {card_bg}; border: 1px solid {border}; border-radius: 14px; }}
+.plugin-card {{ background-color: {card_solid}; background-image: linear-gradient({card_bg}, {card_bg}); border: 1px solid {card_border}; border-radius: 14px; }}
+.plugin-installed-card {{ background-color: {card_solid}; background-image: linear-gradient({card_bg}, {card_bg}); border: 1px solid {card_border}; border-radius: 14px; padding: 12px 14px; }}
 .plugin-card:hover {{ border-color: {accent_line}; }}
 .plugin-card-preview {{ background-color: {preview_bg}; }}
 .plugin-card-placeholder {{ font-size: 34px; opacity: 0.35; }}
@@ -112,7 +113,9 @@ pub fn css(theme: &crate::theme::OmarchyTheme) -> String {
         text_soft = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.78),
         text_hint = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.55),
         chip_bg = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.07),
-        card_bg = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.035),
+        card_bg = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.045),
+        card_solid = OmarchyTheme::hex_to_rgba(&theme.background, 0.94),
+        card_border = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.14),
         preview_bg = OmarchyTheme::hex_to_rgba(&theme.foreground, 0.05),
         accent = theme.accent,
         accent_soft = OmarchyTheme::hex_to_rgba(&theme.accent, 0.22),
