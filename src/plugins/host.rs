@@ -11,6 +11,17 @@ use std::process::{Child, Command, Stdio};
 
 const MAX_PACKET: usize = 1 << 20;
 
+// Plugins run on Linux only (the overlay is GTK on Hyprland); these keep the
+// shared library building elsewhere, where `spawn` refuses.
+#[cfg(target_os = "linux")]
+const SOCKET_KIND: libc::c_int = libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const SOCKET_KIND: libc::c_int = libc::SOCK_SEQPACKET;
+#[cfg(target_os = "linux")]
+const RECEIVE_CLOEXEC: libc::c_int = libc::MSG_CMSG_CLOEXEC;
+#[cfg(not(target_os = "linux"))]
+const RECEIVE_CLOEXEC: libc::c_int = 0;
+
 pub struct SpawnOptions<'a> {
     pub host: &'a Path,
     pub qml: &'a Path,
@@ -45,10 +56,13 @@ fn cvt(result: libc::c_int) -> io::Result<libc::c_int> {
 
 impl HostProcess {
     pub fn spawn(options: &SpawnOptions) -> io::Result<Self> {
+        if !cfg!(target_os = "linux") {
+            return Err(io::Error::new(io::ErrorKind::Unsupported, "plugins run on Linux only"));
+        }
         let mut fds = [0 as RawFd; 2];
         // SAFETY: `fds` has room for the two descriptors socketpair writes.
         cvt(unsafe {
-            libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr())
+            libc::socketpair(libc::AF_UNIX, SOCKET_KIND, 0, fds.as_mut_ptr())
         })?;
         // SAFETY: socketpair succeeded, so both are fresh descriptors we own.
         let (ours, theirs) = unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
@@ -88,6 +102,7 @@ impl HostProcess {
                     return Err(io::Error::last_os_error());
                 }
                 // The host ends with the overlay, whatever way it ends.
+                #[cfg(target_os = "linux")]
                 libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
                 Ok(())
             });
@@ -175,7 +190,7 @@ pub fn send_packet(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
 
 /// One packet. `block` waits for it; otherwise `Ok(None)` when none is there.
 pub fn receive_packet(fd: RawFd, block: bool) -> io::Result<Option<(Vec<u8>, Option<OwnedFd>)>> {
-    let flags = libc::MSG_CMSG_CLOEXEC | if block { 0 } else { libc::MSG_DONTWAIT };
+    let flags = RECEIVE_CLOEXEC | if block { 0 } else { libc::MSG_DONTWAIT };
     let mut buffer = vec![0u8; MAX_PACKET];
     let mut control = [0u8; 64];
     loop {
