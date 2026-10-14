@@ -328,6 +328,9 @@ impl Page {
                 let keys: Vec<String> = m.shortcuts.iter().map(|s| format!("{} → {} {}", s.keys, s.action, s.surface)).collect();
                 card.append(&label(&format!("Shortcuts: {}", keys.join(", ")), "launcher-note"));
             }
+            if m.replaces_launchers {
+                card.append(&label("Hides the agent buttons in the top bar while it is on: it launches the agents itself.", "launcher-note"));
+            }
         }
         // Installed from elsewhere: where from, and the approval it needs.
         let places = super_desktop::plugins::install::Places::current();

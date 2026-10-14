@@ -164,6 +164,12 @@ pub fn insets() -> (i32, i32) {
     get().map_or((0, 0), |slots| slots.insets())
 }
 
+/// Whether a running plugin's top-bar item or dock replaces the built-in agent
+/// launchers ("replacesLaunchers" in its plugin.json).
+pub fn launchers_replaced() -> bool {
+    get().is_some_and(|slots| slots.launchers_replaced())
+}
+
 /// Keeps docks below the top bar and toolbar items inside it after the top
 /// bar's size changes.
 pub fn set_top_inset(top: i32) {
@@ -368,7 +374,19 @@ impl Slots {
         &self.root
     }
 
-    /// Called after plugins load, reload or go away (Settings → Plugins).
+    /// True while an approved, enabled plugin with "replacesLaunchers" has a
+    /// top-bar item or dock that has not failed. A plugin that fails to load
+    /// or keeps crashing gives the launchers back, so the agents can always
+    /// be started.
+    pub fn launchers_replaced(&self) -> bool {
+        self.plugins.borrow().values().any(|loaded| {
+            loaded.manifest.as_ref().is_ok_and(|m| m.replaces_launchers)
+                && loaded.surfaces.iter().any(|(_, surface)| !surface.failed())
+        })
+    }
+
+    /// Called after plugins load, reload or go away (Settings → Plugins),
+    /// and when a surface replacing the launchers starts or stops failing.
     pub fn on_change(&self, listener: Rc<dyn Fn()>) {
         self.listeners.borrow_mut().push(listener);
     }
@@ -1182,6 +1200,14 @@ impl Slots {
                             widget.set_vexpand(true);
                         }
                         widget.set_hexpand(false);
+                        if manifest.replaces_launchers {
+                            let weak = Rc::downgrade(self);
+                            surface.on_failed_changed(Rc::new(move || {
+                                if let Some(slots) = weak.upgrade() {
+                                    slots.notify();
+                                }
+                            }));
+                        }
                         (s.clone(), surface)
                     })
                     .collect();
@@ -1584,6 +1610,66 @@ mod tests {
         crate::gtk_test::pump_until("the panel to open again", || slots.is_panel_open("tool", "win"));
         crate::plugin_ui::settings_page::set_enabled(&plugins.join("tool"), false).unwrap();
         crate::gtk_test::pump_until("the plugin to turn off", || !slots.is_panel_open("tool", "win") && !slots.toolbar_items.is_visible());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_slots_replace_the_launchers() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::replace_the_launchers_inner");
+    }
+
+    #[test]
+    fn replace_the_launchers_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-launchers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let plugins = root.join("plugins");
+        let dir = plugins.join("agents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), serde_json::json!({"id": "agents", "api": 1, "replacesLaunchers": true, "surfaces": [
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml", "size": 60}
+        ]}).to_string()).unwrap();
+        let good = "import QtQuick\nRectangle { color: \"orange\" }\n";
+        std::fs::write(dir.join("Button.qml"), good).unwrap();
+
+        gtk4::init().unwrap();
+        let overlay = gtk4::Overlay::new();
+        let top = gtk4::Box::new(Orientation::Horizontal, 0);
+        overlay.set_child(Some(&top));
+        let slots = Slots::install(&overlay, 46);
+        // Stands in for the built-in launcher group, wired as the window does.
+        let launchers = gtk4::Box::new(Orientation::Horizontal, 0);
+        top.append(&launchers);
+        top.append(slots.toolbar());
+        launchers.set_visible(!slots.launchers_replaced());
+        slots.on_change(Rc::new({
+            let launchers = launchers.clone();
+            move || launchers.set_visible(!launchers_replaced())
+        }));
+        let window = gtk4::Window::new();
+        window.set_default_size(800, 200);
+        window.set_child(Some(&overlay));
+        window.present();
+        crate::gtk_test::pump_until("the toolbar item's frame", || view_frame(slots.toolbar_items.upcast_ref()).is_some());
+        assert!(!launchers.is_visible());
+
+        // A QML error gives the launchers back until it is fixed.
+        std::fs::write(dir.join("Button.qml"), "import QtQuick\nRectangle { color: }\n").unwrap();
+        crate::gtk_test::pump_until("the launchers after a load error", || launchers.is_visible());
+        std::fs::write(dir.join("Button.qml"), good).unwrap();
+        crate::gtk_test::pump_until("the launchers hidden again", || !launchers.is_visible());
+
+        // Turned off: they come back.
+        crate::plugin_ui::settings_page::set_enabled(&dir, false).unwrap();
+        crate::gtk_test::pump_until("the plugin to turn off", || launchers.is_visible() && !slots.toolbar_items.is_visible());
         let _ = std::fs::remove_dir_all(&root);
     }
 

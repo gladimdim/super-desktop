@@ -104,6 +104,8 @@ struct Inner {
     scale: Cell<f64>,
     pointer: Cell<(f64, f64)>,
     failed: Cell<bool>,
+    /// Told, on the next idle, when the surface starts or stops failing.
+    on_failed: RefCell<Option<Rc<dyn Fn()>>>,
     crashes: RefCell<Vec<Instant>>,
     restart: RefCell<Option<glib::SourceId>>,
     disposed: Cell<bool>,
@@ -175,6 +177,7 @@ impl QmlSurface {
             scale: Cell::new(1.0),
             pointer: Cell::new((0.0, 0.0)),
             failed: Cell::new(false),
+            on_failed: RefCell::new(None),
             crashes: RefCell::new(Vec::new()),
             restart: RefCell::new(None),
             disposed: Cell::new(false),
@@ -206,6 +209,17 @@ impl QmlSurface {
         self.inner.keeps_escape.set(keep);
     }
 
+    /// Whether it could not load, could not start or crashed too often (it
+    /// shows the error instead).
+    pub fn failed(&self) -> bool {
+        self.inner.failed.get()
+    }
+
+    /// Calls `listener` after the surface starts or stops failing.
+    pub fn on_failed_changed(&self, listener: Rc<dyn Fn()>) {
+        *self.inner.on_failed.borrow_mut() = Some(listener);
+    }
+
     /// Ends the host. The widget can be dropped afterwards.
     pub fn dispose(&self) {
         self.inner.disposed.set(true);
@@ -223,6 +237,15 @@ impl Drop for QmlSurface {
 }
 
 impl Inner {
+    fn set_failed(&self, failed: bool) {
+        if self.failed.replace(failed) == failed || self.disposed.get() {
+            return;
+        }
+        if let Some(listener) = self.on_failed.borrow().clone() {
+            glib::idle_add_local_once(move || listener());
+        }
+    }
+
     fn bind(this: &Rc<Self>) {
         let weak = Rc::downgrade(this);
         *this.view.imp().on_allocate.borrow_mut() = Some(Box::new({
@@ -443,7 +466,7 @@ impl Inner {
 
     fn start(self: &Rc<Self>) {
         let Some(binary) = paths::qml_host_binary() else {
-            self.failed.set(true);
+            self.set_failed(true);
             let message = "sd-qml-host is not installed: install qt6-declarative and update SUPER DESKTOP.";
             self.log(message);
             self.show_error(&format!("{}\n{message}", self.spec.plugin_name));
@@ -476,7 +499,7 @@ impl Inner {
                 let reader = match host.reader() {
                     Ok(reader) => reader,
                     Err(e) => {
-                        self.failed.set(true);
+                        self.set_failed(true);
                         self.show_error(&format!("{}\ncannot talk to the QML host: {e}", self.spec.plugin_name));
                         return;
                     }
@@ -526,7 +549,7 @@ impl Inner {
                 });
             }
             Err(e) => {
-                self.failed.set(true);
+                self.set_failed(true);
                 self.log(&format!("cannot start {}: {e}", binary.display()));
                 self.show_error(&format!("{}\ncannot start the QML host: {e}", self.spec.plugin_name));
             }
@@ -544,7 +567,7 @@ impl Inner {
     fn handle(self: &Rc<Self>, message: FromHost, fd: Option<std::os::fd::OwnedFd>) {
         match message {
             FromHost::Ready => {
-                self.failed.set(false);
+                self.set_failed(false);
                 self.error.set_visible(false);
                 let (width, height) = self.size.get();
                 self.send(&protocol::resize(width, height));
@@ -552,7 +575,7 @@ impl Inner {
                 paths::write_status(&self.spec.plugin_id, "running", &json!([]));
             }
             FromHost::Error(errors) => {
-                self.failed.set(true);
+                self.set_failed(true);
                 let first = errors.get(0).cloned().unwrap_or(Value::Null);
                 let file = first["file"].as_str().unwrap_or("");
                 let file = std::path::Path::new(file).file_name().and_then(|n| n.to_str()).unwrap_or(file);
@@ -621,7 +644,7 @@ impl Inner {
         let how = status.map_or_else(|| "ended".to_owned(), |s| format!("ended ({s})"));
         self.log(&format!("QML host {how}"));
         if count >= CRASH_LIMIT {
-            self.failed.set(true);
+            self.set_failed(true);
             self.show_error(&format!(
                 "{} stopped after crashing {CRASH_LIMIT} times.\nSave a file of the plugin to try again.\n\nsuper-desktop plugin logs {}",
                 self.spec.plugin_name, self.spec.plugin_id

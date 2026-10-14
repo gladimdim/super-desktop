@@ -79,6 +79,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `minHost` | Optional: the oldest SUPER DESKTOP it works with, `"1.6.0"`. An older SUPER DESKTOP says so instead of failing on the QML. Needed to publish. |
 | `categories` | Optional, up to 5 lowercase words: `["productivity", "time"]`. Discover groups plugins by them. |
 | `enabled` | Optional, default `true`. `false` keeps the folder but shows nothing. |
+| `replacesLaunchers` | Optional, default `false`. `true`: while the plugin runs, the top bar hides SUPER DESKTOP's own agent buttons, because this plugin launches the agents (`harness.list`, `harness.launch`) from its `toolbar.item` or dock, which it must have. They come back when the user turns the plugin off, removes it, or its item fails to load. Older SUPER DESKTOP versions ignore it and keep the buttons. |
 | `surfaces` | 1–8 surfaces. |
 | `surfaces[].id` | Lowercase letters, digits, `-`; unique in the plugin. |
 | `surfaces[].slot` | Where it goes (below). |
@@ -246,6 +247,8 @@ Full working examples, copy the closest one:
 - `examples/agents-menu/`: a `toolbar.item` whose click opens a `popup`
   below it, listing the agents (`harness.list`); a click on one opens its
   card (`harness.launch`) and closes the popup (`popup.close`).
+  `"replacesLaunchers": true` hides the built-in agent buttons, so the
+  menu takes their place in the top bar.
 - `examples/reminder/`: a bell in the top bar. Click: a `popup` form (when,
   what; quick presets, text fields, Enter/Esc); right click: a `popup` list
   that removes what you click. A list saved in `sd.values`, a `Timer` that

@@ -126,6 +126,10 @@ pub struct Manifest {
     /// What it is about, for the public list ("productivity", "games"…).
     pub categories: Vec<String>,
     pub enabled: bool,
+    /// While the plugin runs, the top bar hides SUPER DESKTOP's own agent
+    /// launchers: its toolbar item or dock launches the agents instead.
+    #[serde(rename = "replacesLaunchers")]
+    pub replaces_launchers: bool,
     pub surfaces: Vec<Surface>,
     pub shortcuts: Vec<Shortcut>,
     #[serde(skip)]
@@ -473,8 +477,21 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
         Some(_) => problems.push(problem("shortcuts", format!("\"shortcuts\" must be a list of at most {MAX_SHORTCUTS}"), "Use [{\"keys\": \"Ctrl+Alt+T\", \"action\": \"card.toggle\", \"surface\": \"main\"}].")),
     }
 
+    let replaces_launchers = match object.get("replacesLaunchers") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) if surfaces.iter().any(|s| matches!(s.slot, Slot::ToolbarItem | Slot::DockLeft | Slot::DockRight)) => true,
+        Some(Value::Bool(true)) => {
+            problems.push(problem("replacesLaunchers", "\"replacesLaunchers\" needs a toolbar.item or dock surface", "Add the top-bar item or dock that launches the agents, or remove it."));
+            false
+        }
+        Some(_) => {
+            problems.push(problem("replacesLaunchers", "\"replacesLaunchers\" must be true or false", "Remove it or use a boolean."));
+            false
+        }
+    };
+
     if problems.is_empty() {
-        Ok(Manifest { id, name, description, version, min_host, categories, enabled, surfaces, shortcuts, dir: dir.to_path_buf() })
+        Ok(Manifest { id, name, description, version, min_host, categories, enabled, replaces_launchers, surfaces, shortcuts, dir: dir.to_path_buf() })
     } else {
         Err(problems)
     }
@@ -582,6 +599,29 @@ mod tests {
         ]})).unwrap_err();
         let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
         assert_eq!(fields, ["surfaces[0].tooltip", "surfaces[1].tooltip", "surfaces[2].tooltip"]);
+    }
+
+    #[test]
+    fn plugins_manifest_replaces_launchers_only_with_a_bar_surface() {
+        let dir = plugin_dir("agents", &["Button.qml", "Menu.qml"]);
+        let m = validate(&dir, &json!({"id": "agents", "api": 1, "replacesLaunchers": true, "surfaces": [
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml"},
+            {"id": "list", "slot": "popup", "qml": "Menu.qml"}
+        ]})).unwrap();
+        assert!(m.replaces_launchers);
+        let m = validate(&dir, &json!({"id": "agents", "api": 1, "surfaces": [
+            {"id": "side", "slot": "dock.left", "qml": "Button.qml"}
+        ]})).unwrap();
+        assert!(!m.replaces_launchers);
+        let problems = validate(&dir, &json!({"id": "agents", "api": 1, "replacesLaunchers": true, "surfaces": [
+            {"id": "list", "slot": "popup", "qml": "Menu.qml"}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "replacesLaunchers");
+        assert!(problems[0].message.contains("toolbar.item or dock"));
+        let problems = validate(&dir, &json!({"id": "agents", "api": 1, "replacesLaunchers": "yes", "surfaces": [
+            {"id": "side", "slot": "dock.left", "qml": "Button.qml"}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "replacesLaunchers");
     }
 
     #[test]

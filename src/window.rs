@@ -1087,6 +1087,18 @@ impl SuperDesktopWindow {
                 });
             }
         }));
+        // A plugin that launches the agents itself ("replacesLaunchers") hides
+        // these buttons while it runs; they come back when it is turned off,
+        // removed or fails.
+        harness_bar.group.set_visible(!plugin_slots.launchers_replaced());
+        plugin_slots.on_change(Rc::new({
+            let group = harness_bar.group.downgrade();
+            move || {
+                if let Some(group) = group.upgrade() {
+                    group.set_visible(!crate::plugin_ui::slots::launchers_replaced());
+                }
+            }
+        }));
         hud.append(&top_bar_content(&hud_left, &launchers, &hud_right));
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
