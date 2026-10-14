@@ -30,7 +30,8 @@ The installer needs nothing set up beforehand. It:
 
 - installs the system packages it needs that are missing, with `pacman` (it
   asks for your password once): the build tools, GTK 4, gtk4-layer-shell, VTE,
-  tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap and poppler;
+  Qt Quick (for plugins), tmux, wl-clipboard, libnotify, sqlite, avahi,
+  bubblewrap and poppler;
 - installs Rust with the official rustup into `~/.cargo` and `~/.rustup` when
   there is no Rust 1.92 or newer, without changing your shell profile;
 - downloads the source of the newest
@@ -618,7 +619,7 @@ State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace
 
 - OS is Omarchy/Arch, Wayland Hyprland session with a display (`echo $WAYLAND_DISPLAY` must be non-empty for the overlay; build works headless, showing does not).
 - You run commands as the **user** (never root for build/install steps).
-- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
+- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `qt6-base`, `qt6-declarative`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
 - Installing packages runs `sudo pacman`, which reads the user's password from the terminal. Run the installer in a terminal the user can type into. Without one, install the missing packages first (the installer prints the `pacman` command).
 
 ### 1. Install (the only supported way)
