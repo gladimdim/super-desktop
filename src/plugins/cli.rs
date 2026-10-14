@@ -1,6 +1,6 @@
 //! `super-desktop plugin …`: the commands an agent uses to make a plugin and
 //! check its own work. None of them needs a running overlay.
-use super::{install, manifest, paths, skill};
+use super::{install, manifest, paths, registry, skill};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,7 +17,10 @@ const USAGE: &str = "usage: super-desktop plugin <command>
                                       render a surface to a PNG off screen
   logs <id> [--lines N]               the end of the plugin's log
   doctor [--json]                     what works and what is missing for plugins
-  install <git-url|folder> [--json]   install a shared plugin; it runs once approved
+  search [TEXT] [--category C] [--json]
+                                      the public plugin list, by name or by category
+  install <id|git-url|folder> [--json]
+                                      install a plugin (an id from search); it runs once approved
   approve <id> [--json]               let an installed plugin run
   update <id> [--json]                fast-forward an installed plugin from its git source
   remove <id> [--json]                move a plugin's folder to the trash
@@ -101,6 +104,7 @@ pub fn run(args: &[String]) -> i32 {
         "snapshot" => Flags::parse(rest, &["surface", "width", "height", "scale", "out", "wait", "values"]).and_then(|f| snapshot(&f)),
         "logs" => Flags::parse(rest, &["lines"]).and_then(|f| logs(&f)),
         "doctor" => Flags::parse(rest, &[]).map(|f| doctor(f.json)),
+        "search" => Flags::parse(rest, &["category"]).and_then(|f| search(&f)),
         "install" => Flags::parse(rest, &[]).and_then(|f| install_command(&f)),
         "approve" => Flags::parse(rest, &[]).and_then(|f| one_id(&f).and_then(|id| {
             install::approve(&install::Places::current(), &id)?;
@@ -472,11 +476,73 @@ fn report(as_json: bool, value: Value, text: &str) {
     }
 }
 
+/// The public plugin list, filtered; each with whether it is here already.
+fn search(flags: &Flags) -> Result<i32, String> {
+    let query = flags.positional.join(" ");
+    let (entries, note) = match registry::fetch() {
+        Ok((entries, _)) => (entries, None),
+        Err(e) => match registry::cached() {
+            Some((entries, _)) => (entries, Some(format!("offline ({e}); showing the list from the last fetch"))),
+            None => return Err(e),
+        },
+    };
+    let category = flags.get("category");
+    let order = if category.is_some() { registry::Order::Name } else { registry::Order::Category };
+    let found = registry::select(&entries, &query, category, order);
+    let places = install::Places::current();
+    let state = |e: &registry::Entry| {
+        if places.plugins.join(&e.id).exists() {
+            if install::approved(&places, &e.id) { "installed" } else { "waiting for approval" }
+        } else {
+            "not installed"
+        }
+    };
+    let compat = |e: &registry::Entry| match e.compatibility() {
+        registry::Compatibility::Ok => None,
+        registry::Compatibility::MadeForNewer(v) => Some(format!("made for SUPER DESKTOP {v} or newer; this is {}", env!("CARGO_PKG_VERSION"))),
+        registry::Compatibility::NeedsApi(api) => Some(format!("needs plugin API {api}; update SUPER DESKTOP")),
+    };
+    if flags.json {
+        let rows: Vec<Value> = found.iter().map(|(e, _)| json!({
+            "id": e.id, "name": e.name, "description": e.description, "author": e.author, "categories": e.tags,
+            "slots": e.slots, "repo": e.web_url(), "minHost": e.min_host, "api": e.api,
+            "state": state(e), "warning": compat(e),
+        })).collect();
+        print_json(&json!({"ok": true, "source": registry::source(), "note": note, "categories": registry::categories(&entries), "plugins": rows}));
+        return Ok(0);
+    }
+    if let Some(note) = &note {
+        println!("{note}");
+    }
+    if found.is_empty() {
+        println!("No plugin matches. Categories: {}", registry::categories(&entries).join(", "));
+        return Ok(0);
+    }
+    let mut group: Option<&str> = None;
+    for (e, under) in &found {
+        if let Some(under) = under.as_deref().filter(|u| Some(*u) != group) {
+            println!("\n{under}");
+            group = Some(under);
+        }
+        println!("  {:<16} {} by {} ({})", e.id, e.name, e.author, state(e));
+        println!("  {:<16} {}", "", e.description);
+        if let Some(warning) = compat(e) {
+            println!("  {:<16} ! {warning}", "");
+        }
+    }
+    println!("\nInstall one: super-desktop plugin install <id>. Listing is not a review: read it before you approve it.");
+    Ok(0)
+}
+
 fn install_command(flags: &Flags) -> Result<i32, String> {
     let [source] = flags.positional.as_slice() else {
-        return Err("install needs one git URL or folder".into());
+        return Err("install needs one plugin id, git URL or folder".into());
     };
-    let installed = install::install(&install::Places::current(), source)?;
+    let (source, entry) = registry::resolve(source)?;
+    if let Some(registry::Compatibility::NeedsApi(api)) = entry.as_ref().map(registry::Entry::compatibility) {
+        return Err(format!("{} needs plugin API {api}; update SUPER DESKTOP first", entry.map(|e| e.id).unwrap_or_default()));
+    }
+    let installed = install::install_as(&install::Places::current(), &source, entry.as_ref().map(|e| e.id.as_str()))?;
     let surfaces: Vec<Value> = installed.manifest.surfaces.iter()
         .map(|s| json!({"id": s.id, "slot": s.slot.name(), "qml": s.qml}))
         .collect();
@@ -506,7 +572,7 @@ mod tests {
         assert!(command_help("path").unwrap().contains("print the plugins folder"));
         assert!(command_help("nope").is_none());
         // Every command in the dispatch has its help.
-        for command in ["list", "new", "check", "snapshot", "logs", "doctor", "install", "approve", "update", "remove", "path"] {
+        for command in ["list", "new", "check", "snapshot", "logs", "doctor", "search", "install", "approve", "update", "remove", "path"] {
             assert!(command_help(command).is_some(), "{command}");
         }
     }

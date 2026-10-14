@@ -75,13 +75,44 @@ struct Page {
 /// Builds the page in `root`; the returned closure refreshes it (call it
 /// when the page is shown).
 pub fn build(root: &gtk4::Box) -> Rc<dyn Fn()> {
+    let top = gtk4::Box::new(Orientation::Horizontal, 8);
+    top.set_halign(Align::Start);
     let create = gtk4::Button::with_label("✨ Create a plugin with AI");
     create.add_css_class("launcher-btn");
     create.add_css_class("launcher-btn-primary");
-    create.set_halign(Align::Start);
     create.set_tooltip_text(Some("Describe a widget, toolbar, panel or game; an AI agent builds it here"));
     create.connect_clicked(|_| super::create::open());
-    root.append(&create);
+    top.append(&create);
+    // The public plugin list, made when first asked for.
+    let get = gtk4::Button::with_label("🧩 Get plugins");
+    get.add_css_class("launcher-btn");
+    get.set_tooltip_text(Some("Browse plugins other people share and install them"));
+    top.append(&get);
+    root.append(&top);
+    let browser_slot = gtk4::Box::new(Orientation::Vertical, 0);
+    root.append(&browser_slot);
+    let browser: Rc<RefCell<Option<Rc<super::browse::Browser>>>> = Rc::new(RefCell::new(None));
+    get.connect_clicked({
+        let (browser, browser_slot) = (Rc::clone(&browser), browser_slot.clone());
+        move |get| {
+            let mut browser = browser.borrow_mut();
+            match browser.as_ref() {
+                Some(shown) => {
+                    let visible = !shown.widget.is_visible();
+                    shown.widget.set_visible(visible);
+                    if visible {
+                        shown.render();
+                    }
+                }
+                None => {
+                    let made = super::browse::Browser::new();
+                    browser_slot.append(&made.widget);
+                    *browser = Some(made);
+                }
+            }
+            get.set_label(if browser.as_ref().is_some_and(|b| b.widget.is_visible()) { "🧩 Hide plugin list" } else { "🧩 Get plugins" });
+        }
+    });
     if paths::qml_host_binary().is_none() {
         let missing = label(
             "Plugins cannot be drawn: the QML host (sd-qml-host) is not installed. Install qt6-declarative, then update SUPER DESKTOP. `super-desktop plugin doctor` says more.",

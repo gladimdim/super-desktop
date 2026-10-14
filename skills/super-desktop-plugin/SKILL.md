@@ -380,7 +380,9 @@ a pull request adding to `registry.json`, in id order,
   is missing (the QML host, Qt Quick, the overlay) and how to fix it.
 - Sharing: a plugin is shared as a git repository with `plugin.json` at its
   top level (the folder itself). Others run
-  `super-desktop plugin install <git url>`; it does not run until they approve
+  `super-desktop plugin install <git url>`, or `install <id>` for one in the
+  public list (`super-desktop plugin search [text]`; Settings → Plugins →
+  Get plugins); it does not run until they approve
   it (Settings → Plugins or `super-desktop plugin approve <id>`).
   `super-desktop plugin update <id>` fast-forwards it; `remove` moves it to the
   trash. Keep the id stable: it is the folder name on every PC. Do not commit

@@ -114,6 +114,12 @@ pub struct Installed {
 
 /// Installs from a git URL or a local folder, not approved.
 pub fn install(places: &Places, source: &str) -> Result<Installed, String> {
+    install_as(places, source, None)
+}
+
+/// Like `install`; with `expected`, refuses a plugin.json with another id
+/// (an entry of the plugin list must install what it says).
+pub fn install_as(places: &Places, source: &str, expected: Option<&str>) -> Result<Installed, String> {
     let root = &places.plugins;
     fs::create_dir_all(root).map_err(|e| e.to_string())?;
     // A hidden folder: the overlay ignores it while it is being filled.
@@ -126,7 +132,7 @@ pub fn install(places: &Places, source: &str) -> Result<Installed, String> {
             None
         } else {
             let out = Command::new("git")
-                .args(["clone", "--depth", "1", "--quiet", source])
+                .args(["clone", "--depth", "1", "--quiet", "--", source])
                 .arg(&staging)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .output()
@@ -143,6 +149,9 @@ pub fn install(places: &Places, source: &str) -> Result<Installed, String> {
         let id = value["id"].as_str().unwrap_or("").to_owned();
         if !manifest::valid_plugin_id(&id) {
             return Err(format!("plugin.json has an invalid id {id:?}"));
+        }
+        if let Some(expected) = expected.filter(|e| *e != id) {
+            return Err(format!("{source} holds plugin {id:?}, not {expected:?} as the plugin list says; nothing was installed"));
         }
         let dir = root.join(&id);
         if dir.exists() {
@@ -300,6 +309,8 @@ mod tests {
         assert!(!copied.dir.join(".git").exists(), "a copy leaves the source's git history behind");
         assert!(!approved(&places, "shared"), "installed plugins wait for approval");
         assert!(install(&places, upstream.to_str().unwrap()).is_err(), "a second install refuses to overwrite");
+        let other = install_as(&places, upstream.to_str().unwrap(), Some("other")).unwrap_err();
+        assert!(other.contains("not \"other\""), "{other}");
         let trash = root.join("trash");
         let trashed = remove(&places, "shared", &trash).unwrap();
         assert!(trashed.join("Dock.qml").is_file());
