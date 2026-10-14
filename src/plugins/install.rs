@@ -71,18 +71,35 @@ fn nudge(dir: &Path) {
     }
 }
 
+/// Copies a plugin folder, without its `.git` (a copied plugin is not
+/// updated through git). A file that goes away while it is copied, such as
+/// git's own temporary files, is skipped.
 fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::create_dir_all(to)?;
     for entry in fs::read_dir(from)? {
         let entry = entry?;
-        let kind = entry.file_type()?;
-        let target = to.join(entry.file_name());
-        if kind.is_dir() {
-            copy_dir(&entry.path(), &target)?;
-        } else if kind.is_file() {
-            fs::copy(entry.path(), target)?;
+        if entry.file_name() == ".git" {
+            continue;
         }
-        // Symbolic links are not copied: a plugin cannot point outside itself.
+        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        let target = to.join(entry.file_name());
+        let copied = if kind.is_dir() {
+            copy_dir(&entry.path(), &target)
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target).map(|_| ())
+        } else {
+            // Symbolic links are not copied: a plugin cannot point outside itself.
+            Ok(())
+        };
+        match copied {
+            Err(e) if gone(&e) => {}
+            other => other?,
+        }
     }
     Ok(())
 }
@@ -279,6 +296,8 @@ mod tests {
         // A local folder is copied.
         let copied = install(&places, upstream.to_str().unwrap()).unwrap();
         assert!(copied.commit.is_none());
+        assert!(copied.dir.join("Dock.qml").is_file());
+        assert!(!copied.dir.join(".git").exists(), "a copy leaves the source's git history behind");
         assert!(!approved(&places, "shared"), "installed plugins wait for approval");
         assert!(install(&places, upstream.to_str().unwrap()).is_err(), "a second install refuses to overwrite");
         let trash = root.join("trash");
