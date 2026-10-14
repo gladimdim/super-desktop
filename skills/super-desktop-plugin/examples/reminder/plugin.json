@@ -1,0 +1,11 @@
+{
+  "id": "reminder",
+  "name": "Reminder",
+  "description": "A bell in the top bar: click it to add a reminder (when and what), right-click it to see and remove them. When one is due it notifies, plays a ding-dong and the bell shakes until clicked.",
+  "api": 1,
+  "surfaces": [
+    { "id": "main", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 52, "tooltip": "Click to add a reminder · right-click to see the list" },
+    { "id": "add", "slot": "popup", "qml": "AddPopup.qml", "size": 420, "height": 316 },
+    { "id": "list", "slot": "popup", "qml": "ListPopup.qml", "size": 320, "height": 280 }
+  ]
+}

@@ -32,7 +32,11 @@ path` prints the folder). The folder name is the plugin id.
 3. `super-desktop plugin snapshot <id> --surface <surface id> --out /tmp/<id>.png --json`
    for **each** surface → **open the PNG and look at it.** `paintedFraction: 0`
    means nothing visible was drawn. Use `--width`, `--height` and `--scale 2`
-   to see other sizes. Snapshots use the user's current theme and saved values.
+   to see other sizes. Snapshots use the user's current theme and saved values;
+   `--values sample.json` (one JSON object, as `sd.values` sees it) shows other
+   states (a full list, an empty one, an alarm going off), and `--wait 120`
+   catches an animation part-way. What the QML saves during a snapshot is
+   thrown away.
 4. When the user has SUPER DESKTOP open, the plugin is already live. Runtime
    errors and `sd.log` output: `super-desktop plugin logs <id>`.
 5. Repeat until check is clean and the snapshot looks right.
@@ -100,7 +104,12 @@ through `sd.values` (and files or programs you run).
 3. **Use the theme**: colors from `sd.theme` (`background`, `foreground`,
    `accent`, `muted`, `surface`, `selection`, `red`, `green`, `yellow`,
    `blue`, `magenta`, `cyan`, `orange`), font from `sd.theme.fontFamily`.
-   They change live when the user switches the Omarchy theme. Standard
+   They change live when the user switches the Omarchy theme. **`muted` is
+   for borders and dividers, not text**: on its own background it can be
+   nearly invisible. Some themes also make `red` or `yellow` a shade of blue,
+   or too dark to read. Write text in `foreground` (secondary text: it faded
+   toward `background`), and check any other text color against
+   `background` (see "Pitfalls and recipes"). Standard
    `QtQuick.Controls` (Button, CheckBox, SpinBox, Slider, TextField…) already
    use the theme's colors. A transparent root shows the desktop through.
    Set `cursorShape` on a `MouseArea` (e.g. `Qt.PointingHandCursor`) for
@@ -134,7 +143,7 @@ through `sd.values` (and files or programs you run).
 | `sd.exec([program, args…], function(r) {})` | Run a program; `r.code`, `r.stdout`, `r.stderr`. No shell: use `["sh", "-c", "…"]` when you need one. Working folder: the plugin folder. |
 | `sd.run([program, args…])` | Start a program and don't wait for it. |
 | `sd.log(text)` | Write to the plugin log. |
-| `sd.values` | The plugin's saved values (an object), shared by all its surfaces and kept across restarts. Bind to it: `checked: sd.values.dark === true`. Updates live (`sd.valuesChanged`) when any surface saves. |
+| `sd.values` | The plugin's saved values (a plain JS object; lists are JS arrays), shared by all its surfaces and kept across restarts. Bind to it: `checked: sd.values.dark === true`. Updates live (`sd.valuesChanged`) when any surface saves. Do not change it in place: copy, change the copy, `sd.setValue` it. Kept in `~/.local/state/super-desktop/plugins/<id>.data.json`. |
 | `sd.setValue(key, value)` | Save a JSON value (`null` removes it). At most 1 MiB in total. |
 | `sd.value(key, fallback)` | Read one value (not a binding: prefer `sd.values.key`). |
 | `sd.env(name)` | A variable of the user's environment, e.g. `sd.env("SHELL")`, `sd.env("HOME")`. |
@@ -148,6 +157,7 @@ as the program expects them: `"\r"` for Enter, `"\x7f"` for Backspace,
 use `TerminalView` (below)** instead of handling them yourself. Programs started with
 `sd.run`, `sd.exec` and `sd.openPty` get the user's environment, display
 included, so GUI apps open normally.
+| `sd.visible` | Whether SUPER DESKTOP is on screen. Bind animations to it (`running: ringing && sd.visible`): surfaces are not drawn while it is hidden. |
 | `sd.visibleChanged(visible)` | Signal: the overlay was shown or hidden (`Connections { target: sd; function onVisibleChanged(v) {} }`). |
 
 ### `sd.call` methods
@@ -216,6 +226,12 @@ Full working examples, copy the closest one:
 - `examples/agents-menu/`: a `toolbar.item` whose click opens a `popup`
   below it, listing the agents (`harness.list`); a click on one opens its
   card (`harness.launch`) and closes the popup (`popup.close`).
+- `examples/reminder/`: a bell in the top bar. Click: a `popup` form (when,
+  what; quick presets, text fields, Enter/Esc); right click: a `popup` list
+  that removes what you click. A list saved in `sd.values`, a `Timer` that
+  checks what is due (in the `toolbar.item`, which keeps running), a
+  notification, a sound, a shaking icon over a moving theme gradient, the
+  `tooltip`, and text colors checked for contrast (`reminders.js`).
 - `examples/agents-dock/`: a dock listing the agent cards with their status
   (`cards.list`), a click jumps to one (`cards.focus`), and ✦ summarizes what
   an agent is doing (`cards.text` → `llm.complete`).
@@ -250,6 +266,84 @@ Rectangle {
     ToolTip.text: tip
 }
 ```
+
+## Pitfalls and recipes
+
+**What runs when.** Docks and `toolbar.item` surfaces run as long as the
+plugin is loaded, also while SUPER DESKTOP is hidden: their `Timer`s keep
+going, but nothing is drawn. Panels, popups, cards and settings pages run only
+while shown, so work that must happen in the background (checking a clock,
+polling) belongs in a dock or toolbar item. Animations: `running: sd.visible`.
+
+**Saving a list.** Read, copy, change, save the whole key; all surfaces see it:
+
+```js
+function add(item) {
+    var list = (sd.values.items || []).slice()   // a copy
+    list.push(item)
+    sd.setValue("items", list)
+}
+function remove(id) {
+    sd.setValue("items", (sd.values.items || []).filter(i => i.id !== id))
+}
+```
+
+Two surfaces that save the same key at the same moment: the last one wins.
+Let one surface own a key, or save small keys. To look at what is saved:
+`cat ~/.local/state/super-desktop/plugins/<id>.data.json`.
+
+**Readable colors** in every theme (light and dark): compare with
+`background` and fall back to `foreground`. In a `.pragma library` JS file:
+
+```js
+function lum(c) {
+    var s = String(c); if (s.length === 9) s = "#" + s.slice(3)
+    var v = [1, 3, 5].map(i => parseInt(s.substr(i, 2), 16) / 255)
+        .map(x => x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4))
+    return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+}
+function contrast(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) }
+// The first theme color that reads on the background, else the foreground.
+function readable(theme, names) {
+    for (var i = 0; i < names.length; i++)
+        if (theme[names[i]] && contrast(theme[names[i]], theme.background) >= 4.5) return theme[names[i]]
+    return theme.foreground
+}
+```
+
+Then `color: R.readable(sd.theme, ["accent", "blue", "cyan"])`; secondary
+text: `Qt.alpha(sd.theme.foreground, 0.7)`. `examples/reminder/reminders.js`
+has the full version (`soft`, `mix`).
+
+**A sound**: put a `.wav` in the plugin folder and play it on the event,
+with whatever player the PC has:
+
+```js
+sd.exec(["sh", "-c", "pw-play \"$1\" 2>/dev/null || paplay \"$1\" 2>/dev/null || aplay -q \"$1\"",
+         "sh", sd.pluginDir + "/ding.wav"], function(r) { if (r.code !== 0) sd.log(r.stderr) })
+```
+
+`/usr/share/sounds/freedesktop/stereo/` (`.oga`, for `pw-play`/`paplay`) has
+standard sounds. Play only for something the user asked for (a reminder,
+a finished task), and not again and again without end.
+
+**Popups from a button**: `sd.call("popup.toggle", {surface})` on the click.
+Inside the popup, `sd.call("popup.close", {surface: sd.surfaceId})` after a
+choice. A dock with several buttons passes the button's box
+(`var p = button.mapToItem(null, 0, 0)`; `{surface, x: p.x, y: p.y, width:
+button.width, height: button.height}`) so the popup opens next to it.
+
+**Publishing.** Push the plugin folder as its own git repository
+(`plugin.json` at the top, a README that says what it does on the user's PC:
+programs it runs, files it writes, anything it sends; `.claude/skills/` in
+`.gitignore`). Check it installs: `super-desktop plugin install <url>` on a
+fresh folder (`SD_PLUGINS_DIR=/tmp/x/plugins SD_PLUGINS_STATE_DIR=/tmp/x/state`).
+Then list it in the public registry, github.com/gladimdim/super-desktop-plugins:
+a pull request adding to `registry.json`, in id order,
+`{"id", "name", "description", "repo": "owner/name", "tags", "author",
+"api": 1, "minHost": "<lowest SUPER DESKTOP version>", "slots": [sorted]}`
+(`id`, `name`, `api` and `slots` must match `plugin.json`; its
+`validate.py` checks).
 
 ## Other commands
 

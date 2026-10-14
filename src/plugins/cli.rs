@@ -13,7 +13,8 @@ const USAGE: &str = "usage: super-desktop plugin <command>
                                       create a working plugin to start from
   check <id|dir> [--json]             manifest and QML errors (exit 0 when clean)
   snapshot <id|dir> [--surface ID] [--width W] [--height H] [--scale S]
-           [--out FILE.png] [--json]  render a surface to a PNG off screen
+           [--wait MS] [--values FILE.json] [--out FILE.png] [--json]
+                                      render a surface to a PNG off screen
   logs <id> [--lines N]               the end of the plugin's log
   doctor [--json]                     what works and what is missing for plugins
   install <git-url|folder> [--json]   install a shared plugin; it runs once approved
@@ -81,7 +82,7 @@ pub fn run(args: &[String]) -> i32 {
         "list" => Flags::parse(rest, &[]).map(|f| list(f.json)),
         "new" => Flags::parse(rest, &["slot", "name", "request"]).and_then(|f| new(&f)),
         "check" => Flags::parse(rest, &[]).and_then(|f| check(&f)),
-        "snapshot" => Flags::parse(rest, &["surface", "width", "height", "scale", "out", "wait"]).and_then(|f| snapshot(&f)),
+        "snapshot" => Flags::parse(rest, &["surface", "width", "height", "scale", "out", "wait", "values"]).and_then(|f| snapshot(&f)),
         "logs" => Flags::parse(rest, &["lines"]).and_then(|f| logs(&f)),
         "doctor" => Flags::parse(rest, &[]).map(|f| doctor(f.json)),
         "install" => Flags::parse(rest, &[]).and_then(|f| install_command(&f)),
@@ -264,6 +265,25 @@ fn print_check(report: &Value) {
 }
 
 fn snapshot(flags: &Flags) -> Result<i32, String> {
+    let (report, out) = snapshot_report(flags, None)?;
+    let ok = report["ok"] == true;
+    if flags.json {
+        print_json(&report);
+    } else if ok {
+        println!("Wrote {} ({}x{} px, {:.0}% painted)", out.display(), report["width"], report["height"],
+            report["paintedFraction"].as_f64().unwrap_or(0.0) * 100.0);
+        for w in report["warnings"].as_array().into_iter().flatten() {
+            println!("warning: {}:{}: {}", w["file"].as_str().unwrap_or(""), w["line"], w["message"].as_str().unwrap_or(""));
+        }
+    } else {
+        print_check(&json!({"ok": false, "manifest": [], "surfaces": [{"surface": report["surface"], "errors": report["errors"]}]}));
+    }
+    Ok(if ok { 0 } else { 1 })
+}
+
+/// Renders the surface; the host's report (with `surface`) and the PNG path.
+/// `saved` is where the plugin's values are (default: its data file).
+fn snapshot_report(flags: &Flags, saved: Option<&Path>) -> Result<(Value, PathBuf), String> {
     let dir = plugin_dir(flags)?;
     let m = manifest::load(&dir).map_err(|problems| {
         format!("plugin.json has problems; run `super-desktop plugin check`: {}", problems[0].message)
@@ -281,6 +301,24 @@ fn snapshot(flags: &Flags) -> Result<i32, String> {
     let out = flags.get("out").map(PathBuf::from).unwrap_or_else(|| {
         std::env::temp_dir().join(format!("{}-{}.png", m.id, surface.id))
     });
+    // The plugin's saved values, or sample ones from --values, in a copy:
+    // what the QML saves during a snapshot is thrown away.
+    let values: Value = match flags.get("values") {
+        Some(file) => {
+            let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?;
+            let value: Value = serde_json::from_str(&text).map_err(|e| format!("{file} is not valid JSON: {e}"))?;
+            if !value.is_object() {
+                return Err(format!("{file} must hold one JSON object, like sd.values: {{\"key\": value}}"));
+            }
+            value
+        }
+        None => std::fs::read_to_string(saved.map_or_else(|| paths::data_path(&m.id), Path::to_path_buf)).ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({})),
+    };
+    let data = std::env::temp_dir().join(format!("sd-snapshot-{}-{}.json", m.id, std::process::id()));
+    std::fs::write(&data, values.to_string()).map_err(|e| format!("cannot write {}: {e}", data.display()))?;
     let theme = std::fs::read_to_string(paths::theme_path()).unwrap_or_default();
     let mut command = Command::new(&host);
     command
@@ -290,28 +328,18 @@ fn snapshot(flags: &Flags) -> Result<i32, String> {
         .args(["--plugin-id", &m.id, "--surface-id", &surface.id])
         .args(["--width", &width.to_string(), "--height", &height.to_string()])
         .args(["--scale", &scale.to_string(), "--wait", &wait.to_string()])
-        .arg("--data").arg(paths::data_path(&m.id));
+        .arg("--data").arg(&data);
     if !theme.trim().is_empty() {
         command.args(["--theme", theme.trim()]);
     }
-    let output = command.output().map_err(|e| format!("cannot run {}: {e}", host.display()))?;
+    let output = command.output();
+    let _ = std::fs::remove_file(&data);
+    let output = output.map_err(|e| format!("cannot run {}: {e}", host.display()))?;
     let mut report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({
         "ok": false, "errors": [{"message": String::from_utf8_lossy(&output.stderr).trim().to_owned()}],
     }));
     report["surface"] = json!(surface.id);
-    let ok = report["ok"] == true;
-    if flags.json {
-        print_json(&report);
-    } else if ok {
-        println!("Wrote {} ({}x{} px, {:.0}% painted)", out.display(), report["width"], report["height"],
-            report["paintedFraction"].as_f64().unwrap_or(0.0) * 100.0);
-        for w in report["warnings"].as_array().into_iter().flatten() {
-            println!("warning: {}:{}: {}", w["file"].as_str().unwrap_or(""), w["line"], w["message"].as_str().unwrap_or(""));
-        }
-    } else {
-        print_check(&json!({"ok": false, "manifest": [], "surfaces": [{"surface": surface.id, "errors": report["errors"]}]}));
-    }
-    Ok(if ok { 0 } else { 1 })
+    Ok((report, out))
 }
 
 fn logs(flags: &Flags) -> Result<i32, String> {
@@ -448,4 +476,50 @@ fn install_command(flags: &Flags) -> Result<i32, String> {
         println!("then turn it on in Settings → Plugins or run: super-desktop plugin approve {}", installed.id);
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// --values renders with sample values; a snapshot never changes the
+    /// plugin's saved values.
+    #[test]
+    fn plugins_snapshot_uses_sample_values_and_keeps_saved_ones() {
+        if paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-snapshot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("sample");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), json!({"id": "sample", "api": 1, "surfaces": [
+            {"id": "main", "slot": "panel", "qml": "Main.qml", "size": 200, "height": 120}]}).to_string()).unwrap();
+        // Painted only when it sees two items; it also tries to save.
+        std::fs::write(dir.join("Main.qml"), "import QtQuick\nRectangle {\n    color: (sd.values.items || []).length === 2 ? \"red\" : \"transparent\"\n    Component.onCompleted: sd.setValue(\"touched\", true)\n}\n").unwrap();
+        // Not paths::data_path: library tests run without the private test root.
+        let saved = root.join("sample.data.json");
+        std::fs::write(&saved, r#"{"items": [1]}"#).unwrap();
+        let sample = root.join("sample.json");
+        std::fs::write(&sample, r#"{"items": [1, 2]}"#).unwrap();
+        let shot = |extra: &[&str]| {
+            let mut args: Vec<String> = vec![dir.to_string_lossy().into(), "--out".into(), root.join("out.png").to_string_lossy().into()];
+            args.extend(extra.iter().map(|a| a.to_string()));
+            let flags = Flags::parse(&args, &["surface", "width", "height", "scale", "out", "wait", "values"]).unwrap();
+            snapshot_report(&flags, Some(&saved)).unwrap().0
+        };
+        let with_saved = shot(&[]);
+        assert_eq!(with_saved["ok"], true, "{with_saved}");
+        assert_eq!(with_saved["paintedFraction"], 0.0, "the saved values have one item");
+        let with_sample = shot(&["--values", sample.to_str().unwrap()]);
+        assert_eq!(with_sample["paintedFraction"], 1.0, "{with_sample}");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), r#"{"items": [1]}"#, "a snapshot does not save");
+        assert_eq!(std::fs::read_to_string(&sample).unwrap(), r#"{"items": [1, 2]}"#);
+        std::fs::write(root.join("bad.json"), "[1, 2]").unwrap();
+        let args: Vec<String> = vec![dir.to_string_lossy().into(), "--values".into(), root.join("bad.json").to_string_lossy().into()];
+        let flags = Flags::parse(&args, &["values"]).unwrap();
+        assert!(snapshot_report(&flags, Some(&saved)).unwrap_err().contains("one JSON object"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

@@ -23,6 +23,13 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
     ("examples/pomodoro/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Toolbar.qml")),
     ("examples/pomodoro/Panel.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Panel.qml")),
     ("examples/pomodoro/Settings.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Settings.qml")),
+    ("examples/reminder/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/reminder/plugin.json")),
+    ("examples/reminder/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/reminder/Toolbar.qml")),
+    ("examples/reminder/AddPopup.qml", include_str!("../../skills/super-desktop-plugin/examples/reminder/AddPopup.qml")),
+    ("examples/reminder/ListPopup.qml", include_str!("../../skills/super-desktop-plugin/examples/reminder/ListPopup.qml")),
+    ("examples/reminder/Bell.qml", include_str!("../../skills/super-desktop-plugin/examples/reminder/Bell.qml")),
+    ("examples/reminder/reminders.js", include_str!("../../skills/super-desktop-plugin/examples/reminder/reminders.js")),
+    ("examples/reminder/make-ding-dong.py", include_str!("../../skills/super-desktop-plugin/examples/reminder/make-ding-dong.py")),
     ("examples/snake/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/snake/plugin.json")),
     ("examples/snake/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/snake/Toolbar.qml")),
     ("examples/snake/Game.qml", include_str!("../../skills/super-desktop-plugin/examples/snake/Game.qml")),
@@ -521,7 +528,7 @@ mod tests {
                 fs::write(path, contents).unwrap();
             }
         }
-        for example in ["clock-dock", "launcher-dock", "agents-dock", "agents-menu", "pomodoro", "snake", "terminal"] {
+        for example in ["clock-dock", "launcher-dock", "agents-dock", "agents-menu", "pomodoro", "reminder", "snake", "terminal"] {
             let m = manifest::load(&root.join(example)).unwrap_or_else(|p| panic!("{example}: {p:?}"));
             // Every QML file of an example loads cleanly, when the host is built.
             if let Some(host) = crate::plugins::paths::qml_host_binary() {
@@ -536,7 +543,7 @@ mod tests {
         // Every example file is in SKILL_FILES (and so reaches plugin folders).
         let on_disk = |dir: &str| std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples").join(dir))
             .unwrap().flatten().map(|e| format!("examples/{dir}/{}", e.file_name().to_string_lossy())).collect::<Vec<_>>();
-        for example in ["clock-dock", "launcher-dock", "agents-dock", "agents-menu", "pomodoro", "snake", "terminal"] {
+        for example in ["clock-dock", "launcher-dock", "agents-dock", "agents-menu", "pomodoro", "reminder", "snake", "terminal"] {
             for file in on_disk(example) {
                 assert!(SKILL_FILES.iter().any(|(path, _)| *path == file), "{file} is missing from SKILL_FILES");
             }

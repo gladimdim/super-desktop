@@ -270,11 +270,15 @@ class SdApi : public QObject {
     Q_PROPERTY(QString instanceId READ instanceId CONSTANT)
     Q_PROPERTY(bool connected READ connected CONSTANT)
     Q_PROPERTY(int apiVersion READ apiVersion CONSTANT)
-    Q_PROPERTY(QVariantMap values READ values NOTIFY valuesChanged)
+    // Real JS objects and arrays (a QVariantMap would hand QML Qt list
+    // wrappers, for which Array.isArray is false).
+    Q_PROPERTY(QJSValue values READ values NOTIFY valuesChanged)
+    // Whether the overlay is on screen; visibleChanged(visible) follows it.
+    Q_PROPERTY(bool visible READ visible NOTIFY visibleChanged)
 public:
     SdApi(QJSEngine *js, QString pluginDir, QString pluginId, QString surfaceId, bool connected)
         : m_js(js), m_pluginDir(pluginDir), m_pluginId(pluginId), m_surfaceId(surfaceId),
-          m_connected(connected) {}
+          m_connected(connected), m_valuesJs(js->newObject()) {}
 
     QVariantMap theme() const { return m_theme; }
     QString pluginDir() const { return m_pluginDir; }
@@ -349,10 +353,17 @@ public:
         loadValues(false);
     }
 
-    QVariantMap values() const { return m_values; }
+    QJSValue values() const { return m_valuesJs; }
 
-    Q_INVOKABLE QVariant value(const QString &key, const QVariant &fallback = QVariant()) const {
-        return m_values.contains(key) ? m_values.value(key) : fallback;
+    Q_INVOKABLE QJSValue value(const QString &key, const QJSValue &fallback = QJSValue()) const {
+        return m_values.contains(key) ? toJs(m_values.value(key)) : fallback;
+    }
+
+    bool visible() const { return m_visible; }
+    void setVisible(bool visible) {
+        if (visible == m_visible) return;
+        m_visible = visible;
+        emit visibleChanged(visible);
     }
 
     // Saves `value` under `key` (any JSON value; undefined removes the key).
@@ -368,7 +379,7 @@ public:
         }
         QSaveFile file(m_dataFile);
         if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) return false;
-        m_values = next;
+        setValues(next);
         emit valuesChanged();
         return true;
     }
@@ -488,8 +499,33 @@ private:
             if (doc.isObject()) loaded = doc.object().toVariantMap();
         }
         if (loaded == m_values) return;
-        m_values = loaded;
+        setValues(loaded);
         if (notify) emit valuesChanged();
+    }
+
+    void setValues(const QVariantMap &values) {
+        m_values = values;
+        m_valuesJs = toJs(values);
+    }
+
+    // JSON-shaped variants as plain JS values: objects, arrays, scalars.
+    QJSValue toJs(const QVariant &v) const {
+        switch (v.typeId()) {
+        case QMetaType::QVariantMap: {
+            QJSValue object = m_js->newObject();
+            const QVariantMap map = v.toMap();
+            for (auto it = map.cbegin(); it != map.cend(); ++it) object.setProperty(it.key(), toJs(it.value()));
+            return object;
+        }
+        case QMetaType::QVariantList: {
+            const QVariantList list = v.toList();
+            QJSValue array = m_js->newArray(list.size());
+            for (int i = 0; i < list.size(); ++i) array.setProperty(i, toJs(list.at(i)));
+            return array;
+        }
+        default:
+            return m_js->toScriptValue(v);
+        }
     }
 
     QJSEngine *m_js;
@@ -497,6 +533,8 @@ private:
     bool m_connected;
     QVariantMap m_theme;
     QVariantMap m_values;
+    QJSValue m_valuesJs;
+    bool m_visible = true;
     QString m_dataFile;
     QFileSystemWatcher *m_watcher = nullptr;
     QList<QPointer<Pty>> m_ptys;
@@ -610,7 +648,7 @@ public:
 
     void setVisible(bool visible) {
         m_visible = visible;
-        emit m_api->visibleChanged(visible);
+        m_api->setVisible(visible);
         if (visible) scheduleRender();
     }
 

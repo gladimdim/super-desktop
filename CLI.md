@@ -880,6 +880,9 @@ super-desktop plugin doctor                             # what is missing, with 
 `check` exits 0 only when every surface loads without errors or warnings.
 `snapshot` renders off screen with the current theme and the plugin's saved
 values and reports `paintedFraction` (0 means nothing visible was drawn).
+`--values FILE.json` renders with sample values instead (one JSON object, as
+`sd.values` sees it), and `--wait MS` waits that long first, to catch an
+animation; what the QML saves during a snapshot is thrown away.
 `plugin new` also writes the plugin skill into the folder
 (`.claude/skills/super-desktop-plugin/SKILL.md`) and an `AGENTS.md`, so any
 coding agent opened there knows the plugin API. ✨ in the top bar and
@@ -905,7 +908,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `plugin list [--json]` | Offline | List QML plugins and whether they run |
 | `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page\|card\|fullscreen\|popup] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
 | `plugin check ID\|DIR [--json]` | Offline | Check a plugin's manifest and QML |
-| `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
+| `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--values FILE.json] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
 | `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |
 | `plugin doctor [--json]` | Offline | Check what plugins need |
 | `plugin install GIT_URL\|DIR [--json]` | Offline | Install a shared plugin from git or a folder |

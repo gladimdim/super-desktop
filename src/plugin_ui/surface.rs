@@ -446,6 +446,11 @@ impl Inner {
                     }
                 };
                 *self.host.borrow_mut() = Some(host);
+                // sd.visible starts true; a host restarted while the overlay
+                // is hidden learns it at once.
+                if !self.view.is_mapped() {
+                    self.send(&protocol::visible(false));
+                }
                 let generation = self.generation.get().wrapping_add(1);
                 self.generation.set(generation);
                 // Blocking reads on a thread; handled on the GTK thread.

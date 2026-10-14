@@ -307,6 +307,50 @@ mod tests {
         false
     }
 
+    /// `sd.values` hands QML plain JS objects and arrays: a saved list
+    /// passes Array.isArray (a Qt list wrapper did not), `sd.value` too.
+    #[test]
+    fn plugins_host_values_are_plain_js() {
+        let Some(binary) = crate::plugins::paths::qml_host_binary() else {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sd-plugins-values-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let data = dir.join("values.json");
+        std::fs::write(&data, r#"{"items": [{"at": 1, "tags": ["a", "b"]}], "count": 3, "on": true}"#).unwrap();
+        // Each binding throws (a warning in the report) when a value is not what JS expects.
+        let check = |qml: &str, with_data: bool| -> serde_json::Value {
+            let file = dir.join("Probe.qml");
+            std::fs::write(&file, qml).unwrap();
+            let mut command = std::process::Command::new(&binary);
+            command.arg("--check").arg(&file);
+            if with_data {
+                command.arg("--data").arg(&data);
+            }
+            serde_json::from_slice(&command.output().unwrap().stdout).unwrap()
+        };
+        let probe = r#"import QtQuick
+Item {
+    function must(ok, what) { if (!ok) throw new Error(what) }
+    property bool a: { must(Array.isArray(sd.values.items), "items is not an array"); return true }
+    property bool b: { must(Array.isArray(sd.values.items[0].tags), "nested list is not an array"); return true }
+    property bool c: { must(sd.values.items.slice().concat([2]).length === 2, "array methods"); return true }
+    property bool d: { must(Array.isArray(sd.value("items", [])) && sd.value("missing", 7) === 7, "sd.value"); return true }
+    property bool e: { must(sd.values.count === 3 && sd.values.on === true, "scalars"); return true }
+    property bool f: { must(sd.visible === true, "visible"); return true }
+}
+"#;
+        let report = check(probe, true);
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["warnings"], serde_json::json!([]), "{report}");
+        // No saved values: an empty object, not undefined.
+        let empty = check("import QtQuick\nItem { property int n: Object.keys(sd.values).length }\n", false);
+        assert_eq!(empty["warnings"], serde_json::json!([]), "{empty}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Runs the real `sd-qml-host` when it is built
     /// (`scripts/build-qml-host.sh debug`), else says why it is skipped.
     #[test]
