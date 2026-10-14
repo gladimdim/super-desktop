@@ -185,9 +185,15 @@ impl PluginCard {
 
     /// Moves and resizes the card (Arrange) and remembers it.
     pub fn set_geometry(&self, host: &CanvasHost, geometry: Geometry) {
+        self.remember_geometry(geometry);
+        host.canvas.move_(&self.container, f64::from(geometry.x), f64::from(geometry.y));
+    }
+
+    /// Takes and remembers a new place and size, leaving the widget where it
+    /// is drawn now: a slide in flight takes it there.
+    pub fn remember_geometry(&self, geometry: Geometry) {
         self.geometry.set(geometry);
         self.container.set_size_request(geometry.width, geometry.height);
-        host.canvas.move_(&self.container, f64::from(geometry.x), f64::from(geometry.y));
         save(&self.plugin, &self.key, geometry, true);
     }
 

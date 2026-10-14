@@ -1129,10 +1129,7 @@ impl SuperDesktopWindow {
                     return;
                 }
                 if let Some(owner) = owner.upgrade() {
-                    let cards = owner.terminal_cards.borrow().clone();
-                    for card in cards {
-                        card.set_workspace_size(width, height);
-                    }
+                    owner.follow_workspace_size((width, height));
                 }
             }
         }));
@@ -1839,6 +1836,9 @@ impl SuperDesktopWindow {
         let window_toggle = self.window.clone();
         let ghosts_toggle = Rc::clone(&ghosts);
         let on_double_click = move |data: &TerminalData| {
+            // The display this card was made on may be gone: expand to 80% of
+            // the one the overlay is on now.
+            let (sw, sh) = allocated_workspace_size(&window_toggle, (sw, sh));
             apply_terminal_expand(
                 &terminal_cards_toggle,
                 &canvas_toggle,
@@ -2121,6 +2121,93 @@ impl SuperDesktopWindow {
             }
         });
         // Refresh outlines after every card has its final geometry.
+        self.ghosts.refresh();
+    }
+
+    /// The overlay was given another size: another display, a new scale, or a
+    /// restart on a display the cards were not laid out for. Every card, note
+    /// and plugin card keeps its place in proportion on the new size
+    /// (`arrange::follow_workspace`), so none is left past an edge, and an
+    /// expanded card fills 80% of the new size.
+    fn follow_workspace_size(&self, size: (i32, i32)) {
+        self.ghosts.set_screen_size(size.0, size.1);
+        // Snapshot the lists: moving and resizing cards emits signals that
+        // re-enter the raise handlers.
+        let terms: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
+        let laid_out_for = self.state.borrow().layout_size;
+        let from = match laid_out_for {
+            Some(from) if from == size => {
+                for term in &terms {
+                    term.set_workspace_size(size.0, size.1);
+                }
+                return;
+            }
+            Some(from) => from,
+            // A layout from before sizes were recorded: cards on screen stay,
+            // and only those hanging past an edge come back in.
+            None => size,
+        };
+        let follow = |x: i32, y: i32, width: i32, height: i32, min: (i32, i32)| {
+            let rect = crate::card_resize::Rect { x: f64::from(x), y: f64::from(y), width, height };
+            crate::arrange::follow_workspace(rect, from, size, min)
+        };
+
+        for term in &terms {
+            term.follow_workspace(from, size);
+        }
+        let notes: Vec<Rc<StickyNote>> = self.note_cards.borrow().clone();
+        for note in &notes {
+            let rect = {
+                let d = note.data.borrow();
+                follow(d.x, d.y, d.width, d.height, (crate::sticky_note::MIN_NOTE_WIDTH, crate::sticky_note::MIN_NOTE_HEIGHT))
+            };
+            {
+                let mut d = note.data.borrow_mut();
+                (d.x, d.y, d.width, d.height) = (rect.x as i32, rect.y as i32, rect.width, rect.height);
+            }
+            note.container.set_size_request(rect.width, rect.height);
+        }
+        let plugin_cards = crate::plugin_ui::slots::get().map(|s| s.cards()).unwrap_or_default();
+        for card in &plugin_cards {
+            let g = card.geometry();
+            let rect = follow(g.x, g.y, g.width, g.height, (crate::plugin_ui::cards::MIN_WIDTH, crate::plugin_ui::cards::MIN_HEIGHT));
+            card.remember_geometry(crate::plugin_ui::cards::Geometry {
+                x: rect.x as i32, y: rect.y as i32, width: rect.width, height: rect.height,
+            });
+        }
+
+        persist(&self.state, |s| {
+            s.layout_size = Some(size);
+            for note in &notes {
+                if let Some(n) = s.notes.iter_mut().find(|n| n.id == note.data.borrow().id) {
+                    *n = note.data.borrow().clone();
+                }
+            }
+            for term in &terms {
+                if let Some(t) = s.terminals.iter_mut().find(|t| t.session_name == term.data.borrow().session_name) {
+                    *t = term.data.borrow().clone();
+                }
+            }
+        });
+
+        if self.slide.running.get() {
+            // The slide in flight takes the cards to their new places: its
+            // tick rebuilds the paths once they no longer match the size.
+            self.slide.built_for.set((0, 0));
+        } else {
+            for term in &terms {
+                let rect = term.canvas_rect(size.0, size.1);
+                self.canvas.move_(&term.container, rect.x, rect.y);
+            }
+            for note in &notes {
+                let (x, y) = (note.data.borrow().x, note.data.borrow().y);
+                self.canvas.move_(&note.container, f64::from(x), f64::from(y));
+            }
+            for card in &plugin_cards {
+                let g = card.geometry();
+                self.canvas.move_(&card.container, f64::from(g.x), f64::from(g.y));
+            }
+        }
         self.ghosts.refresh();
     }
 
@@ -3898,6 +3985,118 @@ mod tests {
         let entry = path();
         assert_eq!(entry.sx, 940.0, "a right-half card must enter from the real right edge");
         assert_eq!((entry.tx, entry.ty), (380.0, 200.0));
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cards_follow_the_display_size_and_expand_to_it() {
+        crate::gtk_test::run_in_child_process("window::tests::cards_follow_the_display_size_and_expand_to_it_inner");
+    }
+
+    #[test]
+    fn cards_follow_the_display_size_and_expand_to_it_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-follow-display-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.FollowDisplayTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        // Laid out on a 3440×1440 display: a card in its bottom-right corner,
+        // a minimized card in the middle with its icon in that corner, and a
+        // note in the same corner.
+        let mut state = AppState::default();
+        state.layout_size = Some((3440, 1440));
+        state.notes = vec![serde_json::from_value(serde_json::json!({
+            "id":"note_corner", "text":"", "x":3130, "y":1200, "width":300, "height":230,
+            "color":"omarchy", "updated_at":0.0
+        })).unwrap()];
+        for card in [
+            serde_json::json!({"id":"sd_term_corner", "session_name":"sd_term_corner", "agent_type":"shell",
+                "command":"/bin/false", "x":2790, "y":950, "width":640, "height":480, "created_at":0.0}),
+            serde_json::json!({"id":"sd_term_icon", "session_name":"sd_term_icon", "agent_type":"shell",
+                "command":"/bin/false", "x":1400, "y":510, "width":128, "height":128,
+                "restored_width":640, "restored_height":480, "iconified":true,
+                "icon_x":3302, "icon_y":1302, "created_at":0.0}),
+        ] {
+            state.terminals.push(serde_json::from_value(card).unwrap());
+        }
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let corner = window.any_terminal_card("sd_term_corner").unwrap();
+        let icon = window.any_terminal_card("sd_term_icon").unwrap();
+        let note = Rc::clone(&window.note_cards.borrow()[0]);
+        let at = |widget: &gtk4::Widget| window.canvas.child_position(widget);
+        let pump_until = |done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !done() && std::time::Instant::now() < deadline {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        // `child_position` reports a moved card once the canvas laid out again.
+        let assert_at = |widget: &gtk4::Widget, spot: (f64, f64)| {
+            pump_until(&|| at(widget) == spot);
+            assert_eq!(at(widget), spot);
+        };
+        let show = |size: (i32, i32)| {
+            window.window.set_default_size(size.0, size.1);
+            window.window.present();
+            pump_until(&|| window.state.borrow().layout_size == Some(size));
+            assert_eq!(allocated_size(&window.window), Some(size), "the window must take the size");
+            assert_eq!(window.state.borrow().layout_size, Some(size), "the layout must follow the size");
+        };
+
+        // The 900×600 display, shown as the shortcut does: the slide starts
+        // before the overlay has its size, and takes every card to its new
+        // place, its corner on this display, whole on screen.
+        window.start_slide_in();
+        show((900, 600));
+        pump_until(&|| window.slide.built_for.get() == (900, 600));
+        let target = |widget: &gtk4::Widget| {
+            let path = *window.anim_trajectories.borrow().get(widget).unwrap();
+            (path.tx, path.ty)
+        };
+        assert_eq!(target(corner.container.upcast_ref()), (250.0, 110.0), "the slide must end at the new place");
+        assert_eq!(target(icon.container.upcast_ref()), (762.0, 462.0));
+        assert_eq!(target(note.container.upcast_ref()), (590.0, 360.0));
+        // Broadway ticks too slowly to wait for the settle: stop the tick and
+        // put every card where the slide ends.
+        window.slide.gen.set(window.slide.gen.get().wrapping_add(1));
+        window.slide.running.set(false);
+        window.paint_slide(1.0);
+        let d = corner.data.borrow().clone();
+        assert_eq!((d.x, d.y, d.width, d.height), (250, 110, 640, 480));
+        assert_at(corner.container.upcast_ref(), (250.0, 110.0));
+        let d = icon.data.borrow().clone();
+        assert_eq!((d.x, d.y, d.icon_x, d.icon_y), (130, 90, Some(762), Some(462)));
+        assert_eq!((d.restored_width, d.restored_height), (640, 480));
+        assert_at(icon.container.upcast_ref(), (762.0, 462.0));
+        assert_eq!((note.data.borrow().x, note.data.borrow().y), (590, 360));
+        assert_at(note.container.upcast_ref(), (590.0, 360.0));
+        let saved = window.state.borrow().terminals.iter().find(|t| t.id == "sd_term_corner").cloned().unwrap();
+        assert_eq!((saved.x, saved.y), (250, 110), "the new places are saved");
+
+        // Expand fills 80% of this display, not of the one the card was made on.
+        corner.press_expand_button();
+        assert!(corner.is_expanded());
+        assert_at(corner.container.upcast_ref(), (90.0, 60.0));
+        assert_eq!(corner.container.size_request(), (720, 480));
+
+        // A larger display: the expanded card grows with it, the card's own
+        // place moves with the rest.
+        show((1000, 700));
+        assert!(corner.is_expanded());
+        assert_at(corner.container.upcast_ref(), (100.0, 70.0));
+        assert_eq!(corner.container.size_request(), (800, 560));
+        assert_eq!((corner.data.borrow().x, corner.data.borrow().y), (350, 210));
+        assert_at(icon.container.upcast_ref(), (862.0, 562.0));
+        assert_at(note.container.upcast_ref(), (690.0, 460.0));
         window.window.close();
         let _ = std::fs::remove_dir_all(root);
     }

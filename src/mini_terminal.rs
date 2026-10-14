@@ -1703,6 +1703,12 @@ impl MiniTerminalCard {
         );
     }
 
+    /// Press the card's ⛶ button, as the user does.
+    #[cfg(test)]
+    pub fn press_expand_button(&self) {
+        self.chrome.expand_btn.emit_clicked();
+    }
+
     /// What the card's footer is telling the user, so a view can check that the
     /// host's state reached the chrome.
     #[cfg(test)]
@@ -1748,6 +1754,47 @@ impl MiniTerminalCard {
     /// or a remote view switched between Fit and 100%, zoomed, or resized.
     pub fn set_workspace_size(&self, width: i32, height: i32) {
         self.workspace.set((width.max(1), height.max(1)));
+    }
+
+    /// The local workspace went from `from` to `to` (another display or
+    /// scale): move the card's place and its icon's place in proportion (see
+    /// `arrange::follow_workspace`), shrink it if it no longer fits, and size
+    /// the widget for its current form. Moving the widget is the caller's.
+    pub fn follow_workspace(&self, from: (i32, i32), to: (i32, i32)) {
+        self.set_workspace_size(to.0, to.1);
+        let scale = self.fit.get().2;
+        {
+            let mut d = self.data.borrow_mut();
+            // An icon's card keeps its place and size for the restore.
+            let (width, height) = if d.iconified {
+                (d.restored_width, d.restored_height)
+            } else {
+                (d.width, d.height)
+            };
+            let rect = crate::card_resize::Rect { x: f64::from(d.x), y: f64::from(d.y), width, height };
+            let rect = crate::arrange::follow_workspace(rect, from, to, min_card_size(scale));
+            (d.x, d.y) = (rect.x as i32, rect.y as i32);
+            (d.restored_width, d.restored_height) = (rect.width, rect.height);
+            if !d.iconified {
+                (d.width, d.height) = (rect.width, rect.height);
+            }
+            if let (Some(x), Some(y)) = (d.icon_x, d.icon_y) {
+                let side = icon_side(scale);
+                let icon = crate::card_resize::Rect { x: f64::from(x), y: f64::from(y), width: side, height: side };
+                let icon = crate::arrange::follow_workspace(icon, from, to, (side, side));
+                (d.icon_x, d.icon_y) = (Some(icon.x as i32), Some(icon.y as i32));
+            }
+        }
+        if self.is_expanded() {
+            let (x, y, w, h) = expanded_rect(to.0, to.1);
+            *self.visual_pos.borrow_mut() = (x, y);
+            self.container.set_size_request(w as i32, h as i32);
+        } else {
+            *self.visual_pos.borrow_mut() = displayed_pos(&self.data.borrow());
+            let (w, h) = (self.data.borrow().width, self.data.borrow().height);
+            self.container.set_size_request(w, h);
+        }
+        self.apply_chrome();
     }
 
     /// The scale this card's emulator font was last fitted at.

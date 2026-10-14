@@ -171,6 +171,13 @@ pub struct AppState {
     /// display in use, so a size from a larger screen still opens whole here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_panel_size: Option<(i32, i32)>,
+    /// The workspace size, in logical pixels, the cards' places were last
+    /// laid out for. When the overlay opens on a display of another size
+    /// (another output, or after a restart there) every card is moved to fit
+    /// it. `None` in older state files: the next display keeps every card
+    /// where it is and brings back only those hanging past an edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_size: Option<(i32, i32)>,
     /// Whether the welcome tour has been shown. Only a fresh install starts
     /// with `false` (see `fresh_install_state`); a state file from before the
     /// tour existed loads as `true`, so people upgrading never get it.
@@ -211,6 +218,7 @@ impl Default for AppState {
             folder_tags: std::collections::BTreeMap::new(),
             settings_panel_pos: None,
             settings_panel_size: None,
+            layout_size: None,
             welcome_tour_seen: true,
         }
     }
