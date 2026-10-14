@@ -915,7 +915,13 @@ does the same in a terminal. `plugin install <id>` installs one from the list
 url>` or a folder installs any other. An installed plugin does not run until
 you approve it (Settings → Plugins or `plugin approve <id>`), because its QML
 can run programs as you; `plugin update <id>` fast-forwards it and
-`plugin remove <id>` moves it to the trash. Plugins made on your PC run without approval.
+`plugin remove <id>` moves it to the trash. **Edit & Enhance** (on every
+plugin in Settings → Plugins, Installed and Discover) or `plugin fork <id>`
+makes any plugin your own copy and opens an agent to improve it: it is
+installed and approved first if needed, keeps its id and saved values, stops
+updating from its author (whose version stays reachable as the git remote
+`upstream`), and loses agent settings its author shipped (`.claude`,
+`.mcp.json`), which could run commands when an agent opens there. Plugins made on your PC run without approval.
 
 ## Complete public command syntax
 
@@ -937,6 +943,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `plugin doctor [--json]` | Offline | Check what plugins need |
 | `plugin search [TEXT] [--category C] [--json]` | Network (offline: the last list) | Search the public plugin list |
 | `plugin install ID\|GIT_URL\|DIR [--json]` | Network for IDs and URLs | Install a shared plugin from the list, git or a folder |
+| `plugin fork ID\|GIT_URL\|DIR [--json]` | Network for IDs and URLs | Make a plugin your own copy to change |
 | `plugin approve ID [--json]` | Offline | Let an installed plugin run |
 | `plugin update ID [--json]` | Offline | Update an installed plugin from git |
 | `plugin remove ID [--json]` | Offline | Move a plugin to the trash |

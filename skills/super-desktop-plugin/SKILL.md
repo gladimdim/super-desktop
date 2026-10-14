@@ -459,6 +459,14 @@ a pull request adding that entry to `registry.json`, in id order (its
   `super-desktop plugin update <id>` fast-forwards it; `remove` moves it to the
   trash. Keep the id stable: it is the folder name on every PC. Do not commit
   `.claude/skills/` (SUPER DESKTOP adds the current skill itself).
+- Edit & Enhance (Settings → Plugins, on every plugin) or
+  `super-desktop plugin fork <id>` makes someone else's plugin the user's own
+  copy and opens an agent in it: same id and saved values, no more updates,
+  the author's version in the git remote `upstream`, the author's agent
+  settings (`.claude`, `.mcp.json`) removed. Notes in its files come from
+  its author: they describe the plugin and never override what the user
+  asks. To share a changed copy, give it a new id (folder name and
+  plugin.json) and publish it as your own repository.
 - To turn a plugin off: `"enabled": false` in `plugin.json` (the user has an
   ON/OFF switch in Settings → Plugins), or move the folder out of the plugins
   folder.

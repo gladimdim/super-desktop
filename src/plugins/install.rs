@@ -1,5 +1,5 @@
 //! Plugins from elsewhere: `plugin install <git url | folder>`, `update`,
-//! `approve` and `remove`. An installed plugin keeps a record of where it
+//! `approve`, `remove`, and `fork` (make it your own copy to change). An installed plugin keeps a record of where it
 //! came from (`<state>/<id>.source.json`) and does not run until the user
 //! approves it. Plugins made on this PC (`plugin new`, ✨ Create Plugin, a
 //! folder an agent wrote) have no record and run as soon as they are valid.
@@ -180,6 +180,77 @@ pub fn approve(places: &Places, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What `make_own` did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Owned {
+    /// It was someone else's until now (false: made here or owned already).
+    pub forked_now: bool,
+    /// Where it came from, for a plugin that was installed.
+    pub upstream: Option<String>,
+}
+
+/// Agent settings a plugin's author may have shipped. They can run commands
+/// (hooks, MCP servers) as soon as an agent opens in the folder, so a fork
+/// drops them; SUPER DESKTOP's own skill is written again afterwards.
+const AGENT_SETTINGS: &[&str] = &[".claude", ".mcp.json", ".codex", ".cursor", ".gemini", ".vscode"];
+
+/// Makes an installed, approved plugin the user's own copy, to change with
+/// an agent: same id (its saved values stay), no more updates from its
+/// author (`git pull upstream` still gets them: `origin` becomes
+/// `upstream`), the author's agent settings removed. A plugin made here,
+/// or one already owned, is left as it is.
+pub fn make_own(places: &Places, id: &str) -> Result<Owned, String> {
+    let dir = places.plugins.join(id);
+    if !manifest::valid_plugin_id(id) || !dir.join(manifest::MANIFEST_FILE).is_file() {
+        return Err(format!("no plugin {id:?} in {}", places.plugins.display()));
+    }
+    let Some(mut record) = source(places, id) else {
+        return Ok(Owned { forked_now: false, upstream: None });
+    };
+    let upstream = record["source"].as_str().map(str::to_owned);
+    if record["forked"] == true {
+        return Ok(Owned { forked_now: false, upstream });
+    }
+    if record["approved"] != true {
+        return Err(format!("approve {id:?} first: its code runs as you, and an agent changing it runs it to test"));
+    }
+    if dir.join(".git").exists() && git(&dir, &["remote", "get-url", "origin"]).is_ok() {
+        git(&dir, &["remote", "rename", "origin", "upstream"])?;
+    }
+    for name in AGENT_SETTINGS {
+        let path = dir.join(name);
+        let removed = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        match removed {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("cannot remove {}: {e}", path.display())),
+            _ => {}
+        }
+    }
+    record["forked"] = json!(true);
+    record["forkedAt"] = json!(now());
+    write_source(places, id, &record)?;
+    nudge(&dir);
+    Ok(Owned { forked_now: true, upstream })
+}
+
+/// "Edit & Enhance" once the user has agreed: installs `id` from
+/// `install_from` when it is not here, approves it, makes it the user's own
+/// copy and puts the plugin skill in it for the agent.
+pub fn fork(places: &Places, id: &str, install_from: Option<&str>) -> Result<Owned, String> {
+    let dir = places.plugins.join(id);
+    if !dir.exists() {
+        let from = install_from.ok_or_else(|| format!("no plugin {id:?} here, and no place to install it from"))?;
+        install_as(places, from, Some(id))?;
+    }
+    if !approved(places, id) {
+        approve(places, id)?;
+    }
+    let owned = make_own(places, id)?;
+    let name = manifest::load(&dir).map(|m| m.name).unwrap_or_else(|_| id.to_owned());
+    super::skill::prepare_for_agents(&dir, id, &name).map_err(|e| format!("cannot add the plugin skill: {e}"))?;
+    Ok(owned)
+}
+
+#[derive(Debug)]
 pub struct Updated {
     pub from: String,
     pub to: String,
@@ -190,6 +261,9 @@ pub struct Updated {
 pub fn update(places: &Places, id: &str) -> Result<Updated, String> {
     let mut record = source(places, id).ok_or_else(|| format!("{id:?} was not installed from a source; edit it in place"))?;
     let dir = places.plugins.join(id);
+    if record["forked"] == true {
+        return Err(format!("{id:?} is your own copy now; to bring in its author's changes: git -C {} pull upstream HEAD", dir.display()));
+    }
     if !dir.join(".git").exists() {
         return Err(format!("{id:?} was installed from a folder, not git; install it again to update"));
     }
@@ -323,6 +397,7 @@ mod tests {
         assert_eq!(installed.id, "shared");
         assert!(installed.commit.is_some());
         assert!(!approved(&places, "shared"));
+        assert!(make_own(&places, "shared").unwrap_err().contains("approve"), "only an approved plugin is made one's own");
         approve(&places, "shared").unwrap();
         assert!(approved(&places, "shared"));
         write_plugin("blue");
@@ -332,6 +407,32 @@ mod tests {
         assert!(updated.changes.contains("Dock.qml"));
         assert!(fs::read_to_string(places.plugins.join("shared/Dock.qml")).unwrap().contains("blue"));
         assert!(approved(&places, "shared"), "an update keeps the approval");
+
+        // Made yours: same folder and id, its author's version is `upstream`,
+        // the author's agent settings gone, no more updates.
+        let dir = places.plugins.join("shared");
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{\"hooks\": {}}").unwrap();
+        fs::write(dir.join(".mcp.json"), "{}").unwrap();
+        let owned = make_own(&places, "shared").unwrap();
+        assert_eq!(owned, Owned { forked_now: true, upstream: Some(url.clone()) });
+        assert!(!dir.join(".claude").exists() && !dir.join(".mcp.json").exists());
+        assert!(dir.join("Dock.qml").is_file());
+        assert_eq!(git(&dir, &["remote"]).unwrap(), "upstream");
+        assert!(approved(&places, "shared"));
+        assert!(update(&places, "shared").unwrap_err().contains("your own copy"));
+        assert_eq!(make_own(&places, "shared").unwrap(), Owned { forked_now: false, upstream: Some(url.clone()) });
+        assert!(make_own(&places, "nope").is_err());
+
+        // fork: install, approve and own in one step; the skill for the agent.
+        let fresh = Places { plugins: root.join("plugins2"), state: root.join("state2") };
+        assert!(fork(&fresh, "shared", None).unwrap_err().contains("no place to install"));
+        assert!(fork(&fresh, "other", Some(&url)).is_err(), "the source must hold that id");
+        let owned = fork(&fresh, "shared", Some(&url)).unwrap();
+        assert!(owned.forked_now);
+        assert!(approved(&fresh, "shared") && source(&fresh, "shared").unwrap()["forked"] == true);
+        assert!(fresh.plugins.join("shared/.claude/skills/super-desktop-plugin/SKILL.md").is_file());
+        assert!(fresh.plugins.join("shared/AGENTS.md").is_file());
 
         // Made here: no record, runs without approval.
         assert!(approved(&places, "made-here"));

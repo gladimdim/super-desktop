@@ -26,6 +26,8 @@ const USAGE: &str = "usage: super-desktop plugin <command>
                                       the public plugin list, by name or by category
   install <id|git-url|folder> [--json]
                                       install a plugin (an id from search); it runs once approved
+  fork <id|git-url|folder> [--json]   make a plugin your own copy to change with an agent
+                                      (installs and approves it when needed; no more updates)
   approve <id> [--json]               let an installed plugin run
   update <id> [--json]                fast-forward an installed plugin from its git source
   remove <id> [--json]                move a plugin's folder to the trash
@@ -119,6 +121,7 @@ pub fn run(args: &[String]) -> i32 {
         "doctor" => Flags::parse(rest, &[]).map(|f| doctor(f.json)),
         "search" => Flags::parse(rest, &["category"]).and_then(|f| search(&f)),
         "install" => Flags::parse(rest, &[]).and_then(|f| install_command(&f)),
+        "fork" => Flags::parse(rest, &[]).and_then(|f| fork_command(&f)),
         "approve" => Flags::parse(rest, &[]).and_then(|f| one_id(&f).and_then(|id| {
             install::approve(&install::Places::current(), &id)?;
             report(f.json, json!({"ok": true, "id": id}), &format!("Approved {id}: it runs in SUPER DESKTOP now."));
@@ -857,6 +860,43 @@ fn search(flags: &Flags) -> Result<i32, String> {
     Ok(0)
 }
 
+/// `plugin fork`: the plugin here (or installed first from the list, a git
+/// URL or a folder), approved and made the user's own copy.
+fn fork_command(flags: &Flags) -> Result<i32, String> {
+    let [source] = flags.positional.as_slice() else {
+        return Err("fork needs one plugin id, git URL or folder".into());
+    };
+    let places = install::Places::current();
+    let id = if manifest::valid_plugin_id(source) && places.plugins.join(source).exists() {
+        install::fork(&places, source, None)?;
+        source.clone()
+    } else {
+        match registry::resolve(source)? {
+            (url, Some(entry)) => {
+                install::fork(&places, &entry.id, Some(&url))?;
+                entry.id
+            }
+            (url, None) => {
+                let installed = install::install(&places, &url)?;
+                install::fork(&places, &installed.id, None)?;
+                installed.id
+            }
+        }
+    };
+    let dir = places.plugins.join(&id);
+    let upstream = install::source(&places, &id).and_then(|r| r["source"].as_str().map(str::to_owned));
+    if flags.json {
+        print_json(&json!({"ok": true, "id": id, "dir": dir, "upstream": upstream}));
+    } else {
+        println!("{id} is yours to change in {}.", dir.display());
+        if let Some(upstream) = &upstream {
+            println!("It no longer updates from {upstream}; its author's version is the git remote `upstream`.");
+        }
+        println!("Open an agent there (it reads AGENTS.md and the plugin skill) and say what to improve.");
+    }
+    Ok(0)
+}
+
 fn install_command(flags: &Flags) -> Result<i32, String> {
     let [source] = flags.positional.as_slice() else {
         return Err("install needs one plugin id, git URL or folder".into());
@@ -895,7 +935,7 @@ mod tests {
         assert!(command_help("path").unwrap().contains("print the plugins folder"));
         assert!(command_help("nope").is_none());
         // Every command in the dispatch has its help.
-        for command in ["list", "new", "check", "snapshot", "preview", "publish", "logs", "doctor", "search", "install", "approve", "update", "remove", "path"] {
+        for command in ["list", "new", "check", "snapshot", "preview", "publish", "fork", "logs", "doctor", "search", "install", "approve", "update", "remove", "path"] {
             assert!(command_help(command).is_some(), "{command}");
         }
     }

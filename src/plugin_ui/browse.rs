@@ -3,7 +3,7 @@
 //! (a quarter of the card's width) beside its text, with a search, category
 //! chips (all categories: grouped under each), and one button per plugin:
 //! Install (from its GitHub repository; it then waits for approval under
-//! Installed), or where it stands. The list shows at once from the last
+//! Installed), or where it stands, and Edit & Enhance (`enhance`). The list shows at once from the last
 //! fetch; the list and the previews refresh off the GTK thread.
 use super_desktop::plugins::install::{self, Places};
 use super_desktop::plugins::registry::{self, Compatibility, Entry, Order};
@@ -541,6 +541,12 @@ impl Browser {
             }
         }
         footer.append(&action);
+        // Anyone's plugin can be made one's own and improved by an agent.
+        let enhance = gtk4::Button::with_label(super::enhance::LABEL);
+        enhance.add_css_class("plugin-action");
+        enhance.set_sensitive(!matches!(entry.compatibility(), Compatibility::NeedsApi(_)));
+        let confirm = super::enhance::attach(&enhance, &entry.id, &entry.name, &entry.author, Some(entry.git_url()), &note);
+        footer.append(&enhance);
         let page = gtk4::Button::with_label("GitHub ↗");
         page.add_css_class("plugin-link");
         page.set_tooltip_text(Some(&entry.web_url()));
@@ -554,6 +560,7 @@ impl Browser {
         });
         footer.append(&page);
         body.append(&footer);
+        body.append(&confirm);
         body.append(&note);
         card.attach(&body, 1, 0, CARD_COLUMNS - 1, 1);
         card
@@ -705,6 +712,29 @@ mod tests {
         assert!(!places.plugins.join("something-else").exists() && !places.plugins.join("liar").exists());
         browser.render();
         assert_eq!(buttons("Approve under Installed").len(), 1);
+
+        // Edit & Enhance asks first, then approves it and makes it the user's
+        // own copy; with no agent in the top bar, it says so.
+        let clock_card = crate::gtk_test::descendants(browser.results.upcast_ref()).into_iter()
+            .filter(|w| w.has_css_class("plugin-card"))
+            .find(|card| crate::gtk_test::descendants(card).iter().any(|w| w.downcast_ref::<gtk4::Label>().is_some_and(|l| l.text() == "Clock")))
+            .unwrap();
+        let in_card = |text: &str| crate::gtk_test::descendants(&clock_card).into_iter()
+            .filter_map(|w| w.downcast::<gtk4::Button>().ok())
+            .find(|b| b.label().as_deref() == Some(text));
+        in_card(super::super::enhance::LABEL).unwrap().emit_clicked();
+        let agree = in_card("Approve and edit").expect("the question");
+        assert!(agree.is_visible() && agree.parent().unwrap().parent().unwrap().is_visible());
+        assert!(!install::approved(&places, "clock"), "nothing happens before the user agrees");
+        if let Ok(out) = std::env::var("SD_UI_SHOT_ENHANCE") {
+            crate::gtk_test::pump(300);
+            crate::gtk_test::save_png(&clock_card, std::path::Path::new(&out));
+        }
+        agree.emit_clicked();
+        crate::gtk_test::pump_until("the fork", || install::source(&places, "clock").is_some_and(|r| r["forked"] == true));
+        assert!(install::approved(&places, "clock"));
+        assert!(places.plugins.join("clock/.claude/skills/super-desktop-plugin/SKILL.md").is_file());
+        crate::gtk_test::pump_until("the note", || labels("plugin-card-meta").iter().any(|t| t.contains("No AI agent")));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

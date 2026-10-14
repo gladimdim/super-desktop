@@ -1,5 +1,5 @@
 //! Settings → Plugins: ✨ Create Plugin, every plugin with its state, an
-//! on/off switch, Edit with AI, its log, Delete, and the plugin's own
+//! on/off switch, Edit & Enhance, its log, Delete, and the plugin's own
 //! settings section (its `settings.page` surfaces).
 use super::surface::{QmlSurface, SurfaceSpec};
 use super_desktop::plugins::manifest::{Manifest, Problem, Slot};
@@ -334,7 +334,8 @@ impl Page {
         if let Some(record) = super_desktop::plugins::install::source(&places, id) {
             let from = record["source"].as_str().unwrap_or("?");
             let commit = record["commit"].as_str().map(|c| format!(" at {}", &c[..c.len().min(8)])).unwrap_or_default();
-            card.append(&label(&format!("Installed from {from}{commit}"), "plugin-subtle"));
+            let origin = if record["forked"] == true { format!("Your own copy of {from}{commit}") } else { format!("Installed from {from}{commit}") };
+            card.append(&label(&origin, "plugin-subtle"));
             if record["approved"] != true {
                 card.append(&self.approval_row(slots, id, &dir, from));
             }
@@ -342,38 +343,12 @@ impl Page {
 
         let actions = gtk4::Box::new(Orientation::Horizontal, 6);
         actions.add_css_class("launcher-actions");
-        let edit = button("Edit with AI", "Open an agent in this plugin's folder; tell it what to change");
-        // An installed plugin's own agent instructions are untrusted until approved.
-        if !super_desktop::plugins::install::approved(&super_desktop::plugins::install::Places::current(), id) {
-            edit.set_sensitive(false);
-            edit.set_tooltip_text(Some("Approve it first: its files would instruct the agent"));
-        }
+        // Edit & Enhance: someone else's plugin becomes the user's own copy first.
+        let edit = button(super::enhance::LABEL, "");
         let note = label("", "launcher-note");
         note.set_visible(false);
-        edit.connect_clicked({
-            let dir = dir.clone();
-            let note = note.clone();
-            move |_| {
-                let result = match super::create::preferred_harness() {
-                    Some(harness) => {
-                        let _ = super_desktop::plugins::skill::install(&dir);
-                        super::agent::open(&harness, &dir, None)
-                    }
-                    None => Err("No AI agent is offered in the top bar.".into()),
-                };
-                match result {
-                    Ok(()) => {
-                        note.remove_css_class("launcher-note-error");
-                        note.set_text("A new card is open in the plugin's folder: tell the agent what to change.");
-                    }
-                    Err(e) => {
-                        note.add_css_class("launcher-note-error");
-                        note.set_text(&e);
-                    }
-                }
-                note.set_visible(true);
-            }
-        });
+        let name = manifest.as_ref().map(|m| m.name.clone()).unwrap_or_else(|_| id.to_owned());
+        let confirm = super::enhance::attach(&edit, id, &name, "", None, &note);
         actions.append(&edit);
         if let Ok(m) = manifest.as_ref().map(Clone::clone) {
             for surface in m.surfaces.iter().filter(|s| matches!(s.slot, Slot::Panel | Slot::Card | Slot::Fullscreen)) {
@@ -441,6 +416,7 @@ impl Page {
         });
         actions.append(&delete);
         card.append(&actions);
+        card.append(&confirm);
         card.append(&note);
         card.append(&log);
 

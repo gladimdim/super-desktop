@@ -1,12 +1,13 @@
 //! The overlay side of agent plugins: QML surfaces drawn by `sd-qml-host`
 //! (`surface`), the places they live in (`slots`), the calls they can make
 //! (`api`), ✨ Create Plugin (`create`, `agent`), Settings → Plugins
-//! (`settings_page`) and its Get plugins list (`browse`). The display-free half is `super_desktop::plugins`.
+//! (`settings_page`), its Discover list (`browse`) and Edit & Enhance (`enhance`). The display-free half is `super_desktop::plugins`.
 pub mod agent;
 pub mod api;
 pub mod browse;
 pub mod cards;
 pub mod create;
+pub mod enhance;
 pub mod llm;
 pub mod settings_page;
 pub mod slots;
@@ -104,6 +105,7 @@ pub fn css(theme: &crate::theme::OmarchyTheme) -> String {
 .plugin-action-primary:disabled {{ background-color: {chip_bg}; color: {text_hint}; }}
 .plugin-link {{ background: none; box-shadow: none; border: none; padding: 5px 6px; color: {text_hint}; font-size: 11px; font-weight: 600; }}
 .plugin-link:hover {{ color: {foreground}; }}
+.plugin-confirm {{ border-left: 3px solid {accent_line}; padding: 4px 0 4px 10px; margin-top: 4px; }}
 .plugin-popup {{ background-color: {background}; border: 1px solid {border}; border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); }}
 ",
         error_bg = OmarchyTheme::hex_to_rgba(&theme.background, 0.92),

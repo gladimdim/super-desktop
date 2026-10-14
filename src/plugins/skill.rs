@@ -414,6 +414,18 @@ impl Template {
 
 /// Creates `<root>/<id>` with a working plugin, AGENTS.md (with the user's
 /// `request`, when given) and the skill.
+/// The skill, and an AGENTS.md (with CLAUDE.md pointing at it) when the
+/// plugin has none: what any agent opened in the folder reads first.
+pub fn prepare_for_agents(dir: &Path, id: &str, name: &str) -> io::Result<()> {
+    if !dir.join("AGENTS.md").exists() {
+        fs::write(dir.join("AGENTS.md"), AGENTS_MD.replace("{name}", name).replace("{id}", id))?;
+    }
+    if !dir.join("CLAUDE.md").exists() {
+        fs::write(dir.join("CLAUDE.md"), "@AGENTS.md\n")?;
+    }
+    install(dir)
+}
+
 pub fn new_plugin(root: &Path, id: &str, name: &str, template: Template, request: &str) -> Result<PathBuf, String> {
     if !manifest::valid_plugin_id(id) {
         return Err(format!("invalid plugin id {id:?}: use 1-48 lowercase letters, digits and '-'"));
