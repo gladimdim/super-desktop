@@ -9,6 +9,7 @@ pub const MANIFEST_FILE: &str = "plugin.json";
 pub const MAX_SURFACES: usize = 8;
 pub const DOCK_SIZE_DEFAULT: i32 = 64;
 pub const MAX_TITLE: usize = 60;
+pub const MAX_TOOLTIP: usize = 120;
 
 /// Where a surface is placed in the overlay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -27,6 +28,8 @@ pub enum Slot {
     Card,
     #[serde(rename = "fullscreen")]
     Fullscreen,
+    #[serde(rename = "popup")]
+    Popup,
 }
 
 /// What `size` and `height` mean for a slot, and their limits.
@@ -37,7 +40,7 @@ pub struct SlotSizes {
 }
 
 impl Slot {
-    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen"];
+    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen", "popup"];
 
     pub fn parse(text: &str) -> Option<Self> {
         match text {
@@ -48,6 +51,7 @@ impl Slot {
             "settings.page" => Some(Self::SettingsPage),
             "card" => Some(Self::Card),
             "fullscreen" => Some(Self::Fullscreen),
+            "popup" => Some(Self::Popup),
             _ => None,
         }
     }
@@ -61,6 +65,7 @@ impl Slot {
             Self::SettingsPage => "settings.page",
             Self::Card => "card",
             Self::Fullscreen => "fullscreen",
+            Self::Popup => "popup",
         }
     }
 
@@ -72,6 +77,7 @@ impl Slot {
             Self::SettingsPage => SlotSizes { size: None, height: Some((60, 240, 1200)) },
             Self::Card => SlotSizes { size: Some((200, 640, 4000)), height: Some((120, 420, 3000)) },
             Self::Fullscreen => SlotSizes { size: None, height: None },
+            Self::Popup => SlotSizes { size: Some((120, 280, 800)), height: Some((40, 240, 800)) },
         }
     }
 
@@ -84,6 +90,7 @@ impl Slot {
             Self::SettingsPage => (560, height),
             Self::Card => (size, height),
             Self::Fullscreen => (1280, 720),
+            Self::Popup => (size, height),
         }
     }
 }
@@ -94,14 +101,16 @@ pub struct Surface {
     pub slot: Slot,
     /// Relative to the plugin folder.
     pub qml: String,
-    /// Width in logical px (docks, toolbar items, panels); 0 when unused.
+    /// Width in logical px (docks, toolbar items, panels, popups); 0 when unused.
     pub size: i32,
-    /// Height in logical px (panels, cards, settings pages); 0 when unused.
+    /// Height in logical px (panels, cards, settings pages, popups); 0 when unused.
     pub height: i32,
     /// Panel header and settings section title; empty means the plugin name.
     pub title: String,
     /// A card the user may open several times (`card.new`).
     pub multiple: bool,
+    /// Docks and toolbar items: the hover text; empty means the plugin name.
+    pub tooltip: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -360,8 +369,17 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
                         false
                     }
                 };
+                let tooltip = match entry.get("tooltip") {
+                    None => String::new(),
+                    Some(Value::String(t)) if t.chars().count() <= MAX_TOOLTIP
+                        && matches!(slot, Some(Slot::DockLeft | Slot::DockRight | Slot::ToolbarItem)) => t.trim().to_owned(),
+                    Some(_) => {
+                        problems.push(problem(field("tooltip"), "tooltip must be text of at most 120 characters, on a dock or toolbar.item surface", "Shorten it, or remove it from other surfaces (panels and cards have a title instead)."));
+                        String::new()
+                    }
+                };
                 if let Some(slot) = slot {
-                    surfaces.push(Surface { id: surface_id, slot, qml, size, height, title, multiple });
+                    surfaces.push(Surface { id: surface_id, slot, qml, size, height, title, multiple, tooltip });
                 }
             }
         }
@@ -488,6 +506,44 @@ mod tests {
         ]})).unwrap_err();
         assert_eq!(problems[0].field, "surfaces[0].height");
         assert!(problems[0].hint.contains("120"));
+    }
+
+    #[test]
+    fn plugins_manifest_tooltips_on_docks_and_toolbar_items() {
+        let dir = plugin_dir("tips", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "tips", "api": 1, "surfaces": [
+            {"id": "bar", "slot": "toolbar.item", "qml": "A.qml", "tooltip": " Right-click for the list "},
+            {"id": "side", "slot": "dock.left", "qml": "A.qml"}
+        ]})).unwrap();
+        assert_eq!(m.surfaces[0].tooltip, "Right-click for the list");
+        assert_eq!(m.surfaces[1].tooltip, "");
+        let problems = validate(&dir, &json!({"id": "tips", "api": 1, "surfaces": [
+            {"id": "win", "slot": "panel", "qml": "A.qml", "tooltip": "no"},
+            {"id": "bar", "slot": "toolbar.item", "qml": "A.qml", "tooltip": "x".repeat(121)},
+            {"id": "num", "slot": "dock.right", "qml": "A.qml", "tooltip": 5}
+        ]})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, ["surfaces[0].tooltip", "surfaces[1].tooltip", "surfaces[2].tooltip"]);
+    }
+
+    #[test]
+    fn plugins_manifest_accepts_a_popup() {
+        let dir = plugin_dir("menu", &["Button.qml", "Menu.qml"]);
+        let m = validate(&dir, &json!({"id": "menu", "api": 1, "surfaces": [
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml", "size": 48},
+            {"id": "list", "slot": "popup", "qml": "Menu.qml"},
+            {"id": "form", "slot": "popup", "qml": "Menu.qml", "size": 360, "height": 300}
+        ]})).unwrap();
+        assert_eq!(m.surfaces[1].slot, Slot::Popup);
+        assert_eq!((m.surfaces[1].size, m.surfaces[1].height), (280, 240));
+        assert_eq!((m.surfaces[2].size, m.surfaces[2].height), (360, 300));
+        assert_eq!(Slot::Popup.default_snapshot_size(360, 300), (360, 300));
+        let problems = validate(&dir, &json!({"id": "menu", "api": 1, "surfaces": [
+            {"id": "list", "slot": "popup", "qml": "Menu.qml", "size": 2000, "height": 20}
+        ]})).unwrap_err();
+        assert_eq!(problems.len(), 2);
+        assert!(problems[0].hint.contains("120 to 800"));
+        assert!(problems[1].hint.contains("40 to 800"));
     }
 
     #[test]

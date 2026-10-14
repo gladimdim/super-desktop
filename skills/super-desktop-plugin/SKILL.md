@@ -2,9 +2,9 @@
 name: super-desktop-plugin
 description: >
   Create, change or fix a SUPER DESKTOP plugin: a folder of QML (Qt Quick) that
-  adds docks at the screen edges, items in the top bar, floating panels, cards
-  on the desktop (games, tools, terminals), full-screen views and Settings
-  sections to the SUPER DESKTOP overlay on Linux (Hyprland/Omarchy). Covers
+  adds docks at the screen edges, items in the top bar, floating panels,
+  popups (menus, quick forms), cards on the desktop (games, tools, terminals),
+  full-screen views and Settings sections to the SUPER DESKTOP overlay on Linux (Hyprland/Omarchy). Covers
   plugin.json, the `sd` object in QML (theme, saved values, calls into SUPER
   DESKTOP, programs and pseudo-terminals), and the check/snapshot loop that
   lets you see your work. Use when the folder has a plugin.json for
@@ -67,6 +67,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `surfaces[].height` | Height in logical pixels for `panel` and `settings.page`. |
 | `surfaces[].title` | Optional, ≤ 60 characters: the panel's header or the Settings section's title. Default: the plugin name. |
 | `surfaces[].multiple` | Optional, `card` only: the user can open several copies (`card.new`), e.g. several terminals. Each copy is its own QML program with its own `sd.instanceId` and place. |
+| `surfaces[].tooltip` | Optional, ≤ 120 characters, docks and `toolbar.item` only: the text shown when the pointer rests on the surface, e.g. `"Click to add · right-click for the list"`. Default: the plugin name. Use it instead of a QML `ToolTip` there. |
 | `shortcuts` | Optional, up to 8: `{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}`. Work while SUPER DESKTOP is shown, before any card gets the key. `keys`: Super, or two of Ctrl/Alt/Shift, plus one key (a letter, digit, punctuation, `F1`–`F12`, `Space`, `Return`, `Tab`, `Up`…). `action`: `panel`, `card` or `fullscreen` + `.open`/`.close`/`.toggle`, or `card.new`, for one of this plugin's surfaces of that kind. The first plugin (by id) wins a combination two plugins share. |
 
 ### Slots
@@ -79,6 +80,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `settings.page` | A section under the plugin in Settings → Plugins, as wide as the page. Runs only while that page is shown. Use it for options, saved with `sd.setValue`. | ignored | 60–1200, default 240 |
 | `card` | A card on the desktop next to notes and terminals, with a header (title, ✕). The user drags and resizes it; Arrange places it; it slides in and out with the other cards. Opened with `sd.call("card.open"/"card.toggle", {surface})` or from Settings → Plugins; reopens where it was after a restart if it was open. Games, tools and terminals go here. | 200–4000, default 640 | 120–3000, default 420 |
 | `fullscreen` | Covers the whole overlay until **Esc** (or `fullscreen.close`). Opened with `sd.call("fullscreen.open", {surface})`. One at a time. Games, screensavers, presentations. | the screen's | the screen's |
+| `popup` | A small box with no header, like a menu: below the `toolbar.item` that opened it, beside a dock (inside the screen, flipped when there is no room), or below the point the caller gives. Opened with `sd.call("popup.open"/"popup.toggle", {surface})`. It gets the keyboard at once; a click outside it, **Esc**, hiding the overlay or `popup.close` closes it. One popup at a time in the whole overlay. Runs only while open. Menus, pickers, quick forms, lists. | 120–800, default 280 | 40–800, default 240 |
 
 Each surface is its own QML program: surfaces of one plugin share data only
 through `sd.values` (and files or programs you run).
@@ -90,7 +92,11 @@ through `sd.values` (and files or programs you run).
    Use anchors and layouts that follow the root's `width` and `height`.
 2. **No windows or system dialogs**: no `Window`, `FileDialog`,
    `MessageDialog`, `Qt.labs.platform`. `Popup`, `Menu` and `ToolTip` from
-   `QtQuick.Controls` work inside the surface's area.
+   `QtQuick.Controls` work only inside the surface's area: a `toolbar.item`
+   is about 40 px tall, so there they have no room and cover the item itself
+   (a hover `ToolTip` then swallows its clicks). For a menu or a form that
+   opens from a top-bar item or a dock, use a `popup` surface instead, and
+   for hover text the surface's `tooltip` in plugin.json.
 3. **Use the theme**: colors from `sd.theme` (`background`, `foreground`,
    `accent`, `muted`, `surface`, `selection`, `red`, `green`, `yellow`,
    `blue`, `magenta`, `cyan`, `orange`), font from `sd.theme.fontFamily`.
@@ -161,6 +167,7 @@ included, so GUI apps open normally.
 | `card.open`, `card.close`, `card.toggle` | `{surface, instance?}`: one of this plugin's `card` surfaces; `instance` picks a copy of a `multiple` card (default: the caller's own copy when the caller is that card, else the first) | `{open}` |
 | `card.new` | `{surface}` of a `multiple` card | `{}`; opens one more copy. |
 | `fullscreen.open`, `fullscreen.close`, `fullscreen.toggle` | `{surface}`: one of this plugin's `fullscreen` surfaces | `{open}` |
+| `popup.open`, `popup.close`, `popup.toggle` | `{surface, x?, y?, width?, height?}`: one of this plugin's `popup` surfaces. It opens next to the caller: below a `toolbar.item`, beside a dock. `x, y` (and `width, height`) are a point or box in the **caller's** coordinates to open below instead, e.g. `var p = button.mapToItem(null, 0, 0)` then `{surface, x: p.x, y: p.y, width: button.width, height: button.height}` for one button of a dock. Opening one closes any other popup. Use `toggle` on the button: a click on the button that opened it closes it and its toggle then leaves it closed. A popup closes itself with `{surface: sd.surfaceId}`. | `{open}` |
 
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
 `unavailable`, `not_connected`. Show them in the UI where they happen.
@@ -206,6 +213,9 @@ Full working examples, copy the closest one:
   (`harness.list`, `harness.launch`), hover states, tooltips, a component file.
 - `examples/pomodoro/`: a `toolbar.item` that toggles a `panel`, and a
   `settings.page`, sharing state through `sd.values`.
+- `examples/agents-menu/`: a `toolbar.item` whose click opens a `popup`
+  below it, listing the agents (`harness.list`); a click on one opens its
+  card (`harness.launch`) and closes the popup (`popup.close`).
 - `examples/agents-dock/`: a dock listing the agent cards with their status
   (`cards.list`), a click jumps to one (`cards.focus`), and ✦ summarizes what
   an agent is doing (`cards.text` → `llm.complete`).
@@ -243,8 +253,8 @@ Rectangle {
 
 ## Other commands
 
-- `super-desktop plugin new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page|card|fullscreen] [--name "…"]`:
-  a working plugin to start from (`panel`, `card` and `fullscreen` also make
+- `super-desktop plugin new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page|card|fullscreen|popup] [--name "…"]`:
+  a working plugin to start from (`panel`, `card`, `fullscreen` and `popup` also make
   the top-bar item that opens it).
 - `super-desktop plugin list [--json]`: every plugin, whether it is valid and
   whether it is running.

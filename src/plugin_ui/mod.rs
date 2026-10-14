@@ -50,10 +50,12 @@ pub fn css(theme: &crate::theme::OmarchyTheme) -> String {
 .plugin-create-request-frame {{ border: 1px solid {border}; border-radius: 6px; }}
 .plugin-settings-row {{ padding: 6px 0 10px 0; border-bottom: 1px solid {border}; }}
 .plugin-toolbar-item {{ border-radius: 999px; }}
+.plugin-popup {{ background-color: {background}; border: 1px solid {border}; border-radius: 12px; box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); }}
 ",
         error_bg = OmarchyTheme::hex_to_rgba(&theme.background, 0.92),
         error_border = OmarchyTheme::hex_to_rgba(&theme.red, 0.75),
         foreground = theme.foreground,
+        background = theme.background,
         border = theme.rgba_muted(0.30),
     )
 }

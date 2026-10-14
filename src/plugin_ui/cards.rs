@@ -170,6 +170,11 @@ impl PluginCard {
         *self.surface.borrow_mut() = Some(surface);
     }
 
+    /// The widget its QML is drawn in, below the header.
+    pub fn surface_widget(&self) -> Option<gtk4::Widget> {
+        self.surface.borrow().as_ref().map(|s| s.widget().clone().upcast())
+    }
+
     pub fn set_title(&self, title: &str) {
         self.title.set_text(title);
     }

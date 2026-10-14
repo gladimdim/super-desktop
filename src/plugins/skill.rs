@@ -16,6 +16,9 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
     ("examples/launcher-dock/DockButton.qml", include_str!("../../skills/super-desktop-plugin/examples/launcher-dock/DockButton.qml")),
     ("examples/agents-dock/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/agents-dock/plugin.json")),
     ("examples/agents-dock/Dock.qml", include_str!("../../skills/super-desktop-plugin/examples/agents-dock/Dock.qml")),
+    ("examples/agents-menu/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/agents-menu/plugin.json")),
+    ("examples/agents-menu/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/agents-menu/Toolbar.qml")),
+    ("examples/agents-menu/Menu.qml", include_str!("../../skills/super-desktop-plugin/examples/agents-menu/Menu.qml")),
     ("examples/pomodoro/plugin.json", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/plugin.json")),
     ("examples/pomodoro/Toolbar.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Toolbar.qml")),
     ("examples/pomodoro/Panel.qml", include_str!("../../skills/super-desktop-plugin/examples/pomodoro/Panel.qml")),
@@ -224,6 +227,54 @@ Rectangle {
 }
 "#;
 
+const POPUP_QML: &str = r#"import QtQuick
+import QtQuick.Layouts
+
+// {name}: a popup under its top-bar item, like a menu. A click outside it
+// or Esc closes it; it can close itself with popup.close.
+Rectangle {
+    id: root
+    color: sd.theme.background
+
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 6
+        spacing: 2
+
+        Repeater {
+            model: ["First choice", "Second choice", "Third choice"]
+            delegate: Rectangle {
+                id: row
+                required property string modelData
+                Layout.fillWidth: true
+                Layout.preferredHeight: 32
+                radius: 8
+                color: area.containsMouse ? Qt.alpha(sd.theme.accent, 0.25) : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 10
+                    text: row.modelData
+                    color: sd.theme.foreground
+                    font.family: sd.theme.fontFamily
+                }
+                MouseArea {
+                    id: area
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        sd.call("notify", { title: "{name}", body: row.modelData })
+                        sd.call("popup.close", { surface: sd.surfaceId })
+                    }
+                }
+            }
+        }
+        Item { Layout.fillHeight: true }
+    }
+}
+"#;
+
 const SETTINGS_QML: &str = r#"import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -265,10 +316,12 @@ pub enum Template {
     Card,
     /// A top-bar item that shows a full-screen surface.
     Fullscreen,
+    /// A top-bar item that opens a popup below itself.
+    Popup,
 }
 
 impl Template {
-    pub const NAMES: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen"];
+    pub const NAMES: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen", "popup"];
 
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {
@@ -279,6 +332,7 @@ impl Template {
             "settings.page" => Self::SettingsPage,
             "card" => Self::Card,
             "fullscreen" => Self::Fullscreen,
+            "popup" => Self::Popup,
             _ => return None,
         })
     }
@@ -333,6 +387,16 @@ impl Template {
                 vec![
                     ("Toolbar.qml", fill(TOOLBAR_QML).replace("{CLICK}", "sd.call(\"fullscreen.open\", { surface: \"main\" })")),
                     ("Fullscreen.qml", fill(FULLSCREEN_QML)),
+                ],
+            ),
+            Self::Popup => (
+                serde_json::json!([
+                    {"id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 120},
+                    {"id": "main", "slot": "popup", "qml": "Popup.qml", "size": 240, "height": 116}
+                ]),
+                vec![
+                    ("Toolbar.qml", fill(TOOLBAR_QML).replace("{CLICK}", "sd.call(\"popup.toggle\", { surface: \"main\" })")),
+                    ("Popup.qml", fill(POPUP_QML)),
                 ],
             ),
         }
@@ -457,7 +521,7 @@ mod tests {
                 fs::write(path, contents).unwrap();
             }
         }
-        for example in ["clock-dock", "launcher-dock", "agents-dock", "pomodoro", "snake", "terminal"] {
+        for example in ["clock-dock", "launcher-dock", "agents-dock", "agents-menu", "pomodoro", "snake", "terminal"] {
             let m = manifest::load(&root.join(example)).unwrap_or_else(|p| panic!("{example}: {p:?}"));
             // Every QML file of an example loads cleanly, when the host is built.
             if let Some(host) = crate::plugins::paths::qml_host_binary() {
@@ -472,7 +536,7 @@ mod tests {
         // Every example file is in SKILL_FILES (and so reaches plugin folders).
         let on_disk = |dir: &str| std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/super-desktop-plugin/examples").join(dir))
             .unwrap().flatten().map(|e| format!("examples/{dir}/{}", e.file_name().to_string_lossy())).collect::<Vec<_>>();
-        for example in ["clock-dock", "launcher-dock", "agents-dock", "pomodoro", "snake", "terminal"] {
+        for example in ["clock-dock", "launcher-dock", "agents-dock", "agents-menu", "pomodoro", "snake", "terminal"] {
             for file in on_disk(example) {
                 assert!(SKILL_FILES.iter().any(|(path, _)| *path == file), "{file} is missing from SKILL_FILES");
             }

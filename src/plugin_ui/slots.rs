@@ -1,6 +1,6 @@
 //! Where plugin surfaces live in the overlay: docks at the left and right
-//! edges, items in the top bar's launcher row, floating panels, and pages in
-//! Settings → Plugins. Every plugin folder is watched; saving any file in it
+//! edges, items in the top bar's launcher row, floating panels, popups next
+//! to the surface that opened them, and pages in Settings → Plugins. Every plugin folder is watched; saving any file in it
 //! rebuilds that plugin's surfaces (open panels included), which is how an
 //! agent sees its edits live.
 use super::surface::{QmlSurface, SurfaceSpec};
@@ -13,7 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Space between a dock and the screen edge, the top bar and the next dock.
 pub const DOCK_GAP: i32 = 8;
@@ -22,6 +22,13 @@ const TOOLBAR_ITEM_INSET: i32 = 10;
 const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Plugin folders are watched this deep (the folder itself is depth 0).
 const WATCH_DEPTH: usize = 3;
+/// Space between a popup and what it opens next to.
+const POPUP_GAP: i32 = 6;
+/// A popup stays this far inside the overlay.
+const POPUP_MARGIN: i32 = 8;
+/// A press on the surface that opened a popup closes it; that surface's
+/// popup.toggle within this time then leaves it closed.
+const POPUP_TOGGLE_GRACE: Duration = Duration::from_millis(1500);
 
 struct Loaded {
     manifest: Result<Manifest, Vec<Problem>>,
@@ -36,6 +43,74 @@ struct Loaded {
 struct OpenPanel {
     body: gtk4::Box,
     surface: Option<QmlSurface>,
+}
+
+/// Which side of what it opens next to a popup goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupSide {
+    Below,
+    Right,
+    Left,
+}
+
+/// What a popup opens next to: the surface that asked for it (found again
+/// at every layout, so it follows a reload) and, optionally, a rectangle in
+/// that surface's own coordinates.
+#[derive(Clone, Debug)]
+pub struct PopupAnchor {
+    pub caller: String,
+    pub instance: String,
+    pub rect: Option<(f64, f64, f64, f64)>,
+}
+
+/// The open popup: at most one in the whole overlay.
+struct Popup {
+    plugin: String,
+    surface_id: String,
+    container: gtk4::Box,
+    surface: QmlSurface,
+    anchor: PopupAnchor,
+    size: (i32, i32),
+}
+
+/// Where a popup of `size` goes in an overlay of `area`: on `side` of
+/// `anchor` (overlay coordinates: x, y, width, height), on the other side
+/// when there is no room, and inside the overlay. No anchor: centered below
+/// the top bar (`top` tall). Returns (x, y, width, height).
+pub fn popup_rect(area: (i32, i32), top: i32, anchor: Option<((f64, f64, f64, f64), PopupSide)>, size: (i32, i32)) -> (i32, i32, i32, i32) {
+    let (width, height) = area;
+    let w = size.0.min(width - 2 * POPUP_MARGIN).max(1);
+    let h = size.1.min(height - 2 * POPUP_MARGIN).max(1);
+    let (x, y) = match anchor {
+        None => ((width - w) / 2, top + POPUP_GAP),
+        Some(((ax, ay, aw, ah), side)) => {
+            let (ax, ay, aw, ah) = (ax.round() as i32, ay.round() as i32, aw.round() as i32, ah.round() as i32);
+            match side {
+                PopupSide::Below => {
+                    let below = ay + ah + POPUP_GAP;
+                    let above = ay - POPUP_GAP - h;
+                    let y = if below + h > height - POPUP_MARGIN && above >= POPUP_MARGIN { above } else { below };
+                    (ax + aw / 2 - w / 2, y)
+                }
+                PopupSide::Right | PopupSide::Left => {
+                    let right = ax + aw + POPUP_GAP;
+                    let left = ax - POPUP_GAP - w;
+                    let fits_right = right + w <= width - POPUP_MARGIN;
+                    let fits_left = left >= POPUP_MARGIN;
+                    let x = match side {
+                        PopupSide::Right if fits_right || !fits_left => right,
+                        PopupSide::Right => left,
+                        _ if fits_left || !fits_right => left,
+                        _ => right,
+                    };
+                    (x, ay + ah / 2 - h / 2)
+                }
+            }
+        }
+    };
+    let x = x.clamp(POPUP_MARGIN, (width - POPUP_MARGIN - w).max(POPUP_MARGIN));
+    let y = y.clamp(POPUP_MARGIN, (height - POPUP_MARGIN - h).max(POPUP_MARGIN));
+    (x, y, w, h)
 }
 
 /// The open full-screen surface.
@@ -60,6 +135,10 @@ pub struct Slots {
     canvas: RefCell<Option<Rc<super::cards::CanvasHost>>>,
     open_cards: RefCell<BTreeMap<String, Rc<super::cards::PluginCard>>>,
     fullscreen: RefCell<Option<Fullscreen>>,
+    popup: RefCell<Option<Popup>>,
+    /// The popup a press on its own caller just closed, and when.
+    popup_pressed: RefCell<Option<(String, String, Instant)>>,
+    top: Cell<i32>,
     item_height: Cell<i32>,
     root_monitor: RefCell<Option<gio::FileMonitor>>,
     pending: RefCell<BTreeSet<String>>,
@@ -166,6 +245,9 @@ impl Slots {
             canvas: RefCell::new(None),
             open_cards: RefCell::new(BTreeMap::new()),
             fullscreen: RefCell::new(None),
+            popup: RefCell::new(None),
+            popup_pressed: RefCell::new(None),
+            top: Cell::new(top_inset),
             item_height: Cell::new(26),
             root_monitor: RefCell::new(None),
             pending: RefCell::new(BTreeSet::new()),
@@ -178,6 +260,7 @@ impl Slots {
             overlay.set_clip_overlay(edge, true);
         }
         slots.set_top_inset(top_inset);
+        slots.bind_popups();
         SLOTS.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&slots)));
         slots.watch_root();
         slots.scan();
@@ -191,6 +274,7 @@ impl Slots {
     }
 
     pub fn set_top_inset(&self, top: i32) {
+        self.top.set(top);
         for edge in [&self.left, &self.right] {
             edge.set_margin_top(top + DOCK_GAP);
         }
@@ -502,6 +586,205 @@ impl Slots {
         self.canvas.borrow().clone()
     }
 
+    // ── popups ────────────────────────────────────────────────────────────
+
+    /// Places the open popup and closes it on a press anywhere else.
+    fn bind_popups(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.overlay.connect_get_child_position(move |overlay, child| {
+            let slots = weak.upgrade()?;
+            let popup = slots.popup.borrow();
+            let popup = popup.as_ref().filter(|p| child == p.container.upcast_ref::<gtk4::Widget>())?;
+            let (x, y, width, height) = slots.place_popup(overlay, popup);
+            Some(gtk4::gdk::Rectangle::new(x, y, width, height))
+        });
+        // Observe presses without taking them: what was clicked still works.
+        let press = gtk4::GestureClick::new();
+        press.set_button(0);
+        press.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let weak = Rc::downgrade(self);
+        press.connect_pressed(move |gesture, _, x, y| {
+            // A press in a GTK popover is on its own surface, not here.
+            if gesture.current_event().and_then(|e| e.surface()).is_some_and(|s| s.is::<gtk4::gdk::Popup>()) {
+                return;
+            }
+            if let Some(slots) = weak.upgrade() {
+                slots.popup_press(x, y);
+            }
+        });
+        self.overlay.add_controller(press);
+    }
+
+    /// The widget a running surface of `plugin` is drawn in, and its slot.
+    fn caller_widget(&self, plugin: &str, caller: &str, instance: &str) -> Option<(gtk4::Widget, Slot)> {
+        let running = self.plugins.borrow().get(plugin).and_then(|loaded| {
+            loaded.surfaces.iter().find(|(s, _)| s.id == caller).map(|(s, q)| (q.widget().clone().upcast::<gtk4::Widget>(), s.slot))
+        });
+        if running.is_some() {
+            return running;
+        }
+        if let Some(widget) = self.open_panels.borrow().get(&panel_key(plugin, caller)).and_then(|open| open.surface.as_ref()) {
+            return Some((widget.widget().clone().upcast(), Slot::Panel));
+        }
+        if let Some(widget) = self.open_cards.borrow().get(&Self::card_slot_key(plugin, caller, instance)).and_then(|c| c.surface_widget()) {
+            return Some((widget, Slot::Card));
+        }
+        self.fullscreen.borrow().as_ref()
+            .filter(|f| f.plugin == plugin && f.surface_id == caller)
+            .map(|f| (f.surface.widget().clone().upcast(), Slot::Fullscreen))
+    }
+
+    /// The popup's place in `overlay`: beside a dock, below a toolbar item,
+    /// below the rectangle the caller gave; else centered below the top bar.
+    fn place_popup(&self, overlay: &gtk4::Overlay, popup: &Popup) -> (i32, i32, i32, i32) {
+        let anchor = self.caller_widget(&popup.plugin, &popup.anchor.caller, &popup.anchor.instance).and_then(|(widget, slot)| {
+            if !widget.is_mapped() {
+                return None;
+            }
+            let side = match slot {
+                Slot::DockLeft => PopupSide::Right,
+                Slot::DockRight => PopupSide::Left,
+                _ => PopupSide::Below,
+            };
+            let rect = match (popup.anchor.rect, slot) {
+                (Some(rect), _) => rect,
+                (None, Slot::ToolbarItem | Slot::DockLeft | Slot::DockRight) => (0.0, 0.0, f64::from(widget.width()), f64::from(widget.height())),
+                (None, _) => return None,
+            };
+            let bounds = widget.compute_bounds(overlay)?;
+            Some(((f64::from(bounds.x()) + rect.0, f64::from(bounds.y()) + rect.1, rect.2, rect.3), side))
+        });
+        popup_rect((overlay.width(), overlay.height()), self.top.get(), anchor, popup.size)
+    }
+
+    pub fn popup_check(&self, plugin: &str, surface: &str) -> Result<(), String> {
+        self.slot_surface(plugin, surface, Slot::Popup).map(|_| ())
+    }
+
+    pub fn is_popup_open(&self, plugin: &str, surface: &str) -> bool {
+        self.popup.borrow().as_ref().is_some_and(|p| p.plugin == plugin && p.surface_id == surface)
+    }
+
+    /// Opens a plugin's popup next to `anchor`, closing any other popup.
+    /// It has the keyboard at once; Esc or a press outside it closes it.
+    pub fn open_popup(self: &Rc<Self>, plugin: &str, surface: &str, anchor: PopupAnchor) -> Result<(), String> {
+        let (manifest, found) = self.slot_surface(plugin, surface, Slot::Popup)?;
+        self.close_popup();
+        let container = gtk4::Box::new(Orientation::Vertical, 0);
+        container.add_css_class("plugin-popup");
+        container.set_overflow(gtk4::Overflow::Hidden);
+        let qml = QmlSurface::new(spec(&manifest, &found));
+        qml.widget().set_hexpand(true);
+        qml.widget().set_vexpand(true);
+        container.append(qml.widget());
+        // Esc closes the popup instead of hiding the overlay.
+        let keys = gtk4::EventControllerKey::new();
+        keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        keys.connect_key_pressed({
+            let weak = Rc::downgrade(self);
+            move |_, key, _, _| {
+                if key != gtk4::gdk::Key::Escape {
+                    return glib::Propagation::Proceed;
+                }
+                if let Some(slots) = weak.upgrade() {
+                    glib::idle_add_local_once(move || { slots.close_popup(); });
+                }
+                glib::Propagation::Stop
+            }
+        });
+        container.add_controller(keys);
+        // Hiding the overlay closes it: a popup is for the moment.
+        container.connect_unmap({
+            let weak = Rc::downgrade(self);
+            move |container| {
+                let (Some(slots), container) = (weak.upgrade(), container.clone()) else { return };
+                glib::idle_add_local_once(move || {
+                    let current = slots.popup.borrow().as_ref().is_some_and(|p| p.container == container);
+                    if current && !container.is_mapped() {
+                        slots.close_popup();
+                    }
+                });
+            }
+        });
+        self.overlay.add_overlay(&container);
+        self.overlay.set_measure_overlay(&container, false);
+        let view = qml.widget().child();
+        *self.popup.borrow_mut() = Some(Popup {
+            plugin: plugin.to_owned(),
+            surface_id: surface.to_owned(),
+            container,
+            surface: qml,
+            anchor,
+            size: (found.size, found.height),
+        });
+        if let Some(view) = view {
+            glib::idle_add_local_once(move || {
+                view.grab_focus();
+            });
+        }
+        Ok(())
+    }
+
+    /// Closes the popup; whether one was open.
+    pub fn close_popup(&self) -> bool {
+        let Some(popup) = self.popup.borrow_mut().take() else { return false };
+        popup.surface.dispose();
+        if popup.container.parent().is_some() {
+            self.overlay.remove_overlay(&popup.container);
+        }
+        true
+    }
+
+    /// A press at (x, y) in the overlay: outside the popup it closes it. A
+    /// press on the surface that opened it is remembered, so that surface's
+    /// popup.toggle right after leaves it closed instead of opening it again.
+    pub fn popup_press(&self, x: f64, y: f64) {
+        let (plugin, surface, on_caller) = {
+            let popup = self.popup.borrow();
+            let Some(popup) = popup.as_ref() else { return };
+            let picked = self.overlay.pick(x, y, gtk4::PickFlags::DEFAULT);
+            let within = |widget: &gtk4::Widget| picked.as_ref().is_some_and(|p| p == widget || p.is_ancestor(widget));
+            if within(popup.container.upcast_ref()) {
+                return;
+            }
+            let caller = self.caller_widget(&popup.plugin, &popup.anchor.caller, &popup.anchor.instance);
+            (popup.plugin.clone(), popup.surface_id.clone(), caller.is_some_and(|(w, _)| within(&w)))
+        };
+        *self.popup_pressed.borrow_mut() = on_caller.then(|| (plugin, surface, Instant::now()));
+        self.close_popup();
+    }
+
+    /// Whether a press on its caller just closed this popup (asked once, by
+    /// popup.toggle).
+    pub fn popup_just_closed(&self, plugin: &str, surface: &str) -> bool {
+        let pressed = self.popup_pressed.borrow_mut().take();
+        pressed.is_some_and(|(p, s, at)| p == plugin && s == surface && at.elapsed() < POPUP_TOGGLE_GRACE)
+    }
+
+    /// Rebuilds the open popup of `plugin` after it reloads, or closes it.
+    fn refresh_popup(&self, plugin: &str) {
+        let open = self.popup.borrow().as_ref().filter(|p| p.plugin == plugin).map(|p| p.surface_id.clone());
+        let Some(surface) = open else { return };
+        match self.slot_surface(plugin, &surface, Slot::Popup) {
+            Ok((manifest, found)) => {
+                let mut popup = self.popup.borrow_mut();
+                let Some(popup) = popup.as_mut() else { return };
+                let qml = QmlSurface::new(spec(&manifest, &found));
+                qml.widget().set_hexpand(true);
+                qml.widget().set_vexpand(true);
+                popup.surface.dispose();
+                popup.container.remove(popup.surface.widget());
+                popup.container.append(qml.widget());
+                popup.surface = qml;
+                popup.size = (found.size, found.height);
+                popup.container.queue_resize();
+            }
+            Err(_) => {
+                self.close_popup();
+            }
+        }
+    }
+
     // ── full screen ───────────────────────────────────────────────────────
 
     pub fn fullscreen_check(&self, plugin: &str, surface: &str) -> Result<(), String> {
@@ -771,6 +1054,9 @@ impl Slots {
         if self.fullscreen.borrow().as_ref().is_some_and(|f| f.plugin == id) {
             self.close_fullscreen();
         }
+        if self.popup.borrow().as_ref().is_some_and(|p| p.plugin == id) {
+            self.close_popup();
+        }
     }
 
     fn reload(self: &Rc<Self>, id: &str) {
@@ -815,6 +1101,9 @@ impl Slots {
                     .map(|s| {
                         let surface = QmlSurface::new(spec(manifest, s));
                         let widget = surface.widget();
+                        if !s.tooltip.is_empty() {
+                            widget.set_tooltip_text(Some(&s.tooltip));
+                        }
                         if s.slot == Slot::ToolbarItem {
                             widget.set_size_request(s.size, self.item_height.get());
                             widget.set_valign(Align::Center);
@@ -839,6 +1128,7 @@ impl Slots {
         self.refresh_panels(id);
         self.refresh_cards(id);
         self.refresh_fullscreen(id);
+        self.refresh_popup(id);
         self.restore_cards(id);
     }
 
@@ -865,7 +1155,7 @@ impl Slots {
                     Slot::DockLeft => &self.left,
                     Slot::DockRight => &self.right,
                     Slot::ToolbarItem => &self.toolbar_items,
-                    Slot::Panel | Slot::SettingsPage | Slot::Card | Slot::Fullscreen => continue,
+                    Slot::Panel | Slot::SettingsPage | Slot::Card | Slot::Fullscreen | Slot::Popup => continue,
                 };
                 target.append(widget.widget());
             }
@@ -1260,6 +1550,175 @@ mod tests {
         assert_eq!((bounds.width() as i32, bounds.height() as i32), (overlay.width(), overlay.height()));
         assert!(slots.close_fullscreen());
         assert!(!slots.close_fullscreen());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_slots_popup_placement() {
+        let area = (1000, 700);
+        // Below a toolbar item, centered on it.
+        assert_eq!(popup_rect(area, 46, Some(((400.0, 10.0, 52.0, 36.0), PopupSide::Below)), (200, 150)), (326, 52, 200, 150));
+        // At the right end of the bar it stays inside the screen.
+        assert_eq!(popup_rect(area, 46, Some(((970.0, 10.0, 20.0, 36.0), PopupSide::Below)), (200, 150)).0, 1000 - POPUP_MARGIN - 200);
+        // Near the bottom it flips above its anchor.
+        assert_eq!(popup_rect(area, 46, Some(((100.0, 600.0, 40.0, 40.0), PopupSide::Below)), (200, 150)).1, 600 - POPUP_GAP - 150);
+        // Beside a left dock, centered on the point; a right dock opens to the left.
+        assert_eq!(popup_rect(area, 46, Some(((8.0, 300.0, 64.0, 40.0), PopupSide::Right)), (200, 100)), (78, 270, 200, 100));
+        assert_eq!(popup_rect(area, 46, Some(((928.0, 300.0, 64.0, 40.0), PopupSide::Left)), (200, 100)), (722, 270, 200, 100));
+        // A left dock's popup with no room on the right goes left of it.
+        assert_eq!(popup_rect((300, 700), 46, Some(((200.0, 300.0, 64.0, 40.0), PopupSide::Right)), (100, 100)).0, 200 - POPUP_GAP - 100);
+        // No anchor: centered below the bar. Too big: fitted to the screen.
+        assert_eq!(popup_rect(area, 46, None, (200, 150)), (400, 52, 200, 150));
+        assert_eq!(popup_rect((300, 200), 46, None, (800, 800)), (POPUP_MARGIN, POPUP_MARGIN, 284, 184));
+    }
+
+    #[test]
+    fn plugins_slots_popups() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::popups_inner");
+    }
+
+    #[test]
+    fn popups_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-popups-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let plugins = root.join("plugins");
+        write_manifest(&plugins, "menu", serde_json::json!([
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml", "size": 60, "tooltip": "Right-click for more"},
+            {"id": "side", "slot": "dock.left", "qml": "Button.qml", "size": 64},
+            {"id": "list", "slot": "popup", "qml": "List.qml", "size": 220, "height": 160},
+            {"id": "form", "slot": "popup", "qml": "List.qml", "size": 300, "height": 200}
+        ]));
+        std::fs::write(plugins.join("menu/Button.qml"), "import QtQuick\nRectangle { color: \"orange\" }\n").unwrap();
+        std::fs::write(plugins.join("menu/List.qml"), "import QtQuick\nRectangle { color: \"purple\" }\n").unwrap();
+
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let overlay = gtk4::Overlay::new();
+        let top = gtk4::Box::new(Orientation::Vertical, 0);
+        overlay.set_child(Some(&top));
+        let slots = Slots::install(&overlay, 46);
+        let bar = gtk4::Box::new(Orientation::Horizontal, 0);
+        bar.set_size_request(-1, 46);
+        bar.set_margin_start(300);
+        bar.append(slots.toolbar());
+        top.append(&bar);
+        let window = gtk4::Window::new();
+        window.set_default_size(1000, 700);
+        window.set_child(Some(&overlay));
+        window.present();
+        crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks {
+            hide: Rc::new(|| {}),
+            harnesses: Rc::new(|| serde_json::json!([])),
+            launch: Rc::new(|_, _| Ok(())),
+            cards: Rc::new(|| serde_json::json!([])),
+            focus_card: Rc::new(|_| Ok(())),
+            card_session: Rc::new(|_| None),
+            open_card: Rc::new(|_, _| Err("no cards in tests".into())),
+        });
+        let caller = |surface: &str| SurfaceSpec {
+            plugin_id: "menu".into(), plugin_name: "menu".into(), surface_id: surface.into(), instance: String::new(),
+            qml: plugins.join("menu/Button.qml"), dir: plugins.join("menu"),
+        };
+        let call = |from: &str, method: &str, params: serde_json::Value| crate::plugin_ui::api::call(&caller(from), method, &params);
+        crate::gtk_test::pump_until("the toolbar item's frame", || view_frame(slots.toolbar_items.upcast_ref()).is_some());
+        // Its own hover text; the dock without one shows the plugin name.
+        assert_eq!(slots.toolbar_items.first_child().unwrap().tooltip_text().as_deref(), Some("Right-click for more"));
+        assert_eq!(slots.left.first_child().unwrap().tooltip_text().as_deref(), Some("menu"));
+        let item = slots.toolbar_items.first_child().unwrap().compute_bounds(&overlay).unwrap();
+        let popup_bounds = || slots.popup.borrow().as_ref().and_then(|p| p.container.compute_bounds(&overlay));
+        let popup_frame = || slots.popup.borrow().as_ref().and_then(|p| view_frame(p.container.upcast_ref()));
+
+        // Only popup surfaces open as popups.
+        assert_eq!(call("button", "popup.open", serde_json::json!({"surface": "button"})).unwrap_err()["code"], "bad_params");
+        assert_eq!(call("button", "popup.open", serde_json::json!({})).unwrap_err()["code"], "bad_params");
+
+        // From the toolbar item: below it, centered on it, at its size.
+        assert_eq!(call("button", "popup.toggle", serde_json::json!({"surface": "list"})).unwrap()["open"], true);
+        crate::gtk_test::pump_until("the popup's frame", || popup_frame().is_some());
+        assert!(slots.is_popup_open("menu", "list"));
+        let b = popup_bounds().unwrap();
+        assert_eq!((b.width() as i32, b.height() as i32), (220, 160));
+        assert_eq!(b.y() as i32, (item.y() + item.height()) as i32 + POPUP_GAP);
+        assert_eq!((b.x() + b.width() / 2.0) as i32, (item.x() + item.width() / 2.0) as i32);
+
+        // Saving its QML rebuilds it in place.
+        let before = popup_frame().unwrap();
+        std::fs::write(plugins.join("menu/List.qml"), "import QtQuick\nRectangle { color: \"teal\" }\n").unwrap();
+        crate::gtk_test::pump_until("the reloaded popup", || popup_frame().is_some_and(|f| f != before));
+        assert!(slots.is_popup_open("menu", "list"));
+
+        // A press inside it keeps it; toggle closes it.
+        slots.popup_press(b.x() as f64 + 20.0, b.y() as f64 + 20.0);
+        assert!(slots.is_popup_open("menu", "list"));
+        assert_eq!(call("button", "popup.toggle", serde_json::json!({"surface": "list"})).unwrap()["open"], false);
+        crate::gtk_test::pump_until("the popup to close", || slots.popup.borrow().is_none());
+
+        // A press elsewhere closes it.
+        call("button", "popup.open", serde_json::json!({"surface": "list"})).unwrap();
+        crate::gtk_test::pump_until("the popup again", || slots.is_popup_open("menu", "list"));
+        crate::gtk_test::pump(100);
+        slots.popup_press(900.0, 600.0);
+        assert!(slots.popup.borrow().is_none());
+
+        // A press on the item that opened it closes it, and the item's
+        // toggle right after leaves it closed.
+        call("button", "popup.open", serde_json::json!({"surface": "list"})).unwrap();
+        crate::gtk_test::pump_until("the popup once more", || slots.is_popup_open("menu", "list"));
+        crate::gtk_test::pump(100);
+        slots.popup_press((item.x() + item.width() / 2.0) as f64, (item.y() + item.height() / 2.0) as f64);
+        assert!(slots.popup.borrow().is_none());
+        assert_eq!(call("button", "popup.toggle", serde_json::json!({"surface": "list"})).unwrap()["open"], false);
+        crate::gtk_test::pump(100);
+        assert!(slots.popup.borrow().is_none());
+        // The next toggle opens it again.
+        assert_eq!(call("button", "popup.toggle", serde_json::json!({"surface": "list"})).unwrap()["open"], true);
+        crate::gtk_test::pump_until("the popup after the grace", || slots.is_popup_open("menu", "list"));
+
+        // One popup at a time: opening another replaces it.
+        call("button", "popup.open", serde_json::json!({"surface": "form"})).unwrap();
+        crate::gtk_test::pump_until("the second popup", || slots.is_popup_open("menu", "form"));
+        assert!(!slots.is_popup_open("menu", "list"));
+        crate::gtk_test::pump_until("the second popup's frame", || popup_bounds().is_some_and(|b| b.width() as i32 == 300));
+
+        // From a dock: beside it, centered on the box the dock gives.
+        call("side", "popup.open", serde_json::json!({"surface": "list", "x": 0, "y": 200, "width": 64, "height": 40})).unwrap();
+        crate::gtk_test::pump_until("the dock's popup", || slots.is_popup_open("menu", "list") && popup_frame().is_some());
+        let dock = slots.left.compute_bounds(&overlay).unwrap();
+        crate::gtk_test::pump_until("the popup beside the dock", || {
+            popup_bounds().is_some_and(|b| b.x() as i32 == (dock.x() + dock.width()) as i32 + POPUP_GAP && b.y() as i32 == (dock.y() + 220.0) as i32 - 80)
+        });
+
+        // Esc closes it (and does not reach the overlay).
+        let keys = {
+            let popup = slots.popup.borrow();
+            let controllers = popup.as_ref().unwrap().container.observe_controllers();
+            (0..controllers.n_items()).find_map(|i| controllers.item(i).and_downcast::<gtk4::EventControllerKey>()).unwrap()
+        };
+        let stopped: bool = keys.emit_by_name("key-pressed", &[&gtk4::gdk::Key::Escape, &9u32, &gtk4::gdk::ModifierType::empty()]);
+        assert!(stopped);
+        crate::gtk_test::pump_until("Esc to close the popup", || slots.popup.borrow().is_none());
+        call("side", "popup.open", serde_json::json!({"surface": "list"})).unwrap();
+        crate::gtk_test::pump_until("the dock's popup again", || slots.is_popup_open("menu", "list"));
+
+        // The popup itself can close it.
+        assert_eq!(call("list", "popup.close", serde_json::json!({"surface": "list"})).unwrap()["open"], false);
+        crate::gtk_test::pump_until("the self-closed popup", || slots.popup.borrow().is_none());
+
+        // Turning the plugin off closes an open popup.
+        call("button", "popup.open", serde_json::json!({"surface": "list"})).unwrap();
+        crate::gtk_test::pump_until("an open popup", || slots.is_popup_open("menu", "list"));
+        crate::plugin_ui::settings_page::set_enabled(&plugins.join("menu"), false).unwrap();
+        crate::gtk_test::pump_until("the popup to go with its plugin", || slots.popup.borrow().is_none());
+        assert_eq!(call("button", "popup.open", serde_json::json!({"surface": "list"})).unwrap_err()["code"], "bad_params");
         let _ = std::fs::remove_dir_all(&root);
     }
 

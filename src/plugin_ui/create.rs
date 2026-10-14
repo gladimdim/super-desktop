@@ -17,6 +17,7 @@ const PLACES: &[(&str, &str)] = &[
     ("settings.page", "Section in Settings → Plugins"),
     ("card", "Card on the desktop (a game, tool or terminal)"),
     ("fullscreen", "Full screen, opened from the top bar (a game, a screensaver)"),
+    ("popup", "Popup under a top-bar item (a menu, a quick form)"),
 ];
 
 thread_local! {

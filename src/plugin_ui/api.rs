@@ -221,6 +221,42 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             });
             Ok(json!({"open": want}))
         }
+        "popup.open" | "popup.close" | "popup.toggle" => {
+            let Some(surface) = params.get("surface").and_then(Value::as_str) else {
+                return Err(error("bad_params", format!("{method} needs {{surface}}"), "Pass the id of one of your plugin's \"popup\" surfaces, e.g. {surface: \"menu\"}."));
+            };
+            let Some(slots) = super::slots::get() else {
+                return Err(error("unavailable", "the overlay is not ready", "Try again in a moment."));
+            };
+            let (plugin, surface) = (spec.plugin_id.clone(), surface.to_owned());
+            let open = slots.is_popup_open(&plugin, &surface);
+            // A press on the caller already closed it: its toggle leaves it closed.
+            let want = match method {
+                "popup.open" => true,
+                "popup.close" => false,
+                _ => !open && !slots.popup_just_closed(&plugin, &surface),
+            };
+            if want {
+                slots.popup_check(&plugin, &surface)
+                    .map_err(|message| error("bad_params", message, "Declare the surface in plugin.json with \"slot\": \"popup\"."))?;
+                // Where in the caller it opens: x, y (and width, height) in
+                // the caller's own coordinates; else beside the whole caller.
+                let number = |name: &str| params.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
+                let rect = number("x").zip(number("y")).map(|(x, y)| {
+                    (x, y, number("width").unwrap_or(0.0).max(0.0), number("height").unwrap_or(0.0).max(0.0))
+                });
+                let anchor = super::slots::PopupAnchor { caller: spec.surface_id.clone(), instance: spec.instance.clone(), rect };
+                // After this call returns: opening moves the keyboard.
+                gtk4::glib::idle_add_local_once(move || {
+                    let _ = slots.open_popup(&plugin, &surface, anchor);
+                });
+            } else if open {
+                gtk4::glib::idle_add_local_once(move || {
+                    slots.close_popup();
+                });
+            }
+            Ok(json!({"open": want}))
+        }
         "notify" => {
             let title = params.get("title").and_then(Value::as_str).unwrap_or(&spec.plugin_name).to_owned();
             let body = params.get("body").and_then(Value::as_str).unwrap_or("").to_owned();
@@ -243,7 +279,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, llm.complete, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, llm.complete, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle, popup.open/close/toggle.",
         )),
     }
 }

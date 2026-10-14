@@ -8,7 +8,7 @@ use std::process::Command;
 const USAGE: &str = "usage: super-desktop plugin <command>
 
   list [--json]                       every plugin, valid or not, and its state
-  new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page|card|fullscreen]
+  new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page|card|fullscreen|popup]
       [--name NAME] [--request TEXT]
                                       create a working plugin to start from
   check <id|dir> [--json]             manifest and QML errors (exit 0 when clean)
