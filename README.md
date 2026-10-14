@@ -171,6 +171,7 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **🎨 Native Omarchy theming** — colors, fonts, and terminal palette are read from the active Omarchy theme and update instantly when you switch themes (no restart).
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
 - **🔌 Phone bridge (optional)** — for the [SUPER DESKTOP Android app on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop) ([how to connect it](https://superdesktop.dmytrogladkyi.com/connect.html)). Encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Connections*. A background supervisor checks every five seconds and recovers the bridge after three consecutive failed checks, even with the overlay hidden or screen locked. Stop pauses recovery until Start (or the next daemon launch). Failed starts are retried, and `bridge.previous.log` preserves the previous run beside `bridge.log`. To stay reachable while unattended on external power, enable *Settings → Sleep lock*; recovery cannot run while the PC is suspended. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
+- **🧩 Plugins made by AI** — describe a widget, dock, top-bar item, popup, panel, desktop card, game or full-screen view, and an AI agent builds it as a small QML plugin that appears while it works. Browse and install other people's plugins, or make any plugin your own copy and improve it with an agent. See [Plugins](#plugins).
 - **🖥 Other PCs** — pair two PCs and open the other one's workspace from the top-left **This PC** selector: its consoles stream live and every action runs on that PC. See [Use another PC's harnesses](#use-another-pcs-harnesses).
 
 The overlay takes its colors from the active Omarchy theme and follows a theme
@@ -443,6 +444,39 @@ parameters. Open cards keep their command, and restored cards keep theirs while
 gaining parameters you add. Keep display-mode defaults such as Codex's
 `--no-alt-screen` if you follow that harness from the phone: they are what puts
 its history into scrollback.
+
+### Plugins
+
+Plugins add things to the overlay: docks at the screen edges, items in the
+top bar with popups under them, floating panels, cards on the desktop
+(games, tools, terminals), full-screen views and sections in Settings. A
+plugin is a folder of QML in `~/.config/super-desktop/plugins/<id>/` with a
+`plugin.json`, drawn by Qt Quick (`qt6-declarative`) and colored by your
+Omarchy theme; it reloads on screen whenever one of its files is saved.
+
+- **Make one with AI**: ✨ **Create Plugin** (top bar, or **Settings →
+  Plugins**) asks what it should do and where it goes, then opens an agent
+  (Claude Code, Codex…) in a new plugin folder with the plugin skill. The
+  plugin appears and changes while the agent works. Agents check their own
+  work with `super-desktop plugin check` and `plugin snapshot`, which also
+  clicks and types through a plugin like a user.
+- **Get plugins**: **Settings → Plugins → Discover** lists the public
+  [plugin list](https://github.com/gladimdim/super-desktop-plugins) with
+  pictures, a search and categories. **Install** clones a plugin from its
+  repository; it runs only after you approve it, and **Ask AI to review**
+  reads it for you first. `super-desktop plugin search` and `plugin install
+  <id>` do the same in a terminal.
+- **Edit & Enhance** on any plugin opens an agent to improve it. Someone
+  else's plugin first becomes your own copy (it keeps its saved data and
+  stops updating from its author).
+- **Share yours**: `super-desktop plugin preview <id>` draws its picture and
+  `plugin publish <id>` checks it is ready for the list; the list's
+  [CONTRIBUTING.md](https://github.com/gladimdim/super-desktop-plugins/blob/main/CONTRIBUTING.md)
+  explains the pull request.
+
+Plugins run as you: their QML can start programs. Plugins you make run at
+once; installed ones wait for your approval. See the
+[plugin commands](CLI.md#plugins).
 
 ### Keybindings
 
