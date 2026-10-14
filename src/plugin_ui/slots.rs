@@ -725,6 +725,20 @@ impl Slots {
         Ok(())
     }
 
+    /// Changes the open popup's size (either side, within the slot's limits);
+    /// the size it has now, or an error when that popup is not open.
+    pub fn resize_popup(&self, plugin: &str, surface: &str, width: Option<i32>, height: Option<i32>) -> Result<(i32, i32), String> {
+        let mut popup = self.popup.borrow_mut();
+        let popup = popup.as_mut().filter(|p| p.plugin == plugin && p.surface_id == surface)
+            .ok_or_else(|| format!("popup {surface:?} is not open"))?;
+        let sizes = Slot::Popup.sizes();
+        let ((wmin, _, wmax), (hmin, _, hmax)) = (sizes.size.unwrap_or((1, 1, i32::MAX)), sizes.height.unwrap_or((1, 1, i32::MAX)));
+        popup.size = (width.map_or(popup.size.0, |w| w.clamp(wmin, wmax)), height.map_or(popup.size.1, |h| h.clamp(hmin, hmax)));
+        popup.container.queue_resize();
+        self.overlay.queue_allocate();
+        Ok(popup.size)
+    }
+
     /// Closes the popup; whether one was open.
     pub fn close_popup(&self) -> bool {
         let Some(popup) = self.popup.borrow_mut().take() else { return false };
@@ -1708,6 +1722,13 @@ mod tests {
         crate::gtk_test::pump_until("Esc to close the popup", || slots.popup.borrow().is_none());
         call("side", "popup.open", serde_json::json!({"surface": "list"})).unwrap();
         crate::gtk_test::pump_until("the dock's popup again", || slots.is_popup_open("menu", "list"));
+
+        // The popup can resize itself, within the slot's limits; only while open.
+        assert_eq!(call("list", "popup.resize", serde_json::json!({"surface": "list", "height": 300})).unwrap(), serde_json::json!({"width": 220, "height": 300}));
+        crate::gtk_test::pump_until("the taller popup", || popup_bounds().is_some_and(|b| b.height() as i32 == 300));
+        assert_eq!(call("list", "popup.resize", serde_json::json!({"surface": "list", "width": 5000})).unwrap()["width"], 800);
+        assert_eq!(call("list", "popup.resize", serde_json::json!({"surface": "list"})).unwrap_err()["code"], "bad_params");
+        assert_eq!(call("list", "popup.resize", serde_json::json!({"surface": "form", "height": 100})).unwrap_err()["code"], "bad_params");
 
         // The popup itself can close it.
         assert_eq!(call("list", "popup.close", serde_json::json!({"surface": "list"})).unwrap()["open"], false);

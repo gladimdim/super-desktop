@@ -309,6 +309,29 @@ public:
         const QColor muted = color("muted", "foreground");
         const QColor accent = color("accent", "foreground");
         const bool light = theme.value("mode").toString() == "light";
+        // WCAG contrast, so text set on a color stays readable in every theme.
+        auto luminance = [](const QColor &c) {
+            auto channel = [](double v) { return v <= 0.03928 ? v / 12.92 : std::pow((v + 0.055) / 1.055, 2.4); };
+            return 0.2126 * channel(c.redF()) + 0.7152 * channel(c.greenF()) + 0.0722 * channel(c.blueF());
+        };
+        auto contrast = [&](const QColor &a, const QColor &b) {
+            const double la = luminance(a), lb = luminance(b);
+            return (std::max(la, lb) + 0.05) / (std::min(la, lb) + 0.05);
+        };
+        auto mix = [](const QColor &a, const QColor &b, double t) {
+            return QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * t, a.greenF() + (b.greenF() - a.greenF()) * t,
+                                    a.blueF() + (b.blueF() - a.blueF()) * t);
+        };
+        // Text on the accent (highlighted and checked buttons): the theme's
+        // own text or background color, whichever reads better.
+        const QColor onAccent = contrast(fg, accent) >= contrast(bg, accent) ? fg : bg;
+        // Placeholder text: the foreground faded toward the background, not
+        // `muted` (meant for borders, nearly invisible in some themes).
+        QColor placeholder = fg;
+        for (double t = 0.45; t > 0; t -= 0.05) {
+            const QColor c = mix(fg, dark, t);
+            if (contrast(c, dark) >= 4.5) { placeholder = c; break; }
+        }
         QPalette p;
         p.setColor(QPalette::Window, bg);
         p.setColor(QPalette::WindowText, fg);
@@ -317,15 +340,17 @@ public:
         p.setColor(QPalette::Text, fg);
         p.setColor(QPalette::Button, surface);
         p.setColor(QPalette::ButtonText, fg);
-        p.setColor(QPalette::BrightText, light ? QColor(Qt::black) : QColor(Qt::white));
+        p.setColor(QPalette::BrightText, onAccent);
         p.setColor(QPalette::Highlight, accent);
         p.setColor(QPalette::HighlightedText, bg);
         p.setColor(QPalette::Light, light ? surface.darker(110) : surface.lighter(130));
         p.setColor(QPalette::Midlight, light ? surface.darker(105) : surface.lighter(115));
         p.setColor(QPalette::Mid, muted);
-        p.setColor(QPalette::Dark, light ? muted : dark);
+        // The Basic style fills highlighted/checked buttons, checked
+        // switches, sliders and progress bars with Dark: the accent.
+        p.setColor(QPalette::Dark, accent);
         p.setColor(QPalette::Shadow, QColor(0, 0, 0, 120));
-        p.setColor(QPalette::PlaceholderText, muted);
+        p.setColor(QPalette::PlaceholderText, placeholder);
         p.setColor(QPalette::ToolTipBase, surface);
         p.setColor(QPalette::ToolTipText, fg);
         p.setColor(QPalette::Link, accent);

@@ -64,12 +64,28 @@ impl Flags {
     }
 }
 
+/// The lines of USAGE about one command, or `None` for an unknown one.
+fn command_help(command: &str) -> Option<String> {
+    let mut lines = USAGE.lines().skip_while(|l| !(l.starts_with(&format!("  {command} ")) || *l == format!("  {command}")));
+    let first = lines.next()?;
+    // Its continuation lines are indented further than the next command.
+    let rest: Vec<&str> = lines.take_while(|l| l.starts_with("     ")).collect();
+    Some(format!("usage: super-desktop plugin {}\n{}", first.trim_start(), rest.join("\n")).trim_end().to_owned())
+}
+
 /// Runs `plugin <args>`; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
     let (command, rest) = match args.split_first() {
         Some((command, rest)) => (command.as_str(), rest),
         None => ("help", &[][..]),
     };
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        match command_help(command) {
+            Some(help) => println!("{help}\n\nAll commands: super-desktop plugin help"),
+            None => println!("{USAGE}"),
+        }
+        return 0;
+    }
     let result = match command {
         "help" | "--help" | "-h" => {
             println!("{USAGE}");
@@ -481,6 +497,19 @@ fn install_command(flags: &Flags) -> Result<i32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugins_cli_help_for_each_command() {
+        let snapshot = command_help("snapshot").unwrap();
+        assert!(snapshot.starts_with("usage: super-desktop plugin snapshot <id|dir>"), "{snapshot}");
+        assert!(snapshot.contains("--values FILE.json"), "{snapshot}");
+        assert!(command_help("path").unwrap().contains("print the plugins folder"));
+        assert!(command_help("nope").is_none());
+        // Every command in the dispatch has its help.
+        for command in ["list", "new", "check", "snapshot", "logs", "doctor", "install", "approve", "update", "remove", "path"] {
+            assert!(command_help(command).is_some(), "{command}");
+        }
+    }
 
     /// --values renders with sample values; a snapshot never changes the
     /// plugin's saved values.

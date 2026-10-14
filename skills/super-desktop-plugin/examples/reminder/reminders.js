@@ -3,8 +3,8 @@
 // Reminders are kept in sd.values.reminders as
 // [{id, at (ms since epoch), text, fired (bool)}].
 
-// A copy of the saved list: change the copy, then sd.setValue it. (Before
-// SUPER DESKTOP 1.6 a saved list came back as a Qt list, not a JS array.)
+// A copy of the saved list (and of each item): change the copy, then
+// sd.setValue it.
 function list(values) {
     var r = values && values.reminders
     if (!r || typeof r.length !== "number") return []

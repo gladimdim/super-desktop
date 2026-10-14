@@ -257,6 +257,22 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             }
             Ok(json!({"open": want}))
         }
+        "popup.resize" => {
+            let Some(surface) = params.get("surface").and_then(Value::as_str) else {
+                return Err(error("bad_params", "popup.resize needs {surface}", "Pass the open popup's id, e.g. {surface: sd.surfaceId, height: 200}."));
+            };
+            let Some(slots) = super::slots::get() else {
+                return Err(error("unavailable", "the overlay is not ready", "Try again in a moment."));
+            };
+            let number = |name: &str| params.get(name).and_then(Value::as_f64).filter(|n| n.is_finite()).map(|n| n.round() as i32);
+            let (width, height) = (number("width"), number("height"));
+            if width.is_none() && height.is_none() {
+                return Err(error("bad_params", "popup.resize needs width or height", "Pass a size in logical pixels, e.g. {surface: sd.surfaceId, height: column.implicitHeight + 24}."));
+            }
+            slots.resize_popup(&spec.plugin_id, surface, width, height)
+                .map(|(width, height)| json!({"width": width, "height": height}))
+                .map_err(|message| error("bad_params", message, "Resize a popup while it is open, usually from the popup itself."))
+        }
         "notify" => {
             let title = params.get("title").and_then(Value::as_str).unwrap_or(&spec.plugin_name).to_owned();
             let body = params.get("body").and_then(Value::as_str).unwrap_or("").to_owned();
@@ -279,7 +295,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
         _ => Err(error(
             "unknown_method",
             format!("unknown method {method:?}"),
-            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, llm.complete, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle, popup.open/close/toggle.",
+            "Methods: overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, llm.complete, notify, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle, popup.open/close/toggle, popup.resize.",
         )),
     }
 }

@@ -351,6 +351,58 @@ Item {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Standard controls follow the theme: highlighted buttons (and checked
+    /// switches, sliders) use the accent with readable text on it, and
+    /// placeholder text reads on the field, in a dark and a light theme.
+    #[test]
+    fn plugins_host_palette_follows_the_theme() {
+        let Some(binary) = crate::plugins::paths::qml_host_binary() else {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sd-plugins-palette-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Probe.qml");
+        std::fs::write(&file, r#"import QtQuick
+import QtQuick.Controls
+Item {
+    function must(ok, what) { if (!ok) throw new Error(what) }
+    function lum(c) {
+        var v = [c.r, c.g, c.b].map(x => x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4))
+        return 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2]
+    }
+    function contrast(a, b) { var x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05) }
+    Button { id: button; highlighted: true }
+    TextField { id: field; y: 50 }
+    // Controls take the palette once they are in the window: check a moment
+    // later, and paint only when every check passed.
+    Rectangle { id: done; anchors.fill: parent; color: "transparent"; z: 10 }
+    Timer {
+        interval: 50; running: true
+        onTriggered: {
+            must(Qt.colorEqual(button.palette.dark, sd.theme.accent), "highlight is not the accent")
+            must(contrast(button.palette.brightText, button.palette.dark) >= 2.5, "text on the accent does not read")
+            must(contrast(field.placeholderTextColor, field.palette.base) >= 4.5, "placeholder does not read")
+            done.color = "red"
+        }
+    }
+}
+"#).unwrap();
+        // Matte Black (accent orange) and Lupine (light, accent blue).
+        for theme in [
+            serde_json::json!({"mode": "dark", "background": "#121212", "foreground": "#bebebe", "surface": "#1e1e1e", "darkBackground": "#0d0d0d", "muted": "#333333", "accent": "#e68e0d"}),
+            serde_json::json!({"mode": "light", "background": "#fafafa", "foreground": "#212121", "surface": "#f5f5f5", "darkBackground": "#ececec", "muted": "#9e9e9e", "accent": "#3264eb"}),
+        ] {
+            let out = std::process::Command::new(&binary).arg("--snapshot").arg(&file).arg("--out").arg(dir.join("out.png"))
+                .args(["--width", "120", "--height", "100", "--wait", "300", "--theme", &theme.to_string()]).output().unwrap();
+            let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(report["warnings"], serde_json::json!([]), "{theme}: {report}");
+            assert_eq!(report["paintedFraction"], 1.0, "the checks did not run: {report}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Runs the real `sd-qml-host` when it is built
     /// (`scripts/build-qml-host.sh debug`), else says why it is skipped.
     #[test]

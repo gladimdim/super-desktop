@@ -23,6 +23,10 @@ install.
 Plugins live in `~/.config/super-desktop/plugins/<id>/` (`super-desktop plugin
 path` prints the folder). The folder name is the plugin id.
 
+This copy of the skill comes from the SUPER DESKTOP installed on this PC,
+which puts it in the plugin folder and refreshes it after every update: all
+it describes works here, whatever version number SUPER DESKTOP reports.
+
 ## The loop (do this every time)
 
 1. Edit the QML or `plugin.json`.
@@ -32,7 +36,9 @@ path` prints the folder). The folder name is the plugin id.
 3. `super-desktop plugin snapshot <id> --surface <surface id> --out /tmp/<id>.png --json`
    for **each** surface → **open the PNG and look at it.** `paintedFraction: 0`
    means nothing visible was drawn. Use `--width`, `--height` and `--scale 2`
-   to see other sizes. Snapshots use the user's current theme and saved values;
+   to see other sizes (a `toolbar.item` renders 36 px tall; the bar's items
+   are 26–50 px, so try `--height 26` and `--height 50`). Snapshots use the
+   user's current theme and saved values;
    `--values sample.json` (one JSON object, as `sd.values` sees it) shows other
    states (a full list, an empty one, an alarm going off), and `--wait 120`
    catches an animation part-way. What the QML saves during a snapshot is
@@ -84,7 +90,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `settings.page` | A section under the plugin in Settings → Plugins, as wide as the page. Runs only while that page is shown. Use it for options, saved with `sd.setValue`. | ignored | 60–1200, default 240 |
 | `card` | A card on the desktop next to notes and terminals, with a header (title, ✕). The user drags and resizes it; Arrange places it; it slides in and out with the other cards. Opened with `sd.call("card.open"/"card.toggle", {surface})` or from Settings → Plugins; reopens where it was after a restart if it was open. Games, tools and terminals go here. | 200–4000, default 640 | 120–3000, default 420 |
 | `fullscreen` | Covers the whole overlay until **Esc** (or `fullscreen.close`). Opened with `sd.call("fullscreen.open", {surface})`. One at a time. Games, screensavers, presentations. | the screen's | the screen's |
-| `popup` | A small box with no header, like a menu: below the `toolbar.item` that opened it, beside a dock (inside the screen, flipped when there is no room), or below the point the caller gives. Opened with `sd.call("popup.open"/"popup.toggle", {surface})`. It gets the keyboard at once; a click outside it, **Esc**, hiding the overlay or `popup.close` closes it. One popup at a time in the whole overlay. Runs only while open. Menus, pickers, quick forms, lists. | 120–800, default 280 | 40–800, default 240 |
+| `popup` | A small box with no header, like a menu: below the `toolbar.item` that opened it, beside a dock (inside the screen, flipped when there is no room), or below the point the caller gives. Opened with `sd.call("popup.open"/"popup.toggle", {surface})`. It opens at the size in plugin.json; `popup.resize` fits it to its content. It gets the keyboard at once; a click outside it, **Esc**, hiding the overlay or `popup.close` closes it. One popup at a time in the whole overlay. Runs only while open. Menus, pickers, quick forms, lists. | 120–800, default 280 | 40–800, default 240 |
 
 Each surface is its own QML program: surfaces of one plugin share data only
 through `sd.values` (and files or programs you run).
@@ -111,7 +117,8 @@ through `sd.values` (and files or programs you run).
    toward `background`), and check any other text color against
    `background` (see "Pitfalls and recipes"). Standard
    `QtQuick.Controls` (Button, CheckBox, SpinBox, Slider, TextField…) already
-   use the theme's colors. A transparent root shows the desktop through.
+   use the theme's colors: `Button { highlighted: true }` (and checked
+   switches, sliders, progress bars) take the accent with readable text. A transparent root shows the desktop through.
    Set `cursorShape` on a `MouseArea` (e.g. `Qt.PointingHandCursor`) for
    clickable things.
 4. **Rendering is software**: `ShaderEffect`, `MultiEffect`, Qt Quick 3D and
@@ -177,6 +184,7 @@ included, so GUI apps open normally.
 | `card.open`, `card.close`, `card.toggle` | `{surface, instance?}`: one of this plugin's `card` surfaces; `instance` picks a copy of a `multiple` card (default: the caller's own copy when the caller is that card, else the first) | `{open}` |
 | `card.new` | `{surface}` of a `multiple` card | `{}`; opens one more copy. |
 | `fullscreen.open`, `fullscreen.close`, `fullscreen.toggle` | `{surface}`: one of this plugin's `fullscreen` surfaces | `{open}` |
+| `popup.resize` | `{surface, width?, height?}` of this plugin's **open** popup, usually from the popup itself: `onImplicitHeightChanged: sd.call("popup.resize", {surface: sd.surfaceId, height: implicitHeight})` on its layout. Clamped to the slot's limits. | `{width, height}` |
 | `popup.open`, `popup.close`, `popup.toggle` | `{surface, x?, y?, width?, height?}`: one of this plugin's `popup` surfaces. It opens next to the caller: below a `toolbar.item`, beside a dock. `x, y` (and `width, height`) are a point or box in the **caller's** coordinates to open below instead, e.g. `var p = button.mapToItem(null, 0, 0)` then `{surface, x: p.x, y: p.y, width: button.width, height: button.height}` for one button of a dock. Opening one closes any other popup. Use `toggle` on the button: a click on the button that opened it closes it and its toggle then leaves it closed. A popup closes itself with `{surface: sd.surfaceId}`. | `{open}` |
 
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
@@ -289,8 +297,24 @@ function remove(id) {
 ```
 
 Two surfaces that save the same key at the same moment: the last one wins.
-Let one surface own a key, or save small keys. To look at what is saved:
+Let one surface own a key, or save small keys. One surface adding and another
+removing (a history the toolbar item appends to and a popup prunes) is fine:
+the user cannot do both at the same instant, and each reads the latest
+`sd.values` before it saves. To look at what is saved:
 `cat ~/.local/state/super-desktop/plugins/<id>.data.json`.
+
+**Testing what happens on an event** (a timer ending, a reminder due): in
+`check` and `snapshot`, `sd.connected` is false and `sd.call`/`sd.exec` fail,
+so keep the decision in plain functions (what is due, what to save) and the
+side effects (notify, sound) in a few lines guarded by `sd.connected`.
+Snapshot the states with `--values`: times are epoch milliseconds, so write
+the sample just before the snapshot (`N=$(date +%s%3N)`, then
+`"endsAt": $((N + 60000))`). To see it live, ask the user first (it makes a
+sound), then use a very short length (0.1 minutes).
+
+**Adding files**: write a new QML file before plugin.json names it. Every
+save reloads the plugin on screen, and a surface whose file is missing shows
+an error until it exists.
 
 **Readable colors** in every theme (light and dark): compare with
 `background` and fall back to `foreground`. In a `.pragma library` JS file:
