@@ -5,7 +5,7 @@ use super::surface::{QmlSurface, SurfaceSpec};
 use super_desktop::plugins::manifest::{Manifest, Problem, Slot};
 use super_desktop::plugins::paths;
 use gtk4::prelude::*;
-use gtk4::{Align, Orientation};
+use gtk4::Orientation;
 use serde_json::Value;
 use std::cell::RefCell;
 use std::path::Path;
@@ -75,44 +75,30 @@ struct Page {
 /// Builds the page in `root`; the returned closure refreshes it (call it
 /// when the page is shown).
 pub fn build(root: &gtk4::Box) -> Rc<dyn Fn()> {
-    let top = gtk4::Box::new(Orientation::Horizontal, 8);
-    top.set_halign(Align::Start);
-    let create = gtk4::Button::with_label("✨ Create a plugin with AI");
+    // Installed | Discover, and ✨ Create on the right.
+    let header = gtk4::Box::new(Orientation::Horizontal, 8);
+    let tabs = gtk4::Box::new(Orientation::Horizontal, 0);
+    tabs.add_css_class("plugin-tabs");
+    let installed_tab = gtk4::ToggleButton::with_label("Installed");
+    let discover_tab = gtk4::ToggleButton::with_label("Discover");
+    discover_tab.set_group(Some(&installed_tab));
+    for tab in [&installed_tab, &discover_tab] {
+        tab.add_css_class("plugin-tab");
+        tabs.append(tab);
+    }
+    installed_tab.set_active(true);
+    discover_tab.set_tooltip_text(Some("Plugins other people share: search them and install"));
+    header.append(&tabs);
+    let spacer = gtk4::Box::new(Orientation::Horizontal, 0);
+    spacer.set_hexpand(true);
+    header.append(&spacer);
+    let create = gtk4::Button::with_label("✨ Create with AI");
     create.add_css_class("launcher-btn");
     create.add_css_class("launcher-btn-primary");
     create.set_tooltip_text(Some("Describe a widget, toolbar, panel or game; an AI agent builds it here"));
     create.connect_clicked(|_| super::create::open());
-    top.append(&create);
-    // The public plugin list, made when first asked for.
-    let get = gtk4::Button::with_label("🧩 Get plugins");
-    get.add_css_class("launcher-btn");
-    get.set_tooltip_text(Some("Browse plugins other people share and install them"));
-    top.append(&get);
-    root.append(&top);
-    let browser_slot = gtk4::Box::new(Orientation::Vertical, 0);
-    root.append(&browser_slot);
-    let browser: Rc<RefCell<Option<Rc<super::browse::Browser>>>> = Rc::new(RefCell::new(None));
-    get.connect_clicked({
-        let (browser, browser_slot) = (Rc::clone(&browser), browser_slot.clone());
-        move |get| {
-            let mut browser = browser.borrow_mut();
-            match browser.as_ref() {
-                Some(shown) => {
-                    let visible = !shown.widget.is_visible();
-                    shown.widget.set_visible(visible);
-                    if visible {
-                        shown.render();
-                    }
-                }
-                None => {
-                    let made = super::browse::Browser::new();
-                    browser_slot.append(&made.widget);
-                    *browser = Some(made);
-                }
-            }
-            get.set_label(if browser.as_ref().is_some_and(|b| b.widget.is_visible()) { "🧩 Hide plugin list" } else { "🧩 Get plugins" });
-        }
-    });
+    header.append(&create);
+    root.append(&header);
     if paths::qml_host_binary().is_none() {
         let missing = label(
             "Plugins cannot be drawn: the QML host (sd-qml-host) is not installed. Install qt6-declarative, then update SUPER DESKTOP. `super-desktop plugin doctor` says more.",
@@ -121,16 +107,47 @@ pub fn build(root: &gtk4::Box) -> Rc<dyn Fn()> {
         missing.add_css_class("launcher-note-error");
         root.append(&missing);
     }
-    root.append(&label(
-        &format!(
-            "Plugins are folders of QML in {}. A plugin reloads on screen whenever one of its files is saved.",
-            paths::plugins_dir().display()
-        ),
-        "launcher-note",
-    ));
+    let stack = gtk4::Stack::new();
+    stack.set_vhomogeneous(false);
+    let installed = gtk4::Box::new(Orientation::Vertical, 10);
+    stack.add_named(&installed, Some("installed"));
+    let discover = gtk4::Box::new(Orientation::Vertical, 0);
+    stack.add_named(&discover, Some("discover"));
+    root.append(&stack);
+    // The public list, made when first shown.
+    let browser: Rc<RefCell<Option<Rc<super::browse::Browser>>>> = Rc::new(RefCell::new(None));
+    installed_tab.connect_toggled({
+        let stack = stack.clone();
+        move |tab| {
+            if tab.is_active() {
+                stack.set_visible_child_name("installed");
+            }
+        }
+    });
+    discover_tab.connect_toggled({
+        let (stack, discover, browser) = (stack.clone(), discover.clone(), Rc::clone(&browser));
+        move |tab| {
+            if !tab.is_active() {
+                return;
+            }
+            let mut browser = browser.borrow_mut();
+            match browser.as_ref() {
+                Some(shown) => shown.render(),
+                None => {
+                    let made = super::browse::Browser::new();
+                    discover.append(&made.widget);
+                    *browser = Some(made);
+                }
+            }
+            stack.set_visible_child_name("discover");
+        }
+    });
+    let root = &installed;
     let list = gtk4::Box::new(Orientation::Vertical, 10);
     list.add_css_class("harness-rows");
     root.append(&list);
+    let folder = label(&format!("Your plugins are folders of QML in {}; a plugin reloads whenever one of its files is saved.", paths::plugins_dir().display()), "plugin-subtle");
+    root.append(&folder);
 
     let page = Rc::new(Page { list, surfaces: RefCell::new(Vec::new()) });
     let refresh: Rc<dyn Fn()> = Rc::new({
@@ -251,15 +268,25 @@ impl Page {
 
         let head = gtk4::Box::new(Orientation::Horizontal, 8);
         head.add_css_class("harness-row");
-        let icon = gtk4::Label::new(Some("🧩"));
-        icon.add_css_class("harness-icon");
-        head.append(&icon);
+        // Its preview.png, when it has one.
+        let preview = dir.join("preview.png");
+        if super_desktop::plugins::registry::is_preview(&preview) {
+            let (frame, picture) = super::browse::preview_box(44);
+            frame.set_size_request(70, 44);
+            super::browse::show_preview(&picture, &preview);
+            frame.add_css_class("plugin-thumb");
+            head.append(&frame);
+        } else {
+            let icon = gtk4::Label::new(Some("🧩"));
+            icon.add_css_class("harness-icon");
+            head.append(&icon);
+        }
         let name = gtk4::Label::new(Some(manifest.as_ref().map_or(id, |m| m.name.as_str())));
         name.add_css_class("harness-name");
         head.append(&name);
         let slots_text = manifest
             .as_ref()
-            .map(|m| m.surfaces.iter().map(|s| s.slot.name()).collect::<Vec<_>>().join(", "))
+            .map(|m| super::browse::slots_text(m.surfaces.iter().map(|s| s.slot.name())))
             .unwrap_or_default();
         let (state, failed) = state_text(id, manifest);
         let detail = gtk4::Label::new(Some(&if slots_text.is_empty() { state.clone() } else { format!("{slots_text} · {state}") }));
@@ -292,7 +319,7 @@ impl Page {
 
         if let Ok(m) = manifest {
             if !m.description.is_empty() {
-                card.append(&label(&m.description, "launcher-note"));
+                card.append(&label(&m.description, "plugin-card-text"));
             }
             if !m.shortcuts.is_empty() {
                 let keys: Vec<String> = m.shortcuts.iter().map(|s| format!("{} → {} {}", s.keys, s.action, s.surface)).collect();
@@ -304,7 +331,7 @@ impl Page {
         if let Some(record) = super_desktop::plugins::install::source(&places, id) {
             let from = record["source"].as_str().unwrap_or("?");
             let commit = record["commit"].as_str().map(|c| format!(" at {}", &c[..c.len().min(8)])).unwrap_or_default();
-            card.append(&label(&format!("Installed from {from}{commit}"), "launcher-note"));
+            card.append(&label(&format!("Installed from {from}{commit}"), "plugin-subtle"));
             if record["approved"] != true {
                 card.append(&self.approval_row(slots, id, &dir, from));
             }
@@ -497,6 +524,22 @@ mod tests {
         assert!(shown.iter().any(|t| t == "Prefs"), "{shown:?}");
         assert!(shown.iter().any(|t| t == "Options"));
         assert!(shown.iter().any(|t| t.starts_with("plugin.json:")), "the broken plugin says why: {shown:?}");
+
+        // The tabs: Installed shows the list, Discover the public list.
+        let tab = |text: &str| crate::gtk_test::descendants(page_root.upcast_ref()).into_iter()
+            .filter_map(|w| w.downcast::<gtk4::ToggleButton>().ok())
+            .find(|b| b.label().as_deref() == Some(text))
+            .unwrap();
+        assert!(tab("Installed").is_active());
+        // SD_UI_SHOT_SETTINGS=file.png saves a picture of the page.
+        if let Ok(out) = std::env::var("SD_UI_SHOT_SETTINGS") {
+            let provider = gtk4::CssProvider::new();
+            provider.load_from_string(&format!(".plugin-shot {{ background-color: {}; padding: 16px; }}", crate::theme::current_theme().rgba_dark_bg(0.97)));
+            gtk4::style_context_add_provider_for_display(&gtk4::gdk::Display::default().unwrap(), &provider, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION);
+            page_root.add_css_class("plugin-shot");
+            crate::gtk_test::pump(300);
+            crate::gtk_test::save_png(&page_root, std::path::Path::new(&out));
+        }
 
         // Turning it off keeps the rest of plugin.json and removes the section.
         let toggle = crate::gtk_test::descendants(page_root.upcast_ref()).into_iter()

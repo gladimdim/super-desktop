@@ -13,6 +13,8 @@ pub const DEFAULT_URL: &str = "https://raw.githubusercontent.com/gladimdim/super
 /// The registry format this SUPER DESKTOP reads.
 pub const REGISTRY_VERSION: u64 = 2;
 const MAX_BYTES: usize = 1 << 20;
+/// A preview.png larger than this is not shown.
+pub const MAX_PREVIEW_BYTES: usize = 3 << 19;
 
 /// One plugin in the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +42,13 @@ impl Entry {
 
     pub fn web_url(&self) -> String {
         format!("https://github.com/{}", self.repo)
+    }
+
+    /// Its `preview.png`, at the top of its repository (`$SD_PLUGIN_RAW_BASE`
+    /// replaces `https://raw.githubusercontent.com` in tests).
+    pub fn preview_url(&self) -> String {
+        let base = std::env::var("SD_PLUGIN_RAW_BASE").unwrap_or_else(|_| "https://raw.githubusercontent.com".into());
+        format!("{}/{}/HEAD/preview.png", base.trim_end_matches('/'), self.repo)
     }
 
     /// Why this SUPER DESKTOP may not run it, or `None`. The version check
@@ -166,6 +175,54 @@ pub fn fetch() -> Result<(Vec<Entry>, Vec<String>), String> {
     Ok(parsed)
 }
 
+fn previews_dir() -> PathBuf {
+    paths::state_dir().join("previews")
+}
+
+/// A PNG file of at most MAX_PREVIEW_BYTES.
+pub fn is_preview(path: &std::path::Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    if meta.len() == 0 || meta.len() as usize > MAX_PREVIEW_BYTES {
+        return false;
+    }
+    let mut head = [0u8; 8];
+    use std::io::Read;
+    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && head == *b"\x89PNG\r\n\x1a\n"
+}
+
+/// The entry's preview picture, downloaded once and kept (blocking: run it
+/// off the GTK thread). `None` when it has none; that is remembered too,
+/// until `again` asks for both again.
+pub fn preview(entry: &Entry, again: bool) -> Option<PathBuf> {
+    let dir = previews_dir();
+    let path = dir.join(format!("{}.png", entry.id));
+    let missing = dir.join(format!("{}.none", entry.id));
+    if !again {
+        if is_preview(&path) {
+            return Some(path);
+        }
+        if missing.exists() {
+            return None;
+        }
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    let part = dir.join(format!("{}.part", entry.id));
+    let fetched = Command::new("curl")
+        .args(["--fail", "--silent", "--location", "--max-time", "20", "--max-filesize", &MAX_PREVIEW_BYTES.to_string(), "--output"])
+        .arg(&part)
+        .args(["--", &entry.preview_url()])
+        .status()
+        .is_ok_and(|s| s.success());
+    if fetched && is_preview(&part) && std::fs::rename(&part, &path).is_ok() {
+        let _ = std::fs::remove_file(&missing);
+        return Some(path);
+    }
+    let _ = std::fs::remove_file(&part);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::write(&missing, "");
+    None
+}
+
 /// Every category (tag) in the list, sorted.
 pub fn categories(entries: &[Entry]) -> Vec<String> {
     let mut tags: Vec<String> = entries.iter().flat_map(|e| e.tags.iter().cloned()).collect();
@@ -287,6 +344,23 @@ mod tests {
         assert!(resolve("missing").unwrap_err().contains("plugin search"));
         assert_eq!(resolve("https://example.com/x.git").unwrap(), ("https://example.com/x.git".into(), None));
         assert_eq!(resolve(dir.to_str().unwrap()).unwrap().1, None);
+        // preview.png from the repository, kept; a missing one is remembered.
+        let raw = dir.join("raw");
+        std::fs::create_dir_all(raw.join("you/clock/HEAD")).unwrap();
+        std::fs::write(raw.join("you/clock/HEAD/preview.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
+        std::env::set_var("SD_PLUGIN_RAW_BASE", format!("file://{}", raw.display()));
+        let clock = &entries[1];
+        let shown = preview(clock, false).unwrap();
+        assert!(is_preview(&shown));
+        std::fs::remove_dir_all(raw.join("you")).unwrap();
+        assert_eq!(preview(clock, false), Some(shown.clone()), "kept");
+        assert_eq!(preview(&entries[0], false), None);
+        assert!(dir.join("state/previews/reminder.none").exists());
+        // Not a PNG: not shown.
+        std::fs::create_dir_all(raw.join("me/sd-reminder/HEAD")).unwrap();
+        std::fs::write(raw.join("me/sd-reminder/HEAD/preview.png"), b"<html>").unwrap();
+        assert_eq!(preview(&entries[0], true), None);
+        std::env::remove_var("SD_PLUGIN_RAW_BASE");
         std::env::remove_var("SD_PLUGIN_REGISTRY");
         std::env::remove_var("SD_PLUGINS_STATE_DIR");
         let _ = std::fs::remove_dir_all(&dir);

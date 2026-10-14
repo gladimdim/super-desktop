@@ -357,8 +357,28 @@ choice. A dock with several buttons passes the button's box
 (`var p = button.mapToItem(null, 0, 0)`; `{surface, x: p.x, y: p.y, width:
 button.width, height: button.height}`) so the popup opens next to it.
 
+**A preview picture.** Put `preview.png` at the top of the plugin folder:
+1280×640 (2:1), at most 1.5 MiB, the plugin in use with sample data, on the
+theme's background, no text around it. SUPER DESKTOP shows it on the
+plugin's card in Settings → Plugins → Discover and next to it under
+Installed (cropped to fill, so keep the middle meaningful), and GitHub can
+use it as the repository's social preview. Make it from snapshots of the
+real surfaces with `--values` and `--scale 2`, for example the
+`toolbar.item` and, below it, the popup or panel it opens; with ImageMagick:
+
+```sh
+super-desktop plugin snapshot <id> --surface main --scale 2.5 --values sample.json --out /tmp/button.png
+super-desktop plugin snapshot <id> --surface menu --scale 1.75 --values sample.json --out /tmp/popup.png
+magick -size 1280x640 xc:'#121212' -fill '#1e1e1e' -draw 'rectangle 0,0,1280,112' \
+  /tmp/button.png -gravity north -geometry +0+11 -composite \
+  /tmp/popup.png -gravity north -geometry +0+128 -composite preview.png
+```
+
+Use the colors of `~/.local/state/super-desktop/plugins/theme.json`
+(`background`, `surface`), then open preview.png and look at it.
+
 **Publishing.** Push the plugin folder as its own git repository
-(`plugin.json` at the top, a README that says what it does on the user's PC:
+(`plugin.json` and `preview.png` at the top, a README that says what it does on the user's PC:
 programs it runs, files it writes, anything it sends; `.claude/skills/` in
 `.gitignore`). Check it installs: `super-desktop plugin install <url>` on a
 fresh folder (`SD_PLUGINS_DIR=/tmp/x/plugins SD_PLUGINS_STATE_DIR=/tmp/x/state`).
