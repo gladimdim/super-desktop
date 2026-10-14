@@ -77,7 +77,9 @@ and follow its loop:
 2. `super-desktop plugin check {id} --json` and fix every error and warning;
 3. `super-desktop plugin snapshot {id} --out /tmp/{id}.png --json` (add
    `--surface <id>` for each surface), then open the PNG and look at it;
-4. `super-desktop plugin logs {id}` for runtime errors.
+4. click through it like a user: `snapshot ... --do 'click \"OK\"; type hi;
+   expect \"hi\"'` for every button and form;
+5. `super-desktop plugin logs {id}` for runtime errors.
 
 Keep the plugin id `{id}` (it must equal the folder name). You may change
 the slots, add surfaces and files, and rewrite the starting QML entirely.

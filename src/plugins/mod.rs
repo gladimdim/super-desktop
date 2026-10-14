@@ -6,6 +6,7 @@
 pub mod cli;
 pub mod host;
 pub mod install;
+pub mod lint;
 pub mod manifest;
 pub mod paths;
 pub mod protocol;

@@ -14,8 +14,11 @@
 //       Load the file, print {"ok":bool,"errors":[...],"warnings":[...]} on
 //       stdout and exit 0 when it loads.
 //   --snapshot FILE --out PNG --width W --height H [--scale S] [--theme JSON]
-//       [--wait MS]
+//       [--wait MS] [--do STEPS]
 //       Render the surface once to a PNG, for agents to look at their work.
+//       STEPS (`click "OK"; type hello; key Return; shot`) click, type and
+//       check text first, as a user would; the report says what each did,
+//       the calls the plugin made and the values it saved.
 
 #include <QGuiApplication>
 #include <QQmlComponent>
@@ -49,11 +52,14 @@
 #include <QFile>
 #include <QFileSystemWatcher>
 #include <QSaveFile>
+#include <QKeySequence>
+#include <QRegularExpression>
 
 #include <QProcessEnvironment>
 #include <QStringDecoder>
 
 #include <cmath>
+#include <functional>
 #include <csignal>
 #include <pty.h>
 #include <sys/ioctl.h>
@@ -413,6 +419,9 @@ public:
     Q_INVOKABLE void call(const QString &method, const QVariant &params = QVariant(),
                           const QJSValue &callback = QJSValue()) {
         if (!m_connected) {
+            // A snapshot does not reach SUPER DESKTOP: it says what was asked.
+            m_calls.append(QJsonObject{{"method", method},
+                                       {"params", params.isValid() ? QJsonValue::fromVariant(plain(params)) : QJsonValue()}});
             if (callback.isCallable()) {
                 QJSValue cb = callback;
                 QJSValue err = m_js->toScriptValue(QVariantMap{
@@ -432,6 +441,11 @@ public:
     // Starts a program detached from this surface (argv list, no shell).
     Q_INVOKABLE bool run(const QStringList &argv) {
         if (argv.isEmpty()) return false;
+        if (!m_connected) {
+            // check and snapshot never start programs on the user's desktop.
+            m_runs.append(QJsonArray::fromStringList(argv));
+            return true;
+        }
         QProcess process;
         process.setProgram(argv.first());
         process.setArguments(argv.mid(1));
@@ -498,8 +512,14 @@ public:
 
     Q_INVOKABLE void log(const QString &text) {
         if (m_connected) sendMessage(QJsonObject{{"t", "log"}, {"level", "info"}, {"message", text}});
-        else std::fprintf(stderr, "%s\n", text.toUtf8().constData());
+        else m_logs.append(text);
     }
+
+    // What a snapshot's plugin asked for, ran and logged, and its values now.
+    const QJsonArray &calls() const { return m_calls; }
+    const QJsonArray &runs() const { return m_runs; }
+    const QStringList &logs() const { return m_logs; }
+    QJsonObject savedValues() const { return QJsonObject::fromVariantMap(m_values); }
 
     void reply(int id, const QJsonValue &result, const QJsonValue &error) {
         auto it = m_pending.find(id);
@@ -533,6 +553,10 @@ private:
         m_valuesJs = toJs(values);
     }
 
+    static QVariant plain(const QVariant &v) {
+        return v.canConvert<QJSValue>() && v.typeId() == qMetaTypeId<QJSValue>() ? v.value<QJSValue>().toVariant() : v;
+    }
+
     // JSON-shaped variants as plain JS values: objects, arrays, scalars.
     QJSValue toJs(const QVariant &v) const {
         switch (v.typeId()) {
@@ -563,6 +587,8 @@ private:
     QString m_dataFile;
     QFileSystemWatcher *m_watcher = nullptr;
     QList<QPointer<Pty>> m_ptys;
+    QJsonArray m_calls, m_runs;
+    QStringList m_logs;
     int m_nextId = 0;
     QHash<int, QJSValue> m_pending;
 };
@@ -689,11 +715,31 @@ public:
         QImage image = m_window->grabWindow();
         if (image.format() != QImage::Format_ARGB32_Premultiplied)
             image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+        // At a fractional scale whose size rounds down (83 px at 1.666 is
+        // 138.33), the renderer leaves the last column or row unpainted:
+        // it holds stale pixels (dots of an earlier glyph). Repeat its
+        // neighbor instead.
+        const qreal dpr = image.devicePixelRatio();
+        const auto unpainted = [dpr](int logical) {
+            const qreal exact = logical * dpr;
+            return exact - std::floor(exact) > 1e-6 && exact - std::floor(exact) < 0.5;
+        };
+        if (image.width() >= 2 && unpainted(m_width)) {
+            for (int y = 0; y < image.height(); ++y) {
+                QRgb *line = reinterpret_cast<QRgb *>(image.scanLine(y));
+                line[image.width() - 1] = line[image.width() - 2];
+            }
+        }
+        if (image.height() >= 2 && unpainted(m_height))
+            std::memcpy(image.scanLine(image.height() - 1), image.constScanLine(image.height() - 2), size_t(image.bytesPerLine()));
         return image;
     }
 
     QQuickWindow *window() const { return m_window; }
     QQuickItem *root() const { return m_root; }
+    // Lays out what changed (layouts and anchors settle when polished, which
+    // otherwise happens only when a frame is drawn).
+    void polish() { m_control->polishItems(); }
 
 public slots:
     void scheduleRender() {
@@ -872,8 +918,322 @@ private:
     int m_cursor = int(Qt::ArrowCursor);
 };
 
+// `--do`: steps a snapshot runs before its last shot, the way a user would
+// use the surface: click (by text or position), type, press keys, wait,
+// check what is shown, save pictures between steps.
+struct Step {
+    QString source, verb;
+    QStringList args;
+};
+
+// Steps are separated by `;` or new lines; "quoted text" keeps spaces and `;`.
+static QList<Step> parseSteps(const QString &text) {
+    QList<Step> steps;
+    QStringList tokens;
+    QString token, source;
+    bool quoted = false, hasToken = false;
+    auto endToken = [&]() {
+        if (hasToken) tokens.append(token);
+        token.clear();
+        hasToken = false;
+    };
+    auto endStep = [&]() {
+        endToken();
+        if (!tokens.isEmpty()) steps.append(Step{source.trimmed(), tokens.first().toLower(), tokens.mid(1)});
+        tokens.clear();
+        source.clear();
+    };
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar c = text.at(i);
+        if (quoted) {
+            source += c;
+            if (c == '\\' && i + 1 < text.size()) { token += text.at(++i); source += text.at(i); }
+            else if (c == '"') quoted = false;
+            else token += c;
+        } else if (c == '"') {
+            source += c;
+            quoted = true;
+            hasToken = true;
+        } else if (c == ';' || c == '\n') {
+            endStep();
+        } else if (c.isSpace()) {
+            source += c;
+            endToken();
+        } else {
+            source += c;
+            token += c;
+            hasToken = true;
+        }
+    }
+    endStep();
+    return steps;
+}
+
+class Script : public QObject {
+    Q_OBJECT
+public:
+    Script(Surface *surface, const QList<Step> &steps, const QString &out, std::function<void(QJsonArray, bool)> done)
+        : m_surface(surface), m_steps(steps), m_out(out), m_done(std::move(done)) {}
+
+    void start() {
+        QFocusEvent focus(QEvent::FocusIn, Qt::OtherFocusReason);
+        QCoreApplication::sendEvent(m_surface->window(), &focus);
+        next();
+    }
+
+private:
+    void next() {
+        if (m_index >= m_steps.size()) {
+            m_done(m_report, true);
+            return;
+        }
+        const Step step = m_steps.at(m_index++);
+        m_surface->polish();
+        QJsonObject r{{"step", step.source}};
+        QString error;
+        int delay = 100;  // let bindings, animations and handlers settle
+        run(step, r, error, delay);
+        r["ok"] = error.isEmpty();
+        if (!error.isEmpty()) r["error"] = error;
+        m_report.append(r);
+        if (!error.isEmpty()) {
+            m_done(m_report, false);
+            return;
+        }
+        QTimer::singleShot(delay, this, &Script::next);
+    }
+
+    void run(const Step &step, QJsonObject &r, QString &error, int &delay) {
+        const QString &verb = step.verb;
+        const QString rest = step.args.join(' ');
+        if (verb == "click" || verb == "double" || verb == "move" || verb == "press" || verb == "release") {
+            QStringList args = step.args;
+            Qt::MouseButton button = Qt::LeftButton;
+            if (!args.isEmpty() && (args.last() == "right" || args.last() == "middle")) {
+                button = args.takeLast() == "right" ? Qt::RightButton : Qt::MiddleButton;
+            }
+            QPointF at;
+            if (!target(args.join(' '), at, r, error)) return;
+            pointer(QEvent::MouseMove, at, Qt::NoButton);
+            if (verb == "move") return;
+            if (verb != "release") pointer(QEvent::MouseButtonPress, at, button);
+            if (verb != "press") pointer(QEvent::MouseButtonRelease, at, button);
+            if (verb == "double") {
+                pointer(QEvent::MouseButtonDblClick, at, button);
+                pointer(QEvent::MouseButtonRelease, at, button);
+            }
+        } else if (verb == "drag") {
+            QPointF from, to;
+            if (step.args.size() != 2 || !point(step.args[0], from) || !point(step.args[1], to)) {
+                error = "drag needs two points: drag 10,20 200,20";
+                return;
+            }
+            pointer(QEvent::MouseMove, from, Qt::NoButton);
+            pointer(QEvent::MouseButtonPress, from, Qt::LeftButton);
+            for (int i = 1; i <= 10; ++i) pointer(QEvent::MouseMove, from + (to - from) * (i / 10.0), Qt::NoButton);
+            pointer(QEvent::MouseButtonRelease, to, Qt::LeftButton);
+        } else if (verb == "scroll") {
+            QStringList args = step.args;
+            bool ok = false;
+            const double amount = args.isEmpty() ? 0 : args.takeLast().toDouble(&ok);
+            QPointF at;
+            if (!ok) {
+                error = "scroll needs a place and an amount: scroll 100,80 3 (down), scroll \"List\" -2 (up)";
+                return;
+            }
+            if (!target(args.join(' '), at, r, error)) return;
+            QWheelEvent ev(at, at, QPoint(), QPoint(0, std::lround(-amount * 120)), m_buttons, Qt::NoModifier,
+                           Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(m_surface->window(), &ev);
+        } else if (verb == "type") {
+            for (const char32_t u : rest.toUcs4()) {
+                const QString text = QString::fromUcs4(&u, 1);
+                if (text == "\n") { key(Qt::Key_Return, Qt::NoModifier, "\r"); continue; }
+                const QChar c = text.at(0);
+                const int code = u < 128 && c.isLetter() ? c.toUpper().unicode() : (u == ' ' ? Qt::Key_Space : (u < 128 ? int(u) : Qt::Key_unknown));
+                key(code, u < 128 && c.isUpper() ? Qt::ShiftModifier : Qt::NoModifier, text);
+            }
+        } else if (verb == "key") {
+            if (step.args.isEmpty()) error = "key needs a key: key Return, key Escape, key Ctrl+A, key Down Down Return";
+            for (const QString &name : step.args) {
+                int code = 0;
+                Qt::KeyboardModifiers mods;
+                QString text;
+                if (!keyCombo(name, code, mods, text)) {
+                    error = QString("unknown key %1: use names like Return, Escape, Tab, Space, Backspace, Delete, "
+                                    "Up, Down, Left, Right, Home, End, PageUp, F5, a, Ctrl+A, Shift+Tab").arg(name);
+                    return;
+                }
+                key(code, mods, text);
+            }
+        } else if (verb == "wait") {
+            static const QRegularExpression re("^(\\d+(?:\\.\\d+)?)(ms|s)?$");
+            const auto m = re.match(rest.trimmed());
+            if (!m.hasMatch()) {
+                error = "wait needs a time: wait 500 (ms), wait 2s";
+                return;
+            }
+            const double n = m.captured(1).toDouble();
+            delay = std::clamp(int(m.captured(2) == "s" ? n * 1000 : n), 0, 60000);
+        } else if (verb == "shot") {
+            QString name = rest.trimmed().isEmpty() ? QString::number(++m_shots) : rest.trimmed();
+            name.replace(QRegularExpression("[^A-Za-z0-9_-]"), "-");
+            const QFileInfo out(m_out);
+            const QString path = out.dir().filePath(out.completeBaseName() + "-" + name + ".png");
+            const QImage image = m_surface->renderFrame();
+            if (!image.save(path, "PNG")) error = "cannot write " + path;
+            r["out"] = path;
+        } else if (verb == "expect" || verb == "absent") {
+            if (rest.isEmpty()) {
+                error = verb + " needs the text to look for";
+                return;
+            }
+            QQuickItem *item = find(rest);
+            if (verb == "expect" && !item) error = QString("no visible text %1; shown: %2").arg(quote(rest), shown());
+            if (verb == "absent" && item) error = QString("%1 is shown").arg(quote(rest));
+        } else {
+            error = QString("unknown step %1: use click, double, move, press, release, drag, scroll, type, key, "
+                            "wait, shot, expect, absent").arg(quote(verb));
+        }
+    }
+
+    static QString quote(const QString &s) { return "\"" + s + "\""; }
+
+    static bool point(const QString &text, QPointF &at) {
+        static const QRegularExpression re("^(-?\\d+(?:\\.\\d+)?),\\s*(-?\\d+(?:\\.\\d+)?)$");
+        const auto m = re.match(text.trimmed());
+        if (!m.hasMatch()) return false;
+        at = QPointF(m.captured(1).toDouble(), m.captured(2).toDouble());
+        return true;
+    }
+
+    // A point "x,y", an object name "@name", or text shown on the surface
+    // (a Text, a Button's text, a field's placeholder): its center.
+    bool target(const QString &text, QPointF &at, QJsonObject &r, QString &error) {
+        if (text.isEmpty()) {
+            error = "say where: a point (120,40), shown text (\"OK\") or an objectName (@ok)";
+            return false;
+        }
+        if (point(text, at)) return true;
+        QQuickItem *item = text.startsWith('@') ? byName(m_surface->window()->contentItem(), text.mid(1)) : find(text);
+        if (!item) {
+            error = text.startsWith('@') ? QString("no visible item with objectName %1").arg(quote(text.mid(1)))
+                                         : QString("no visible text %1; shown: %2").arg(quote(text), shown());
+            return false;
+        }
+        at = item->mapToScene(QPointF(item->width() / 2, item->height() / 2));
+        r["at"] = QJsonArray{std::round(at.x()), std::round(at.y())};
+        return true;
+    }
+
+    bool showing(QQuickItem *item) const {
+        if (!item->isVisible() || item->width() <= 0 || item->height() <= 0) return false;
+        for (QQuickItem *i = item; i; i = i->parentItem())
+            if (i->opacity() <= 0.01) return false;
+        const QRectF box = item->mapRectToScene(QRectF(0, 0, item->width(), item->height()));
+        return box.intersects(QRectF(0, 0, m_surface->window()->width(), m_surface->window()->height()));
+    }
+
+    static QString label(QQuickItem *item) {
+        for (const char *name : {"text", "placeholderText", "title"}) {
+            const QVariant v = item->property(name);
+            if (v.typeId() == QMetaType::QString && !v.toString().trimmed().isEmpty()) return v.toString().trimmed();
+        }
+        return QString();
+    }
+
+    // Shown items, in drawing order; a zero-size item's children may show.
+    void walk(QQuickItem *item, const std::function<void(QQuickItem *)> &visit) const {
+        if (!item->isVisible() || item->opacity() <= 0.01) return;
+        if (showing(item)) visit(item);
+        QList<QQuickItem *> children = item->childItems();
+        std::stable_sort(children.begin(), children.end(), [](QQuickItem *x, QQuickItem *y) { return x->z() < y->z(); });
+        for (QQuickItem *child : children) walk(child, visit);
+    }
+
+    // The topmost shown item whose text is `text` (else contains it, any case).
+    QQuickItem *find(const QString &text) const {
+        QQuickItem *exact = nullptr, *partial = nullptr;
+        walk(m_surface->window()->contentItem(), [&](QQuickItem *item) {
+            const QString l = label(item);
+            if (l.isEmpty()) return;
+            if (l == text) exact = item;
+            else if (l.contains(text, Qt::CaseInsensitive)) partial = item;
+        });
+        return exact ? exact : partial;
+    }
+
+    QQuickItem *byName(QQuickItem *item, const QString &name) const {
+        QQuickItem *found = nullptr;
+        walk(item, [&](QQuickItem *i) { if (i->objectName() == name) found = i; });
+        return found;
+    }
+
+    QString shown() const {
+        QStringList texts;
+        walk(m_surface->window()->contentItem(), [&](QQuickItem *item) {
+            const QString l = label(item);
+            if (!l.isEmpty() && !texts.contains(quote(l)) && texts.size() < 30) texts.append(quote(l.left(60)));
+        });
+        return texts.isEmpty() ? "no text" : texts.join(", ");
+    }
+
+    void pointer(QEvent::Type type, QPointF at, Qt::MouseButton button) {
+        QQuickWindow *win = m_surface->window();
+        if (!m_entered) {
+            QEnterEvent enter(at, at, at);
+            QCoreApplication::sendEvent(win, &enter);
+            m_entered = true;
+        }
+        if (type == QEvent::MouseButtonPress) m_buttons |= button;
+        if (type == QEvent::MouseButtonRelease) m_buttons &= ~button;
+        QMouseEvent ev(type, at, at, at, button, m_buttons, Qt::NoModifier);
+        QCoreApplication::sendEvent(win, &ev);
+    }
+
+    void key(int code, Qt::KeyboardModifiers mods, const QString &text) {
+        QKeyEvent press(QEvent::KeyPress, code, mods, text);
+        QCoreApplication::sendEvent(m_surface->window(), &press);
+        QKeyEvent release(QEvent::KeyRelease, code, mods, text);
+        QCoreApplication::sendEvent(m_surface->window(), &release);
+    }
+
+    static bool keyCombo(QString name, int &code, Qt::KeyboardModifiers &mods, QString &text) {
+        static const QHash<QString, QString> aliases{
+            {"escape", "Esc"}, {"enter", "Return"}, {"delete", "Del"}, {"pageup", "PgUp"}, {"pagedown", "PgDown"},
+            {"page_up", "PgUp"}, {"page_down", "PgDown"}, {"control", "Ctrl"}, {"super", "Meta"}};
+        QStringList parts = name.split('+');
+        for (QString &p : parts) {
+            const auto alias = aliases.find(p.toLower());
+            if (alias != aliases.end()) p = alias.value();
+        }
+        const QKeySequence seq = QKeySequence::fromString(parts.join('+'), QKeySequence::PortableText);
+        if (seq.count() != 1 || seq[0].key() == Qt::Key_unknown) return false;
+        code = seq[0].key();
+        mods = seq[0].keyboardModifiers();
+        const bool plain = !(mods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier));
+        if (code == Qt::Key_Return) text = "\r";
+        else if (code == Qt::Key_Tab) text = "\t";
+        else if (code == Qt::Key_Space && plain) text = " ";
+        else if (plain && code >= 0x21 && code <= 0x7e) {
+            const QString last = parts.last();
+            text = last.size() == 1 ? (mods & Qt::ShiftModifier ? last.toUpper() : last) : QString();
+        }
+        return true;
+    }
+
+    Surface *m_surface;
+    QList<Step> m_steps;
+    QString m_out;
+    std::function<void(QJsonArray, bool)> m_done;
+    QJsonArray m_report;
+    int m_index = 0, m_shots = 0;
+    bool m_entered = false;
+    Qt::MouseButtons m_buttons = Qt::NoButton;
+};
+
 struct Args {
-    QString mode, qml, pluginDir, pluginId, surfaceId, instanceId, out, theme, data;
+    QString mode, qml, pluginDir, pluginId, surfaceId, instanceId, out, theme, data, steps;
     int fd = -1, width = 0, height = 0, waitMs = 300;
     qreal scale = 1.0;
 };
@@ -883,7 +1243,7 @@ static void usage() {
                  "usage:\n"
                  "  sd-qml-host --check FILE.qml [--plugin-dir DIR]\n"
                  "  sd-qml-host --snapshot FILE.qml --out FILE.png --width W --height H "
-                 "[--scale S] [--theme JSON] [--wait MS] [--data FILE]\n"
+                 "[--scale S] [--theme JSON] [--wait MS] [--data FILE] [--do STEPS]\n"
                  "  sd-qml-host --serve --fd N --qml FILE.qml --plugin-dir DIR --width W --height H [--data FILE]\n");
 }
 
@@ -915,6 +1275,9 @@ static bool parseArgs(int argc, char **argv, Args &a) {
             if (!next(a.out)) return false;
         } else if (arg == "--data") {
             if (!next(a.data)) return false;
+        } else if (arg == "--do") {
+            if (!next(v)) return false;
+            a.steps += (a.steps.isEmpty() ? "" : ";") + v;
         } else if (arg == "--theme") {
             if (!next(a.theme)) return false;
         } else if (arg == "--fd" && next(v)) {
@@ -994,8 +1357,9 @@ int main(int argc, char **argv) {
     surface.resize(a.width, a.height);
 
     if (a.mode == "snapshot") {
-        // Let timers, bindings and short animations settle before the shot.
-        QTimer::singleShot(std::max(0, a.waitMs), &app, [&]() {
+        const QList<Step> steps = parseSteps(a.steps);
+        // The last shot, and what the plugin did, asked for and saved.
+        auto finish = [&](const QJsonArray &stepReport, bool stepsOk) {
             QImage image = surface.renderFrame();
             const bool saved = image.save(a.out, "PNG");
             // An all-transparent frame is almost always a mistake (zero size,
@@ -1005,12 +1369,25 @@ int main(int argc, char **argv) {
                 const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
                 for (int x = 0; x < image.width(); ++x) painted += qAlpha(line[x]) != 0;
             }
-            QJsonObject r{{"ok", saved}, {"out", a.out}, {"width", image.width()},
+            QJsonObject r{{"ok", saved && stepsOk}, {"out", a.out}, {"width", image.width()},
                           {"height", image.height()},
                           {"paintedFraction", double(painted) / std::max<qint64>(1, qint64(image.width()) * image.height())},
                           {"warnings", surface.warnings()}};
+            if (!steps.isEmpty()) {
+                r["steps"] = stepReport;
+                r["values"] = surface.api()->savedValues();
+            }
+            if (!surface.api()->calls().isEmpty()) r["calls"] = surface.api()->calls();
+            if (!surface.api()->runs().isEmpty()) r["runs"] = surface.api()->runs();
+            if (!surface.api()->logs().isEmpty()) r["logs"] = QJsonArray::fromStringList(surface.api()->logs());
             std::printf("%s\n", QJsonDocument(r).toJson(QJsonDocument::Compact).constData());
-            app.exit(saved ? 0 : 1);
+            app.exit(saved && stepsOk ? 0 : 1);
+        };
+        Script script(&surface, steps, a.out, finish);
+        // Let timers, bindings and short animations settle before the shot.
+        QTimer::singleShot(std::max(0, a.waitMs), &app, [&]() {
+            if (steps.isEmpty()) finish(QJsonArray(), true);
+            else script.start();
         });
         return app.exec();
     }

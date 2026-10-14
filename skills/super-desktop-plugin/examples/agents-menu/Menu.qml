@@ -69,7 +69,7 @@ Rectangle {
             Layout.margins: 6
             visible: root.error.length > 0 || !sd.connected
             text: sd.connected ? root.error : "Your agents appear here inside SUPER DESKTOP."
-            color: sd.connected ? sd.theme.red : sd.theme.muted
+            color: sd.connected ? sd.theme.red : Qt.alpha(sd.theme.foreground, 0.7)
             font.family: sd.theme.fontFamily
             wrapMode: Text.Wrap
         }

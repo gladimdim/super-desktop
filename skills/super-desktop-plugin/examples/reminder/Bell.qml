@@ -4,7 +4,7 @@ import QtQuick.Shapes
 // A bell icon drawn in one color (24×24 design, scaled to the item's size).
 Item {
     id: bell
-    property color color: "white"
+    property color color: "white"  // set by the user of the icon. sd-lint: ignore theme-colors
     implicitWidth: 24; implicitHeight: 24
 
     Shape {

@@ -57,7 +57,7 @@ impl Entry {
     pub fn compatibility(&self) -> Compatibility {
         if self.api > manifest::API_VERSION {
             Compatibility::NeedsApi(self.api)
-        } else if older(env!("CARGO_PKG_VERSION"), &self.min_host) {
+        } else if manifest::version_older(manifest::HOST_VERSION, &self.min_host) {
             Compatibility::MadeForNewer(self.min_host.clone())
         } else {
             Compatibility::Ok
@@ -82,11 +82,6 @@ pub enum Compatibility {
 }
 
 /// Whether version `a` is older than `b` ("1.5.0" < "1.6.0").
-fn older(a: &str, b: &str) -> bool {
-    let parts = |v: &str| v.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
-    parts(a) < parts(b)
-}
-
 fn valid_repo(repo: &str) -> bool {
     let mut halves = repo.split('/');
     let ok = |part: Option<&str>| {
@@ -303,7 +298,7 @@ mod tests {
     #[test]
     fn plugins_registry_compatibility() {
         let (entries, _) = parse(LIST).unwrap();
-        assert!(older("1.5.0", "1.6.0") && older("1.9.0", "1.10.0") && !older("1.6.0", "1.6.0") && !older("2.0.0", "1.6.0"));
+        assert!(manifest::version_older("1.5.0", "1.6.0") && manifest::version_older("1.9.0", "1.10.0") && !manifest::version_older("1.6.0", "1.6.0") && !manifest::version_older("2.0.0", "1.6.0"));
         assert_eq!(entries[1].compatibility(), Compatibility::Ok);
         assert_eq!(entries[2].compatibility(), Compatibility::NeedsApi(9));
         let newer = Entry { min_host: "99.0.0".into(), ..entries[1].clone() };

@@ -38,7 +38,6 @@ Rectangle {
                 Layout.fillWidth: true
                 icon: modelData.icon
                 glyph: modelData.name.charAt(0)
-                tip: "New " + modelData.name + " card"
                 onClicked: sd.call("harness.launch", { harness: modelData.id }, function(r, err) {
                     if (err) root.error = err.message
                 })
@@ -49,7 +48,7 @@ Rectangle {
             Layout.fillWidth: true
             visible: root.error.length > 0 || !sd.connected
             text: sd.connected ? root.error : "Agents appear here inside SUPER DESKTOP."
-            color: sd.connected ? sd.theme.red : sd.theme.muted
+            color: sd.connected ? sd.theme.red : Qt.alpha(sd.theme.foreground, 0.7)
             wrapMode: Text.Wrap
             horizontalAlignment: Text.AlignHCenter
             font.pixelSize: 10
@@ -60,7 +59,6 @@ Rectangle {
         DockButton {
             Layout.fillWidth: true
             glyph: "⏷"
-            tip: "Hide SUPER DESKTOP"
             onClicked: sd.call("overlay.hide")
         }
     }

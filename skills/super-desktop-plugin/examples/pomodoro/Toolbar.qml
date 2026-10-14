@@ -11,7 +11,7 @@ Rectangle {
     property int remaining: 0
 
     Timer {
-        interval: 1000; running: true; repeat: true; triggeredOnStart: true
+        interval: 1000; running: sd.visible; repeat: true; triggeredOnStart: true
         onTriggered: root.remaining = Math.max(0, Math.round((root.endsAt - Date.now()) / 1000))
     }
 

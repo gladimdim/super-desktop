@@ -118,6 +118,13 @@ pub struct Manifest {
     pub id: String,
     pub name: String,
     pub description: String,
+    /// The plugin's own version ("1.2.0"); empty when not given.
+    pub version: String,
+    /// The oldest SUPER DESKTOP it works with ("1.6.0"); empty when any.
+    #[serde(rename = "minHost")]
+    pub min_host: String,
+    /// What it is about, for the public list ("productivity", "games"…).
+    pub categories: Vec<String>,
     pub enabled: bool,
     pub surfaces: Vec<Surface>,
     pub shortcuts: Vec<Shortcut>,
@@ -209,12 +216,35 @@ fn problem(field: impl Into<String>, message: impl Into<String>, hint: impl Into
     Problem { field: field.into(), message: message.into(), hint: hint.into() }
 }
 
+/// "1.6.0", "2.1": two or three numbers.
+pub fn valid_version(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    (2..=3).contains(&parts.len()) && parts.iter().all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether version `a` is older than `b` ("1.6" is "1.6.0").
+pub fn version_older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| {
+        let mut p: Vec<u64> = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect();
+        p.resize(3.max(p.len()), 0);
+        p
+    };
+    parts(a) < parts(b)
+}
+
+/// This SUPER DESKTOP's version.
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn valid_plugin_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     !bytes.is_empty()
         && bytes.len() <= 48
         && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
         && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+fn valid_category(c: &str) -> bool {
+    (1..=24).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 fn valid_surface_id(id: &str) -> bool {
@@ -292,6 +322,34 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
         Some(_) => {
             problems.push(problem("enabled", "\"enabled\" must be true or false", "Remove it or use a boolean."));
             true
+        }
+    };
+
+    let mut version_field = |name: &str| match object.get(name) {
+        None => String::new(),
+        Some(Value::String(v)) if valid_version(v) => v.clone(),
+        Some(v) => {
+            problems.push(problem(name, format!("{name} {v} is not a version"), "Write it as two or three numbers, e.g. \"1.0.0\"."));
+            String::new()
+        }
+    };
+    let version = version_field("version");
+    let min_host = version_field("minHost");
+    if !min_host.is_empty() && version_older(HOST_VERSION, &min_host) {
+        problems.push(problem(
+            "minHost",
+            format!("this plugin needs SUPER DESKTOP {min_host} or newer; this is {HOST_VERSION}"),
+            "Update SUPER DESKTOP (Settings → Updates). Making the plugin? Set minHost to the version you test with.",
+        ));
+    }
+    let categories = match object.get("categories") {
+        None => Vec::new(),
+        Some(Value::Array(list)) if list.len() <= 5 && list.iter().all(|c| c.as_str().is_some_and(valid_category)) => {
+            list.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+        }
+        Some(_) => {
+            problems.push(problem("categories", "categories must be a list of up to 5 lowercase words", "E.g. [\"productivity\", \"time\"]: letters, digits and '-', up to 24 characters each."));
+            Vec::new()
         }
     };
 
@@ -416,7 +474,7 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
     }
 
     if problems.is_empty() {
-        Ok(Manifest { id, name, description, enabled, surfaces, shortcuts, dir: dir.to_path_buf() })
+        Ok(Manifest { id, name, description, version, min_host, categories, enabled, surfaces, shortcuts, dir: dir.to_path_buf() })
     } else {
         Err(problems)
     }
@@ -587,6 +645,27 @@ mod tests {
             "shortcuts": [{"keys": "T", "action": "panel.toggle", "surface": "term"}, {"keys": "Ctrl+Alt+X", "action": "run", "surface": "term"}]})).unwrap_err();
         let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
         assert_eq!(fields, ["shortcuts[0].keys", "shortcuts[0].surface", "shortcuts[1].action"]);
+    }
+
+    #[test]
+    fn plugins_manifest_versions_and_categories() {
+        let dir = plugin_dir("versions", &["A.qml"]);
+        let surfaces = json!([{"id": "a", "slot": "dock.left", "qml": "A.qml"}]);
+        let m = validate(&dir, &json!({"id": "versions", "api": 1, "version": "1.2.0", "minHost": "1.0",
+            "categories": ["productivity", "time"], "surfaces": surfaces})).unwrap();
+        assert_eq!((m.version.as_str(), m.min_host.as_str()), ("1.2.0", "1.0"));
+        assert_eq!(m.categories, ["productivity", "time"]);
+        let m = validate(&dir, &json!({"id": "versions", "api": 1, "surfaces": surfaces})).unwrap();
+        assert!(m.version.is_empty() && m.min_host.is_empty() && m.categories.is_empty());
+        // Made for a newer SUPER DESKTOP: a clear problem, not QML errors later.
+        let problems = validate(&dir, &json!({"id": "versions", "api": 1, "minHost": "99.0.0", "surfaces": surfaces})).unwrap_err();
+        assert_eq!(problems[0].field, "minHost");
+        assert!(problems[0].message.contains("99.0.0 or newer"), "{}", problems[0].message);
+        let problems = validate(&dir, &json!({"id": "versions", "api": 1, "version": "v1", "minHost": 2,
+            "categories": ["Time"], "surfaces": surfaces})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, ["version", "minHost", "categories"]);
+        assert!(version_older("1.5.0", "1.6") && !version_older("1.6", "1.6.0") && version_older("1.9.9", "1.10.0"));
     }
 
     #[test]

@@ -872,17 +872,34 @@ work:
 super-desktop plugin new my-dock --slot dock.left      # a working start
 super-desktop plugin check my-dock --json               # QML errors with file:line
 super-desktop plugin snapshot my-dock --out /tmp/my-dock.png --json
+super-desktop plugin snapshot my-dock --do 'click "Add"; type hi; expect "hi"'
 super-desktop plugin logs my-dock                       # runtime errors, sd.log
+super-desktop plugin preview my-dock                    # preview.png for sharing
+super-desktop plugin publish my-dock                    # ready for the public list?
 super-desktop plugin list
 super-desktop plugin doctor                             # what is missing, with fixes
 ```
 
-`check` exits 0 only when every surface loads without errors or warnings.
+`check` exits 0 only when every surface loads without errors or warnings
+and no lint rule finds an error (QML that loads but is wrong in SUPER
+DESKTOP, such as a `ToolTip` in a top-bar item or `cards.send` from a timer);
+lint advice (fixed colors, text in the theme's border color, a timer running
+while hidden) is reported without failing, and `// sd-lint: ignore RULE` on
+the line, or the line above, keeps advice that was weighed out.
 `snapshot` renders off screen with the current theme and the plugin's saved
 values and reports `paintedFraction` (0 means nothing visible was drawn).
 `--values FILE.json` renders with sample values instead (one JSON object, as
 `sd.values` sees it), and `--wait MS` waits that long first, to catch an
-animation; what the QML saves during a snapshot is thrown away.
+animation; what the QML saves during a snapshot is thrown away. `--do`
+first uses the surface like a user, step by step: `click` (on shown text,
+`@objectName` or `x,y`; `right`/`middle`), `double`, `move`, `press`,
+`release`, `drag`, `scroll`, `type`, `key` (`Return`, `Escape`, `Ctrl+A`…),
+`wait`, `expect`/`absent` (text shown or not) and `shot [NAME]` (an extra
+PNG); the report lists each step, the `sd.call`s and `sd.run`s the plugin
+made (recorded, not done), its log lines and its values afterwards, and the
+command fails at the first failing step. `preview` composes the surfaces
+into the 1280×640 `preview.png` the public list shows; `publish` checks a
+plugin's repository is ready for the list and prints its entry.
 `plugin new` also writes the plugin skill into the folder
 (`.claude/skills/super-desktop-plugin/SKILL.md`) and an `AGENTS.md`, so any
 coding agent opened there knows the plugin API. ✨ in the top bar and
@@ -891,7 +908,7 @@ new folder. Drawing plugins needs Qt Quick (`qt6-declarative`).
 
 Plugins people share are listed at
 [github.com/gladimdim/super-desktop-plugins](https://github.com/gladimdim/super-desktop-plugins):
-**Settings → Plugins → Get plugins** shows the list (search, a category,
+**Settings → Plugins → Discover** shows the list (search, a category,
 grouped by category or by name) with Install, and `plugin search [text]`
 does the same in a terminal. `plugin install <id>` installs one from the list
 (it checks the repository's `plugin.json` has that id); `plugin install <git
@@ -913,7 +930,9 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `plugin list [--json]` | Offline | List QML plugins and whether they run |
 | `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page\|card\|fullscreen\|popup] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
 | `plugin check ID\|DIR [--json]` | Offline | Check a plugin's manifest and QML |
-| `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--values FILE.json] [--out FILE.png] [--json]` | Offline | Render a plugin surface to a PNG |
+| `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--values FILE.json] [--out FILE.png] [--do STEPS] [--steps FILE] [--json]` | Offline | Render a plugin surface to a PNG |
+| `plugin preview ID\|DIR [--surface ID]... [--values FILE.json] [--out FILE.png] [--json]` | Offline | Draw a plugin's preview picture |
+| `plugin publish ID\|DIR [--json]` | Offline | Check a plugin is ready for the public list |
 | `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |
 | `plugin doctor [--json]` | Offline | Check what plugins need |
 | `plugin search [TEXT] [--category C] [--json]` | Network (offline: the last list) | Search the public plugin list |

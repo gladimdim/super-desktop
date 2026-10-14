@@ -73,7 +73,7 @@ Rectangle {
         event.accepted = true
     }
 
-    MouseArea { anchors.fill: parent; onClicked: game.forceActiveFocus() }
+    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: game.forceActiveFocus() }
 
     ColumnLayout {
         anchors.fill: parent
@@ -84,7 +84,7 @@ Rectangle {
             Layout.fillWidth: true
             Text { text: "Score " + game.score; color: sd.theme.foreground; font.family: sd.theme.fontFamily; font.pixelSize: 16 }
             Item { Layout.fillWidth: true }
-            Text { text: "Best " + (sd.values.best || 0); color: sd.theme.muted; font.family: sd.theme.fontFamily; font.pixelSize: 16 }
+            Text { text: "Best " + (sd.values.best || 0); color: Qt.alpha(sd.theme.foreground, 0.7); font.family: sd.theme.fontFamily; font.pixelSize: 16 }
         }
 
         Rectangle {

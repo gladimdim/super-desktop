@@ -32,7 +32,11 @@ it describes works here, whatever version number SUPER DESKTOP reports.
 1. Edit the QML or `plugin.json`.
 2. `super-desktop plugin check <id> --json` → fix every error. Errors give the
    file, line and column. Warnings are bugs too (an undefined property is
-   usually a typo).
+   usually a typo). `lint` lists QML that loads but is wrong here (`error`:
+   fails the check, e.g. a `ToolTip` in a top-bar item) or usually unwanted
+   (`advice`: fixed colors, text in `muted`, a timer running while hidden).
+   Advice you have weighed can be kept out with a comment on that line or
+   the line above: `// sd-lint: ignore hidden-timer` (the rule's name).
 3. `super-desktop plugin snapshot <id> --surface <surface id> --out /tmp/<id>.png --json`
    for **each** surface → **open the PNG and look at it.** `paintedFraction: 0`
    means nothing visible was drawn. Use `--width`, `--height` and `--scale 2`
@@ -43,9 +47,12 @@ it describes works here, whatever version number SUPER DESKTOP reports.
    states (a full list, an empty one, an alarm going off), and `--wait 120`
    catches an animation part-way. What the QML saves during a snapshot is
    thrown away.
-4. When the user has SUPER DESKTOP open, the plugin is already live. Runtime
+4. **Use it like a user**: `--do` clicks, types and checks before the shot
+   (see "Testing like a user"). Do it for every button and form you made:
+   it shows what each click asked SUPER DESKTOP for and what got saved.
+5. When the user has SUPER DESKTOP open, the plugin is already live. Runtime
    errors and `sd.log` output: `super-desktop plugin logs <id>`.
-5. Repeat until check is clean and the snapshot looks right.
+6. Repeat until check is clean, the steps pass and the snapshot looks right.
 
 Never ask the user to restart SUPER DESKTOP for a plugin change.
 
@@ -68,6 +75,9 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `id` | Lowercase letters, digits, `-`; 1–48 characters; **equal to the folder name**. |
 | `api` | `1`. |
 | `name`, `description` | Shown to the user. |
+| `version` | Optional: the plugin's version, `"1.0.0"`. Shown in Settings → Plugins; raise it with each release. |
+| `minHost` | Optional: the oldest SUPER DESKTOP it works with, `"1.6.0"`. An older SUPER DESKTOP says so instead of failing on the QML. Needed to publish. |
+| `categories` | Optional, up to 5 lowercase words: `["productivity", "time"]`. Discover groups plugins by them. |
 | `enabled` | Optional, default `true`. `false` keeps the folder but shows nothing. |
 | `surfaces` | 1–8 surfaces. |
 | `surfaces[].id` | Lowercase letters, digits, `-`; unique in the plugin. |
@@ -145,7 +155,7 @@ through `sd.values` (and files or programs you run).
 | --- | --- |
 | `sd.theme` | Theme map (above). |
 | `sd.pluginId`, `sd.surfaceId`, `sd.instanceId`, `sd.pluginDir`, `sd.apiVersion` | Who and where you are. `instanceId` is `""` for the first copy of a card, then `"2"`, `"3"`… |
-| `sd.connected` | `false` during `check` and `snapshot` (calls then fail with `not_connected`). |
+| `sd.connected` | `false` during `check` and `snapshot`: `sd.call` then fails with `not_connected` and `sd.run` starts nothing; both are listed in the snapshot's report. `sd.exec` runs. |
 | `sd.call(method, params, function(result, error) {})` | Ask SUPER DESKTOP to do something (table below). |
 | `sd.exec([program, args…], function(r) {})` | Run a program; `r.code`, `r.stdout`, `r.stderr`. No shell: use `["sh", "-c", "…"]` when you need one. Working folder: the plugin folder. |
 | `sd.run([program, args…])` | Start a program and don't wait for it. |
@@ -155,6 +165,8 @@ through `sd.values` (and files or programs you run).
 | `sd.value(key, fallback)` | Read one value (not a binding: prefer `sd.values.key`). |
 | `sd.env(name)` | A variable of the user's environment, e.g. `sd.env("SHELL")`, `sd.env("HOME")`. |
 | `sd.openPty([program, args…], {cols, rows, cwd, env})` | Start a program on a pseudo-terminal (for terminal plugins); returns a **Pty** or `null`. At most 8 per surface; they end with the surface. |
+| `sd.visible` | Whether SUPER DESKTOP is on screen. Bind animations to it (`running: ringing && sd.visible`): surfaces are not drawn while it is hidden. |
+| `sd.visibleChanged(visible)` | Signal: the overlay was shown or hidden (`Connections { target: sd; function onVisibleChanged(v) {} }`). |
 
 A **Pty** has `output(text)` and `exited(code)` signals, `write(text)` (keys
 as the program expects them: `"\r"` for Enter, `"\x7f"` for Backspace,
@@ -164,13 +176,12 @@ as the program expects them: `"\r"` for Enter, `"\x7f"` for Backspace,
 use `TerminalView` (below)** instead of handling them yourself. Programs started with
 `sd.run`, `sd.exec` and `sd.openPty` get the user's environment, display
 included, so GUI apps open normally.
-| `sd.visible` | Whether SUPER DESKTOP is on screen. Bind animations to it (`running: ringing && sd.visible`): surfaces are not drawn while it is hidden. |
-| `sd.visibleChanged(visible)` | Signal: the overlay was shown or hidden (`Connections { target: sd; function onVisibleChanged(v) {} }`). |
 
 ### `sd.call` methods
 
 | Method | Params | Result |
 | --- | --- | --- |
+| `overlay.show` | none | `{}` once SUPER DESKTOP is on screen; e.g. from a notification's action, then `popup.open`. |
 | `overlay.hide` | none | `{}` |
 | `harness.list` | none | `[{id, name, icon}]`: the agents offered in the top bar. `icon` is a file path or empty. |
 | `harness.launch` | `{harness, folder?}` | `{}`; opens a new terminal card for that agent, in `folder` or the folder chosen in the top bar. |
@@ -178,7 +189,8 @@ included, so GUI apps open normally.
 | `cards.focus` | `{id}` from `cards.list` | `{}`; brings that card to the front with the keyboard (restores a minimized one). |
 | `cards.text` | `{id, lines?}` of a terminal card (default 60, at most 300) | `{text}`: the end of its terminal, plain text. |
 | `cards.send` | `{id, text, enter?}` of a terminal card | `{}`; types `text` into it as if the user did (`enter: true` presses Enter after it; at most 64 KiB). **Only on the user's click**, and show what will be typed first. |
-| `notify` | `{title, body}` | `{}`; a desktop notification. |
+| `notify` | `{title, body, urgency?, actions?}`; `urgency`: `low`, `normal`, `critical` (stays until dismissed); `actions`: up to 3 `{id, label}` buttons, `id: "default"` also runs on a click on the notification | `{}` at once; with `actions`, `{action}` when one is clicked (`null` when it closes without), which can be minutes later. |
+| `sound.play` | `{file}`: a sound in the plugin folder (`.wav`, `.oga`, `.ogg`), or `{name}`: a desktop sound (`complete`, `bell`, `alarm-clock-elapsed`, `message-new-instant`…) | `{}` at once; it plays with the PC's player. At most 4 at once (`busy`). Only for what the user asked for. |
 | `llm.complete` | `{prompt, system?, maxTokens? (default 1024), json? (answer is one JSON document), fast? (a smaller, quicker model)}`; prompt ≤ 64 KiB | `{text, provider, model}`, through the user's own Claude Code (else Codex) with all tools off. Takes seconds; at most two at once (`busy`); errors `unavailable`, `timeout`. **Send only what the task needs**: never secrets, keys or `.env` contents, and say in the plugin's description what it sends. |
 | `panel.open`, `panel.close`, `panel.toggle` | `{surface}`: one of **this plugin's** `panel` surfaces | `{open}`: whether it is open now. |
 | `card.open`, `card.close`, `card.toggle` | `{surface, instance?}`: one of this plugin's `card` surfaces; `instance` picks a copy of a `multiple` card (default: the caller's own copy when the caller is that card, else the first) | `{open}` |
@@ -188,7 +200,7 @@ included, so GUI apps open normally.
 | `popup.open`, `popup.close`, `popup.toggle` | `{surface, x?, y?, width?, height?}`: one of this plugin's `popup` surfaces. It opens next to the caller: below a `toolbar.item`, beside a dock. `x, y` (and `width, height`) are a point or box in the **caller's** coordinates to open below instead, e.g. `var p = button.mapToItem(null, 0, 0)` then `{surface, x: p.x, y: p.y, width: button.width, height: button.height}` for one button of a dock. Opening one closes any other popup. Use `toggle` on the button: a click on the button that opened it closes it and its toggle then leaves it closed. A popup closes itself with `{surface: sd.surfaceId}`. | `{open}` |
 
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
-`unavailable`, `not_connected`. Show them in the UI where they happen.
+`unavailable`, `busy`, `not_connected`. Show them in the UI where they happen.
 
 ## Terminals: `TerminalView`
 
@@ -228,7 +240,7 @@ Full working examples, copy the closest one:
 
 - `examples/clock-dock/`: a dock with clock, date and battery (`sd.exec`).
 - `examples/launcher-dock/`: a dock with a button per agent
-  (`harness.list`, `harness.launch`), hover states, tooltips, a component file.
+  (`harness.list`, `harness.launch`), hover states, the dock's `tooltip`, a component file.
 - `examples/pomodoro/`: a `toolbar.item` that toggles a `panel`, and a
   `settings.page`, sharing state through `sd.values`.
 - `examples/agents-menu/`: a `toolbar.item` whose click opens a `popup`
@@ -238,7 +250,8 @@ Full working examples, copy the closest one:
   what; quick presets, text fields, Enter/Esc); right click: a `popup` list
   that removes what you click. A list saved in `sd.values`, a `Timer` that
   checks what is due (in the `toolbar.item`, which keeps running), a
-  notification, a sound, a shaking icon over a moving theme gradient, the
+  notification that shows the list when clicked (`overlay.show`), a sound
+  (`sound.play`), a shaking icon over a moving theme gradient, the
   `tooltip`, and text colors checked for contrast (`reminders.js`).
 - `examples/agents-dock/`: a dock listing the agent cards with their status
   (`cards.list`), a click jumps to one (`cards.focus`), and ✦ summarizes what
@@ -249,16 +262,15 @@ Full working examples, copy the closest one:
   card: each click or Ctrl+Alt+T opens another), with the program's title and
   Enter to restart.
 
-A themed icon button:
+A themed icon button (hover text: the surface's `tooltip` in plugin.json,
+not a QML `ToolTip`, which would cover the button):
 
 ```qml
 import QtQuick
-import QtQuick.Controls
 
 Rectangle {
     id: button
     property string label: "?"
-    property string tip: ""
     signal clicked()
     width: parent.width; height: width
     radius: 10
@@ -269,11 +281,44 @@ Rectangle {
         color: area.containsMouse ? sd.theme.background : sd.theme.foreground
         font.pixelSize: 20
     }
-    MouseArea { id: area; anchors.fill: parent; hoverEnabled: true; onClicked: button.clicked() }
-    ToolTip.visible: area.containsMouse && tip.length > 0
-    ToolTip.text: tip
+    MouseArea {
+        id: area; anchors.fill: parent; hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onClicked: button.clicked()
+    }
 }
 ```
+
+## Testing like a user
+
+`snapshot --do STEPS` (or `--steps FILE`, one step per line) clicks, types and
+checks before the last shot. Steps are separated by `;` or new lines; put
+text with spaces or `;` in "quotes".
+
+| Step | Does |
+| --- | --- |
+| `click TARGET [right\|middle]`, `double TARGET` | A click where TARGET is: shown text (`"OK"`, a Button's text, a field's placeholder; exact, else contained), `@objectName`, or `x,y` in the surface's logical pixels. |
+| `move TARGET`, `press TARGET`, `release TARGET` | Hover, or one half of a click (long presses: `press`, `wait`, `release`). |
+| `drag X,Y X,Y` | Press, move, release. |
+| `scroll TARGET N` | The wheel, N notches down (negative: up). |
+| `type TEXT` | Types into the focused item (click the field first). |
+| `key KEY…` | Keys: `Return`, `Escape`, `Tab`, `Space`, `Backspace`, `Delete`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `F5`, `a`, `Ctrl+A`, `Shift+Tab`. |
+| `wait TIME` | `500` (ms) or `2s`: timers and animations run meanwhile. |
+| `expect TEXT`, `absent TEXT` | Fails unless that text is (is not) shown. |
+| `shot [NAME]` | A picture now: `<out>-NAME.png` next to `--out`. |
+
+```sh
+super-desktop plugin snapshot reminder --surface add --values sample.json --out /tmp/add.png \
+  --do 'click "30 min"; click "Call mom"; type Buy milk; expect "Buy milk"; shot typed; key Return'
+```
+
+The report gives each step (✓/✗, where it clicked, the text shown when a
+target is missing), every `sd.call` the plugin made (`popup.close`,
+`notify`…) and `sd.run`, its `sd.log` lines, and `values` after the steps.
+The command fails at the first failing step, and `--out` then shows that
+moment. Each surface is tested on its own: a click that opens a popup shows
+as `sd.call popup.toggle {surface: "add"}`; test the popup with its own
+`--surface`.
 
 ## Pitfalls and recipes
 
@@ -304,9 +349,10 @@ the user cannot do both at the same instant, and each reads the latest
 `cat ~/.local/state/super-desktop/plugins/<id>.data.json`.
 
 **Testing what happens on an event** (a timer ending, a reminder due): in
-`check` and `snapshot`, `sd.connected` is false and `sd.call`/`sd.exec` fail,
-so keep the decision in plain functions (what is due, what to save) and the
-side effects (notify, sound) in a few lines guarded by `sd.connected`.
+`check` and `snapshot`, `sd.connected` is false: `sd.call` fails (and is
+listed in the report), so keep the decision in plain functions (what is due,
+what to save) and the side effects (notify, sound) in a few lines guarded by
+`sd.connected`.
 Snapshot the states with `--values`: times are epoch milliseconds, so write
 the sample just before the snapshot (`N=$(date +%s%3N)`, then
 `"endsAt": $((N + 60000))`). To see it live, ask the user first (it makes a
@@ -339,17 +385,28 @@ Then `color: R.readable(sd.theme, ["accent", "blue", "cyan"])`; secondary
 text: `Qt.alpha(sd.theme.foreground, 0.7)`. `examples/reminder/reminders.js`
 has the full version (`soft`, `mix`).
 
-**A sound**: put a `.wav` in the plugin folder and play it on the event,
-with whatever player the PC has:
+**A sound**: put a `.wav` in the plugin folder and play it on the event;
+SUPER DESKTOP finds a player:
 
 ```js
-sd.exec(["sh", "-c", "pw-play \"$1\" 2>/dev/null || paplay \"$1\" 2>/dev/null || aplay -q \"$1\"",
-         "sh", sd.pluginDir + "/ding.wav"], function(r) { if (r.code !== 0) sd.log(r.stderr) })
+sd.call("sound.play", {file: "ding.wav"}, function(result, err) {
+    if (err) sd.call("sound.play", {name: "complete"})   // a desktop sound
+})
 ```
 
-`/usr/share/sounds/freedesktop/stereo/` (`.oga`, for `pw-play`/`paplay`) has
-standard sounds. Play only for something the user asked for (a reminder,
-a finished task), and not again and again without end.
+Play only for something the user asked for (a reminder, a finished task),
+and not again and again without end.
+
+**A notification the user can act on**: `urgency: "critical"` keeps it until
+dismissed; an action with id `"default"` runs on a click on it:
+
+```js
+sd.call("notify", {title: "⏰ Reminder", body: text, urgency: "critical",
+                   actions: [{id: "default", label: "Show"}]}, function(result, err) {
+    if (result && result.action === "default")
+        sd.call("overlay.show", {}, function() { sd.call("popup.open", {surface: "list"}) })
+})
+```
 
 **Popups from a button**: `sd.call("popup.toggle", {surface})` on the click.
 Inside the popup, `sd.call("popup.close", {surface: sd.surfaceId})` after a
@@ -357,37 +414,30 @@ choice. A dock with several buttons passes the button's box
 (`var p = button.mapToItem(null, 0, 0)`; `{surface, x: p.x, y: p.y, width:
 button.width, height: button.height}`) so the popup opens next to it.
 
-**A preview picture.** Put `preview.png` at the top of the plugin folder:
-1280×640 (2:1), at most 1.5 MiB, the plugin in use with sample data, on the
-theme's background, no text around it. SUPER DESKTOP shows its middle square (640×640) beside
-the plugin in Settings → Plugins → Discover, and a small crop under
-Installed, so keep the important part in the middle; GitHub can use the
-whole picture as the repository's social preview. Make it from snapshots of the
-real surfaces with `--values` and `--scale 2`, for example the
-`toolbar.item` and, below it, the popup or panel it opens; with ImageMagick:
-
-```sh
-super-desktop plugin snapshot <id> --surface main --scale 2.5 --values sample.json --out /tmp/button.png
-super-desktop plugin snapshot <id> --surface menu --scale 1.75 --values sample.json --out /tmp/popup.png
-magick -size 1280x640 xc:'#121212' -fill '#1e1e1e' -draw 'rectangle 0,0,1280,112' \
-  /tmp/button.png -gravity north -geometry +0+11 -composite \
-  /tmp/popup.png -gravity north -geometry +0+128 -composite preview.png
-```
-
-Use the colors of `~/.local/state/super-desktop/plugins/theme.json`
-(`background`, `surface`), then open preview.png and look at it.
+**A preview picture.** `super-desktop plugin preview <id> --values sample.json`
+draws `preview.png` at the top of the plugin folder: 1280×640 (2:1), the
+plugin's top-bar items and docks over a bar-colored strip, the popups, panels
+or cards they open below, with sample data, on the theme's background.
+`--surface` (repeat it) picks which ones. SUPER DESKTOP shows its middle
+square (640×640) beside the plugin in Settings → Plugins → Discover, and a
+small crop under Installed; GitHub can use the whole picture as the
+repository's social preview. Open preview.png and look at it; it must stay
+under 1.5 MiB. To show a state you can only click to (a form filled in),
+take that shot with `snapshot --do` and compose it yourself (ImageMagick:
+`magick -size 1280x640 xc:'<background>' shot.png -gravity center -composite preview.png`).
 
 **Publishing.** Push the plugin folder as its own git repository
 (`plugin.json` and `preview.png` at the top, a README that says what it does on the user's PC:
-programs it runs, files it writes, anything it sends; `.claude/skills/` in
-`.gitignore`). Check it installs: `super-desktop plugin install <url>` on a
+programs it runs, files it writes, anything it sends; `.claude/` in
+`.gitignore`), then run `super-desktop plugin publish <id>`. It checks what
+the public list needs (a clean check, `minHost`, a description, the README,
+committed and pushed to GitHub, no `.claude/` in git; `version`,
+`categories` and preview.png are recommended) and prints the entry to add.
+Check it installs: `super-desktop plugin install <url>` on a
 fresh folder (`SD_PLUGINS_DIR=/tmp/x/plugins SD_PLUGINS_STATE_DIR=/tmp/x/state`).
 Then list it in the public registry, github.com/gladimdim/super-desktop-plugins:
-a pull request adding to `registry.json`, in id order,
-`{"id", "name", "description", "repo": "owner/name", "tags", "author",
-"api": 1, "minHost": "<lowest SUPER DESKTOP version>", "slots": [sorted]}`
-(`id`, `name`, `api` and `slots` must match `plugin.json`; its
-`validate.py` checks).
+a pull request adding that entry to `registry.json`, in id order (its
+`validate.py` checks it).
 
 ## Other commands
 
@@ -396,13 +446,15 @@ a pull request adding to `registry.json`, in id order,
   the top-bar item that opens it).
 - `super-desktop plugin list [--json]`: every plugin, whether it is valid and
   whether it is running.
+- `super-desktop plugin preview <id>` and `super-desktop plugin publish <id>`:
+  the preview picture and the readiness check for the public list (above).
 - `super-desktop plugin doctor`: when nothing appears at all, this says what
   is missing (the QML host, Qt Quick, the overlay) and how to fix it.
 - Sharing: a plugin is shared as a git repository with `plugin.json` at its
   top level (the folder itself). Others run
   `super-desktop plugin install <git url>`, or `install <id>` for one in the
   public list (`super-desktop plugin search [text]`; Settings → Plugins →
-  Get plugins); it does not run until they approve
+  Discover); it does not run until they approve
   it (Settings → Plugins or `super-desktop plugin approve <id>`).
   `super-desktop plugin update <id>` fast-forwards it; `remove` moves it to the
   trash. Keep the id stable: it is the folder name on every PC. Do not commit

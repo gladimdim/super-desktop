@@ -1,12 +1,10 @@
 import QtQuick
-import QtQuick.Controls
 
 // A square, themed button with an icon (an image path) or a text glyph.
 Rectangle {
     id: button
     property string glyph: ""
     property string icon: ""
-    property string tip: ""
     signal clicked()
 
     height: width
@@ -36,9 +34,7 @@ Rectangle {
         id: area
         anchors.fill: parent
         hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
         onClicked: button.clicked()
     }
-    ToolTip.visible: area.containsMouse && tip.length > 0
-    ToolTip.text: tip
-    ToolTip.delay: 300
 }

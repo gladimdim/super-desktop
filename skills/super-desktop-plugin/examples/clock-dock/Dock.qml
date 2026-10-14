@@ -13,13 +13,13 @@ Rectangle {
     property string battery: ""
 
     Timer {
-        interval: 1000; running: true; repeat: true; triggeredOnStart: true
+        interval: 1000; running: sd.visible; repeat: true; triggeredOnStart: true
         onTriggered: root.now = new Date()
     }
 
     // Reads the first battery's capacity; shows nothing on a desktop PC.
     Timer {
-        interval: 60000; running: true; repeat: true; triggeredOnStart: true
+        interval: 60000; running: sd.visible; repeat: true; triggeredOnStart: true
         onTriggered: sd.exec(["sh", "-c", "cat /sys/class/power_supply/BAT*/capacity 2>/dev/null | head -1"],
                              function(r) { root.battery = r.stdout.trim() })
     }
@@ -53,7 +53,7 @@ Rectangle {
         Text {
             Layout.alignment: Qt.AlignHCenter
             text: Qt.formatDate(root.now, "ddd")
-            color: sd.theme.muted
+            color: Qt.alpha(sd.theme.foreground, 0.7)
             font.family: sd.theme.fontFamily
             font.pixelSize: 12
         }

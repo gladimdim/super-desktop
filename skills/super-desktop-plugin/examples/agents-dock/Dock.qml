@@ -75,7 +75,7 @@ Rectangle {
             visible: root.cards.length === 0
             Layout.fillWidth: true
             text: sd.connected ? "No agent cards." : "Agent cards appear here inside SUPER DESKTOP."
-            color: sd.theme.muted
+            color: Qt.alpha(sd.theme.foreground, 0.7)
             wrapMode: Text.Wrap
             font.pixelSize: 11
         }
@@ -121,14 +121,14 @@ Rectangle {
                         Text {
                             Layout.fillWidth: true
                             text: modelData.status + (modelData.folder ? " · " + modelData.folder.split("/").pop() : "")
-                            color: sd.theme.muted
+                            color: Qt.alpha(sd.theme.foreground, 0.7)
                             elide: Text.ElideRight
                             font.pixelSize: 10
                         }
                     }
                     Text {
                         text: "✦"
-                        color: sparkle.containsMouse ? sd.theme.accent : sd.theme.muted
+                        color: sparkle.containsMouse ? sd.theme.accent : Qt.alpha(sd.theme.foreground, 0.7)
                         font.pixelSize: 14
                         MouseArea {
                             id: sparkle

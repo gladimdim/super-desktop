@@ -22,7 +22,6 @@ Rectangle {
     property int dings: 0
 
     readonly property int maxDings: 5
-    readonly property string sound: sd.pluginDir + "/ding-dong.wav"
 
     Connections {
         target: sd
@@ -30,13 +29,13 @@ Rectangle {
     }
 
     // Plays ding-dong.wav (make it with `python3 make-ding-dong.py
-    // ding-dong.wav`; examples come without it), else the desktop's alarm.
+    // ding-dong.wav`; examples come without it), else the desktop's alarm
+    // sound. SUPER DESKTOP picks the player; check and snapshot stay quiet.
     function ding() {
-        if (!sd.connected) return
         root.dings += 1
-        sd.exec(["sh", "-c", "f=$1; [ -f \"$f\" ] || f=/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga; "
-                 + "pw-play \"$f\" 2>/dev/null || paplay \"$f\" 2>/dev/null || aplay -q \"$f\"", "sh", root.sound],
-                function(r) { if (r.code !== 0) sd.log("could not play the sound: " + r.stderr) })
+        sd.call("sound.play", { file: "ding-dong.wav" }, function(result, err) {
+            if (err) sd.call("sound.play", { name: "alarm-clock-elapsed" })
+        })
     }
 
     function checkDue() {
@@ -53,8 +52,11 @@ Rectangle {
         sd.setValue("reminders", all)
         for (var j = 0; j < fired.length; j++) {
             const body = fired[j]
-            sd.call("notify", { title: "⏰ Reminder", body: body }, function(result, err) {
-                if (err) sd.run(["notify-send", "-u", "critical", "⏰ Reminder", body])
+            // Stays until dismissed; a click on it brings up the list.
+            sd.call("notify", { title: "⏰ Reminder", body: body, urgency: "critical",
+                                actions: [{ id: "default", label: "Show" }] }, function(result, err) {
+                if (result && result.action === "default")
+                    sd.call("overlay.show", {}, function() { sd.call("popup.open", { surface: "list" }) })
             })
         }
         root.dings = 0
@@ -66,6 +68,7 @@ Rectangle {
         sd.setValue("reminders", R.list(sd.values).map(r => r.fired ? Object.assign({}, r, { seen: true }) : r))
     }
 
+    // Reminders are due while SUPER DESKTOP is hidden too. sd-lint: ignore hidden-timer
     Timer {
         interval: 5000; running: true; repeat: true; triggeredOnStart: true
         onTriggered: root.checkDue()

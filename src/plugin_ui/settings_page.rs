@@ -286,7 +286,10 @@ impl Page {
         head.append(&name);
         let slots_text = manifest
             .as_ref()
-            .map(|m| super::browse::slots_text(m.surfaces.iter().map(|s| s.slot.name())))
+            .map(|m| {
+                let slots = super::browse::slots_text(m.surfaces.iter().map(|s| s.slot.name()));
+                if m.version.is_empty() { slots } else { format!("v{} · {slots}", m.version) }
+            })
             .unwrap_or_default();
         let (state, failed) = state_text(id, manifest);
         let detail = gtk4::Label::new(Some(&if slots_text.is_empty() { state.clone() } else { format!("{slots_text} · {state}") }));

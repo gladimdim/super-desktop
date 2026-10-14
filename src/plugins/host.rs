@@ -351,6 +351,76 @@ Item {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// `--do` clicks shown text, types, presses keys and checks what is
+    /// shown; the report has each step, the calls the QML made (recorded,
+    /// not done), its log and its values afterwards.
+    #[test]
+    fn plugins_host_snapshot_steps_use_the_surface_like_a_user() {
+        let Some(binary) = crate::plugins::paths::qml_host_binary() else {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("sd-plugins-steps-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("Form.qml");
+        std::fs::write(&file, r#"import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+Rectangle {
+    color: "white"
+    ColumnLayout {
+        anchors.fill: parent
+        anchors.margins: 10
+        TextField { id: field; placeholderText: "What to remember"; Layout.fillWidth: true
+            Keys.onReturnPressed: save() }
+        Button { text: "Add it"; onClicked: save() }
+        Text { objectName: "count"; text: (sd.values.items || []).length + " saved" }
+        Item { Layout.fillHeight: true }
+    }
+    MouseArea { anchors.fill: parent; z: -1; acceptedButtons: Qt.RightButton; onClicked: sd.run(["xdg-open", "https://example.com"]) }
+    function save() {
+        sd.setValue("items", (sd.values.items || []).concat([field.text]))
+        sd.log("saved " + field.text)
+        sd.call("popup.close", {surface: sd.surfaceId})
+        field.text = ""
+    }
+}
+"#).unwrap();
+        let data = dir.join("values.json");
+        std::fs::write(&data, "{}").unwrap();
+        let run = |steps: &str| -> serde_json::Value {
+            let out = std::process::Command::new(&binary).arg("--snapshot").arg(&file).arg("--out").arg(dir.join("out.png"))
+                .arg("--data").arg(&data).args(["--surface-id", "form", "--width", "300", "--height", "200", "--wait", "50", "--do", steps])
+                .output().unwrap();
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|_| panic!("{}", String::from_utf8_lossy(&out.stderr)))
+        };
+        let report = run("click \"What to remember\"; type milk; click \"Add it\"; expect \"1 saved\"\n\
+                          click What; type eggs; key Return; expect \"2 saved\"; absent \"3 saved\"; click 5,190 right; shot done");
+        assert_eq!(report["ok"], true, "{report}");
+        let steps = report["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 11);
+        assert!(steps.iter().all(|s| s["ok"] == true), "{report}");
+        assert!(steps[0]["at"][0].as_f64().unwrap() > 100.0, "the field's center: {}", steps[0]);
+        assert!(dir.join("out-done.png").is_file());
+        assert_eq!(report["values"], serde_json::json!({"items": ["milk", "eggs"]}));
+        assert_eq!(report["calls"], serde_json::json!([
+            {"method": "popup.close", "params": {"surface": "form"}}, {"method": "popup.close", "params": {"surface": "form"}}]));
+        assert_eq!(report["runs"], serde_json::json!([["xdg-open", "https://example.com"]]), "sd.run is recorded, not run");
+        assert_eq!(report["logs"], serde_json::json!(["saved milk", "saved eggs"]));
+        // A missing target fails the run at that step and says what is shown.
+        let report = run("click \"Nope\"; type never");
+        assert_eq!(report["ok"], false);
+        assert_eq!(report["steps"].as_array().unwrap().len(), 1);
+        let error = report["steps"][0]["error"].as_str().unwrap();
+        assert!(error.contains("no visible text \"Nope\"") && error.contains("\"Add it\""), "{error}");
+        let report = run("key Hyper+Q");
+        assert!(report["steps"][0]["error"].as_str().unwrap().starts_with("unknown key"), "{report}");
+        let report = run("click @count; frobnicate");
+        assert!(report["steps"][1]["error"].as_str().unwrap().starts_with("unknown step"), "{report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Standard controls follow the theme: highlighted buttons (and checked
     /// switches, sliders) use the accent with readable text on it, and
     /// placeholder text reads on the field, in a dark and a light theme.

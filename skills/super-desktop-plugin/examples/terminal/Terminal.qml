@@ -16,7 +16,7 @@ Rectangle {
         Text {
             Layout.fillWidth: true
             text: term.title || "Terminal"
-            color: sd.theme.muted
+            color: Qt.alpha(sd.theme.foreground, 0.7)
             font.family: sd.theme.fontFamily
             font.pixelSize: 11
             elide: Text.ElideMiddle
