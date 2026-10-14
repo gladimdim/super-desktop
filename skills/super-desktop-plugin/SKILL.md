@@ -359,10 +359,10 @@ button.width, height: button.height}`) so the popup opens next to it.
 
 **A preview picture.** Put `preview.png` at the top of the plugin folder:
 1280×640 (2:1), at most 1.5 MiB, the plugin in use with sample data, on the
-theme's background, no text around it. SUPER DESKTOP shows it on the
-plugin's card in Settings → Plugins → Discover and next to it under
-Installed (cropped to fill, so keep the middle meaningful), and GitHub can
-use it as the repository's social preview. Make it from snapshots of the
+theme's background, no text around it. SUPER DESKTOP shows its middle square (640×640) beside
+the plugin in Settings → Plugins → Discover, and a small crop under
+Installed, so keep the important part in the middle; GitHub can use the
+whole picture as the repository's social preview. Make it from snapshots of the
 real surfaces with `--values` and `--scale 2`, for example the
 `toolbar.item` and, below it, the popup or panel it opens; with ImageMagick:
 
