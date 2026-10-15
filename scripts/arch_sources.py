@@ -95,7 +95,7 @@ def prepare_sources(root, destination):
     (destination / "BUILDING").write_text(
         f"SUPER DESKTOP corresponding source\nCommit: {commit}\nCompiler used: {rustc}\n\n"
         "On Omarchy / Arch x86_64, install build prerequisites:\n"
-        "  sudo pacman -S --needed base-devel rust python gtk4 gtk4-layer-shell vte4 qt6-base qt6-declarative\n"
+        "  sudo pacman -S --needed base-devel rust python gtk4 gtk4-layer-shell vte4 gtksourceview5 qt6-base qt6-declarative\n"
         "Build without downloading Rust dependencies:\n"
         "  cargo build --release --locked --offline --bins\n"
         "Build the QML plugin host into the same folder:\n"

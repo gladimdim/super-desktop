@@ -139,7 +139,7 @@ fn file_rules(file: &Path, source: &Source, findings: &mut Vec<Finding>) {
     // it again from a show, a timer or a change undoes the user's ✕. Opening
     // it once on load, or on a click, is fine. One helper function deep:
     // `onVisibleChanged: reopen()` with `function reopen() { sd.call(…) }`.
-    for method in ["panel.open", "panel.toggle", "card.open", "card.toggle", "card.new", "fullscreen.open", "fullscreen.toggle"] {
+    for method in ["panel.open", "panel.toggle", "card.open", "card.toggle", "card.new", "fullscreen.open", "fullscreen.toggle", "editor.open"] {
         for quote in ['"', '\''] {
             for (at, _) in source.text.match_indices(&format!("{quote}{method}{quote}")) {
                 let mut triggers: Vec<(usize, String)> = source.handler_at(at).filter(|h| reopens(h)).map(|h| (at, h)).into_iter().collect();

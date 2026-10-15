@@ -941,6 +941,78 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     color: {light_foreground};
 }}
 
+/* SD Editor: a folder tree beside GtkSourceView tabs, in a card. */
+.sd-editor-toolbar {{
+    padding: 4px 8px;
+    border-bottom: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-toolbar button,
+.sd-editor-menu > button {{
+    padding: 2px 10px;
+    min-height: 0;
+}}
+
+.sd-editor-side {{
+    background-color: {note_content_bg};
+    border-right: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-tree-title {{
+    font-weight: bold;
+    padding: 6px 10px;
+    color: {light_foreground};
+}}
+
+.sd-editor-tree {{
+    background: transparent;
+    color: {light_foreground};
+}}
+
+.sd-editor-tree > row {{
+    padding: 2px 6px;
+}}
+
+.sd-editor-text {{
+    font-family: '{font_family}', monospace;
+    font-size: 13px;
+}}
+
+.sd-editor-bar {{
+    padding: 6px 8px;
+    background-color: {term_hdr_bg};
+    color: {light_foreground};
+}}
+
+.sd-editor-prompt {{
+    border-bottom: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-status {{
+    padding: 2px 10px;
+    font-size: 11px;
+    color: alpha({light_foreground}, 0.75);
+    border-top: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-empty {{
+    color: alpha({light_foreground}, 0.75);
+}}
+
+.sd-editor-card notebook > header {{
+    background: transparent;
+}}
+
+.sd-editor-tab-label {{
+    font-size: 12px;
+}}
+
+.sd-editor-tab-close {{
+    padding: 0 4px;
+    min-height: 0;
+    min-width: 0;
+}}
+
 .term-btn:hover {{
     color: {bright_foreground};
     background-color: {btn_hover_bg};

@@ -6,10 +6,10 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-struct Frame {
+pub(crate) struct Frame {
     pixels: Vec<u8>,
-    width: i32,
-    height: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
     stride: usize,
     alpha: bool,
     delay: Duration,
@@ -22,7 +22,9 @@ enum Preview {
     Audio(Vec<u8>),
 }
 
-fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
+/// An image's frames (one, or an animated GIF's), at most 1600 pixels on a
+/// side. Runs off GTK's thread; SD Editor's previews use it too.
+pub(crate) fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
     let count = if bytes.starts_with(b"GIF") {
         crate::assets::gif_frames(bytes)?
     } else {
@@ -389,7 +391,7 @@ fn load_preview(session: &str, id: &str, page: u32) -> Result<Preview, String> {
 
 /// An image with a zoom slider; an animated one plays while its preview
 /// (`ticket` in `generation`) is still the panel's.
-fn image_preview(content: &gtk4::Box, frames: Vec<Frame>, generation: Rc<Cell<u64>>, ticket: u64) {
+pub(crate) fn image_preview(content: &gtk4::Box, frames: Vec<Frame>, generation: Rc<Cell<u64>>, ticket: u64) {
     let picture = gtk4::Picture::new();
     picture.set_can_shrink(true);
     let textures: Vec<_> = frames

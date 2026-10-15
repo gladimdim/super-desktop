@@ -201,6 +201,7 @@ mod tests {
             "sd-arrange-symbolic.svg",
             "sd-hide-symbolic.svg",
             "sd-attach-symbolic.svg",
+            "sd-editor.svg",
         ] {
             let p = root.join("hicolor/scalable/actions").join(name);
             assert!(p.is_file(), "missing vendored HUD icon {name}");

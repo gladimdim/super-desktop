@@ -59,15 +59,17 @@ DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-desktop/source"
 # The oldest Rust that builds the locked dependencies (gtk4 0.11).
 MIN_RUST="1.92"
 
-# The build needs a C compiler, GTK 4, gtk4-layer-shell and VTE, and Qt Quick
-# for the plugin host. At run time the app uses tmux for sessions, wl-clipboard
-# for copying, libnotify for notifications, sqlite for OpenCode card titles,
-# avahi for phone discovery, and bubblewrap with poppler for sandboxed PDF
+# The build needs a C compiler, GTK 4, gtk4-layer-shell, VTE and GtkSourceView
+# (SD Editor), and Qt Quick for the plugin host. At run time the app uses tmux
+# for sessions, wl-clipboard for copying, libnotify for notifications, sqlite
+# for OpenCode card titles, avahi for phone discovery, bubblewrap with poppler
+# for sandboxed PDF previews, and GStreamer's plugins to play sound and video
 # previews.
 PACKAGES=(
     base-devel git curl
-    gtk4 gtk4-layer-shell vte4 qt6-base qt6-declarative
+    gtk4 gtk4-layer-shell vte4 gtksourceview5 qt6-base qt6-declarative
     tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
+    gst-plugins-good gst-libav
 )
 
 BIN_DST="$HOME/.local/bin/super-desktop"

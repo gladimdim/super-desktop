@@ -105,23 +105,64 @@ pub struct PluginCard {
     pub container: gtk4::Overlay,
     body: gtk4::Box,
     title: gtk4::Label,
+    badge: gtk4::Label,
     surface: RefCell<Option<QmlSurface>>,
     geometry: Cell<Geometry>,
+    /// Told where and how big a drag, a resize or Arrange left the card: a
+    /// plugin card saves it per plugin, an SD Editor card with its files.
+    saved: Rc<dyn Fn(Geometry)>,
 }
 
 impl PluginCard {
     /// Builds the card at `geometry` and puts it on the canvas. `on_close`
     /// runs when the user presses ✕.
     pub fn new(host: &Rc<CanvasHost>, spec: SurfaceSpec, title: &str, geometry: Geometry, on_close: Rc<dyn Fn()>) -> Rc<Self> {
+        let (plugin, key) = (spec.plugin_id.clone(), card_key(&spec.surface_id, &spec.instance));
+        let saved: Rc<dyn Fn(Geometry)> = Rc::new(move |geometry| save(&plugin, &key, geometry, true));
+        let card = Self::build(host, (&spec.plugin_id, &spec.surface_id, &spec.instance), "🧩", title, geometry, on_close, saved);
+        card.container.add_css_class("plugin-card");
+        card.set_surface(spec);
+        card
+    }
+
+    /// A card on the canvas whose body is `body` instead of a plugin's QML,
+    /// for SUPER DESKTOP's own cards (SD Editor). `saved` is told its new
+    /// place after a drag, a resize or Arrange.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_body(
+        host: &Rc<CanvasHost>,
+        key: &str,
+        badge: &str,
+        title: &str,
+        body: &impl IsA<gtk4::Widget>,
+        geometry: Geometry,
+        on_close: Rc<dyn Fn()>,
+        saved: Rc<dyn Fn(Geometry)>,
+    ) -> Rc<Self> {
+        let card = Self::build(host, ("", key, ""), badge, title, geometry, on_close, saved);
+        body.as_ref().set_vexpand(true);
+        body.as_ref().set_hexpand(true);
+        card.body.append(body);
+        card
+    }
+
+    fn build(
+        host: &Rc<CanvasHost>,
+        (plugin, surface_id, instance): (&str, &str, &str),
+        badge: &str,
+        title: &str,
+        geometry: Geometry,
+        on_close: Rc<dyn Fn()>,
+        saved: Rc<dyn Fn(Geometry)>,
+    ) -> Rc<Self> {
         let container = gtk4::Overlay::new();
         container.add_css_class("mini-terminal");
-        container.add_css_class("plugin-card");
         let body = gtk4::Box::new(Orientation::Vertical, 0);
         container.set_child(Some(&body));
 
         let header = gtk4::Box::new(Orientation::Horizontal, 6);
         header.add_css_class("term-header");
-        let badge = gtk4::Label::new(Some("🧩"));
+        let badge = gtk4::Label::new(Some(badge));
         badge.add_css_class("plugin-card-badge");
         header.append(&badge);
         let title_label = gtk4::Label::new(Some(title));
@@ -138,17 +179,18 @@ impl PluginCard {
         body.append(&header);
 
         let card = Rc::new(Self {
-            plugin: spec.plugin_id.clone(),
-            surface_id: spec.surface_id.clone(),
-            instance: spec.instance.clone(),
-            key: card_key(&spec.surface_id, &spec.instance),
+            plugin: plugin.to_owned(),
+            surface_id: surface_id.to_owned(),
+            instance: instance.to_owned(),
+            key: card_key(surface_id, instance),
             container,
             body,
             title: title_label,
+            badge: badge.clone(),
             surface: RefCell::new(None),
             geometry: Cell::new(geometry),
+            saved,
         });
-        card.set_surface(spec);
         card.container.set_size_request(geometry.width, geometry.height);
         host.canvas.put(&card.container, f64::from(geometry.x), f64::from(geometry.y));
         (host.raise)(card.container.upcast_ref());
@@ -175,6 +217,17 @@ impl PluginCard {
         self.surface.borrow().as_ref().map(|s| s.widget().clone().upcast())
     }
 
+    /// Shows the icon `name` in place of the header's badge text.
+    pub fn set_badge_icon(&self, name: &str) {
+        let image = gtk4::Image::from_icon_name(name);
+        image.set_pixel_size(18);
+        image.add_css_class("plugin-card-badge");
+        if let Some(header) = self.badge.parent().and_downcast::<gtk4::Box>() {
+            header.insert_child_after(&image, Some(&self.badge));
+            self.badge.set_visible(false);
+        }
+    }
+
     pub fn set_title(&self, title: &str) {
         self.title.set_text(title);
     }
@@ -194,7 +247,7 @@ impl PluginCard {
     pub fn remember_geometry(&self, geometry: Geometry) {
         self.geometry.set(geometry);
         self.container.set_size_request(geometry.width, geometry.height);
-        save(&self.plugin, &self.key, geometry, true);
+        (self.saved)(geometry);
     }
 
     /// Ends the QML and takes the card off the canvas.
@@ -259,7 +312,7 @@ impl PluginCard {
                 let (x, y) = (host.drag_end)(card.container.upcast_ref(), x.round() as i32, y.round() as i32);
                 let geometry = Geometry { x, y, ..card.geometry.get() };
                 card.geometry.set(geometry);
-                save(&card.plugin, &card.key, geometry, true);
+                (card.saved)(geometry);
             }
         });
         header.add_controller(drag);
@@ -309,7 +362,7 @@ impl PluginCard {
                 host.canvas.move_(&card.container, rect.x, rect.y);
                 if commit {
                     card.container.remove_css_class("resizing");
-                    save(&card.plugin, &card.key, geometry, true);
+                    (card.saved)(geometry);
                 }
             }
         };

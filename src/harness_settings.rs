@@ -56,6 +56,7 @@ enum SettingsPage {
     CustomHarness,
     HarnessArgs,
     TopBar,
+    Editor,
     Mcp,
     Plugins,
     SleepLock,
@@ -75,6 +76,7 @@ impl SettingsPage {
             Self::CustomHarness => ("＋", "Add a harness", "Icon · name · executable · arguments"),
             Self::HarnessArgs => ("⌘", "Harness parameters", "What new cards start with"),
             Self::TopBar => ("▤", "Top bar", "Choose the desktop dock size"),
+            Self::Editor => ("✎", "SD Editor", "The built-in text editor"),
             Self::Mcp => ("⚙", "MCP", "Local agent access and connection setup"),
             Self::SleepLock => ("☀", "Sleep lock", "Keep harnesses available on charger power"),
             Self::Updates => ("⟳", "Updates", "Newer versions from GitHub"),
@@ -784,6 +786,7 @@ struct HomePage {
     btn_shortcut: Button,
     btn_harnesses: Button,
     btn_top_bar: Button,
+    btn_editor: Button,
     btn_mcp: Button,
     btn_plugins: Button,
     btn_sleep_lock: Button,
@@ -855,6 +858,14 @@ fn home_page() -> HomePage {
     );
     btn_top_bar.set_tooltip_text(Some("Change the top-bar size"));
     root.append(&btn_top_bar);
+
+    let (btn_editor, _) = settings_entry(
+        "✎",
+        "SD Editor",
+        "The built-in text editor: show or hide its button in the top bar.",
+        "settings-editor-entry",
+    );
+    root.append(&btn_editor);
 
     let (btn_mcp, _) = settings_entry("⚙", "MCP", "Control local agent access and copy connection instructions.", "settings-mcp-entry");
     root.append(&btn_mcp);
@@ -937,6 +948,7 @@ fn home_page() -> HomePage {
         btn_shortcut,
         btn_harnesses,
         btn_top_bar,
+        btn_editor,
         btn_mcp,
         btn_plugins,
         btn_sleep_lock,
@@ -1790,6 +1802,54 @@ fn top_bar_page(state: &Rc<RefCell<AppState>>, on_top_bar_size_change: &Rc<dyn F
     (root, paint_size)
 }
 
+/// Settings → SD Editor: the built-in editor's top-bar button, on or off,
+/// and a way to open it when the button is hidden.
+fn editor_page(state: &Rc<RefCell<AppState>>) -> Box {
+    let root = settings_page_root();
+    let (_, body) = section_card(&root, "", "SD Editor");
+    body.append(&hint("A text editor card on the desktop. It opens on the folder chosen in the top bar: \
+        its files in a tree on the left, open files in tabs on the right, with syntax colors, find and replace, \
+        Save and Save as. Images, sound and video open in previews."));
+    let row = Box::new(Orientation::Horizontal, 12);
+    let label = Label::new(Some("Show the SD Editor button (a lightning bolt with a pencil) in the top bar"));
+    label.set_hexpand(true);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    let toggle = gtk4::Switch::new();
+    toggle.add_css_class("editor-button-toggle");
+    toggle.set_valign(Align::Center);
+    toggle.set_active(!state.borrow().editor_button_hidden);
+    row.append(&label);
+    row.append(&toggle);
+    body.append(&row);
+    toggle.connect_active_notify({
+        let state = Rc::clone(state);
+        move |toggle| {
+            let shown = toggle.is_active();
+            state.borrow_mut().editor_button_hidden = !shown;
+            crate::state::save_state_async(state.borrow().clone());
+            crate::editor::set_button_shown(shown);
+        }
+    });
+    let actions = Box::new(Orientation::Horizontal, 8);
+    actions.add_css_class("launcher-actions");
+    let open = Button::with_label("Open SD Editor");
+    open.add_css_class("launcher-btn");
+    open.set_tooltip_text(Some("Open SD Editor on the folder chosen in the top bar"));
+    actions.append(&open);
+    body.append(&actions);
+    let status = hint("");
+    status.set_visible(false);
+    body.append(&status);
+    open.connect_clicked(move |_| {
+        if let Err(e) = crate::editor::open_here() {
+            status.set_text(&e);
+            status.set_visible(true);
+        }
+    });
+    root
+}
+
 /// Settings → Sleep lock: stay awake on external power.
 fn sleep_lock_page(state: &Rc<RefCell<AppState>>) -> Box {
     let root = settings_page_root();
@@ -2119,6 +2179,7 @@ pub fn build_harness_settings_panel(
     let custom = custom_page(&subtitle);
     let args = args_page(&subtitle);
     let (top_bar_root, paint_size) = top_bar_page(&state, &on_top_bar_size_change);
+    let editor_root = editor_page(&state);
     let sleep_root = sleep_lock_page(&state);
 
     let mcp_root = settings_page_root();
@@ -2164,6 +2225,7 @@ pub fn build_harness_settings_panel(
         (SettingsPage::Harnesses, page_scroll(&harnesses.root).upcast()),
         (SettingsPage::CustomHarness, page_scroll(&custom.root).upcast()),
         (SettingsPage::TopBar, page_scroll(&top_bar_root).upcast()),
+        (SettingsPage::Editor, page_scroll(&editor_root).upcast()),
         (SettingsPage::Mcp, page_scroll(&mcp_root).upcast()),
         (SettingsPage::Plugins, page_scroll(&plugins_root).upcast()),
     ];
@@ -2237,6 +2299,7 @@ pub fn build_harness_settings_panel(
         (&home.btn_shortcut, SettingsPage::Shortcut),
         (&home.btn_harnesses, SettingsPage::Harnesses),
         (&home.btn_top_bar, SettingsPage::TopBar),
+        (&home.btn_editor, SettingsPage::Editor),
         (&home.btn_mcp, SettingsPage::Mcp),
         (&home.btn_plugins, SettingsPage::Plugins),
         (&home.btn_connections, SettingsPage::Connections(ConnectionPage::Overview)),
@@ -2967,6 +3030,67 @@ mod tests {
     }
 
     #[test]
+    fn settings_editor_button_switch() {
+        crate::gtk_test::run_in_child_process("harness_settings::tests::settings_editor_button_switch_inner");
+    }
+
+    /// Settings → SD Editor turns the top bar's ✎ off and on, and saves it.
+    #[test]
+    fn settings_editor_button_switch_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        // Saving writes state.json under HOME: a private one.
+        let root = std::env::temp_dir().join(format!("sd-settings-editor-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("HOME", &root);
+        let _ = gtk4::init();
+        let app_state = Rc::new(RefCell::new(AppState::default()));
+        let button = crate::editor::toolbar_button(Rc::new(|| std::path::PathBuf::from("/tmp")), !app_state.borrow().editor_button_hidden);
+        assert!(button.get_visible(), "shown by default");
+        let panel = build_harness_settings_panel(
+            Rc::clone(&app_state),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        (panel.refresh)();
+        find_all::<Button>(&panel.widget, "settings-editor-entry").pop().expect("an SD Editor entry").emit_clicked();
+        assert_eq!(title_text(&panel.widget), "SD Editor");
+        let toggle = find_all::<gtk4::Switch>(&panel.widget, "editor-button-toggle").pop().expect("the switch");
+        assert!(toggle.is_active());
+        toggle.set_active(false);
+        assert!(!button.get_visible());
+        assert!(app_state.borrow().editor_button_hidden);
+        let saved = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                let text = std::fs::read_to_string(crate::state::get_state_path()).unwrap_or_default();
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if let Some(hidden) = value["editor_button_hidden"].as_bool() {
+                        return hidden;
+                    }
+                }
+                assert!(std::time::Instant::now() < deadline, "state.json was not written");
+                crate::gtk_test::pump(20);
+            }
+        };
+        assert!(saved());
+        toggle.set_active(true);
+        assert!(button.get_visible());
+        assert!(!app_state.borrow().editor_button_hidden);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while saved() && std::time::Instant::now() < deadline {
+            crate::gtk_test::pump(20);
+        }
+        assert!(!saved());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_panel_gtk_structure() {
         // GTK may only be used from one thread per process, so the widget
         // assertions run in a child process (see `crate::gtk_test`).
@@ -3007,19 +3131,19 @@ mod tests {
         let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            17,
-            "hub + five destinations + plugins + custom harness page + seven Connections pages + updates + harness parameters page"
+            18,
+            "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + updates + harness parameters page"
         );
         let sections: Vec<usize> = pages
             .iter()
             .map(|p| count_class(p, "launcher-section"))
             .collect();
-        // hub, shortcut, harnesses, custom, top bar, MCP, plugins,
+        // hub, shortcut, harnesses, custom, top bar, SD Editor, MCP, plugins,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
         // updates, harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 20);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 21);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -3036,11 +3160,12 @@ mod tests {
             ("settings-shortcut-entry", 1, "Keyboard shortcut"),
             ("settings-harnesses-entry", 2, "Harness launchers"),
             ("settings-top-bar-entry", 4, "Top bar"),
-            ("settings-mcp-entry", 5, "MCP"),
-            ("settings-plugins-entry", 6, "Plugins"),
-            ("android-settings-entry", 7, "Connections"),
-            ("settings-sleep-lock-entry", 14, "Sleep lock"),
-            ("settings-updates-entry", 15, "Updates"),
+            ("settings-editor-entry", 5, "SD Editor"),
+            ("settings-mcp-entry", 6, "MCP"),
+            ("settings-plugins-entry", 7, "Plugins"),
+            ("android-settings-entry", 8, "Connections"),
+            ("settings-sleep-lock-entry", 15, "Sleep lock"),
+            ("settings-updates-entry", 16, "Updates"),
         ] {
             let button = find_all::<Button>(&panel.widget, class)
                 .into_iter()
@@ -3097,18 +3222,18 @@ mod tests {
         // overview, then to the hub.
         find_all::<Button>(&panel.widget, "android-settings-entry")[0].emit_clicked();
         for (class, page_index, page_title) in [
-            ("connections-add-entry", 8, "Add a device"),
-            ("connections-pcs-entry", 10, "PCs"),
-            ("connections-phones-entry", 11, "Phones & other devices"),
-            ("connections-rejected-entry", 12, "Rejected devices"),
-            ("connections-network-entry", 13, "Network & firewall"),
+            ("connections-add-entry", 9, "Add a device"),
+            ("connections-pcs-entry", 11, "PCs"),
+            ("connections-phones-entry", 12, "Phones & other devices"),
+            ("connections-rejected-entry", 13, "Rejected devices"),
+            ("connections-network-entry", 14, "Network & firewall"),
         ] {
             find_all::<Button>(&panel.widget, class)[0].emit_clicked();
             assert!(shown(&pages[page_index]), "{class}");
             assert_eq!(pages.iter().filter(|page| shown(*page)).count(), 1);
             assert_eq!(title_text(&panel.widget), page_title);
             btn_back.emit_clicked();
-            assert!(shown(&pages[7]), "back from {page_title} returns to Connections");
+            assert!(shown(&pages[8]), "back from {page_title} returns to Connections");
             assert_eq!(title_text(&panel.widget), "Connections");
         }
         btn_back.emit_clicked();
@@ -3120,7 +3245,7 @@ mod tests {
             .find(|b| b.label().as_deref() == Some("Review") && b.ancestor(gtk4::Box::static_type()).is_some_and(|a| a.has_css_class("settings-firewall-warning")))
             .expect("the hub's firewall warning offers Review")
             .emit_clicked();
-        assert!(shown(&pages[13]));
+        assert!(shown(&pages[14]));
         btn_back.emit_clicked();
         btn_back.emit_clicked();
         assert!(shown(&pages[0]));
@@ -3132,7 +3257,7 @@ mod tests {
             .expect("the Android destination must offer a navigation button");
         panel.widget.set_visible(false);
         btn_launcher.emit_clicked();
-        assert!(shown(&pages[7]));
+        assert!(shown(&pages[8]));
         panel.widget.set_visible(true);
         assert!(shown(&pages[0]), "reopening resets to the settings hub");
         assert!(pages[1..].iter().all(|page| !shown(page)));

@@ -13,6 +13,7 @@ desktop = [
     "dep:gtk4", "dep:gtk4-layer-shell", "dep:vte4", "dep:shlex", "dep:chrono",
     "dep:futures-channel", "dep:futures-util", "dep:rustls", "dep:rcgen",
     "dep:qrcode", "dep:reqwest", "dep:tungstenite", "dep:pulldown-cmark",
+    "dep:sourceview5",
 ]
 
 [[bin]]
@@ -35,6 +36,7 @@ required-features = ["desktop"]
 [dependencies]
 gtk4 = { version = "0.11", features = ["v4_18"], optional = true }
 vte4 = { version = "0.10", features = ["v0_84"], optional = true }
+sourceview5 = { version = "0.11", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 shlex = { version = "2.0.1", optional = true }

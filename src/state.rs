@@ -152,6 +152,10 @@ pub struct AppState {
     /// Prevent suspend while external power is connected. Off by default.
     #[serde(default)]
     pub sleep_lock_on_ac: bool,
+    /// The top bar's ✎ SD Editor button is turned off (Settings → SD
+    /// Editor). Shown by default.
+    #[serde(default)]
+    pub editor_button_hidden: bool,
     /// Retired harness keys already swapped for their successor in
     /// `visible_harnesses` (see `retire_harnesses`), so a user who turns the
     /// retired one back on keeps it.
@@ -224,6 +228,7 @@ impl Default for AppState {
             used_dirs: Vec::new(),
             top_bar_size: TopBarSize::Large,
             sleep_lock_on_ac: false,
+            editor_button_hidden: false,
             retired_harness_swaps: Vec::new(),
             folder_tags: std::collections::BTreeMap::new(),
             settings_panel_pos: None,

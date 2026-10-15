@@ -446,6 +446,21 @@ gaining parameters you add. Keep display-mode defaults such as Codex's
 `--no-alt-screen` if you follow that harness from the phone: they are what puts
 its history into scrollback.
 
+### SD Editor
+
+The lightning bolt with a pencil in the top bar, next to 📝, opens
+**SD Editor**, the built-in text editor, as a card on the desktop. It opens on the folder chosen in the top
+bar: the folder's files in a tree on the left (right-click for a new file or
+folder, rename, or move to the trash) and open files in tabs on the right,
+with syntax colors from your theme, line numbers, find and replace and undo.
+The File menu and the usual shortcuts do New, Open, Save, Save as, Close,
+Find, Replace and Go to line; questions such as "save changes?" are asked
+inside the card. Images open in a preview with zoom (animated GIFs play), and
+sound and video in a player. It drags, resizes, arranges and slides like the
+other cards and comes back with its files after a restart.
+**Settings → SD Editor** turns that button off (and opens the editor
+without it). Plugins can open it too (`editor.open`).
+
 ### Plugins
 
 Plugins add things to the overlay: docks at the screen edges, items in the
@@ -654,7 +669,7 @@ State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace
 
 - OS is Omarchy/Arch, Wayland Hyprland session with a display (`echo $WAYLAND_DISPLAY` must be non-empty for the overlay; build works headless, showing does not).
 - You run commands as the **user** (never root for build/install steps).
-- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `qt6-base`, `qt6-declarative`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
+- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `gtksourceview5`, `qt6-base`, `qt6-declarative`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`, `gst-plugins-good`, `gst-libav`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
 - Installing packages runs `sudo pacman`, which reads the user's password from the terminal. Run the installer in a terminal the user can type into. Without one, install the missing packages first (the installer prints the `pacman` command).
 
 ### 1. Install (the only supported way)
@@ -710,7 +725,7 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 | A shortcut recorded in ⚙ Settings does nothing | Opening ⚙ Settings → *Record* parks Hyprland in a throwaway submap, so any combination is captured even if a bind already owns it; the new bind then needs a reload. Check `hyprctl configerrors`, then re-record. |
 | Global shortcuts stopped working after using ⚙ Settings → *Record* | The recorder releases the submap on Esc, on Cancel and after 10s. If it was killed mid-recording: `hyprctl dispatch 'hl.dsp.submap("reset")'` |
 | Installer stops at the package step | `sudo pacman -Syu` if the package database is out of date, then `sudo pacman -S --needed` with the packages it printed, then run the installer again |
-| Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk4-layer-shell pkgconf`, then `./rebuild.sh` |
+| Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk4-layer-shell gtksourceview5 pkgconf`, then `./rebuild.sh` |
 | Installer says rustup's default is too old or not working | `rustup default stable`, then run the installer again |
 | Theme changes don't restyle the overlay | Check `~/.config/omarchy/hooks/theme-set.d/super-desktop` is executable; run `super-desktop reload-theme` manually |
 | Card shows another card's prompt in its title | Fixed in current code (owned-session resolution + self-heal). Update to latest (run the installer again); titles correct themselves within ~30s of the overlay being visible |

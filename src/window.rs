@@ -991,6 +991,17 @@ impl SuperDesktopWindow {
         });
         hud_left.append(&btn_note);
 
+        // ✎ SD Editor, on the same folder new cards start in (Settings → SD
+        // Editor turns it off).
+        let btn_editor = crate::editor::toolbar_button(
+            Rc::new({
+                let state = Rc::clone(&win_rc.state);
+                move || std::path::PathBuf::from(crate::state::effective_workspace_dir(&state.borrow()))
+            }),
+            !win_rc.state.borrow().editor_button_hidden,
+        );
+        hud_left.append(&btn_editor);
+
         // Harnesses (company logo + name; emoji label if the SVG is missing).
         // The bar is the same widget a remote PC's workspace shows: it is told
         // which keys this machine offers and what a click means, and everything
@@ -1249,6 +1260,12 @@ impl SuperDesktopWindow {
                     move || top_bar_height(state.borrow().top_bar_size)
                 }),
             });
+            // SD Editor cards share that canvas; the ones open at the last
+            // stop come back.
+            if let Some(host) = plugin_slots.canvas_host() {
+                crate::editor::set_host(host);
+                crate::editor::restore();
+            }
         }
 
         // Added after the HUD so the settings card floats above it. It moves
@@ -2158,9 +2175,9 @@ impl SuperDesktopWindow {
         let terminal_area = crate::card_resize::Rect {
             height: (area.height - icon_height).max(1), ..area
         };
-        // Plugin cards take the places after the terminals.
+        // Plugin and SD Editor cards take the places after the terminals.
         let plugin_slots = crate::plugin_ui::slots::get();
-        let plugin_cards = plugin_slots.as_ref().map(|s| s.cards()).unwrap_or_default();
+        let plugin_cards = canvas_cards();
         let mut grid = crate::arrange::terminal_grid(terminal_area, terminals.len() + plugin_cards.len()).into_iter();
         for (term, rect) in terminals.iter().zip(grid.by_ref()) {
             term.apply_geometry(rect);
@@ -2240,7 +2257,7 @@ impl SuperDesktopWindow {
             }
             note.container.set_size_request(rect.width, rect.height);
         }
-        let plugin_cards = crate::plugin_ui::slots::get().map(|s| s.cards()).unwrap_or_default();
+        let plugin_cards = canvas_cards();
         for card in &plugin_cards {
             let g = card.geometry();
             let rect = follow(g.x, g.y, g.width, g.height, (crate::plugin_ui::cards::MIN_WIDTH, crate::plugin_ui::cards::MIN_HEIGHT));
@@ -2388,7 +2405,7 @@ impl SuperDesktopWindow {
             let (sx, sy) = card_slide_offscreen(tx, ty, w, sw as f64);
             trajs.insert(term.container.clone().upcast(), Trajectory { sx, sy, tx, ty });
         }
-        for card in crate::plugin_ui::slots::get().map(|s| s.cards()).unwrap_or_default() {
+        for card in canvas_cards() {
             let g = card.geometry();
             let (tx, ty) = (f64::from(g.x), f64::from(g.y));
             let (sx, sy) = card_slide_offscreen(tx, ty, f64::from(g.width), sw as f64);
@@ -3426,6 +3443,7 @@ impl SuperDesktopWindow {
     pub fn reload_theme(&self) {
         let theme = crate::styles::reload_styles();
         crate::plugin_ui::apply_theme(&theme);
+        crate::editor::theme_changed();
         // Snapshot before restyling: `apply_theme` touches VTE/fonts, which
         // can emit signals back into our handlers.
         let cards: Vec<Rc<MiniTerminalCard>> = self.terminal_cards.borrow().clone();
@@ -3655,6 +3673,14 @@ fn thaw_slide_cards(cards: &[Rc<MiniTerminalCard>]) {
 ///
 /// A card lives either in the local canvas or in a remote PC's fitted canvas,
 /// so the widget moves inside whichever `Fixed` holds it.
+/// The cards on the canvas that are not terminals or notes: plugin cards and
+/// SD Editor cards. They arrange, slide and follow the display the same way.
+fn canvas_cards() -> Vec<Rc<crate::plugin_ui::cards::PluginCard>> {
+    let mut cards = crate::plugin_ui::slots::get().map(|s| s.cards()).unwrap_or_default();
+    cards.extend(crate::editor::cards());
+    cards
+}
+
 fn paint_slide_widget(widget: &gtk4::Widget, traj: Trajectory, factor: f64) {
     let Some(parent) = widget
         .parent()
@@ -4444,6 +4470,70 @@ mod tests {
         window.paint_slide(1.0);
         pump_until("full screen back", &|| x(&full) == Some((0, 900)));
         slots.close_fullscreen();
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn top_bar_editor_button_opens_sd_editor() {
+        crate::gtk_test::run_in_child_process("window::tests::top_bar_editor_button_inner");
+    }
+
+    /// ✎ in the top bar, after 📝: SD Editor on the top bar's folder. Turned
+    /// off in Settings it is not there.
+    #[test]
+    fn top_bar_editor_button_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-editor-button-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        // The repository's icons, as an install puts them on the search path.
+        gtk4::IconTheme::for_display(&gtk4::gdk::Display::default().unwrap())
+            .add_search_path(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons"));
+        let app = gtk4::Application::new(Some("com.superdesktop.EditorButtonTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state = AppState::default();
+        state.workspace_dir = Some(project.to_string_lossy().into_owned());
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let hud = window.hud.clone().upcast::<gtk4::Widget>();
+        let button = crate::gtk_test::find_all::<gtk4::Button>(&hud, "sd-editor-button").pop().expect("✎ in the top bar");
+        assert!(button.get_visible());
+        // The bolt-and-pencil icon (the repository's icons are on the search path).
+        assert_eq!(button.child().and_downcast::<gtk4::Image>().and_then(|i| i.icon_name()).as_deref(), Some(crate::editor::ICON));
+        // A picture of the bar: SD_EDITOR_SHOTS=<dir> cargo test top_bar_editor_button.
+        if let Some(dir) = std::env::var_os("SD_EDITOR_SHOTS") {
+            window.window.set_default_size(1000, 400);
+            window.window.present();
+            crate::gtk_test::pump(400);
+            crate::gtk_test::save_png(&button.parent().unwrap(), &std::path::PathBuf::from(dir).join("top-bar.png"));
+        }
+        // Right after 📝 +.
+        let previous = button.prev_sibling().and_downcast::<gtk4::Button>().expect("a button before ✎");
+        assert_eq!(previous.label().as_deref(), Some("📝 +"));
+        button.emit_clicked();
+        let cards = crate::editor::cards();
+        assert_eq!(cards.len(), 1, "SD Editor opened");
+        assert!(cards[0].container.parent().is_some(), "on the canvas");
+        crate::editor::set_button_shown(false);
+        assert!(!button.get_visible());
+        window.window.close();
+
+        // Turned off in Settings: not shown after a restart either.
+        let mut state = AppState::default();
+        state.editor_button_hidden = true;
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let hud = window.hud.clone().upcast::<gtk4::Widget>();
+        let button = crate::gtk_test::find_all::<gtk4::Button>(&hud, "sd-editor-button").pop().unwrap();
+        assert!(!button.get_visible());
         window.window.close();
         let _ = std::fs::remove_dir_all(root);
     }

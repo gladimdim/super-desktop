@@ -219,6 +219,7 @@ included, so GUI apps open normally.
 | `harness.list` | none | `[{id, name, icon}]`: the agents offered in the top bar. `icon` is a file path or empty. |
 | `harness.launch` | `{harness, folder?}` | `{}`; opens a new terminal card for that agent, in `folder` or the folder chosen in the top bar. |
 | `workspace.folder` | none | `{folder, recent}`: the folder chosen in the top bar (the user's project: new agent cards start there) and the folders chosen before, newest first. Absolute paths. Start editors, file browsers and git tools there (see "Programs in the user's project"). |
+| `editor.open` | `{folder?, file?}`: a folder (default: the top bar's) and a file in it or an absolute path | `{folder}`; opens SD Editor, SUPER DESKTOP's own text editor card, on that folder (its tree on the left, files in tabs, syntax colors, find and replace, Save, Save as; images, sound and video in previews), or brings the one already there to the front, and opens `file` in it. Only on the user's click. |
 | `cards.list` | none | `[{id, kind, title, harness, folder, status, minimized}]`; `kind` is `terminal` or `note`; `status` (terminals) is `working`, `waiting`, `finished`, `idle`, `error`, `exited`, `unknown` or `remote`. Poll it (every few seconds, only while `sd.visibleChanged` says shown). |
 | `cards.focus` | `{id}` from `cards.list` | `{}`; brings that card to the front with the keyboard (restores a minimized one). |
 | `cards.text` | `{id, lines?}` of a terminal card (default 60, at most 300) | `{text}`: the end of its terminal, plain text. |
@@ -445,7 +446,9 @@ Then `color: R.readable(sd.theme, ["accent", "blue", "cyan"])`; secondary
 text: `Qt.alpha(sd.theme.foreground, 0.7)`. `examples/reminder/reminders.js`
 has the full version (`soft`, `mix`).
 
-**Programs in the user's project.** `workspace.folder` is the folder chosen
+**Programs in the user's project.** To edit files there, `editor.open`
+opens SD Editor, the editor card built into SUPER DESKTOP; no terminal or
+other program is needed. `workspace.folder` is the folder chosen
 in the top bar. A terminal program (vim, nano, `emacs -nw`, lazygit) runs
 in a `card` with `TerminalView` there; make the view once the folder is
 known, so it starts in it:

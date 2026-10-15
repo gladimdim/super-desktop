@@ -38,6 +38,7 @@ mod prompt_history_view;
 mod shell_title;
 mod scrollback;
 mod updates;
+mod editor;
 mod floating_panel;
 mod overlay_slide;
 mod folder_colors;

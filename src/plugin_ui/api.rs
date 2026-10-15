@@ -270,6 +270,27 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 .map_err(|message| error("bad_params", message, "Use an id from harness.list."))
         }
         "cards.list" => Ok((hooks.cards)()),
+        "editor.open" => {
+            // In the given folder, else the top bar's; a file in it or absolute.
+            let folder = match params.get("folder").and_then(Value::as_str) {
+                Some(folder) => folder.to_owned(),
+                None => WORKSPACE_FOLDER.with(|cell| cell.borrow().clone())
+                    .and_then(|source| source()["folder"].as_str().map(str::to_owned))
+                    .ok_or_else(|| error("unavailable", "SUPER DESKTOP is still starting", "Try again in a moment."))?,
+            };
+            if !std::path::Path::new(&folder).is_dir() {
+                return Err(error("bad_params", format!("{folder} is not a folder"), "Give an absolute path to an existing folder, or leave folder out for the top bar's."));
+            }
+            let file = params.get("file").and_then(Value::as_str).map(std::path::PathBuf::from);
+            // After this call returns: opening moves the keyboard.
+            let (opened, plugin) = (folder.clone(), spec.plugin_id.clone());
+            gtk4::glib::idle_add_local_once(move || {
+                if let Err(e) = crate::editor::open(std::path::Path::new(&opened), file.as_deref()) {
+                    super_desktop::plugins::paths::append_log(&plugin, &format!("editor.open: {e}"));
+                }
+            });
+            Ok(json!({"folder": folder}))
+        }
         "workspace.folder" => WORKSPACE_FOLDER.with(|cell| cell.borrow().clone())
             .map(|source| source())
             .ok_or_else(|| error("unavailable", "SUPER DESKTOP is still starting", "Try again in a moment.")),
@@ -429,7 +450,7 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
 fn call_hint() -> &'static str {
     "Methods: overlay.show, overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, \
      cards.geometry, cards.move, cards.resize, cards.minimize, cards.restore, cards.expand, cards.collapse, cards.raise, \
-     cards.tag, cards.close, workspace.folder, llm.complete, notify, sound.play, card.new, panel.open/close/toggle, card.open/close/toggle, \
+     cards.tag, cards.close, workspace.folder, editor.open, llm.complete, notify, sound.play, card.new, panel.open/close/toggle, card.open/close/toggle, \
      fullscreen.open/close/toggle, popup.open/close/toggle, popup.resize."
 }
 

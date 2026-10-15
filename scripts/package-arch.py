@@ -12,7 +12,7 @@ import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-LIBRARIES = ("glibc", "gcc-libs", "glib2", "gtk4", "gtk4-layer-shell", "vte4", "cairo", "pango", "gdk-pixbuf2", "graphene", "qt6-base", "qt6-declarative")
+LIBRARIES = ("glibc", "gcc-libs", "glib2", "gtk4", "gtk4-layer-shell", "vte4", "gtksourceview5", "cairo", "pango", "gdk-pixbuf2", "graphene", "qt6-base", "qt6-declarative")
 RUNTIME = ("bash", "coreutils", "python", "tmux", "wl-clipboard", "libnotify", "sqlite", "avahi", "bubblewrap", "poppler")
 
 
@@ -83,7 +83,9 @@ arch=('x86_64')
 url='https://github.com/gladimdim/super-desktop'
 license=({quote(license_id)})
 depends=({deps})
-optdepends=('hyprland: Wayland compositor for the overlay')
+optdepends=('hyprland: Wayland compositor for the overlay'
+            'gst-plugins-good: play WAV, MP3, FLAC, WebM and MP4 in SD Editor and Files previews'
+            'gst-libav: play H.264 and AAC (most MP4 videos) in previews')
 provides=("super-desktop=$pkgver")
 conflicts=('super-desktop' 'super-desktop-git')
 options=('!strip' '!debug')
