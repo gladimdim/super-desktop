@@ -135,6 +135,22 @@ pub fn set_theme(theme: Value) {
     });
 }
 
+/// Sends `message` to every running surface of `plugin`: docks and top-bar
+/// items always, panels, cards, popups and full screen while they are open.
+/// Returns how many got it.
+pub fn broadcast(plugin: &str, message: &Value) -> usize {
+    LIVE.with(|live| {
+        live.borrow_mut().retain(|weak| weak.strong_count() > 0);
+        let targets: Vec<Rc<Inner>> = live.borrow().iter().filter_map(Weak::upgrade)
+            .filter(|inner| inner.spec.plugin_id == plugin && !inner.disposed.get() && inner.host.borrow().is_some())
+            .collect();
+        for inner in &targets {
+            inner.send(message);
+        }
+        targets.len()
+    })
+}
+
 fn current_theme() -> Value {
     THEME.with(|cell| cell.borrow().clone())
 }

@@ -920,6 +920,27 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     min-width: 0;
 }}
 
+/* Buttons plugins add to a card's header: as tight as the panel buttons.
+   They fold into ⋯ when the header has no room for them. */
+.plugin-card-btns .term-btn {{
+    padding: 3px 4px;
+    min-width: 0;
+}}
+
+.plugin-card-menu {{
+    padding: 6px;
+}}
+
+.plugin-card-menu button {{
+    color: {light_foreground};
+    padding: 4px 10px;
+}}
+
+.card-close-confirm-box {{
+    padding: 10px 12px;
+    color: {light_foreground};
+}}
+
 .term-btn:hover {{
     color: {bright_foreground};
     background-color: {btn_hover_bg};

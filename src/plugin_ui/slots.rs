@@ -415,8 +415,24 @@ impl Slots {
         })
     }
 
+    /// The card buttons of every running plugin, in plugin-id order: an
+    /// approved, enabled plugin whose top-bar item or dock (which receives
+    /// the clicks) has not failed.
+    pub fn card_buttons(&self) -> Vec<super::card_buttons::Spec> {
+        self.plugins.borrow().iter()
+            .filter(|(_, loaded)| loaded.surfaces.iter().any(|(_, surface)| !surface.failed()))
+            .filter_map(|(id, loaded)| Some((id, loaded.manifest.as_ref().ok()?)))
+            .flat_map(|(id, manifest)| manifest.card_buttons.iter().map(|button| super::card_buttons::Spec {
+                plugin: id.clone(),
+                plugin_name: manifest.name.clone(),
+                button: button.clone(),
+            }))
+            .collect()
+    }
+
     /// Called after plugins load, reload or go away (Settings → Plugins),
-    /// and when a surface replacing the launchers starts or stops failing.
+    /// and when a surface replacing the launchers or receiving card button
+    /// clicks starts or stops failing.
     pub fn on_change(&self, listener: Rc<dyn Fn()>) {
         self.listeners.borrow_mut().push(listener);
     }
@@ -1230,7 +1246,7 @@ impl Slots {
                             widget.set_vexpand(true);
                         }
                         widget.set_hexpand(false);
-                        if manifest.replaces_launchers {
+                        if manifest.replaces_launchers || !manifest.card_buttons.is_empty() {
                             let weak = Rc::downgrade(self);
                             surface.on_failed_changed(Rc::new(move || {
                                 if let Some(slots) = weak.upgrade() {
@@ -1543,6 +1559,81 @@ mod tests {
         assert_eq!(count("pressed"), 2, "{}", log());
         assert_eq!(count("clicked"), 1, "a press taken by the bar must not click:\n{}", log());
         drop(plugins_ref);
+        window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn plugins_slots_card_buttons_reach_the_plugin() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::slots::tests::card_buttons_inner");
+    }
+
+    /// A running plugin's cardButtons show on cards, and a click reaches its
+    /// QML as sd.cardButtonClicked(button, card) with the card cards.list
+    /// gives; turned off, its buttons go.
+    #[test]
+    fn card_buttons_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-card-buttons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let dir = root.join("plugins/tiles");
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = |enabled: bool| serde_json::json!({"id": "tiles", "name": "Tiles", "api": 1, "enabled": enabled,
+            "surfaces": [{"id": "bar", "slot": "toolbar.item", "qml": "Bar.qml", "size": 40}],
+            "cardButtons": [{"id": "left", "icon": "◧", "tooltip": "Move to the left half"},
+                            {"id": "sum", "icon": "✦", "tooltip": "Summarize", "cards": "agents"}]}).to_string();
+        std::fs::write(dir.join("plugin.json"), manifest(true)).unwrap();
+        std::fs::write(dir.join("Bar.qml"), "import QtQuick\nRectangle {\n    color: sd.theme.accent\n    \
+            Connections {\n        target: sd\n        \
+            function onCardButtonClicked(button, card) { sd.log(\"card \" + button + \" \" + card.id + \" \" + card.status) }\n    }\n}\n").unwrap();
+        gtk4::init().unwrap();
+        crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks {
+            hide: Rc::new(|| {}),
+            harnesses: Rc::new(|| serde_json::json!([])),
+            launch: Rc::new(|_, _| Ok(())),
+            cards: Rc::new(|| serde_json::json!([{"id": "sd_term_x", "kind": "terminal", "title": "Fix it", "harness": "claude",
+                "folder": "/tmp", "status": "working", "minimized": false}])),
+            open_card: Rc::new(|_, _| Err("no".into())),
+            focus_card: Rc::new(|_| Ok(())),
+            card_session: Rc::new(|_| None),
+        });
+        let overlay = gtk4::Overlay::new();
+        let top = gtk4::Box::new(Orientation::Vertical, 0);
+        overlay.set_child(Some(&top));
+        let slots = Slots::install(&overlay, 46);
+        top.append(slots.toolbar());
+        let window = gtk4::Window::new();
+        window.set_default_size(600, 200);
+        window.set_child(Some(&overlay));
+        window.present();
+        crate::gtk_test::pump_until("the toolbar item's frame", || view_frame(slots.toolbar_items.upcast_ref()).is_some());
+        let ids = |specs: Vec<super::super::card_buttons::Spec>| specs.into_iter().map(|s| format!("{}/{}", s.plugin, s.button.id)).collect::<Vec<_>>();
+        assert_eq!(ids(slots.card_buttons()), ["tiles/left", "tiles/sum"]);
+        assert_eq!(slots.card_buttons()[0].plugin_name, "Tiles");
+
+        // A card's row follows the plugins; a click reaches the QML.
+        let row = super::super::card_buttons::ButtonRow::new("sd_term_x", false);
+        assert_eq!(row.state().0.len(), 2);
+        let log = || std::fs::read_to_string(paths::log_path("tiles")).unwrap_or_default();
+        row.state().0[0].emit_clicked();
+        crate::gtk_test::pump_until("the click in the QML", || log().contains("card left sd_term_x working"));
+        // A card that is gone tells the plugin nothing.
+        assert_eq!(super::super::card_buttons::click("tiles", "left", "sd_term_gone"), 0);
+
+        // Turned off: no buttons.
+        std::fs::write(dir.join("plugin.json"), manifest(false)).unwrap();
+        slots.reload_now("tiles");
+        assert!(slots.card_buttons().is_empty());
+        row.set(&super::super::card_buttons::current());
+        assert!(!row.is_visible());
         window.close();
         let _ = std::fs::remove_dir_all(root);
     }

@@ -40,10 +40,84 @@ pub fn hooks() -> Option<Hooks> {
 
 thread_local! {
     static HOOKS: RefCell<Option<Hooks>> = const { RefCell::new(None) };
+    static CARD_COMMANDS: RefCell<Option<CardCommands>> = const { RefCell::new(None) };
+    static WORKSPACE_FOLDER: RefCell<Option<Rc<dyn Fn() -> Value>>> = const { RefCell::new(None) };
+}
+
+/// Set by the overlay: `{folder, recent}`, the folder chosen in the top bar
+/// (where new agent cards start) and the ones chosen before.
+pub fn set_workspace_folder(source: Rc<dyn Fn() -> Value>) {
+    WORKSPACE_FOLDER.with(|cell| *cell.borrow_mut() = Some(source));
 }
 
 pub fn set_hooks(hooks: Hooks) {
     HOOKS.with(|cell| *cell.borrow_mut() = Some(hooks));
+}
+
+/// What a plugin asks of a terminal card: the `cards.*` methods that change
+/// a card the way its own buttons and edges do.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardCommand {
+    Geometry,
+    Move { x: i32, y: i32 },
+    Resize { width: i32, height: i32 },
+    Minimize,
+    Restore,
+    Expand,
+    Collapse,
+    Raise,
+    Tag(u8),
+    Close,
+}
+
+/// Carries out a card command on the card with this id, for the plugin named
+/// in the third argument; answers through the callback (`cards.close` waits
+/// for the user).
+pub type CardCommands = Rc<dyn Fn(&str, CardCommand, &str, Box<dyn FnOnce(Result<Value, Value>)>)>;
+
+/// Set by the overlay (`window.rs`).
+pub fn set_card_commands(commands: CardCommands) {
+    CARD_COMMANDS.with(|cell| *cell.borrow_mut() = Some(commands));
+}
+
+impl CardCommand {
+    /// The card id and command of a `cards.*` method, `None` for any other
+    /// method.
+    pub fn parse(method: &str, params: &Value) -> Option<Result<(String, Self), Value>> {
+        let plain = match method {
+            "cards.geometry" => Some(Self::Geometry),
+            "cards.minimize" => Some(Self::Minimize),
+            "cards.restore" => Some(Self::Restore),
+            "cards.expand" => Some(Self::Expand),
+            "cards.collapse" => Some(Self::Collapse),
+            "cards.raise" => Some(Self::Raise),
+            "cards.close" => Some(Self::Close),
+            "cards.move" | "cards.resize" | "cards.tag" => None,
+            _ => return None,
+        };
+        Some((|| {
+            let Some(id) = params.get("id").and_then(Value::as_str) else {
+                return Err(error("bad_params", format!("{method} needs {{id}}"), "Pass the id of a terminal card from cards.list, or the card of sd.cardButtonClicked."));
+            };
+            let number = |name: &str| params.get(name).and_then(Value::as_f64).filter(|n| n.is_finite() && n.abs() <= 32768.0).map(|n| n.round() as i32);
+            let command = match (plain, method) {
+                (Some(command), _) => command,
+                (None, "cards.move") => match (number("x"), number("y")) {
+                    (Some(x), Some(y)) => Self::Move { x, y },
+                    _ => return Err(error("bad_params", "cards.move needs {id, x, y}", "Pass the new top-left corner in logical pixels; cards.geometry says where cards may go (area).")),
+                },
+                (None, "cards.resize") => match (number("width"), number("height")) {
+                    (Some(width), Some(height)) if width > 0 && height > 0 => Self::Resize { width, height },
+                    _ => return Err(error("bad_params", "cards.resize needs {id, width, height}", "Pass the new size in logical pixels; cards.geometry gives the smallest (minWidth, minHeight) and the area.")),
+                },
+                _ => match params.get("tag").and_then(Value::as_u64) {
+                    Some(tag @ 0..=8) => Self::Tag(tag as u8),
+                    _ => return Err(error("bad_params", "cards.tag needs {id, tag} with tag 0 to 8", "0 removes the color; 1 to 8 are the colors of the card's dot.")),
+                },
+            };
+            Ok((id.to_owned(), command))
+        })())
+    }
 }
 
 fn error(code: &str, message: impl Into<String>, hint: &str) -> Value {
@@ -106,6 +180,18 @@ pub fn call_async(spec: &SurfaceSpec, method: &str, params: &Value, done: Box<dy
         gtk4::glib::spawn_future_local(async move {
             done(handle.await.unwrap_or_else(|_| Err(error("unavailable", "showing failed", "Try again."))));
         });
+        return;
+    }
+    if let Some(parsed) = CardCommand::parse(method, params) {
+        let (id, command) = match parsed {
+            Ok(parsed) => parsed,
+            Err(e) => return done(Err(e)),
+        };
+        let Some(commands) = CARD_COMMANDS.with(|cell| cell.borrow().clone()) else {
+            return done(Err(error("unavailable", "SUPER DESKTOP is still starting", "Try again in a moment.")));
+        };
+        super_desktop::plugins::paths::append_log(&spec.plugin_id, &format!("[{}] call {method} {id}", spec.surface_id));
+        commands(&id, command, &spec.plugin_name, done);
         return;
     }
     if !matches!(method, "cards.text" | "cards.send") {
@@ -184,6 +270,9 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 .map_err(|message| error("bad_params", message, "Use an id from harness.list."))
         }
         "cards.list" => Ok((hooks.cards)()),
+        "workspace.folder" => WORKSPACE_FOLDER.with(|cell| cell.borrow().clone())
+            .map(|source| source())
+            .ok_or_else(|| error("unavailable", "SUPER DESKTOP is still starting", "Try again in a moment.")),
         "cards.focus" => {
             let Some(id) = params.get("id").and_then(Value::as_str) else {
                 return Err(error("bad_params", "cards.focus needs {id}", "Pass an id from cards.list."));
@@ -332,12 +421,16 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             let path = sound_path(spec, params)?;
             play(&path).map(|()| json!({}))
         }
-        _ => Err(error(
-            "unknown_method",
-            format!("unknown method {method:?}"),
-            "Methods: overlay.show, overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, llm.complete, notify, sound.play, card.new, panel.open/close/toggle, card.open/close/toggle, fullscreen.open/close/toggle, popup.open/close/toggle, popup.resize.",
-        )),
+        _ => Err(error("unknown_method", format!("unknown method {method:?}"), call_hint())),
     }
+}
+
+/// Every method, for the hint of an unknown one.
+fn call_hint() -> &'static str {
+    "Methods: overlay.show, overlay.hide, harness.list, harness.launch, cards.list, cards.focus, cards.text, cards.send, \
+     cards.geometry, cards.move, cards.resize, cards.minimize, cards.restore, cards.expand, cards.collapse, cards.raise, \
+     cards.tag, cards.close, workspace.folder, llm.complete, notify, sound.play, card.new, panel.open/close/toggle, card.open/close/toggle, \
+     fullscreen.open/close/toggle, popup.open/close/toggle, popup.resize."
 }
 
 /// `notify-send` for `{title, body, urgency?, actions?: [{id, label}]}`.
@@ -491,6 +584,52 @@ mod tests {
             }
         }).unwrap();
     }
+    /// SKILL.md is how agents learn the API: every method has its row.
+    #[test]
+    fn plugins_skill_lists_every_method() {
+        let hint = call_hint();
+        let skill = super_desktop::plugins::skill::SKILL_FILES[0].1;
+        let mut methods = Vec::new();
+        for item in hint.trim_start_matches("Methods: ").trim_end_matches('.').split(", ") {
+            match item.split_once('/') {
+                Some((first, rest)) => {
+                    let (kind, _) = first.split_once('.').unwrap();
+                    methods.push(first.to_owned());
+                    methods.extend(rest.split('/').map(|action| format!("{kind}.{action}")));
+                }
+                None => methods.push(item.to_owned()),
+            }
+        }
+        assert!(methods.len() > 25, "{methods:?}");
+        for method in methods {
+            assert!(skill.contains(&format!("`{method}`")), "SKILL.md does not describe `{method}`");
+        }
+    }
+
+    #[test]
+    fn plugins_card_commands_parse() {
+        let parse = |method: &str, params: Value| CardCommand::parse(method, &params);
+        assert!(parse("cards.list", json!({})).is_none());
+        assert!(parse("cards.focus", json!({"id": "a"})).is_none());
+        let ok = |method: &str, params: Value| parse(method, params).unwrap().unwrap();
+        assert_eq!(ok("cards.geometry", json!({"id": "a"})), ("a".into(), CardCommand::Geometry));
+        assert_eq!(ok("cards.move", json!({"id": "a", "x": 10.4, "y": 80})), ("a".into(), CardCommand::Move { x: 10, y: 80 }));
+        assert_eq!(ok("cards.resize", json!({"id": "a", "width": 640, "height": 480})).1, CardCommand::Resize { width: 640, height: 480 });
+        assert_eq!(ok("cards.tag", json!({"id": "a", "tag": 3})).1, CardCommand::Tag(3));
+        for (method, command) in [("cards.minimize", CardCommand::Minimize), ("cards.restore", CardCommand::Restore),
+            ("cards.expand", CardCommand::Expand), ("cards.collapse", CardCommand::Collapse),
+            ("cards.raise", CardCommand::Raise), ("cards.close", CardCommand::Close)] {
+            assert_eq!(ok(method, json!({"id": "a"})).1, command);
+        }
+        let bad = |method: &str, params: Value| parse(method, params).unwrap().unwrap_err()["code"].clone();
+        for (method, params) in [("cards.close", json!({})), ("cards.move", json!({"id": "a", "x": 1})),
+            ("cards.move", json!({"id": "a", "x": "1", "y": 2})), ("cards.resize", json!({"id": "a", "width": 0, "height": 10})),
+            ("cards.resize", json!({"id": "a", "width": 1e9, "height": 10})), ("cards.tag", json!({"id": "a", "tag": 9})),
+            ("cards.tag", json!({"id": "a"}))] {
+            assert_eq!(bad(method, params.clone()), "bad_params", "{method} {params}");
+        }
+    }
+
     #[test]
     fn plugins_sound_and_notify_params() {
         let dir = std::env::temp_dir().join(format!("sd-plugins-sound-{}", std::process::id()));

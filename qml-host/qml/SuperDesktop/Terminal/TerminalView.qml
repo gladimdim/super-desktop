@@ -29,9 +29,16 @@ Item {
     signal exited(int code)
     signal bell()
 
-    /// Starts `command` (or the shell); stops a running one first.
+    /// Starts `command` (or the shell); stops a running one first. Before the
+    /// view has its size (a layout not done yet), it starts once it has one,
+    /// so the program gets the right number of columns and rows.
     function start() {
         stop();
+        if (width <= 0 || height <= 0) {
+            priv.startPending = true;
+            return true;
+        }
+        priv.startPending = false;
         const argv = command && command.length ? command : [sd.env("SHELL") || "/bin/sh"];
         priv.screen.reset();
         priv.pty = sd.openPty(argv, { cols: cols, rows: rows, cwd: workingDirectory, env: environment });
@@ -171,6 +178,9 @@ Item {
 
     onColsChanged: resizeTimer.restart()
     onRowsChanged: resizeTimer.restart()
+    // A start waiting for a size starts with the first one.
+    onWidthChanged: if (priv.startPending) resizeTimer.restart()
+    onHeightChanged: if (priv.startPending) resizeTimer.restart()
     // The program starts once the view has its size, so it starts with the
     // right number of columns and rows.
     Component.onCompleted: {

@@ -10,6 +10,26 @@ pub const MAX_SURFACES: usize = 8;
 pub const DOCK_SIZE_DEFAULT: i32 = 64;
 pub const MAX_TITLE: usize = 60;
 pub const MAX_TOOLTIP: usize = 120;
+pub const MAX_CARD_BUTTONS: usize = 4;
+
+/// A card button's icon: one or two symbols, or one emoji (its variation
+/// selectors, skin tones, keycap marks and joined parts do not count).
+fn valid_icon(icon: &str) -> bool {
+    let marks = |c: char| matches!(c as u32, 0xFE00..=0xFE0F | 0x1F3FB..=0x1F3FF | 0x20E3);
+    let mut shown = 0;
+    let mut joined = false;
+    for c in icon.chars() {
+        if c == '\u{200D}' {
+            joined = true;
+        } else if !marks(c) {
+            shown += usize::from(!joined);
+            joined = false;
+        }
+    }
+    (1..=2).contains(&shown)
+        && icon.chars().count() <= 12
+        && !icon.chars().any(|c| c.is_control() || c.is_whitespace())
+}
 
 /// Where a surface is placed in the overlay.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -132,8 +152,36 @@ pub struct Manifest {
     pub replaces_launchers: bool,
     pub surfaces: Vec<Surface>,
     pub shortcuts: Vec<Shortcut>,
+    /// Buttons in the header of terminal cards.
+    #[serde(rename = "cardButtons")]
+    pub card_buttons: Vec<CardButton>,
     #[serde(skip)]
     pub dir: PathBuf,
+}
+
+/// A button SUPER DESKTOP adds to the header of terminal cards. A click
+/// reaches the plugin's running surfaces as `sd.cardButtonClicked(button, card)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CardButton {
+    pub id: String,
+    /// One short symbol or emoji drawn on the button ("◧", "✦").
+    pub icon: String,
+    /// The hover text, and the button's name in the menu a narrow card folds
+    /// the buttons into.
+    pub tooltip: String,
+    /// Which terminal cards show it: "all", "agents" or "shells".
+    pub cards: String,
+}
+
+impl CardButton {
+    /// Whether a card running `agent_type` shows this button.
+    pub fn shows_on(&self, shell: bool) -> bool {
+        match self.cards.as_str() {
+            "agents" => !shell,
+            "shells" => shell,
+            _ => true,
+        }
+    }
 }
 
 /// A key combination that, while the overlay is shown, opens, closes or
@@ -490,8 +538,49 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
         }
     };
 
+    let mut card_buttons: Vec<CardButton> = Vec::new();
+    match object.get("cardButtons") {
+        None => {}
+        Some(Value::Array(list)) if list.len() <= MAX_CARD_BUTTONS => {
+            if !list.is_empty() && !surfaces.iter().any(|s| matches!(s.slot, Slot::ToolbarItem | Slot::DockLeft | Slot::DockRight)) {
+                problems.push(problem("cardButtons", "card buttons need a toolbar.item or dock surface",
+                    "Add a top-bar item or dock: it always runs, so it receives sd.cardButtonClicked(button, card)."));
+            }
+            for (index, entry) in list.iter().enumerate() {
+                let field = |name: &str| format!("cardButtons[{index}].{name}");
+                let text = |name: &str| entry.get(name).and_then(Value::as_str).unwrap_or("").trim().to_owned();
+                let (id, icon, tooltip) = (text("id"), text("icon"), text("tooltip"));
+                if !valid_surface_id(&id) {
+                    problems.push(problem(field("id"), format!("invalid card button id {id:?}"), "Use 1-32 characters: lowercase letters, digits and '-'."));
+                } else if card_buttons.iter().any(|b| b.id == id) {
+                    problems.push(problem(field("id"), format!("duplicate card button id {id:?}"), "Give every card button its own id."));
+                }
+                if !valid_icon(&icon) {
+                    problems.push(problem(field("icon"), format!("icon {icon:?} is not one short symbol"),
+                        "Use one symbol or emoji, e.g. \"◧\" or \"✦\": it is drawn in the theme's font on a small button."));
+                }
+                if tooltip.is_empty() || tooltip.chars().count() > MAX_TITLE {
+                    problems.push(problem(field("tooltip"), "tooltip must be text of 1 to 60 characters",
+                        "Say what a click does, e.g. \"Move to the left half\": it is the hover text and the name in the ⋯ menu."));
+                }
+                let cards = match entry.get("cards") {
+                    None => "all".to_owned(),
+                    Some(Value::String(c)) if matches!(c.as_str(), "all" | "agents" | "shells") => c.clone(),
+                    Some(other) => {
+                        problems.push(problem(field("cards"), format!("unknown cards {other}"),
+                            "Use \"all\" (default), \"agents\" (cards running an AI agent) or \"shells\" (plain terminals)."));
+                        "all".to_owned()
+                    }
+                };
+                card_buttons.push(CardButton { id, icon, tooltip, cards });
+            }
+        }
+        Some(_) => problems.push(problem("cardButtons", format!("\"cardButtons\" must be a list of at most {MAX_CARD_BUTTONS}"),
+            "Use [{\"id\": \"left\", \"icon\": \"◧\", \"tooltip\": \"Move to the left half\"}].")),
+    }
+
     if problems.is_empty() {
-        Ok(Manifest { id, name, description, version, min_host, categories, enabled, replaces_launchers, surfaces, shortcuts, dir: dir.to_path_buf() })
+        Ok(Manifest { id, name, description, version, min_host, categories, enabled, replaces_launchers, surfaces, shortcuts, card_buttons, dir: dir.to_path_buf() })
     } else {
         Err(problems)
     }
@@ -622,6 +711,45 @@ mod tests {
             {"id": "side", "slot": "dock.left", "qml": "Button.qml"}
         ]})).unwrap_err();
         assert_eq!(problems[0].field, "replacesLaunchers");
+    }
+
+    #[test]
+    fn plugins_manifest_card_buttons() {
+        let dir = plugin_dir("tiles", &["Bar.qml", "Menu.qml"]);
+        let bar = json!({"id": "bar", "slot": "toolbar.item", "qml": "Bar.qml"});
+        let with = |buttons: Value, surfaces: Value| validate(&dir, &json!({"id": "tiles", "api": 1, "surfaces": surfaces, "cardButtons": buttons}));
+        let m = with(json!([
+            {"id": "left", "icon": "◧", "tooltip": "Move to the left half"},
+            {"id": "sum", "icon": "✦", "tooltip": " Summarize ", "cards": "agents"},
+            {"id": "flag", "icon": "👩‍💻", "tooltip": "Flag", "cards": "shells"}
+        ]), json!([bar])).unwrap();
+        assert_eq!(m.card_buttons.len(), 3);
+        assert_eq!(m.card_buttons[0], CardButton { id: "left".into(), icon: "◧".into(), tooltip: "Move to the left half".into(), cards: "all".into() });
+        assert_eq!(m.card_buttons[1].tooltip, "Summarize");
+        assert!(m.card_buttons[0].shows_on(true) && m.card_buttons[0].shows_on(false));
+        assert!(!m.card_buttons[1].shows_on(true) && m.card_buttons[1].shows_on(false));
+        assert!(m.card_buttons[2].shows_on(true) && !m.card_buttons[2].shows_on(false));
+        assert!(with(json!([]), json!([{"id": "list", "slot": "popup", "qml": "Menu.qml"}])).is_ok(), "an empty list needs nothing");
+        // A dock receives the clicks too.
+        assert!(with(json!([{"id": "a", "icon": "A", "tooltip": "A"}]), json!([{"id": "d", "slot": "dock.left", "qml": "Bar.qml"}])).is_ok());
+
+        let field = |buttons: Value, surfaces: Value| with(buttons, surfaces).unwrap_err()[0].field.clone();
+        let one = |button: Value| field(json!([button]), json!([bar]));
+        assert_eq!(field(json!([{"id": "a", "icon": "A", "tooltip": "A"}]), json!([{"id": "list", "slot": "popup", "qml": "Menu.qml"}])), "cardButtons");
+        assert_eq!(one(json!({"id": "Bad Id", "icon": "A", "tooltip": "A"})), "cardButtons[0].id");
+        assert_eq!(one(json!({"id": "a", "icon": "", "tooltip": "A"})), "cardButtons[0].icon");
+        assert_eq!(one(json!({"id": "a", "icon": "Left", "tooltip": "A"})), "cardButtons[0].icon");
+        assert_eq!(one(json!({"id": "a", "icon": "A B", "tooltip": "A"})), "cardButtons[0].icon");
+        for icon in ["⬅️", "AB", "🏳️", "1️⃣", "👍🏽"] {
+            assert!(valid_icon(icon), "{icon}");
+        }
+        assert_eq!(one(json!({"id": "a", "icon": "A"})), "cardButtons[0].tooltip");
+        assert_eq!(one(json!({"id": "a", "icon": "A", "tooltip": "x".repeat(61)})), "cardButtons[0].tooltip");
+        assert_eq!(one(json!({"id": "a", "icon": "A", "tooltip": "A", "cards": "notes"})), "cardButtons[0].cards");
+        assert_eq!(field(json!([{"id": "a", "icon": "A", "tooltip": "A"}, {"id": "a", "icon": "B", "tooltip": "B"}]), json!([bar])), "cardButtons[1].id");
+        let five: Vec<Value> = (0..5).map(|i| json!({"id": format!("b{i}"), "icon": "B", "tooltip": "B"})).collect();
+        assert_eq!(field(json!(five), json!([bar])), "cardButtons");
+        assert_eq!(field(json!({"id": "a"}), json!([bar])), "cardButtons");
     }
 
     #[test]

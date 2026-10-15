@@ -1,0 +1,14 @@
+{
+  "id": "card-tools",
+  "name": "Card tools",
+  "description": "Buttons on terminal cards: put a card on the left or right half of the screen, or minimize the others to focus on it. ⧉ in the top bar puts the open terminals side by side.",
+  "api": 1,
+  "surfaces": [
+    { "id": "bar", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 40, "tooltip": "Put the open terminals side by side" }
+  ],
+  "cardButtons": [
+    { "id": "left", "icon": "◧", "tooltip": "Move to the left half" },
+    { "id": "right", "icon": "◨", "tooltip": "Move to the right half" },
+    { "id": "focus", "icon": "◉", "tooltip": "Minimize the other terminals" }
+  ]
+}

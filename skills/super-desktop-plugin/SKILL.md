@@ -4,7 +4,9 @@ description: >
   Create, change or fix a SUPER DESKTOP plugin: a folder of QML (Qt Quick) that
   adds docks at the screen edges, items in the top bar, floating panels,
   popups (menus, quick forms), cards on the desktop (games, tools, terminals),
-  full-screen views and Settings sections to the SUPER DESKTOP overlay on Linux (Hyprland/Omarchy). Covers
+  full-screen views, Settings sections and buttons on terminal cards to the
+  SUPER DESKTOP overlay on Linux (Hyprland/Omarchy), and moves, sizes,
+  minimizes or closes the terminal cards. Covers
   plugin.json, the `sd` object in QML (theme, saved values, calls into SUPER
   DESKTOP, programs and pseudo-terminals), and the check/snapshot loop that
   lets you see your work. Use when the folder has a plugin.json for
@@ -89,6 +91,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `surfaces[].title` | Optional, ≤ 60 characters: the panel's header or the Settings section's title. Default: the plugin name. |
 | `surfaces[].multiple` | Optional, `card` only: the user can open several copies (`card.new`), e.g. several terminals. Each copy is its own QML program with its own `sd.instanceId` and place. |
 | `surfaces[].tooltip` | Optional, ≤ 120 characters, docks and `toolbar.item` only: the text shown when the pointer rests on the surface, e.g. `"Click to add · right-click for the list"`. Default: the plugin name. Use it instead of a QML `ToolTip` there. |
+| `cardButtons` | Optional, up to 4: buttons SUPER DESKTOP adds to the header of every terminal card (see "Card buttons"). `{"id": "left", "icon": "◧", "tooltip": "Move to the left half", "cards": "all"}`: `id` like a surface id; `icon` one or two symbols or one emoji; `tooltip` 1–60 characters, the hover text and the button's name in the ⋯ menu; `cards` `all` (default), `agents` (cards running an AI agent) or `shells` (plain terminals). Needs a `toolbar.item` or dock surface: it receives the clicks. |
 | `shortcuts` | Optional, up to 8: `{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}`. Work while SUPER DESKTOP is shown, before any card gets the key. `keys`: Super, or two of Ctrl/Alt/Shift, plus one key (a letter, digit, punctuation, `F1`–`F12`, `Space`, `Return`, `Tab`, `Up`…). `action`: `panel`, `card` or `fullscreen` + `.open`/`.close`/`.toggle`, or `card.new`, for one of this plugin's surfaces of that kind. The first plugin (by id) wins a combination two plugins share. |
 
 ### Slots
@@ -97,7 +100,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | --- | --- | --- | --- |
 | `dock.left`, `dock.right` | A vertical toolbar at that edge, from below the top bar to the bottom of the screen. Several docks on one edge sit side by side, ordered by plugin id. Arrange keeps cards clear of them. | 32–480, default 64 | the screen's |
 | `toolbar.item` | An item in the top bar, after the agent launchers. The bar's height (about 26–50 px, it follows the user's top-bar size). Keep it short: the launcher row scrolls when full. The user drags toolbar items to rearrange them: a press that moves more than 8 px belongs to the bar, and the item sees the pointer move off it and the press released there, so it is no click. Use clicks, not drags, in a toolbar item. | 24–240, default 96 | the bar's |
-| `panel` | A floating card the user can move, resize and close (✕). Not shown until opened with `sd.call("panel.open"/"panel.toggle", {surface})`, usually from a `toolbar.item` or dock button, or from Settings → Plugins. Runs only while open. | 200–1600, default 480 | 120–1200, default 360 |
+| `panel` | A floating card the user can move, resize and close (✕). Not shown until opened with `sd.call("panel.open"/"panel.toggle", {surface})`, usually from a `toolbar.item` or dock button, or from Settings → Plugins. Runs only while open; it stays open while SUPER DESKTOP is hidden, until the user closes it. | 200–1600, default 480 | 120–1200, default 360 |
 | `settings.page` | A section under the plugin in Settings → Plugins, as wide as the page. Runs only while that page is shown. Use it for options, saved with `sd.setValue`. | ignored | 60–1200, default 240 |
 | `card` | A card on the desktop next to notes and terminals, with a header (title, ✕). The user drags and resizes it; Arrange places it; it slides in and out with the other cards. Opened with `sd.call("card.open"/"card.toggle", {surface})` or from Settings → Plugins; reopens where it was after a restart if it was open. Games, tools and terminals go here. | 200–4000, default 640 | 120–3000, default 420 |
 | `fullscreen` | Covers the whole overlay until **Esc** (or `fullscreen.close`). Opened with `sd.call("fullscreen.open", {surface})`. One at a time. Games, screensavers, presentations. | the screen's | the screen's |
@@ -105,6 +108,33 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 
 Each surface is its own QML program: surfaces of one plugin share data only
 through `sd.values` (and files or programs you run).
+
+### Card buttons
+
+`cardButtons` in plugin.json put small buttons in the header of terminal
+cards, before the card's own 🗕 ⛶ ✕. They take only room the header can
+spare: when it has too little for all of them they fold into one ⋯ menu,
+and on the narrowest cards they are not shown. A click calls
+`sd.cardButtonClicked(button, card)` in every running surface of the plugin
+(`button` is the id, `card` the card as `cards.list` gives it); handle it in
+the `toolbar.item` or dock, which always run:
+
+```qml
+Connections {
+    target: sd
+    function onCardButtonClicked(button, card) {
+        if (button === "left") sd.call("cards.geometry", {id: card.id}, function(g) {
+            var a = g.area, w = Math.floor((a.width - 12) / 2)
+            sd.call("cards.resize", {id: card.id, width: w, height: a.height}, function() {
+                sd.call("cards.move", {id: card.id, x: a.x, y: a.y})
+            })
+        })
+    }
+}
+```
+
+They are on this PC's own cards only (not on another PC's, nor on the
+phone). Settings → Plugins lists them under the plugin.
 
 ## QML rules
 
@@ -138,9 +168,10 @@ through `sd.values` (and files or programs you run).
 5. **Don't block**: no busy loops; use `Timer` and the callbacks of `sd.exec`
    and `sd.call`.
 6. **Act only on a click or key**: anything that launches, sends or deletes
-   follows a user action. `cards.send` types into the user's agents: never
-   call it from a timer or on load, and never with text from a program's
-   output or a web page.
+   follows a user action (a card button is one). `cards.send` types into the
+   user's agents: never call it from a timer or on load, and never with text
+   from a program's output or a web page. `cards.close` ends a session, so
+   it asks the user first; call it only on a click too.
 7. **Keyboard**: a `card` or `fullscreen` surface gets the keyboard when the
    user clicks it (full screen: at once). Put `focus: true` on the item that
    handles `Keys.onPressed`, call `forceActiveFocus()` on click, and show a
@@ -168,6 +199,7 @@ through `sd.values` (and files or programs you run).
 | `sd.openPty([program, args…], {cols, rows, cwd, env})` | Start a program on a pseudo-terminal (for terminal plugins); returns a **Pty** or `null`. At most 8 per surface; they end with the surface. |
 | `sd.visible` | Whether SUPER DESKTOP is on screen. Bind animations to it (`running: ringing && sd.visible`): surfaces are not drawn while it is hidden. |
 | `sd.visibleChanged(visible)` | Signal: the overlay was shown or hidden (`Connections { target: sd; function onVisibleChanged(v) {} }`). |
+| `sd.cardButtonClicked(button, card)` | Signal: one of the plugin's `cardButtons` was clicked on a terminal card (`function onCardButtonClicked(button, card) {}`); `card` is `{id, kind, title, harness, folder, status, minimized}`. A click of the user: the plugin may act on that card. |
 
 A **Pty** has `output(text)` and `exited(code)` signals, `write(text)` (keys
 as the program expects them: `"\r"` for Enter, `"\x7f"` for Backspace,
@@ -186,10 +218,19 @@ included, so GUI apps open normally.
 | `overlay.hide` | none | `{}` |
 | `harness.list` | none | `[{id, name, icon}]`: the agents offered in the top bar. `icon` is a file path or empty. |
 | `harness.launch` | `{harness, folder?}` | `{}`; opens a new terminal card for that agent, in `folder` or the folder chosen in the top bar. |
+| `workspace.folder` | none | `{folder, recent}`: the folder chosen in the top bar (the user's project: new agent cards start there) and the folders chosen before, newest first. Absolute paths. Start editors, file browsers and git tools there (see "Programs in the user's project"). |
 | `cards.list` | none | `[{id, kind, title, harness, folder, status, minimized}]`; `kind` is `terminal` or `note`; `status` (terminals) is `working`, `waiting`, `finished`, `idle`, `error`, `exited`, `unknown` or `remote`. Poll it (every few seconds, only while `sd.visibleChanged` says shown). |
 | `cards.focus` | `{id}` from `cards.list` | `{}`; brings that card to the front with the keyboard (restores a minimized one). |
 | `cards.text` | `{id, lines?}` of a terminal card (default 60, at most 300) | `{text}`: the end of its terminal, plain text. |
 | `cards.send` | `{id, text, enter?}` of a terminal card | `{}`; types `text` into it as if the user did (`enter: true` presses Enter after it; at most 64 KiB). **Only on the user's click**, and show what will be typed first. |
+| `cards.geometry` | `{id}` of a terminal card | `{id, mode, x, y, width, height, area: {x, y, width, height}, minWidth, minHeight}`: `mode` is `normal`, `minimized` (its icon's place) or `expanded`; `area` is where cards may go (below the top bar, inside the docks). Logical pixels. The commands below, but `cards.close`, answer with this too. |
+| `cards.move` | `{id, x, y}` | Moves the card's top-left corner (a minimized card: its icon), kept inside `area`, saved as if dragged. An expanded card refuses (`cards.collapse` first). |
+| `cards.resize` | `{id, width, height}` | Resizes it (at least `minWidth` × `minHeight`, at most `area`), keeping its corner unless the card would leave `area`. A minimized or expanded card refuses. |
+| `cards.minimize`, `cards.restore` | `{id}` | 🗕 and its icon's 🗖: to the 128 px icon and back to the size it had. Minimizing an expanded card collapses it first. |
+| `cards.expand`, `cards.collapse` | `{id}` | ⛶: to 80% of the screen with the keyboard, and back. |
+| `cards.raise` | `{id}` | Brings it to the front, without the keyboard (`cards.focus` takes the keyboard). |
+| `cards.tag` | `{id, tag}`: 0 (none) to 8 | Sets the color of the card's dot, as the dot's own menu does. |
+| `cards.close` | `{id}` | Asks the user on the card, next to its ✕ ("<plugin> wants to close this card"), and answers `{closed}` once they choose (`closed: false` for Cancel or a click elsewhere). Closing ends the card's session. **Only on the user's click**; SUPER DESKTOP must be shown. |
 | `notify` | `{title, body, urgency?, actions?}`; `urgency`: `low`, `normal`, `critical` (stays until dismissed); `actions`: up to 3 `{id, label}` buttons, `id: "default"` also runs on a click on the notification | `{}` at once; with `actions`, `{action}` when one is clicked (`null` when it closes without), which can be minutes later. |
 | `sound.play` | `{file}`: a sound in the plugin folder (`.wav`, `.oga`, `.ogg`), or `{name}`: a desktop sound (`complete`, `bell`, `alarm-clock-elapsed`, `message-new-instant`…) | `{}` at once; it plays with the PC's player. At most 4 at once (`busy`). Only for what the user asked for. |
 | `llm.complete` | `{prompt, system?, maxTokens? (default 1024), json? (answer is one JSON document), fast? (a smaller, quicker model)}`; prompt ≤ 64 KiB | `{text, provider, model}`, through the user's own Claude Code (else Codex) with all tools off. Takes seconds; at most two at once (`busy`); errors `unavailable`, `timeout`. **Send only what the task needs**: never secrets, keys or `.env` contents, and say in the plugin's description what it sends. |
@@ -202,6 +243,8 @@ included, so GUI apps open normally.
 
 Errors are `{code, message, hint}`: `unknown_method`, `bad_params`,
 `unavailable`, `busy`, `not_connected`. Show them in the UI where they happen.
+The `cards.*` commands answer `busy` while the user drags, resizes or
+slides the card, and `bad_params` for a note or a card that is gone.
 
 ## Terminals: `TerminalView`
 
@@ -222,10 +265,10 @@ TerminalView {
 
 | Member | Meaning |
 | --- | --- |
-| `command`, `workingDirectory` (default `$HOME`), `environment`, `autoStart` (default true) | What runs. |
+| `command`, `workingDirectory` (default `$HOME`), `environment`, `autoStart` (default true) | What runs. With `autoStart`, it starts once the view has its size. |
 | `fontFamily` (default `monospace`), `fontPixelSize` (13), `foreground`, `background`, `cursorColor`, `scrollbackLines` (2000) | Look; colors default to the theme. |
 | `cols`, `rows`, `running`, `title` (the program's window title) | Read-only. |
-| `start()`, `stop()`, `send(text)` (type into it), `paste(text)`, `feed(text)` (draw as if printed), `lineText(row)`, `cursorPosition()`, `cellAt(row, col)`, `selectedText()`, `select(r0, c0, r1, c1)`, `clearSelection()`, `copy()` | Methods. |
+| `start()` (waits for the view's size when it has none yet, e.g. right after a layout changed), `stop()`, `send(text)` (type into it), `paste(text)`, `feed(text)` (draw as if printed), `lineText(row)`, `cursorPosition()`, `cellAt(row, col)`, `selectedText()`, `select(r0, c0, r1, c1)`, `clearSelection()`, `copy()` | Methods. |
 | `exited(code)`, `bell()` | Signals. |
 
 Click it to type. Drag to select (it becomes the primary selection),
@@ -256,6 +299,10 @@ Full working examples, copy the closest one:
   notification that shows the list when clicked (`overlay.show`), a sound
   (`sound.play`), a shaking icon over a moving theme gradient, the
   `tooltip`, and text colors checked for contrast (`reminders.js`).
+- `examples/card-tools/`: `cardButtons` on terminal cards (◧ ◨ put a card on
+  the left or right half with `cards.geometry`, `cards.resize` and
+  `cards.move`; ◉ minimizes the other terminals), handled in a top-bar
+  item whose ⧉ tiles the open terminals side by side.
 - `examples/agents-dock/`: a dock listing the agent cards with their status
   (`cards.list`), a click jumps to one (`cards.focus`), and ✦ summarizes what
   an agent is doing (`cards.text` → `llm.complete`).
@@ -309,6 +356,7 @@ text with spaces or `;` in "quotes".
 | `wait TIME` | `500` (ms) or `2s`: timers and animations run meanwhile. |
 | `expect TEXT`, `absent TEXT` | Fails unless that text is (is not) shown. |
 | `shot [NAME]` | A picture now: `<out>-NAME.png` next to `--out`. |
+| `cardbutton ID [KEY=VALUE…]` | A click on the plugin's card button `ID` on a sample card (`sd_term_sample`, a waiting `claude` card); `status=working`, `harness=shell`, `minimized=true`… change it. The report lists the `cards.*` calls the plugin then made. |
 
 ```sh
 super-desktop plugin snapshot reminder --surface add --values sample.json --out /tmp/add.png \
@@ -327,9 +375,18 @@ as `sd.call popup.toggle {surface: "add"}`; test the popup with its own
 
 **What runs when.** Docks and `toolbar.item` surfaces run as long as the
 plugin is loaded, also while SUPER DESKTOP is hidden: their `Timer`s keep
-going, but nothing is drawn. Panels, popups, cards and settings pages run only
-while shown, so work that must happen in the background (checking a clock,
-polling) belongs in a dock or toolbar item. Animations: `running: sd.visible`.
+going, but nothing is drawn. Panels, cards and full-screen surfaces run only
+while open; they stay open (and running) while SUPER DESKTOP is hidden and
+slide back in with it. Popups close when it hides; settings pages run while
+their page is shown. Work that must happen in the background (checking a
+clock, polling) belongs in a dock or toolbar item. Animations:
+`running: sd.visible`.
+
+**Closed means closed.** When the user closes a panel or card with ✕, it
+stays closed until they open it again. Never open it again from
+`sd.visibleChanged`, a `Timer` or a change of values (`check` reports that
+as `reopen`): open it on a click, or once in `Component.onCompleted` to have
+it there when SUPER DESKTOP starts.
 
 **Saving a list.** Read, copy, change, save the whole key; all surfaces see it:
 
@@ -387,6 +444,39 @@ function readable(theme, names) {
 Then `color: R.readable(sd.theme, ["accent", "blue", "cyan"])`; secondary
 text: `Qt.alpha(sd.theme.foreground, 0.7)`. `examples/reminder/reminders.js`
 has the full version (`soft`, `mix`).
+
+**Programs in the user's project.** `workspace.folder` is the folder chosen
+in the top bar. A terminal program (vim, nano, `emacs -nw`, lazygit) runs
+in a `card` with `TerminalView` there; make the view once the folder is
+known, so it starts in it:
+
+```qml
+Loader {
+    id: term
+    anchors.fill: parent
+    active: false
+    sourceComponent: TerminalView { command: ["vim", "."]; workingDirectory: term.folder }
+    property string folder: ""
+    Component.onCompleted: sd.call("workspace.folder", {}, function(r, err) {
+        if (r) { folder = r.folder; active = true; item.forceActiveFocus() }
+    })
+}
+```
+
+A program with its own window (VS Code, a file manager) starts with `sd.run`
+in that folder (`sd.run` starts in the plugin folder, so change folder
+first), then hide SUPER DESKTOP so its window shows:
+
+```js
+sd.call("workspace.folder", {}, function(r) {
+    sd.run(["sh", "-c", 'cd "$1" || exit 1; shift; exec "$@"', "sh", r.folder, "code", "."])
+    sd.call("overlay.hide")
+})
+```
+
+In `check` and `snapshot`, and on SUPER DESKTOP older than this method
+(`unknown_method`), `super-desktop workspace inspect --format json` gives the
+same folder as `data.workspace` (through `sd.exec`).
 
 **A sound**: put a `.wav` in the plugin folder and play it on the event;
 SUPER DESKTOP finds a player:

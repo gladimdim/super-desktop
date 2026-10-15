@@ -331,6 +331,10 @@ impl Page {
             if m.replaces_launchers {
                 card.append(&label("Hides the agent buttons in the top bar while it is on: it launches the agents itself.", "launcher-note"));
             }
+            if !m.card_buttons.is_empty() {
+                let buttons: Vec<String> = m.card_buttons.iter().map(|b| format!("{} {}", b.icon, b.tooltip)).collect();
+                card.append(&label(&format!("Adds to terminal cards: {}", buttons.join(", ")), "launcher-note"));
+            }
         }
         // Installed from elsewhere: where from, and the approval it needs.
         let places = super_desktop::plugins::install::Places::current();

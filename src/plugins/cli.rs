@@ -980,6 +980,72 @@ mod tests {
         assert!(snapshot_report(&flags, Some(&saved)).unwrap_err().contains("one JSON object"));
         let _ = std::fs::remove_dir_all(&root);
     }
+    /// A TerminalView started before its layout is done (here: at once, in the
+    /// card's Component.onCompleted) waits for its size, so the program sees
+    /// the real columns and rows rather than 2×1.
+    #[test]
+    fn plugins_terminal_view_starts_at_its_real_size() {
+        if paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-terminal-size-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("term");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), json!({"id": "term", "api": 1,
+            "surfaces": [{"id": "card", "slot": "card", "qml": "Card.qml", "size": 600, "height": 260}]}).to_string()).unwrap();
+        std::fs::write(dir.join("Card.qml"), "import QtQuick\nimport QtQuick.Layouts\nimport SuperDesktop.Terminal\n\
+            Rectangle {\n    Component.onCompleted: term.start()\n    ColumnLayout {\n        anchors.fill: parent\n        \
+            TerminalView {\n            id: term\n            Layout.fillWidth: true\n            Layout.fillHeight: true\n            \
+            autoStart: false\n            command: [\"sh\", \"-c\", \"stty size\"]\n            \
+            onExited: sd.log(\"size \" + term.lineText(0).trim())\n        }\n    }\n}\n").unwrap();
+        let args: Vec<String> = vec![dir.to_string_lossy().into(), "--out".into(), root.join("out.png").to_string_lossy().into(),
+            "--do".into(), "wait 1500".into()];
+        let report = snapshot_report(&Flags::parse(&args, SNAPSHOT_OPTIONS).unwrap(), Some(&root.join("term.data.json"))).unwrap().0;
+        let line = report["logs"][0].as_str().unwrap_or_else(|| panic!("the program never ran: {report}")).to_owned();
+        let size: Vec<u32> = line.trim_start_matches("size ").split_whitespace().map(|n| n.parse().unwrap()).collect();
+        assert!(size.len() == 2 && size[0] > 5 && size[1] > 40, "rows and columns the program saw: {line}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `cardbutton` in --do clicks a card button on a sample card: the report
+    /// shows what the plugin then asked of the card.
+    #[test]
+    fn plugins_snapshot_clicks_card_buttons() {
+        if paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-snapshot-cardbutton-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("tiles");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), json!({"id": "tiles", "api": 1,
+            "surfaces": [{"id": "bar", "slot": "toolbar.item", "qml": "Bar.qml", "size": 40}],
+            "cardButtons": [{"id": "left", "icon": "◧", "tooltip": "Move to the left half"}]}).to_string()).unwrap();
+        std::fs::write(dir.join("Bar.qml"), "import QtQuick\nRectangle {\n    color: sd.theme.accent\n    Connections {\n        target: sd\n        \
+            function onCardButtonClicked(button, card) {\n            sd.log(button + \" \" + card.status + \" \" + card.minimized)\n            \
+            sd.call(\"cards.move\", {id: card.id, x: 10, y: 80})\n        }\n    }\n}\n").unwrap();
+        let shot = |steps: &str| {
+            let args: Vec<String> = vec![dir.to_string_lossy().into(), "--out".into(), root.join("out.png").to_string_lossy().into(),
+                "--do".into(), steps.into()];
+            let flags = Flags::parse(&args, SNAPSHOT_OPTIONS).unwrap();
+            snapshot_report(&flags, Some(&root.join("tiles.data.json"))).unwrap().0
+        };
+        let report = shot("cardbutton left status=working minimized=true");
+        assert_eq!(report["ok"], true, "{report}");
+        assert_eq!(report["steps"][0]["card"]["id"], "sd_term_sample");
+        assert_eq!(report["logs"], json!(["left working true"]));
+        assert_eq!(report["calls"], json!([{"method": "cards.move", "params": {"id": "sd_term_sample", "x": 10, "y": 80}}]));
+        let report = shot("cardbutton");
+        assert_eq!(report["ok"], false);
+        assert!(report["steps"][0]["error"].as_str().unwrap().contains("cardbutton needs a button id"), "{report}");
+        let report = shot("cardbutton left working");
+        assert!(report["steps"][0]["error"].as_str().unwrap().contains("key=value"), "{report}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// preview composes the surfaces into a 1280×640 PNG; publish says what
     /// is missing before a plugin can be listed.
     #[test]

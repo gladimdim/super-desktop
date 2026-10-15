@@ -1,10 +1,11 @@
 //! The overlay side of agent plugins: QML surfaces drawn by `sd-qml-host`
 //! (`surface`), the places they live in (`slots`), the calls they can make
-//! (`api`), ✨ Create Plugin (`create`, `agent`), Settings → Plugins
+//! (`api`), their buttons on terminal cards (`card_buttons`), ✨ Create Plugin (`create`, `agent`), Settings → Plugins
 //! (`settings_page`), its Discover list (`browse`) and Edit & Enhance (`enhance`). The display-free half is `super_desktop::plugins`.
 pub mod agent;
 pub mod api;
 pub mod browse;
+pub mod card_buttons;
 pub mod cards;
 pub mod create;
 pub mod enhance;

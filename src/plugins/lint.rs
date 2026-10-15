@@ -122,7 +122,7 @@ fn file_rules(file: &Path, source: &Source, findings: &mut Vec<Finding>) {
         }
     }
     // Acting on the user's agents only follows a click or a key.
-    for method in ["cards.send", "harness.launch"] {
+    for method in ["cards.send", "harness.launch", "cards.close"] {
         for quote in ['"', '\''] {
             let needle = format!("{quote}{method}{quote}");
             for (at, _) in source.text.match_indices(&needle) {
@@ -131,6 +131,33 @@ fn file_rules(file: &Path, source: &Source, findings: &mut Vec<Finding>) {
                     add("act-without-click", Level::Error, at,
                         format!("{method} in {handler}: it runs without the user asking"),
                         "Call it only from a click or key handler (onClicked, Keys.onPressed), after showing what it will do.");
+                }
+            }
+        }
+    }
+    // An open panel or card stays open while the overlay is hidden: opening
+    // it again from a show, a timer or a change undoes the user's ✕. Opening
+    // it once on load, or on a click, is fine. One helper function deep:
+    // `onVisibleChanged: reopen()` with `function reopen() { sd.call(…) }`.
+    for method in ["panel.open", "panel.toggle", "card.open", "card.toggle", "card.new", "fullscreen.open", "fullscreen.toggle"] {
+        for quote in ['"', '\''] {
+            for (at, _) in source.text.match_indices(&format!("{quote}{method}{quote}")) {
+                let mut triggers: Vec<(usize, String)> = source.handler_at(at).filter(|h| reopens(h)).map(|h| (at, h)).into_iter().collect();
+                let helper = source.frames_at(at).into_iter()
+                    .find(|f| f.kind == Kind::Function && !f.name.starts_with("on"))
+                    .map(|f| f.name.clone());
+                if let Some(name) = helper {
+                    for call in find_word(&source.stripped, &name) {
+                        let called = source.stripped[call + name.len()..].trim_start().starts_with('(');
+                        let definition = source.stripped[..call].trim_end().ends_with("function");
+                        if let Some(handler) = (called && !definition).then(|| source.handler_at(call)).flatten().filter(|h| reopens(h)) {
+                            triggers.push((call, handler));
+                        }
+                    }
+                }
+                for (at, handler) in triggers {
+                    add("reopen", Level::Advice, at, format!("{method} from {handler}: it opens again what the user closed with ✕"),
+                        "Panels and cards stay open while SUPER DESKTOP is hidden. Open one on a click (or once in Component.onCompleted), never from sd.visibleChanged, a Timer or a change.");
                 }
             }
         }
@@ -179,6 +206,13 @@ fn is_automatic(handler: &str) -> bool {
     let last = handler.rsplit('.').next().unwrap_or(handler);
     matches!(last, "onCompleted" | "onTriggered" | "onOutput" | "onExited" | "onFinished")
         || (last.starts_with("on") && last.ends_with("Changed"))
+}
+
+/// A handler that runs on its own, again and again: a change (the overlay
+/// shown, saved values) or a timer. Not a click, and not the one-time load.
+fn reopens(handler: &str) -> bool {
+    let last = handler.rsplit('.').next().unwrap_or(handler);
+    last == "onTriggered" || (last.starts_with("on") && last.ends_with("Changed"))
 }
 
 fn contains_re(text: &str, pattern: &str) -> bool {
@@ -513,6 +547,8 @@ Item {
     Connections { target: sd; function onValuesChanged() { sd.call("cards.send", {}) } }
     function send() { sd.call("cards.send", {}) }
     Canvas { onPaint: { sd.exec(["sh", "-c", "pw-play ding.wav"]) } }
+    Connections { target: sd; function onCardButtonClicked(button, card) { sd.call("cards.close", {id: card.id}) } }
+    Connections { target: sd; function onVisibleChanged(v) { sd.call("cards.close", {id: "x"}) } }
 }
 "#;
         let m = plugin("lint", &[("Bar.qml", bar), ("Pill.qml", pill), ("Panel.qml", panel)], json!([
@@ -545,10 +581,36 @@ Item {
         assert!(panel_rules.contains(&("act-without-click", 6)), "{panel_rules:?}");
         assert!(!panel_rules.iter().any(|r| r == &("act-without-click", 7)), "{panel_rules:?}");
         assert!(panel_rules.contains(&("sound", 8)), "{panel_rules:?}");
+        // A card button is a click; closing a card when the overlay shows is not.
+        assert!(!panel_rules.iter().any(|r| r == &("act-without-click", 9)), "{panel_rules:?}");
+        assert!(panel_rules.contains(&("act-without-click", 10)), "{panel_rules:?}");
         assert!(!panel_rules.iter().any(|r| r.0 == "hidden-timer"), "{panel_rules:?}");
         // Errors first.
         let first_advice = found.iter().position(|f| f.level == Level::Advice).unwrap();
         assert!(found[first_advice..].iter().all(|f| f.level == Level::Advice));
+    }
+
+    #[test]
+    fn plugins_lint_finds_reopening_what_the_user_closed() {
+        let bar = r#"import QtQuick
+Rectangle {
+    id: root
+    function showPanel() { sd.call("panel.open", {surface: "game"}) }
+    Component.onCompleted: showPanel()
+    Connections { target: sd; function onVisibleChanged(v) { if (v) root.showPanel() } }
+    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.showPanel() }
+    Timer { interval: 60000; running: sd.visible; repeat: true; onTriggered: sd.call('card.open', {surface: "board"}) }
+    function onValuesChanged() { sd.call("fullscreen.toggle", {surface: "f"}) }
+    MouseArea { cursorShape: Qt.PointingHandCursor; onClicked: sd.call("card.toggle", {surface: "board"}) }
+}
+"#;
+        let m = plugin("reopen", &[("Bar.qml", bar)], json!([{"id": "main", "slot": "toolbar.item", "qml": "Bar.qml"}]));
+        let found = lint(&m);
+        let reopen: Vec<usize> = found.iter().filter(|f| f.rule == "reopen").map(|f| f.line).collect();
+        // The show (through the helper), the timer and the change; not the
+        // load or the clicks.
+        assert_eq!(reopen, [6, 8, 9], "{found:?}");
+        assert!(found.iter().filter(|f| f.rule == "reopen").all(|f| f.level == Level::Advice));
     }
 
     #[test]

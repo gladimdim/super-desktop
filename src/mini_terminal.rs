@@ -499,6 +499,7 @@ struct CardChrome {
     /// Everything the card draws while iconified.
     compact: CompactChrome,
     expand_btn: Button,
+    close_btn: Button,
     hint_label: Label,
     /// The last thing the source said about this card's session. A chrome
     /// change of our own must not lose it.
@@ -615,6 +616,8 @@ pub struct MiniTerminalCard {
     cli_mode_change: Rc<Cell<bool>>,
     cli_tag_buttons: Rc<RefCell<Vec<glib::WeakRef<Button>>>>,
     geometry_commit: GeometryAction,
+    /// The header buttons running plugins add (a local card only).
+    plugin_buttons: Option<crate::plugin_ui::card_buttons::ButtonRow>,
 }
 
 impl MiniTerminalCard {
@@ -798,6 +801,16 @@ impl MiniTerminalCard {
         status_badge.add_css_class("status-idle");
         status_badge.set_halign(Align::End);
         header.append(&status_badge);
+        // Plugin buttons act on this machine's cards only: a remote card
+        // belongs to its host.
+        let plugin_buttons = (!source.is_remote()).then(|| {
+            let row = crate::plugin_ui::card_buttons::ButtonRow::new(
+                &data.borrow().id,
+                crate::shell_title::is_regular(&agent_type),
+            );
+            header.append(&row);
+            row
+        });
         // File previews read this machine's own sessions, so a remote card
         // never gets that button. The panel buttons sit closer together than
         // the rest of the header: it sets the card's minimum width, and these
@@ -1095,6 +1108,7 @@ impl MiniTerminalCard {
                 preview_label,
                 compact,
                 expand_btn,
+                close_btn: kill_btn.clone(),
                 hint_label,
                 source_message,
             },
@@ -1137,6 +1151,7 @@ impl MiniTerminalCard {
             cli_mode_change: Rc::new(Cell::new(false)),
             cli_tag_buttons: Rc::clone(&tag_sync),
             geometry_commit: Rc::new(RefCell::new(None)),
+            plugin_buttons,
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,
@@ -1642,6 +1657,80 @@ impl MiniTerminalCard {
                 true
             }
         }
+    }
+
+    /// Asks on this card, next to its ✕, whether `asker` (a plugin) may close
+    /// it, and gives the answer: a plugin never ends a session without the
+    /// user saying so. Clicking elsewhere is a no. Returns false, without
+    /// asking, when the card cannot show the question now or already does.
+    pub fn confirm_close(&self, asker: &str, answer: Box<dyn FnOnce(bool)>) -> bool {
+        let anchor = if self.is_compact() { self.chrome.compact.close.clone() } else { self.chrome.close_btn.clone() };
+        let asking = std::iter::successors(anchor.first_child(), |w| w.next_sibling()).any(|w| w.is::<gtk4::Popover>());
+        if !anchor.is_mapped() || asking {
+            return false;
+        }
+        let answer = Rc::new(RefCell::new(Some(answer)));
+        let reply = {
+            let answer = Rc::clone(&answer);
+            move |yes: bool| {
+                if let Some(answer) = answer.borrow_mut().take() {
+                    answer(yes);
+                }
+            }
+        };
+        let popover = gtk4::Popover::new();
+        popover.add_css_class("ws-pop");
+        popover.add_css_class("card-close-confirm");
+        let column = gtk4::Box::new(Orientation::Vertical, 8);
+        column.add_css_class("card-close-confirm-box");
+        let question = Label::new(Some(&format!("{asker} wants to close this card.\nIts session ends.")));
+        question.set_xalign(0.0);
+        column.append(&question);
+        let buttons = gtk4::Box::new(Orientation::Horizontal, 6);
+        buttons.set_halign(Align::End);
+        let cancel = Button::with_label("Cancel");
+        let close = Button::with_label("Close");
+        close.add_css_class("destructive-action");
+        buttons.append(&cancel);
+        buttons.append(&close);
+        column.append(&buttons);
+        popover.set_child(Some(&column));
+        for (button, yes) in [(&cancel, false), (&close, true)] {
+            let (reply, weak) = (reply.clone(), popover.downgrade());
+            button.connect_clicked(move |_| {
+                reply(yes);
+                if let Some(popover) = weak.upgrade() {
+                    popover.popdown();
+                }
+            });
+        }
+        popover.connect_closed(move |popover| {
+            reply(false);
+            let popover = popover.clone();
+            glib::idle_add_local_once(move || popover.unparent());
+        });
+        popover.set_parent(&anchor);
+        popover.popup();
+        cancel.grab_focus();
+        true
+    }
+
+    /// Shows the card buttons of the plugins running now.
+    pub fn set_plugin_buttons(&self, specs: &[crate::plugin_ui::card_buttons::Spec]) {
+        if let Some(row) = &self.plugin_buttons {
+            row.set(specs);
+        }
+    }
+
+    /// The header's ✕, where a plugin's close request asks.
+    #[cfg(test)]
+    pub fn close_button(&self) -> &Button {
+        &self.chrome.close_btn
+    }
+
+    #[cfg(test)]
+    pub fn plugin_buttons(&self) -> Option<&crate::plugin_ui::card_buttons::ButtonRow> {
+        self.plugin_buttons.as_ref()
     }
 
     pub(crate) fn cli_raise(&self) { (self.on_raise)(self.container.clone().upcast()); }

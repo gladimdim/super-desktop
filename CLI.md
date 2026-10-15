@@ -862,7 +862,9 @@ super-desktop peer-attach PEER_ID CARD_ID --seconds 10 < /dev/null
 
 Plugins add docks at the screen edges, top-bar items, floating panels, popups
 under a top-bar item or beside a dock, cards on the desktop (games, tools,
-terminals), full-screen views and Settings sections to the overlay. A plugin
+terminals), full-screen views, Settings sections and buttons on terminal
+cards to the overlay, and can move, size, minimize, expand or (after asking
+you on the card) close terminal cards. A plugin
 is a folder of QML (Qt Quick) in `~/.config/super-desktop/plugins/<id>/` with
 a `plugin.json`; the overlay reloads it whenever one of its files is saved.
 These commands work without a running overlay, so an agent can check its own
@@ -884,7 +886,8 @@ super-desktop plugin doctor                             # what is missing, with 
 and no lint rule finds an error (QML that loads but is wrong in SUPER
 DESKTOP, such as a `ToolTip` in a top-bar item or `cards.send` from a timer);
 lint advice (fixed colors, text in the theme's border color, a timer running
-while hidden) is reported without failing, and `// sd-lint: ignore RULE` on
+while hidden, a panel or card opened again from a show or a timer after the
+user closed it) is reported without failing, and `// sd-lint: ignore RULE` on
 the line, or the line above, keeps advice that was weighed out.
 `snapshot` renders off screen with the current theme and the plugin's saved
 values and reports `paintedFraction` (0 means nothing visible was drawn).
@@ -894,8 +897,9 @@ animation; what the QML saves during a snapshot is thrown away. `--do`
 first uses the surface like a user, step by step: `click` (on shown text,
 `@objectName` or `x,y`; `right`/`middle`), `double`, `move`, `press`,
 `release`, `drag`, `scroll`, `type`, `key` (`Return`, `Escape`, `Ctrl+A`…),
-`wait`, `expect`/`absent` (text shown or not) and `shot [NAME]` (an extra
-PNG); the report lists each step, the `sd.call`s and `sd.run`s the plugin
+`wait`, `expect`/`absent` (text shown or not), `shot [NAME]` (an extra
+PNG) and `cardbutton ID [KEY=VALUE…]` (a click on one of the plugin's card
+buttons, on a sample card); the report lists each step, the `sd.call`s and `sd.run`s the plugin
 made (recorded, not done), its log lines and its values afterwards, and the
 command fails at the first failing step. `preview` composes the surfaces
 into the 1280×640 `preview.png` the public list shows; `publish` checks a

@@ -97,6 +97,11 @@ pub fn theme(theme: &Value) -> Value {
     json!({"t": "theme", "theme": theme})
 }
 
+/// A click on one of the plugin's card buttons, for `sd.cardButtonClicked`.
+pub fn card_button(button: &str, card: &Value) -> Value {
+    json!({"t": "event", "name": "cardButton", "button": button, "card": card})
+}
+
 pub fn reply(id: u64, result: Result<Value, Value>) -> Value {
     match result {
         Ok(result) => json!({"t": "reply", "id": id, "result": result, "error": Value::Null}),
@@ -217,6 +222,12 @@ mod tests {
         assert_eq!(cursor_name(0), None);
         assert_eq!(parse(br#"{"t":"something-new"}"#), FromHost::Unknown);
         assert_eq!(parse(b"not json"), FromHost::Unknown);
+    }
+
+    #[test]
+    fn plugins_protocol_card_button_event() {
+        let card = json!({"id": "sd_term_1", "kind": "terminal"});
+        assert_eq!(card_button("left", &card), json!({"t": "event", "name": "cardButton", "button": "left", "card": card}));
     }
 
     #[test]

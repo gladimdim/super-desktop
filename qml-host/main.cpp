@@ -521,6 +521,13 @@ public:
     const QStringList &logs() const { return m_logs; }
     QJsonObject savedValues() const { return QJsonObject::fromVariantMap(m_values); }
 
+    // Something that happened in SUPER DESKTOP, for every running surface of
+    // the plugin. Unknown names are ignored, so the overlay can grow.
+    void deliver(const QJsonObject &m) {
+        if (m["name"].toString() == "cardButton")
+            emit cardButtonClicked(m["button"].toString(), m["card"].toObject().toVariantMap());
+    }
+
     void reply(int id, const QJsonValue &result, const QJsonValue &error) {
         auto it = m_pending.find(id);
         if (it == m_pending.end()) return;
@@ -534,6 +541,9 @@ signals:
     void valuesChanged();
     // Emitted when the overlay is shown or hidden.
     void visibleChanged(bool visible);
+    // One of the plugin's cardButtons was clicked on a terminal card; `card`
+    // is that card as cards.list describes it.
+    void cardButtonClicked(const QString &button, const QVariant &card);
 
 private:
     void loadValues(bool notify) {
@@ -850,6 +860,8 @@ private:
                 QJsonDocument(m["theme"].toObject()).toJson(QJsonDocument::Compact))));
         } else if (t == "reply") {
             m_surface->api()->reply(m["id"].toInt(), m["result"], m["error"]);
+        } else if (t == "event") {
+            m_surface->api()->deliver(m);
         } else if (t == "pointer") {
             pointer(win, m);
         } else if (t == "scroll") {
@@ -1083,6 +1095,27 @@ private:
             const QImage image = m_surface->renderFrame();
             if (!image.save(path, "PNG")) error = "cannot write " + path;
             r["out"] = path;
+        } else if (verb == "cardbutton") {
+            // A click on one of the plugin's card buttons, on a sample card;
+            // `key=value` after the id changes the card (status=working).
+            if (step.args.isEmpty()) {
+                error = "cardbutton needs a button id: cardbutton left, cardbutton sum status=working harness=codex";
+                return;
+            }
+            QJsonObject card{{"id", "sd_term_sample"}, {"kind", "terminal"}, {"title", "Fix the login bug"},
+                             {"harness", "claude"}, {"folder", childEnvironment().value("HOME") + "/project"},
+                             {"status", "waiting"}, {"minimized", false}};
+            for (const QString &pair : step.args.mid(1)) {
+                const qsizetype eq = pair.indexOf('=');
+                if (eq <= 0) {
+                    error = QString("%1 is not key=value: cardbutton sum status=working").arg(quote(pair));
+                    return;
+                }
+                const QString key = pair.left(eq), value = pair.mid(eq + 1);
+                card[key] = key == "minimized" ? QJsonValue(value == "true") : QJsonValue(value);
+            }
+            m_surface->api()->deliver(QJsonObject{{"name", "cardButton"}, {"button", step.args.first()}, {"card", card}});
+            r["card"] = card;
         } else if (verb == "expect" || verb == "absent") {
             if (rest.isEmpty()) {
                 error = verb + " needs the text to look for";
@@ -1093,7 +1126,7 @@ private:
             if (verb == "absent" && item) error = QString("%1 is shown").arg(quote(rest));
         } else {
             error = QString("unknown step %1: use click, double, move, press, release, drag, scroll, type, key, "
-                            "wait, shot, expect, absent").arg(quote(verb));
+                            "wait, shot, expect, absent, cardbutton").arg(quote(verb));
         }
     }
 
