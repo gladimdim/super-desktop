@@ -143,12 +143,15 @@ impl MovablePanel {
             placement: RefCell::new(None),
         });
         let weak = Rc::downgrade(&this);
+        // While the overlay slides in or out, the panel goes with the cards.
+        crate::overlay_slide::register(overlay);
         let placement = overlay.connect_get_child_position(move |overlay, child| {
             let this = weak.upgrade()?;
             if *child != this.shell {
                 return None;
             }
             let (x, y, width, height) = this.rect(overlay);
+            let x = crate::overlay_slide::shifted_x(x, width, overlay.width());
             Some(gdk::Rectangle::new(x, y, width, height))
         });
         this.placement.replace(Some(placement));

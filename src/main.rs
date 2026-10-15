@@ -39,6 +39,7 @@ mod shell_title;
 mod scrollback;
 mod updates;
 mod floating_panel;
+mod overlay_slide;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;

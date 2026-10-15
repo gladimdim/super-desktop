@@ -280,12 +280,42 @@ impl Slots {
             overlay.set_measure_overlay(edge, false);
             overlay.set_clip_overlay(edge, true);
         }
+        slots.slide_with_the_cards();
         slots.set_top_inset(top_inset);
         slots.bind_popups();
         SLOTS.with(|cell| *cell.borrow_mut() = Some(Rc::clone(&slots)));
         slots.watch_root();
         slots.scan();
         slots
+    }
+
+    /// Docks and a full-screen surface leave and come back with the cards
+    /// when the overlay hides and shows: by their own edge, a full-screen
+    /// surface by the right one. At rest the overlay places them as usual.
+    fn slide_with_the_cards(self: &Rc<Self>) {
+        crate::overlay_slide::register(&self.overlay);
+        let weak = Rc::downgrade(self);
+        self.overlay.connect_get_child_position(move |overlay, child| {
+            if crate::overlay_slide::at_rest() {
+                return None;
+            }
+            let slots = weak.upgrade()?;
+            let dock = *child == slots.left || *child == slots.right;
+            let fullscreen = slots.fullscreen.borrow().as_ref().is_some_and(|f| f.container == *child);
+            if !dock && !fullscreen {
+                return None;
+            }
+            let (width, height) = (overlay.width(), overlay.height());
+            // Where GTK puts it at rest: a dock as wide as it asks at its
+            // edge (its margins inside), full screen everywhere.
+            let (x, w) = if fullscreen {
+                (0, width)
+            } else {
+                let w = child.measure(Orientation::Horizontal, height).1.min(width);
+                (if *child == slots.left { 0 } else { width - w }, w)
+            };
+            Some(gtk4::gdk::Rectangle::new(crate::overlay_slide::shifted_x(x, w, width), 0, w, height))
+        });
     }
 
     /// The top-bar row: plugin toolbar items, then ✨ Create Plugin. It goes

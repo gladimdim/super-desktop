@@ -2395,6 +2395,8 @@ impl SuperDesktopWindow {
         for (widget, traj) in trajs.iter() {
             paint_slide_widget(widget, *traj, progress);
         }
+        // Panels, plugin docks and full screen, which the overlay places.
+        crate::overlay_slide::paint(progress);
     }
 
     fn ensure_slide_tick(&self) {
@@ -2465,6 +2467,7 @@ impl SuperDesktopWindow {
                 for (widget, traj) in frames.borrow().iter() {
                     paint_slide_widget(widget, *traj, target);
                 }
+                crate::overlay_slide::paint(target);
                 canvas.remove_css_class("sliding");
                 slide.freeze_pending.set(false);
                 thaw_slide_cards(&cards);
@@ -2483,6 +2486,7 @@ impl SuperDesktopWindow {
             for (widget, traj) in frames.borrow().iter() {
                 paint_slide_widget(widget, *traj, progress);
             }
+            crate::overlay_slide::paint(progress);
             glib::ControlFlow::Continue
         });
     }
@@ -3479,13 +3483,7 @@ fn paint_slide_widget(widget: &gtk4::Widget, traj: Trajectory, factor: f64) {
 /// same Y. Corner (top-left, bottom-right, …) only decides which side is
 /// nearer — cards never slide up or down.
 fn card_slide_offscreen(tx: f64, ty: f64, w: f64, screen_w: f64) -> (f64, f64) {
-    let mid = tx + w * 0.5;
-    let sx = if mid < screen_w * 0.5 {
-        -w - 40.0
-    } else {
-        screen_w + 40.0
-    };
-    (sx, ty)
+    (crate::overlay_slide::offscreen_x(tx, w, screen_w), ty)
 }
 
 pub(crate) fn raise_canvas_child(canvas: &Fixed, widget: &impl gtk4::glib::object::IsA<gtk4::Widget>) {
@@ -4137,6 +4135,127 @@ mod tests {
         assert_eq!((corner.data.borrow().x, corner.data.borrow().y), (350, 210));
         assert_at(icon.container.upcast_ref(), (862.0, 562.0));
         assert_at(note.container.upcast_ref(), (690.0, 460.0));
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn slide_takes_plugin_cards_docks_panels_and_full_screen_along() {
+        crate::gtk_test::run_in_child_process("window::tests::slide_takes_plugins_along_inner");
+    }
+
+    /// Hiding and showing slides a plugin's card, dock, panel and full-screen
+    /// surface out and in with the terminal cards: off the nearer left or
+    /// right edge, and back to where they were.
+    #[test]
+    fn slide_takes_plugins_along_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-slide-plugins-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        let kit = root.join("plugins/kit");
+        std::fs::create_dir_all(&kit).unwrap();
+        std::fs::write(kit.join("plugin.json"), serde_json::json!({"id": "kit", "api": 1, "surfaces": [
+            {"id": "side", "slot": "dock.right", "qml": "Part.qml", "size": 64},
+            {"id": "board", "slot": "card", "qml": "Part.qml", "size": 300, "height": 200},
+            {"id": "win", "slot": "panel", "qml": "Part.qml", "size": 240, "height": 160},
+            {"id": "full", "slot": "fullscreen", "qml": "Part.qml"}
+        ]}).to_string()).unwrap();
+        std::fs::write(kit.join("Part.qml"), "import QtQuick\nRectangle { color: \"teal\" }\n").unwrap();
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.SlidePluginsTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let mut state = AppState::default();
+        state.layout_size = Some((900, 600));
+        state.terminals.push(serde_json::from_value(serde_json::json!({"id":"sd_term_a", "session_name":"sd_term_a",
+            "agent_type":"shell", "command":"/bin/false", "x":100, "y":100, "width":400, "height":300, "created_at":0.0})).unwrap());
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        window.window.set_default_size(900, 600);
+        window.window.present();
+        let pump_until = |what: &str, done: &dyn Fn() -> bool| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while !done() && std::time::Instant::now() < deadline {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(done(), "timed out: {what}");
+        };
+        pump_until("the window's size", &|| allocated_size(&window.window) == Some((900, 600)));
+        window.slide.gen.set(window.slide.gen.get().wrapping_add(1));
+        window.slide.running.set(false);
+        window.paint_slide(1.0);
+        let slots = crate::plugin_ui::slots::get().expect("plugin slots");
+        slots.open_card("kit", "board", "").unwrap();
+        slots.open_panel("kit", "win").unwrap();
+        let root_widget = window.window.clone().upcast::<gtk4::Widget>();
+        let one = |class: &str| crate::gtk_test::find_all::<gtk4::Widget>(&root_widget, class).pop().unwrap_or_else(|| panic!("no .{class}"));
+        let terminal = window.any_terminal_card("sd_term_a").unwrap().container.clone().upcast::<gtk4::Widget>();
+        // The plugin's panel, not another kind waiting hidden.
+        let panel = crate::gtk_test::find_all::<gtk4::Widget>(&root_widget, "harness-panel").into_iter()
+            .find(|p| !crate::gtk_test::find_all::<gtk4::Widget>(p, "plugin-surface").is_empty())
+            .expect("the plugin's panel");
+        let parts = [("terminal", terminal), ("plugin card", one("plugin-card")), ("dock", one("plugin-dock-edge")), ("panel", panel)];
+        let x = |widget: &gtk4::Widget| widget.compute_bounds(&window.window).map(|b| (b.x().round() as i32, b.width().round() as i32));
+        pump_until("everything laid out", &|| parts.iter().all(|(_, w)| x(w).is_some_and(|(_, width)| width > 0)));
+        // Where they rest once the layout stops changing: a surface whose QML
+        // host is missing shows its error a moment later, at another size.
+        let mut rest: Vec<(i32, i32)> = Vec::new();
+        for _ in 0..60 {
+            for _ in 0..10 {
+                while glib::MainContext::default().iteration(false) {}
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let now: Vec<(i32, i32)> = parts.iter().map(|(_, w)| x(w).unwrap()).collect();
+            if now == rest { break; }
+            rest = now;
+        }
+        assert!(rest[2].0 >= 900 - 64 - 16, "the dock is at the right edge: {:?}", rest[2]);
+        // A terminal's path uses its saved width, which Broadway's fonts
+        // make narrower than drawn: it is gone once it is past the edge.
+        let gone = |(name, w): &(&str, gtk4::Widget)| x(w).is_some_and(|(x, width)| {
+            x >= 900 || if *name == "terminal" { x < 0 } else { x + width <= 0 }
+        });
+
+        // Hidden: every one of them off screen, by its nearer edge.
+        window.ensure_slide_trajectories(true);
+        window.paint_slide(0.0);
+        pump_until("all off screen", &|| parts.iter().all(gone));
+        for ((name, widget), (rest_x, width)) in parts.iter().zip(&rest) {
+            let (now, _) = x(widget).unwrap();
+            let right = rest_x + width / 2 >= 450;
+            assert_eq!(now >= 900, right, "{name} left by the wrong edge: rest {rest_x}, now {now}");
+        }
+        // Halfway, they are on their way.
+        window.paint_slide(0.5);
+        pump_until("half way", &|| parts.iter().zip(&rest).all(|((_, w), r)| x(w).is_some_and(|now| now.0 != r.0 && now.0 < 900 && now.0 + now.1 > 0)));
+        // Shown: all back where they were.
+        window.paint_slide(1.0);
+        // Back at the same x; a terminal's width follows its status text.
+        let back = || parts.iter().zip(&rest).all(|((_, w), r)| x(w).is_some_and(|now| now.0 == r.0));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !back() && std::time::Instant::now() < deadline {
+            while glib::MainContext::default().iteration(false) {}
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let now: Vec<(&str, Option<(i32, i32)>)> = parts.iter().map(|(name, w)| (*name, x(w))).collect();
+        assert!(back(), "not back where they were: rest {rest:?}, now {now:?}");
+
+        // A full-screen surface leaves by the right edge and comes back.
+        slots.open_fullscreen("kit", "full").unwrap();
+        let full = one("plugin-fullscreen");
+        pump_until("full screen laid out", &|| x(&full) == Some((0, 900)));
+        window.paint_slide(0.0);
+        pump_until("full screen off", &|| x(&full).is_some_and(|(x, _)| x >= 900));
+        window.paint_slide(1.0);
+        pump_until("full screen back", &|| x(&full) == Some((0, 900)));
+        slots.close_fullscreen();
         window.window.close();
         let _ = std::fs::remove_dir_all(root);
     }
