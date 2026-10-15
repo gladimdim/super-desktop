@@ -2,9 +2,10 @@
 //!
 //! The shortcuts are Omarchy's terminal ones: Ctrl+Shift+C/V, and
 //! Ctrl+Insert/Shift+Insert, which Omarchy's Super+C/Super+V send to a
-//! terminal. Super+V sends Ctrl+V instead when the window under the overlay is
-//! not a terminal, so a harness card pastes text on Ctrl+V too, and a shell
-//! card does when that Ctrl+V comes from Super+V.
+//! terminal. Super+C/V send Ctrl+C/V instead when the window under the overlay
+//! is not a terminal, so a harness card pastes text on Ctrl+V too, a shell card
+//! does when that Ctrl+V comes from Super+V, and a Ctrl+C from Super+C copies
+//! instead of interrupting the program.
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -26,14 +27,7 @@ fn action(
     paste_on_control_v: bool,
     text_available: impl Fn() -> bool,
 ) -> Option<Action> {
-    // Ignore Caps Lock and pointer-button state, but never steal Alt/Super chords.
-    let modifiers = modifiers
-        & (gdk::ModifierType::CONTROL_MASK
-            | gdk::ModifierType::SHIFT_MASK
-            | gdk::ModifierType::ALT_MASK
-            | gdk::ModifierType::SUPER_MASK
-            | gdk::ModifierType::HYPER_MASK
-            | gdk::ModifierType::META_MASK);
+    let modifiers = chord(modifiers);
     #[cfg(target_os = "macos")]
     if modifiers == gdk::ModifierType::META_MASK || modifiers == gdk::ModifierType::SUPER_MASK {
         match key {
@@ -63,6 +57,26 @@ fn action(
     }
 }
 
+/// Ignore Caps Lock and pointer-button state, but never steal Alt/Super chords.
+fn chord(modifiers: gdk::ModifierType) -> gdk::ModifierType {
+    modifiers
+        & (gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::SUPER_MASK
+            | gdk::ModifierType::HYPER_MASK
+            | gdk::ModifierType::META_MASK)
+}
+
+/// Omarchy's Super+C over a window that is not a terminal arrives as Ctrl+C
+/// with Super held (`HeldKeys::from_super`). Typed through, that Ctrl+C would
+/// interrupt the card's agent, and two in a row quit Claude Code.
+fn super_copy(key: gdk::Key, modifiers: gdk::ModifierType) -> Option<Action> {
+    let control_c = matches!(key, gdk::Key::c | gdk::Key::C)
+        && chord(modifiers) == gdk::ModifierType::CONTROL_MASK;
+    control_c.then_some(Action::Copy)
+}
+
 /// The key a shortcut means in any layout. A non-Latin layout turns Ctrl+V
 /// into Ctrl+м (Ukrainian), so a letter outside ASCII stands for the Latin
 /// letter on the same physical key in another layout, as in GTK's own
@@ -80,9 +94,10 @@ fn shortcut_key(key: gdk::Key, same_key: impl FnOnce() -> Vec<gdk::Key>) -> gdk:
         .unwrap_or(key)
 }
 
-/// Which physical modifier keys the terminal saw go down. Omarchy's Super+V
-/// sends Ctrl+V with Super still physically held and no Control key pressed,
-/// which tells it apart from a Ctrl+V typed for Vim or the shell.
+/// Which physical modifier keys the terminal saw go down. Omarchy's Super+C
+/// and Super+V send Ctrl+C and Ctrl+V with Super still physically held and no
+/// Control key pressed, which tells them apart from a Ctrl+C or Ctrl+V typed
+/// for the agent, Vim or the shell.
 #[derive(Default)]
 struct HeldKeys {
     control: Cell<bool>,
@@ -103,7 +118,7 @@ impl HeldKeys {
         self.super_.set(false);
     }
 
-    fn super_v(&self) -> bool {
+    fn from_super(&self) -> bool {
         self.super_.get() && !self.control.get()
     }
 }
@@ -147,8 +162,11 @@ pub fn install(terminal: &vte4::Terminal, paste_on_control_v: bool) -> gtk4::Eve
         // selections. Check formats only: never read or replace the clipboard
         // on key routing.
         let text_available = || has_text(&terminal.clipboard().formats());
-        let paste_on_control_v = paste_on_control_v || held.super_v();
-        let Some(action) = action(key, modifiers, paste_on_control_v, text_available) else {
+        let from_super = held.from_super();
+        let paste_on_control_v = paste_on_control_v || from_super;
+        let Some(action) = action(key, modifiers, paste_on_control_v, text_available)
+            .or_else(|| super_copy(key, modifiers).filter(|_| from_super))
+        else {
             return glib::Propagation::Proceed;
         };
         match action {
@@ -266,19 +284,34 @@ mod tests {
     #[test]
     fn clipboard_super_v_pastes_in_shell_cards() {
         let held = HeldKeys::default();
-        assert!(!held.super_v());
+        assert!(!held.from_super());
         held.update(gdk::Key::Super_L, true);
-        assert!(held.super_v());
+        assert!(held.from_super());
         held.update(gdk::Key::Control_L, true);
-        assert!(!held.super_v(), "a real Ctrl+V while Super is held");
+        assert!(!held.from_super(), "a real Ctrl+V while Super is held");
         held.update(gdk::Key::Control_L, false);
         held.update(gdk::Key::v, false);
-        assert!(held.super_v());
+        assert!(held.from_super());
         held.update(gdk::Key::Super_L, false);
-        assert!(!held.super_v());
+        assert!(!held.from_super());
         held.update(gdk::Key::Super_R, true);
         held.clear();
-        assert!(!held.super_v(), "focus loss forgets held keys");
+        assert!(!held.from_super(), "focus loss forgets held keys");
+    }
+
+    /// Omarchy's Super+C over a browser sends Ctrl+C with Super held: a copy,
+    /// whatever else is held, never the agent's interrupt.
+    #[test]
+    fn clipboard_super_c_copies_instead_of_interrupting() {
+        let ctrl = gdk::ModifierType::CONTROL_MASK;
+        for key in [gdk::Key::c, gdk::Key::C] {
+            assert_eq!(super_copy(key, ctrl), Some(Action::Copy));
+        }
+        assert_eq!(super_copy(gdk::Key::c, ctrl | gdk::ModifierType::LOCK_MASK), Some(Action::Copy));
+        assert_eq!(super_copy(gdk::Key::c, ctrl | gdk::ModifierType::ALT_MASK), None);
+        assert_eq!(super_copy(gdk::Key::c, gdk::ModifierType::empty()), None);
+        assert_eq!(super_copy(gdk::Key::v, ctrl), None);
+        assert_eq!(super_copy(gdk::Key::x, ctrl), None);
     }
 
     /// With the Ukrainian layout active the V key arrives as м, and with Shift
@@ -446,6 +479,24 @@ mod tests {
         release(&shell_keys, gdk::Key::v);
         release(&shell_keys, gdk::Key::Super_L);
         assert!(!press(&shell_keys, gdk::Key::v, gdk::ModifierType::CONTROL_MASK));
+        // Omarchy's Super+C over a browser: Ctrl+C with Super held copies the
+        // selection, and without one it still never interrupts the agent.
+        terminal.select_all();
+        assert!(!press(&keys, gdk::Key::Super_L, gdk::ModifierType::empty()));
+        assert!(press(&keys, gdk::Key::c, gdk::ModifierType::CONTROL_MASK));
+        let read = || context.block_on(clipboard.read_text_future()).unwrap().unwrap();
+        assert_eq!(read(), copied);
+        terminal.unselect_all();
+        clipboard.set_text("kept");
+        assert!(press(&keys, gdk::Key::c, gdk::ModifierType::CONTROL_MASK));
+        assert_eq!(read(), "kept", "an empty selection keeps the clipboard");
+        release(&keys, gdk::Key::c);
+        // A Ctrl+C typed with the Control key, Super held or not, interrupts.
+        assert!(!press(&keys, gdk::Key::Control_L, gdk::ModifierType::SUPER_MASK));
+        assert!(!press(&keys, gdk::Key::c, gdk::ModifierType::CONTROL_MASK));
+        release(&keys, gdk::Key::Control_L);
+        release(&keys, gdk::Key::Super_L);
+        assert!(!press(&keys, gdk::Key::c, gdk::ModifierType::CONTROL_MASK));
         window.close();
     }
 }
