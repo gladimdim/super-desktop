@@ -177,9 +177,11 @@ pub fn open() {
             match result {
                 Ok(dir) => {
                     LAST_HARNESS.with(|last| *last.borrow_mut() = Some(harness_id));
-                    show(&format!("{harness_name} is building “{id}” in {}. The request is typed as soon as it is ready; the plugin updates on screen with every save.", dir.display()), false);
-                    // Leave the card in view: the form has done its job.
-                    gtk4::glib::timeout_add_local_once(std::time::Duration::from_secs(4), || PANELS.with(|p| p.close(KEY)));
+                    super_desktop::plugins::paths::append_log(&id, &format!("✨ Create Plugin: {harness_name} opened in {}", dir.display()));
+                    // The form has done its job: the agent's card takes over,
+                    // in view. After this click handler returns: closing
+                    // removes the button.
+                    gtk4::glib::idle_add_local_once(|| PANELS.with(|p| p.close(KEY)));
                 }
                 Err(e) => show(&e, true),
             }
@@ -271,6 +273,15 @@ mod tests {
         assert!(agents.contains("A Pomodoro timer in the top bar"));
         assert!(dir.join(".claude/skills/super-desktop-plugin/SKILL.md").is_file());
         assert_eq!(preferred_harness().as_deref(), Some("claude"));
+        // The form closes at once (within a second): the agent's card is in view.
+        let form_open = || crate::gtk_test::descendants(overlay.upcast_ref()).iter()
+            .filter_map(|w| w.clone().downcast::<gtk4::Button>().ok())
+            .any(|b| b.label().as_deref() == Some("✨ Create"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while form_open() && std::time::Instant::now() < deadline {
+            crate::gtk_test::pump(20);
+        }
+        assert!(!form_open(), "the Create Plugin form stayed open after Create");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
