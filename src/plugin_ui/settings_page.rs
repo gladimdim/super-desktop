@@ -590,6 +590,69 @@ mod tests {
     }
 
     #[test]
+    fn plugins_settings_section_passes_an_unused_wheel_to_the_page() {
+        if super_desktop::plugins::paths::qml_host_binary().is_none() {
+            eprintln!("skipped: sd-qml-host is not built (scripts/build-qml-host.sh debug)");
+            return;
+        }
+        crate::gtk_test::run_in_child_process("plugin_ui::settings_page::tests::wheel_inner");
+    }
+
+    /// The wheel over a settings section that does not scroll (a form)
+    /// scrolls the page; over one that does (a long list), only the list.
+    #[test]
+    fn wheel_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-plugins-wheel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let dir = root.join("plugins/wheel");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Form.qml"), "import QtQuick\nRectangle { color: \"gold\"; MouseArea { anchors.fill: parent; onClicked: {} } }\n").unwrap();
+        std::fs::write(dir.join("List.qml"), "import QtQuick\nListView { model: 200; delegate: Rectangle { width: 100; height: 20; color: index % 2 ? \"red\" : \"blue\" } }\n").unwrap();
+        gtk4::init().unwrap();
+        let surface = |qml: &str| QmlSurface::new(SurfaceSpec {
+            plugin_id: "wheel".into(), plugin_name: "Wheel".into(), surface_id: qml.into(), instance: String::new(),
+            qml: dir.join(qml), dir: dir.clone(),
+        });
+        let (form, list) = (surface("Form.qml"), surface("List.qml"));
+        let content = gtk4::Box::new(Orientation::Vertical, 0);
+        for qml in [&form, &list] {
+            qml.widget().set_size_request(200, 120);
+            content.append(qml.widget());
+        }
+        let tall = gtk4::Box::new(Orientation::Vertical, 0);
+        tall.set_size_request(-1, 2000);
+        content.append(&tall);
+        let page = gtk4::ScrolledWindow::new();
+        page.set_child(Some(&content));
+        let window = gtk4::Window::new();
+        window.set_default_size(300, 400);
+        window.set_child(Some(&page));
+        window.present();
+        let drawn = |qml: &QmlSurface| crate::gtk_test::descendants(qml.widget().upcast_ref()).into_iter()
+            .find_map(|w| w.downcast::<SurfaceView>().ok())
+            .is_some_and(|v| v.imp().texture.borrow().is_some());
+        crate::gtk_test::pump_until("both sections", || drawn(&form) && drawn(&list));
+        let value = || page.vadjustment().value();
+        assert_eq!(value(), 0.0);
+        form.send_wheel(50.0, 50.0, 1.0);
+        crate::gtk_test::pump_until("the page to scroll", || value() > 0.0);
+        let after_form = value();
+        // GTK's step for a notch: page height ^ 2/3.
+        let step = page.vadjustment().page_size().powf(2.0 / 3.0);
+        assert!((after_form - step).abs() < 1.0, "{after_form} vs {step}");
+        list.send_wheel(50.0, 50.0, 1.0);
+        crate::gtk_test::pump(600);
+        assert_eq!(value(), after_form, "the list keeps the wheel it uses");
+        drop((form, list));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn page_inner() {
         if !crate::gtk_test::is_child() {
             return;

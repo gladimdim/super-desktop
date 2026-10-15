@@ -18,6 +18,9 @@ pub enum FromHost {
     Call { id: u64, method: String, params: Value },
     /// QML asked for another pointer shape (a Qt::CursorShape value).
     Cursor { shape: i64 },
+    /// No QML item took a `scroll` (the overlay's own deltas, echoed): what
+    /// is around the surface may scroll instead.
+    ScrollIgnored { dx: f64, dy: f64 },
     Unknown,
 }
 
@@ -46,6 +49,10 @@ pub fn parse(bytes: &[u8]) -> FromHost {
             params: value.get("params").cloned().unwrap_or(Value::Null),
         },
         "cursor" => FromHost::Cursor { shape: int("shape") },
+        "scrollIgnored" => {
+            let float = |key: &str| value.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+            FromHost::ScrollIgnored { dx: float("dx"), dy: float("dy") }
+        }
         _ => FromHost::Unknown,
     }
 }

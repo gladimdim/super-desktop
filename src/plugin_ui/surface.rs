@@ -110,6 +110,9 @@ struct Inner {
     restart: RefCell<Option<glib::SourceId>>,
     disposed: Cell<bool>,
     keeps_escape: Cell<bool>,
+    /// Whether the last wheel turn came in notches (a mouse) or pixels (a
+    /// touchpad), for scrolling the page when the QML does not use it.
+    wheel_notches: Cell<bool>,
 }
 
 pub struct QmlSurface {
@@ -198,6 +201,7 @@ impl QmlSurface {
             restart: RefCell::new(None),
             disposed: Cell::new(false),
             keeps_escape: Cell::new(false),
+            wheel_notches: Cell::new(true),
         });
         LIVE.with(|live| live.borrow_mut().push(Rc::downgrade(&inner)));
         Inner::bind(&inner);
@@ -215,6 +219,14 @@ impl QmlSurface {
     }
 
     /// What the view does when the top bar takes a press away.
+    /// A mouse wheel turn of `dy` notches at (x, y), as the scroll
+    /// controller sends it.
+    #[cfg(test)]
+    pub fn send_wheel(&self, x: f64, y: f64, dy: f64) {
+        self.inner.wheel_notches.set(true);
+        self.inner.send(&protocol::scroll(x, y, 0.0, dy, 0));
+    }
+
     #[cfg(test)]
     pub fn take_press(&self, button: u32) {
         self.inner.press_taken(button);
@@ -381,6 +393,7 @@ impl Inner {
             move |c, dx, dy| {
                 if let Some(inner) = weak.upgrade() {
                     let (x, y) = inner.pointer.get();
+                    inner.wheel_notches.set(c.unit() == gdk::ScrollUnit::Wheel);
                     inner.send(&protocol::scroll(x, y, dx, dy, mods(c.upcast_ref())));
                 }
                 glib::Propagation::Stop
@@ -636,7 +649,27 @@ impl Inner {
             FromHost::Cursor { shape } => {
                 self.view.set_cursor_from_name(protocol::cursor_name(shape));
             }
+            FromHost::ScrollIgnored { dx, dy } => self.scroll_around(dx, dy),
             FromHost::Unknown => {}
+        }
+    }
+
+    /// The QML did not use a wheel turn: the scrolled page the surface sits
+    /// in (a settings section in Settings) scrolls as if the pointer were
+    /// on the page, by GTK's own step for a notch.
+    fn scroll_around(&self, dx: f64, dy: f64) {
+        let Some(scroller) = self.view.ancestor(gtk4::ScrolledWindow::static_type()).and_downcast::<gtk4::ScrolledWindow>() else { return };
+        let (horizontal, vertical) = (scroller.hadjustment(), scroller.vadjustment());
+        let movable = |a: &gtk4::Adjustment| a.upper() - a.page_size() > a.lower();
+        // A row that only scrolls sideways takes the wheel sideways.
+        let (dx, dy) = if dx == 0.0 && !movable(&vertical) && movable(&horizontal) { (dy, 0.0) } else { (dx, dy) };
+        for (adjustment, delta) in [(horizontal, dx), (vertical, dy)] {
+            if delta == 0.0 {
+                continue;
+            }
+            let step = if self.wheel_notches.get() { adjustment.page_size().powf(2.0 / 3.0) } else { 1.0 };
+            // set_value keeps it within the page.
+            adjustment.set_value(adjustment.value() + delta * step);
         }
     }
 

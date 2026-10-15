@@ -868,7 +868,13 @@ private:
             const QPointF pos(m["x"].toDouble(), m["y"].toDouble());
             const QPoint angle(std::lround(-m["dx"].toDouble() * 120), std::lround(-m["dy"].toDouble() * 120));
             QWheelEvent ev(pos, pos, QPoint(), angle, m_buttons, modifiers(m), Qt::NoScrollPhase, false);
+            ev.setAccepted(false);
             QCoreApplication::sendEvent(win, &ev);
+            // Nothing in the QML used it (no Flickable, ListView or wheel
+            // handler under the pointer): the overlay may scroll the page
+            // around the surface instead.
+            if (!ev.isAccepted())
+                sendMessage(QJsonObject{{"t", "scrollIgnored"}, {"dx", m["dx"]}, {"dy", m["dy"]}});
         } else if (t == "key") {
             const bool press = m["kind"].toString() == "press";
             QKeyEvent ev(press ? QEvent::KeyPress : QEvent::KeyRelease, m["key"].toInt(), modifiers(m),
