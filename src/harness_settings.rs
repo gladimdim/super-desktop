@@ -59,6 +59,8 @@ enum SettingsPage {
     Editor,
     Mcp,
     Plugins,
+    /// One plugin's page, titled with its name.
+    PluginDetail,
     SleepLock,
     Updates,
     Connections(ConnectionPage),
@@ -71,6 +73,7 @@ impl SettingsPage {
         match self {
             Self::Home => ("⚙", "Settings", "Choose a section"),
             Self::Plugins => ("🧩", "Plugins", "Widgets, docks and panels made by AI agents"),
+            Self::PluginDetail => ("🧩", "Plugin", "Its settings, actions and log"),
             Self::Shortcut => ("⌨", "Keyboard shortcut", "Show or hide SUPER DESKTOP"),
             Self::Harnesses => ("⌘", "Harness launchers", "Choose what appears in the top bar"),
             Self::CustomHarness => ("＋", "Add a harness", "Icon · name · executable · arguments"),
@@ -2186,8 +2189,8 @@ pub fn build_harness_settings_panel(
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
 
     let plugins_root = settings_page_root();
-    // Refreshes itself whenever it is shown and when plugins change.
-    let _ = crate::plugin_ui::settings_page::build(&plugins_root);
+    let plugin_detail_root = settings_page_root();
+    let plugin_title: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
 
     let updates_root = settings_page_root();
     let check_updates = build_updates_page(&updates_root, &home.updates_chip);
@@ -2217,6 +2220,18 @@ pub fn build_harness_settings_panel(
         }),
     );
     let connection_pages = Rc::new(connection_pages);
+    // Refreshes itself whenever it is shown and when plugins change; a row
+    // opens the plugin's own page.
+    let _ = crate::plugin_ui::settings_page::build(&plugins_root, &plugin_detail_root, Rc::new({
+        let (nav_slot, plugin_title) = (Rc::clone(&nav_slot), Rc::clone(&plugin_title));
+        move |name: &str| {
+            *plugin_title.borrow_mut() = name.to_owned();
+            let nav = nav_slot.borrow().upgrade();
+            if let Some(nav) = nav {
+                nav(SettingsPage::PluginDetail);
+            }
+        }
+    }));
 
     // Every page, in the order the panel holds them; the hub shows first.
     let mut views: Vec<(SettingsPage, gtk4::Widget)> = vec![
@@ -2234,6 +2249,7 @@ pub fn build_harness_settings_panel(
         (SettingsPage::SleepLock, page_scroll(&sleep_root).upcast()),
         (SettingsPage::Updates, page_scroll(&updates_root).upcast()),
         (SettingsPage::HarnessArgs, page_scroll(&args.root).upcast()),
+        (SettingsPage::PluginDetail, page_scroll(&plugin_detail_root).upcast()),
     ]);
     let pages = Box::new(Orientation::Vertical, 0);
     pages.add_css_class("harness-pages");
@@ -2255,6 +2271,7 @@ pub fn build_harness_settings_panel(
         let subtitle = subtitle.clone();
         let editing_custom = Rc::clone(&custom.form.editing);
         let editing_args = Rc::clone(&args.editing);
+        let plugin_title = Rc::clone(&plugin_title);
         let current_page = Rc::clone(&current_page);
         Rc::new(move |page| {
             current_page.set(page);
@@ -2269,6 +2286,7 @@ pub fn build_harness_settings_panel(
             btn_back.set_visible(page != SettingsPage::Home);
             btn_back.set_tooltip_text(Some(match page {
                 SettingsPage::CustomHarness | SettingsPage::HarnessArgs => "Back to harness launchers",
+                SettingsPage::PluginDetail => "Back to plugins",
                 SettingsPage::Connections(ConnectionPage::Invite) => "Back to Add a device",
                 SettingsPage::Connections(ConnectionPage::Overview) => "Back to settings",
                 SettingsPage::Connections(_) => "Back to Connections",
@@ -2283,6 +2301,7 @@ pub fn build_harness_settings_panel(
                     let name = editing_args.get().map_or("Harness", |key| crate::tmux::get_agent_config(key).name);
                     title.set_label(&format!("{name} parameters"));
                 }
+                SettingsPage::PluginDetail => title.set_label(&plugin_title.borrow()),
                 _ => title.set_label(heading),
             }
             subtitle.set_label(summary);
@@ -2332,6 +2351,7 @@ pub fn build_harness_settings_panel(
         let current_page = Rc::clone(&current_page);
         move |_| match current_page.get() {
             SettingsPage::CustomHarness | SettingsPage::HarnessArgs => nav(SettingsPage::Harnesses),
+            SettingsPage::PluginDetail => nav(SettingsPage::Plugins),
             SettingsPage::Connections(page) if page.parent().is_some() => {
                 nav(SettingsPage::Connections(page.parent().unwrap_or(ConnectionPage::Overview)))
             }
@@ -2921,7 +2941,8 @@ mod tests {
         let panel = inert_panel(Rc::clone(&state));
         find_all::<Button>(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
         let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
-        let (harnesses, args_page) = (pages[2].clone(), pages.last().unwrap().clone());
+        // The parameters page comes just before the plugin page, which is last.
+        let (harnesses, args_page) = (pages[2].clone(), pages[pages.len() - 2].clone());
         let entry = find_all::<gtk4::Widget>(&panel.widget, "harness-args-entry")[0].clone()
             .downcast::<gtk4::Entry>().unwrap();
         let label = |class: &str| find_all::<gtk4::Widget>(&panel.widget, class)[0].clone().downcast::<Label>().unwrap();
@@ -3091,6 +3112,66 @@ mod tests {
     }
 
     #[test]
+    fn settings_plugin_row_opens_its_page() {
+        crate::gtk_test::run_in_child_process("harness_settings::tests::settings_plugin_row_opens_its_page_inner");
+    }
+
+    /// Settings → Plugins: a row opens the plugin's own page in the same
+    /// panel, titled with its name, and ← goes back to the list.
+    #[test]
+    fn settings_plugin_row_opens_its_page_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("sd-settings-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
+        std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("state"));
+        let dir = root.join("plugins/clock");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plugin.json"), serde_json::json!({
+            "id": "clock", "name": "Big Clock", "description": "A clock", "api": 1, "version": "2.0.1", "enabled": false,
+            "surfaces": [{"id": "w", "slot": "toolbar.item", "qml": "W.qml"}]
+        }).to_string()).unwrap();
+        std::fs::write(dir.join("W.qml"), "import QtQuick\nItem {}\n").unwrap();
+        let _ = gtk4::init();
+        let panel = build_harness_settings_panel(
+            Rc::new(RefCell::new(AppState::default())),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        let overlay = gtk4::Overlay::new();
+        overlay.set_child(Some(&panel.widget));
+        let slots = crate::plugin_ui::slots::Slots::install(&overlay, 46);
+        let window = gtk4::Window::new();
+        window.set_default_size(700, 700);
+        window.set_child(Some(&overlay));
+        window.present();
+        (panel.refresh)();
+        find_all::<Button>(&panel.widget, "settings-plugins-entry").pop().expect("a Plugins entry").emit_clicked();
+        assert_eq!(title_text(&panel.widget), "Plugins");
+        let row = || find_all::<Button>(&panel.widget, "plugin-row-open").into_iter().find(|b| b.is_mapped());
+        crate::gtk_test::pump_until("its row", || row().is_some());
+        row().unwrap().emit_clicked();
+        crate::gtk_test::pump(50);
+        assert_eq!(title_text(&panel.widget), "Big Clock");
+        let names = find_all::<Label>(&panel.widget, "plugin-detail-name");
+        assert!(names.iter().any(|l| l.is_mapped() && l.text() == "Big Clock"));
+        let back = find_all::<Button>(&panel.widget, "term-btn").into_iter()
+            .find(|b| b.label().as_deref() == Some("←")).unwrap();
+        assert!(back.is_mapped());
+        back.emit_clicked();
+        crate::gtk_test::pump(50);
+        assert_eq!(title_text(&panel.widget), "Plugins");
+        assert!(row().is_some(), "back on the list");
+        drop(slots);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn test_panel_gtk_structure() {
         // GTK may only be used from one thread per process, so the widget
         // assertions run in a child process (see `crate::gtk_test`).
@@ -3131,8 +3212,8 @@ mod tests {
         let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            18,
-            "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + updates + harness parameters page"
+            19,
+            "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + updates + harness parameters page + a plugin's page"
         );
         let sections: Vec<usize> = pages
             .iter()
@@ -3140,8 +3221,8 @@ mod tests {
             .collect();
         // hub, shortcut, harnesses, custom, top bar, SD Editor, MCP, plugins,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
-        // updates, harness parameters
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1]);
+        // updates, harness parameters, a plugin's page
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1, 0]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
         assert_eq!(count_class(&panel.widget, "launcher-section-title"), 21);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);

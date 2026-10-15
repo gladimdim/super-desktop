@@ -92,6 +92,16 @@ pub fn css(theme: &crate::theme::OmarchyTheme) -> String {
 .plugin-card-preview {{ background-color: {preview_bg}; }}
 .plugin-card-placeholder {{ font-size: 34px; opacity: 0.35; }}
 .plugin-thumb {{ border-radius: 8px; border: 1px solid {border}; }}
+.plugin-row {{ background-color: {card_solid}; background-image: linear-gradient({card_bg}, {card_bg}); border: 1px solid {card_border}; border-radius: 10px; padding: 0 10px 0 0; }}
+.plugin-row:hover {{ border-color: {accent_line}; }}
+.plugin-row-open {{ background: none; box-shadow: none; border: none; border-radius: 10px; padding: 6px 4px 6px 8px; min-height: 0; }}
+.plugin-row-off .plugin-thumb, .plugin-row-off .plugin-row-icon, .plugin-row-off .plugin-row-name {{ opacity: 0.55; }}
+.plugin-row-icon {{ font-size: 18px; }}
+.plugin-row-name {{ color: {foreground}; font-size: 12.5px; font-weight: 800; }}
+.plugin-row-version {{ color: {text_hint}; font-size: 10.5px; font-weight: 600; }}
+.plugin-row-desc {{ color: {text_soft}; font-size: 11px; }}
+.plugin-row-chevron {{ color: {text_hint}; font-size: 18px; margin: 0 2px; }}
+.plugin-detail-name {{ color: {foreground}; font-size: 15px; font-weight: 800; }}
 .plugin-card-body {{ padding: 12px 14px 14px 14px; }}
 .plugin-card-name {{ color: {foreground}; font-size: 13.5px; font-weight: 800; }}
 .plugin-card-text {{ color: {text_soft}; font-size: 11.5px; }}

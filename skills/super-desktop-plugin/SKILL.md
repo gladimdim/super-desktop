@@ -76,7 +76,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | --- | --- |
 | `id` | Lowercase letters, digits, `-`; 1–48 characters; **equal to the folder name**. |
 | `api` | `1`. |
-| `name`, `description` | Shown to the user. |
+| `name`, `description` | Shown to the user. Settings → Plugins shows the description on one line of the plugin's row, so lead with a short sentence. |
 | `version` | Optional: the plugin's version, `"1.0.0"`. Shown in Settings → Plugins; raise it with each release. |
 | `minHost` | Optional: the oldest SUPER DESKTOP it works with, `"1.6.0"`. An older SUPER DESKTOP says so instead of failing on the QML. Needed to publish. |
 | `categories` | Optional, up to 5 lowercase words: `["productivity", "time"]`. Discover groups plugins by them. |
@@ -101,7 +101,7 @@ Never ask the user to restart SUPER DESKTOP for a plugin change.
 | `dock.left`, `dock.right` | A vertical toolbar at that edge, from below the top bar to the bottom of the screen. Several docks on one edge sit side by side, ordered by plugin id. Arrange keeps cards clear of them. | 32–480, default 64 | the screen's |
 | `toolbar.item` | An item in the top bar, after the agent launchers. The bar's height (about 26–50 px, it follows the user's top-bar size). Keep it short: the launcher row scrolls when full. The user drags toolbar items to rearrange them: a press that moves more than 8 px belongs to the bar, and the item sees the pointer move off it and the press released there, so it is no click. Use clicks, not drags, in a toolbar item. | 24–240, default 96 | the bar's |
 | `panel` | A floating card the user can move, resize and close (✕). Not shown until opened with `sd.call("panel.open"/"panel.toggle", {surface})`, usually from a `toolbar.item` or dock button, or from Settings → Plugins. Runs only while open; it stays open while SUPER DESKTOP is hidden, until the user closes it. | 200–1600, default 480 | 120–1200, default 360 |
-| `settings.page` | A section under the plugin in Settings → Plugins, as wide as the page. Runs only while that page is shown. Use it for options, saved with `sd.setValue`. | ignored | 60–1200, default 240 |
+| `settings.page` | A section on the plugin's own page in Settings → Plugins (a click on its row opens it), as wide as the page. Runs only while that page is shown and the plugin is on. Use it for options, saved with `sd.setValue`. | ignored | 60–1200, default 240 |
 | `card` | A card on the desktop next to notes and terminals, with a header (title, ✕). The user drags and resizes it; Arrange places it; it slides in and out with the other cards. Opened with `sd.call("card.open"/"card.toggle", {surface})` or from Settings → Plugins; reopens where it was after a restart if it was open. Games, tools and terminals go here. | 200–4000, default 640 | 120–3000, default 420 |
 | `fullscreen` | Covers the whole overlay until **Esc** (or `fullscreen.close`). Opened with `sd.call("fullscreen.open", {surface})`. One at a time. Games, screensavers, presentations. | the screen's | the screen's |
 | `popup` | A small box with no header, like a menu: below the `toolbar.item` that opened it, beside a dock (inside the screen, flipped when there is no room), or below the point the caller gives. Opened with `sd.call("popup.open"/"popup.toggle", {surface})`. It opens at the size in plugin.json; `popup.resize` fits it to its content. It gets the keyboard at once; a click outside it, **Esc**, hiding the overlay or `popup.close` closes it. One popup at a time in the whole overlay. Runs only while open. Menus, pickers, quick forms, lists. | 120–800, default 280 | 40–800, default 240 |
@@ -134,7 +134,7 @@ Connections {
 ```
 
 They are on this PC's own cards only (not on another PC's, nor on the
-phone). Settings → Plugins lists them under the plugin.
+phone). The plugin's page in Settings → Plugins lists them.
 
 ## QML rules
 
@@ -515,8 +515,8 @@ draws `preview.png` at the top of the plugin folder: 1280×640 (2:1), the
 plugin's top-bar items and docks over a bar-colored strip, the popups, panels
 or cards they open below, with sample data, on the theme's background.
 `--surface` (repeat it) picks which ones. SUPER DESKTOP shows its middle
-square (640×640) beside the plugin in Settings → Plugins → Discover, and a
-small crop under Installed; GitHub can use the whole picture as the
+square (640×640) beside the plugin in Settings → Plugins → Discover, a small
+crop on its row under Installed and a larger one on its page; GitHub can use the whole picture as the
 repository's social preview. Open preview.png and look at it; it must stay
 under 1.5 MiB. To show a state you can only click to (a form filled in),
 take that shot with `snapshot --do` and compose it yourself (ImageMagick:
