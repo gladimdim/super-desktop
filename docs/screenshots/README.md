@@ -125,3 +125,11 @@ drawn as an HTML page in headless Chromium on 2026-10-06: the brand, the hero
 headline and `readme-overlay.webp` (a real capture, see above) in perspective,
 in Noto Sans and JetBrains Mono, then saved as JPEG at quality 88. Keep text
 away from the edges: some sites crop the card a little.
+
+## SD Editor
+
+- `sd-editor.webp`: 1240 × 760, the SD Editor card alone, drawn by the
+  app's own GTK code (release 1.7.0) on a private Broadway display rather
+  than captured from the screen, open on a copy of this repository's files
+  with `src/editor/media.rs` showing, in the default Tokyo Night theme.
+  WebP at quality 92.
