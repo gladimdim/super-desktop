@@ -1456,8 +1456,8 @@ pub fn capture_pane_history(session_name: &str) -> Option<String> {
     capture_pane(session_name, false, 300)
 }
 
-/// Join terminal soft wraps for desktop file discovery, without changing captures
-/// used for display, status, links or the phone bridge.
+/// Join terminal soft wraps for desktop and phone file discovery, without
+/// changing captures used for display, status, links or terminal streaming.
 pub fn capture_file_references(session_name: &str) -> Option<String> {
     capture_file_references_with(Command::new("tmux"), session_name)
 }

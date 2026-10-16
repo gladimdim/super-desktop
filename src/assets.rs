@@ -242,27 +242,9 @@ fn workspace(session: &str) -> Result<PathBuf, String> {
     Ok(root)
 }
 
-/// Conservative candidates: quoted paths, Markdown targets, and plain words.
-/// Ambiguous/wrapped references can be added manually through the same policy.
+/// Shared wrap handling, restricted to formats supported by existing phones.
 fn candidates(text: &str) -> Vec<String> {
-    let text: String = text.chars().take(128 * 1024).collect();
-    let mut result = Vec::new();
-    for delimiter in ['`', '"', '\''] {
-        result.extend(text.split(delimiter).skip(1).step_by(2).map(str::to_string));
-    }
-    for part in text.split("](").skip(1) {
-        if let Some((path, _)) = part.split_once(')') {
-            result.push(path.into());
-        }
-    }
-    result.extend(text.split_whitespace().map(|word| {
-        word.trim_matches(|c: char| "()[]{}<>\"'`,;".contains(c))
-            .trim_end_matches('.')
-            .to_string()
-    }));
-    result.retain(|s| s.len() <= 4096 && file_type(Path::new(s)).is_some());
-    result.truncate(256);
-    result
+    crate::asset_references::candidates(text, |path| file_type(Path::new(path)).is_some())
 }
 
 pub fn list(session: &str, explicit: Option<&str>) -> Result<Vec<Asset>, String> {
@@ -286,11 +268,7 @@ fn list_for(session: &str, explicit: Option<&str>, desktop: bool) -> Result<Vec<
         found.push(register(&root, session, path)?);
     }
     // This runs only when opening/refreshing the drawer, never per frame/keystroke.
-    let screen = if desktop {
-        crate::tmux::capture_file_references(session)
-    } else {
-        crate::tmux::capture_pane_history(session)
-    }.unwrap_or_default();
+    let screen = crate::tmux::capture_file_references(session).unwrap_or_default();
     let paths = if desktop {
         crate::asset_references::candidates(&screen, |path| desktop_file_type(Path::new(path)).is_some())
     } else {
@@ -551,6 +529,59 @@ mod tests {
         for name in ["x.html", "x.svg", "x.exe", "x.zip", ".env"] {
             assert!(file_type(Path::new(name)).is_none());
         }
+    }
+
+    #[test]
+    fn mobile_references_find_screenshot_paths_wrapped_across_directories() {
+        let dir = Fixture::new();
+        let folder = "content/Images/Universe/Hetmanate-Federation/Ships";
+        std::fs::create_dir_all(dir.0.join(folder)).unwrap();
+        let names = ["Hetmanate_Patrol_Dawn.png", "Hetmanate_Patrol_Nightside.png"];
+        for name in names {
+            std::fs::write(dir.0.join(folder).join(name), b"\x89PNG\r\n\x1a\n").unwrap();
+        }
+        // Codex's rendered final answer: absolute paths in parentheses, multiple
+        // hard breaks (including mid-directory), then sentence punctuation.
+        let text = format!(
+            "денний патруль ({}/\ncontent/Images/Universe/Hetmanate-\nFederation/Ships/Hetmanate_Patrol_Dawn.png) та нічний\nпатруль ({}/content/Images/Universe/\nHetmanate-Federation/Ships/\nHetmanate_Patrol_Nightside.png).",
+            dir.0.display(), dir.0.display(),
+        );
+        let mut found: Vec<_> = candidates(&text).iter()
+            .filter_map(|path| register(&dir.0, "s", path).ok())
+            .map(|entry| {
+                assert_eq!(read_entry(&entry).unwrap().1, b"\x89PNG\r\n\x1a\n");
+                entry.asset.relative_path
+            }).collect();
+        found.sort();
+        found.dedup();
+        assert_eq!(found, names.map(|name| format!("{folder}/{name}")));
+    }
+
+    #[test]
+    fn mobile_wrapped_references_keep_legacy_formats_and_access_policy() {
+        let dir = Fixture::new();
+        std::fs::write(dir.0.join("ok.png"), b"\x89PNG\r\n\x1a\n").unwrap();
+        std::fs::create_dir(dir.0.join(".private")).unwrap();
+        std::fs::write(dir.0.join(".private/key.png"), "secret").unwrap();
+        symlink("ok.png", dir.0.join("link.png")).unwrap();
+        std::fs::hard_link(dir.0.join("ok.png"), dir.0.join("hard.png")).unwrap();
+        for name in ["sound.wav", "sound.mp3", "art.bmp", "events.jsonl", "vector.svg", "page.html"] {
+            std::fs::write(dir.0.join(name), "not shared").unwrap();
+            assert!(candidates(name).is_empty(), "{name}");
+        }
+        let outside = Fixture::new();
+        std::fs::write(outside.0.join("outside.png"), "not shared").unwrap();
+        let text = format!(
+            "(.private/\nkey.png) (li\nnk.png) (ha\nrd.png) (../\noutside.png) ({}/\noutside.png) (file://{}/\nok.png) (https://example.org/\nok.png)",
+            outside.0.display(), dir.0.display(),
+        );
+        let paths = candidates(&text);
+        assert!(paths.iter().all(|path| !path.contains("://")));
+        assert!(paths.iter().all(|path| register(&dir.0, "s", path).is_err()), "{paths:?}");
+        assert!(candidates(&format!("file://{}/ok.png", dir.0.display())).is_empty());
+        assert!(candidates("https://example.org/ok.png").is_empty());
+        // Existing complete references on adjacent lines remain separate.
+        assert_eq!(candidates("ok.png\nnotes.md"), ["ok.png", "notes.md"]);
     }
     #[test]
     fn denies_traversal_symlinks_hidden_files_and_hard_links() {
