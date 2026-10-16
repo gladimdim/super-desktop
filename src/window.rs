@@ -253,7 +253,7 @@ fn install_plugin_hooks(
         Rc::new(move || {
             let Some(owner) = owner.upgrade() else { return serde_json::json!({"folder": crate::state::home_dir_string(), "recent": []}) };
             let state = owner.state.borrow();
-            serde_json::json!({"folder": crate::state::effective_workspace_dir(&state), "recent": state.recent_dirs})
+            serde_json::json!({"folder": crate::state::effective_workspace_dir(&state), "recent": crate::state::shared_recent_dirs(&state)})
         })
     });
     let owner = Rc::downgrade(owner);
@@ -1729,7 +1729,7 @@ impl SuperDesktopWindow {
     pub fn workspace_choices(&self) -> serde_json::Value {
         let state = self.state.borrow();
         serde_json::json!({"workspace": crate::state::effective_workspace_dir(&state),
-            "recentDirectories": state.recent_dirs,
+            "recentDirectories": crate::state::shared_recent_dirs(&state),
             "usedDirectories": state.used_dirs})
     }
 

@@ -28,7 +28,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick, GestureDrag, Label, Orientation,
-    Popover, PositionType, PropagationPhase,
+    Popover, PolicyType, PositionType, PropagationPhase, ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -38,7 +38,7 @@ use std::rc::Rc;
 
 use crate::state::{
     clean_dir, display_dir, effective_workspace_dir, home_dir_string, remember_workspace_dir,
-    resolve_workspace_input, AppState,
+    resolve_workspace_input, AppState, RECENT_DIRS_VISIBLE,
 };
 
 /// Cap on the autocomplete dropdown. Enough to scan; short enough for the HUD.
@@ -163,6 +163,67 @@ fn list_box() -> GtkBox {
     let container = GtkBox::new(Orientation::Vertical, 2);
     container.add_css_class("ws-pop-box");
     container
+}
+
+/// Put a ▾ list's rows in `popover`: the first [`RECENT_DIRS_VISIBLE`] show
+/// at once and the rest scroll, so a long history never runs off the screen.
+/// `selected` (the ↑/↓ highlight) is scrolled into view.
+fn show_list(popover: &Popover, container: &GtkBox, selected: Option<usize>) {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_child(Some(container));
+    // Row heights come from the theme's CSS, so measure them once styled.
+    scroll.set_max_content_height(visible_rows_height(container));
+    let container_map = container.clone();
+    scroll.connect_map(move |scroll| {
+        scroll.set_max_content_height(visible_rows_height(&container_map));
+        if let Some(index) = selected {
+            reveal_row(scroll, &container_map, index);
+        }
+    });
+    if let Some(index) = selected {
+        // Already mapped (↑/↓ repaint while open): reveal after layout.
+        let (scroll, container) = (scroll.clone(), container.clone());
+        glib::idle_add_local_once(move || reveal_row(&scroll, &container, index));
+    }
+    popover.set_child(Some(&scroll));
+}
+
+/// Height of the list's first [`RECENT_DIRS_VISIBLE`] rows, with the box's
+/// spacing and padding.
+fn visible_rows_height(container: &GtkBox) -> i32 {
+    let mut height = 0;
+    let mut rows = 0;
+    let mut child = container.first_child();
+    while let Some(row) = child {
+        if rows == RECENT_DIRS_VISIBLE {
+            break;
+        }
+        height += row.measure(Orientation::Vertical, -1).1;
+        rows += 1;
+        child = row.next_sibling();
+    }
+    // `.ws-pop-box` pads 6 px above and below the rows.
+    height + container.spacing() * (rows as i32 - 1).max(0) + 12
+}
+
+/// Scroll so the `index`th row is fully visible.
+fn reveal_row(scroll: &ScrolledWindow, container: &GtkBox, index: usize) {
+    let mut child = container.first_child();
+    for _ in 0..index {
+        child = child.and_then(|c| c.next_sibling());
+    }
+    let Some(row) = child else { return };
+    let Some(top) = row.compute_point(container, &gtk4::graphene::Point::new(0.0, 0.0)) else { return };
+    let (top, bottom) = (top.y() as f64, top.y() as f64 + row.height() as f64);
+    let adjustment = scroll.vadjustment();
+    if top < adjustment.value() {
+        adjustment.set_value(top);
+    } else if bottom > adjustment.value() + adjustment.page_size() {
+        adjustment.set_value(bottom - adjustment.page_size());
+    }
 }
 
 /// A ▾ list with no folders in it, saying `text` instead.
@@ -357,7 +418,7 @@ fn paint_remote_rows(
         }
         container.append(&row);
     }
-    popover.set_child(Some(&container));
+    show_list(popover, &container, None);
 }
 
 /// Live autocomplete / history-list state for one workspace field.
@@ -891,7 +952,7 @@ fn list_matching_dirs(parent: &Path, partial: &str) -> Vec<String> {
 
 /// Folders a harness has actually run in, newest first, existing on disk.
 ///
-/// `recent_dirs` is the seven-row visible list; `used_dirs` is the persistent
+/// `recent_dirs` is the ▾ history list; `used_dirs` is the persistent
 /// autocomplete index. Each card also contributes its cwd so sessions written
 /// by an older version become searchable before the next state save.
 fn collect_used_dirs(state: &AppState) -> Vec<String> {
@@ -1079,7 +1140,7 @@ fn paint_rows<FChange: Fn(AppState) + 'static>(
         ));
     }
 
-    popover.set_child(Some(&container));
+    show_list(popover, &container, selected);
 }
 
 /// One list row: `[✓] name  path` picks the folder; `✕` (history only) forgets it.
@@ -1163,6 +1224,7 @@ mod tests {
     use super::*;
     use crate::gtk_test::{count_class, find_first};
     use crate::state::{TerminalData, RECENT_DIRS_MAX};
+    use gtk4::{PolicyType, ScrolledWindow};
 
     #[test]
     fn a_remote_folder_control_is_the_local_one_without_the_typing() {
@@ -1204,7 +1266,8 @@ mod tests {
             move |dir: String| picked.borrow_mut().push(dir)
         });
         paint_remote_rows(&popover, &dirs, "/work/notes", &on_pick);
-        let container = popover.child().expect("one container");
+        let list = popover.child().expect("one list");
+        let container = find_first::<GtkBox>(&list, "ws-pop-box").expect("the rows' box");
         let second = container
             .first_child()
             .and_then(|row| row.next_sibling())
@@ -1422,6 +1485,37 @@ mod tests {
         assert!(sug.len() >= 2, "sibling folders still appear after it");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_long_folder_history_scrolls_past_eight_rows() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::long_history_child");
+    }
+
+    #[test]
+    fn long_history_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let state = Rc::new(RefCell::new(AppState::default()));
+        state.borrow_mut().recent_dirs = (0..RECENT_DIRS_MAX).map(|i| format!("/work/project-{i}")).collect();
+        let bar = build_workspace_bar(Rc::clone(&state), Rc::new(|_: AppState| {}));
+        let entry = find_first::<Entry>(bar.widget.upcast_ref(), "ws-entry").unwrap();
+        rebuild_recent(&bar.popover, &state, &entry, Rc::new(|_: AppState| {}), None);
+
+        // Every remembered folder is a row, inside a list that scrolls
+        // vertically once more than eight are shown.
+        let list = bar.popover.child().unwrap().downcast::<ScrolledWindow>().expect("a scrolling list");
+        assert_eq!(count_class(list.upcast_ref(), "ws-row"), RECENT_DIRS_MAX);
+        assert_eq!(list.vscrollbar_policy(), PolicyType::Automatic);
+        assert_eq!(list.hscrollbar_policy(), PolicyType::Never);
+        let rows = find_first::<GtkBox>(list.upcast_ref(), "ws-pop-box").unwrap();
+        let row = rows.first_child().unwrap().measure(Orientation::Vertical, -1).1;
+        let eight = list.max_content_height();
+        assert!(eight >= row * RECENT_DIRS_VISIBLE as i32, "eight rows fit before scrolling");
+        assert!(eight < row * (RECENT_DIRS_VISIBLE as i32 + 1) + 2 * RECENT_DIRS_VISIBLE as i32 + 12,
+            "the ninth row is below the fold");
     }
 
     #[test]

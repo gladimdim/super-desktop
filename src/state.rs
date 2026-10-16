@@ -262,8 +262,22 @@ pub fn display_dir(path: &str) -> String {
     }
 }
 
-/// How many folders the top bar's open dropdown shows directly.
-pub const RECENT_DIRS_MAX: usize = 7;
+/// How many folders the top bar's ▾ history remembers. It shows
+/// [`RECENT_DIRS_VISIBLE`] rows at once and scrolls through the rest.
+pub const RECENT_DIRS_MAX: usize = 30;
+
+/// Rows of the ▾ history visible before it scrolls.
+pub const RECENT_DIRS_VISIBLE: usize = 8;
+
+/// How many recent folders go to phones, other PCs and plugins
+/// (`recentDirectories`, `recent`): the seven every released client has
+/// always received, so a longer local history changes nothing on the wire.
+pub const RECENT_DIRS_SHARED: usize = 7;
+
+/// The recent folders shared outside this desktop; see [`RECENT_DIRS_SHARED`].
+pub fn shared_recent_dirs(state: &AppState) -> &[String] {
+    &state.recent_dirs[..state.recent_dirs.len().min(RECENT_DIRS_SHARED)]
+}
 
 /// The folder new harness sessions start in: the configured one when it is
 /// still a usable directory, otherwise the home directory.
@@ -316,7 +330,7 @@ pub fn push_recent_dir(recent: &mut Vec<String>, dir: &str) {
 }
 
 /// Remember a folder for future substring autocomplete. This history is kept
-/// independently from the seven-row dropdown so an older project remains
+/// independently from the ▾ history so an older project remains
 /// discoverable after it falls out of the recent list.
 pub fn push_used_dir(used: &mut Vec<String>, dir: &str) {
     used.retain(|d| d != dir);
@@ -331,8 +345,8 @@ pub fn remember_workspace_dir(state: &mut AppState, dir: &str) {
 }
 
 /// Upgrade history written by older versions. Capture every formerly recent,
-/// current, or still-open card directory before trimming the visible list to
-/// seven, so an update never makes an older workspace undiscoverable.
+/// current, or still-open card directory before trimming the history to
+/// [`RECENT_DIRS_MAX`], so an update never makes an older workspace undiscoverable.
 fn normalize_workspace_history(state: &mut AppState) -> bool {
     let before_recent = state.recent_dirs.clone();
     let before_used = state.used_dirs.clone();
@@ -882,14 +896,17 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_workspace_history_outlives_the_seven_row_dropdown() {
+    fn test_complete_workspace_history_outlives_the_dropdown_history() {
         let mut state = AppState::default();
-        for i in 0..12 {
+        let total = RECENT_DIRS_MAX + 5;
+        for i in 0..total {
             remember_workspace_dir(&mut state, &format!("/project-{i}"));
         }
-        assert_eq!(state.recent_dirs.len(), 7);
-        assert_eq!(state.used_dirs.len(), 12);
-        assert_eq!(state.recent_dirs[0], "/project-11");
+        assert_eq!(state.recent_dirs.len(), RECENT_DIRS_MAX);
+        assert_eq!(state.used_dirs.len(), total);
+        assert_eq!(state.recent_dirs[0], format!("/project-{}", total - 1));
+        // Phones, other PCs and plugins still get the seven they always did.
+        assert_eq!(shared_recent_dirs(&state), &state.recent_dirs[..RECENT_DIRS_SHARED]);
         assert!(state.used_dirs.contains(&"/project-0".to_string()));
 
         // Re-use moves a directory to the front of both lists without
@@ -897,17 +914,18 @@ mod tests {
         remember_workspace_dir(&mut state, "/project-0");
         assert_eq!(state.recent_dirs[0], "/project-0");
         assert_eq!(state.used_dirs[0], "/project-0");
-        assert_eq!(state.used_dirs.len(), 12);
+        assert_eq!(state.used_dirs.len(), total);
     }
 
     #[test]
     fn test_history_migration_preserves_entries_trimmed_from_old_dropdowns() {
         let mut state = AppState::default();
-        state.recent_dirs = (0..9).map(|i| format!("/old-{i}")).collect();
+        let total = RECENT_DIRS_MAX + 2;
+        state.recent_dirs = (0..total).map(|i| format!("/old-{i}")).collect();
         assert!(normalize_workspace_history(&mut state));
-        assert_eq!(state.recent_dirs.len(), 7);
-        assert_eq!(state.used_dirs.len(), 9);
-        assert!(state.used_dirs.contains(&"/old-8".to_string()));
+        assert_eq!(state.recent_dirs.len(), RECENT_DIRS_MAX);
+        assert_eq!(state.used_dirs.len(), total);
+        assert!(state.used_dirs.contains(&format!("/old-{}", total - 1)));
     }
 
     #[test]

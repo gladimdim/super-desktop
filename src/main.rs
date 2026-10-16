@@ -1526,7 +1526,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let shared = ctx.borrow().local_workspace.state();
             let state = shared.borrow();
             json!({"workspace": state::effective_workspace_dir(&state),
-                "recentDirectories": state.recent_dirs,
+                "recentDirectories": state::shared_recent_dirs(&state),
                 "usedDirectories": state.used_dirs}).to_string()
         }
         "add-term-in" => {
