@@ -133,3 +133,16 @@ away from the edges: some sites crop the card a little.
   than captured from the screen, open on a copy of this repository's files
   with `src/editor/media.rs` showing, in the default Tokyo Night theme.
   WebP at quality 92.
+
+## SD Launcher images
+
+- `sd-launcher-page.webp`: a SUPER DESKTOP home page with live Codex and Claude
+  Code sessions.
+- `sd-launcher-terminal.webp`: a terminal shell open in the page, with its key row.
+- `sd-launcher-new.webp`: starting a new agent on the PC.
+- `sd-launcher-menu.webp`: the home screen's long-press menu with the super
+  desktop row; the home screen behind the menu is blurred.
+
+Captured on 2026-10-18 with `adb exec-out screencap` on a Xiaomi 2602BPC18G
+(1280 × 2772) running SD Launcher in the Tokyo Night theme, resized to 540 px
+wide and encoded as WebP at quality 82.
