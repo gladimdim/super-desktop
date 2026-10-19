@@ -134,7 +134,7 @@ away from the edges: some sites crop the card a little.
   with `src/editor/media.rs` showing, in the default Tokyo Night theme.
   WebP at quality 92.
 
-## SD Launcher images
+## SUPER DESKTOP Omalauncher (SD Launcher) images
 
 - `sd-launcher-page.webp`: a SUPER DESKTOP home page with live Codex and Claude
   Code sessions.
@@ -146,3 +146,8 @@ away from the edges: some sites crop the card a little.
 Captured on 2026-10-18 with `adb exec-out screencap` on a Xiaomi 2602BPC18G
 (1280 × 2772) running SD Launcher in the Tokyo Night theme, resized to 540 px
 wide and encoded as WebP at quality 82.
+
+- `sd-launcher-landscape.webp`: the agent list and a live Claude Code terminal
+  side by side in landscape (540 × 249). Converted from the fork's existing
+  `docs/superdesktop/media/landscape-split.png` capture at WebP quality 86,
+  without resizing.

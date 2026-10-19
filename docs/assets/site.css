@@ -634,11 +634,14 @@ footer .legal { flex-basis: 100%; margin: 0; font-size: 12px; }
 .sd-pform .go:disabled { opacity: .5; cursor: default; }
 .sd-pform .go.pulse { animation: sdPulse 0.9s ease-in-out infinite; }
 
-/* ── The SD Launcher section ──────────────────────────────── */
+/* ── The SUPER DESKTOP Omalauncher section ─────────────────── */
 .launcher-shots { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .launcher-shots figure { margin: 0; display: flex; flex-direction: column; gap: 8px; }
 .launcher-shots img { width: 100%; height: auto; border-radius: 14px; border: 1px solid #2b3346; background: #1a1b26; }
 .launcher-shots figcaption { font-size: 13px; color: var(--faint); text-align: center; }
+.launcher-landscape { max-width: 720px; margin: 24px auto 4px; }
+.launcher-landscape img { width: 100%; height: auto; border-radius: 14px; border: 1px solid var(--border); }
+.launcher-landscape figcaption { margin-top: 8px; font-size: 13px; color: var(--muted); text-align: center; }
 @media (max-width: 760px) { .launcher-shots { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* ── The plugins section ──────────────────────────────────── */
