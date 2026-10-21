@@ -2910,6 +2910,14 @@ pub(crate) fn dragged_origin(
     }
 }
 
+/// Where a card's widget sits on its canvas now, rounded to whole pixels.
+pub(crate) fn placed_origin(widget: &gtk4::Widget) -> Option<(i32, i32)> {
+    let canvas = widget.parent()?.downcast::<gtk4::Fixed>().ok()?;
+    // Read the move's translation: `child_position` reports 0,0 on GTK 4.24.
+    let (x, y) = canvas.child_transform(widget).map_or((0.0, 0.0), |t| t.to_translate());
+    Some((x.round() as i32, y.round() as i32))
+}
+
 /// What a card's move drags act on: its saved and drawn position, and the
 /// overlay's drag callbacks.
 #[derive(Clone)]
@@ -2991,7 +2999,14 @@ impl MoveDrag {
                 let (nx, ny) = (nx.round() as i32, ny.round() as i32);
                 set_displayed_pos(&mut this.data.borrow_mut(), nx, ny);
                 *this.visual_pos.borrow_mut() = (nx as f64, ny as f64);
-                (this.on_end)(c.upcast(), &this.data.borrow());
+                (this.on_end)(c.clone().upcast(), &this.data.borrow());
+                // The drop handler may have clamped the card below the top bar:
+                // keep where it put the card, or a later slide-in restores the
+                // unclamped spot.
+                if let Some((x, y)) = placed_origin(c.upcast_ref()) {
+                    set_displayed_pos(&mut this.data.borrow_mut(), x, y);
+                    *this.visual_pos.borrow_mut() = (f64::from(x), f64::from(y));
+                }
             }
         });
 
@@ -3023,6 +3038,24 @@ mod tests {
             agent_session_id: None,
             workspace_dir: None,
         }
+    }
+
+    #[test]
+    fn dropped_card_keeps_the_clamped_origin() {
+        crate::gtk_test::run_in_child_process("mini_terminal::tests::dropped_card_clamped_origin_inner");
+    }
+
+    #[test]
+    fn dropped_card_clamped_origin_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        gtk4::init().unwrap();
+        let canvas = gtk4::Fixed::new();
+        let card = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+        // Dragged to y 20, then the drop handler clamped it below the top bar.
+        canvas.put(&card, 300.0, 20.0);
+        canvas.move_(&card, 300.0, 70.0);
+        assert_eq!(placed_origin(card.upcast_ref()), Some((300, 70)));
+        assert_eq!(placed_origin(gtk4::Box::new(gtk4::Orientation::Vertical, 0).upcast_ref()), None);
     }
 
     #[test]

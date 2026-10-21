@@ -272,7 +272,12 @@ impl StickyNote {
                 let ry = ny.round() as i32;
                 data_drag_end.borrow_mut().x = rx;
                 data_drag_end.borrow_mut().y = ry;
-                on_drag_end_move(c.upcast(), &data_drag_end.borrow());
+                on_drag_end_move(c.clone().upcast(), &data_drag_end.borrow());
+                // Keep the spot the drop handler clamped the note to.
+                if let Some((x, y)) = crate::mini_terminal::placed_origin(c.upcast_ref()) {
+                    let mut data = data_drag_end.borrow_mut();
+                    (data.x, data.y) = (x, y);
+                }
             }
         });
 
