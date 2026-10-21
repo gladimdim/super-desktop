@@ -473,13 +473,15 @@ fn renderer(session: &str, view: &View) -> Rc<dyn Fn(crate::assets::Asset, u32)>
 }
 
 /// Choosing a file to preview: the preview itself, the file shown, its PDF
-/// page, and the page buttons.
+/// page, the page buttons, and Back to the list with the path it was made with.
 #[derive(Clone)]
 struct Chooser {
     render: Rc<dyn Fn(crate::assets::Asset, u32)>,
     selected: Rc<RefCell<Option<crate::assets::Asset>>>,
     page: Rc<Cell<u32>>,
     pages: gtk4::Box,
+    back: gtk4::Button,
+    listed: Rc<RefCell<Option<String>>>,
 }
 
 impl Chooser {
@@ -501,12 +503,16 @@ impl Chooser {
             pages.append(&button);
         }
         pages.set_visible(false);
-        Chooser { render, selected, page, pages }
+        let back = gtk4::Button::with_label("‹ Back");
+        back.set_tooltip_text(Some("Back to the list of files and links"));
+        back.set_visible(false);
+        Chooser { render, selected, page, pages, back, listed: Rc::new(RefCell::new(None)) }
     }
 
     /// Preview `item` from its first page.
     fn choose(&self, item: &crate::assets::Asset) {
         self.page.set(1);
+        self.back.set_visible(true);
         self.pages.set_visible(item.kind == "pdf");
         *self.selected.borrow_mut() = Some(item.clone());
         (self.render)(item.clone(), 1);
@@ -548,6 +554,8 @@ fn reloader(session: &str, view: &View, collapsed: &Collapsed, chooser: Chooser)
     Rc::new(move |explicit| {
         let ticket = view.next_ticket();
         chooser.pages.set_visible(false);
+        chooser.back.set_visible(false);
+        chooser.listed.replace(explicit.clone());
         clear(&view.bar);
         view.bar.set_visible(false);
         view.edits.dirty.set(false);
@@ -570,7 +578,7 @@ fn reloader(session: &str, view: &View, collapsed: &Collapsed, chooser: Chooser)
                     show_links(&view.content, &urls, &collapsed, &view.status);
                     match files {
                         Ok(items) => {
-                            view.status.set_text(&format!("{} files · {} links. Choose a file to preview; Refresh returns to this list.", items.len(), urls.len()));
+                            view.status.set_text(&format!("{} files · {} links. Choose a file to preview; Back returns to this list.", items.len(), urls.len()));
                             list_files(&view.content, &items, &collapsed, &chooser);
                         }
                         Err(error) => view.status.set_text(&format!("{} links · Files: {}", urls.len(), error.replace('_', " "))),
@@ -596,33 +604,44 @@ fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawe
     path.set_hexpand(true);
     let add = gtk4::Button::with_label("Add");
     let refresh = gtk4::Button::with_label("Refresh");
+    let view = View {
+        content: gtk4::Box::new(gtk4::Orientation::Vertical, 6),
+        bar: gtk4::Box::new(gtk4::Orientation::Horizontal, 6),
+        status: gtk4::Label::new(Some("Only referenced files inside this terminal’s workspace. No folder scanning.")),
+        generation: Rc::new(Cell::new(0u64)),
+        edits: Edits::default(),
+    };
+    let chooser = Chooser::new(renderer(session, &view));
+    controls.append(&chooser.back);
     controls.append(&path);
     controls.append(&add);
     controls.append(&refresh);
     body.append(&controls);
-    let status = gtk4::Label::new(Some(
-        "Only referenced files inside this terminal’s workspace. No folder scanning.",
-    ));
+    let status = &view.status;
     status.set_wrap(true);
     status.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
     status.set_xalign(0.0);
-    body.append(&status);
+    body.append(status);
     // A Markdown preview's Rendered / Edit switch and Save.
-    let bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    bar.set_visible(false);
-    body.append(&bar);
+    view.bar.set_visible(false);
+    body.append(&view.bar);
     let scroll = gtk4::ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
         .min_content_height(120)
         .build();
-    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    scroll.set_child(Some(&content));
+    scroll.set_child(Some(&view.content));
     body.append(&scroll);
-    let view = View { content, bar, status, generation: Rc::new(Cell::new(0u64)), edits: Edits::default() };
-    let chooser = Chooser::new(renderer(session, &view));
     body.append(&chooser.pages);
+    let (back, listed) = (chooser.back.clone(), Rc::clone(&chooser.listed));
     let reload = reloader(session, &view, collapsed, chooser);
+    connect_leaving(&back, &view.edits, &view.status, {
+        let reload = Rc::clone(&reload);
+        move || {
+            let path = listed.borrow().clone();
+            reload(path)
+        }
+    });
     connect_leaving(&refresh, &view.edits, &view.status, {
         let reload = Rc::clone(&reload);
         move || reload(None)
@@ -891,6 +910,39 @@ mod tests {
         let links_content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
         show_links(&links_content, &["https://example.org/".into()], &collapsed, &status);
         assert!(links_content.first_child().unwrap().is::<gtk4::Expander>());
+
+        // Back shows only on a preview and lists again with the path the list was made with.
+        let view = View {
+            content: gtk4::Box::new(gtk4::Orientation::Vertical, 6),
+            bar: gtk4::Box::new(gtk4::Orientation::Horizontal, 6),
+            status: gtk4::Label::new(None),
+            generation: Rc::new(Cell::new(0u64)),
+            edits: Edits::default(),
+        };
+        let chosen = Rc::new(RefCell::new(Vec::new()));
+        let chooser = Chooser::new({
+            let chosen = Rc::clone(&chosen);
+            Rc::new(move |asset: crate::assets::Asset, page| chosen.borrow_mut().push((asset.name, page)))
+        });
+        let reload = reloader("test_missing_asset_terminal", &view, &collapsed, chooser.clone());
+        reload(Some("out/plan.md".into()));
+        assert!(!chooser.back.is_visible());
+        let asset = crate::assets::Asset {
+            id: "id".into(),
+            name: "plan.md".into(),
+            relative_path: "out/plan.md".into(),
+            mime_type: "text/markdown".into(),
+            kind: "markdown".into(),
+            size: 9,
+            modified: 0,
+        };
+        chooser.choose(&asset);
+        assert!(chooser.back.is_visible());
+        assert_eq!(*chosen.borrow(), [("plan.md".to_string(), 1)]);
+        assert_eq!(chooser.listed.borrow().as_deref(), Some("out/plan.md"));
+        let path = chooser.listed.borrow().clone();
+        reload(path);
+        assert!(!chooser.back.is_visible() && chooser.selected.borrow().is_none());
 
         let text = text_view("# Title\n<script>ignored</script>");
         let buffer = text.buffer();
