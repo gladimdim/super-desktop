@@ -11,7 +11,7 @@ description = "High-performance Wayland LayerShell overlay for sticky notes and 
 default = ["desktop"]
 desktop = [
     "dep:gtk4", "dep:gtk4-layer-shell", "dep:vte4", "dep:shlex", "dep:chrono",
-    "dep:futures-channel", "dep:futures-util", "dep:rustls", "dep:rcgen",
+    "dep:futures-channel", "dep:futures-util", "dep:rustls", "dep:rcgen", "dep:ring",
     "dep:qrcode", "dep:reqwest", "dep:tungstenite", "dep:pulldown-cmark",
     "dep:sourceview5",
 ]
@@ -46,6 +46,7 @@ futures-channel = { version = "0.3", optional = true }
 futures-util = { version = "0.3", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "crypto"], optional = true }
+ring = { version = "0.17", optional = true }
 sha2 = "0.10"
 qrcode = { version = "0.14", default-features = false, optional = true }
 reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "json", "rustls-no-provider"], optional = true }

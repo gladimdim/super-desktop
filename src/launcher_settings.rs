@@ -553,6 +553,13 @@ pub fn build_connection_pages(
         "connections-invite-pc",
     );
     add.append(&btn_share);
+    let (btn_tv, _, _) = settings_entry_with_summary(
+        "▬",
+        "Pair a TV",
+        "Type the code SUPER DESKTOP for Android shows on a TV, which can't scan a QR code.",
+        "connections-invite-tv",
+    );
+    add.append(&btn_tv);
     let (btn_view, _, _) = settings_entry_with_summary(
         "↗",
         "View another PC from here",
@@ -561,7 +568,7 @@ pub fn build_connection_pages(
     );
     add.append(&btn_view);
     add.append(&hint("Devices you reject stay blocked until you remove them from Rejected devices."));
-    for (button, kind) in [(&btn_phone, InviteKind::Phone), (&btn_share, InviteKind::Pc)] {
+    for (button, kind) in [(&btn_phone, InviteKind::Phone), (&btn_share, InviteKind::Pc), (&btn_tv, InviteKind::Tv)] {
         let start_invite = Rc::clone(&start_invite);
         button.connect_clicked(move |_| start_invite(kind));
     }
@@ -1325,11 +1332,12 @@ mod tests {
         review.emit_clicked();
         assert_eq!(reviews.get(), 1);
 
-        // Add a device offers the three directions; viewing another PC is the
+        // Add a device offers the four directions; viewing another PC is the
         // wizard's job. (The invitation entries start the real bridge, so they
         // are covered by `pairing_invite`'s tests instead.)
         let add = pages.widget(ConnectionPage::AddDevice);
-        assert_eq!(count_class(add, "settings-entry"), 3);
+        assert_eq!(count_class(add, "settings-entry"), 4);
+        assert!(button(add, "connections-invite-tv").is_visible());
         button(add, "connections-connect-pc").emit_clicked();
         assert_eq!(connects.get(), 1);
 

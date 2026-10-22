@@ -1784,6 +1784,7 @@ dependencies = [
  "qrcode",
  "rcgen",
  "reqwest",
+ "ring",
  "rustls",
  "schemars",
  "serde",

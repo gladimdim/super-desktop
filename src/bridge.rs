@@ -21,6 +21,7 @@ mod pairing;
 pub use pairing::{
     pending_requests, decide_request, paired_devices, revoke_device, pairing_invitation,
     rejected_devices, forget_rejected, pairing_requests,
+    open_code_pairing, close_code_pairing, confirm_pairing_code,
 };
 pub(crate) use pairing::local_request as owner_pairing_request;
 #[path = "bridge_security.rs"]
