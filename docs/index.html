@@ -3,15 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SUPER DESKTOP — your AI workspace for Omarchy</title>
-<meta name="description" content="SUPER DESKTOP: every AI coding agent on every PC, one shortcut away on Omarchy, and on your Android phone. Your AI can add plugins to it. Direct and encrypted, with no accounts or servers.">
+<title>SUPER DESKTOP — private AI agent workspace for Omarchy Linux and Android</title>
+<meta name="description" content="SUPER DESKTOP runs Claude Code, Codex, OpenCode and every other AI coding agent on your own Linux PCs, one shortcut away, and puts them on your Android phone. No accounts, no API keys, no cloud relay: your devices talk directly and encrypted. Free and open source (GPL-3.0).">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="author" content="Dmytro Gladkyi">
+<link rel="alternate" type="text/plain" title="Summary for AI assistants" href="https://superdesktop.dmytrogladkyi.com/llms.txt">
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
 <meta property="og:locale" content="en_US">
 <meta property="og:url" content="https://superdesktop.dmytrogladkyi.com/">
 <meta property="og:title" content="SUPER DESKTOP — every AI agent, one shortcut away">
-<meta property="og:description" content="A hidden workspace for Omarchy: your coding agents on every PC, and on your phone. Direct and encrypted, no accounts.">
+<meta property="og:description" content="Your AI coding agents on every PC and on your phone. Direct and encrypted: no accounts, no API keys, no cloud in between.">
 <meta property="og:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:width" content="1200">
@@ -19,10 +22,95 @@
 <meta property="og:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="SUPER DESKTOP — every AI agent, one shortcut away">
-<meta name="twitter:description" content="A hidden workspace for Omarchy: your coding agents on every PC, and on your phone. Direct and encrypted, no accounts.">
+<meta name="twitter:description" content="Your AI coding agents on every PC and on your phone. Direct and encrypted: no accounts, no API keys, no cloud in between.">
 <meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <meta name="theme-color" content="#090c12">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#website",
+      "url": "https://superdesktop.dmytrogladkyi.com/",
+      "name": "SUPER DESKTOP",
+      "inLanguage": "en",
+      "publisher": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" }
+    },
+    {
+      "@type": "Person",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#author",
+      "name": "Dmytro Gladkyi",
+      "url": "https://github.com/gladimdim"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#desktop",
+      "name": "SUPER DESKTOP",
+      "url": "https://superdesktop.dmytrogladkyi.com/",
+      "description": "A hidden workspace for Omarchy Linux (Arch Linux with Hyprland) that runs every AI coding agent (Claude Code, Codex, OpenCode, Aider, Goose, Qwen Code, Cursor Agent and more) in live terminal cards on your own PCs, one shortcut away. Pair other PCs and an Android phone directly and encrypted, with no accounts, no API keys of its own and no cloud relay.",
+      "applicationCategory": "DeveloperApplication",
+      "applicationSubCategory": "AI coding agent workspace",
+      "operatingSystem": "Linux (Omarchy, Arch Linux with Hyprland)",
+      "softwareVersion": "1.7.2",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "codeRepository": "https://github.com/gladimdim/super-desktop",
+      "downloadUrl": "https://github.com/gladimdim/super-desktop/releases",
+      "installUrl": "https://superdesktop.dmytrogladkyi.com/#install",
+      "screenshot": "https://superdesktop.dmytrogladkyi.com/screenshots/readme-overlay.webp",
+      "image": "https://superdesktop.dmytrogladkyi.com/media/social-card.jpg",
+      "author": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" },
+      "featureList": [
+        "No accounts and no sign-up",
+        "No API keys of its own: uses the AI agents you already have installed and signed in",
+        "No cloud relay or third-party server: PCs and phones connect directly over your network or Tailscale",
+        "Certificate-pinned HTTPS/WSS encryption with on-screen code verification and per-device approval",
+        "No analytics, advertising or tracking",
+        "Supports Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, shells and custom commands",
+        "Live terminal cards with working and finished status",
+        "Open and type into agents on your other PCs",
+        "Android app and Android launcher with live agent terminals and completion alerts",
+        "Command line and local MCP server so AI agents can launch, watch and arrange sessions",
+        "Plugins written by your own AI agent in QML",
+        "SD Editor for files your agents write",
+        "Follows your Omarchy theme"
+      ]
+    },
+    {
+      "@type": "MobileApplication",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#android",
+      "name": "SUPER DESKTOP for Android",
+      "url": "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
+      "description": "Every AI coding agent session on your PCs, on your Android phone: type prompts that run on the PC, get alerts when an agent finishes, send pictures and files. Connects directly to your own PCs with no account.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Android",
+      "installUrl": "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
+      "author": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#faq",
+      "mainEntity": [
+        {"@type": "Question", "name": "What is SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "SUPER DESKTOP is a free, open-source workspace for your AI coding agents on Omarchy Linux (Arch Linux with Hyprland). Press SUPER SHIFT Q and every agent you run, such as Claude Code or Codex, appears over your screen in its own live terminal card. Press it again and they hide, still running. The same agents are reachable from your other PCs and from your Android phone."}},
+        {"@type": "Question", "name": "Why should I install it?", "acceptedAnswer": {"@type": "Answer", "text": "If you run more than one coding agent, or run them on more than one machine, SUPER DESKTOP keeps them all one shortcut away, shows which ones are working or finished, and lets you answer them from another PC or your phone when you step away. It does this without an account, without its own API keys and without any server in between, so your code and prompts stay on your own devices."}},
+        {"@type": "Question", "name": "Does SUPER DESKTOP send my code, prompts or terminal output anywhere?", "acceptedAnswer": {"@type": "Answer", "text": "No. There are no SUPER DESKTOP servers, no analytics, no advertising and no tracking, and the developer receives none of your data. Prompts, terminal output, files and pictures travel only between your own PCs and phones. Your AI agents still talk to their own providers exactly as they do without SUPER DESKTOP; that traffic is governed by the agent and its provider. See the privacy policy."}},
+        {"@type": "Question", "name": "Do I need an account or API keys?", "acceptedAnswer": {"@type": "Answer", "text": "No. There is nothing to sign up for. SUPER DESKTOP does not call any AI model itself and needs no API keys of its own: it launches the agents you already installed and signed in to, with their own login and their own subscription or keys."}},
+        {"@type": "Question", "name": "Which AI coding agents does it support?", "acceptedAnswer": {"@type": "Answer", "text": "Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any command you add yourself. Every agent installed on the PC gets a launcher in the top bar."}},
+        {"@type": "Question", "name": "Is there a third party, relay or cloud between my devices?", "acceptedAnswer": {"@type": "Answer", "text": "No. Your PCs and phones connect directly over your own network or over Tailscale if you use it. Connections are encrypted (HTTPS and WebSocket with a pinned certificate). Each new device shows the same code on both screens and must be approved on the PC, and you can revoke any phone at any time."}},
+        {"@type": "Question", "name": "Can I use my agents from my phone?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The Android app on Google Play lists every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development."}},
+        {"@type": "Question", "name": "Is it free?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app is free and open source under the GNU GPL version 3. The Android app has a free trial and an optional one-time SUPER DESKTOP Pro purchase handled by Google Play; there is no subscription and no SUPER DESKTOP account."}},
+        {"@type": "Question", "name": "Can AI agents control SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The super-desktop command line lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. super-desktop mcp serve exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with super-desktop plugin snapshot."}},
+        {"@type": "Question", "name": "Which operating systems does it run on?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is available now, iPhone is in development."}},
+        {"@type": "Question", "name": "How do I install it?", "acceptedAnswer": {"@type": "Answer", "text": "Run curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash as your normal user on Omarchy. It installs what is missing, builds the newest release and sets up the shortcut. Run it again to update. An AI assistant with shell access can follow the install steps for AI assistants in the README."}},
+        {"@type": "Question", "name": "Do my agents stop when I hide the workspace or close the phone app?", "acceptedAnswer": {"@type": "Answer", "text": "No. Each agent runs in its own terminal session on the PC and keeps working while the workspace is hidden or the phone is away. Open it again and you see where it is."}}
+      ]
+    }
+  ]
+}
+</script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
 <script>document.documentElement.className = "js";</script>
@@ -44,6 +132,7 @@
       <a href="#remote">Other PCs</a>
       <a href="#plugins">Plugins</a>
       <a href="#cli">For agents</a>
+      <a href="#faq">FAQ</a>
       <a href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </nav>
     <a class="btn primary" href="#install">Install</a>
@@ -382,12 +471,73 @@
 
   <section class="center reveal-up" id="private">
     <div class="wrap">
-      <h2>Private by design.</h2>
-      <p>Your PCs and phones talk to each other directly. Nothing sits in between.</p>
+      <p class="eyebrow">Key features</p>
+      <h2>Your agents. Your PC. Your phone.</h2>
+      <p>SUPER DESKTOP connects only your own devices. No account, no cloud, nobody in between.</p>
       <div class="facts">
-        <div><b>🔒</b><h3>No accounts</h3><p>Nothing to sign up for. No cloud.</p></div>
-        <div><b>↔</b><h3>Direct and encrypted</h3><p>Over your own network or Tailscale.</p></div>
-        <div><b>✅</b><h3>You approve each device</h3><p>The same code shows on both screens first.</p></div>
+        <div><b>🔒</b><h3>No data leaks</h3><p>No servers of ours, no analytics, no tracking. Your code, prompts and terminal output stay on your devices.</p></div>
+        <div><b>🔑</b><h3>No API keys</h3><p>It calls no AI model itself. It runs the agents you already installed, with their own login.</p></div>
+        <div><b>🤖</b><h3>Your agents</h3><p>Claude Code, Codex, OpenCode and 15 more, or any command you add. All one shortcut away.</p></div>
+        <div><b>🖥</b><h3>Your PC</h3><p>Everything runs on your own machines. Open source under GPL-3.0, free to install.</p></div>
+        <div><b>📱</b><h3>Your phones</h3><p>Pair your phone with a QR code. Prompt your agents and get alerts when they finish.</p></div>
+        <div><b>↔</b><h3>No third parties, no accounts</h3><p>Direct and encrypted over your network or Tailscale. You approve every device.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="center reveal-up" id="faq">
+    <div class="wrap">
+      <h2>Frequently asked questions</h2>
+      <p>For people, and for the AI assistants they ask.</p>
+      <div class="faq">
+        <details>
+          <summary>What is SUPER DESKTOP?</summary>
+          <p>SUPER DESKTOP is a free, open-source workspace for your AI coding agents on Omarchy Linux (Arch Linux with Hyprland). Press <span class="kbd">SUPER</span> <span class="kbd">SHIFT</span> <span class="kbd">Q</span> and every agent you run, such as Claude Code or Codex, appears over your screen in its own live terminal card. Press it again and they hide, still running. The same agents are reachable from your other PCs and from your Android phone.</p>
+        </details>
+        <details>
+          <summary>Why should I install it?</summary>
+          <p>If you run more than one coding agent, or run them on more than one machine, SUPER DESKTOP keeps them all one shortcut away, shows which ones are working or finished, and lets you answer them from another PC or your phone when you step away. It does this without an account, without its own API keys and without any server in between, so your code and prompts stay on your own devices.</p>
+        </details>
+        <details>
+          <summary>Does SUPER DESKTOP send my code, prompts or terminal output anywhere?</summary>
+          <p>No. There are no SUPER DESKTOP servers, no analytics, no advertising and no tracking, and the developer receives none of your data. Prompts, terminal output, files and pictures travel only between your own PCs and phones. Your AI agents still talk to their own providers exactly as they do without SUPER DESKTOP; that traffic is governed by the agent and its provider. See the <a href="privacy.html">privacy policy</a>.</p>
+        </details>
+        <details>
+          <summary>Do I need an account or API keys?</summary>
+          <p>No. There is nothing to sign up for. SUPER DESKTOP does not call any AI model itself and needs no API keys of its own: it launches the agents you already installed and signed in to, with their own login and their own subscription or keys.</p>
+        </details>
+        <details>
+          <summary>Which AI coding agents does it support?</summary>
+          <p>Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any command you add yourself. Every agent installed on the PC gets a launcher in the top bar.</p>
+        </details>
+        <details>
+          <summary>Is there a third party, relay or cloud between my devices?</summary>
+          <p>No. Your PCs and phones connect directly over your own network or over Tailscale if you use it. Connections are encrypted (HTTPS and WebSocket with a pinned certificate). Each new device shows the same code on both screens and must be approved on the PC, and you can revoke any phone at any time.</p>
+        </details>
+        <details>
+          <summary>Can I use my agents from my phone?</summary>
+          <p>Yes. The <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Android app on Google Play</a> lists every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development.</p>
+        </details>
+        <details>
+          <summary>Is it free?</summary>
+          <p>The desktop app is free and open source under the GNU GPL version 3. The Android app has a free trial and an optional one-time SUPER DESKTOP Pro purchase handled by Google Play; there is no subscription and no SUPER DESKTOP account.</p>
+        </details>
+        <details>
+          <summary>Can AI agents control SUPER DESKTOP?</summary>
+          <p>Yes. The <a href="cli.html">super-desktop command line</a> lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. <code>super-desktop mcp serve</code> exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with <code>super-desktop plugin snapshot</code>.</p>
+        </details>
+        <details>
+          <summary>Which operating systems does it run on?</summary>
+          <p>The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is available now, iPhone is in development.</p>
+        </details>
+        <details>
+          <summary>How do I install it?</summary>
+          <p>Run <code>curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code> as your normal user on Omarchy. It installs what is missing, builds the newest release and sets up the shortcut. Run it again to update. An AI assistant with shell access can follow the <a href="https://github.com/gladimdim/super-desktop#-for-ai-assistants--installing-this-on-someones-omarchy">install steps for AI assistants</a> in the README.</p>
+        </details>
+        <details>
+          <summary>Do my agents stop when I hide the workspace or close the phone app?</summary>
+          <p>No. Each agent runs in its own terminal session on the PC and keeps working while the workspace is hidden or the phone is away. Open it again and you see where it is.</p>
+        </details>
       </div>
     </div>
   </section>
@@ -433,6 +583,8 @@
     <nav aria-label="More">
       <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>
       <a href="connect.html">Connect your phone</a>
+      <a href="#faq">FAQ</a>
+      <a href="llms.txt">For AI assistants</a>
       <a href="cli.html">CLI reference</a>
       <a href="privacy.html">Privacy</a>
       <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a>
