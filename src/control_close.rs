@@ -162,7 +162,8 @@ pub(crate) fn pane_guard(
         format!("#{{==:#{{session_name}},{session}}}"),
         format!("#{{==:#{{session_id}},{}}}", pane.session_id),
         format!("#{{==:#{{pane_id}},{}}}", pane.pane_id),
-        format!("#{{==:#{{pane_pid}},{}}}", pane.pid),
+        // tmux 3.8 prints no pane_pid for an exited pane; `probe` reads that as 0.
+        format!("#{{==:#{{pane_pid}},{}}}", if pane.pid == 0 { String::new() } else { pane.pid.to_string() }),
         format!("#{{==:#{{pane_dead}},{}}}", u8::from(dead)),
     ];
     terms.extend(also.iter().map(|term| term.to_string()));

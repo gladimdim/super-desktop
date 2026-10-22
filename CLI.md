@@ -234,7 +234,9 @@ super-desktop terminal capture CARD_ID --history --lines 200 --format json
 `panePid`, `status`, `columns`, `rows`, `units: "terminal-cells"`,
 `alternateScreen`, `retainedHistoryLines`, `observedAtUnixMs` and
 `readiness: "not_observed"`. Status is `running` or `exited` (when tmux retains
-an exited pane). Neither state implies harness readiness or task completion.
+an exited pane). For an exited pane `panePid` is `0` when tmux no longer
+reports its process (tmux 3.8 and newer). Neither state implies harness
+readiness or task completion.
 `paneIdentity` is an opaque observation identifier that changes when the pane
 process or tmux server is replaced; it is not an authorization token. Use
 `terminal inspect` for saved card geometry in logical pixels.

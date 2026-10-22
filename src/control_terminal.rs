@@ -213,11 +213,14 @@ pub(crate) fn probe(session: &str, deadline: Instant) -> Result<Pane, Failure> {
         "1" => Ok(true),
         _ => Err(UNAVAILABLE),
     };
+    let dead = boolean(4)?;
+    // tmux 3.8 prints no pane_pid once the pane's process has exited.
+    let pid = if dead && fields[3].is_empty() { 0 } else { number(3)? };
     let mut pane = Pane {
         session_id: fields[1].into(),
         pane_id: fields[2].into(),
-        pid: number(3)?,
-        dead: boolean(4)?,
+        pid,
+        dead,
         columns: number(5)?,
         rows: number(6)?,
         history: number(7)?,
