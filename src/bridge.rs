@@ -63,6 +63,8 @@ mod wake;
 mod terminal_stream;
 #[path = "bridge_completions.rs"]
 mod completions;
+#[path = "bridge_previews.rs"]
+mod previews;
 
 /// Phone input reached `session`: wake that session's terminal streams only.
 fn wake_terminal_streams(session: &str) {
@@ -1001,6 +1003,10 @@ fn route(stream: &mut Connection, req: &Request, admission: Option<&security::Ad
         stream.credential(token);
     }
     let path = req.path.as_str();
+    if path == "/api/v1/previews" || path.starts_with("/api/v1/previews/") {
+        if !require_pairing(stream, &req.headers, Envelope::Plain) { return; }
+        return previews::handle(stream, req);
+    }
     if req.method == "POST" {
         let image = crate::prompt_image::route(path);
         if let Some(session) = image.or_else(|| crate::prompt_attachments::route(path)) {
@@ -2313,9 +2319,121 @@ GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\n\r\n").unwrap();
         assert!(body.get("wake").is_none(), "wake in the open ping: {body}");
     }
 
+    fn preview_request(method: &str, path: &str, token: Option<&str>, body: &str) -> (u16, serde_json::Value) {
+        let (client, server) = loopback_pair();
+        serve_one(Connection::plain(server), client, &http(method, path, token, body))
+    }
+
+    #[test]
+    fn preview_sessions_require_pairing_and_remain_owned_and_revocable() {
+        let body = r#"{"url":"http://localhost:3000/a?q=1#art","futureField":true}"#;
+        assert_eq!(preview_request("POST", "/api/v1/previews", None, body).0, 401);
+        let token = Some(paired_token());
+        let (status, created) = preview_request("POST", "/api/v1/previews", token, body);
+        assert_eq!(status, 201);
+        assert_eq!(created["path"], "/a?q=1#art");
+        let path = format!("/api/v1/previews/{}", created["id"].as_str().unwrap());
+        let (client, server) = loopback_pair();
+        let browser = http("POST", "/api/v1/previews", token, body).replacen("Host:", "Origin: http://localhost\r\nHost:", 1);
+        assert!(raw_exchange(Connection::plain(server), client, &browser).contains("browser_access_disabled"));
+        // A different paired device cannot open or delete the session.
+        let stranger = random_hex(24);
+        {
+            let mut state = pair_state().lock().unwrap();
+            state.cfg.devices.push(PairedDevice { id: random_hex(16), name: "preview stranger".into(),
+                device_type: "android".into(), token_hash: security::digest(stranger.as_bytes()), expires: now_epoch()+3600.0 });
+            assert!(state.save());
+        }
+        assert_eq!(preview_request("DELETE", &path, Some(&stranger), "").0, 404);
+        assert_eq!(preview_request("GET", &format!("{path}/tunnel"), Some(&stranger), "").0, 404);
+        assert_eq!(preview_request("DELETE", &path, token, "").0, 200);
+        assert_eq!(preview_request("GET", &format!("{path}/tunnel"), token, "").0, 404);
+        for url in ["http://192.168.0.1:3000", "http://localhost:8759", "https://localhost:3000"] {
+            assert_eq!(preview_request("POST", "/api/v1/previews", token, &serde_json::json!({"url":url}).to_string()).0, 400);
+        }
+    }
+
+    #[test]
+    fn preview_tunnel_streams_http_bytes_and_closes_on_session_delete() {
+        use tungstenite::client::IntoClientRequest;
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let token = Some(paired_token());
+        let (status, created) = preview_request("POST", "/api/v1/previews", token,
+            &serde_json::json!({"url":format!("http://localhost:{port}/")}).to_string());
+        assert_eq!(status, 201);
+        let path = format!("/api/v1/previews/{}", created["id"].as_str().unwrap());
+        let (client, server) = loopback_pair();
+        let bridge = std::thread::spawn(move || serve_connection(Connection::plain(server), None));
+        let mut request = format!("ws://127.0.0.1{path}/tunnel").into_client_request().unwrap();
+        request.headers_mut().insert("Authorization", format!("Bearer {}", token.unwrap()).parse().unwrap());
+        let (mut ws, _) = tungstenite::client(request, client).unwrap();
+        let (mut service, _) = upstream.accept().unwrap();
+        service.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let request = b"POST /art HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello";
+        // Separate messages model a request head/body arriving on different reads.
+        ws.send(tungstenite::Message::Binary(request[..11].to_vec().into())).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        ws.send(tungstenite::Message::Binary(request[11..].to_vec().into())).unwrap();
+        let mut bytes = vec![0; request.len()];
+        service.read_exact(&mut bytes).unwrap();
+        assert_eq!(bytes, request);
+        let response = vec![0x7f; 70000];
+        service.write_all(&response).unwrap();
+        let mut received = Vec::new();
+        while received.len() < response.len() {
+            match ws.read().unwrap() {
+                tungstenite::Message::Binary(bytes) => received.extend_from_slice(&bytes),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        assert_eq!(received, response);
+        assert_eq!(preview_request("DELETE", &path, token, "").0, 200);
+        assert!(matches!(ws.read(), Ok(tungstenite::Message::Close(_)) | Err(_)));
+        bridge.join().unwrap();
+        assert_eq!(service.read(&mut [0]).unwrap(), 0);
+    }
+
+    #[test]
+    fn preview_tunnel_stops_when_its_device_is_revoked() {
+        use tungstenite::client::IntoClientRequest;
+        let token = random_hex(24);
+        let hash = security::digest(token.as_bytes());
+        {
+            let mut state = pair_state().lock().unwrap();
+            state.cfg.devices.push(PairedDevice { id: random_hex(16), name: "preview revocation".into(),
+                device_type: "android".into(), token_hash: hash.clone(), expires: now_epoch()+3600.0 });
+            assert!(state.save());
+        }
+        let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+        let (status, created) = preview_request("POST", "/api/v1/previews", Some(&token),
+            &serde_json::json!({"url":format!("http://localhost:{}/", upstream.local_addr().unwrap().port())}).to_string());
+        assert_eq!(status, 201);
+        let path = format!("/api/v1/previews/{}/tunnel", created["id"].as_str().unwrap());
+        let (mut client, server) = loopback_pair();
+        client.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let bridge = std::thread::spawn(move || serve_connection(Connection::plain(server), None));
+        let mut request = format!("ws://127.0.0.1{path}").into_client_request().unwrap();
+        request.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+        let (mut ws, _) = tungstenite::client(request, &mut client).unwrap();
+        let (mut service, _) = upstream.accept().unwrap();
+        service.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        // Leave a partial client frame buffered when authorization disappears.
+        ws.get_mut().write_all(&[0x82, 0x85, 1, 2]).unwrap();
+        {
+            let mut state = pair_state().lock().unwrap();
+            state.cfg.devices.retain(|d| d.token_hash != hash);
+            assert!(state.save());
+        }
+        assert!(ws.read().is_err() || !ws.can_read());
+        bridge.join().unwrap();
+        assert_eq!(service.read(&mut [0]).unwrap(), 0);
+        assert_eq!(preview_request("GET", &path, Some(&token), "").0, 401);
+    }
+
     /// A device token the bridge accepts, registered once per test process
     /// in the test-only credential store (`state_path`).
-    fn paired_token() -> &'static str {
+    pub(super) fn paired_token() -> &'static str {
         static TOKEN: OnceLock<String> = OnceLock::new();
         TOKEN.get_or_init(|| {
             let token = random_hex(24);

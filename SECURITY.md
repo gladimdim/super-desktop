@@ -369,6 +369,28 @@ so A viewing B while B views C gives A nothing of C.
 
 ## Resource bounds
 
+### Private web previews
+
+Paired devices can create a temporary tunnel to one HTTP loopback service on
+the PC. Only `localhost`, `127.0.0.1`, `0.0.0.0` (mapped to loopback), `::1` and
+`::` (mapped to IPv6 loopback) are accepted, on ports 1024–65535 except the
+bridge's own port. Targets are parsed once and never resolved through DNS.
+Sessions belong to their creating credential, expire after 30 minutes, and
+close on deletion, device revocation or bridge exit. Limits are four sessions
+and six tunnels per device, 16 sessions and 24 tunnels globally; existing
+network admission limits also apply. Each tunnel carries bounded 16 KiB binary
+WebSocket messages with socket backpressure. SD opens no additional PC listener.
+
+Android renders a preview in a WebView with a fresh random localhost origin.
+Its phone-loopback proxy checks the exact Host, a private HttpOnly cookie and
+browser origin/fetch metadata before opening a tunnel. The proxy removes its
+authorization cookie; SD's bearer token and certificate pin stay in native
+networking. File/content access, native JavaScript interfaces, popups and
+third-party cookies are disabled. Closing or backgrounding the preview destroys
+the view and closes its local sockets. Preview access carries the authority
+exposed by the selected local service; it is separate from workspace-bounded
+file previews.
+
 ### Referenced files
 
 File listing/registration, content downloads and PDF page previews require the
