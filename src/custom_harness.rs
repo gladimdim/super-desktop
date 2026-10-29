@@ -1,5 +1,6 @@
 //! User-defined launchers are local, explicit commands. The executable and
-//! each argument are quoted separately before tmux's command shell sees them.
+//! each argument are quoted separately, only where needed, before tmux's
+//! command shell sees them, so `/bin/echo --model=opus` reads as it is typed.
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -93,7 +94,7 @@ impl CustomHarness {
     pub fn command(&self) -> String {
         std::iter::once(&self.executable)
             .chain(self.arguments.iter())
-            .map(|part| format!("'{}'", part.replace('\'', "'\"'\"'")))
+            .map(|part| crate::launch_args::quote(part))
             .collect::<Vec<_>>()
             .join(" ")
     }

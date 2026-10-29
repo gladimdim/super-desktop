@@ -1411,7 +1411,7 @@ impl CustomForm {
         match item {
             Some(item) => {
                 self.name.set_text(&item.name); self.path.set_text(&item.executable);
-                self.args.set_text(&item.arguments.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\"'\"'"))).collect::<Vec<_>>().join(" "));
+                self.args.set_text(&crate::launch_args::display(&item.arguments));
                 self.selected_icon.set(crate::custom_harness::ICONS.iter().position(|icon| *icon == item.icon).unwrap_or(0));
             }
             None => {
@@ -3102,7 +3102,7 @@ mod tests {
         assert_eq!(copy.arguments, ["--yes-always"]);
         assert_eq!(crate::state::load_state().custom_harnesses, vec![copy]);
         assert_eq!(entry("Harness name").text(), "Aider");
-        assert_eq!(entry("Optional arguments, e.g. --model 'my model'").text(), "'--yes-always'");
+        assert_eq!(entry("Optional arguments, e.g. --model 'my model'").text(), "--yes-always");
         entry("Harness name").set_text("Aider two");
         entry("Optional arguments, e.g. --model 'my model'").set_text("--model 'gpt 4'");
         button("Save harness").emit_clicked();
