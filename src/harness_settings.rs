@@ -445,8 +445,8 @@ fn paint_size_button(btn: &Button, selected: bool) {
     }
 }
 
-/// One `[logo] name …… resolved command [Parameters] [ON/OFF]` row.
-fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button, Button) {
+/// One `[logo] name …… resolved command [Parameters] [Clone] [ON/OFF]` row.
+fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button, Button, Button) {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("harness-row");
 
@@ -497,13 +497,19 @@ fn harness_row(info: &HarnessInfo, light_theme: bool) -> (Box, Button, Button) {
     params.set_tooltip_text(Some("Edit the parameters new cards start with"));
     row.append(&params);
 
+    let clone = Button::with_label("Clone");
+    clone.add_css_class("launcher-btn");
+    clone.set_valign(Align::Center);
+    clone.set_tooltip_text(Some("Copy this launcher into a custom launcher of its own to rename and edit"));
+    row.append(&clone);
+
     let btn = Button::new();
     btn.add_css_class("harness-toggle");
     btn.set_valign(Align::Center);
     btn.set_tooltip_text(Some("Show / hide this harness in the top bar"));
     row.append(&btn);
 
-    (row, params, btn)
+    (row, params, btn, clone)
 }
 
 /// The blocking OpenClaw steps behind the plugin line under OpenClaw's row.
@@ -680,7 +686,7 @@ fn openclaw_plugin_notice(actions: OpenClawActions) -> Box {
     line
 }
 
-fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Button, Button) {
+fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Button, Button, Button) {
     let row = Box::new(Orientation::Horizontal, 8);
     row.add_css_class("harness-row");
     let icon = Label::new(Some(&item.icon));
@@ -699,6 +705,10 @@ fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Butt
     let edit = Button::with_label("Edit");
     edit.add_css_class("launcher-btn");
     row.append(&edit);
+    let clone = Button::with_label("Clone");
+    clone.add_css_class("launcher-btn");
+    clone.set_tooltip_text(Some("Copy this launcher into a custom launcher of its own to rename and edit"));
+    row.append(&clone);
     let remove = Button::with_label("Remove");
     remove.add_css_class("launcher-btn");
     remove.add_css_class("launcher-btn-danger");
@@ -707,7 +717,7 @@ fn custom_row(item: &crate::custom_harness::CustomHarness) -> (Box, Button, Butt
     toggle.add_css_class("harness-toggle");
     toggle.set_sensitive(item.available());
     row.append(&toggle);
-    (row, toggle, edit, remove)
+    (row, toggle, edit, remove, clone)
 }
 
 /// Build the panel.
@@ -1997,6 +2007,27 @@ fn wire_harness_list(page: &HarnessesPage, hooks: HarnessListHooks) -> Rc<dyn Fn
     };
     let list = HarnessList { selection, order, row_buttons, apply };
 
+    // Both Clone buttons funnel here: push a fresh copy into state, persist
+    // the selection, then repaint and refresh the list. Returns the copy so
+    // the caller can open the edit form for it.
+    let clone_into: Rc<dyn Fn(crate::custom_harness::CustomHarness) -> crate::custom_harness::CustomHarness> = {
+        let state = Rc::clone(&hooks.state);
+        let on_change = Rc::clone(&hooks.on_change);
+        let refresh = hooks.refresh.clone();
+        Rc::new(move |copy: crate::custom_harness::CustomHarness| {
+            let selected = {
+                let mut s = state.borrow_mut();
+                s.custom_harnesses.push(copy.clone());
+                if let Some(visible) = &mut s.visible_harnesses { visible.push(copy.id.clone()); }
+                visible_keys(&s, &detect_harnesses())
+            };
+            on_change(selected);
+            crate::state::flush_state_saves();
+            run_refresh(&refresh);
+            copy
+        })
+    };
+
     let refresh: Rc<dyn Fn()> = {
         let rows = page.rows.clone();
         let rescan_status = page.rescan_status.clone();
@@ -2021,11 +2052,37 @@ fn wire_harness_list(page: &HarnessesPage, hooks: HarnessListHooks) -> Rc<dyn Fn
             missing_count.set_text(&fill_missing_rows(&missing_rows, &detected, light_theme).to_string());
 
             for info in &detected {
-                let (row, params, btn) = harness_row(info, light_theme);
+                let (row, params, btn, clone) = harness_row(info, light_theme);
                 params.connect_clicked({
                     let open = Rc::clone(&hooks.open_args);
                     let key = info.key;
                     move |_| open(key)
+                });
+                clone.connect_clicked({
+                    let clone_into = Rc::clone(&clone_into);
+                    let form = hooks.custom.clone();
+                    let nav = Rc::clone(&hooks.nav);
+                    let key = info.key;
+                    let name = info.name;
+                    let icon =
+                        if crate::custom_harness::ICONS.iter().any(|choice| *choice == info.icon) {
+                            info.icon
+                        } else {
+                            crate::custom_harness::ICONS[0]
+                        };
+                    move |_| {
+                        let Some(executable) = crate::tmux::harness_binary(key) else { return };
+                        let arguments =
+                            crate::launch_args::display(&crate::launch_args::effective(key));
+                        if let Some(copy) =
+                            crate::custom_harness::CustomHarness::create(
+                                name, icon, &executable, &arguments
+                            ).ok()
+                        {
+                            let copy = (clone_into)(copy);
+                            form.open(Some(&copy), &*nav);
+                        }
+                    }
                 });
                 let key = info.key.to_string();
                 list.connect_toggle(&btn, key.clone());
@@ -2037,7 +2094,7 @@ fn wire_harness_list(page: &HarnessesPage, hooks: HarnessListHooks) -> Rc<dyn Fn
             }
 
             for item in hooks.state.borrow().custom_harnesses.clone() {
-                let (row, btn) = custom_harness_row(item, &list, &hooks);
+                let (row, btn) = custom_harness_row(item, &list, &hooks, &clone_into);
                 rows.append(&row);
                 list.row_buttons.borrow_mut().push(btn);
             }
@@ -2093,30 +2150,43 @@ fn fill_missing_rows(missing_rows: &Box, detected: &[HarnessInfo], light_theme: 
             key, name: cfg.name, icon: cfg.icon,
             command: format!("Not installed · {}", cfg.commands[0]),
         };
-        let (row, params, toggle) = harness_row(&info, light_theme);
+        let (row, params, toggle, clone) = harness_row(&info, light_theme);
         row.remove(&params);
         row.remove(&toggle);
+        row.remove(&clone);
         missing_rows.append(&row);
         missing += 1;
     }
     missing
 }
 
-/// A custom launcher's row, with its toggle, Edit and Remove connected.
+/// A custom launcher's row, with its toggle, Edit, Clone and Remove connected.
 /// Returns the row and its toggle, keyed by the launcher's id.
 fn custom_harness_row(
     item: crate::custom_harness::CustomHarness,
     list: &HarnessList,
     hooks: &HarnessListHooks,
+    clone_into: &Rc<dyn Fn(crate::custom_harness::CustomHarness) -> crate::custom_harness::CustomHarness>,
 ) -> (Box, (String, Button)) {
-    let (row, btn, edit, remove) = custom_row(&item);
+    let (row, btn, edit, remove, clone) = custom_row(&item);
     let key = item.id.clone();
+    let row_id = item.id.clone();
     list.connect_toggle(&btn, key.clone());
     edit.connect_clicked({
         let form = hooks.custom.clone();
         let nav = Rc::clone(&hooks.nav);
         let item = item.clone();
         move |_| form.open(Some(&item), &*nav)
+    });
+    clone.connect_clicked({
+        let clone_into = Rc::clone(clone_into);
+        let form = hooks.custom.clone();
+        let nav = Rc::clone(&hooks.nav);
+        let base = item;
+        move |_| {
+            let copy = (clone_into)(base.cloned());
+            form.open(Some(&copy), &*nav);
+        }
     });
     remove.connect_clicked({
         let state = Rc::clone(&hooks.state); let on_change = Rc::clone(&hooks.on_change);
@@ -2131,7 +2201,7 @@ fn custom_harness_row(
             run_refresh(&refresh);
         }
     });
-    (row, (item.id, btn))
+    (row, (row_id, btn))
 }
 
 /// The card and its header: badge, title + subtitle, ← back, close.
@@ -2895,6 +2965,104 @@ mod tests {
             .find(|button| button.label().as_deref() == Some("Remove")).unwrap().emit_clicked();
         crate::state::flush_state_saves();
         assert!(state.borrow().custom_harnesses.is_empty());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn clone_button_duplicates_a_launcher_as_a_custom_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process(
+                "harness_settings::tests::clone_button_duplicates_a_launcher_as_a_custom_copy",
+            );
+            return;
+        }
+        gtk4::init().unwrap();
+        let home = std::env::temp_dir().join(format!("sd-clone-ui-{}", std::process::id()));
+        let bin = home.join(".local/bin");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&bin).unwrap();
+        std::env::set_var("HOME", &home);
+        let stub = bin.join("aider");
+        std::fs::write(&stub, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let state = Rc::new(RefCell::new(AppState::default()));
+        let saved = Rc::clone(&state);
+        let panel = build_harness_settings_panel(
+            Rc::clone(&state),
+            Rc::new(move |keys| {
+                saved.borrow_mut().visible_harnesses = Some(keys);
+                crate::state::save_state_async(saved.borrow().clone());
+            }),
+            Rc::new(|_| {}), Rc::new(|_| {}), Rc::new(|_| {}),
+            ConnectionHooks::inert(),
+        );
+        find_all::<Button>(&panel.widget, "settings-harnesses-entry")[0].emit_clicked();
+        let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
+        let (harnesses, form_page) = (pages[2].clone(), pages[3].clone());
+        let clone_button = |name: &str| find_all::<Button>(
+            &harness_row_named(&panel.widget, name), "launcher-btn",
+        ).into_iter().find(|button| button.label().as_deref() == Some("Clone")).unwrap();
+        let entry = |placeholder: &str| find_all::<gtk4::Widget>(&panel.widget, "ws-entry").iter()
+            .filter_map(|widget| widget.clone().downcast::<gtk4::Entry>().ok())
+            .find(|widget| widget.placeholder_text().as_deref() == Some(placeholder)).unwrap();
+        let button = |text: &str| find_all::<Button>(&panel.widget, "launcher-btn").into_iter()
+            .find(|b| b.label().as_deref() == Some(text)).unwrap();
+
+        // Cloning a built-in adds a custom copy with its executable and
+        // current arguments, then opens the edit form pre-filled on it.
+        clone_button("Aider").emit_clicked();
+        assert!(shown(&form_page));
+        assert_eq!(title_text(&panel.widget), "Edit harness");
+        assert_eq!(state.borrow().custom_harnesses.len(), 1);
+        crate::state::flush_state_saves();
+        let copy = state.borrow().custom_harnesses[0].clone();
+        assert_eq!(copy.name, "Aider");
+        assert_eq!(copy.executable, crate::tmux::harness_binary("aider").unwrap());
+        assert_eq!(copy.arguments, ["--yes-always"]);
+        assert_eq!(crate::state::load_state().custom_harnesses, vec![copy]);
+        assert_eq!(entry("Harness name").text(), "Aider");
+        assert_eq!(entry("Optional arguments, e.g. --model 'my model'").text(), "'--yes-always'");
+        entry("Harness name").set_text("Aider two");
+        entry("Optional arguments, e.g. --model 'my model'").set_text("--model 'gpt 4'");
+        button("Save harness").emit_clicked();
+        assert!(shown(&harnesses));
+        assert_eq!(state.borrow().custom_harnesses[0].name, "Aider two");
+        assert_eq!(state.borrow().custom_harnesses[0].arguments, ["--model", "gpt 4"]);
+
+        // Cloning a custom launcher copies its fields under a fresh id and
+        // opens the form on the copy; Cancel still keeps the copy.
+        clone_button("Aider two").emit_clicked();
+        assert!(shown(&form_page));
+        assert_eq!(state.borrow().custom_harnesses.len(), 2);
+        let (first, second) =
+            (state.borrow().custom_harnesses[0].id.clone(), state.borrow().custom_harnesses[1].id.clone());
+        assert_ne!(first, second);
+        assert_eq!(state.borrow().custom_harnesses[1].name, "Aider two");
+        assert_eq!(state.borrow().custom_harnesses[1].arguments, ["--model", "gpt 4"]);
+        assert_eq!(crate::state::load_state().custom_harnesses.len(), 2);
+        button("Cancel").emit_clicked();
+        assert!(shown(&harnesses), "cancel returns to the launcher list, copy stays");
+        assert_eq!(state.borrow().custom_harnesses.len(), 2);
+
+        // Removing one copy leaves the other with its own id and fields.
+        let rows: Vec<gtk4::Widget> = find_all::<gtk4::Widget>(&panel.widget, "harness-row").into_iter()
+            .filter(|row| find_all::<gtk4::Widget>(row, "harness-name").iter()
+                .any(|label| label.downcast_ref::<Label>().is_some_and(|l| l.text() == "Aider two")))
+            .collect();
+        rows[1].add_css_class("clone-test-second-row");
+        let second_row = find_all::<gtk4::Widget>(&panel.widget, "clone-test-second-row")[0].clone();
+        find_all::<Button>(&second_row, "launcher-btn").into_iter()
+            .find(|b| b.label().as_deref() == Some("Remove")).unwrap().emit_clicked();
+        crate::state::flush_state_saves();
+        assert_eq!(state.borrow().custom_harnesses.len(), 1);
+        assert_eq!(state.borrow().custom_harnesses[0].id, first);
+        assert_eq!(state.borrow().custom_harnesses[0].name, "Aider two");
+        assert_eq!(crate::state::load_state().custom_harnesses[0].arguments, ["--model", "gpt 4"]);
+        assert!(find_all::<gtk4::Widget>(&panel.widget, "harness-row").into_iter()
+            .any(|row| find_all::<gtk4::Widget>(&row, "harness-name").iter()
+                .any(|label| label.downcast_ref::<Label>().is_some_and(|l| l.text() == "Aider"))),
+            "the built-in launcher survives its own cloning");
         std::fs::remove_dir_all(home).unwrap();
     }
 

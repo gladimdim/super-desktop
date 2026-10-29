@@ -437,6 +437,12 @@ add a button to this PC's top bar. You can edit, hide, or remove it from the
 same list. Its command runs in the selected workspace
 folder; a connected PC can launch it only while this PC offers it.
 
+Every launcher row also has a **Clone** button. It copies that launcher as a
+custom launcher of its own — keeping its executable and current arguments — and
+opens the edit form on the copy, so you can rename it and change its startup
+arguments (for example a second OpenCode with `--model …`) without touching the
+original. **Cancel** closes the form but keeps the copy in the list.
+
 Every installed built-in harness, Terminal included, has a **Parameters**
 button in the same list. Its page shows the built-in defaults (Claude Code's
 `--dangerously-skip-permissions`, Codex's `--no-alt-screen
