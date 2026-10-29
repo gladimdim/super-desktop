@@ -152,6 +152,10 @@ pub struct AppState {
     /// Prevent suspend while external power is connected. Off by default.
     #[serde(default)]
     pub sleep_lock_on_ac: bool,
+    /// Start the daemon at login on this PC (Settings → System launch). Off
+    /// by default; when on, owns one systemd user unit, see `boot_autostart`.
+    #[serde(default)]
+    pub boot_autostart: bool,
     /// The top bar's ✎ SD Editor button is turned off (Settings → SD
     /// Editor). Shown by default.
     #[serde(default)]
@@ -228,6 +232,7 @@ impl Default for AppState {
             used_dirs: Vec::new(),
             top_bar_size: TopBarSize::Large,
             sleep_lock_on_ac: false,
+            boot_autostart: false,
             editor_button_hidden: false,
             retired_harness_swaps: Vec::new(),
             folder_tags: std::collections::BTreeMap::new(),

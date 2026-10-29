@@ -353,6 +353,7 @@ read data is withheld if its mapping changes during the operation.
 `settings reset KEY` with workspace epoch/revision and a request ID. Strings
 need JSON quotes, for example `--value '"small"'`. Writable keys are
 `toolbarSize` (small/medium/large), `sleepLockOnAc` (Linux boolean),
+`bootAutostart` (Linux boolean),
 `workspaceDefault` (existing absolute directory or null),
 `settingsPanelPosition` ([x,y] or null) and `settingsPanelSize` ([width,height]
 or null, 660×620 through 8192×8192). Panel preferences are fitted to the current

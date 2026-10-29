@@ -86,6 +86,7 @@ mod terminal_links;
 mod overlap_ghost;
 mod shortcut;
 mod sleep_lock;
+mod boot_autostart;
 mod screensaver;
 mod state;
 mod startup;

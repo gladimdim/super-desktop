@@ -62,6 +62,7 @@ enum SettingsPage {
     /// One plugin's page, titled with its name.
     PluginDetail,
     SleepLock,
+    SystemLaunch,
     Updates,
     Connections(ConnectionPage),
 }
@@ -82,6 +83,7 @@ impl SettingsPage {
             Self::Editor => ("✎", "SD Editor", "The built-in text editor"),
             Self::Mcp => ("⚙", "MCP", "Local agent access and connection setup"),
             Self::SleepLock => ("☀", "Sleep lock", "Keep harnesses available on charger power"),
+            Self::SystemLaunch => ("⚡", "System launch", "Start the daemon when this PC starts"),
             Self::Updates => ("⟳", "Updates", "Newer versions from GitHub"),
             Self::Connections(page) => connections.header(page),
         }
@@ -803,6 +805,7 @@ struct HomePage {
     btn_mcp: Button,
     btn_plugins: Button,
     btn_sleep_lock: Button,
+    btn_system_launch: Button,
     btn_connections: Button,
     btn_updates: Button,
     updates_chip: Label,
@@ -891,6 +894,12 @@ fn home_page() -> HomePage {
     );
     root.append(&btn_sleep_lock);
 
+    let (btn_system_launch, _) = settings_entry(
+        "⚡", "System launch", "Start the daemon at login on this PC, headless included.",
+        "settings-system-launch-entry",
+    );
+    root.append(&btn_system_launch);
+
     let (btn_connections, connections_trailing) = settings_entry(
         "▣",
         "Connections",
@@ -965,6 +974,7 @@ fn home_page() -> HomePage {
         btn_mcp,
         btn_plugins,
         btn_sleep_lock,
+        btn_system_launch,
         btn_connections,
         btn_updates,
         updates_chip,
@@ -1925,6 +1935,73 @@ fn sleep_lock_page(state: &Rc<RefCell<AppState>>) -> Box {
     root
 }
 
+/// Settings → System launch: the daemon starts at login on this PC, so a
+/// headless PC answers the phone bridge without any desktop session.
+fn system_launch_page(state: &Rc<RefCell<AppState>>) -> Box {
+    let root = settings_page_root();
+    let (_, launch_body) = section_card(&root, "", "Daemon starts when this PC starts");
+    let launch_row = Box::new(Orientation::Horizontal, 12);
+    let launch_label = Label::new(Some("Start the daemon at login"));
+    launch_label.set_hexpand(true);
+    launch_label.set_xalign(0.0);
+    launch_label.set_wrap(true);
+    let launch_toggle = gtk4::Switch::new();
+    launch_toggle.add_css_class("system-launch-toggle");
+    launch_toggle.set_valign(Align::Center);
+    launch_toggle.set_active(state.borrow().boot_autostart);
+    launch_toggle.set_tooltip_text(Some(
+        "Run the daemon as a private systemd user service at every login of this user, including a headless text console",
+    ));
+    launch_row.append(&launch_label);
+    launch_row.append(&launch_toggle);
+    launch_body.append(&launch_row);
+    let launch_help = hint(
+        "For a PC you only reach from your phone or another PC: the daemon, its cards and its phone bridge answer with no desktop. This owns one file, ~/.config/systemd/user/super-desktop-boot.service, and turning this off removes it. The service starts when this user's session starts, so the PC has to log the user in at boot (a getty autologin or a display manager). Hyprland's own autostart keeps working; only one daemon ever runs.",
+    );
+    #[cfg(target_os = "macos")]
+    {
+        launch_toggle.set_active(false);
+        launch_toggle.set_sensitive(false);
+        launch_toggle.set_tooltip_text(Some("System launch is unavailable in this macOS build"));
+        launch_help.set_label("This build cannot manage systemd services.");
+    }
+    launch_body.append(&launch_help);
+    let launch_status = Label::new(Some(&crate::boot_autostart::status()));
+    launch_status.set_wrap(true);
+    launch_status.set_xalign(0.0);
+    launch_status.add_css_class("system-launch-status");
+    launch_body.append(&launch_status);
+    launch_toggle.connect_active_notify({
+        let state = Rc::clone(state);
+        move |toggle| {
+            let enabled = toggle.is_active();
+            state.borrow_mut().boot_autostart = enabled;
+            crate::state::save_state_async(state.borrow().clone());
+            crate::boot_autostart::apply(enabled);
+        }
+    });
+    // Shown right away on map (the status is one mutex read), then every
+    // second while the page stays on screen.
+    let paint_launch_status: Rc<dyn Fn()> = {
+        let weak_status = launch_status.downgrade();
+        Rc::new(move || {
+            let Some(label) = weak_status.upgrade() else { return; };
+            let text = crate::boot_autostart::status();
+            if label.text().as_str() != text { label.set_text(&text); }
+        })
+    };
+    launch_status.connect_map({
+        let paint_launch_status = Rc::clone(&paint_launch_status);
+        move |_| paint_launch_status()
+    });
+    crate::launcher_settings::tick_while_mapped(
+        &[launch_status.clone().upcast()],
+        Duration::from_secs(1),
+        move || paint_launch_status(),
+    );
+    root
+}
+
 /// The harness list's selection: what is shown, in detection order, and the
 /// rows' show/hide toggles.
 #[derive(Clone)]
@@ -2254,6 +2331,7 @@ pub fn build_harness_settings_panel(
     let (top_bar_root, paint_size) = top_bar_page(&state, &on_top_bar_size_change);
     let editor_root = editor_page(&state);
     let sleep_root = sleep_lock_page(&state);
+    let system_launch_root = system_launch_page(&state);
 
     let mcp_root = settings_page_root();
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
@@ -2317,6 +2395,7 @@ pub fn build_harness_settings_panel(
     views.extend(connection_pages.widgets().map(|(page, view)| (SettingsPage::Connections(page), view.clone())));
     views.extend([
         (SettingsPage::SleepLock, page_scroll(&sleep_root).upcast()),
+        (SettingsPage::SystemLaunch, page_scroll(&system_launch_root).upcast()),
         (SettingsPage::Updates, page_scroll(&updates_root).upcast()),
         (SettingsPage::HarnessArgs, page_scroll(&args.root).upcast()),
         (SettingsPage::PluginDetail, page_scroll(&plugin_detail_root).upcast()),
@@ -2393,6 +2472,7 @@ pub fn build_harness_settings_panel(
         (&home.btn_plugins, SettingsPage::Plugins),
         (&home.btn_connections, SettingsPage::Connections(ConnectionPage::Overview)),
         (&home.btn_sleep_lock, SettingsPage::SleepLock),
+        (&home.btn_system_launch, SettingsPage::SystemLaunch),
         (&home.btn_updates, SettingsPage::Updates),
     ] {
         let nav = Rc::clone(&nav);
@@ -3380,8 +3460,8 @@ mod tests {
         let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
         assert_eq!(
             pages.len(),
-            19,
-            "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + updates + harness parameters page + a plugin's page"
+            20,
+            "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + system launch + updates + harness parameters page + a plugin's page"
         );
         let sections: Vec<usize> = pages
             .iter()
@@ -3389,10 +3469,10 @@ mod tests {
             .collect();
         // hub, shortcut, harnesses, custom, top bar, SD Editor, MCP, plugins,
         // overview, add, invitation, PCs, phones, rejected, network, sleep,
-        // updates, harness parameters, a plugin's page
-        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1, 0]);
+        // system launch, updates, harness parameters, a plugin's page
+        assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1, 1, 0]);
         assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 21);
+        assert_eq!(count_class(&panel.widget, "launcher-section-title"), 22);
         assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
         // The card opens on the hub, and ← appears on every destination page.
@@ -3414,7 +3494,8 @@ mod tests {
             ("settings-plugins-entry", 7, "Plugins"),
             ("android-settings-entry", 8, "Connections"),
             ("settings-sleep-lock-entry", 15, "Sleep lock"),
-            ("settings-updates-entry", 16, "Updates"),
+            ("settings-system-launch-entry", 16, "System launch"),
+            ("settings-updates-entry", 17, "Updates"),
         ] {
             let button = find_all::<Button>(&panel.widget, class)
                 .into_iter()

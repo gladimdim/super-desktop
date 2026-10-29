@@ -286,6 +286,22 @@ page reports active, battery, unknown-power, or permission/service errors rather
 than claiming protection when the lock could not be acquired. Forced sleep and
 other components that bypass logind inhibitors are outside its control.
 
+### System launch on a headless PC
+
+In **Settings → System launch**, turn on **Start the daemon at login** so the
+daemon starts at every login of this user, including a text console. On a PC
+with no display no overlay window appears, while the cards, AI harnesses and
+the phone bridge keep running and answering — this is how a PC you only reach
+from your phone or another PC stays reachable, since Hyprland's own login
+autostart needs a Hyprland session and a headless PC starts none. The setting
+installs exactly one private systemd user service,
+`~/.config/systemd/user/super-desktop-boot.service`, and turning the setting
+off removes that file. The service starts when this user's session starts, so
+for a PC that answers straight from power-on the user has to be logged in at
+boot (a getty autologin or a display manager). Hyprland's autostart keeps
+working alongside; only one daemon ever runs. The setting is off by default,
+and the page shows what systemd reports, plus why a change failed if it did.
+
 ### Terminal copy and paste
 
 Hold **Ctrl** and hover a web link (http/https) in a terminal card: it is underlined with a hand cursor, and **Ctrl+click** opens it in your default browser. A link that tmux wrapped onto several rows is only found on its first row.
