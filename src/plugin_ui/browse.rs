@@ -2,10 +2,11 @@
 //! (`plugins::registry`) as a list of cards, each a square preview picture
 //! (a quarter of the card's width) beside its text, with a search, category
 //! chips (all categories: grouped under each), and one button per plugin:
-//! Install (from its GitHub repository; it then waits for approval under
-//! Installed), or where it stands, and Edit & Enhance (`enhance`). The list shows at once from the last
+//! Install (from its GitHub repository), then Enable (approves it) and
+//! Disable / Enable in place, and Edit & Enhance (`enhance`). The list shows at once from the last
 //! fetch; the list and the previews refresh off the GTK thread.
 use super_desktop::plugins::install::{self, Places};
+use super_desktop::plugins::manifest;
 use super_desktop::plugins::registry::{self, Compatibility, Entry, Order};
 use gtk4::prelude::*;
 use gtk4::{gio, glib, Align, Orientation};
@@ -496,50 +497,46 @@ impl Browser {
         note.set_visible(false);
         let action = gtk4::Button::new();
         action.add_css_class("plugin-action");
-        match here(&Places::current(), &entry.id) {
-            Here::Installed => {
-                action.set_label("✓ Installed");
-                action.set_sensitive(false);
-            }
-            Here::WaitingApproval => {
-                action.set_label("Approve under Installed");
-                action.set_sensitive(false);
-            }
-            Here::No => {
-                action.set_label("Install");
-                action.set_tooltip_text(Some(&format!("From {}; it runs once you approve it", entry.web_url())));
-                let installable = !matches!(entry.compatibility(), Compatibility::NeedsApi(_));
-                action.set_sensitive(installable);
-                if installable {
-                    action.add_css_class("plugin-action-primary");
-                }
-                let (url, id, note) = (entry.git_url(), entry.id.clone(), note.clone());
-                action.connect_clicked(move |action| {
+        let installable = !matches!(entry.compatibility(), Compatibility::NeedsApi(_));
+        paint_action(&action, &entry.id, &entry.web_url(), installable);
+        let (url, web, id, on_note) = (entry.git_url(), entry.web_url(), entry.id.clone(), note.clone());
+        action.connect_clicked(move |action| {
+            let places = Places::current();
+            match here(&places, &id) {
+                Here::No => {
                     action.set_sensitive(false);
                     action.set_label("Installing…");
-                    let (url, id, places) = (url.clone(), id.clone(), Places::current());
-                    let handle = gio::spawn_blocking(move || install::install_as(&places, &url, Some(&id)).map(|_| ()));
-                    let (note, action) = (note.clone(), action.clone());
+                    let (url, id_, places) = (url.clone(), id.clone(), places.clone());
+                    let handle = gio::spawn_blocking(move || install::install_as(&places, &url, Some(&id_)).map(|_| ()));
+                    let (note, action, id, web) = (on_note.clone(), action.clone(), id.clone(), web.clone());
                     glib::spawn_future_local(async move {
                         match handle.await.unwrap_or_else(|_| Err("the install failed".into())) {
                             Ok(()) => {
-                                action.remove_css_class("plugin-action-primary");
-                                action.set_label("Approve under Installed");
                                 note.remove_css_class("plugin-error");
-                                note.set_text("Installed. It runs once you approve it under Installed.");
+                                note.set_text("Installed. Its QML can run programs with your permissions: enable it when you trust it.");
                             }
                             Err(e) => {
-                                action.set_label("Install");
-                                action.set_sensitive(true);
                                 note.add_css_class("plugin-error");
                                 note.set_text(&e);
                             }
                         }
+                        paint_action(&action, &id, &web, true);
                         note.set_visible(true);
                     });
-                });
+                }
+                Here::WaitingApproval => {
+                    let result = install::approve(&places, &id);
+                    after_switch(action, &on_note, &id, &web, result, "Enabled: it runs in SUPER DESKTOP now.");
+                }
+                Here::Installed => {
+                    let dir = places.plugins.join(&id);
+                    let enabled = manifest::load(&dir).is_ok_and(|m| m.enabled);
+                    let result = super::settings_page::set_enabled(&dir, !enabled);
+                    let done = if enabled { "Disabled." } else { "Enabled: it runs in SUPER DESKTOP now." };
+                    after_switch(action, &on_note, &id, &web, result, done);
+                }
             }
-        }
+        });
         footer.append(&action);
         // Anyone's plugin can be made one's own and improved by an agent.
         let enhance = gtk4::Button::with_label(super::enhance::LABEL);
@@ -565,6 +562,65 @@ impl Browser {
         card.attach(&body, 1, 0, CARD_COLUMNS - 1, 1);
         card
     }
+}
+
+/// The card's one button for where the plugin stands: Install, then Enable
+/// (approves it) and Disable / Enable (its `"enabled"`), without a trip to
+/// Installed.
+fn paint_action(action: &gtk4::Button, id: &str, from: &str, installable: bool) {
+    let places = Places::current();
+    action.remove_css_class("plugin-action-primary");
+    action.set_sensitive(true);
+    match here(&places, id) {
+        Here::No => {
+            action.set_label("Install");
+            action.set_tooltip_text(Some(&format!("From {from}; it runs once you enable it")));
+            action.set_sensitive(installable);
+            if installable {
+                action.add_css_class("plugin-action-primary");
+            }
+        }
+        Here::WaitingApproval => {
+            action.set_label("Enable");
+            action.set_tooltip_text(Some("Approve it and let it run: its QML can run programs with your permissions"));
+            action.add_css_class("plugin-action-primary");
+        }
+        Here::Installed => match manifest::load(&places.plugins.join(id)) {
+            Ok(m) if m.enabled => {
+                action.set_label("Disable");
+                action.set_tooltip_text(Some("Turn this plugin off"));
+            }
+            Ok(_) => {
+                action.set_label("Enable");
+                action.set_tooltip_text(Some("Turn this plugin on"));
+                action.add_css_class("plugin-action-primary");
+            }
+            Err(_) => {
+                action.set_label("✓ Installed");
+                action.set_tooltip_text(Some("Its plugin.json has problems: see it under Installed"));
+                action.set_sensitive(false);
+            }
+        },
+    }
+}
+
+/// Reloads the plugin after Enable / Disable and says how it went.
+fn after_switch(action: &gtk4::Button, note: &gtk4::Label, id: &str, from: &str, result: Result<(), String>, done: &str) {
+    match result {
+        Ok(()) => {
+            if let Some(slots) = super::slots::get() {
+                slots.reload_now(id);
+            }
+            note.remove_css_class("plugin-error");
+            note.set_text(done);
+        }
+        Err(e) => {
+            note.add_css_class("plugin-error");
+            note.set_text(&e);
+        }
+    }
+    note.set_visible(true);
+    paint_action(action, id, from, true);
 }
 
 fn capitalize(text: &str) -> String {
@@ -700,10 +756,11 @@ mod tests {
         // Install clones, then the plugin waits for approval.
         let install_clock = buttons("Install").into_iter().find(|b| b.tooltip_text().is_some_and(|t| t.contains("me/clock"))).unwrap();
         install_clock.emit_clicked();
-        crate::gtk_test::pump_until("the install", || install_clock.label().as_deref() == Some("Approve under Installed"));
+        crate::gtk_test::pump_until("the install", || install_clock.label().as_deref() == Some("Enable"));
         let places = Places::current();
         assert!(places.plugins.join("clock/plugin.json").is_file());
         assert_eq!(here(&places, "clock"), Here::WaitingApproval);
+        assert!(install_clock.is_sensitive(), "it can be enabled right here");
         // An entry whose repository holds another id is refused, nothing installed.
         let install_liar = buttons("Install").into_iter().find(|b| b.tooltip_text().is_some_and(|t| t.contains("me/liar"))).unwrap();
         install_liar.emit_clicked();
@@ -711,7 +768,25 @@ mod tests {
         assert!(labels("plugin-card-meta").iter().any(|t| t.contains("not \"liar\"")), "the refusal says why");
         assert!(!places.plugins.join("something-else").exists() && !places.plugins.join("liar").exists());
         browser.render();
-        assert_eq!(buttons("Approve under Installed").len(), 1);
+        assert_eq!(buttons("Enable").len(), 1);
+        // Enable approves it in place; then Disable / Enable switch it.
+        let manifest_enabled = || manifest::load(&places.plugins.join("clock")).unwrap().enabled;
+        buttons("Enable")[0].emit_clicked();
+        assert!(install::approved(&places, "clock"));
+        assert!(manifest_enabled());
+        assert_eq!(buttons("Disable").len(), 1);
+        buttons("Disable")[0].emit_clicked();
+        assert!(!manifest_enabled());
+        browser.render();
+        buttons("Enable")[0].emit_clicked();
+        assert!(manifest_enabled());
+        assert_eq!(buttons("Disable").len(), 1);
+        // Back to waiting, for Edit & Enhance below.
+        let record = places.state.join("clock.source.json");
+        let mut source = install::source(&places, "clock").unwrap();
+        source["approved"] = serde_json::json!(false);
+        std::fs::write(&record, source.to_string()).unwrap();
+        browser.render();
 
         // Edit & Enhance asks first, then approves it and makes it the user's
         // own copy; with no agent in the top bar, it says so.
