@@ -278,9 +278,18 @@ pub struct WorkspaceBar {
     pub widget: GtkBox,
     pub popover: Popover,
     pub entry: Entry,
+    commit_typed: Rc<dyn Fn() -> bool>,
 }
 
 impl WorkspaceBar {
+    /// Adopt a folder typed into the field but not yet confirmed with Enter,
+    /// so a harness launched right after typing starts there rather than in
+    /// the previous folder. Returns `false` when the text is not a folder: the
+    /// field is marked invalid and the caller should not launch.
+    pub fn commit_typed(&self) -> bool {
+        (self.commit_typed)()
+    }
+
     /// Show a folder that was chosen elsewhere — a viewer asking this machine
     /// to work somewhere else. The state write is the caller's: this only keeps
     /// the field the user reads in step with it.
@@ -715,10 +724,35 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
         pop_destroy.unparent();
     });
 
+    // A harness click after typing (no Enter): the typed text is the folder
+    // the user means. Left alone when it still shows the folder in use.
+    let commit_typed = {
+        let state = Rc::clone(&state);
+        let entry = entry.clone();
+        let popover = popover.clone();
+        let complete = Rc::clone(&complete);
+        let on_change = Rc::clone(&on_change);
+        Rc::new(move || {
+            if entry.text().trim() == effective_workspace_dir(&state.borrow()) {
+                return true;
+            }
+            if !commit_entry(&state, &entry, &on_change) {
+                return false;
+            }
+            let mut c = complete.borrow_mut();
+            c.selected = None;
+            c.suggestions.clear();
+            c.last_typed = entry.text().to_string();
+            popover.popdown();
+            true
+        }) as Rc<dyn Fn() -> bool>
+    };
+
     WorkspaceBar {
         widget: bar,
         popover,
         entry,
+        commit_typed,
     }
 }
 
@@ -1483,6 +1517,52 @@ mod tests {
         let sug = suggestions_for(&format!("{root_s}/al"), "/tmp", &[alpine.clone()]);
         assert_eq!(sug[0], alpine, "a used harness folder must lead the list");
         assert!(sug.len() >= 2, "sibling folders still appear after it");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_typed_without_enter_is_used_by_the_next_launch() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::typed_without_enter_child");
+    }
+
+    #[test]
+    fn typed_without_enter_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let root = std::env::temp_dir().join(format!("sd-ws-typed-{}", std::process::id()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        let canon = |p: &Path| fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        let (old_s, new_s) = (canon(&old), canon(&new));
+
+        let state = Rc::new(RefCell::new(AppState::default()));
+        state.borrow_mut().workspace_dir = Some(old_s.clone());
+        let saved: Rc<RefCell<Vec<AppState>>> = Rc::new(RefCell::new(Vec::new()));
+        let saved_cb = Rc::clone(&saved);
+        let bar = build_workspace_bar(
+            Rc::clone(&state),
+            Rc::new(move |s: AppState| saved_cb.borrow_mut().push(s)),
+        );
+
+        // Untouched field: nothing to adopt, nothing saved.
+        assert!(bar.commit_typed());
+        assert!(saved.borrow().is_empty());
+
+        // Typed, no Enter: the launch picks the typed folder.
+        bar.entry.set_text(&new_s);
+        assert!(bar.commit_typed());
+        assert_eq!(effective_workspace_dir(&state.borrow()), new_s);
+        assert_eq!(saved.borrow().len(), 1);
+
+        // Not a folder: no launch, the field is marked, the folder stays.
+        bar.entry.set_text(&root.join("missing").to_string_lossy());
+        assert!(!bar.commit_typed());
+        assert!(bar.entry.has_css_class("ws-entry-invalid"));
+        assert_eq!(effective_workspace_dir(&state.borrow()), new_s);
 
         let _ = fs::remove_dir_all(&root);
     }

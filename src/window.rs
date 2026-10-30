@@ -1018,7 +1018,10 @@ impl SuperDesktopWindow {
                 let win_w = Rc::downgrade(&win_rc);
                 move |key: &str| {
                     if let Some(w) = win_w.upgrade() {
-                        w.launch_new_terminal(key);
+                        // A folder typed without Enter is the one meant.
+                        if w.ws_bar.commit_typed() {
+                            w.launch_new_terminal(key);
+                        }
                     }
                 }
             }),
