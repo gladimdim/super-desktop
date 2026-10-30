@@ -434,7 +434,8 @@ public:
         const int id = ++m_nextId;
         if (callback.isCallable()) m_pending.insert(id, callback);
         QJsonObject msg{{"t", "call"}, {"id", id}, {"method", method}};
-        if (params.isValid()) msg["params"] = QJsonValue::fromVariant(params);
+        // plain(): Qt hands a JS object over as a QJSValue, which fromVariant drops.
+        if (params.isValid()) msg["params"] = QJsonValue::fromVariant(plain(params));
         sendMessage(msg);
     }
 
@@ -564,7 +565,18 @@ private:
     }
 
     static QVariant plain(const QVariant &v) {
-        return v.canConvert<QJSValue>() && v.typeId() == qMetaTypeId<QJSValue>() ? v.value<QJSValue>().toVariant() : v;
+        if (v.typeId() == qMetaTypeId<QJSValue>()) return plain(v.value<QJSValue>().toVariant());
+        if (v.typeId() == QMetaType::QVariantMap) {
+            QVariantMap map = v.toMap();
+            for (auto it = map.begin(); it != map.end(); ++it) it.value() = plain(it.value());
+            return map;
+        }
+        if (v.typeId() == QMetaType::QVariantList) {
+            QVariantList list = v.toList();
+            for (auto &item : list) item = plain(item);
+            return list;
+        }
+        return v;
     }
 
     // JSON-shaped variants as plain JS values: objects, arrays, scalars.

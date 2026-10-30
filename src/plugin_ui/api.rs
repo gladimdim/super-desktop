@@ -195,7 +195,11 @@ pub fn call_async(spec: &SurfaceSpec, method: &str, params: &Value, done: Box<dy
         return;
     }
     if !matches!(method, "cards.text" | "cards.send") {
-        done(call(spec, method, params));
+        let result = call(spec, method, params);
+        if let Err(e) = &result {
+            super_desktop::plugins::paths::append_log(&spec.plugin_id, &format!("[{}] {method} failed: {}", spec.surface_id, e["message"].as_str().unwrap_or("")));
+        }
+        done(result);
         return;
     }
     let Some(hooks) = hooks() else {
@@ -396,7 +400,9 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 let anchor = super::slots::PopupAnchor { caller: spec.surface_id.clone(), instance: spec.instance.clone(), rect };
                 // After this call returns: opening moves the keyboard.
                 gtk4::glib::idle_add_local_once(move || {
-                    let _ = slots.open_popup(&plugin, &surface, anchor);
+                    if let Err(e) = slots.open_popup(&plugin, &surface, anchor) {
+                        super_desktop::plugins::paths::append_log(&plugin, &format!("[{surface}] popup did not open: {e}"));
+                    }
                 });
             } else if open {
                 gtk4::glib::idle_add_local_once(move || {
