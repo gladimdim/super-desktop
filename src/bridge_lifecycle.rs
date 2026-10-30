@@ -49,7 +49,18 @@ impl Lifecycle {
 pub(super) static LIFECYCLE: Mutex<Lifecycle> = Mutex::new(Lifecycle::new());
 
 pub fn supervise() {
+    supervise_while(|| true);
+}
+
+/// `supervise`, but each check runs only while `active()` says this process
+/// owns the bridge. The headless daemon defers to a desktop daemon this way,
+/// so that daemon's Stop and Start stay in charge while it runs.
+pub fn supervise_while(active: impl Fn() -> bool) {
     loop {
+        if !active() {
+            std::thread::sleep(CHECK_INTERVAL);
+            continue;
+        }
         let result = LIFECYCLE.lock().unwrap().check(
             || bridge_running(),
             || {

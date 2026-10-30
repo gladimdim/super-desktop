@@ -290,15 +290,23 @@ other components that bypass logind inhibitors are outside its control.
 
 In **Settings → System launch**, turn on **Start the daemon at login** so the
 daemon starts at every login of this user, including a text console. On a PC
-with no display no overlay window appears, while the cards, AI harnesses and
-the phone bridge keep running and answering — this is how a PC you only reach
-from your phone or another PC stays reachable, since Hyprland's own login
-autostart needs a Hyprland session and a headless PC starts none. The setting
+with no display no overlay window appears, but the PC still works from your
+phone: the daemon brings back your saved cards (each agent resumes its
+conversation), and the phone lists them, opens them, creates new ones and
+closes them. Agents find the same programs as in your login shell. This is how
+a PC you only reach from your phone stays useful, since Hyprland's own login
+autostart needs a Hyprland session and a headless PC starts none. When you
+later log in to Hyprland, its overlay takes over and shows the cards that are
+already running; after you log out, the headless daemon takes them back.
+Notes, card layout and anything else that needs the overlay wait for a desktop
+session, and so does opening this PC's desktop from another PC. The setting
 installs exactly one private systemd user service,
 `~/.config/systemd/user/super-desktop-boot.service`, and turning the setting
-off removes that file. The service starts when this user's session starts, so
-for a PC that answers straight from power-on the user has to be logged in at
-boot (a getty autologin or a display manager). Hyprland's autostart keeps
+off removes that file. The service starts when this user's systemd manager
+starts. For a PC that answers straight from power-on with nobody logged in,
+turn on lingering once with `loginctl enable-linger $USER`; otherwise it
+starts at the first login (a text console, a getty autologin or a display
+manager). Hyprland's autostart keeps
 working alongside; only one daemon ever runs. The setting is off by default,
 and the page shows what systemd reports, plus why a change failed if it did.
 

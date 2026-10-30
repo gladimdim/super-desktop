@@ -29,6 +29,7 @@ mod security;
 #[path = "bridge_lifecycle.rs"]
 mod lifecycle;
 pub use lifecycle::supervise as supervise_bridge;
+pub use lifecycle::supervise_while as supervise_bridge_while;
 use security::Connection;
 use std::collections::HashMap;
 use std::fs;

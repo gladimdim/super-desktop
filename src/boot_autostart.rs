@@ -1,7 +1,8 @@
 //! ⚡ Settings → System launch: start the daemon when this PC starts.
 //!
-//! The daemon runs fine headless — with no display there is simply no overlay
-//! window, while the cards, harnesses and the phone bridge keep working — so on
+//! The daemon runs headless — with no display it draws no overlay, while it
+//! restores the cards, runs their harnesses and keeps the phone bridge up
+//! (see `headless`) — so on
 //! a headless PC (or a machine one only ever reaches from the phone) the daemon
 //! alone is enough to keep it reachable. Hyprland's login autostart cannot
 //! cover that: a headless PC starts no Hyprland session. This setting installs

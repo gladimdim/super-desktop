@@ -7,6 +7,8 @@ use super_desktop::cli_legacy::{self, Dial};
 use super_desktop::{cli, control, preload};
 use super_desktop::control_journal;
 mod control_launch;
+#[cfg(unix)]
+mod headless;
 mod control_terminal;
 mod control_geometry;
 mod control_close;
@@ -560,6 +562,15 @@ fn main() {
 
     let full_cmd = if args.len() > 1 { args[1..].join(" ") } else { "toggle".to_string() };
     let resp = match ipc_request(&full_cmd) {
+        // Only a headless daemon is up but this session has a display: start
+        // the overlay, which takes over from it.
+        Ipc::Reply(resp)
+            if matches!(action, "toggle" | "show" | "pairing-review" | "tour")
+                && headless::is_headless(&resp)
+                && headless::display_available() =>
+        {
+            None
+        }
         Ipc::Reply(resp) => Some(resp),
         Ipc::Stalled => {
             // A daemon is alive but busy: starting another one would orphan the
@@ -640,6 +651,8 @@ fn main() {
             // socket (see start_ipc_thread), so never spawn a second process
             // from this loop.
             match ipc_request(first) {
+                // Still the headless daemon: the new one has not taken over.
+                Ipc::Reply(reply) if headless::is_headless(&reply) => {}
                 Ipc::Reply(_) => {
                     println!("SUPER DESKTOP (Rust): Started and Shown");
                     return;
@@ -661,14 +674,21 @@ fn main() {
 }
 
 fn run_daemon(start_visible: bool) {
-    let initial_state = state::load_state();
+    let mut initial_state = state::load_state();
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
-    // Before any card is restored: restores resolve through these too.
-    launch_args::install(&initial_state.harness_args);
     if let Err(error) = gtk4::init() {
         eprintln!("SUPER DESKTOP cannot initialize its display: {error}");
+        headless::run();
         return;
     }
+    // A headless daemon (Settings → System launch) may own the socket and
+    // have changed the saved cards: take over before trusting the state.
+    if headless::take_over() {
+        initial_state = state::load_state();
+        sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
+    }
+    // Before any card is restored: restores resolve through these too.
+    launch_args::install(&initial_state.harness_args);
     startup::mark("GTK initialized");
 
     let app = Application::builder()
