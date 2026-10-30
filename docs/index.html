@@ -105,6 +105,7 @@
         {"@type": "Question", "name": "Can AI agents control SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The super-desktop command line lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. super-desktop mcp serve exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with super-desktop plugin snapshot."}},
         {"@type": "Question", "name": "Which operating systems does it run on?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is available now, iPhone is in development."}},
         {"@type": "Question", "name": "How do I install it?", "acceptedAnswer": {"@type": "Answer", "text": "Run curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash as your normal user on Omarchy. It installs what is missing, builds the newest release and sets up the shortcut. Run it again to update. An AI assistant with shell access can follow the install steps for AI assistants in the README."}},
+        {"@type": "Question", "name": "Does it work on a headless PC, or before I log in?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Turn on Settings → System launch and the PC starts SUPER DESKTOP by itself, with no screen and nobody logged in. Your agents come back where they were, and your phone can open them, prompt them, start new ones and close them. When you log in, the workspace shows the same agents, still running. For a PC that answers straight from power-on, turn on lingering once with loginctl enable-linger."}},
         {"@type": "Question", "name": "Do my agents stop when I hide the workspace or close the phone app?", "acceptedAnswer": {"@type": "Answer", "text": "No. Each agent runs in its own terminal session on the PC and keeps working while the workspace is hidden or the phone is away. Open it again and you see where it is."}}
       ]
     }
@@ -268,6 +269,7 @@
         <h2>Your agents, in your pocket.</h2>
         <p>Every session on your PC shows up on your phone. <strong>Type on the phone; it runs on the PC.</strong></p>
         <p>Get an alert when an agent finishes. Send it pictures and files.</p>
+        <p><strong>No screen? No login? Still there.</strong> SUPER DESKTOP can run headless from boot, so your phone reaches your agents on a server or a PC nobody is logged in to.</p>
         <p>The Android app is out now on Google Play. iPhone is in development.</p>
         <p class="store"><a class="play-badge large" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="188" height="56"></a> <a href="connect.html">Connect your phone →</a></p>
       </div>
@@ -538,6 +540,10 @@
           <summary>Do my agents stop when I hide the workspace or close the phone app?</summary>
           <p>No. Each agent runs in its own terminal session on the PC and keeps working while the workspace is hidden or the phone is away. Open it again and you see where it is.</p>
         </details>
+        <details>
+          <summary>Does it work on a headless PC, or before I log in?</summary>
+          <p>Yes. Turn on <strong>Settings → System launch</strong> and the PC starts SUPER DESKTOP by itself, with no screen and nobody logged in. Your agents come back where they were, and your phone can open them, prompt them, start new ones and close them. When you log in, the workspace shows the same agents, still running. For a PC that answers straight from power-on, turn on lingering once with <code>loginctl enable-linger</code>.</p>
+        </details>
       </div>
     </div>
   </section>
@@ -569,7 +575,7 @@
         <details class="more">
           <summary>Update, or install a specific release</summary>
           <p>Run the same command again to update to the newest release. Your settings, notes and running agents stay. To match an older phone app, pick a release:</p>
-          <div class="cmd"><code id="cmd-version">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v1.9.0 bash</code><button type="button" data-copy="cmd-version">Copy</button></div>
+          <div class="cmd"><code id="cmd-version">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v2.0.0 bash</code><button type="button" data-copy="cmd-version">Copy</button></div>
           <p>All releases: <a href="https://github.com/gladimdim/super-desktop/releases">GitHub releases</a>. Prerequisites and troubleshooting: <a href="https://github.com/gladimdim/super-desktop#readme">installation guide</a>.</p>
         </details>
       </div>

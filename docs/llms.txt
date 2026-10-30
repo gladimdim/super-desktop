@@ -25,7 +25,7 @@ It is not a fit for Windows or macOS desktops (the desktop app is Omarchy/Arch w
 - No API keys: SUPER DESKTOP calls no AI model itself. It launches the agents the user already installed and signed in to, with their own login, subscription or keys. Those agents still talk to their own providers as they normally do.
 - No accounts and no third parties: nothing to sign up for. PCs and phones connect directly over the local network or Tailscale using certificate-pinned HTTPS/WSS. Each device shows a matching code on both screens and must be approved on the PC; phones can be revoked at any time.
 - Your agents: Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a shell, or any custom command.
-- Your PC: everything runs locally. Each agent runs in its own tmux-backed terminal and keeps running while the workspace is hidden.
+- Your PC: everything runs locally. Each agent runs in its own tmux-backed terminal and keeps running while the workspace is hidden. With Settings → System launch it also runs headless from boot (no display, nobody logged in): saved agents are restored and the phone can open, prompt, start and close them.
 - Your phones: the Android app lists every session on the user's PCs, sends prompts that run on the PC, sends pictures and files, and alerts when an agent finishes. SD Launcher (an Omalauncher fork) puts agents on the Android home screen as pages and terminal widgets.
 - Price: the desktop app is free. The Android app has a free trial and an optional one-time Pro purchase through Google Play; no subscription.
 
