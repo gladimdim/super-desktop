@@ -30,7 +30,7 @@ const TOOLS: &[(&str, &str, &str)] = &[
     ("wait_for_completion", "Wait for a new native completion after an explicitly observed baseline. Requires exact pane identity and after=the last completionId, or none only for an observed null baseline. Timeout 1–300 seconds, default 30; repeated waits retain the same baseline. No output-silence heuristic or per-prompt attribution. Unknown/unsupported completion, exited or replaced panes fail clearly. Settings disable is checked while polling. Other calls on this stdio connection wait until this call returns.", "wait"),
     ("list_notes", "List sticky note metadata without exposing text. The result includes epoch and revision guards for edits. Requires the Read sticky notes permission.", ""),
     ("inspect_note", "Read one sticky note by exact ID, including its text. The result includes epoch and revision guards for edits. Requires the Read sticky notes permission.", "id"),
-    ("create_note", "Create a sticky note at x=80, y=140 with size 260×200 and tag 0; creation does not change visibility. Requires workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_create"),
+    ("create_note", "Create a sticky note. Optional x, y, width, height and tag place it; defaults are x=80, y=140, 260×200 and tag 0, so pass a position when creating several. The rectangle must fit the current logical canvas (minimum 180×120). Creation does not change visibility. Requires workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_create"),
     ("update_note", "Replace the text of one sticky note by exact ID. Requires workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_update"),
     ("delete_note", "Delete one sticky note by exact ID. Requires confirm=true, workspace guards and a unique requestId. Requires the Edit sticky notes permission.", "note_delete"),
 
@@ -114,7 +114,7 @@ fn schema(kind: &str) -> Value {
             ]),
         ),
         "note_create" => (
-            json!({"text":{"type":"string","minLength":0,"maxLength":4096,"description":"UTF-8 note text, at most 4096 bytes. Empty text is allowed; newline and tab are the only allowed control characters."},"requestId":request_id,"expectEpoch":request_id,"expectRevision":opaque}),
+            json!({"text":{"type":"string","minLength":0,"maxLength":4096,"description":"UTF-8 note text, at most 4096 bytes. Empty text is allowed; newline and tab are the only allowed control characters."},"x":{"type":"integer","minimum":0,"maximum":100000,"default":80,"description":"Left edge in logical canvas pixels; at least 10 and inside the canvas."},"y":{"type":"integer","minimum":0,"maximum":100000,"default":140,"description":"Top edge in logical canvas pixels, below the toolbar."},"width":{"type":"integer","minimum":180,"maximum":100000,"default":260,"description":"At most 70% of the canvas width."},"height":{"type":"integer","minimum":120,"maximum":100000,"default":200,"description":"At most 75% of the canvas height."},"tag":{"type":"integer","minimum":0,"maximum":8,"default":0,"description":"Color tag 0–8, as in the note's menu."},"requestId":request_id,"expectEpoch":request_id,"expectRevision":opaque}),
             json!(["text","requestId","expectEpoch","expectRevision"]),
         ),
         "note_update" => (
@@ -134,7 +134,7 @@ fn tools(config: Config) -> Value {
     Value::Array(TOOLS.iter().filter(|(name, _, _)| config.allows(name)).map(|(name, description, kind)| {
         let mutation = matches!(*kind, "launch" | "prompt" | "launch_prompt" | "send" | "keys" | "interrupt" | "close" | "note_create" | "note_update" | "note_delete");
         json!({"name":name,"description":description,"inputSchema":schema(kind),"outputSchema":schemars::schema_for!(control::Reply),
-            "annotations":{"readOnlyHint":!mutation,"destructiveHint":mutation,"idempotentHint":!mutation,"openWorldHint":mutation}})
+            "annotations":{"readOnlyHint":!mutation,"destructiveHint":mutation && *kind != "note_create","idempotentHint":!mutation,"openWorldHint":mutation}})
     }).collect())
 }
 
@@ -234,6 +234,8 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
     }
     let string = |key: &str| args[key].as_str().unwrap().to_owned();
     let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
+    // Already bounded by the schema above, so the conversion cannot fail.
+    let int = |key: &str, default: i32| args.get(key).and_then(Value::as_u64).map_or(default, |n| n as i32);
     let request_id = args.get("requestId").map(|_| string("requestId"));
     let mut workflow = None;
     let mut wait = None;
@@ -248,11 +250,11 @@ fn command(params: &Value) -> Result<ToolCall, &'static str> {
         "create_note" => Command::WorkspaceEdit {
             edit: crate::control::WorkspaceEdit::NoteCreate {
                 text: string("text"),
-                x: 80,
-                y: 140,
-                width: 260,
-                height: 200,
-                tag: 0,
+                x: int("x", 80),
+                y: int("y", 140),
+                width: int("width", 260),
+                height: int("height", 200),
+                tag: int("tag", 0) as u8,
             },
             expect_epoch: string("expectEpoch"),
             expect_revision: string("expectRevision"),
@@ -714,6 +716,16 @@ mod tests {
         let mut boundary = guards.as_object().unwrap().clone();
         boundary.insert("text".into(), json!("é".repeat(2048)));
         assert!(command(&json!({"name":"create_note","arguments":boundary})).is_ok());
+        let mut placed = guards.as_object().unwrap().clone();
+        placed.extend(json!({"text":"x","x":400,"y":300,"width":320,"height":240,"tag":5}).as_object().unwrap().clone());
+        assert!(matches!(command(&json!({"name":"create_note","arguments":placed})).unwrap().command,
+            Command::WorkspaceEdit { edit: crate::control::WorkspaceEdit::NoteCreate { x: 400, y: 300, width: 320, height: 240, tag: 5, .. }, .. }));
+        for (key, bad) in [("tag", json!(9)), ("width", json!(179)), ("height", json!(119)), ("x", json!(-1)), ("y", json!(1.5)), ("x", json!("80"))] {
+            let mut args = guards.as_object().unwrap().clone();
+            args.insert("text".into(), json!("x"));
+            args.insert(key.into(), bad.clone());
+            assert!(command(&json!({"name":"create_note","arguments":args})).is_err(), "{key}={bad}");
+        }
         let mut controls = guards.as_object().unwrap().clone();
         controls.insert("text".into(), json!("line one\nline two\tend"));
         assert!(command(&json!({"name":"create_note","arguments":controls})).is_ok());
@@ -842,6 +854,9 @@ mod tests {
             assert_eq!(tool["annotations"]["readOnlyHint"], !mutation);
             assert_eq!(tool["annotations"]["idempotentHint"], !mutation);
             assert_eq!(tool["annotations"]["openWorldHint"], mutation);
+            // Creating a note only adds one; replacing or deleting text can lose it.
+            let additive = tool["name"] == "create_note";
+            assert_eq!(tool["annotations"]["destructiveHint"], mutation && !additive);
             if mutation {
                 assert!(tool["inputSchema"]["required"]
                     .as_array()

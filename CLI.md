@@ -94,8 +94,6 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 | `inspect_request` | `id` (mutation request ID) | Read a historical receipt |
 | `launch_harness` | `harness`, `cwd`, `requestId`; optional `allowUnsafeHarness`, `allowDownload` | Launch a configured harness or `shell`; opt-ins default to false |
 | `submit_prompt` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision`, `expectPaneIdentity` | Submit a guarded text prompt; no attachments |
-
-
 | `send_terminal_text` | Input guards and `requestId`, `text`, optional `enter` | Send literal text (1–4096 UTF-8 bytes); Enter defaults false |
 | `send_terminal_keys` | Input guards and `requestId`, `keys` | Send 1–32 named keys from the schema's allowlist |
 | `interrupt_terminal` | Input guards and `requestId` | Send Ctrl-C to the exact guarded pane |
@@ -104,7 +102,7 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 | `wait_for_completion` | `id`, `expectPaneIdentity`, `after`; optional `timeoutSeconds` | Wait for a new native completion after the observed baseline; no terminal-silence heuristic |
 | `list_notes` | None | List note metadata without text; returns workspace epoch and revision guards |
 | `inspect_note` | `id` | Read exact note metadata and text, plus workspace epoch and revision guards |
-| `create_note` | `text`, `requestId`, `expectEpoch`, `expectRevision` | Create a note at x=80, y=140, size 260×200, tag 0; empty text is allowed |
+| `create_note` | `text`, `requestId`, `expectEpoch`, `expectRevision`; optional `x`, `y`, `width`, `height`, `tag` | Create a note, by default at x=80, y=140, size 260×200, tag 0; the rectangle must fit the canvas; empty text is allowed |
 | `update_note` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision` | Replace note text; empty text is allowed |
 | `delete_note` | `id`, `confirm=true`, `requestId`, `expectEpoch`, `expectRevision` | Delete one exact note after explicit confirmation |
 
