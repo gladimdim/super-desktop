@@ -134,15 +134,10 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    struct Server(String);
+    struct Server(crate::test_isolation::TmuxServer);
     impl Server {
         fn new() -> Self {
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let server = Self(format!(
-                "sd-viewport-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ));
+            let server = Self(crate::test_isolation::TmuxServer::new());
             server.run(&[
                 "new-session",
                 "-d",
@@ -158,21 +153,10 @@ mod tests {
             server
         }
         fn command(&self) -> Command {
-            let mut command = Command::new("tmux");
-            command
-                .args(["-L", &self.0, "-f", "/dev/null"])
-                .env_remove("TMUX")
-                .env_remove("TMUX_PANE");
-            command
+            self.0.command()
         }
         fn run(&self, args: &[&str]) -> String {
-            let output = self.command().args(args).output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
+            self.0.run(args)
         }
         fn open(&self) -> Result<Control, String> {
             Control::open_for_test("sd_term_viewport", self.command())
@@ -196,11 +180,6 @@ mod tests {
                 assert!(Instant::now() < until, "expected {expected}, got {actual}");
                 std::thread::sleep(Duration::from_millis(10));
             }
-        }
-    }
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self.command().arg("kill-server").output();
         }
     }
 

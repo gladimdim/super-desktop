@@ -200,8 +200,7 @@ impl Zone {
 pub struct HotCorner {
     /// Dropping this would destroy the window and unmap the zone, which is the
     /// whole gesture — holding it is the point, so it is never read.
-    #[allow(dead_code)]
-    window: ApplicationWindow,
+    _window: ApplicationWindow,
 }
 
 impl HotCorner {
@@ -269,7 +268,7 @@ impl HotCorner {
         area.add_controller(motion);
 
         window.present();
-        Some(Self { window })
+        Some(Self { _window: window })
     }
 }
 

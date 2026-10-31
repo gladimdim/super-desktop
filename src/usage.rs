@@ -248,60 +248,22 @@ pub fn format_tokens(n: u64) -> String {
     }
 }
 
-/// Days since civil 1970-01-01 (Howard Hinnant's algorithm).
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
-}
-
-/// Minimal ISO-8601 parser (`2026-09-19T08:10:41[.frac][Z|±HH:MM]`) to unix
-/// seconds. No extra deps for one hover label.
+/// ISO-8601 time (`2026-09-19T08:10:41[.frac]`, `T` or a space between date
+/// and time) to unix seconds. The zone is `Z`, `±HH:MM` or `±HHMM`; a time
+/// without one is UTC.
 fn parse_iso_to_epoch(s: &str) -> Option<i64> {
+    use chrono::{DateTime, NaiveDateTime};
     let s = s.trim();
-    if s.len() < 19 {
-        return None;
+    if let Ok(at) = DateTime::parse_from_rfc3339(s) {
+        return Some(at.timestamp());
     }
-    let date = s.get(0..10)?;
-    let time = s.get(11..19)?;
-    let mut dp = date.split('-');
-    let y: i64 = dp.next()?.parse().ok()?;
-    let mo: i64 = dp.next()?.parse().ok()?;
-    let d: i64 = dp.next()?.parse().ok()?;
-    let mut tp = time.split(':');
-    let h: i64 = tp.next()?.parse().ok()?;
-    let mi: i64 = tp.next()?.parse().ok()?;
-    let se: i64 = tp.next()?.parse().ok()?;
-    if !(1..=12).contains(&mo) || !(1..=31).contains(&d) || h > 23 || mi > 59 || se > 60 {
-        return None;
-    }
-    let mut epoch = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se;
-
-    // Tail after `YYYY-MM-DDTHH:MM:SS`: optional `.fraction`, then zone
-    // (`Z`, `±HH:MM`, `±HHMM`) or nothing (assume UTC).
-    let tail = s.get(19..).unwrap_or("");
-    let mut chars = tail.chars().peekable();
-    if chars.peek() == Some(&'.') {
-        chars.next();
-        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
-            chars.next();
-        }
-    }
-    let zone: String = chars.collect();
-    if zone.starts_with('+') || zone.starts_with('-') {
-        let sign = if zone.starts_with('+') { 1 } else { -1 };
-        let digits: String = zone[1..].chars().filter(|c| c.is_ascii_digit()).collect();
-        if digits.len() >= 4 {
-            let zh: i64 = digits.get(0..2)?.parse().ok()?;
-            let zm: i64 = digits.get(2..4)?.parse().ok()?;
-            epoch -= sign * (zh * 3600 + zm * 60);
-        }
-    }
-    // 'Z' or missing zone => already UTC.
-    Some(epoch)
+    ["T", " "].iter().find_map(|separator| {
+        let local = format!("%Y-%m-%d{separator}%H:%M:%S%.f");
+        DateTime::parse_from_str(s, &format!("{local}%z"))
+            .map(|at| at.timestamp())
+            .or_else(|_| NaiveDateTime::parse_from_str(s, &local).map(|at| at.and_utc().timestamp()))
+            .ok()
+    })
 }
 
 fn now_epoch() -> i64 {
@@ -596,5 +558,33 @@ mod tests {
         );
         assert_eq!(parse_iso_to_epoch("garbage"), None);
         assert_eq!(parse_iso_to_epoch(""), None);
+    }
+
+    #[test]
+    fn parse_iso_accepts_every_zone_shape_usage_apis_send() {
+        let epoch = Some(1_789_805_441); // 2026-09-19T08:10:41Z
+        for value in [
+            "2026-09-19T08:10:41Z",
+            "2026-09-19T08:10:41z",
+            " 2026-09-19T08:10:41Z\n",
+            "2026-09-19T08:10:41.5Z",
+            "2026-09-19T08:10:41.123456789Z",
+            "2026-09-19T08:10:41+00:00",
+            "2026-09-19T11:10:41+03:00",
+            "2026-09-19T03:40:41-04:30",
+            "2026-09-19T11:10:41+0300",
+            "2026-09-19T11:10:41.250+0300",
+            "2026-09-19 08:10:41Z",
+            "2026-09-19 11:10:41+03:00",
+            // Without a zone the time is UTC.
+            "2026-09-19T08:10:41",
+            "2026-09-19T08:10:41.123",
+            "2026-09-19 08:10:41",
+        ] {
+            assert_eq!(parse_iso_to_epoch(value), epoch, "{value:?}");
+        }
+        for value in ["2026-09-19", "2026-13-19T08:10:41Z", "2026-09-19T25:10:41Z", "08:10:41"] {
+            assert_eq!(parse_iso_to_epoch(value), None, "{value:?}");
+        }
     }
 }

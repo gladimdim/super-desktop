@@ -7,9 +7,22 @@ thread_local! {
     static CSS_PROVIDER: RefCell<Option<CssProvider>> = RefCell::new(None);
 }
 
+/// Run GTK's own theme in the Omarchy theme's light or dark variant.
+/// Without a desktop settings portal GTK falls back to its light variant,
+/// whose white buttons, entries and popovers then show the dark palette's
+/// light text on white.
+fn match_gtk_variant(theme: &OmarchyTheme) {
+    if let Some(settings) = gtk4::Settings::default() {
+        settings.set_gtk_application_prefer_dark_theme(theme.mode != "light");
+    }
+}
+
 pub fn generate_css(theme: &OmarchyTheme) -> String {
     let mut css = theme_css(theme);
     css.push_str(&icon_radius_css());
+    css.push_str(&crate::welcome_tour::css(theme));
+    css.push_str(&crate::attachment_view::css(theme));
+    css.push_str(&crate::plugin_ui::css(theme));
     css
 }
 
@@ -25,6 +38,18 @@ fn icon_radius_css() -> String {
             )
         })
         .collect()
+}
+
+/// One `.tag-dot-N` class per group color in `tag::TAG_COLORS`.
+fn tag_dot_css() -> String {
+    crate::tag::TAG_COLORS
+        .iter()
+        .enumerate()
+        .map(|(index, color)| {
+            format!(".tag-dot-{} {{ background-color: {color}; border-color: {color}; }}", index + 1)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn theme_css(theme: &OmarchyTheme) -> String {
@@ -49,6 +74,7 @@ r#"
 }}
 .asset-drawer button, .asset-drawer entry {{
     background-color: {btn_bg};
+    background-image: none;
     color: {foreground};
     border: 1px solid {btn_border};
     border-radius: 5px;
@@ -152,6 +178,24 @@ menubutton.machine-selector > button:checked {{
     box-shadow: inset 0 -2px {accent};
 }}
 
+/* A top-bar item being dragged to another place (toolbar_reorder): every
+   item of its row shows its outline and the dragged one is dimmed. The line
+   in the gap it will be dropped in is the row's background, drawn there. */
+.toolbar-rearranging {{
+    /* Room for the line before the first item and after the last. */
+    padding-left: 6px;
+    padding-right: 6px;
+}}
+.toolbar-rearranging > * {{
+    outline: 1px dashed alpha({light_foreground}, 0.5);
+    outline-offset: -1px;
+    border-radius: 6px;
+}}
+.toolbar-rearranging > .toolbar-reordering {{
+    outline: 1.5px dashed {accent};
+    opacity: 0.45;
+}}
+
 .hud-action-primary {{
     color: {accent};
     font-weight: 700;
@@ -178,12 +222,7 @@ button.machine-peer-selected {{
     background-color: {badge_bg};
 }}
 
-/* ================= Remote PC live consoles =================
-   A remote card is the local `.mini-terminal` chrome with a distinct border, so
-   a streamed console is never mistaken for a local one. */
-.term-remote {{
-    border: 1.5px solid {bright_blue};
-}}
+/* ================= Remote PC live consoles ================= */
 
 .remote-canvas {{
     background-color: {darker_background};
@@ -213,12 +252,12 @@ button.machine-peer-selected {{
 
 .hud-button-danger {{
     background-color: transparent;
-    color: {bright_red};
+    color: {red_text};
 }}
 
 .hud-button-danger:hover {{
     background-color: {danger_bg};
-    color: {bright_red};
+    color: {red_text};
     box-shadow: inset 0 -2px {bright_red};
 }}
 
@@ -278,7 +317,7 @@ entry.ws-entry:focus {{
    instead of starting cards somewhere the user did not ask for. */
 entry.ws-entry.ws-entry-invalid {{
     border-color: {bright_red};
-    color: {bright_red};
+    color: {red_text};
 }}
 
 .ws-menu-btn {{
@@ -389,7 +428,7 @@ popover.ws-pop > contents {{
 
 .ws-del:hover {{
     background-color: {danger_bg};
-    color: {bright_red};
+    color: {red_text};
 }}
 
 .ws-empty {{
@@ -490,14 +529,7 @@ popover.ws-pop > contents {{
     opacity: 0.55;
 }}
 
-.tag-dot-1 {{ background-color: #f87171; border-color: #f87171; }}
-.tag-dot-2 {{ background-color: #fb923c; border-color: #fb923c; }}
-.tag-dot-3 {{ background-color: #facc15; border-color: #facc15; }}
-.tag-dot-4 {{ background-color: #4ade80; border-color: #4ade80; }}
-.tag-dot-5 {{ background-color: #22d3ee; border-color: #22d3ee; }}
-.tag-dot-6 {{ background-color: #60a5fa; border-color: #60a5fa; }}
-.tag-dot-7 {{ background-color: #c084fc; border-color: #c084fc; }}
-.tag-dot-8 {{ background-color: #f472b6; border-color: #f472b6; }}
+{tag_dots}
 
 .tag-pop-box {{
     padding: 8px;
@@ -881,9 +913,114 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     transition: background-color 150ms ease;
 }}
 
+/* A card's panel buttons (Files, 📎, history): tighter than the header's
+   other buttons, so all three fit a default-size card. */
+.term-panel-btns .term-btn {{
+    padding: 3px 4px;
+    min-width: 0;
+}}
+
+/* Buttons plugins add to a card's header: as tight as the panel buttons.
+   They fold into ⋯ when the header has no room for them. */
+.plugin-card-btns .term-btn {{
+    padding: 3px 4px;
+    min-width: 0;
+}}
+
+.plugin-card-menu {{
+    padding: 6px;
+}}
+
+.plugin-card-menu button {{
+    color: {light_foreground};
+    padding: 4px 10px;
+}}
+
+.card-close-confirm-box {{
+    padding: 10px 12px;
+    color: {light_foreground};
+}}
+
+/* SD Editor: a folder tree beside GtkSourceView tabs, in a card. */
+.sd-editor-toolbar {{
+    padding: 4px 8px;
+    border-bottom: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-toolbar button,
+.sd-editor-menu > button {{
+    padding: 2px 10px;
+    min-height: 0;
+}}
+
+.sd-editor-side {{
+    background-color: {note_content_bg};
+    border-right: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-tree-title {{
+    font-weight: bold;
+    padding: 6px 10px;
+    color: {light_foreground};
+}}
+
+.sd-editor-tree {{
+    background: transparent;
+    color: {light_foreground};
+}}
+
+.sd-editor-tree > row {{
+    padding: 2px 6px;
+}}
+
+.sd-editor-text {{
+    font-family: '{font_family}', monospace;
+    font-size: 13px;
+}}
+
+.sd-editor-bar {{
+    padding: 6px 8px;
+    background-color: {term_hdr_bg};
+    color: {light_foreground};
+}}
+
+.sd-editor-prompt {{
+    border-bottom: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-status {{
+    padding: 2px 10px;
+    font-size: 11px;
+    color: alpha({light_foreground}, 0.75);
+    border-top: 1px solid {term_hdr_divider};
+}}
+
+.sd-editor-empty {{
+    color: alpha({light_foreground}, 0.75);
+}}
+
+.sd-editor-card notebook > header {{
+    background: transparent;
+}}
+
+.sd-editor-tab-label {{
+    font-size: 12px;
+}}
+
+.sd-editor-tab-close {{
+    padding: 0 4px;
+    min-height: 0;
+    min-width: 0;
+}}
+
 .term-btn:hover {{
     color: {bright_foreground};
     background-color: {btn_hover_bg};
+}}
+
+.term-btn:disabled {{
+    opacity: 0.4;
+    background: transparent;
 }}
 
 .term-preview-box {{
@@ -1062,10 +1199,8 @@ button.term-jump-newest:hover {{
     border-color: {accent};
     background: {badge_bg};
 }}
-.settings-entry-icon,
-.android-entry-icon {{ color: {accent}; font-size: 24px; }}
-.settings-entry-title,
-.android-entry-title {{ color: {foreground}; font-weight: 700; font-size: 13px; }}
+.settings-entry-icon {{ color: {accent}; font-size: 24px; }}
+.settings-entry-title {{ color: {foreground}; font-weight: 700; font-size: 13px; }}
 .settings-entry-summary {{ color: {dark_foreground}; font-size: 10.5px; }}
 .settings-entry-arrow {{ color: {dark_foreground}; font-size: 22px; }}
 
@@ -1139,7 +1274,7 @@ button.term-jump-newest:hover {{
     font-size: 34px;
     font-weight: 800;
 }}
-.pairing-result-mark.pairing-result-rejected {{ color: {bright_red}; }}
+.pairing-result-mark.pairing-result-rejected {{ color: {red_text}; }}
 
 /* Invitation flow: a checklist of prerequisites, the invitation, then what
    happened to the request it produced. */
@@ -1167,7 +1302,7 @@ button.term-jump-newest:hover {{
     border: 1px solid {status_busy_border};
 }}
 .invite-step-mark.invite-fail {{
-    color: {bright_red};
+    color: {red_text};
     background-color: {danger_bg};
     border: 1px solid {danger_border};
 }}
@@ -1245,18 +1380,8 @@ button.term-jump-newest:hover {{
 .android-page .launcher-section-head {{ margin-bottom: 8px; }}
 .android-page .launcher-section-title {{ font-size: 13px; }}
 .android-page .launcher-btn {{ border-radius: 4px; padding: 7px 12px; }}
-.connection-link-popover {{
-    padding: 10px;
-    min-width: 300px;
-}}
-.connection-link-popover entry {{
-    min-width: 300px;
-}}
 .android-page .launcher-section-body {{ border-spacing: 8px; }}
 /* Flat device groups inherit the current Omarchy palette in both modes. */
-.connections-list {{ padding: 8px 0; }}
-.connections-icon {{ color: {accent}; min-width: 24px; }}
-.connections-group-title {{ color: {accent}; font-weight: 700; font-size: 12px; }}
 .connections-device {{
     padding: 12px 0;
     border-bottom: 1px solid {launcher_section_border};
@@ -1264,15 +1389,7 @@ button.term-jump-newest:hover {{
 .connections-device-name {{ color: {foreground}; font-weight: 600; font-size: 12px; }}
 .connections-device-detail {{ color: {dark_foreground}; font-size: 10px; }}
 .connections-device .launcher-btn {{ background: transparent; }}
-.android-device-row {{ padding: 9px 0; }}
 .android-empty {{ color: {dark_foreground}; padding: 12px 0; }}
-.android-request {{
-    border-left: 2px solid {accent};
-    padding: 10px 12px;
-    background: {badge_bg};
-}}
-.android-advanced {{ color: {dark_foreground}; padding: 8px 0; }}
-.android-advanced > box {{ margin-top: 10px; }}
 
 .launcher-section {{
     background-color: {launcher_section_bg};
@@ -1332,7 +1449,7 @@ separator.launcher-sep {{
 
 /* Failed start/stop: the overlay is the only place the user sees it */
 .launcher-note-error {{
-    color: {bright_red};
+    color: {red_text};
     font-weight: 700;
 }}
 
@@ -1348,8 +1465,14 @@ separator.launcher-sep {{
 }}
 
 /* Buttons keep the HUD pill language, sized for a panel */
+/* GTK's own theme paints buttons with a background image (white in its
+   light variant, which GTK uses when the desktop reports no dark
+   preference); it covers `background-color`, so clear it here. */
 .launcher-btn {{
     background-color: {btn_bg};
+    background-image: none;
+    box-shadow: none;
+    text-shadow: none;
     color: {foreground};
     border: 1px solid {btn_border};
     border-radius: 9px;
@@ -1367,58 +1490,21 @@ separator.launcher-sep {{
 
 .launcher-btn-primary {{
     background-color: {badge_bg};
-    color: {accent};
+    color: {primary_text};
     border-color: {accent};
 }}
 
 .launcher-btn-danger {{
     background-color: {danger_bg};
-    color: {bright_red};
+    color: {danger_text};
     border-color: {danger_border};
 }}
 
 .launcher-btn-danger:hover {{
     background-color: {danger_border};
-    color: #ffffff;
+    color: {danger_hover_text};
 }}
 
-/* The PIN is the one value the user retypes on the phone: own panel + accent */
-.launcher-pin-box {{
-    background-color: {launcher_pin_bg};
-    border: 1px dashed {accent};
-    border-radius: 10px;
-    padding: 6px 12px;
-}}
-
-.launcher-pin-label {{
-    color: {dark_foreground};
-    font-size: 10px;
-    font-weight: 800;
-    letter-spacing: 0.8px;
-}}
-
-.launcher-pin-value {{
-    color: {accent};
-    font-family: '{font_family}', monospace;
-    font-size: 27px;
-    font-weight: 800;
-    letter-spacing: 6px;
-}}
-
-.launcher-window-state {{
-    font-size: 11px;
-}}
-
-.launcher-window-open {{
-    color: {bright_yellow};
-    font-weight: 700;
-}}
-
-.launcher-window-closed {{
-    color: {dark_foreground};
-}}
-
-/* Bridge state chips, mirroring .status-active / .status-exited */
 .launcher-online {{
     background-color: {status_active_bg};
     color: {bright_green};
@@ -1552,26 +1638,6 @@ separator.launcher-sep {{
     border: 1px solid {status_exited_border};
 }}
 
-/* Numbered phone steps */
-.launcher-step {{
-    padding: 2px 0;
-}}
-
-.launcher-step-num {{
-    background-color: {launcher_step_bg};
-    color: {light_foreground};
-    border-radius: 9999px;
-    min-width: 16px;
-    min-height: 14px;
-    padding: 1px 0;
-    font-size: 9.5px;
-    font-weight: 700;
-}}
-
-.launcher-step-text {{
-    color: {foreground};
-    font-size: 11px;
-}}
 "#,
         // The Mac overlay uses an opaque native window: a translucent root
         // can leave black/stale regions when terminal surfaces disappear.
@@ -1588,8 +1654,13 @@ separator.launcher-sep {{
         btn_bg = theme.rgba_lighter_bg(0.85),
         btn_border = theme.rgba_muted(0.35),
         btn_hover_bg = theme.rgba_muted(0.45),
+        red_text = theme.readable_text(&theme.background, 1.0, &[&theme.bright_red, &theme.red]),
         danger_bg = OmarchyTheme::hex_to_rgba(&theme.red, 0.20),
+        danger_text = theme.readable_text(&theme.red, 0.20, &[&theme.bright_red, &theme.red]),
+        danger_hover_text = theme.readable_text(&theme.red, 0.40, &["#ffffff"]),
+        primary_text = theme.readable_text(&theme.accent, 0.15, &[&theme.accent]),
         bright_red = theme.bright_red,
+        tag_dots = tag_dot_css(),
         danger_border = OmarchyTheme::hex_to_rgba(&theme.red, 0.40),
         note_bg = theme.rgba_dark_bg(0.94),
         note_border = theme.rgba_muted(0.35),
@@ -1624,7 +1695,6 @@ separator.launcher-sep {{
         launcher_section_bg = theme.rgba_darker_bg(0.35),
         launcher_section_border = theme.rgba_muted(0.25),
         launcher_pin_bg = theme.rgba_darker_bg(0.55),
-        launcher_step_bg = theme.rgba_muted(0.25),
         term_hdr_bg = theme.rgba_lighter_bg(0.85),
         term_hdr_divider = theme.rgba_muted(0.30),
         bright_green = theme.bright_green,
@@ -1674,6 +1744,7 @@ pub fn apply_styles() {
         });
 
         let theme = current_theme();
+        match_gtk_variant(&theme);
         let css = generate_css(&theme);
         provider.load_from_string(&css);
     });
@@ -1681,6 +1752,7 @@ pub fn apply_styles() {
 
 pub fn reload_styles() -> OmarchyTheme {
     let theme = reload_theme();
+    match_gtk_variant(&theme);
     let css = generate_css(&theme);
 
     CSS_PROVIDER.with(|cell| {
@@ -1787,9 +1859,6 @@ mod tests {
             "launcher-key",
             "launcher-value",
             "launcher-btn",
-            "launcher-pin-box",
-            "launcher-pin-value",
-            "launcher-step-num",
             "launcher-online",
             "launcher-offline",
             "launcher-note",
@@ -1987,5 +2056,152 @@ mod tests {
         for class in crate::command_feedback::TONE_CLASSES {
             assert!(css.contains(&format!(".{class}")), "missing CSS rule for {class}");
         }
+    }
+
+    #[test]
+    fn button_labels_are_readable_in_every_omarchy_theme() {
+        crate::gtk_test::run_in_child_process("styles::tests::button_contrast_inner");
+    }
+
+    /// WCAG relative luminance of an sRGB colour (0..=1 channels).
+    fn luminance([r, g, b]: [f64; 3]) -> f64 {
+        let lin = |c: f64| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    fn contrast(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Every installed Omarchy theme (and the built-in palette), with GTK's
+    /// own theme in the variant the app picks for it and in the other one
+    /// (a desktop without a settings portal, or a theme switch in flight):
+    /// each button's label must stand out from the button it is drawn on.
+    #[test]
+    fn button_contrast_inner() {
+        use gtk4::prelude::*;
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let mut themes = vec![("built-in".to_string(), OmarchyTheme::default())];
+        if let Ok(dirs) = std::fs::read_dir("/usr/share/omarchy/themes") {
+            let mut dirs: Vec<_> = dirs.filter_map(Result::ok).map(|d| d.path()).collect();
+            dirs.sort();
+            for dir in dirs {
+                if let Ok(colors) = std::fs::read_to_string(dir.join("colors.toml")) {
+                    let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+                    themes.push((name, crate::theme::from_colors_toml(&colors)));
+                }
+            }
+        }
+        // (panel classes, button classes)
+        let cases: &[(&[&str], &[&str])] = &[
+            (&["mini-terminal", "harness-panel"], &["launcher-btn"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "launcher-btn-primary"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "launcher-btn-danger"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "tour-next"]),
+            (&["mini-terminal", "harness-panel"], &["launcher-btn", "tour-demo"]),
+            (&["mini-terminal", "harness-panel"], &["term-btn"]),
+            (&["mini-terminal", "harness-panel", "asset-drawer"], &[]),
+            (&["mini-terminal", "harness-panel", "asset-drawer"], &["attach-browse-row"]),
+            (&[], &["hud-button"]),
+            (&[], &["hud-button", "hud-button-danger"]),
+        ];
+        let provider = CssProvider::new();
+        let display = gdk::Display::default().unwrap();
+        style_context_add_provider_for_display(&display, &provider, STYLE_PROVIDER_PRIORITY_APPLICATION);
+        let settings = gtk4::Settings::default().unwrap();
+        let shots = std::env::var_os("SD_CONTRAST_SHOTS").map(std::path::PathBuf::from);
+        let renderer = gtk4::gsk::CairoRenderer::new();
+        renderer.realize(None::<&gdk::Surface>).unwrap();
+        let mut failures = Vec::new();
+        for (name, theme) in &themes {
+            let backdrop = gdk::RGBA::parse(theme.background.as_str()).ok()
+                .map(|c| [f64::from(c.red()), f64::from(c.green()), f64::from(c.blue())])
+                .unwrap();
+            let matched = theme.mode != "light";
+            for dark in [matched, !matched] {
+                provider.load_from_string(&generate_css(theme));
+                settings.set_gtk_application_prefer_dark_theme(dark);
+                // Fresh widgets for every palette: nothing styled earlier
+                // is measured.
+                let window = gtk4::Window::new();
+                let column = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
+                let mut buttons = Vec::new();
+                for (panel_classes, button_classes) in cases {
+                    let panel = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
+                    for class in *panel_classes {
+                        panel.add_css_class(class);
+                    }
+                    let button = gtk4::Button::with_label("Skip tour");
+                    for class in *button_classes {
+                        button.add_css_class(class);
+                    }
+                    button.set_halign(gtk4::Align::Start);
+                    button.set_margin_start(12);
+                    panel.append(&button);
+                    column.append(&panel);
+                    buttons.push((format!("{panel_classes:?} {button_classes:?}"), button));
+                }
+                window.set_child(Some(&column));
+                window.present();
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while column.width() == 0 {
+                    assert!(std::time::Instant::now() < until, "never laid out");
+                    crate::gtk_test::pump(20);
+                }
+                crate::gtk_test::pump(100);
+                let paintable = gtk4::WidgetPaintable::new(Some(&column));
+                let snapshot = gtk4::Snapshot::new();
+                paintable.snapshot(&snapshot, f64::from(column.width()), f64::from(column.height()));
+                let texture = renderer.render_texture(&snapshot.to_node().unwrap(), None);
+                let (w, h) = (texture.width() as usize, texture.height() as usize);
+                let mut bytes = vec![0u8; w * h * 4];
+                texture.download(&mut bytes, w * 4);
+                // Premultiplied BGRA over the theme's background.
+                let pixel = |x: usize, y: usize| -> [f64; 3] {
+                    let p = &bytes[(y * w + x) * 4..][..4];
+                    let a = f64::from(p[3]) / 255.0;
+                    let rgb = [p[2], p[1], p[0]];
+                    std::array::from_fn(|i| f64::from(rgb[i]) / 255.0 + backdrop[i] * (1.0 - a))
+                };
+                let variant = if dark { "dark" } else { "light" };
+                let before = failures.len();
+                for (case, button) in &buttons {
+                    let bounds = button.compute_bounds(&column).unwrap();
+                    let (x0, y0) = (bounds.x() as usize + 3, bounds.y() as usize + 3);
+                    let x1 = ((bounds.x() + bounds.width()) as usize).min(w) - 3;
+                    let y1 = ((bounds.y() + bounds.height()) as usize).min(h) - 3;
+                    // The button's fill is its most common colour; the label
+                    // is the pixel that differs from it most.
+                    let mut counts = std::collections::HashMap::new();
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            let c = pixel(x, y).map(|v| (v * 255.0).round() as u8);
+                            *counts.entry(c).or_insert(0) += 1;
+                        }
+                    }
+                    let fill = counts.into_iter().max_by_key(|(_, n)| *n).unwrap().0.map(|v| f64::from(v) / 255.0);
+                    let mut best = 1.0f64;
+                    for y in y0..y1 {
+                        for x in x0..x1 {
+                            best = best.max(contrast(fill, pixel(x, y)));
+                        }
+                    }
+                    if best < 3.0 {
+                        failures.push(format!("{name} (GTK {variant}): {case} label contrast {best:.2}"));
+                    }
+                }
+                if let Some(dir) = shots.as_ref().filter(|_| failures.len() > before) {
+                    std::fs::create_dir_all(dir).unwrap();
+                    texture.save_to_png(dir.join(format!("{name}-{variant}.png"))).unwrap();
+                }
+                window.destroy();
+            }
+        }
+        renderer.unrealize();
+        assert!(failures.is_empty(), "{} unreadable buttons:\n{}", failures.len(), failures.join("\n"));
     }
 }

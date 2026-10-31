@@ -1,6 +1,6 @@
 # ⚡ SUPER DESKTOP
 
-> 🌐 **Live site: [gladimdim.github.io/super-desktop](https://gladimdim.github.io/super-desktop/)**
+> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 
@@ -30,7 +30,8 @@ The installer needs nothing set up beforehand. It:
 
 - installs the system packages it needs that are missing, with `pacman` (it
   asks for your password once): the build tools, GTK 4, gtk4-layer-shell, VTE,
-  tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap and poppler;
+  Qt Quick (for plugins), tmux, wl-clipboard, libnotify, sqlite, avahi,
+  bubblewrap and poppler;
 - installs Rust with the official rustup into `~/.cargo` and `~/.rustup` when
   there is no Rust 1.92 or newer, without changing your shell profile;
 - downloads the source of the newest
@@ -43,7 +44,9 @@ The installer needs nothing set up beforehand. It:
 Keep the source folder: the installed command runs the binaries built there.
 
 Then press **SUPER + SHIFT + Q** (SUPER is usually the Windows key), or run
-`super-desktop toggle`, to open the overlay. Choose a project folder and click
+`super-desktop toggle`, to open the overlay. The first time it opens, a short
+animated tour shows the basics; replay it any time from **⚙ Settings → Getting
+started guide** or with `super-desktop tour`. Choose a project folder and click
 an installed harness in the top bar. Install and sign in to your preferred AI
 CLI separately; SUPER DESKTOP does not install agents or provide their accounts.
 
@@ -134,6 +137,20 @@ follows the `master` branch instead, until you install a release again with
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
+| `v2.0.2` | 3 |
+| `v2.0.1` | 3 |
+| `v2.0.0` | 3 |
+| `v1.9.0` | 3 |
+| `v1.8.0` | 3 |
+| `v1.7.2` | 3 |
+| `v1.7.1` | 3 |
+| `v1.7.0` | 3 |
+| `v1.6.0` | 3 |
+| `v1.5.0` | 3 |
+| `v1.4.0` | 3 |
+| `v1.3.1` | 3 |
+| `v1.3.0` | 3 |
+| `v1.2.0` | 3 |
 | `v1.1.21` | 3 |
 | `v1.1.17` | 3 |
 
@@ -153,6 +170,7 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **📝 Sticky notes** — click any note and type. Notes follow your Omarchy theme, autosave to disk, support drag & drop, resize from any edge or corner, and group color tags.
 - **💻 AI terminals** — small live terminal cards (VTE4) running your AI coding agents as real interactive sessions: type, scroll, and work with the agent right inside the overlay, no fullscreen needed. Cards iconify to 128×128, resize from any edge or corner with a ghost preview, expand to 80% of the screen, and can be double-clicked, dragged, and color-tagged. Each project folder gets its own label color: a new harness takes the color of its folder, so Claude and Codex working in the same folder match, and a new folder gets a color no other folder uses yet. Pick another color on any card's dot and later harnesses in that folder use it. Drop a card on another one and the buried terminal keeps a **dotted ghost outline** of itself — it disappears only while you are working in that terminal or in the card that covers it, so a stacked desk never hides a session you forgot about.
 - **📎 Referenced files** — each terminal's **Files** button opens PNG/JPEG/WebP images, animated GIFs, PDF pages, Markdown, and text/code. Files are discovered on demand from terminal output; **Add** accepts a workspace-relative path when a reference is missing. No recursive folder scan, HTML viewer, or localhost proxy. PDF previews require `bubblewrap` and `poppler` on Linux and fail closed if the sandbox is unavailable.
+- **📎 Attach files to a harness** — the 📎 button in a card's top bar, next to **Files**, opens its attachments panel. Pick files in the panel's folder browser (it starts in the card's project folder), drop them on it from a file manager, or paste copied files with Ctrl+V; up to 20 at a time, each with ✕ to remove it. **Insert into prompt** types them into the harness's prompt without sending it: Claude Code, Codex, OpenCode and Grok take PNG and JPEG images as their own image attachments, every other file is named by its path, and a shell gets the quoted paths. Files stay where they are; nothing is copied. The list is kept per card until you insert or clear it, and the button shows how many files are waiting.
 - **🪄 Overlay, not windows** — when hidden, nothing occupies Hyprland workspaces. Cards animate in from the nearest screen edge with background blur.
 - **🎯 Hot corner** — park the pointer in the very top-left corner for two seconds and the overlay toggles, without touching the keyboard. Hidden while nothing of ours is on screen: it stays a pointer gesture, never a key grab.
 - **⌨️ CLI control for agents** — discover available harnesses, inspect terminal cards, live cell grids and bounded terminal output, send guarded text and keys, attach read-only or interactively, lease a temporary grid, move, resize, minimize, restore, expand and collapse cards with revision checks, close exact sessions with identity guards, create shells and launch configured agents with a requested size, centering and first prompt through commands with built-in help and JSON output. Pair PCs, inspect pending connections, compare approval codes, and revoke device access through the same interface. Explicit unsafe/download choices and durable request receipts make mutations inspectable. See the [CLI reference](CLI.md) for supported commands and limits.
@@ -161,7 +179,8 @@ SUPER DESKTOP is a second, invisible desktop that lives on top of your Omarchy w
 - **⚙ Movable settings** — drag the ⚙ Settings card by its header, like a terminal card, to see what is under it, and drag its edges to resize it. It opens at 1024×768, stays on screen below the top bar, and comes back where and how big you left it.
 - **🎨 Native Omarchy theming** — colors, fonts, and terminal palette are read from the active Omarchy theme and update instantly when you switch themes (no restart).
 - **📁 Workspace folder** — the text field right after the brand is the directory every **new** harness card starts in (`~` by default). Click it and a list of the folders you used before drops down — pick one, or type a path (`~/GitHub/proj`, `GitHub/proj`, or just `proj`) and press `Enter`; each row has its own ✕ to forget it. Clicking the folder also gives the harness its own project: harnesses scope their history to the working directory, and Reasonix keys its workspace write lease on it, so cards started in `~` block each other ("another session is writing to this workspace") while cards started in their own project do not. Existing cards keep the folder they were created in.
-- **🔌 Phone bridge (optional)** — encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Connections*. A background supervisor checks every five seconds and recovers the bridge after three consecutive failed checks, even with the overlay hidden or screen locked. Stop pauses recovery until Start (or the next daemon launch). Failed starts are retried, and `bridge.previous.log` preserves the previous run beside `bridge.log`. To stay reachable while unattended on external power, enable *Settings → Sleep lock*; recovery cannot run while the PC is suspended. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
+- **🔌 Phone bridge (optional)** — for the [SUPER DESKTOP Android app on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop) ([how to connect it](https://superdesktop.dmytrogladkyi.com/connect.html)). Encrypted HTTPS/WSS over LAN or Tailscale (port 8759, mDNS `_omarchy-harness._tcp`). It starts automatically with the SUPER DESKTOP daemon; stop or restart it from the ⚙ gear → *Connections*. A background supervisor checks every five seconds and recovers the bridge after three consecutive failed checks, even with the overlay hidden or screen locked. Stop pauses recovery until Start (or the next daemon launch). Failed starts are retried, and `bridge.previous.log` preserves the previous run beside `bridge.log`. To stay reachable while unattended on external power, enable *Settings → Sleep lock*; recovery cannot run while the PC is suspended. Desktop QR verification, explicit approval, and per-phone revocation keep access under your control. A TV, which cannot scan the QR code, pairs with a code instead: ⚙ → *Connections* → *Add a device* → *Pair a TV*, then type the code the TV shows. Tailscale is optional. Protocol v3 requires re-pairing older phones. See [Security](SECURITY.md).
+- **🧩 Plugins made by AI** — describe a widget, dock, top-bar item, popup, panel, desktop card, game or full-screen view, and an AI agent builds it as a small QML plugin that appears while it works. Browse and install other people's plugins, or make any plugin your own copy and improve it with an agent. See [Plugins](#plugins).
 - **🖥 Other PCs** — pair two PCs and open the other one's workspace from the top-left **This PC** selector: its consoles stream live and every action runs on that PC. See [Use another PC's harnesses](#use-another-pcs-harnesses).
 
 The overlay takes its colors from the active Omarchy theme and follows a theme
@@ -269,6 +288,30 @@ access, logind configuration edits, or helper service is required. The settings
 page reports active, battery, unknown-power, or permission/service errors rather
 than claiming protection when the lock could not be acquired. Forced sleep and
 other components that bypass logind inhibitors are outside its control.
+
+### System launch on a headless PC
+
+In **Settings → System launch**, turn on **Start the daemon at login** so the
+daemon starts at every login of this user, including a text console. On a PC
+with no display no overlay window appears, but the PC still works from your
+phone: the daemon brings back your saved cards (each agent resumes its
+conversation), and the phone lists them, opens them, creates new ones and
+closes them. Agents find the same programs as in your login shell. This is how
+a PC you only reach from your phone stays useful, since Hyprland's own login
+autostart needs a Hyprland session and a headless PC starts none. When you
+later log in to Hyprland, its overlay takes over and shows the cards that are
+already running; after you log out, the headless daemon takes them back.
+Notes, card layout and anything else that needs the overlay wait for a desktop
+session, and so does opening this PC's desktop from another PC. The setting
+installs exactly one private systemd user service,
+`~/.config/systemd/user/super-desktop-boot.service`, and turning the setting
+off removes that file. The service starts when this user's systemd manager
+starts. For a PC that answers straight from power-on with nobody logged in,
+turn on lingering once with `loginctl enable-linger $USER`; otherwise it
+starts at the first login (a text console, a getty autologin or a display
+manager). Hyprland's autostart keeps
+working alongside; only one daemon ever runs. The setting is off by default,
+and the page shows what systemd reports, plus why a change failed if it did.
 
 ### Terminal copy and paste
 
@@ -421,6 +464,12 @@ add a button to this PC's top bar. You can edit, hide, or remove it from the
 same list. Its command runs in the selected workspace
 folder; a connected PC can launch it only while this PC offers it.
 
+Every launcher row also has a **Clone** button. It copies that launcher as a
+custom launcher of its own — keeping its executable and current arguments — and
+opens the edit form on the copy, so you can rename it and change its startup
+arguments (for example a second OpenCode with `--model …`) without touching the
+original. **Cancel** closes the form but keeps the copy in the list.
+
 Every installed built-in harness, Terminal included, has a **Parameters**
 button in the same list. Its page shows the built-in defaults (Claude Code's
 `--dangerously-skip-permissions`, Codex's `--no-alt-screen
@@ -434,6 +483,60 @@ parameters. Open cards keep their command, and restored cards keep theirs while
 gaining parameters you add. Keep display-mode defaults such as Codex's
 `--no-alt-screen` if you follow that harness from the phone: they are what puts
 its history into scrollback.
+
+### SD Editor
+
+The lightning bolt with a pencil in the top bar, next to 📝, opens
+**SD Editor**, the built-in text editor, as a card on the desktop. It opens on the folder chosen in the top
+bar: the folder's files in a tree on the left (right-click for a new file or
+folder, rename, or move to the trash) and open files in tabs on the right,
+with syntax colors from your theme, line numbers, find and replace and undo.
+The File menu and the usual shortcuts do New, Open, Save, Save as, Close,
+Find, Replace and Go to line; questions such as "save changes?" are asked
+inside the card. Images open in a preview with zoom (animated GIFs play), and
+sound and video in a player. It drags, resizes, arranges and slides like the
+other cards and comes back with its files after a restart.
+**Settings → SD Editor** turns that button off (and opens the editor
+without it). Plugins can open it too (`editor.open`).
+
+### Plugins
+
+Plugins add things to the overlay: docks at the screen edges, items in the
+top bar with popups under them, floating panels, cards on the desktop
+(games, tools, terminals), full-screen views, sections in Settings and
+buttons on terminal cards; they can also move, size, minimize and expand
+terminal cards, and close one after asking you on the card. A
+plugin is a folder of QML in `~/.config/super-desktop/plugins/<id>/` with a
+`plugin.json`, drawn by Qt Quick (`qt6-declarative`) and colored by your
+Omarchy theme; it reloads on screen whenever one of its files is saved.
+
+- **Make one with AI**: ✨ **Create Plugin** (top bar, or **Settings →
+  Plugins**) asks what it should do and where it goes, then opens an agent
+  (Claude Code, Codex…) in a new plugin folder with the plugin skill. The
+  plugin appears and changes while the agent works. Agents check their own
+  work with `super-desktop plugin check` and `plugin snapshot`, which also
+  clicks and types through a plugin like a user.
+- **Get plugins**: **Settings → Plugins → Discover** lists the public
+  [plugin list](https://github.com/gladimdim/super-desktop-plugins) with
+  pictures, a search and categories. **Install** clones a plugin from its
+  repository; it runs only after you approve it, and **Ask AI to review**
+  reads it for you first. `super-desktop plugin search` and `plugin install
+  <id>` do the same in a terminal.
+- **Settings → Plugins** lists your plugins in narrow rows (a small
+  picture, name, version, a one-line description and an on/off switch). A
+  click on a row opens the plugin's page: its own settings, Open, Edit &
+  Enhance, its log and Delete.
+- **Edit & Enhance** on any plugin opens an agent to improve it. Someone
+  else's plugin first becomes your own copy (it keeps its saved data and
+  stops updating from its author).
+- **Share yours**: `super-desktop plugin preview <id>` draws its picture and
+  `plugin publish <id>` checks it is ready for the list; the list's
+  [CONTRIBUTING.md](https://github.com/gladimdim/super-desktop-plugins/blob/main/CONTRIBUTING.md)
+  explains the pull request.
+
+Plugins run as you: their QML can start programs. Plugins you make run at
+once; installed ones wait for your approval. See the
+[plugin commands](CLI.md#plugins).
 
 ### Keybindings
 
@@ -588,6 +691,7 @@ commands have the local user's authority; they are not an agent sandbox.
 super-desktop help agents
 super-desktop schema --format json
 super-desktop toggle          # show / hide
+super-desktop tour            # open the overlay with the getting started guide
 super-desktop status          # visible? how many notes / terminals
 super-desktop add-note "Buy milk"
 super-desktop add-term claude # see Settings → Harness launchers for installed types
@@ -611,7 +715,7 @@ State lives in `~/.config/super-desktop/state.json` (notes, cards, the workspace
 
 - OS is Omarchy/Arch, Wayland Hyprland session with a display (`echo $WAYLAND_DISPLAY` must be non-empty for the overlay; build works headless, showing does not).
 - You run commands as the **user** (never root for build/install steps).
-- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
+- Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `gtksourceview5`, `qt6-base`, `qt6-declarative`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`, `gst-plugins-good`, `gst-libav`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
 - Installing packages runs `sudo pacman`, which reads the user's password from the terminal. Run the installer in a terminal the user can type into. Without one, install the missing packages first (the installer prints the `pacman` command).
 
 ### 1. Install (the only supported way)
@@ -667,7 +771,7 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 | A shortcut recorded in ⚙ Settings does nothing | Opening ⚙ Settings → *Record* parks Hyprland in a throwaway submap, so any combination is captured even if a bind already owns it; the new bind then needs a reload. Check `hyprctl configerrors`, then re-record. |
 | Global shortcuts stopped working after using ⚙ Settings → *Record* | The recorder releases the submap on Esc, on Cancel and after 10s. If it was killed mid-recording: `hyprctl dispatch 'hl.dsp.submap("reset")'` |
 | Installer stops at the package step | `sudo pacman -Syu` if the package database is out of date, then `sudo pacman -S --needed` with the packages it printed, then run the installer again |
-| Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk4-layer-shell pkgconf`, then `./rebuild.sh` |
+| Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk4-layer-shell gtksourceview5 pkgconf`, then `./rebuild.sh` |
 | Installer says rustup's default is too old or not working | `rustup default stable`, then run the installer again |
 | Theme changes don't restyle the overlay | Check `~/.config/omarchy/hooks/theme-set.d/super-desktop` is executable; run `super-desktop reload-theme` manually |
 | Card shows another card's prompt in its title | Fixed in current code (owned-session resolution + self-heal). Update to latest (run the installer again); titles correct themselves within ~30s of the overlay being visible |

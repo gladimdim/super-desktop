@@ -28,7 +28,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box as GtkBox, Button, Entry, EventControllerKey, GestureClick, GestureDrag, Label, Orientation,
-    Popover, PositionType, PropagationPhase,
+    Popover, PolicyType, PositionType, PropagationPhase, ScrolledWindow,
 };
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -38,7 +38,7 @@ use std::rc::Rc;
 
 use crate::state::{
     clean_dir, display_dir, effective_workspace_dir, home_dir_string, remember_workspace_dir,
-    resolve_workspace_input, AppState,
+    resolve_workspace_input, AppState, RECENT_DIRS_VISIBLE,
 };
 
 /// Cap on the autocomplete dropdown. Enough to scan; short enough for the HUD.
@@ -95,15 +95,201 @@ fn append_resize_handle(row: &GtkBox, entry: &Entry) {
     row.append(&handle);
 }
 
+/// The parts of a folder control, local or remote: the caption over 📁, the
+/// field, ▾ and the resize handle, and the ▾ list's popover on the field.
+struct FolderControl {
+    bar: GtkBox,
+    subtitle: Label,
+    icon: Label,
+    entry: Entry,
+    menu_btn: Button,
+    popover: Popover,
+}
+
+/// A folder control captioned `caption`, whose ▾ says `menu_tooltip`. The
+/// caller decides whether its field can be typed in.
+fn folder_control(caption: &str, menu_tooltip: &str) -> FolderControl {
+    let bar = GtkBox::new(Orientation::Vertical, 0);
+    bar.add_css_class("ws-bar");
+    bar.set_valign(Align::Center);
+    bar.set_hexpand(false);
+
+    let subtitle = Label::new(Some(caption));
+    subtitle.add_css_class("ws-subtitle");
+    subtitle.set_halign(Align::Start);
+    bar.append(&subtitle);
+
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.set_valign(Align::Center);
+    let icon = Label::new(Some("📁"));
+    icon.add_css_class("ws-icon");
+    row.append(&icon);
+
+    let entry = Entry::new();
+    entry.add_css_class("ws-entry");
+    // About 20% narrower than the original 18–42 character field.
+    entry.set_width_chars(FIELD_MIN_CHARS);
+    entry.set_max_width_chars(FIELD_MAX_CHARS);
+    entry.set_valign(Align::Center);
+    // GTK entries expand by default; the field claims its configured text
+    // width so the other dock controls keep their own space.
+    entry.set_hexpand(false);
+    // No hover tooltip of the path: on a layer-shell HUD the tooltip is its
+    // own popup and sits on top of this small field, so clicks never reach it.
+    entry.set_has_tooltip(false);
+    row.append(&entry);
+
+    let menu_btn = Button::with_label("▾");
+    menu_btn.add_css_class("ws-menu-btn");
+    menu_btn.set_valign(Align::Center);
+    menu_btn.set_tooltip_text(Some(menu_tooltip));
+    row.append(&menu_btn);
+    append_resize_handle(&row, &entry);
+    bar.append(&row);
+
+    let popover = Popover::new();
+    popover.add_css_class("ws-pop");
+    popover.set_position(PositionType::Bottom);
+    popover.set_has_arrow(false);
+    popover.set_offset(0, 6);
+    popover.set_can_focus(false);
+    popover.set_parent(&entry);
+
+    FolderControl { bar, subtitle, icon, entry, menu_btn, popover }
+}
+
+/// The box a ▾ list's rows go in.
+fn list_box() -> GtkBox {
+    let container = GtkBox::new(Orientation::Vertical, 2);
+    container.add_css_class("ws-pop-box");
+    container
+}
+
+/// Put a ▾ list's rows in `popover`: the first [`RECENT_DIRS_VISIBLE`] show
+/// at once and the rest scroll, so a long history never runs off the screen.
+/// `selected` (the ↑/↓ highlight) is scrolled into view.
+fn show_list(popover: &Popover, container: &GtkBox, selected: Option<usize>) {
+    let scroll = ScrolledWindow::new();
+    scroll.set_policy(PolicyType::Never, PolicyType::Automatic);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_propagate_natural_width(true);
+    scroll.set_child(Some(container));
+    // Row heights come from the theme's CSS, so measure them once styled.
+    scroll.set_max_content_height(visible_rows_height(container));
+    let container_map = container.clone();
+    scroll.connect_map(move |scroll| {
+        scroll.set_max_content_height(visible_rows_height(&container_map));
+        if let Some(index) = selected {
+            reveal_row(scroll, &container_map, index);
+        }
+    });
+    if let Some(index) = selected {
+        // Already mapped (↑/↓ repaint while open): reveal after layout.
+        let (scroll, container) = (scroll.clone(), container.clone());
+        glib::idle_add_local_once(move || reveal_row(&scroll, &container, index));
+    }
+    popover.set_child(Some(&scroll));
+}
+
+/// Height of the list's first [`RECENT_DIRS_VISIBLE`] rows, with the box's
+/// spacing and padding.
+fn visible_rows_height(container: &GtkBox) -> i32 {
+    let mut height = 0;
+    let mut rows = 0;
+    let mut child = container.first_child();
+    while let Some(row) = child {
+        if rows == RECENT_DIRS_VISIBLE {
+            break;
+        }
+        height += row.measure(Orientation::Vertical, -1).1;
+        rows += 1;
+        child = row.next_sibling();
+    }
+    // `.ws-pop-box` pads 6 px above and below the rows.
+    height + container.spacing() * (rows as i32 - 1).max(0) + 12
+}
+
+/// Scroll so the `index`th row is fully visible.
+fn reveal_row(scroll: &ScrolledWindow, container: &GtkBox, index: usize) {
+    let mut child = container.first_child();
+    for _ in 0..index {
+        child = child.and_then(|c| c.next_sibling());
+    }
+    let Some(row) = child else { return };
+    let Some(top) = row.compute_point(container, &gtk4::graphene::Point::new(0.0, 0.0)) else { return };
+    let (top, bottom) = (top.y() as f64, top.y() as f64 + row.height() as f64);
+    let adjustment = scroll.vadjustment();
+    if top < adjustment.value() {
+        adjustment.set_value(top);
+    } else if bottom > adjustment.value() + adjustment.page_size() {
+        adjustment.set_value(bottom - adjustment.page_size());
+    }
+}
+
+/// A ▾ list with no folders in it, saying `text` instead.
+fn show_empty_list(popover: &Popover, text: &str) {
+    let container = list_box();
+    let empty = Label::new(Some(text));
+    empty.add_css_class("ws-empty");
+    empty.set_halign(Align::Start);
+    container.append(&empty);
+    popover.set_child(Some(&container));
+}
+
+/// One folder in a ▾ list, here or a host's: `[✓] name  path` on the button
+/// that picks it, checked when it is the folder in use. Returns the row and
+/// that button.
+fn folder_row(dir: &str, active: bool) -> (GtkBox, Button) {
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    row.add_css_class("ws-row");
+    row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
+
+    let pick = Button::new();
+    pick.add_css_class("ws-row-pick");
+    pick.set_hexpand(true);
+    pick.set_can_focus(false);
+    pick.set_focus_on_click(false);
+    pick.set_tooltip_text(Some(dir));
+
+    let label_row = GtkBox::new(Orientation::Horizontal, 8);
+    let mark = Label::new(Some(if active { "✓" } else { " " }));
+    mark.add_css_class("ws-row-mark");
+    label_row.append(&mark);
+
+    let name = Label::new(Some(&row_name(dir)));
+    name.add_css_class("ws-row-name");
+    label_row.append(&name);
+
+    let path = Label::new(Some(&display_dir(dir)));
+    path.add_css_class("ws-row-path");
+    path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
+    path.set_halign(Align::End);
+    path.set_hexpand(true);
+    label_row.append(&path);
+
+    pick.set_child(Some(&label_row));
+    row.append(&pick);
+    (row, pick)
+}
+
 /// The top bar field and the history popover it owns.
 #[derive(Clone)]
 pub struct WorkspaceBar {
     pub widget: GtkBox,
     pub popover: Popover,
     pub entry: Entry,
+    commit_typed: Rc<dyn Fn() -> bool>,
 }
 
 impl WorkspaceBar {
+    /// Adopt a folder typed into the field but not yet confirmed with Enter,
+    /// so a harness launched right after typing starts there rather than in
+    /// the previous folder. Returns `false` when the text is not a folder: the
+    /// field is marked invalid and the caller should not launch.
+    pub fn commit_typed(&self) -> bool {
+        (self.commit_typed)()
+    }
+
     /// Show a folder that was chosen elsewhere — a viewer asking this machine
     /// to work somewhere else. The state write is the caller's: this only keeps
     /// the field the user reads in step with it.
@@ -162,53 +348,16 @@ impl RemoteFolderBar {
 /// Build the folder control for one remote workspace. `on_pick` is what asks
 /// that host to work in a folder: nothing here writes this machine's state.
 pub fn build_remote_folder_bar(on_pick: Rc<dyn Fn(String)>) -> RemoteFolderBar {
-    let bar = GtkBox::new(Orientation::Vertical, 0);
-    bar.add_css_class("ws-bar");
-    bar.set_valign(Align::Center);
-    bar.set_hexpand(false);
-
-    let subtitle = Label::new(Some("working directory on that PC"));
-    subtitle.add_css_class("ws-subtitle");
-    subtitle.set_halign(Align::Start);
-    bar.append(&subtitle);
-
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    row.set_valign(Align::Center);
-    let icon = Label::new(Some("📁"));
-    icon.add_css_class("ws-icon");
-    row.append(&icon);
-
+    let FolderControl { bar, subtitle, icon, entry, menu_btn, popover } =
+        folder_control("working directory on that PC", "Folders that PC offers");
     // The same field the local workspace shows, minus the typing: it is an
     // entry so it looks and spaces identically, but a remote path is not this
     // machine's to spell.
-    let entry = Entry::new();
-    entry.add_css_class("ws-entry");
-    entry.set_width_chars(FIELD_MIN_CHARS);
-    entry.set_max_width_chars(FIELD_MAX_CHARS);
-    entry.set_valign(Align::Center);
-    entry.set_hexpand(false);
     entry.set_editable(false);
     entry.set_can_focus(false);
     entry.set_focus_on_click(false);
-    entry.set_has_tooltip(false);
-    row.append(&entry);
-
-    let menu_btn = Button::with_label("▾");
-    menu_btn.add_css_class("ws-menu-btn");
-    menu_btn.set_valign(Align::Center);
-    menu_btn.set_tooltip_text(Some("Folders that PC offers"));
-    row.append(&menu_btn);
-    append_resize_handle(&row, &entry);
-    bar.append(&row);
 
     let folders: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let popover = Popover::new();
-    popover.add_css_class("ws-pop");
-    popover.set_position(PositionType::Bottom);
-    popover.set_has_arrow(false);
-    popover.set_offset(0, 6);
-    popover.set_can_focus(false);
-    popover.set_parent(&entry);
 
     {
         // The list is built from what the host last reported, so it is as fresh
@@ -260,45 +409,13 @@ fn paint_remote_rows(
     current: &str,
     on_pick: &Rc<dyn Fn(String)>,
 ) {
-    let container = GtkBox::new(Orientation::Vertical, 2);
-    container.add_css_class("ws-pop-box");
     if dirs.is_empty() {
-        let empty = Label::new(Some("That PC offers no other folder yet."));
-        empty.add_css_class("ws-empty");
-        empty.set_halign(Align::Start);
-        container.append(&empty);
-        popover.set_child(Some(&container));
+        show_empty_list(popover, "That PC offers no other folder yet.");
         return;
     }
+    let container = list_box();
     for dir in dirs {
-        let active = dir == current;
-        let row = GtkBox::new(Orientation::Horizontal, 4);
-        row.add_css_class("ws-row");
-        row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
-
-        let pick = Button::new();
-        pick.add_css_class("ws-row-pick");
-        pick.set_hexpand(true);
-        pick.set_can_focus(false);
-        pick.set_focus_on_click(false);
-        pick.set_tooltip_text(Some(dir));
-
-        let label_row = GtkBox::new(Orientation::Horizontal, 8);
-        let mark = Label::new(Some(if active { "✓" } else { " " }));
-        mark.add_css_class("ws-row-mark");
-        label_row.append(&mark);
-        let name = Label::new(Some(&row_name(dir)));
-        name.add_css_class("ws-row-name");
-        label_row.append(&name);
-        let path = Label::new(Some(&display_dir(dir)));
-        path.add_css_class("ws-row-path");
-        path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-        path.set_halign(Align::End);
-        path.set_hexpand(true);
-        label_row.append(&path);
-        pick.set_child(Some(&label_row));
-        row.append(&pick);
-
+        let (row, pick) = folder_row(dir, dir == current);
         {
             let dir = dir.clone();
             let pop = popover.clone();
@@ -310,7 +427,7 @@ fn paint_remote_rows(
         }
         container.append(&row);
     }
-    popover.set_child(Some(&container));
+    show_list(popover, &container, None);
 }
 
 /// Live autocomplete / history-list state for one workspace field.
@@ -381,58 +498,14 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
     state: Rc<RefCell<AppState>>,
     on_change: Rc<FChange>,
 ) -> WorkspaceBar {
-    let bar = GtkBox::new(Orientation::Vertical, 0);
-    bar.add_css_class("ws-bar");
-    bar.set_valign(Align::Center);
-    bar.set_hexpand(false);
-
-    let subtitle = Label::new(Some("working directory for harness"));
-    subtitle.add_css_class("ws-subtitle");
-    subtitle.set_halign(Align::Start);
-    bar.append(&subtitle);
-
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    row.set_valign(Align::Center);
-
-    let icon = Label::new(Some("📁"));
-    icon.add_css_class("ws-icon");
-    row.append(&icon);
-
-    let entry = Entry::new();
-    entry.add_css_class("ws-entry");
-    // About 20% narrower than the original 18–42 character field.
-    entry.set_width_chars(FIELD_MIN_CHARS);
-    entry.set_max_width_chars(FIELD_MAX_CHARS);
-    entry.set_valign(Align::Center);
-    // GTK entries expand by default; the field claims its configured text
-    // width so the other dock controls keep their own space.
-    entry.set_hexpand(false);
+    let FolderControl { bar, subtitle, icon, entry, menu_btn, popover } =
+        folder_control("working directory for harness", "Folders used before");
     entry.set_can_focus(true);
     entry.set_editable(true);
     entry.set_focus_on_click(true);
     let current_dir = effective_workspace_dir(&state.borrow());
     entry.set_placeholder_text(Some(&home_dir_string()));
     entry.set_text(&current_dir);
-    // No hover tooltip of the path: on a layer-shell HUD the tooltip is its
-    // own popup and sits on top of this small field, so clicks never reach it.
-    entry.set_has_tooltip(false);
-    row.append(&entry);
-
-    let menu_btn = Button::with_label("▾");
-    menu_btn.add_css_class("ws-menu-btn");
-    menu_btn.set_valign(Align::Center);
-    menu_btn.set_tooltip_text(Some("Folders used before"));
-    row.append(&menu_btn);
-    append_resize_handle(&row, &entry);
-    bar.append(&row);
-
-    let popover = Popover::new();
-    popover.add_css_class("ws-pop");
-    popover.set_position(PositionType::Bottom);
-    popover.set_has_arrow(false);
-    popover.set_offset(0, 6);
-    popover.set_can_focus(false);
-    popover.set_parent(&entry);
 
     let complete = Rc::new(RefCell::new(CompleteState {
         suggestions: Vec::new(),
@@ -444,21 +517,13 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
 
     // Clicks on the caption or folder icon land in the field, so the whole
     // control is a typing target — not only the (still compact) entry itself.
-    {
+    for widget in [subtitle.upcast::<gtk4::Widget>(), icon.upcast()] {
         let entry_focus = entry.clone();
         let click = GestureClick::new();
         click.connect_pressed(move |_, _, _, _| {
             entry_focus.grab_focus();
         });
-        subtitle.add_controller(click);
-    }
-    {
-        let entry_focus = entry.clone();
-        let click = GestureClick::new();
-        click.connect_pressed(move |_, _, _, _| {
-            entry_focus.grab_focus();
-        });
-        icon.add_controller(click);
+        widget.add_controller(click);
     }
 
     // ▾ opens the unfiltered history (with ✕). Typing switches the same
@@ -659,10 +724,35 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
         pop_destroy.unparent();
     });
 
+    // A harness click after typing (no Enter): the typed text is the folder
+    // the user means. Left alone when it still shows the folder in use.
+    let commit_typed = {
+        let state = Rc::clone(&state);
+        let entry = entry.clone();
+        let popover = popover.clone();
+        let complete = Rc::clone(&complete);
+        let on_change = Rc::clone(&on_change);
+        Rc::new(move || {
+            if entry.text().trim() == effective_workspace_dir(&state.borrow()) {
+                return true;
+            }
+            if !commit_entry(&state, &entry, &on_change) {
+                return false;
+            }
+            let mut c = complete.borrow_mut();
+            c.selected = None;
+            c.suggestions.clear();
+            c.last_typed = entry.text().to_string();
+            popover.popdown();
+            true
+        }) as Rc<dyn Fn() -> bool>
+    };
+
     WorkspaceBar {
         widget: bar,
         popover,
         entry,
+        commit_typed,
     }
 }
 
@@ -896,7 +986,7 @@ fn list_matching_dirs(parent: &Path, partial: &str) -> Vec<String> {
 
 /// Folders a harness has actually run in, newest first, existing on disk.
 ///
-/// `recent_dirs` is the seven-row visible list; `used_dirs` is the persistent
+/// `recent_dirs` is the ▾ history list; `used_dirs` is the persistent
 /// autocomplete index. Each card also contributes its cwd so sessions written
 /// by an older version become searchable before the next state save.
 fn collect_used_dirs(state: &AppState) -> Vec<String> {
@@ -1065,18 +1155,12 @@ fn paint_rows<FChange: Fn(AppState) + 'static>(
     entry: &Entry,
     on_change: &Rc<FChange>,
 ) {
-    let container = GtkBox::new(Orientation::Vertical, 2);
-    container.add_css_class("ws-pop-box");
-
     if dirs.is_empty() {
-        let empty = Label::new(Some("No folders used yet — type a path above."));
-        empty.add_css_class("ws-empty");
-        empty.set_halign(Align::Start);
-        container.append(&empty);
-        popover.set_child(Some(&container));
+        show_empty_list(popover, "No folders used yet — type a path above.");
         return;
     }
 
+    let container = list_box();
     for (i, dir) in dirs.iter().enumerate() {
         container.append(&list_row(
             dir,
@@ -1090,7 +1174,7 @@ fn paint_rows<FChange: Fn(AppState) + 'static>(
         ));
     }
 
-    popover.set_child(Some(&container));
+    show_list(popover, &container, selected);
 }
 
 /// One list row: `[✓] name  path` picks the folder; `✕` (history only) forgets it.
@@ -1104,38 +1188,10 @@ fn list_row<FChange: Fn(AppState) + 'static>(
     entry: Entry,
     on_change: Rc<FChange>,
 ) -> GtkBox {
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    row.add_css_class("ws-row");
-    row.add_css_class(if active { "ws-row-active" } else { "ws-row-idle" });
+    let (row, pick) = folder_row(dir, active);
     if selected {
         row.add_css_class("ws-row-selected");
     }
-
-    let pick = Button::new();
-    pick.add_css_class("ws-row-pick");
-    pick.set_hexpand(true);
-    pick.set_can_focus(false);
-    pick.set_focus_on_click(false);
-    pick.set_tooltip_text(Some(dir));
-
-    let label_row = GtkBox::new(Orientation::Horizontal, 8);
-    let mark = Label::new(Some(if active { "✓" } else { " " }));
-    mark.add_css_class("ws-row-mark");
-    label_row.append(&mark);
-
-    let name = Label::new(Some(&row_name(dir)));
-    name.add_css_class("ws-row-name");
-    label_row.append(&name);
-
-    let path = Label::new(Some(&display_dir(dir)));
-    path.add_css_class("ws-row-path");
-    path.set_ellipsize(gtk4::pango::EllipsizeMode::Middle);
-    path.set_halign(Align::End);
-    path.set_hexpand(true);
-    label_row.append(&path);
-
-    pick.set_child(Some(&label_row));
-    row.append(&pick);
 
     {
         let pick_dir = dir.to_string();
@@ -1200,7 +1256,9 @@ fn row_name(dir: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::{count_class, find_first};
     use crate::state::{TerminalData, RECENT_DIRS_MAX};
+    use gtk4::{PolicyType, ScrolledWindow};
 
     #[test]
     fn a_remote_folder_control_is_the_local_one_without_the_typing() {
@@ -1242,7 +1300,8 @@ mod tests {
             move |dir: String| picked.borrow_mut().push(dir)
         });
         paint_remote_rows(&popover, &dirs, "/work/notes", &on_pick);
-        let container = popover.child().expect("one container");
+        let list = popover.child().expect("one list");
+        let container = find_first::<GtkBox>(&list, "ws-pop-box").expect("the rows' box");
         let second = container
             .first_child()
             .and_then(|row| row.next_sibling())
@@ -1463,6 +1522,83 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_typed_without_enter_is_used_by_the_next_launch() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::typed_without_enter_child");
+    }
+
+    #[test]
+    fn typed_without_enter_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let root = std::env::temp_dir().join(format!("sd-ws-typed-{}", std::process::id()));
+        let (old, new) = (root.join("old"), root.join("new"));
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&new).unwrap();
+        let canon = |p: &Path| fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        let (old_s, new_s) = (canon(&old), canon(&new));
+
+        let state = Rc::new(RefCell::new(AppState::default()));
+        state.borrow_mut().workspace_dir = Some(old_s.clone());
+        let saved: Rc<RefCell<Vec<AppState>>> = Rc::new(RefCell::new(Vec::new()));
+        let saved_cb = Rc::clone(&saved);
+        let bar = build_workspace_bar(
+            Rc::clone(&state),
+            Rc::new(move |s: AppState| saved_cb.borrow_mut().push(s)),
+        );
+
+        // Untouched field: nothing to adopt, nothing saved.
+        assert!(bar.commit_typed());
+        assert!(saved.borrow().is_empty());
+
+        // Typed, no Enter: the launch picks the typed folder.
+        bar.entry.set_text(&new_s);
+        assert!(bar.commit_typed());
+        assert_eq!(effective_workspace_dir(&state.borrow()), new_s);
+        assert_eq!(saved.borrow().len(), 1);
+
+        // Not a folder: no launch, the field is marked, the folder stays.
+        bar.entry.set_text(&root.join("missing").to_string_lossy());
+        assert!(!bar.commit_typed());
+        assert!(bar.entry.has_css_class("ws-entry-invalid"));
+        assert_eq!(effective_workspace_dir(&state.borrow()), new_s);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_long_folder_history_scrolls_past_eight_rows() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::long_history_child");
+    }
+
+    #[test]
+    fn long_history_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let state = Rc::new(RefCell::new(AppState::default()));
+        state.borrow_mut().recent_dirs = (0..RECENT_DIRS_MAX).map(|i| format!("/work/project-{i}")).collect();
+        let bar = build_workspace_bar(Rc::clone(&state), Rc::new(|_: AppState| {}));
+        let entry = find_first::<Entry>(bar.widget.upcast_ref(), "ws-entry").unwrap();
+        rebuild_recent(&bar.popover, &state, &entry, Rc::new(|_: AppState| {}), None);
+
+        // Every remembered folder is a row, inside a list that scrolls
+        // vertically once more than eight are shown.
+        let list = bar.popover.child().unwrap().downcast::<ScrolledWindow>().expect("a scrolling list");
+        assert_eq!(count_class(list.upcast_ref(), "ws-row"), RECENT_DIRS_MAX);
+        assert_eq!(list.vscrollbar_policy(), PolicyType::Automatic);
+        assert_eq!(list.hscrollbar_policy(), PolicyType::Never);
+        let rows = find_first::<GtkBox>(list.upcast_ref(), "ws-pop-box").unwrap();
+        let row = rows.first_child().unwrap().measure(Orientation::Vertical, -1).1;
+        let eight = list.max_content_height();
+        assert!(eight >= row * RECENT_DIRS_VISIBLE as i32, "eight rows fit before scrolling");
+        assert!(eight < row * (RECENT_DIRS_VISIBLE as i32 + 1) + 2 * RECENT_DIRS_VISIBLE as i32 + 12,
+            "the ninth row is below the fold");
+    }
+
+    #[test]
     fn test_workspace_bar_gtk_structure() {
         // GTK may only be used from one thread per process, so the widget
         // assertions run in a child process (see `crate::gtk_test`).
@@ -1498,11 +1634,11 @@ mod tests {
         );
         let saved_persist = Rc::clone(&saved);
         let persist = Rc::new(move |s: AppState| saved_persist.borrow_mut().push(s));
-        let entry = find_entry(bar.widget.upcast_ref(), "ws-entry").expect("the field must exist");
+        let entry = find_first::<Entry>(bar.widget.upcast_ref(), "ws-entry").expect("the field must exist");
         assert!(bar.popover.child().is_none(), "empty until it is opened");
 
         let subtitle =
-            find_label(bar.widget.upcast_ref(), "ws-subtitle").expect("the subtitle must exist");
+            find_first::<Label>(bar.widget.upcast_ref(), "ws-subtitle").expect("the subtitle must exist");
         assert_eq!(subtitle.text().as_str(), "working directory for harness");
 
         // The field starts on the home directory, shown as the full path.
@@ -1572,7 +1708,7 @@ mod tests {
         let rows_before = count_class(&bar.popover.child().unwrap(), "ws-row");
         assert_eq!(rows_before, 2, "home and the project are both remembered");
 
-        let del = find_button(&bar.popover.child().unwrap(), "ws-del").expect("a delete button");
+        let del = find_first::<Button>(&bar.popover.child().unwrap(), "ws-del").expect("a delete button");
         del.emit_clicked();
         pump_idle();
         assert_eq!(
@@ -1624,7 +1760,7 @@ mod tests {
         rebuild_recent(&bar.popover, &state, &entry, Rc::clone(&persist), None);
         for _ in 0..RECENT_DIRS_MAX + 2 {
             let Some(child) = bar.popover.child() else { break };
-            let Some(del) = find_button(&child, "ws-del") else {
+            let Some(del) = find_first::<Button>(&child, "ws-del") else {
                 break;
             };
             del.emit_clicked();
@@ -1669,63 +1805,5 @@ mod tests {
         for _ in 0..10 {
             let _ = glib::MainContext::default().iteration(false);
         }
-    }
-
-    fn count_class(w: &gtk4::Widget, class: &str) -> usize {
-        let mut n = if w.has_css_class(class) { 1 } else { 0 };
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            n += count_class(&c, class);
-            child = c.next_sibling();
-        }
-        n
-    }
-
-    fn find_label(w: &gtk4::Widget, class: &str) -> Option<Label> {
-        if let Some(l) = w.downcast_ref::<Label>() {
-            if l.has_css_class(class) {
-                return Some(l.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(found) = find_label(&c, class) {
-                return Some(found);
-            }
-            child = c.next_sibling();
-        }
-        None
-    }
-
-    fn find_entry(w: &gtk4::Widget, class: &str) -> Option<Entry> {
-        if let Some(e) = w.downcast_ref::<Entry>() {
-            if e.has_css_class(class) {
-                return Some(e.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(found) = find_entry(&c, class) {
-                return Some(found);
-            }
-            child = c.next_sibling();
-        }
-        None
-    }
-
-    fn find_button(w: &gtk4::Widget, class: &str) -> Option<Button> {
-        if let Some(b) = w.downcast_ref::<Button>() {
-            if b.has_css_class(class) {
-                return Some(b.clone());
-            }
-        }
-        let mut child = w.first_child();
-        while let Some(c) = child {
-            if let Some(found) = find_button(&c, class) {
-                return Some(found);
-            }
-            child = c.next_sibling();
-        }
-        None
     }
 }

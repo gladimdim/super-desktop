@@ -9,6 +9,7 @@
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/cli.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
+<meta property="og:locale" content="en_US">
 <meta property="og:url" content="https://superdesktop.dmytrogladkyi.com/cli.html">
 <meta property="og:title" content="SUPER DESKTOP CLI reference">
 <meta property="og:description" content="Commands and JSON results for driving SUPER DESKTOP from scripts and AI agents.">
@@ -23,6 +24,8 @@
 <meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <style>
+  html, body { overflow-x: hidden; }
+  @supports (overflow: clip) { html, body { overflow-x: clip; } }
   :root { color-scheme: dark; --bg: #0b0e14; --panel: #131722; --text: #e6e9f0; --muted: #a8b2c5; --accent: #22d3ee; --border: #262e42; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.7 system-ui, sans-serif; }
@@ -45,6 +48,7 @@
   th { background: var(--panel); }
   footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
   @media (max-width: 600px) { .wrap { padding: 20px 16px 48px; } body { font-size: 16px; } pre { padding: 12px; } }
+  @media (pointer: coarse) { .links a, .contents summary { display: inline-flex; align-items: center; min-height: 44px; } .contents li { margin: 6px 0; } }
 </style>
 </head>
 <body><div class="wrap">
@@ -75,6 +79,7 @@
 <li><a href="#request-receipts-and-uncertain-outcomes">Request receipts and uncertain outcomes</a></li>
 <li><a href="#json-and-exit-statuses">JSON and exit statuses</a></li>
 <li><a href="#legacy-and-remote-commands">Legacy and remote commands</a></li>
+<li><a href="#plugins">Plugins</a></li>
 <li><a href="#complete-public-command-syntax">Complete public command syntax</a></li>
 <li><a href="#pairing-and-device-administration">Pairing and device administration</a></li>
 <li><a href="#structured-peer-wrappers">Structured peer wrappers</a></li>
@@ -461,7 +466,9 @@ super-desktop terminal capture CARD_ID --history --lines 200 --format json
 <code>panePid</code>, <code>status</code>, <code>columns</code>, <code>rows</code>, <code>units: "terminal-cells"</code>,
 <code>alternateScreen</code>, <code>retainedHistoryLines</code>, <code>observedAtUnixMs</code> and
 <code>readiness: "not_observed"</code>. Status is <code>running</code> or <code>exited</code> (when tmux retains
-an exited pane). Neither state implies harness readiness or task completion.
+an exited pane). For an exited pane <code>panePid</code> is <code>0</code> when tmux no longer
+reports its process (tmux 3.8 and newer). Neither state implies harness
+readiness or task completion.
 <code>paneIdentity</code> is an opaque observation identifier that changes when the pane
 process or tmux server is replaced; it is not an authorization token. Use
 <code>terminal inspect</code> for saved card geometry in logical pixels.</p>
@@ -562,6 +569,7 @@ read data is withheld if its mapping changes during the operation.</p>
 <code>settings reset KEY</code> with workspace epoch/revision and a request ID. Strings
 need JSON quotes, for example <code>--value '"small"'</code>. Writable keys are
 <code>toolbarSize</code> (small/medium/large), <code>sleepLockOnAc</code> (Linux boolean),
+<code>bootAutostart</code> (Linux boolean),
 <code>workspaceDefault</code> (existing absolute directory or null),
 <code>settingsPanelPosition</code> ([x,y] or null) and <code>settingsPanelSize</code> ([width,height]
 or null, 660×620 through 8192×8192). Panel preferences are fitted to the current
@@ -684,7 +692,7 @@ the operation is still wanted; do not automatically overwrite another edit.
 A revision is a comparison token, not a number to increment or parse.</p>
 <p>Bounds are strict by default: the whole card must fit inside the output with
 10-pixel side/bottom margins and space for the toolbar. Normal resizing respects
-the UI minimum size and its maximum 70% width / 75% height. The current geometry
+the UI minimum size; the maximum is the whole output inside those margins. The current geometry
 reports the exact bounds. <code>--clamp</code> explicitly permits adjustment of size and/or
 position to fit; the reply reports <code>requested</code>, final <code>rect</code>, <code>clamped</code>, a new
 <code>revision</code> and <code>outcome: "applied"</code>. Without it, an out-of-bounds request returns
@@ -1025,6 +1033,69 @@ sequences. Interactive stdin is output-only; piped stdin sends input and can
 execute code on the remote PC. For a bounded output-only stream:</p>
 <pre><code class="language-bash">super-desktop peer-attach PEER_ID CARD_ID --seconds 10 &lt; /dev/null
 </code></pre>
+<h2 id="plugins">Plugins</h2>
+<p>Plugins add docks at the screen edges, top-bar items, floating panels, popups
+under a top-bar item or beside a dock, cards on the desktop (games, tools,
+terminals), full-screen views, Settings sections and buttons on terminal
+cards to the overlay, and can move, size, minimize, expand or (after asking
+you on the card) close terminal cards. A plugin
+is a folder of QML (Qt Quick) in <code>~/.config/super-desktop/plugins/&lt;id&gt;/</code> with
+a <code>plugin.json</code>; the overlay reloads it whenever one of its files is saved.
+These commands work without a running overlay, so an agent can check its own
+work:</p>
+<pre><code class="language-sh">super-desktop plugin new my-dock --slot dock.left      # a working start
+super-desktop plugin check my-dock --json               # QML errors with file:line
+super-desktop plugin snapshot my-dock --out /tmp/my-dock.png --json
+super-desktop plugin snapshot my-dock --do 'click &quot;Add&quot;; type hi; expect &quot;hi&quot;'
+super-desktop plugin logs my-dock                       # runtime errors, sd.log
+super-desktop plugin preview my-dock                    # preview.png for sharing
+super-desktop plugin publish my-dock                    # ready for the public list?
+super-desktop plugin list
+super-desktop plugin doctor                             # what is missing, with fixes
+</code></pre>
+<p><code>check</code> exits 0 only when every surface loads without errors or warnings
+and no lint rule finds an error (QML that loads but is wrong in SUPER
+DESKTOP, such as a <code>ToolTip</code> in a top-bar item or <code>cards.send</code> from a timer);
+lint advice (fixed colors, text in the theme's border color, a timer running
+while hidden, a panel or card opened again from a show or a timer after the
+user closed it) is reported without failing, and <code>// sd-lint: ignore RULE</code> on
+the line, or the line above, keeps advice that was weighed out.
+<code>snapshot</code> renders off screen with the current theme and the plugin's saved
+values and reports <code>paintedFraction</code> (0 means nothing visible was drawn).
+<code>--values FILE.json</code> renders with sample values instead (one JSON object, as
+<code>sd.values</code> sees it), and <code>--wait MS</code> waits that long first, to catch an
+animation; what the QML saves during a snapshot is thrown away. <code>--do</code>
+first uses the surface like a user, step by step: <code>click</code> (on shown text,
+<code>@objectName</code> or <code>x,y</code>; <code>right</code>/<code>middle</code>), <code>double</code>, <code>move</code>, <code>press</code>,
+<code>release</code>, <code>drag</code>, <code>scroll</code>, <code>type</code>, <code>key</code> (<code>Return</code>, <code>Escape</code>, <code>Ctrl+A</code>…),
+<code>wait</code>, <code>expect</code>/<code>absent</code> (text shown or not), <code>shot [NAME]</code> (an extra
+PNG) and <code>cardbutton ID [KEY=VALUE…]</code> (a click on one of the plugin's card
+buttons, on a sample card); the report lists each step, the <code>sd.call</code>s and <code>sd.run</code>s the plugin
+made (recorded, not done), its log lines and its values afterwards, and the
+command fails at the first failing step. <code>preview</code> composes the surfaces
+into the 1280×640 <code>preview.png</code> the public list shows; <code>publish</code> checks a
+plugin's repository is ready for the list and prints its entry.
+<code>plugin new</code> also writes the plugin skill into the folder
+(<code>.claude/skills/super-desktop-plugin/SKILL.md</code>) and an <code>AGENTS.md</code>, so any
+coding agent opened there knows the plugin API. ✨ in the top bar and
+Settings → Plugins do the same from the overlay and open an agent in the
+new folder. Drawing plugins needs Qt Quick (<code>qt6-declarative</code>).</p>
+<p>Plugins people share are listed at
+<a href="https://github.com/gladimdim/super-desktop-plugins">github.com/gladimdim/super-desktop-plugins</a>:
+<strong>Settings → Plugins → Discover</strong> shows the list (search, a category,
+grouped by category or by name) with Install, and <code>plugin search [text]</code>
+does the same in a terminal. <code>plugin install &lt;id&gt;</code> installs one from the list
+(it checks the repository's <code>plugin.json</code> has that id); <code>plugin install &lt;git
+url&gt;</code> or a folder installs any other. An installed plugin does not run until
+you approve it (Settings → Plugins or <code>plugin approve &lt;id&gt;</code>), because its QML
+can run programs as you; <code>plugin update &lt;id&gt;</code> fast-forwards it and
+<code>plugin remove &lt;id&gt;</code> moves it to the trash. <strong>Edit &amp; Enhance</strong> (on every
+plugin in Settings → Plugins, Installed and Discover) or <code>plugin fork &lt;id&gt;</code>
+makes any plugin your own copy and opens an agent to improve it: it is
+installed and approved first if needed, keeps its id and saved values, stops
+updating from its author (whose version stays reachable as the git remote
+<code>upstream</code>), and loses agent settings its author shipped (<code>.claude</code>,
+<code>.mcp.json</code>), which could run commands when an agent opens there. Plugins made on your PC run without approval.</p>
 <h2 id="complete-public-command-syntax">Complete public command syntax</h2>
 <p>The catalog below lists all public commands. <code>--help</code> also works for each leaf
 command and for the <code>app</code>, <code>terminal</code>, <code>harness</code> and <code>request</code> groups. Aliases:
@@ -1043,6 +1114,81 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td><code>mcp serve</code></td>
 <td>Local MCP stdio</td>
 <td>Serve desktop inspection, harness launch and guarded prompt tools</td>
+</tr>
+<tr>
+<td><code>plugin list [--json]</code></td>
+<td>Offline</td>
+<td>List QML plugins and whether they run</td>
+</tr>
+<tr>
+<td><code>plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page\|card\|fullscreen\|popup] [--name NAME] [--request TEXT] [--json]</code></td>
+<td>Offline</td>
+<td>Create a working plugin folder to start from</td>
+</tr>
+<tr>
+<td><code>plugin check ID\|DIR [--json]</code></td>
+<td>Offline</td>
+<td>Check a plugin's manifest and QML</td>
+</tr>
+<tr>
+<td><code>plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--values FILE.json] [--out FILE.png] [--do STEPS] [--steps FILE] [--json]</code></td>
+<td>Offline</td>
+<td>Render a plugin surface to a PNG</td>
+</tr>
+<tr>
+<td><code>plugin preview ID\|DIR [--surface ID]... [--values FILE.json] [--out FILE.png] [--json]</code></td>
+<td>Offline</td>
+<td>Draw a plugin's preview picture</td>
+</tr>
+<tr>
+<td><code>plugin publish ID\|DIR [--json]</code></td>
+<td>Offline</td>
+<td>Check a plugin is ready for the public list</td>
+</tr>
+<tr>
+<td><code>plugin logs ID [--lines N]</code></td>
+<td>Offline</td>
+<td>Show the end of a plugin's log</td>
+</tr>
+<tr>
+<td><code>plugin doctor [--json]</code></td>
+<td>Offline</td>
+<td>Check what plugins need</td>
+</tr>
+<tr>
+<td><code>plugin search [TEXT] [--category C] [--json]</code></td>
+<td>Network (offline: the last list)</td>
+<td>Search the public plugin list</td>
+</tr>
+<tr>
+<td><code>plugin install ID\|GIT_URL\|DIR [--json]</code></td>
+<td>Network for IDs and URLs</td>
+<td>Install a shared plugin from the list, git or a folder</td>
+</tr>
+<tr>
+<td><code>plugin fork ID\|GIT_URL\|DIR [--json]</code></td>
+<td>Network for IDs and URLs</td>
+<td>Make a plugin your own copy to change</td>
+</tr>
+<tr>
+<td><code>plugin approve ID [--json]</code></td>
+<td>Offline</td>
+<td>Let an installed plugin run</td>
+</tr>
+<tr>
+<td><code>plugin update ID [--json]</code></td>
+<td>Offline</td>
+<td>Update an installed plugin from git</td>
+</tr>
+<tr>
+<td><code>plugin remove ID [--json]</code></td>
+<td>Offline</td>
+<td>Move a plugin to the trash</td>
+</tr>
+<tr>
+<td><code>plugin path</code></td>
+<td>Offline</td>
+<td>Print the plugins folder</td>
 </tr>
 <tr>
 <td><code>terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]</code></td>
@@ -1603,6 +1749,11 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td><code>toggle</code></td>
 <td>Legacy</td>
 <td>Toggle local overlay visibility</td>
+</tr>
+<tr>
+<td><code>tour</code></td>
+<td>Legacy</td>
+<td>Show the overlay with the getting started guide</td>
 </tr>
 <tr>
 <td><code>start</code></td>

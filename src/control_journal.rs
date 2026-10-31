@@ -1,4 +1,5 @@
 //! Durable mutation receipts. An interrupted request is never re-executed.
+use crate::cli_extended::valid_id;
 use crate::control::{self, Reply, Request};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,16 +31,8 @@ pub fn root() -> PathBuf {
         .join("super-desktop/cli-requests")
 }
 
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
-}
-
 fn entry_path(root: &Path, id: &str) -> io::Result<PathBuf> {
-    if !valid_id(id) {
+    if !valid_id(id, 64) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid request ID",
@@ -286,13 +279,13 @@ pub fn inspect(root: &Path, request_id: &str, id: &str) -> Reply {
 pub fn list(root:&Path,request_id:&str,after:Option<&str>,limit:u16,expected:Option<&str>)->Reply {
     use std::os::unix::fs::MetadataExt;
     let fail=|code,message|Reply::failure(request_id,code,message);
-    if !(1..=100).contains(&limit) || after.is_some_and(|s|!valid_id(s)) { return fail("invalid_arguments","Use limit 1-100 and a returned cursor."); }
+    if !(1..=100).contains(&limit) || after.is_some_and(|s|!valid_id(s, 64)) { return fail("invalid_arguments","Use limit 1-100 and a returned cursor."); }
     let collect=||->io::Result<Vec<(String,u64,i64,i64,u64)>> {
         match control::private_dir(root) { Err(e) if e.kind()==io::ErrorKind::NotFound=>return Ok(vec![]),Err(e)=>return Err(e),Ok(_)=>{} }
         let mut files=vec![];
         for file in fs::read_dir(root)? {
             let file=file?;let name=file.file_name();let Some(id)=name.to_str().and_then(|n|n.strip_suffix(".json")) else {continue;};
-            if !valid_id(id) {return Err(io::Error::other("invalid receipt name"));}
+            if !valid_id(id, 64) {return Err(io::Error::other("invalid receipt name"));}
             let m=control::private_file(&file.path(),false)?;
             files.push((id.to_owned(),m.ino(),m.mtime(),m.mtime_nsec(),m.len()));
             if files.len()>MAX_ENTRIES {return Err(io::Error::other("too many receipts"));}

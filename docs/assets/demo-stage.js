@@ -75,6 +75,8 @@
         '<span class="sd-sep"></span><button class="sd-tb-btn" type="button" title="New note">' + ICON.note + "+</button>" +
         SD.LAUNCHERS.map((k) => '<button class="sd-tb-btn launch" type="button" data-agent="' + k + '"><img alt="" src="' +
           SD.AGENTS[k].logo + '">' + SD.AGENTS[k].short + "</button>").join("") +
+        '<span class="sd-tb-plugins"></span><button class="sd-tb-btn create" type="button" title="Create a plugin with AI" ' +
+        'aria-label="Create a plugin with AI">✨</button>' +
         '<span class="sd-tb-right"><button class="sd-tb-btn arrange" type="button" title="Arrange">' + ICON.arrange + "</button>" +
         '<button class="sd-tb-btn gear" type="button" title="Settings: theme">' + ICON.gear + "</button>" +
         '<button class="sd-tb-btn hide" type="button" title="Hide">' + ICON.hide + '</button><span class="sd-f1">[F1]</span></span>';
@@ -97,6 +99,7 @@
         keys.addEventListener("click", () => this.pressKeys());
         sc.appendChild(keys);
       }
+      if (SD.Plugins) SD.Plugins.attach(this);
       r.appendChild(sc);
       if (this.o.interactive) this.wireBar();
     }
@@ -116,7 +119,8 @@
       })), "Recent folders"));
       b.querySelector(".gear").addEventListener("click", (e) => this.menu(e.currentTarget, SD.THEMES.map(([id, name]) => ({
         label: name, on: id === SD.store.theme, act: () => { SD.store.setTheme(id); this.o.onAction("theme"); },
-      })), "Omarchy theme"));
+      })).concat(SD.Plugins ? SD.Plugins.menuItems(this) : []), "Omarchy theme"));
+      if (SD.Plugins) b.querySelector(".create").addEventListener("click", () => SD.Plugins.openForm(this));
       this.screen.addEventListener("pointerdown", (e) => { if (this.menuEl && !this.menuEl.contains(e.target)) this.closeMenu(); });
     }
 
@@ -125,6 +129,7 @@
       const m = el("div", "sd-menu");
       m.appendChild(el("div", "label", label));
       items.forEach((it) => {
+        if (it.section) { m.appendChild(el("div", "label", "")).textContent = it.section; return; }
         const btn = el("button", it.on ? "on" : "");
         btn.type = "button";
         btn.textContent = it.label;
@@ -199,6 +204,7 @@
       this.cards.forEach((c) => c.el.remove());
       this.cards.clear();
       SD.store.of(this.pc).forEach((s) => this.addCard(s, animate));
+      if (this.plug) SD.Plugins.render(this);
     }
 
     addCard(s, animate) {
@@ -223,7 +229,7 @@
       c.querySelector(".pid").textContent = "PID: " + s.pid + " • " + a.bin;
       c.querySelector(".sd-prompt b").textContent = a.shell ? "$" : "❯";
       const input = c.querySelector("input");
-      input.placeholder = a.hint;
+      input.placeholder = s.hint || a.hint;
       input.setAttribute("aria-label", "Prompt for " + a.name);
       if (!this.o.interactive) input.tabIndex = -1;
       const card = { el: c, s, term: c.querySelector(".sd-term"), input, title: c.querySelector(".sd-title"), chip: c.querySelector(".st") };
@@ -322,15 +328,17 @@
       });
     }
 
+    /* Like the app: docks keep their edges, plugin cards take the places after the terminals. */
     arrange() {
+      const P = SD.Plugins, ins = P ? P.insets() : { l: 0, r: 0 };
       const list = SD.store.of(this.pc).filter((s) => !s.mini);
-      const n = list.length; if (!n) return;
+      const extra = P && !this.pcInfo().remote ? P.cards() : [];
+      const n = list.length + extra.length; if (!n) return;
       const cols = n <= 1 ? 1 : n <= 4 ? 2 : 3, rows = Math.ceil(n / cols), g = 12;
-      const w = (W - g * (cols + 1)) / cols, h = (AREA_H - g * (rows + 1)) / rows;
-      list.forEach((s, i) => {
-        s.prev = null;
-        SD.store.geom(s.id, { x: g + (i % cols) * (w + g), y: g + Math.floor(i / cols) * (h + g), w, h });
-      });
+      const w = (W - ins.l - ins.r - g * (cols + 1)) / cols, h = (AREA_H - g * (rows + 1)) / rows;
+      const at = (i) => ({ x: ins.l + g + (i % cols) * (w + g), y: g + Math.floor(i / cols) * (h + g), w, h });
+      list.forEach((s, i) => { s.prev = null; SD.store.geom(s.id, at(i)); });
+      extra.forEach((p, j) => P.setGeom(p, at(list.length + j)));
       this.o.onAction("arrange");
     }
 

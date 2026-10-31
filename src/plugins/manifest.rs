@@ -1,0 +1,870 @@
+//! `plugin.json`: what a plugin folder adds, and the checks that tell an
+//! agent exactly what to fix.
+use serde::Serialize;
+use serde_json::Value;
+use std::path::{Component, Path, PathBuf};
+
+pub const API_VERSION: u64 = 1;
+pub const MANIFEST_FILE: &str = "plugin.json";
+pub const MAX_SURFACES: usize = 8;
+pub const DOCK_SIZE_DEFAULT: i32 = 64;
+pub const MAX_TITLE: usize = 60;
+pub const MAX_TOOLTIP: usize = 120;
+pub const MAX_CARD_BUTTONS: usize = 4;
+
+/// A card button's icon: one or two symbols, or one emoji (its variation
+/// selectors, skin tones, keycap marks and joined parts do not count).
+fn valid_icon(icon: &str) -> bool {
+    let marks = |c: char| matches!(c as u32, 0xFE00..=0xFE0F | 0x1F3FB..=0x1F3FF | 0x20E3);
+    let mut shown = 0;
+    let mut joined = false;
+    for c in icon.chars() {
+        if c == '\u{200D}' {
+            joined = true;
+        } else if !marks(c) {
+            shown += usize::from(!joined);
+            joined = false;
+        }
+    }
+    (1..=2).contains(&shown)
+        && icon.chars().count() <= 12
+        && !icon.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+/// Where a surface is placed in the overlay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub enum Slot {
+    #[serde(rename = "dock.left")]
+    DockLeft,
+    #[serde(rename = "dock.right")]
+    DockRight,
+    #[serde(rename = "toolbar.item")]
+    ToolbarItem,
+    #[serde(rename = "panel")]
+    Panel,
+    #[serde(rename = "settings.page")]
+    SettingsPage,
+    #[serde(rename = "card")]
+    Card,
+    #[serde(rename = "fullscreen")]
+    Fullscreen,
+    #[serde(rename = "popup")]
+    Popup,
+}
+
+/// What `size` and `height` mean for a slot, and their limits.
+pub struct SlotSizes {
+    /// `(min, default, max)` of `size`, or `None` when the slot ignores it.
+    pub size: Option<(i32, i32, i32)>,
+    pub height: Option<(i32, i32, i32)>,
+}
+
+impl Slot {
+    pub const SUPPORTED: &'static [&'static str] = &["dock.left", "dock.right", "toolbar.item", "panel", "settings.page", "card", "fullscreen", "popup"];
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "dock.left" => Some(Self::DockLeft),
+            "dock.right" => Some(Self::DockRight),
+            "toolbar.item" => Some(Self::ToolbarItem),
+            "panel" => Some(Self::Panel),
+            "settings.page" => Some(Self::SettingsPage),
+            "card" => Some(Self::Card),
+            "fullscreen" => Some(Self::Fullscreen),
+            "popup" => Some(Self::Popup),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::DockLeft => "dock.left",
+            Self::DockRight => "dock.right",
+            Self::ToolbarItem => "toolbar.item",
+            Self::Panel => "panel",
+            Self::SettingsPage => "settings.page",
+            Self::Card => "card",
+            Self::Fullscreen => "fullscreen",
+            Self::Popup => "popup",
+        }
+    }
+
+    pub fn sizes(self) -> SlotSizes {
+        match self {
+            Self::DockLeft | Self::DockRight => SlotSizes { size: Some((32, DOCK_SIZE_DEFAULT, 480)), height: None },
+            Self::ToolbarItem => SlotSizes { size: Some((24, 96, 240)), height: None },
+            Self::Panel => SlotSizes { size: Some((200, 480, 1600)), height: Some((120, 360, 1200)) },
+            Self::SettingsPage => SlotSizes { size: None, height: Some((60, 240, 1200)) },
+            Self::Card => SlotSizes { size: Some((200, 640, 4000)), height: Some((120, 420, 3000)) },
+            Self::Fullscreen => SlotSizes { size: None, height: None },
+            Self::Popup => SlotSizes { size: Some((120, 280, 800)), height: Some((40, 240, 800)) },
+        }
+    }
+
+    /// The size `plugin snapshot` renders when none is given.
+    pub fn default_snapshot_size(self, size: i32, height: i32) -> (i32, i32) {
+        match self {
+            Self::DockLeft | Self::DockRight => (size, 720),
+            Self::ToolbarItem => (size, 36),
+            Self::Panel => (size, height),
+            Self::SettingsPage => (560, height),
+            Self::Card => (size, height),
+            Self::Fullscreen => (1280, 720),
+            Self::Popup => (size, height),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Surface {
+    pub id: String,
+    pub slot: Slot,
+    /// Relative to the plugin folder.
+    pub qml: String,
+    /// Width in logical px (docks, toolbar items, panels, popups); 0 when unused.
+    pub size: i32,
+    /// Height in logical px (panels, cards, settings pages, popups); 0 when unused.
+    pub height: i32,
+    /// Panel header and settings section title; empty means the plugin name.
+    pub title: String,
+    /// A card the user may open several times (`card.new`).
+    pub multiple: bool,
+    /// Docks and toolbar items: the hover text; empty means the plugin name.
+    pub tooltip: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Manifest {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// The plugin's own version ("1.2.0"); empty when not given.
+    pub version: String,
+    /// The oldest SUPER DESKTOP it works with ("1.6.0"); empty when any.
+    #[serde(rename = "minHost")]
+    pub min_host: String,
+    /// What it is about, for the public list ("productivity", "games"…).
+    pub categories: Vec<String>,
+    pub enabled: bool,
+    /// While the plugin runs, the top bar hides SUPER DESKTOP's own agent
+    /// launchers: its toolbar item or dock launches the agents instead.
+    #[serde(rename = "replacesLaunchers")]
+    pub replaces_launchers: bool,
+    pub surfaces: Vec<Surface>,
+    pub shortcuts: Vec<Shortcut>,
+    /// Buttons in the header of terminal cards.
+    #[serde(rename = "cardButtons")]
+    pub card_buttons: Vec<CardButton>,
+    #[serde(skip)]
+    pub dir: PathBuf,
+}
+
+/// A button SUPER DESKTOP adds to the header of terminal cards. A click
+/// reaches the plugin's running surfaces as `sd.cardButtonClicked(button, card)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CardButton {
+    pub id: String,
+    /// One short symbol or emoji drawn on the button ("◧", "✦").
+    pub icon: String,
+    /// The hover text, and the button's name in the menu a narrow card folds
+    /// the buttons into.
+    pub tooltip: String,
+    /// Which terminal cards show it: "all", "agents" or "shells".
+    pub cards: String,
+}
+
+impl CardButton {
+    /// Whether a card running `agent_type` shows this button.
+    pub fn shows_on(&self, shell: bool) -> bool {
+        match self.cards.as_str() {
+            "agents" => !shell,
+            "shells" => shell,
+            _ => true,
+        }
+    }
+}
+
+/// A key combination that, while the overlay is shown, opens, closes or
+/// toggles one of the plugin's panels, cards or full-screen surfaces.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Shortcut {
+    /// As written, e.g. "Ctrl+Alt+T".
+    pub keys: String,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+    /// The key's name, lowercase for letters ("t", "f5", "space").
+    pub key: String,
+    /// "panel.toggle", "card.open", "fullscreen.toggle"…
+    pub action: String,
+    pub surface: String,
+}
+
+pub const MAX_SHORTCUTS: usize = 8;
+const SHORTCUT_ACTIONS: &[&str] = &[
+    "panel.open", "panel.close", "panel.toggle", "card.open", "card.close", "card.toggle", "card.new",
+    "fullscreen.open", "fullscreen.close", "fullscreen.toggle",
+];
+
+/// Parses "Ctrl+Alt+T". A shortcut needs Super, or two of Ctrl/Alt/Shift
+/// (one of them Ctrl or Alt), so it never takes keys people type.
+pub fn parse_keys(text: &str) -> Result<(bool, bool, bool, bool, String), String> {
+    let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    let Some((key, modifiers)) = parts.split_last() else { return Err("empty".into()) };
+    let (mut ctrl, mut alt, mut shift, mut super_key) = (false, false, false, false);
+    for m in modifiers {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            "super" | "meta" | "win" => super_key = true,
+            other => return Err(format!("unknown modifier {other:?}")),
+        }
+    }
+    let mut key = key.to_ascii_lowercase();
+    if key == "enter" {
+        key = "return".into();
+    }
+    let named = ["space", "return", "enter", "tab", "backspace", "delete", "insert", "home", "end",
+        "page_up", "page_down", "up", "down", "left", "right"];
+    let valid_key = (key.chars().count() == 1 && key.chars().all(|c| c.is_ascii_alphanumeric() || ",.;'[]/\\-=`".contains(c)))
+        || named.contains(&key.as_str())
+        || key.strip_prefix('f').and_then(|n| n.parse::<u8>().ok()).is_some_and(|n| (1..=12).contains(&n));
+    if !valid_key {
+        return Err(format!("unknown key {key:?}"));
+    }
+    let strong = super_key || (ctrl as u8 + alt as u8 + shift as u8 >= 2 && (ctrl || alt));
+    if !strong {
+        return Err("needs Super, or two of Ctrl, Alt and Shift".into());
+    }
+    Ok((ctrl, alt, shift, super_key, key))
+}
+
+impl Manifest {
+    pub fn qml_path(&self, surface: &Surface) -> PathBuf {
+        self.dir.join(&surface.qml)
+    }
+
+    pub fn surface(&self, id: &str) -> Option<&Surface> {
+        self.surfaces.iter().find(|s| s.id == id)
+    }
+
+    /// A surface's title, or the plugin name.
+    pub fn title_of<'a>(&'a self, surface: &'a Surface) -> &'a str {
+        if surface.title.is_empty() { &self.name } else { &surface.title }
+    }
+}
+
+/// One thing wrong with a manifest. `hint` says how to fix it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Problem {
+    pub field: String,
+    pub message: String,
+    pub hint: String,
+}
+
+fn problem(field: impl Into<String>, message: impl Into<String>, hint: impl Into<String>) -> Problem {
+    Problem { field: field.into(), message: message.into(), hint: hint.into() }
+}
+
+/// "1.6.0", "2.1": two or three numbers.
+pub fn valid_version(text: &str) -> bool {
+    let parts: Vec<&str> = text.split('.').collect();
+    (2..=3).contains(&parts.len()) && parts.iter().all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Whether version `a` is older than `b` ("1.6" is "1.6.0").
+pub fn version_older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| {
+        let mut p: Vec<u64> = v.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect();
+        p.resize(3.max(p.len()), 0);
+        p
+    };
+    parts(a) < parts(b)
+}
+
+/// This SUPER DESKTOP's version.
+pub const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn valid_plugin_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 48
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+}
+
+fn valid_category(c: &str) -> bool {
+    (1..=24).contains(&c.len()) && c.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn valid_surface_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// A relative path that stays inside the plugin folder.
+fn inside(relative: &str) -> bool {
+    let path = Path::new(relative);
+    !relative.is_empty()
+        && path.is_relative()
+        && path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// Reads and checks `<dir>/plugin.json`.
+pub fn load(dir: &Path) -> Result<Manifest, Vec<Problem>> {
+    let file = dir.join(MANIFEST_FILE);
+    let text = std::fs::read_to_string(&file).map_err(|e| {
+        vec![problem(
+            MANIFEST_FILE,
+            format!("cannot read {}: {e}", file.display()),
+            "Every plugin folder needs a plugin.json; `super-desktop plugin new <id>` writes one.",
+        )]
+    })?;
+    let value: Value = serde_json::from_str(&text).map_err(|e| {
+        vec![problem(
+            MANIFEST_FILE,
+            format!("not valid JSON: {e}"),
+            "Fix the JSON syntax (no comments, no trailing commas).",
+        )]
+    })?;
+    validate(dir, &value)
+}
+
+/// Checks a parsed manifest. Unknown fields are ignored.
+pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
+    let mut problems = Vec::new();
+    let Some(object) = value.as_object() else {
+        return Err(vec![problem("", "the manifest must be a JSON object", "Start from `{\"id\": ..., \"api\": 1, \"surfaces\": [...]}`.")]);
+    };
+    let folder = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+    let id = object.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+    if !valid_plugin_id(&id) {
+        problems.push(problem(
+            "id",
+            format!("invalid plugin id {id:?}"),
+            "Use 1-48 characters: lowercase letters, digits and '-', starting with a letter or digit.",
+        ));
+    } else if !folder.is_empty() && folder != id {
+        problems.push(problem(
+            "id",
+            format!("id {id:?} does not match the folder name {folder:?}"),
+            "Rename the folder or the id so they are the same.",
+        ));
+    }
+
+    match object.get("api").and_then(Value::as_u64) {
+        Some(API_VERSION) => {}
+        Some(other) if other > API_VERSION => problems.push(problem(
+            "api",
+            format!("plugin API {other} needs a newer SUPER DESKTOP (this one has API {API_VERSION})"),
+            "Update SUPER DESKTOP (Settings → Updates) or set \"api\": 1.",
+        )),
+        _ => problems.push(problem("api", "missing or invalid \"api\"", "Set \"api\": 1.")),
+    }
+
+    let name = object.get("name").and_then(Value::as_str).unwrap_or(&id).trim().to_owned();
+    let description = object.get("description").and_then(Value::as_str).unwrap_or("").to_owned();
+    let enabled = match object.get("enabled") {
+        None => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => {
+            problems.push(problem("enabled", "\"enabled\" must be true or false", "Remove it or use a boolean."));
+            true
+        }
+    };
+
+    let mut version_field = |name: &str| match object.get(name) {
+        None => String::new(),
+        Some(Value::String(v)) if valid_version(v) => v.clone(),
+        Some(v) => {
+            problems.push(problem(name, format!("{name} {v} is not a version"), "Write it as two or three numbers, e.g. \"1.0.0\"."));
+            String::new()
+        }
+    };
+    let version = version_field("version");
+    let min_host = version_field("minHost");
+    if !min_host.is_empty() && version_older(HOST_VERSION, &min_host) {
+        problems.push(problem(
+            "minHost",
+            format!("this plugin needs SUPER DESKTOP {min_host} or newer; this is {HOST_VERSION}"),
+            "Update SUPER DESKTOP (Settings → Updates). Making the plugin? Set minHost to the version you test with.",
+        ));
+    }
+    let categories = match object.get("categories") {
+        None => Vec::new(),
+        Some(Value::Array(list)) if list.len() <= 5 && list.iter().all(|c| c.as_str().is_some_and(valid_category)) => {
+            list.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+        }
+        Some(_) => {
+            problems.push(problem("categories", "categories must be a list of up to 5 lowercase words", "E.g. [\"productivity\", \"time\"]: letters, digits and '-', up to 24 characters each."));
+            Vec::new()
+        }
+    };
+
+    let mut surfaces = Vec::new();
+    match object.get("surfaces").and_then(Value::as_array) {
+        None => problems.push(problem(
+            "surfaces",
+            "missing \"surfaces\" array",
+            "Add \"surfaces\": [{\"id\": \"main\", \"slot\": \"dock.right\", \"qml\": \"Dock.qml\"}].",
+        )),
+        Some(list) if list.is_empty() || list.len() > MAX_SURFACES => problems.push(problem(
+            "surfaces",
+            format!("{} surfaces; a plugin has 1 to {MAX_SURFACES}", list.len()),
+            "Declare at least one surface and at most eight.",
+        )),
+        Some(list) => {
+            let mut seen: Vec<String> = Vec::new();
+            for (index, entry) in list.iter().enumerate() {
+                let field = |name: &str| format!("surfaces[{index}].{name}");
+                let surface_id = entry.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
+                if !valid_surface_id(&surface_id) {
+                    problems.push(problem(field("id"), format!("invalid surface id {surface_id:?}"), "Use 1-32 characters: lowercase letters, digits and '-'."));
+                } else if seen.contains(&surface_id) {
+                    problems.push(problem(field("id"), format!("duplicate surface id {surface_id:?}"), "Give every surface its own id."));
+                }
+                seen.push(surface_id.clone());
+                let slot_text = entry.get("slot").and_then(Value::as_str).unwrap_or("");
+                let slot = Slot::parse(slot_text);
+                if slot.is_none() {
+                    problems.push(problem(
+                        field("slot"),
+                        format!("unknown slot {slot_text:?}"),
+                        format!("Use one of: {}.", Slot::SUPPORTED.join(", ")),
+                    ));
+                }
+                let qml = entry.get("qml").and_then(Value::as_str).unwrap_or("").to_owned();
+                if !inside(&qml) || !qml.ends_with(".qml") {
+                    problems.push(problem(field("qml"), format!("invalid qml path {qml:?}"), "Give a .qml file relative to the plugin folder, e.g. \"Dock.qml\"."));
+                } else if !dir.join(&qml).is_file() {
+                    problems.push(problem(field("qml"), format!("{qml} does not exist in the plugin folder"), "Create the file or fix the path."));
+                }
+                let mut number = |name: &str, range: Option<(i32, i32, i32)>| -> i32 {
+                    let Some((min, default, max)) = range else { return 0 };
+                    match entry.get(name) {
+                        None => default,
+                        Some(v) => match v.as_i64() {
+                            Some(n) if (i64::from(min)..=i64::from(max)).contains(&n) => n as i32,
+                            _ => {
+                                problems.push(problem(
+                                    field(name),
+                                    format!("{name} {v} is out of range for {}", slot.map_or("this slot", Slot::name)),
+                                    format!("Use a whole number of logical pixels from {min} to {max}."),
+                                ));
+                                default
+                            }
+                        },
+                    }
+                };
+                let sizes = slot.map(Slot::sizes);
+                let size = number("size", sizes.as_ref().and_then(|s| s.size));
+                let height = number("height", sizes.as_ref().and_then(|s| s.height));
+                let title = match entry.get("title") {
+                    None => String::new(),
+                    Some(Value::String(t)) if t.chars().count() <= MAX_TITLE => t.trim().to_owned(),
+                    Some(_) => {
+                        problems.push(problem(field("title"), "title must be text of at most 60 characters", "Shorten it."));
+                        String::new()
+                    }
+                };
+                let multiple = match entry.get("multiple") {
+                    None => false,
+                    Some(Value::Bool(m)) if !*m || slot == Some(Slot::Card) => *m,
+                    Some(_) => {
+                        problems.push(problem(field("multiple"), "\"multiple\" is true or false, and only for card surfaces", "Remove it, or use it on a \"card\" surface."));
+                        false
+                    }
+                };
+                let tooltip = match entry.get("tooltip") {
+                    None => String::new(),
+                    Some(Value::String(t)) if t.chars().count() <= MAX_TOOLTIP
+                        && matches!(slot, Some(Slot::DockLeft | Slot::DockRight | Slot::ToolbarItem)) => t.trim().to_owned(),
+                    Some(_) => {
+                        problems.push(problem(field("tooltip"), "tooltip must be text of at most 120 characters, on a dock or toolbar.item surface", "Shorten it, or remove it from other surfaces (panels and cards have a title instead)."));
+                        String::new()
+                    }
+                };
+                if let Some(slot) = slot {
+                    surfaces.push(Surface { id: surface_id, slot, qml, size, height, title, multiple, tooltip });
+                }
+            }
+        }
+    }
+
+    let mut shortcuts = Vec::new();
+    match object.get("shortcuts") {
+        None => {}
+        Some(Value::Array(list)) if list.len() <= MAX_SHORTCUTS => {
+            for (index, entry) in list.iter().enumerate() {
+                let field = |name: &str| format!("shortcuts[{index}].{name}");
+                let keys = entry.get("keys").and_then(Value::as_str).unwrap_or("").to_owned();
+                let action = entry.get("action").and_then(Value::as_str).unwrap_or("").to_owned();
+                let surface = entry.get("surface").and_then(Value::as_str).unwrap_or("").to_owned();
+                let parsed = parse_keys(&keys);
+                if let Err(e) = &parsed {
+                    problems.push(problem(field("keys"), format!("{keys:?}: {e}"), "Write it like \"Ctrl+Alt+T\" or \"Super+F5\": Super, or two of Ctrl/Alt/Shift, then one key."));
+                }
+                if !SHORTCUT_ACTIONS.contains(&action.as_str()) {
+                    problems.push(problem(field("action"), format!("unknown action {action:?}"), format!("Use one of: {}.", SHORTCUT_ACTIONS.join(", "))));
+                } else {
+                    let kind = action.split('.').next().unwrap_or("");
+                    let wanted = Slot::parse(kind).unwrap_or(Slot::Panel);
+                    if !surfaces.iter().any(|s: &Surface| s.id == surface && s.slot == wanted) {
+                        problems.push(problem(field("surface"), format!("no {kind} surface {surface:?}"), format!("Name one of this plugin's \"{kind}\" surfaces.")));
+                    }
+                }
+                if let Ok((ctrl, alt, shift, super_key, key)) = parsed {
+                    shortcuts.push(Shortcut { keys, ctrl, alt, shift, super_key, key, action, surface });
+                }
+            }
+        }
+        Some(_) => problems.push(problem("shortcuts", format!("\"shortcuts\" must be a list of at most {MAX_SHORTCUTS}"), "Use [{\"keys\": \"Ctrl+Alt+T\", \"action\": \"card.toggle\", \"surface\": \"main\"}].")),
+    }
+
+    let replaces_launchers = match object.get("replacesLaunchers") {
+        None | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) if surfaces.iter().any(|s| matches!(s.slot, Slot::ToolbarItem | Slot::DockLeft | Slot::DockRight)) => true,
+        Some(Value::Bool(true)) => {
+            problems.push(problem("replacesLaunchers", "\"replacesLaunchers\" needs a toolbar.item or dock surface", "Add the top-bar item or dock that launches the agents, or remove it."));
+            false
+        }
+        Some(_) => {
+            problems.push(problem("replacesLaunchers", "\"replacesLaunchers\" must be true or false", "Remove it or use a boolean."));
+            false
+        }
+    };
+
+    let mut card_buttons: Vec<CardButton> = Vec::new();
+    match object.get("cardButtons") {
+        None => {}
+        Some(Value::Array(list)) if list.len() <= MAX_CARD_BUTTONS => {
+            if !list.is_empty() && !surfaces.iter().any(|s| matches!(s.slot, Slot::ToolbarItem | Slot::DockLeft | Slot::DockRight)) {
+                problems.push(problem("cardButtons", "card buttons need a toolbar.item or dock surface",
+                    "Add a top-bar item or dock: it always runs, so it receives sd.cardButtonClicked(button, card)."));
+            }
+            for (index, entry) in list.iter().enumerate() {
+                let field = |name: &str| format!("cardButtons[{index}].{name}");
+                let text = |name: &str| entry.get(name).and_then(Value::as_str).unwrap_or("").trim().to_owned();
+                let (id, icon, tooltip) = (text("id"), text("icon"), text("tooltip"));
+                if !valid_surface_id(&id) {
+                    problems.push(problem(field("id"), format!("invalid card button id {id:?}"), "Use 1-32 characters: lowercase letters, digits and '-'."));
+                } else if card_buttons.iter().any(|b| b.id == id) {
+                    problems.push(problem(field("id"), format!("duplicate card button id {id:?}"), "Give every card button its own id."));
+                }
+                if !valid_icon(&icon) {
+                    problems.push(problem(field("icon"), format!("icon {icon:?} is not one short symbol"),
+                        "Use one symbol or emoji, e.g. \"◧\" or \"✦\": it is drawn in the theme's font on a small button."));
+                }
+                if tooltip.is_empty() || tooltip.chars().count() > MAX_TITLE {
+                    problems.push(problem(field("tooltip"), "tooltip must be text of 1 to 60 characters",
+                        "Say what a click does, e.g. \"Move to the left half\": it is the hover text and the name in the ⋯ menu."));
+                }
+                let cards = match entry.get("cards") {
+                    None => "all".to_owned(),
+                    Some(Value::String(c)) if matches!(c.as_str(), "all" | "agents" | "shells") => c.clone(),
+                    Some(other) => {
+                        problems.push(problem(field("cards"), format!("unknown cards {other}"),
+                            "Use \"all\" (default), \"agents\" (cards running an AI agent) or \"shells\" (plain terminals)."));
+                        "all".to_owned()
+                    }
+                };
+                card_buttons.push(CardButton { id, icon, tooltip, cards });
+            }
+        }
+        Some(_) => problems.push(problem("cardButtons", format!("\"cardButtons\" must be a list of at most {MAX_CARD_BUTTONS}"),
+            "Use [{\"id\": \"left\", \"icon\": \"◧\", \"tooltip\": \"Move to the left half\"}].")),
+    }
+
+    if problems.is_empty() {
+        Ok(Manifest { id, name, description, version, min_host, categories, enabled, replaces_launchers, surfaces, shortcuts, card_buttons, dir: dir.to_path_buf() })
+    } else {
+        Err(problems)
+    }
+}
+
+/// A plugin folder and what its manifest says.
+pub struct Found {
+    pub dir: PathBuf,
+    pub folder: String,
+    pub manifest: Result<Manifest, Vec<Problem>>,
+}
+
+/// Every folder under `root`, sorted by name (that is the dock order too).
+/// Hidden folders are skipped.
+pub fn discover(root: &Path) -> Vec<Found> {
+    let mut found: Vec<Found> = std::fs::read_dir(root)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().is_dir())
+        .filter_map(|entry| {
+            let folder = entry.file_name().to_str()?.to_owned();
+            (!folder.starts_with('.')).then(|| {
+                let dir = entry.path();
+                Found { manifest: load(&dir), dir, folder }
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| a.folder.cmp(&b.folder));
+    found
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn plugin_dir(name: &str, files: &[&str]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("sd-plugins-manifest-{}-{name}", std::process::id()));
+        let dir = root.join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in files {
+            std::fs::write(dir.join(file), "import QtQuick\nItem {}\n").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn plugins_manifest_accepts_a_dock() {
+        let dir = plugin_dir("clock", &["Dock.qml"]);
+        let m = validate(&dir, &json!({"id": "clock", "api": 1, "surfaces": [
+            {"id": "main", "slot": "dock.right", "qml": "Dock.qml", "size": 72}
+        ], "future": true})).unwrap();
+        assert_eq!(m.name, "clock");
+        assert!(m.enabled);
+        assert_eq!(m.surfaces[0].slot, Slot::DockRight);
+        assert_eq!(m.surfaces[0].size, 72);
+    }
+
+    #[test]
+    fn plugins_manifest_defaults_size() {
+        let dir = plugin_dir("left", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "left", "api": 1, "surfaces": [
+            {"id": "a", "slot": "dock.left", "qml": "A.qml"}
+        ]})).unwrap();
+        assert_eq!(m.surfaces[0].size, DOCK_SIZE_DEFAULT);
+        assert_eq!(m.surfaces[0].height, 0);
+    }
+
+    #[test]
+    fn plugins_manifest_sizes_follow_the_slot() {
+        let dir = plugin_dir("slots", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "slots", "api": 1, "name": "Slots", "surfaces": [
+            {"id": "bar", "slot": "toolbar.item", "qml": "A.qml"},
+            {"id": "win", "slot": "panel", "qml": "A.qml", "size": 640, "height": 400, "title": "Stats"},
+            {"id": "prefs", "slot": "settings.page", "qml": "A.qml", "size": 99999}
+        ]})).unwrap();
+        assert_eq!((m.surfaces[0].size, m.surfaces[0].height), (96, 0));
+        assert_eq!((m.surfaces[1].size, m.surfaces[1].height), (640, 400));
+        assert_eq!(m.title_of(&m.surfaces[1]), "Stats");
+        // A settings page ignores size; its height defaults.
+        assert_eq!((m.surfaces[2].size, m.surfaces[2].height), (0, 240));
+        assert_eq!(m.title_of(&m.surfaces[2]), "Slots");
+        let problems = validate(&dir, &json!({"id": "slots", "api": 1, "surfaces": [
+            {"id": "win", "slot": "panel", "qml": "A.qml", "height": 50}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "surfaces[0].height");
+        assert!(problems[0].hint.contains("120"));
+    }
+
+    #[test]
+    fn plugins_manifest_tooltips_on_docks_and_toolbar_items() {
+        let dir = plugin_dir("tips", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "tips", "api": 1, "surfaces": [
+            {"id": "bar", "slot": "toolbar.item", "qml": "A.qml", "tooltip": " Right-click for the list "},
+            {"id": "side", "slot": "dock.left", "qml": "A.qml"}
+        ]})).unwrap();
+        assert_eq!(m.surfaces[0].tooltip, "Right-click for the list");
+        assert_eq!(m.surfaces[1].tooltip, "");
+        let problems = validate(&dir, &json!({"id": "tips", "api": 1, "surfaces": [
+            {"id": "win", "slot": "panel", "qml": "A.qml", "tooltip": "no"},
+            {"id": "bar", "slot": "toolbar.item", "qml": "A.qml", "tooltip": "x".repeat(121)},
+            {"id": "num", "slot": "dock.right", "qml": "A.qml", "tooltip": 5}
+        ]})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, ["surfaces[0].tooltip", "surfaces[1].tooltip", "surfaces[2].tooltip"]);
+    }
+
+    #[test]
+    fn plugins_manifest_replaces_launchers_only_with_a_bar_surface() {
+        let dir = plugin_dir("agents", &["Button.qml", "Menu.qml"]);
+        let m = validate(&dir, &json!({"id": "agents", "api": 1, "replacesLaunchers": true, "surfaces": [
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml"},
+            {"id": "list", "slot": "popup", "qml": "Menu.qml"}
+        ]})).unwrap();
+        assert!(m.replaces_launchers);
+        let m = validate(&dir, &json!({"id": "agents", "api": 1, "surfaces": [
+            {"id": "side", "slot": "dock.left", "qml": "Button.qml"}
+        ]})).unwrap();
+        assert!(!m.replaces_launchers);
+        let problems = validate(&dir, &json!({"id": "agents", "api": 1, "replacesLaunchers": true, "surfaces": [
+            {"id": "list", "slot": "popup", "qml": "Menu.qml"}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "replacesLaunchers");
+        assert!(problems[0].message.contains("toolbar.item or dock"));
+        let problems = validate(&dir, &json!({"id": "agents", "api": 1, "replacesLaunchers": "yes", "surfaces": [
+            {"id": "side", "slot": "dock.left", "qml": "Button.qml"}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "replacesLaunchers");
+    }
+
+    #[test]
+    fn plugins_manifest_card_buttons() {
+        let dir = plugin_dir("tiles", &["Bar.qml", "Menu.qml"]);
+        let bar = json!({"id": "bar", "slot": "toolbar.item", "qml": "Bar.qml"});
+        let with = |buttons: Value, surfaces: Value| validate(&dir, &json!({"id": "tiles", "api": 1, "surfaces": surfaces, "cardButtons": buttons}));
+        let m = with(json!([
+            {"id": "left", "icon": "◧", "tooltip": "Move to the left half"},
+            {"id": "sum", "icon": "✦", "tooltip": " Summarize ", "cards": "agents"},
+            {"id": "flag", "icon": "👩‍💻", "tooltip": "Flag", "cards": "shells"}
+        ]), json!([bar])).unwrap();
+        assert_eq!(m.card_buttons.len(), 3);
+        assert_eq!(m.card_buttons[0], CardButton { id: "left".into(), icon: "◧".into(), tooltip: "Move to the left half".into(), cards: "all".into() });
+        assert_eq!(m.card_buttons[1].tooltip, "Summarize");
+        assert!(m.card_buttons[0].shows_on(true) && m.card_buttons[0].shows_on(false));
+        assert!(!m.card_buttons[1].shows_on(true) && m.card_buttons[1].shows_on(false));
+        assert!(m.card_buttons[2].shows_on(true) && !m.card_buttons[2].shows_on(false));
+        assert!(with(json!([]), json!([{"id": "list", "slot": "popup", "qml": "Menu.qml"}])).is_ok(), "an empty list needs nothing");
+        // A dock receives the clicks too.
+        assert!(with(json!([{"id": "a", "icon": "A", "tooltip": "A"}]), json!([{"id": "d", "slot": "dock.left", "qml": "Bar.qml"}])).is_ok());
+
+        let field = |buttons: Value, surfaces: Value| with(buttons, surfaces).unwrap_err()[0].field.clone();
+        let one = |button: Value| field(json!([button]), json!([bar]));
+        assert_eq!(field(json!([{"id": "a", "icon": "A", "tooltip": "A"}]), json!([{"id": "list", "slot": "popup", "qml": "Menu.qml"}])), "cardButtons");
+        assert_eq!(one(json!({"id": "Bad Id", "icon": "A", "tooltip": "A"})), "cardButtons[0].id");
+        assert_eq!(one(json!({"id": "a", "icon": "", "tooltip": "A"})), "cardButtons[0].icon");
+        assert_eq!(one(json!({"id": "a", "icon": "Left", "tooltip": "A"})), "cardButtons[0].icon");
+        assert_eq!(one(json!({"id": "a", "icon": "A B", "tooltip": "A"})), "cardButtons[0].icon");
+        for icon in ["⬅️", "AB", "🏳️", "1️⃣", "👍🏽"] {
+            assert!(valid_icon(icon), "{icon}");
+        }
+        assert_eq!(one(json!({"id": "a", "icon": "A"})), "cardButtons[0].tooltip");
+        assert_eq!(one(json!({"id": "a", "icon": "A", "tooltip": "x".repeat(61)})), "cardButtons[0].tooltip");
+        assert_eq!(one(json!({"id": "a", "icon": "A", "tooltip": "A", "cards": "notes"})), "cardButtons[0].cards");
+        assert_eq!(field(json!([{"id": "a", "icon": "A", "tooltip": "A"}, {"id": "a", "icon": "B", "tooltip": "B"}]), json!([bar])), "cardButtons[1].id");
+        let five: Vec<Value> = (0..5).map(|i| json!({"id": format!("b{i}"), "icon": "B", "tooltip": "B"})).collect();
+        assert_eq!(field(json!(five), json!([bar])), "cardButtons");
+        assert_eq!(field(json!({"id": "a"}), json!([bar])), "cardButtons");
+    }
+
+    #[test]
+    fn plugins_manifest_accepts_a_popup() {
+        let dir = plugin_dir("menu", &["Button.qml", "Menu.qml"]);
+        let m = validate(&dir, &json!({"id": "menu", "api": 1, "surfaces": [
+            {"id": "button", "slot": "toolbar.item", "qml": "Button.qml", "size": 48},
+            {"id": "list", "slot": "popup", "qml": "Menu.qml"},
+            {"id": "form", "slot": "popup", "qml": "Menu.qml", "size": 360, "height": 300}
+        ]})).unwrap();
+        assert_eq!(m.surfaces[1].slot, Slot::Popup);
+        assert_eq!((m.surfaces[1].size, m.surfaces[1].height), (280, 240));
+        assert_eq!((m.surfaces[2].size, m.surfaces[2].height), (360, 300));
+        assert_eq!(Slot::Popup.default_snapshot_size(360, 300), (360, 300));
+        let problems = validate(&dir, &json!({"id": "menu", "api": 1, "surfaces": [
+            {"id": "list", "slot": "popup", "qml": "Menu.qml", "size": 2000, "height": 20}
+        ]})).unwrap_err();
+        assert_eq!(problems.len(), 2);
+        assert!(problems[0].hint.contains("120 to 800"));
+        assert!(problems[1].hint.contains("40 to 800"));
+    }
+
+    #[test]
+    fn plugins_manifest_reports_every_problem_with_a_hint() {
+        let dir = plugin_dir("bad", &[]);
+        let problems = validate(&dir, &json!({"id": "Other", "api": 2, "surfaces": [
+            {"id": "x", "slot": "sidebar", "qml": "../evil.qml", "size": 9000},
+            {"id": "x", "slot": "dock.left", "qml": "Missing.qml", "size": 9000, "title": 5}
+        ]})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert!(fields.contains(&"id"));
+        assert!(fields.contains(&"api"));
+        assert!(fields.contains(&"surfaces[0].slot"));
+        assert!(fields.contains(&"surfaces[0].qml"));
+        assert!(!fields.contains(&"surfaces[0].size")); // unknown slot: nothing to check it against
+        assert!(fields.contains(&"surfaces[1].id"));
+        assert!(fields.contains(&"surfaces[1].qml"));
+        assert!(fields.contains(&"surfaces[1].size"));
+        assert!(fields.contains(&"surfaces[1].title"));
+        assert!(problems.iter().all(|p| !p.hint.is_empty()));
+        let slot = problems.iter().find(|p| p.field == "surfaces[0].slot").unwrap();
+        assert!(slot.hint.contains("dock.left"));
+    }
+
+    #[test]
+    fn plugins_manifest_shortcuts_need_strong_keys_and_a_target() {
+        assert_eq!(parse_keys("Ctrl+Alt+T").unwrap(), (true, true, false, false, "t".into()));
+        assert!(parse_keys("Super+F5").is_ok());
+        assert!(parse_keys("Ctrl+Shift+space").is_ok());
+        assert!(parse_keys("Ctrl+T").is_err(), "one modifier would take keys people type");
+        assert!(parse_keys("Shift+Alt+x").is_ok());
+        assert!(parse_keys("Alt+Hyper+x").is_err());
+        assert!(parse_keys("Ctrl+Alt+F13").is_err());
+        let dir = plugin_dir("keys", &["A.qml"]);
+        let m = validate(&dir, &json!({"id": "keys", "api": 1,
+            "surfaces": [{"id": "term", "slot": "card", "qml": "A.qml"}],
+            "shortcuts": [{"keys": "Ctrl+Alt+T", "action": "card.toggle", "surface": "term"}]})).unwrap();
+        assert_eq!(m.shortcuts[0].key, "t");
+        let problems = validate(&dir, &json!({"id": "keys", "api": 1,
+            "surfaces": [{"id": "term", "slot": "card", "qml": "A.qml"}],
+            "shortcuts": [{"keys": "T", "action": "panel.toggle", "surface": "term"}, {"keys": "Ctrl+Alt+X", "action": "run", "surface": "term"}]})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, ["shortcuts[0].keys", "shortcuts[0].surface", "shortcuts[1].action"]);
+    }
+
+    #[test]
+    fn plugins_manifest_versions_and_categories() {
+        let dir = plugin_dir("versions", &["A.qml"]);
+        let surfaces = json!([{"id": "a", "slot": "dock.left", "qml": "A.qml"}]);
+        let m = validate(&dir, &json!({"id": "versions", "api": 1, "version": "1.2.0", "minHost": "1.0",
+            "categories": ["productivity", "time"], "surfaces": surfaces})).unwrap();
+        assert_eq!((m.version.as_str(), m.min_host.as_str()), ("1.2.0", "1.0"));
+        assert_eq!(m.categories, ["productivity", "time"]);
+        let m = validate(&dir, &json!({"id": "versions", "api": 1, "surfaces": surfaces})).unwrap();
+        assert!(m.version.is_empty() && m.min_host.is_empty() && m.categories.is_empty());
+        // Made for a newer SUPER DESKTOP: a clear problem, not QML errors later.
+        let problems = validate(&dir, &json!({"id": "versions", "api": 1, "minHost": "99.0.0", "surfaces": surfaces})).unwrap_err();
+        assert_eq!(problems[0].field, "minHost");
+        assert!(problems[0].message.contains("99.0.0 or newer"), "{}", problems[0].message);
+        let problems = validate(&dir, &json!({"id": "versions", "api": 1, "version": "v1", "minHost": 2,
+            "categories": ["Time"], "surfaces": surfaces})).unwrap_err();
+        let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
+        assert_eq!(fields, ["version", "minHost", "categories"]);
+        assert!(version_older("1.5.0", "1.6") && !version_older("1.6", "1.6.0") && version_older("1.9.9", "1.10.0"));
+    }
+
+    #[test]
+    fn plugins_manifest_id_must_match_folder() {
+        let dir = plugin_dir("folder-a", &["A.qml"]);
+        let problems = validate(&dir, &json!({"id": "folder-b", "api": 1, "surfaces": [
+            {"id": "a", "slot": "dock.left", "qml": "A.qml"}
+        ]})).unwrap_err();
+        assert_eq!(problems[0].field, "id");
+    }
+
+    #[test]
+    fn plugins_manifest_refuses_paths_outside_the_folder() {
+        assert!(!inside("/etc/passwd"));
+        assert!(!inside("../x.qml"));
+        assert!(!inside("a/../../x.qml"));
+        assert!(inside("ui/Dock.qml"));
+        assert!(inside("./Dock.qml"));
+    }
+
+    #[test]
+    fn plugins_discover_sorts_and_skips_hidden() {
+        let root = std::env::temp_dir().join(format!("sd-plugins-discover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for name in ["zeta", "alpha", ".git"] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let found = discover(&root);
+        let names: Vec<&str> = found.iter().map(|f| f.folder.as_str()).collect();
+        assert_eq!(names, ["alpha", "zeta"]);
+        assert!(found[0].manifest.is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}

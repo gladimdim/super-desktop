@@ -1,0 +1,10 @@
+{
+  "id": "snake",
+  "name": "Snake",
+  "description": "The classic game on a card; a top-bar button opens it. Click the card, then use the arrow keys.",
+  "api": 1,
+  "surfaces": [
+    { "id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 84 },
+    { "id": "game", "slot": "card", "qml": "Game.qml", "size": 420, "height": 460, "title": "Snake" }
+  ]
+}

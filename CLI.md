@@ -244,7 +244,9 @@ super-desktop terminal capture CARD_ID --history --lines 200 --format json
 `panePid`, `status`, `columns`, `rows`, `units: "terminal-cells"`,
 `alternateScreen`, `retainedHistoryLines`, `observedAtUnixMs` and
 `readiness: "not_observed"`. Status is `running` or `exited` (when tmux retains
-an exited pane). Neither state implies harness readiness or task completion.
+an exited pane). For an exited pane `panePid` is `0` when tmux no longer
+reports its process (tmux 3.8 and newer). Neither state implies harness
+readiness or task completion.
 `paneIdentity` is an opaque observation identifier that changes when the pane
 process or tmux server is replaced; it is not an authorization token. Use
 `terminal inspect` for saved card geometry in logical pixels.
@@ -361,6 +363,7 @@ read data is withheld if its mapping changes during the operation.
 `settings reset KEY` with workspace epoch/revision and a request ID. Strings
 need JSON quotes, for example `--value '"small"'`. Writable keys are
 `toolbarSize` (small/medium/large), `sleepLockOnAc` (Linux boolean),
+`bootAutostart` (Linux boolean),
 `workspaceDefault` (existing absolute directory or null),
 `settingsPanelPosition` ([x,y] or null) and `settingsPanelSize` ([width,height]
 or null, 660×620 through 8192×8192). Panel preferences are fitted to the current
@@ -504,7 +507,7 @@ A revision is a comparison token, not a number to increment or parse.
 
 Bounds are strict by default: the whole card must fit inside the output with
 10-pixel side/bottom margins and space for the toolbar. Normal resizing respects
-the UI minimum size and its maximum 70% width / 75% height. The current geometry
+the UI minimum size; the maximum is the whole output inside those margins. The current geometry
 reports the exact bounds. `--clamp` explicitly permits adjustment of size and/or
 position to fit; the reply reports `requested`, final `rect`, `clamped`, a new
 `revision` and `outcome: "applied"`. Without it, an out-of-bounds request returns
@@ -868,6 +871,75 @@ execute code on the remote PC. For a bounded output-only stream:
 super-desktop peer-attach PEER_ID CARD_ID --seconds 10 < /dev/null
 ```
 
+## Plugins
+
+Plugins add docks at the screen edges, top-bar items, floating panels, popups
+under a top-bar item or beside a dock, cards on the desktop (games, tools,
+terminals), full-screen views, Settings sections and buttons on terminal
+cards to the overlay, and can move, size, minimize, expand or (after asking
+you on the card) close terminal cards. A plugin
+is a folder of QML (Qt Quick) in `~/.config/super-desktop/plugins/<id>/` with
+a `plugin.json`; the overlay reloads it whenever one of its files is saved.
+These commands work without a running overlay, so an agent can check its own
+work:
+
+```sh
+super-desktop plugin new my-dock --slot dock.left      # a working start
+super-desktop plugin check my-dock --json               # QML errors with file:line
+super-desktop plugin snapshot my-dock --out /tmp/my-dock.png --json
+super-desktop plugin snapshot my-dock --do 'click "Add"; type hi; expect "hi"'
+super-desktop plugin logs my-dock                       # runtime errors, sd.log
+super-desktop plugin preview my-dock                    # preview.png for sharing
+super-desktop plugin publish my-dock                    # ready for the public list?
+super-desktop plugin list
+super-desktop plugin doctor                             # what is missing, with fixes
+```
+
+`check` exits 0 only when every surface loads without errors or warnings
+and no lint rule finds an error (QML that loads but is wrong in SUPER
+DESKTOP, such as a `ToolTip` in a top-bar item or `cards.send` from a timer);
+lint advice (fixed colors, text in the theme's border color, a timer running
+while hidden, a panel or card opened again from a show or a timer after the
+user closed it) is reported without failing, and `// sd-lint: ignore RULE` on
+the line, or the line above, keeps advice that was weighed out.
+`snapshot` renders off screen with the current theme and the plugin's saved
+values and reports `paintedFraction` (0 means nothing visible was drawn).
+`--values FILE.json` renders with sample values instead (one JSON object, as
+`sd.values` sees it), and `--wait MS` waits that long first, to catch an
+animation; what the QML saves during a snapshot is thrown away. `--do`
+first uses the surface like a user, step by step: `click` (on shown text,
+`@objectName` or `x,y`; `right`/`middle`), `double`, `move`, `press`,
+`release`, `drag`, `scroll`, `type`, `key` (`Return`, `Escape`, `Ctrl+A`…),
+`wait`, `expect`/`absent` (text shown or not), `shot [NAME]` (an extra
+PNG) and `cardbutton ID [KEY=VALUE…]` (a click on one of the plugin's card
+buttons, on a sample card); the report lists each step, the `sd.call`s and `sd.run`s the plugin
+made (recorded, not done), its log lines and its values afterwards, and the
+command fails at the first failing step. `preview` composes the surfaces
+into the 1280×640 `preview.png` the public list shows; `publish` checks a
+plugin's repository is ready for the list and prints its entry.
+`plugin new` also writes the plugin skill into the folder
+(`.claude/skills/super-desktop-plugin/SKILL.md`) and an `AGENTS.md`, so any
+coding agent opened there knows the plugin API. ✨ in the top bar and
+Settings → Plugins do the same from the overlay and open an agent in the
+new folder. Drawing plugins needs Qt Quick (`qt6-declarative`).
+
+Plugins people share are listed at
+[github.com/gladimdim/super-desktop-plugins](https://github.com/gladimdim/super-desktop-plugins):
+**Settings → Plugins → Discover** shows the list (search, a category,
+grouped by category or by name) with Install, and `plugin search [text]`
+does the same in a terminal. `plugin install <id>` installs one from the list
+(it checks the repository's `plugin.json` has that id); `plugin install <git
+url>` or a folder installs any other. An installed plugin does not run until
+you approve it (Settings → Plugins or `plugin approve <id>`), because its QML
+can run programs as you; `plugin update <id>` fast-forwards it and
+`plugin remove <id>` moves it to the trash. **Edit & Enhance** (on every
+plugin in Settings → Plugins, Installed and Discover) or `plugin fork <id>`
+makes any plugin your own copy and opens an agent to improve it: it is
+installed and approved first if needed, keeps its id and saved values, stops
+updating from its author (whose version stays reachable as the git remote
+`upstream`), and loses agent settings its author shipped (`.claude`,
+`.mcp.json`), which could run commands when an agent opens there. Plugins made on your PC run without approval.
+
 ## Complete public command syntax
 
 The catalog below lists all public commands. `--help` also works for each leaf
@@ -878,6 +950,21 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
 | `mcp serve` | Local MCP stdio | Serve desktop inspection, harness launch and guarded prompt tools |
+| `plugin list [--json]` | Offline | List QML plugins and whether they run |
+| `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page\|card\|fullscreen\|popup] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
+| `plugin check ID\|DIR [--json]` | Offline | Check a plugin's manifest and QML |
+| `plugin snapshot ID\|DIR [--surface ID] [--width W] [--height H] [--scale S] [--wait MS] [--values FILE.json] [--out FILE.png] [--do STEPS] [--steps FILE] [--json]` | Offline | Render a plugin surface to a PNG |
+| `plugin preview ID\|DIR [--surface ID]... [--values FILE.json] [--out FILE.png] [--json]` | Offline | Draw a plugin's preview picture |
+| `plugin publish ID\|DIR [--json]` | Offline | Check a plugin is ready for the public list |
+| `plugin logs ID [--lines N]` | Offline | Show the end of a plugin's log |
+| `plugin doctor [--json]` | Offline | Check what plugins need |
+| `plugin search [TEXT] [--category C] [--json]` | Network (offline: the last list) | Search the public plugin list |
+| `plugin install ID\|GIT_URL\|DIR [--json]` | Network for IDs and URLs | Install a shared plugin from the list, git or a folder |
+| `plugin fork ID\|GIT_URL\|DIR [--json]` | Network for IDs and URLs | Make a plugin your own copy to change |
+| `plugin approve ID [--json]` | Offline | Let an installed plugin run |
+| `plugin update ID [--json]` | Offline | Update an installed plugin from git |
+| `plugin remove ID [--json]` | Offline | Move a plugin to the trash |
+| `plugin path` | Offline | Print the plugins folder |
 | `terminal attach ID --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--seconds 30] [--interactive --raw \| --raw \| --format jsonl] [--target local]` | Structured local | Attach a bounded local terminal stream |
 | `terminal viewport list ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
 | `terminal viewport acquire ID --columns N --rows N [--ttl 60s] --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID [--format text\|json] [--target local]` | Structured local | Manage temporary terminal cell-grid leases |
@@ -990,6 +1077,7 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `show` | Legacy | Show the local overlay |
 | `hide` | Legacy | Hide the local overlay |
 | `toggle` | Legacy | Toggle local overlay visibility |
+| `tour` | Legacy | Show the overlay with the getting started guide |
 | `start` | Legacy | Run the daemon with its overlay visible |
 | `daemon` | Legacy | Run the daemon with its overlay hidden |
 | `kill` | Legacy | Stop the local overlay daemon |

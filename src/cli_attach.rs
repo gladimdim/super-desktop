@@ -157,7 +157,7 @@ pub(crate) fn run(args: &[String]) -> Option<i32> {
         unreachable!()
     };
     let expected = expect_pane_identity.clone();
-    let reply = send(command, &options, "terminal.attach");
+    let reply = send(command, &options);
     if !reply.ok {
         if raw {
             eprintln!("{}", reply.error.as_ref().unwrap().message);

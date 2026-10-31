@@ -98,6 +98,25 @@ audio. Each has a WebP poster taken from a frame inside it.
 The captions in the clips come from the trailer. The interactive demos on the
 page are a simulation in `../assets/` with sample data, labeled as such.
 
+## Plugin pictures (`../media/plugin-*.webp`)
+
+The "Real plugins" tab of the Plugins section. Each is one plugin surface
+drawn off screen by SUPER DESKTOP 1.6.0's plugin host with `super-desktop
+plugin snapshot --scale 2`, on 2026-10-14 in the Tokyo Night theme, from the
+example plugins in `skills/super-desktop-plugin/examples/` copied to a
+scratch plugins folder (`SD_PLUGINS_DIR`, `SD_PLUGINS_STATE_DIR`).
+
+- `plugin-snake.webp` (840 × 920): `snake --surface game`, with a saved best
+  score of 27 (`--values`), after clicking the board and steering with the
+  arrow keys (`--do`).
+- `plugin-reminder.webp` (840 × 632): `reminder --surface add` after picking
+  "30 min" and typing the text (`--do`).
+- `plugin-bell.webp` (104 × 72) and `plugin-pomodoro-item.webp` (184 × 72): the
+  `reminder` and `pomodoro` top-bar items at `--height 36`, the timer running.
+- `plugin-clock.webp` (144 × 660): `clock-dock --surface main --height 330`.
+
+Converted from PNG to WebP at quality 88 with ImageMagick, without resizing.
+
 ## Social preview card (`../media/social-card.jpg`)
 
 The 1200 × 630 image that link previews show (Open Graph and X/Twitter
@@ -106,3 +125,29 @@ drawn as an HTML page in headless Chromium on 2026-10-06: the brand, the hero
 headline and `readme-overlay.webp` (a real capture, see above) in perspective,
 in Noto Sans and JetBrains Mono, then saved as JPEG at quality 88. Keep text
 away from the edges: some sites crop the card a little.
+
+## SD Editor
+
+- `sd-editor.webp`: 1240 × 760, the SD Editor card alone, drawn by the
+  app's own GTK code (release 1.7.0) on a private Broadway display rather
+  than captured from the screen, open on a copy of this repository's files
+  with `src/editor/media.rs` showing, in the default Tokyo Night theme.
+  WebP at quality 92.
+
+## SUPER DESKTOP Omalauncher (SD Launcher) images
+
+- `sd-launcher-page.webp`: a SUPER DESKTOP home page with live Codex and Claude
+  Code sessions.
+- `sd-launcher-terminal.webp`: a terminal shell open in the page, with its key row.
+- `sd-launcher-new.webp`: starting a new agent on the PC.
+- `sd-launcher-menu.webp`: the home screen's long-press menu with the super
+  desktop row; the home screen behind the menu is blurred.
+
+Captured on 2026-10-18 with `adb exec-out screencap` on a Xiaomi 2602BPC18G
+(1280 × 2772) running SD Launcher in the Tokyo Night theme, resized to 540 px
+wide and encoded as WebP at quality 82.
+
+- `sd-launcher-landscape.webp`: the agent list and a live Claude Code terminal
+  side by side in landscape (540 × 249). Converted from the fork's existing
+  `docs/superdesktop/media/landscape-split.png` capture at WebP quality 86,
+  without resizing.

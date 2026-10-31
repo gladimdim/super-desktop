@@ -85,9 +85,7 @@ pub fn classify(command: &str, alternate: bool, exe: Option<&str>, args: &[Strin
 /// The foreground process of a pane whose first process is `pane_pid`, from
 /// the terminal's foreground process group.
 fn foreground_pid(pane_pid: u32) -> Option<u32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pane_pid}/stat")).ok()?;
-    let (_, fields) = stat.rsplit_once(')')?;
-    let foreground = fields.split_whitespace().nth(5)?.parse::<u32>().ok()?;
+    let (_, foreground) = crate::platform::process::terminal_groups(pane_pid)?;
     Some(if foreground == 0 { pane_pid } else { foreground })
 }
 
@@ -97,15 +95,8 @@ fn foreground_process(pane_pid: u32) -> (Option<String>, Vec<String>) {
     let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
         .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()));
-    let args = std::fs::read(format!("/proc/{pid}/cmdline"))
-        .map(|raw| {
-            raw.split(|byte| *byte == 0)
-                .filter(|arg| !arg.is_empty())
-                .take(64)
-                .map(|arg| String::from_utf8_lossy(arg).into_owned())
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut args = crate::platform::process::cmdline(pid).unwrap_or_default();
+    args.truncate(64);
     (exe, args)
 }
 

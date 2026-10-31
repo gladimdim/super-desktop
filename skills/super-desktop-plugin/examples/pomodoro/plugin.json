@@ -1,0 +1,11 @@
+{
+  "id": "pomodoro",
+  "name": "Pomodoro",
+  "description": "A focus timer in the top bar, a panel to start and stop it, and its length in Settings.",
+  "api": 1,
+  "surfaces": [
+    { "id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 92 },
+    { "id": "timer", "slot": "panel", "qml": "Panel.qml", "size": 320, "height": 240, "title": "Pomodoro" },
+    { "id": "settings", "slot": "settings.page", "qml": "Settings.qml", "height": 90 }
+  ]
+}

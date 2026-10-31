@@ -117,10 +117,7 @@ fn top(canvas: &Canvas) -> i32 {
     70.max(canvas.top_inset as i32 + 10)
 }
 fn max_size(canvas: &Canvas) -> (i32, i32) {
-    (
-        ((canvas.width as f64 * 0.70).round() as i32).min(canvas.width as i32 - 20),
-        ((canvas.height as f64 * 0.75).round() as i32).min(canvas.height as i32 - top(canvas) - 10),
-    )
+    (canvas.width as i32 - 20, canvas.height as i32 - top(canvas) - 10)
 }
 
 /// Return whether the requested mode differs, after checking all guards.
@@ -511,7 +508,7 @@ mod tests {
             *height = 32768;
         }
         let p = prepare(&r, &s, &s.cards[0]).unwrap_or_else(|_| panic!("resize clamp"));
-        assert_eq!((p.rect.width, p.rect.height), (717, 576));
+        assert_eq!((p.rect.width, p.rect.height), (1004, 688));
         if let Command::Resize { width, .. } = &mut r.command {
             *width = u32::MAX;
         }

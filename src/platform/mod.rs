@@ -1,3 +1,4 @@
+pub mod permit;
 pub mod poll;
 pub mod process;
 pub mod pty;

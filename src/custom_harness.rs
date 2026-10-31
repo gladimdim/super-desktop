@@ -1,5 +1,6 @@
 //! User-defined launchers are local, explicit commands. The executable and
-//! each argument are quoted separately before tmux's command shell sees them.
+//! each argument are quoted separately, only where needed, before tmux's
+//! command shell sees them, so `/bin/echo --model=opus` reads as it is typed.
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -15,6 +16,17 @@ pub struct CustomHarness {
     pub arguments: Vec<String>,
 }
 
+/// A fresh launcher id, time-based so copies never collide.
+pub fn new_launcher_id() -> String {
+    format!(
+        "custom-{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
 impl CustomHarness {
     pub fn create(
         name: &str,
@@ -26,13 +38,7 @@ impl CustomHarness {
         let executable = executable.trim();
         let arguments = shlex::split(arguments).ok_or("Arguments have an unmatched quote")?;
         let result = Self {
-            id: format!(
-                "custom-{:x}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            ),
+            id: new_launcher_id(),
             name: name.to_owned(),
             icon: icon.to_owned(),
             executable: executable.to_owned(),
@@ -77,10 +83,18 @@ impl CustomHarness {
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     }
 
+    /// A copy with a fresh id: the settings Clone button makes one and then
+    /// opens the edit form for the copy, so editing never touches the original.
+    pub fn cloned(&self) -> Self {
+        let mut copy = self.clone();
+        copy.id = new_launcher_id();
+        copy
+    }
+
     pub fn command(&self) -> String {
         std::iter::once(&self.executable)
             .chain(self.arguments.iter())
-            .map(|part| format!("'{}'", part.replace('\'', "'\"'\"'")))
+            .map(|part| crate::launch_args::quote(part))
             .collect::<Vec<_>>()
             .join(" ")
     }

@@ -152,6 +152,14 @@ pub struct AppState {
     /// Prevent suspend while external power is connected. Off by default.
     #[serde(default)]
     pub sleep_lock_on_ac: bool,
+    /// Start the daemon at login on this PC (Settings → System launch). Off
+    /// by default; when on, owns one systemd user unit, see `boot_autostart`.
+    #[serde(default)]
+    pub boot_autostart: bool,
+    /// The top bar's ✎ SD Editor button is turned off (Settings → SD
+    /// Editor). Shown by default.
+    #[serde(default)]
+    pub editor_button_hidden: bool,
     /// Retired harness keys already swapped for their successor in
     /// `visible_harnesses` (see `retire_harnesses`), so a user who turns the
     /// retired one back on keeps it.
@@ -171,6 +179,32 @@ pub struct AppState {
     /// display in use, so a size from a larger screen still opens whole here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings_panel_size: Option<(i32, i32)>,
+    /// The workspace size, in logical pixels, the cards' places were last
+    /// laid out for. When the overlay opens on a display of another size
+    /// (another output, or after a restart there) every card is moved to fit
+    /// it. `None` in older state files: the next display keeps every card
+    /// where it is and brings back only those hanging past an edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_size: Option<(i32, i32)>,
+    /// The top bar's launch buttons (harness keys and custom launcher ids),
+    /// in the order the user dragged them to. Empty = never rearranged: the
+    /// built-in order. Launchers it does not name follow those it does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub launcher_order: Vec<String>,
+    /// Plugin toolbar items (`plugin:<id>/<surface>`), in the order the user
+    /// dragged them to. Empty = never rearranged: plugin id order. Items it
+    /// does not name follow those it does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub toolbar_item_order: Vec<String>,
+    /// Whether the welcome tour has been shown. Only a fresh install starts
+    /// with `false` (see `fresh_install_state`); a state file from before the
+    /// tour existed loads as `true`, so people upgrading never get it.
+    #[serde(default = "tour_already_seen")]
+    pub welcome_tour_seen: bool,
+}
+
+fn tour_already_seen() -> bool {
+    true
 }
 
 impl Default for AppState {
@@ -198,10 +232,16 @@ impl Default for AppState {
             used_dirs: Vec::new(),
             top_bar_size: TopBarSize::Large,
             sleep_lock_on_ac: false,
+            boot_autostart: false,
+            editor_button_hidden: false,
             retired_harness_swaps: Vec::new(),
             folder_tags: std::collections::BTreeMap::new(),
             settings_panel_pos: None,
             settings_panel_size: None,
+            layout_size: None,
+            launcher_order: Vec::new(),
+            toolbar_item_order: Vec::new(),
+            welcome_tour_seen: true,
         }
     }
 }
@@ -227,8 +267,22 @@ pub fn display_dir(path: &str) -> String {
     }
 }
 
-/// How many folders the top bar's open dropdown shows directly.
-pub const RECENT_DIRS_MAX: usize = 7;
+/// How many folders the top bar's ▾ history remembers. It shows
+/// [`RECENT_DIRS_VISIBLE`] rows at once and scrolls through the rest.
+pub const RECENT_DIRS_MAX: usize = 30;
+
+/// Rows of the ▾ history visible before it scrolls.
+pub const RECENT_DIRS_VISIBLE: usize = 8;
+
+/// How many recent folders go to phones, other PCs and plugins
+/// (`recentDirectories`, `recent`): the seven every released client has
+/// always received, so a longer local history changes nothing on the wire.
+pub const RECENT_DIRS_SHARED: usize = 7;
+
+/// The recent folders shared outside this desktop; see [`RECENT_DIRS_SHARED`].
+pub fn shared_recent_dirs(state: &AppState) -> &[String] {
+    &state.recent_dirs[..state.recent_dirs.len().min(RECENT_DIRS_SHARED)]
+}
 
 /// The folder new harness sessions start in: the configured one when it is
 /// still a usable directory, otherwise the home directory.
@@ -281,7 +335,7 @@ pub fn push_recent_dir(recent: &mut Vec<String>, dir: &str) {
 }
 
 /// Remember a folder for future substring autocomplete. This history is kept
-/// independently from the seven-row dropdown so an older project remains
+/// independently from the ▾ history so an older project remains
 /// discoverable after it falls out of the recent list.
 pub fn push_used_dir(used: &mut Vec<String>, dir: &str) {
     used.retain(|d| d != dir);
@@ -296,8 +350,8 @@ pub fn remember_workspace_dir(state: &mut AppState, dir: &str) {
 }
 
 /// Upgrade history written by older versions. Capture every formerly recent,
-/// current, or still-open card directory before trimming the visible list to
-/// seven, so an update never makes an older workspace undiscoverable.
+/// current, or still-open card directory before trimming the history to
+/// [`RECENT_DIRS_MAX`], so an update never makes an older workspace undiscoverable.
 fn normalize_workspace_history(state: &mut AppState) -> bool {
     let before_recent = state.recent_dirs.clone();
     let before_used = state.used_dirs.clone();
@@ -404,6 +458,7 @@ fn fresh_install_state(detected: &[crate::tmux::HarnessInfo]) -> AppState {
                 .map(|h| h.key.to_string())
                 .collect(),
         ),
+        welcome_tour_seen: false,
         ..AppState::default()
     }
 }
@@ -700,6 +755,21 @@ mod tests {
     }
 
     #[test]
+    fn only_a_fresh_install_gets_the_welcome_tour() {
+        let fresh = fresh_install_state(&harness_infos(&["claude"]));
+        assert!(!fresh.welcome_tour_seen);
+        let saved: AppState = serde_json::from_str(&serde_json::to_string(&fresh).unwrap()).unwrap();
+        assert!(!saved.welcome_tour_seen, "a fresh install that has not opened yet keeps it");
+        // A state file from before the tour existed: an upgrade, not a new user.
+        let legacy: AppState = serde_json::from_str(r#"{"notes": [], "terminals": []}"#).unwrap();
+        assert!(legacy.welcome_tour_seen);
+        let mut seen = fresh;
+        seen.welcome_tour_seen = true;
+        let saved: AppState = serde_json::from_str(&serde_json::to_string(&seen).unwrap()).unwrap();
+        assert!(saved.welcome_tour_seen);
+    }
+
+    #[test]
     fn fresh_install_selects_at_most_three_detected_harnesses() {
         let detected: Vec<_> = ["claude", "codex", "opencode", "gemini", "shell"]
             .into_iter()
@@ -831,14 +901,17 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_workspace_history_outlives_the_seven_row_dropdown() {
+    fn test_complete_workspace_history_outlives_the_dropdown_history() {
         let mut state = AppState::default();
-        for i in 0..12 {
+        let total = RECENT_DIRS_MAX + 5;
+        for i in 0..total {
             remember_workspace_dir(&mut state, &format!("/project-{i}"));
         }
-        assert_eq!(state.recent_dirs.len(), 7);
-        assert_eq!(state.used_dirs.len(), 12);
-        assert_eq!(state.recent_dirs[0], "/project-11");
+        assert_eq!(state.recent_dirs.len(), RECENT_DIRS_MAX);
+        assert_eq!(state.used_dirs.len(), total);
+        assert_eq!(state.recent_dirs[0], format!("/project-{}", total - 1));
+        // Phones, other PCs and plugins still get the seven they always did.
+        assert_eq!(shared_recent_dirs(&state), &state.recent_dirs[..RECENT_DIRS_SHARED]);
         assert!(state.used_dirs.contains(&"/project-0".to_string()));
 
         // Re-use moves a directory to the front of both lists without
@@ -846,17 +919,18 @@ mod tests {
         remember_workspace_dir(&mut state, "/project-0");
         assert_eq!(state.recent_dirs[0], "/project-0");
         assert_eq!(state.used_dirs[0], "/project-0");
-        assert_eq!(state.used_dirs.len(), 12);
+        assert_eq!(state.used_dirs.len(), total);
     }
 
     #[test]
     fn test_history_migration_preserves_entries_trimmed_from_old_dropdowns() {
         let mut state = AppState::default();
-        state.recent_dirs = (0..9).map(|i| format!("/old-{i}")).collect();
+        let total = RECENT_DIRS_MAX + 2;
+        state.recent_dirs = (0..total).map(|i| format!("/old-{i}")).collect();
         assert!(normalize_workspace_history(&mut state));
-        assert_eq!(state.recent_dirs.len(), 7);
-        assert_eq!(state.used_dirs.len(), 9);
-        assert!(state.used_dirs.contains(&"/old-8".to_string()));
+        assert_eq!(state.recent_dirs.len(), RECENT_DIRS_MAX);
+        assert_eq!(state.used_dirs.len(), total);
+        assert!(state.used_dirs.contains(&format!("/old-{}", total - 1)));
     }
 
     #[test]

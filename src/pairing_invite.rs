@@ -1,8 +1,10 @@
 //! Guided invitation for pairing a device with this PC. It checks the secure
 //! bridge, the firewall and the network, creates a single-use invitation (a
 //! QR code for a phone, a link for another PC), then hands the device's
-//! request to the approval panel and reports what became of it. A step that
-//! fails says why and offers the fix. Bridge and system work stay off GTK.
+//! request to the approval panel and reports what became of it. A TV, which
+//! can't scan or paste, instead shows a code that is typed here while this
+//! page keeps the bridge's TV pairing window open. A step that fails says why
+//! and offers the fix. Bridge and system work stay off GTK.
 
 use crate::pairing_request_ui::{bridge_error_message, Decision, RequestHooks};
 use gtk4::{gdk, glib, prelude::*};
@@ -16,6 +18,7 @@ use std::time::{Duration, Instant};
 pub enum InviteKind {
     Phone,
     Pc,
+    Tv,
 }
 
 impl InviteKind {
@@ -23,6 +26,7 @@ impl InviteKind {
         match self {
             Self::Phone => "Pair a phone",
             Self::Pc => "Share this PC",
+            Self::Tv => "Pair a TV",
         }
     }
 
@@ -30,6 +34,7 @@ impl InviteKind {
         match self {
             Self::Phone => "Scan a code in SUPER DESKTOP for Android",
             Self::Pc => "Let another PC use this PC's harnesses",
+            Self::Tv => "Type the code SUPER DESKTOP for Android shows on the TV",
         }
     }
 
@@ -37,6 +42,7 @@ impl InviteKind {
         match self {
             Self::Phone => "On the phone, open SUPER DESKTOP → Settings → Connections → Add connection and scan the code below. Then compare the code both devices show and approve the request here.",
             Self::Pc => "On the other PC, open Settings → Connections → Add a device → View another PC (or Add a PC in its machine selector) and paste the link below. Then compare the code both PCs show and approve the request here.",
+            Self::Tv => "On the TV, open SUPER DESKTOP → Settings → Connections → Add connection, choose this PC under Nearby computers, then Pair with a code. Type the code the TV shows below. TVs can ask to pair only while this page is open.",
         }
     }
 }
@@ -52,10 +58,14 @@ struct Preflight {
     invitation: Option<Result<String, String>>,
 }
 
-fn preflight() -> Preflight {
+fn preflight(kind: InviteKind) -> Preflight {
     let bridge = crate::bridge::start_bridge();
     let earlier = if bridge.is_ok() { request_ids(crate::bridge::pending_requests()) } else { vec![] };
-    let invitation = bridge.is_ok().then(crate::bridge::pairing_invitation);
+    // For a TV, the "invitation" is the open pairing window.
+    let invitation = bridge.is_ok().then(|| match kind {
+        InviteKind::Tv => crate::bridge::open_code_pairing(),
+        InviteKind::Phone | InviteKind::Pc => crate::bridge::pairing_invitation(),
+    });
     Preflight {
         bridge,
         firewall: crate::bridge::firewall_summary(),
@@ -76,15 +86,45 @@ fn request_ids(requests: Vec<Value>) -> Vec<String> {
 /// `superdesktop://pair?data=…`, the form both the Android app and the
 /// Add-a-PC wizard accept.
 pub fn invitation_link(payload: &str) -> String {
-    let encoded = crate::ws::base64(payload.as_bytes())
-        .trim_end_matches('=')
-        .replace('+', "-")
-        .replace('/', "_");
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
     format!("superdesktop://pair?data={encoded}")
 }
 
-type RunPreflight = Arc<dyn Fn() -> Preflight + Send + Sync>;
+type RunPreflight = Arc<dyn Fn(InviteKind) -> Preflight + Send + Sync>;
 type ListRequests = Arc<dyn Fn() -> Vec<Value> + Send + Sync>;
+
+/// The bridge's TV pairing calls, replaceable in tests.
+#[derive(Clone)]
+pub(crate) struct CodeCalls {
+    /// The typed code → the TV's name, or the bridge's error code.
+    confirm: Arc<dyn Fn(String) -> Result<String, String> + Send + Sync>,
+    /// Keep the pairing window open; `expiresIn` JSON like opening it.
+    renew: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
+    close: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Default for CodeCalls {
+    fn default() -> Self {
+        Self {
+            confirm: Arc::new(|code| crate::bridge::confirm_pairing_code(&code)),
+            renew: Arc::new(crate::bridge::open_code_pairing),
+            close: Arc::new(crate::bridge::close_code_pairing),
+        }
+    }
+}
+
+/// What to say when a typed code is refused.
+fn code_error_message(code: &str) -> String {
+    match code {
+        "invalid_code" => "A code has 12 letters and digits, like K7QM-4XPA-9C0Z.".into(),
+        "no_matching_device" => "No TV is waiting with that code. Check it, or on the TV choose this PC again to get a new code.".into(),
+        other => bridge_error_message(other),
+    }
+}
+
+/// Seconds left in the pairing window when this page renews it.
+const RENEW_BEFORE_SECS: u64 = 40;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Stage {
@@ -168,6 +208,7 @@ pub struct InviteFlow {
     hooks: RequestHooks,
     run_preflight: RunPreflight,
     list: ListRequests,
+    code_calls: CodeCalls,
     kind: Cell<InviteKind>,
     stage: Cell<Stage>,
     intro: gtk4::Label,
@@ -175,11 +216,19 @@ pub struct InviteFlow {
     firewall: Step,
     network: Step,
     card: gtk4::Box,
+    card_title: gtk4::Label,
     expiry: gtk4::Label,
     qr: gtk4::DrawingArea,
     qr_code: Rc<RefCell<Option<qrcode::QrCode>>>,
     link: gtk4::Entry,
+    link_row: gtk4::Box,
     link_note: gtk4::Label,
+    code_row: gtk4::Box,
+    code_entry: gtk4::Entry,
+    code_connect: gtk4::Button,
+    code_note: gtk4::Label,
+    code_busy: Cell<bool>,
+    renew_busy: Cell<bool>,
     invite_error: gtk4::Label,
     outcome: gtk4::Box,
     outcome_text: gtk4::Label,
@@ -202,10 +251,11 @@ impl InviteFlow {
             hooks,
             Arc::new(preflight),
             Arc::new(crate::bridge::pending_requests),
+            CodeCalls::default(),
         )
     }
 
-    fn with_source(hooks: RequestHooks, run_preflight: RunPreflight, list: ListRequests) -> Rc<Self> {
+    fn with_source(hooks: RequestHooks, run_preflight: RunPreflight, list: ListRequests, code_calls: CodeCalls) -> Rc<Self> {
         let widget = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
         widget.add_css_class("invite-flow");
 
@@ -233,6 +283,7 @@ impl InviteFlow {
         card.set_visible(false);
         let card_head = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
         let card_title = gtk4::Label::new(Some("Invitation"));
+        // Read by `prepared`, which names the card after what it holds.
         card_title.add_css_class("launcher-section-title");
         card_title.set_xalign(0.0);
         card_title.set_hexpand(true);
@@ -295,6 +346,26 @@ impl InviteFlow {
         link_note.set_xalign(0.0);
         link_note.set_wrap(true);
         card.append(&link_note);
+        let code_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+        let code_entry = gtk4::Entry::new();
+        code_entry.add_css_class("ws-entry");
+        code_entry.set_hexpand(true);
+        code_entry.set_max_length(20);
+        code_entry.set_placeholder_text(Some("XXXX-XXXX-XXXX"));
+        code_entry.set_tooltip_text(Some("The code SUPER DESKTOP shows on the TV"));
+        code_row.append(&code_entry);
+        let code_connect = gtk4::Button::with_label("Connect");
+        code_connect.add_css_class("launcher-btn");
+        code_connect.add_css_class("launcher-btn-primary");
+        code_row.append(&code_connect);
+        code_row.set_visible(false);
+        card.append(&code_row);
+        let code_note = gtk4::Label::new(None);
+        code_note.add_css_class("launcher-hint");
+        code_note.set_xalign(0.0);
+        code_note.set_wrap(true);
+        code_note.set_visible(false);
+        card.append(&code_note);
         widget.append(&card);
 
         let invite_error = gtk4::Label::new(None);
@@ -332,6 +403,7 @@ impl InviteFlow {
             hooks,
             run_preflight,
             list,
+            code_calls,
             kind: Cell::new(InviteKind::Phone),
             stage: Cell::new(Stage::Idle),
             intro,
@@ -339,11 +411,19 @@ impl InviteFlow {
             firewall,
             network,
             card,
+            card_title,
             expiry,
             qr,
             qr_code,
             link,
+            link_row,
             link_note,
+            code_row,
+            code_entry,
+            code_connect,
+            code_note,
+            code_busy: Cell::new(false),
+            renew_busy: Cell::new(false),
             invite_error,
             outcome,
             outcome_text,
@@ -380,8 +460,20 @@ impl InviteFlow {
                 display.clipboard().set_text(&flow.link.text());
                 flow.link_note.set_text(match flow.kind.get() {
                     InviteKind::Pc => "Link copied. Paste it into SUPER DESKTOP on the other PC.",
-                    InviteKind::Phone => "Link copied. Paste it into SUPER DESKTOP on the phone.",
+                    InviteKind::Phone | InviteKind::Tv => "Link copied. Paste it into SUPER DESKTOP on the phone.",
                 });
+            }
+        });
+        let weak = Rc::downgrade(&flow);
+        flow.code_connect.connect_clicked(move |_| {
+            if let Some(flow) = weak.upgrade() {
+                flow.confirm_code();
+            }
+        });
+        let weak = Rc::downgrade(&flow);
+        flow.code_entry.connect_activate(move |_| {
+            if let Some(flow) = weak.upgrade() {
+                flow.confirm_code();
             }
         });
         let review_hook = Rc::clone(&flow.hooks.review);
@@ -413,6 +505,9 @@ impl InviteFlow {
     /// Check everything and create a fresh invitation. Any earlier one is
     /// replaced: the bridge keeps a single invitation.
     pub fn start(self: &Rc<Self>, kind: InviteKind) {
+        if self.kind.get() == InviteKind::Tv && kind != InviteKind::Tv {
+            self.close_window();
+        }
         self.kind.set(kind);
         let generation = self.reset();
         self.stage.set(Stage::Preparing);
@@ -423,7 +518,7 @@ impl InviteFlow {
         let run = Arc::clone(&self.run_preflight);
         let weak = Rc::downgrade(self);
         glib::MainContext::default().spawn_local(async move {
-            let result = gtk4::gio::spawn_blocking(move || run()).await;
+            let result = gtk4::gio::spawn_blocking(move || run(kind)).await;
             let Some(flow) = weak.upgrade() else {
                 return;
             };
@@ -443,8 +538,19 @@ impl InviteFlow {
     /// Leave the flow. The link's secret is cleared from the page; the
     /// bridge's invitation still expires on its own.
     pub fn stop(&self) {
+        if self.kind.get() == InviteKind::Tv && self.stage.get() != Stage::Idle {
+            self.close_window();
+        }
         self.reset();
         self.stage.set(Stage::Idle);
+    }
+
+    /// TVs can no longer ask to pair; requests already made still finish.
+    fn close_window(&self) {
+        let close = Arc::clone(&self.code_calls.close);
+        glib::MainContext::default().spawn_local(async move {
+            let _ = gtk4::gio::spawn_blocking(move || close()).await;
+        });
     }
 
     fn reset(&self) -> u64 {
@@ -457,6 +563,10 @@ impl InviteFlow {
         self.missing.set(0);
         self.link.set_text("");
         self.qr_code.borrow_mut().take();
+        self.code_entry.set_text("");
+        self.code_note.set_visible(false);
+        self.code_busy.set(false);
+        self.renew_busy.set(false);
         self.card.set_visible(false);
         self.invite_error.set_visible(false);
         self.outcome.set_visible(false);
@@ -527,6 +637,22 @@ impl InviteFlow {
             .ok()
             .and_then(|v| v["expiresIn"].as_u64())
             .unwrap_or(300);
+        let tv = self.kind.get() == InviteKind::Tv;
+        self.card_title.set_text(if tv { "Code from the TV" } else { "Invitation" });
+        self.link_row.set_visible(!tv);
+        self.link_note.set_visible(!tv);
+        self.expiry.set_visible(!tv);
+        self.code_row.set_visible(tv);
+        if tv {
+            self.qr.set_visible(false);
+            self.card.set_visible(true);
+            self.code_connect.set_sensitive(true);
+            self.expires_at.set(Some(Instant::now() + Duration::from_secs(expires_in)));
+            self.stage.set(Stage::Ready);
+            self.show_outcome("Waiting for the TV's code…", false, false);
+            self.code_entry.grab_focus();
+            return;
+        }
         let link = invitation_link(&payload);
         let phone = self.kind.get() == InviteKind::Phone;
         *self.qr_code.borrow_mut() = if phone {
@@ -550,6 +676,7 @@ impl InviteFlow {
             match self.kind.get() {
                 InviteKind::Phone => "Waiting for the phone to scan the code…",
                 InviteKind::Pc => "Waiting for the other PC to use the link…",
+                InviteKind::Tv => "Waiting for the TV's code…",
             },
             false,
             false,
@@ -581,6 +708,7 @@ impl InviteFlow {
 
     fn tick(self: &Rc<Self>) {
         match self.stage.get() {
+            Stage::Ready if self.kind.get() == InviteKind::Tv => self.renew_window(),
             Stage::Ready => {
                 self.paint_expiry();
                 if self
@@ -596,6 +724,90 @@ impl InviteFlow {
             Stage::Requested => self.poll(),
             _ => {}
         }
+    }
+
+    /// Keep the TV pairing window open while this page shows it.
+    fn renew_window(self: &Rc<Self>) {
+        let due = self.expires_at.get().is_none_or(|at| {
+            at.saturating_duration_since(Instant::now()).as_secs() < RENEW_BEFORE_SECS
+        });
+        if !due || self.renew_busy.replace(true) {
+            return;
+        }
+        let renew = Arc::clone(&self.code_calls.renew);
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let result = gtk4::gio::spawn_blocking(move || renew()).await;
+            let Some(flow) = weak.upgrade() else {
+                return;
+            };
+            if flow.generation.get() != generation {
+                return;
+            }
+            flow.renew_busy.set(false);
+            match result {
+                Ok(Ok(payload)) => {
+                    let secs = serde_json::from_str::<Value>(&payload)
+                        .ok()
+                        .and_then(|v| v["expiresIn"].as_u64())
+                        .unwrap_or(120);
+                    flow.expires_at.set(Some(Instant::now() + Duration::from_secs(secs)));
+                }
+                Ok(Err(code)) => {
+                    flow.stage.set(Stage::Failed);
+                    flow.card.set_visible(false);
+                    flow.show_error(&format!("TVs can't ask to pair right now. {}", bridge_error_message(&code)));
+                }
+                Err(_) => {}
+            }
+        });
+    }
+
+    /// The owner typed the TV's code: the bridge finds that TV and lets it pair.
+    fn confirm_code(self: &Rc<Self>) {
+        if self.stage.get() != Stage::Ready || self.kind.get() != InviteKind::Tv || self.code_busy.replace(true) {
+            return;
+        }
+        let typed = self.code_entry.text().to_string();
+        self.code_connect.set_sensitive(false);
+        self.code_note.set_visible(false);
+        let confirm = Arc::clone(&self.code_calls.confirm);
+        let generation = self.generation.get();
+        let weak = Rc::downgrade(self);
+        glib::MainContext::default().spawn_local(async move {
+            let result = gtk4::gio::spawn_blocking(move || confirm(typed)).await;
+            let Some(flow) = weak.upgrade() else {
+                return;
+            };
+            if flow.generation.get() != generation {
+                return;
+            }
+            flow.code_busy.set(false);
+            flow.code_connect.set_sensitive(true);
+            match result {
+                Ok(Ok(device)) => {
+                    flow.stage.set(Stage::Approved);
+                    flow.expires_at.set(None);
+                    flow.code_entry.set_text("");
+                    flow.card.set_visible(false);
+                    flow.renew.set_label("Pair another TV");
+                    flow.show_outcome(
+                        &format!("✓ Code accepted. “{device}” is finishing pairing and shows this PC's harnesses in a moment."),
+                        false,
+                        true,
+                    );
+                }
+                Ok(Err(code)) => {
+                    flow.code_note.set_text(&code_error_message(&code));
+                    flow.code_note.set_visible(true);
+                }
+                Err(_) => {
+                    flow.code_note.set_text("The check did not finish. Try again.");
+                    flow.code_note.set_visible(true);
+                }
+            }
+        });
     }
 
     fn expired(&self, text: &str) {
@@ -750,6 +962,7 @@ impl InviteFlow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::pump_until;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -767,16 +980,6 @@ mod tests {
     #[test]
     fn invite_flow() {
         crate::gtk_test::run_in_child_process("pairing_invite::tests::invite_flow_child");
-    }
-
-    fn pump_until(what: &str, done: impl Fn() -> bool) {
-        let context = glib::MainContext::default();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            while context.iteration(false) {}
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     fn checks(bridge: Result<(), String>, lan: &str, invitation: Option<Result<String, String>>) -> Preflight {
@@ -803,7 +1006,7 @@ mod tests {
         let waiting = Arc::new(Mutex::new(vec![json!({"requestId":"old","deviceName":"Earlier"})]));
         let run = {
             let next = Arc::clone(&next);
-            Arc::new(move || {
+            Arc::new(move |_| {
                 let checked = next.lock().unwrap();
                 Preflight {
                     bridge: checked.bridge.clone(),
@@ -829,7 +1032,23 @@ mod tests {
         };
         // Never presented: the timer only runs on screen, so the test drives
         // the request watch itself.
-        let flow = InviteFlow::with_source(hooks.clone(), run, list);
+        let typed = Arc::new(Mutex::new(Vec::<String>::new()));
+        let closed = Arc::new(Mutex::new(0));
+        let code_calls = CodeCalls {
+            confirm: Arc::new({
+                let typed = Arc::clone(&typed);
+                move |code| {
+                    typed.lock().unwrap().push(code.clone());
+                    if code == "K7QM-4XPA-9C0Z" { Ok("Living room TV".into()) } else { Err("no_matching_device".into()) }
+                }
+            }),
+            renew: Arc::new(|| Ok(r#"{"expiresIn":120}"#.into())),
+            close: Arc::new({
+                let closed = Arc::clone(&closed);
+                move || *closed.lock().unwrap() += 1
+            }),
+        };
+        let flow = InviteFlow::with_source(hooks.clone(), run, list, code_calls);
 
         // A phone gets a QR code and a link; a blocked firewall is a warning
         // with its fix, not a failure.
@@ -890,6 +1109,30 @@ mod tests {
         assert_eq!(flow.network.mark.text(), "✕");
         assert!(flow.invite_error.text().contains("did not answer"));
         assert!(flow.renew.property::<bool>("visible"));
+
+        // A TV gets a code field instead of a QR code; a wrong code says so and
+        // keeps the page waiting, the right one reports the TV by name.
+        *next.lock().unwrap() = checks(Ok(()), "10.0.0.2", Some(Ok(r#"{"expiresIn":120}"#.into())));
+        flow.start(InviteKind::Tv);
+        pump_until("the TV page", || flow.stage.get() == Stage::Ready);
+        assert!(flow.code_row.property::<bool>("visible"));
+        assert!(!flow.qr.property::<bool>("visible") && !flow.link_row.property::<bool>("visible"));
+        assert_eq!(flow.card_title.text(), "Code from the TV");
+        flow.code_entry.set_text("K7QM-4XPA-9C01");
+        flow.confirm_code();
+        pump_until("the refusal", || flow.code_note.property::<bool>("visible"));
+        assert!(flow.code_note.text().contains("No TV is waiting"));
+        assert_eq!(flow.stage.get(), Stage::Ready);
+        flow.code_entry.set_text("K7QM-4XPA-9C0Z");
+        flow.code_entry.emit_activate();
+        pump_until("the accepted code", || flow.stage.get() == Stage::Approved);
+        assert!(flow.outcome_text.text().contains("Living room TV"));
+        assert_eq!(*typed.lock().unwrap(), ["K7QM-4XPA-9C01", "K7QM-4XPA-9C0Z"]);
+        // Leaving a TV page closes the bridge's pairing window.
+        flow.start(InviteKind::Tv);
+        pump_until("the second TV page", || flow.stage.get() == Stage::Ready);
+        flow.stop();
+        pump_until("the closed window", || *closed.lock().unwrap() == 1);
 
         // Leaving the page clears the secret from it.
         *next.lock().unwrap() = checks(Ok(()), "10.0.0.2", Some(Ok(payload)));

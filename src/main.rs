@@ -3,9 +3,12 @@ mod desktop_shell;
 mod macos_shortcut;
 #[cfg(target_os = "macos")]
 mod macos_diagnostics;
-use super_desktop::{cli, control};
+use super_desktop::cli_legacy::{self, Dial};
+use super_desktop::{cli, control, preload};
 use super_desktop::control_journal;
 mod control_launch;
+#[cfg(unix)]
+mod headless;
 mod control_terminal;
 mod control_geometry;
 mod control_close;
@@ -32,19 +35,23 @@ mod custom_harness;
 mod prompt_image;
 mod prompt_attachments;
 mod prompt_history;
+mod prompt_log;
+mod prompt_history_view;
 mod shell_title;
 mod scrollback;
 mod updates;
+mod editor;
 mod floating_panel;
+mod overlay_slide;
 mod folder_colors;
 mod frame_profile;
 mod harness_metadata;
 mod hidden_pause;
-mod preload;
 use super_desktop::{harness_record, platform, session_task, terminal_text};
 mod terminal_frame;
 mod asset_pdf;
 mod asset_view;
+mod attachment_view;
 mod bridge;
 mod card_resize;
 mod arrange;
@@ -63,6 +70,7 @@ mod pairing_request_ui;
 mod card_source;
 mod command_feedback;
 mod harness_bar;
+mod toolbar_reorder;
 mod connection_panel;
 mod machine_selector;
 mod markdown_view;
@@ -71,7 +79,6 @@ mod remote_terminal;
 mod remote_workspace;
 mod harness_settings;
 mod hotcorner;
-mod jev;
 mod launch_args;
 mod launcher_settings;
 mod mini_terminal;
@@ -81,6 +88,8 @@ mod terminal_links;
 mod overlap_ghost;
 mod shortcut;
 mod sleep_lock;
+mod boot_autostart;
+mod screensaver;
 mod state;
 mod startup;
 mod sticky_note;
@@ -93,7 +102,9 @@ mod tmux_control;
 mod phone_viewport;
 mod terminal_transport;
 mod usage;
+mod welcome_tour;
 mod window;
+mod plugin_ui;
 mod workspace_bar;
 mod workspace_model;
 mod ws;
@@ -154,6 +165,56 @@ pub mod gtk_test {
             while gtk4::glib::MainContext::default().iteration(false) {}
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+
+    /// Run the main loop until `done`, failing after 5 s with `what` was
+    /// never seen.
+    pub fn pump_until(what: &str, done: impl Fn() -> bool) {
+        let context = gtk4::glib::MainContext::default();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !done() {
+            while context.iteration(false) {}
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// `root` and every widget below it, each before its children, children
+    /// in order.
+    pub fn descendants(root: &gtk4::Widget) -> Vec<gtk4::Widget> {
+        use gtk4::prelude::*;
+        let mut out = vec![root.clone()];
+        let mut child = root.first_child();
+        while let Some(widget) = child {
+            out.extend(descendants(&widget));
+            child = widget.next_sibling();
+        }
+        out
+    }
+
+    /// The first widget from `root` down (in `descendants` order) that passes `test`.
+    pub fn find_where(root: &gtk4::Widget, test: impl Fn(&gtk4::Widget) -> bool) -> Option<gtk4::Widget> {
+        descendants(root).into_iter().find(|widget| test(widget))
+    }
+
+    /// Every `T` carrying `class` from `root` down, in `descendants` order.
+    pub fn find_all<T: gtk4::prelude::IsA<gtk4::Widget>>(root: &gtk4::Widget, class: &str) -> Vec<T> {
+        use gtk4::prelude::*;
+        descendants(root)
+            .into_iter()
+            .filter(|widget| widget.has_css_class(class))
+            .filter_map(|widget| widget.downcast::<T>().ok())
+            .collect()
+    }
+
+    /// The first `T` carrying `class` from `root` down.
+    pub fn find_first<T: gtk4::prelude::IsA<gtk4::Widget>>(root: &gtk4::Widget, class: &str) -> Option<T> {
+        find_all(root, class).into_iter().next()
+    }
+
+    /// How many widgets carry `class` from `root` down.
+    pub fn count_class(root: &gtk4::Widget, class: &str) -> usize {
+        find_all::<gtk4::Widget>(root, class).len()
     }
 
     pub fn run_in_child_process(inner_test: &str) {
@@ -284,7 +345,6 @@ pub mod gtk_test {
 
 use gtk4::gio::prelude::{ApplicationExt, ApplicationExtManual};
 use gtk4::glib;
-use gtk4::prelude::*;
 use gtk4::Application;
 use futures_util::StreamExt;
 use serde_json::json;
@@ -349,12 +409,12 @@ fn ipc_request_with(
     remove_stale_socket: bool,
     connect: impl FnOnce(&std::path::Path) -> std::io::Result<UnixStream>,
 ) -> Ipc {
-    let mut stream = match connect(sock_path) {
-        Ok(s) => s,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ipc::NoDaemon,
+    let mut stream = match cli_legacy::dial(connect(sock_path)) {
+        Dial::Connected(s) => s,
+        Dial::Missing => return Ipc::NoDaemon,
         // Connection refused: the file is a leftover from a daemon that is
         // gone. Clear it so the daemon we start can bind cleanly.
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+        Dial::Refused => {
             if remove_stale_socket {
                 let _ = fs::remove_file(sock_path);
             }
@@ -362,21 +422,17 @@ fn ipc_request_with(
         }
         // A sandbox denial or transient error says nothing about liveness.
         // Unlinking here makes the live daemon's ownership watcher exit.
-        Err(e) => {
+        Dial::Failed(e) => {
             eprintln!("SUPER DESKTOP: cannot connect to {}: {e}", sock_path.display());
             return Ipc::Stalled;
         }
     };
 
-    // Longer than the daemon's own 2s wait for the GTK thread, so a slow
-    // answer is never mistaken for "no daemon". The socket file is left alone
-    // here: the listener behind it is alive.
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-    let _ = stream.write_all(format!("{}\n", cmd.trim()).as_bytes());
-
-    let mut resp = String::new();
-    match stream.take(1024 * 1024 + 1).read_to_string(&mut resp) {
-        Ok(_) if resp.len() <= 1024 * 1024 && !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
+    // The socket file is left alone here: the listener behind it is alive.
+    let _ = stream.set_read_timeout(Some(cli_legacy::TIMEOUT));
+    let _ = cli_legacy::send(&mut stream, cmd.trim());
+    match cli_legacy::receive(&mut stream, 1024 * 1024 + 1) {
+        Ok(resp) if resp.len() <= 1024 * 1024 && !resp.trim().is_empty() => Ipc::Reply(resp.trim().to_string()),
         _ => Ipc::Stalled,
     }
 }
@@ -422,6 +478,9 @@ struct AppContext {
     /// corner surface while the overlay is hidden and by the overlay window
     /// itself while it is visible (see `hotcorner`).
     hot_inside: Rc<hotcorner::Zone>,
+    /// The screensaver hid the overlay, so it comes back when the screensaver
+    /// ends. Any show or toggle in between takes over.
+    restore_after_screensaver: bool,
 }
 
 fn main() {
@@ -503,6 +562,15 @@ fn main() {
 
     let full_cmd = if args.len() > 1 { args[1..].join(" ") } else { "toggle".to_string() };
     let resp = match ipc_request(&full_cmd) {
+        // Only a headless daemon is up but this session has a display: start
+        // the overlay, which takes over from it.
+        Ipc::Reply(resp)
+            if matches!(action, "toggle" | "show" | "pairing-review" | "tour")
+                && headless::is_headless(&resp)
+                && headless::display_available() =>
+        {
+            None
+        }
         Ipc::Reply(resp) => Some(resp),
         Ipc::Stalled => {
             // A daemon is alive but busy: starting another one would orphan the
@@ -515,22 +583,13 @@ fn main() {
         Ipc::NoDaemon => None,
     };
     if let Some(resp) = resp {
-        if action == "status" {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
-                let vis = val["visible"].as_bool().unwrap_or(false);
-                let notes = val["notes_count"].as_i64().unwrap_or(0);
-                let terms = val["terminals_count"].as_i64().unwrap_or(0);
-                println!("SUPER DESKTOP (Rust): {}", if vis { "Visible" } else { "Hidden" });
-                println!("Notes: {}, Terminals: {}", notes, terms);
-            } else {
-                println!("{}", resp);
-            }
-        } else if action == "toggle" {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
-                let vis = val["visible"].as_bool().unwrap_or(false);
-                println!("SUPER DESKTOP (Rust): {}", if vis { "Shown" } else { "Hidden" });
-            } else {
-                println!("{}", resp);
+        if action == "status" || action == "toggle" {
+            match serde_json::from_str(&resp)
+                .ok()
+                .and_then(|value| cli_legacy::visibility_text(action, &value))
+            {
+                Some(text) => println!("{text}"),
+                None => println!("{}", resp),
             }
         } else if action == "reload-theme" || action == "refresh-theme" {
             if let Ok(val) = serde_json::from_str::<serde_json::Value>(&resp) {
@@ -558,7 +617,7 @@ fn main() {
     }
 
     // Daemon not running -> spawn it
-    if action == "toggle" || action == "show" || action == "pairing-review" {
+    if action == "toggle" || action == "show" || action == "pairing-review" || action == "tour" {
         // LaunchServices owns the no-argument app process. Keep that process
         // alive so reopening the app and its native shortcut reach the UI.
         #[cfg(target_os = "macos")]
@@ -567,7 +626,7 @@ fn main() {
             return;
         }
         // A clicked pairing notification must still end at the approval panel.
-        let first = if action == "pairing-review" { "pairing-review" } else { "show" };
+        let first = if matches!(action, "pairing-review" | "tour") { action } else { "show" };
         let exe = env::current_exe().unwrap_or_else(|_| PathBuf::from("super-desktop"));
         let mut command = std::process::Command::new(exe);
         // This child is the overlay itself: it needs the preload that `main`
@@ -592,6 +651,8 @@ fn main() {
             // socket (see start_ipc_thread), so never spawn a second process
             // from this loop.
             match ipc_request(first) {
+                // Still the headless daemon: the new one has not taken over.
+                Ipc::Reply(reply) if headless::is_headless(&reply) => {}
                 Ipc::Reply(_) => {
                     println!("SUPER DESKTOP (Rust): Started and Shown");
                     return;
@@ -613,14 +674,21 @@ fn main() {
 }
 
 fn run_daemon(start_visible: bool) {
-    let initial_state = state::load_state();
+    let mut initial_state = state::load_state();
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
-    // Before any card is restored: restores resolve through these too.
-    launch_args::install(&initial_state.harness_args);
     if let Err(error) = gtk4::init() {
         eprintln!("SUPER DESKTOP cannot initialize its display: {error}");
+        headless::run();
         return;
     }
+    // A headless daemon (Settings → System launch) may own the socket and
+    // have changed the saved cards: take over before trusting the state.
+    if headless::take_over() {
+        initial_state = state::load_state();
+        sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
+    }
+    // Before any card is restored: restores resolve through these too.
+    launch_args::install(&initial_state.harness_args);
     startup::mark("GTK initialized");
 
     let app = Application::builder()
@@ -640,6 +708,7 @@ fn run_daemon(start_visible: bool) {
         window: None,
         shown: false,
         hot_inside: Rc::new(hotcorner::Zone::default()),
+        restore_after_screensaver: false,
     }));
 
     // Older installs bound the shortcut on press (which repeats while held).
@@ -700,293 +769,62 @@ fn run_daemon(start_visible: bool) {
     });
     startup::mark("IPC listening");
     // Independent owner-only CLI endpoint. Legacy bridge IPC remains unchanged.
-    let (control_tx, mut control_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
-    let (adopt_tx, mut adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
-    let (geometry_tx, mut geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
-    let (files_tx, mut files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
-    let (shortcut_tx, mut shortcut_rx)=futures_channel::mpsc::channel::<control_shortcut::Query>(8);
-    let (close_tx, mut close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
+    let (snapshot, snapshot_rx) = futures_channel::mpsc::channel::<control_service::Query>(8);
+    let (adopt, adopt_rx) = futures_channel::mpsc::channel::<control_service::Adoption>(8);
+    let (geometry, geometry_rx) = futures_channel::mpsc::channel::<control_geometry::Query>(8);
+    let (files, files_rx) = futures_channel::mpsc::channel::<control_files::Query>(8);
+    let (shortcut, shortcut_rx) = futures_channel::mpsc::channel::<control_shortcut::Query>(8);
+    let (close, close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
+    let channels = ControlChannels { snapshot, adopt, geometry, files, shortcut, close };
     match control::Server::bind(&runtime_dir()) {
         Ok(server) => {
             let _ = thread::Builder::new()
                 .name("sd-control".into())
                 .spawn(move || {
-                    server.run(move |request, deadline| {
-                        if matches!(request.command, control::Command::Capabilities {}) {
-                            return control::Reply::success(
-                                &request.request_id,
-                                control::capabilities(),
-                            );
-                        }
-                        if matches!(request.command,control::Command::ConnectionRead {..}|control::Command::ConnectionInvite {..}|control::Command::ConnectionDecide {..}|control::Command::ConnectionRevoke {..}) {
-                            return control_connection::execute(&control_journal::root(), &request, deadline);
-                        }
-                        if matches!(request.command,control::Command::PeerAdd {..}|control::Command::PeerPairing {..}) {
-                            return control_pairing::execute(&control_journal::root(), &request);
-                        }
-                        if matches!(request.command,control::Command::PeerRead {..}|control::Command::PeerCommand {..}|control::Command::PeerForget {..}) {
-                            return control_peer::execute(&control_journal::root(),&request,deadline);
-                        }
-                        if matches!(request.command,control::Command::UpdatesCheck {}|control::Command::UpdatesInstall {..}|control::Command::UpdatesStatus {..}) {
-                            return control_updates::execute(&control_journal::root(),&request);
-                        }
-                        if matches!(request.command,control::Command::Forget {..}|control::Command::Relaunch {..}) {
-                            return control_relaunch::execute(&control_journal::root(),&request,deadline,|action|{
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);close_tx.clone().try_send(control_close::Query {request:request.clone(),action,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
-                            },|data,deadline|{let (responder,response)=std::sync::mpsc::sync_channel(1);adopt_tx.clone().try_send(control_service::Adoption {data,responder,deadline}).map_err(|_|())?;response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())?});
-                        }
-                        if matches!(request.command,control::Command::Shortcut {..}) {
-                            return control_shortcut::execute(&control_journal::root(),&request,deadline,|commit|{
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);
-                                shortcut_tx.clone().try_send(control_shortcut::Query {request:request.clone(),commit,responder,deadline}).map_err(|_|())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
-                            });
-                        }
-                        if let control::Command::Audit {after,limit,expect_revision}=&request.command {
-                            return control_journal::list(&control_journal::root(), &request.request_id,after.as_deref(),*limit,expect_revision.as_deref());
-                        }
-                        if let control::Command::InspectRequest { id } = &request.command {
-                            return control_journal::inspect(
-                                &control_journal::root(),
-                                &request.request_id,
-                                id,
-                            );
-                        }
-                        if matches!(
-                            request.command,
-                            control::Command::Files { .. } | control::Command::FilesEdit { .. }
-                        ) {
-                            return control_files::execute(
-                                &control_journal::root(),
-                                &request,
-                                deadline,
-                                || {
-                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                    files_tx
-                                        .clone()
-                                        .try_send(control_files::Query {
-                                            request: request.clone(),
-                                            responder,
-                                            deadline,
-                                        })
-                                        .map_err(|_| {
-                                            control::Reply::failure(
-                                                &request.request_id,
-                                                "busy",
-                                                "File inventory is busy.",
-                                            )
-                                        })?;
-                                    response
-                                        .recv_timeout(
-                                            deadline.saturating_duration_since(
-                                                std::time::Instant::now(),
-                                            ),
-                                        )
-                                        .map_err(|_| {
-                                            control::Reply::failure(
-                                                &request.request_id,
-                                                "timeout",
-                                                "File inventory timed out.",
-                                            )
-                                        })?
-                                },
-                            );
-                        }
-                        if matches!(request.command, control::Command::Attach { .. }) {
-                            return control_attach::execute(
-                                &control_journal::root(),
-                                &request,
-                                deadline,
-                                || {
-                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                    close_tx
-                                        .clone()
-                                        .try_send(control_close::Query {
-                                            request: request.clone(),
-                                            action: control_close::Action::Inspect,
-                                            responder,
-                                            deadline,
-                                        })
-                                        .map_err(|_| ())?;
-                                    response
-                                        .recv_timeout(
-                                            deadline.saturating_duration_since(
-                                                std::time::Instant::now(),
-                                            ),
-                                        )
-                                        .map_err(|_| ())
-                                },
-                            );
-                        }
-                        if matches!(request.command,control::Command::Viewport {..}|control::Command::Viewports {..}) {
-                            return control_viewport::execute(&control_journal::root(),&request,deadline,|| {
-                                let (responder,response)=std::sync::mpsc::sync_channel(1);
-                                close_tx.clone().try_send(control_close::Query {request:request.clone(),action:control_close::Action::Inspect,responder,deadline}).map_err(|_|())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_|())
-                            });
-                        }
-                        if matches!(request.command, control::Command::Input { .. }) {
-                            return control_input::execute(&control_journal::root(), &request, deadline, || {
-                                let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action: control_close::Action::Inspect, responder, deadline }).map_err(|_| ())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
-                            });
-                        }
-                        if matches!(request.command, control::Command::Close { .. }) {
-                            return control_close::execute(&control_journal::root(), &request, deadline, |action| {
-                                let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                close_tx.clone().try_send(control_close::Query { request: request.clone(), action, responder, deadline }).map_err(|_| ())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
-                            });
-                        }
-                        if matches!(request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. } | control::Command::CardAction { .. } | control::Command::Mode { .. } | control::Command::Geometry { .. } | control::Command::Move { .. } | control::Command::Resize { .. }) {
-                            return control_geometry::dispatch(&control_journal::root(), &request, deadline, |request| {
-                                let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                geometry_tx.clone().try_send(control_geometry::Query { request: request.clone(), responder, deadline }).map_err(|_| ())?;
-                                response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())
-                            });
-                        }
-                        let (responder, response) = std::sync::mpsc::sync_channel(1);
-                        if control_tx
-                            .clone()
-                            .try_send(control_service::Query {
-                                responder,
-                                deadline,
-                            })
-                            .is_err()
-                        {
-                            return control::Reply::failure(
-                                &request.request_id,
-                                "busy",
-                                "Local inventory is busy.",
-                            );
-                        }
-                        let wait = deadline.saturating_duration_since(std::time::Instant::now());
-                        match response.recv_timeout(wait) {
-                            Ok(snapshot)
-                                if matches!(request.command, control::Command::Launch { .. }) =>
-                            {
-                                control_launch::execute(
-                                    &control_journal::root(),
-                                    &request,
-                                    snapshot,
-                                    deadline,
-                                    |data, deadline| {
-                                        let (responder, response) =
-                                            std::sync::mpsc::sync_channel(1);
-                                        adopt_tx
-                                            .clone()
-                                            .try_send(control_service::Adoption {
-                                                data,
-                                                responder,
-                                                deadline,
-                                            })
-                                            .map_err(|_| ())?;
-                                        response
-                                            .recv_timeout(deadline.saturating_duration_since(
-                                                std::time::Instant::now(),
-                                            ))
-                                            .map_err(|_| ())?
-                                    },
-                                )
-                            }
-                            Ok(snapshot) if matches!(request.command, control::Command::Lifecycle { .. } | control::Command::Composer { .. } | control::Command::Runtime { .. } | control::Command::Capture { .. }) => {
-                                control_terminal::execute(&request, &snapshot.state, deadline, |card| {
-                                    let (responder, response) = std::sync::mpsc::sync_channel(1);
-                                    control_tx.clone().try_send(control_service::Query { responder, deadline }).map_err(|_| ())?;
-                                    let current = response.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).map_err(|_| ())?;
-                                    Ok(current.state.terminals.iter().any(|candidate|
-                                        candidate.id == card.id && candidate.session_name == card.session_name
-                                        && candidate.created_at == card.created_at))
-                                })
-                            }
-                            Ok(snapshot) => control_service::answer(request, snapshot),
-                            Err(_) => control::Reply::failure(
-                                &request.request_id,
-                                "timeout",
-                                "Local inventory timed out.",
-                            ),
-                        }
-                    });
+                    server.run(move |request, deadline| control_handler(&channels, request, deadline));
                 });
         }
         Err(error) => eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}"),
     }
-    let close_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = close_rx.next().await {
-            let result = if std::time::Instant::now() >= query.deadline {
-                Err(control::Reply::failure(&query.request.request_id, "timeout", "Close expired before card removal."))
-            } else if let Some(window) = live_window(&close_context) {
-                let model = Rc::clone(&close_context.borrow().local_workspace);
-                window.cli_close(&model, &query.request, query.action)
-            } else {
-                Err(control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready."))
-            };
-            let _ = query.responder.send(result);
-        }
+    serve_window(&context, close_rx, "Close expired before card removal.", "Local desktop is not ready.", Err, |window, model, query| {
+        window.cli_close(model, &query.request, query.action)
     });
-    let files_context=Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query)=files_rx.next().await {
-            let result=if std::time::Instant::now()>=query.deadline {Err(control::Reply::failure(&query.request.request_id,"timeout","File request expired."))}
-                else if let Some(window)=live_window(&files_context) {let model=Rc::clone(&files_context.borrow().local_workspace);window.cli_file_target(&model,&query.request)}
-                else {Err(control::Reply::failure(&query.request.request_id,"unavailable","Local desktop is not ready."))};
-            let _=query.responder.send(result);
-        }
+    serve_window(&context, files_rx, "File request expired.", "Local desktop is not ready.", Err, |window, model, query| {
+        window.cli_file_target(model, &query.request)
     });
-    let shortcut_context=Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query)=shortcut_rx.next().await {
-            let reply=if std::time::Instant::now()>=query.deadline {control::Reply::failure(&query.request.request_id,"timeout","Shortcut request expired.")}
-                else if let Some(window)=live_window(&shortcut_context){let model=Rc::clone(&shortcut_context.borrow().local_workspace);window.cli_shortcut(&model,&query.request,query.commit)}
-                else{control::Reply::failure(&query.request.request_id,"unavailable","Desktop is not ready.")};
-            let _=query.responder.send(reply);
-        }
+    serve_window(&context, shortcut_rx, "Shortcut request expired.", "Desktop is not ready.", std::convert::identity, |window, model, query| {
+        window.cli_shortcut(model, &query.request, query.commit)
     });
-    let geometry_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = geometry_rx.next().await {
-            let reply = if std::time::Instant::now() >= query.deadline {
-                control::Reply::failure(&query.request.request_id, "timeout", "Geometry request expired before application.")
-            } else if let Some(window) = live_window(&geometry_context) {
-                let model = Rc::clone(&geometry_context.borrow().local_workspace);
-                if matches!(query.request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
-                    window.cli_workspace(&model, &query.request)
-                } else { window.cli_geometry(&model, &query.request) }
-            } else {
-                control::Reply::failure(&query.request.request_id, "unavailable", "Local desktop is not ready.")
-            };
-            let _ = query.responder.send(reply);
+    serve_window(&context, geometry_rx, "Geometry request expired before application.", "Local desktop is not ready.", std::convert::identity, |window, model, query| {
+        if matches!(query.request.command, control::Command::Preferences { .. } | control::Command::PreferencesEdit { .. } | control::Command::Workspace { .. } | control::Command::WorkspaceEdit { .. }) {
+            window.cli_workspace(model, &query.request)
+        } else {
+            window.cli_geometry(model, &query.request)
         }
     });
     let adopt_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = adopt_rx.next().await {
-            let result = if std::time::Instant::now() >= query.deadline {
-                Err(())
-            } else {
-                live_window(&adopt_context)
-                    .ok_or(())
-                    .and_then(|window| window.adopt_cli_terminal(query.data))
-            };
-            let _ = query.responder.send(result);
-        }
+    serve(adopt_rx, move |query: control_service::Adoption| {
+        let result = if std::time::Instant::now() >= query.deadline {
+            Err(())
+        } else {
+            live_window(&adopt_context)
+                .ok_or(())
+                .and_then(|window| window.adopt_cli_terminal(query.data))
+        };
+        let _ = query.responder.send(result);
     });
-    let control_context = Rc::clone(&context);
-    glib::MainContext::default().spawn_local(async move {
-        while let Some(query) = control_rx.next().await {
-            if std::time::Instant::now() >= query.deadline {
-                continue;
-            }
-            let ctx = control_context.borrow();
-            let state = ctx.local_workspace.state().borrow().clone();
-            let _ = query.responder.send(control_service::Snapshot {
-                state,
-                visible: ctx.shown,
-                ready: ctx.window.is_some(),
-            });
+    let snapshot_context = Rc::clone(&context);
+    serve(snapshot_rx, move |query: control_service::Query| {
+        if std::time::Instant::now() >= query.deadline {
+            return;
         }
+        let ctx = snapshot_context.borrow();
+        let state = ctx.local_workspace.state().borrow().clone();
+        let _ = query.responder.send(control_service::Snapshot {
+            state,
+            visible: ctx.shown,
+            ready: ctx.window.is_some(),
+        });
     });
     // A start that finishes an update from Settings → Updates says how it went.
     let _ = thread::Builder::new()
@@ -998,7 +836,7 @@ fn run_daemon(start_visible: bool) {
     let _ = thread::Builder::new()
         .name("super-desktop-tmux-env".to_string())
         .spawn(|| {
-            preload::clean_tmux_global_env();
+            clean_tmux_global_env();
             tmux_clipboard::install_existing_sessions();
         });
 
@@ -1023,6 +861,9 @@ fn run_daemon(start_visible: bool) {
             warm_window(&ctx_warm, &app_warm);
         });
     }
+
+    #[cfg(target_os = "linux")]
+    follow_screensaver(&context, &app);
 
     // The channel's waker schedules this future on GTK as soon as a command
     // arrives. No polling timer, idle CPU use, or extra wake-pipe descriptors.
@@ -1068,6 +909,7 @@ fn ensure_omarchy_theme_hook() {
 /// Returns whether the overlay is on screen afterwards. `false` only happens
 /// when there is no display to draw on.
 fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
+    ctx.borrow_mut().restore_after_screensaver = false;
     // No display (a daemon started from a bare shell, a test runner, a session
     // without Wayland): building widgets would dereference NULL deep inside
     // GTK. That is the one SIGSEGV this program has produced — see the
@@ -1103,6 +945,216 @@ fn show_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     win.show_again();
     ctx.borrow_mut().shown = true;
     true
+}
+
+/// A tmux server started from a preloaded environment copies `LD_PRELOAD`
+/// into its global environment, and every new pane inherits it. Remove only
+/// the layer-shell entry there; blocking (runs tmux), so call it off the UI
+/// thread.
+fn clean_tmux_global_env() {
+    let tmux = crate::tmux::tmux_bin();
+    let Ok(output) = std::process::Command::new(&tmux)
+        .args(["show-environment", "-g", "LD_PRELOAD"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return; // No server, or the variable is not set.
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Some(value) = text.trim_end_matches('\n').strip_prefix("LD_PRELOAD=") else {
+        return; // `-LD_PRELOAD` (already removed) or unexpected output.
+    };
+    match preload::strip_layer_shell(value) {
+        None => {}
+        Some(None) => {
+            let _ = std::process::Command::new(&tmux)
+                .args(["set-environment", "-g", "-u", "LD_PRELOAD"])
+                .output();
+        }
+        Some(Some(rest)) => {
+            let _ = std::process::Command::new(&tmux)
+                .args(["set-environment", "-g", "LD_PRELOAD", &rest])
+                .output();
+        }
+    }
+}
+
+/// Channels from control workers to the GTK thread, which owns the workspace.
+struct ControlChannels {
+    snapshot: futures_channel::mpsc::Sender<control_service::Query>,
+    adopt: futures_channel::mpsc::Sender<control_service::Adoption>,
+    geometry: futures_channel::mpsc::Sender<control_geometry::Query>,
+    files: futures_channel::mpsc::Sender<control_files::Query>,
+    shortcut: futures_channel::mpsc::Sender<control_shortcut::Query>,
+    close: futures_channel::mpsc::Sender<control_close::Query>,
+}
+
+/// Why the GTK thread did not answer a control worker's query.
+enum Unanswered {
+    /// The queue was full; the query was not sent.
+    Busy,
+    /// No answer before the deadline; the query may still be applied.
+    Timeout,
+}
+
+/// Queues a query for the GTK thread and waits for its answer until `deadline`.
+fn ask<Q, A>(
+    queue: &futures_channel::mpsc::Sender<Q>,
+    deadline: std::time::Instant,
+    query: impl FnOnce(std::sync::mpsc::SyncSender<A>) -> Q,
+) -> Result<A, Unanswered> {
+    let (responder, response) = std::sync::mpsc::sync_channel(1);
+    queue
+        .clone()
+        .try_send(query(responder))
+        .map_err(|_| Unanswered::Busy)?;
+    response
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .map_err(|_| Unanswered::Timeout)
+}
+
+/// Answers one local control request on a control worker, never on the GTK
+/// thread: work that needs the window is queued through `channels`.
+fn control_handler(
+    channels: &ControlChannels,
+    request: control::Request,
+    deadline: std::time::Instant,
+) -> control::Reply {
+    use control::Command as C;
+    let root = control_journal::root;
+    let close = |action| {
+        ask(&channels.close, deadline, |responder| control_close::Query {
+            request: request.clone(),
+            action,
+            responder,
+            deadline,
+        })
+        .map_err(|_| ())
+    };
+    let inspect = || close(control_close::Action::Inspect);
+    let adopt = |data, deadline| {
+        ask(&channels.adopt, deadline, |responder| control_service::Adoption { data, responder, deadline })
+            .map_err(|_| ())?
+    };
+    match &request.command {
+        C::Capabilities {} => control::Reply::success(&request.request_id, control::capabilities()),
+        C::ConnectionRead { .. } | C::ConnectionInvite { .. } | C::ConnectionDecide { .. } | C::ConnectionRevoke { .. } => {
+            control_connection::execute(&root(), &request, deadline)
+        }
+        C::PeerAdd { .. } | C::PeerPairing { .. } => control_pairing::execute(&root(), &request),
+        C::PeerRead { .. } | C::PeerCommand { .. } | C::PeerForget { .. } => control_peer::execute(&root(), &request, deadline),
+        C::UpdatesCheck {} | C::UpdatesInstall { .. } | C::UpdatesStatus { .. } => control_updates::execute(&root(), &request),
+        C::Forget { .. } | C::Relaunch { .. } => control_relaunch::execute(&root(), &request, deadline, close, adopt),
+        C::Shortcut { .. } => control_shortcut::execute(&root(), &request, deadline, |commit| {
+            ask(&channels.shortcut, deadline, |responder| control_shortcut::Query { request: request.clone(), commit, responder, deadline })
+                .map_err(|_| ())
+        }),
+        C::Audit { after, limit, expect_revision } => control_journal::list(&root(), &request.request_id, after.as_deref(), *limit, expect_revision.as_deref()),
+        C::InspectRequest { id } => control_journal::inspect(&root(), &request.request_id, id),
+        C::Files { .. } | C::FilesEdit { .. } => control_files::execute(&root(), &request, deadline, || {
+            ask(&channels.files, deadline, |responder| control_files::Query { request: request.clone(), responder, deadline })
+                .map_err(|error| match error {
+                    Unanswered::Busy => control::Reply::failure(&request.request_id, "busy", "File inventory is busy."),
+                    Unanswered::Timeout => control::Reply::failure(&request.request_id, "timeout", "File inventory timed out."),
+                })?
+        }),
+        C::Attach { .. } => control_attach::execute(&root(), &request, deadline, inspect),
+        C::Viewport { .. } | C::Viewports { .. } => control_viewport::execute(&root(), &request, deadline, inspect),
+        C::Input { .. } => control_input::execute(&root(), &request, deadline, inspect),
+        C::Close { .. } => control_close::execute(&root(), &request, deadline, close),
+        C::Preferences { .. } | C::PreferencesEdit { .. } | C::Workspace { .. } | C::WorkspaceEdit { .. } | C::CardAction { .. } | C::Mode { .. } | C::Geometry { .. } | C::Move { .. } | C::Resize { .. } => {
+            control_geometry::dispatch(&root(), &request, deadline, |request| {
+                ask(&channels.geometry, deadline, |responder| control_geometry::Query { request: request.clone(), responder, deadline })
+                    .map_err(|_| ())
+            })
+        }
+        _ => {
+            let inventory = |deadline| ask(&channels.snapshot, deadline, |responder| control_service::Query { responder, deadline });
+            let snapshot = match inventory(deadline) {
+                Ok(snapshot) => snapshot,
+                Err(Unanswered::Busy) => return control::Reply::failure(&request.request_id, "busy", "Local inventory is busy."),
+                Err(Unanswered::Timeout) => return control::Reply::failure(&request.request_id, "timeout", "Local inventory timed out."),
+            };
+            match request.command {
+                C::Launch { .. } => control_launch::execute(&root(), &request, snapshot, deadline, adopt),
+                C::Lifecycle { .. } | C::Composer { .. } | C::Runtime { .. } | C::Capture { .. } => {
+                    control_terminal::execute(&request, &snapshot.state, deadline, |card| {
+                        let current = inventory(deadline).map_err(|_| ())?;
+                        Ok(current.state.terminals.iter().any(|candidate| {
+                            candidate.id == card.id
+                                && candidate.session_name == card.session_name
+                                && candidate.created_at == card.created_at
+                        }))
+                    })
+                }
+                _ => control_service::answer(request, snapshot),
+            }
+        }
+    }
+}
+
+/// Runs `handle` on the GTK thread for each query control workers queue.
+fn serve<Q: 'static>(
+    mut queries: futures_channel::mpsc::Receiver<Q>,
+    mut handle: impl FnMut(Q) + 'static,
+) {
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(query) = queries.next().await {
+            handle(query);
+        }
+    });
+}
+
+/// A control worker's query that the GTK thread answers with the window.
+trait WindowQuery: 'static {
+    type Answer: 'static;
+    fn parts(&self) -> (&control::Request, std::time::Instant, &std::sync::mpsc::SyncSender<Self::Answer>);
+}
+
+macro_rules! window_query {
+    ($($query:ty => $answer:ty;)*) => {$(
+        impl WindowQuery for $query {
+            type Answer = $answer;
+            fn parts(&self) -> (&control::Request, std::time::Instant, &std::sync::mpsc::SyncSender<$answer>) {
+                (&self.request, self.deadline, &self.responder)
+            }
+        }
+    )*};
+}
+
+window_query! {
+    control_close::Query => control_close::UiResult;
+    control_files::Query => Result<state::TerminalData, control::Reply>;
+    control_shortcut::Query => control::Reply;
+    control_geometry::Query => control::Reply;
+}
+
+/// Answers window queries on the GTK thread. An expired query, or one that
+/// arrives before the window exists, gets a failure reply wrapped by `failed`.
+fn serve_window<Q: WindowQuery>(
+    context: &Rc<RefCell<AppContext>>,
+    queries: futures_channel::mpsc::Receiver<Q>,
+    expired: &'static str,
+    unavailable: &'static str,
+    failed: fn(control::Reply) -> Q::Answer,
+    answer: impl Fn(&SuperDesktopWindow, &Rc<workspace_model::LocalWorkspace>, Q) -> Q::Answer + 'static,
+) {
+    let context = Rc::clone(context);
+    serve(queries, move |query: Q| {
+        let (request, deadline, responder) = query.parts();
+        let (id, responder) = (request.request_id.clone(), responder.clone());
+        let result = if std::time::Instant::now() >= deadline {
+            failed(control::Reply::failure(&id, "timeout", expired))
+        } else if let Some(window) = live_window(&context) {
+            let model = Rc::clone(&context.borrow().local_workspace);
+            answer(&window, &model, query)
+        } else {
+            failed(control::Reply::failure(&id, "unavailable", unavailable))
+        };
+        let _ = responder.send(result);
+    });
 }
 
 /// Snapshot the live window, if any, **without holding the `RefCell` borrow**.
@@ -1167,6 +1219,7 @@ fn hide_window(ctx: &Rc<RefCell<AppContext>>) {
 fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
     // A tap during the slide-in reverses immediately. Duplicate IPC events
     // from the keysym and physical-key bindings are handled by ToggleGate.
+    ctx.borrow_mut().restore_after_screensaver = false;
     if ctx.borrow().shown {
         hide_window(ctx);
         false
@@ -1174,6 +1227,54 @@ fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
         show_window(ctx, app);
         true
     }
+}
+
+/// Hide the overlay while Omarchy's screensaver is up (the overlay's layer
+/// would draw over it) and bring it back afterwards if it was on screen.
+#[cfg(target_os = "linux")]
+fn follow_screensaver(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
+    let (tx, mut rx) = futures_channel::mpsc::unbounded::<screensaver::Change>();
+    if let Err(error) = thread::Builder::new()
+        .name("super-desktop-screensaver".to_string())
+        .spawn(move || screensaver::watch(|change| {
+            let _ = tx.unbounded_send(change);
+        }))
+    {
+        eprintln!("SUPER DESKTOP: could not follow the screensaver: {error}");
+        return;
+    }
+    let ctx = Rc::clone(ctx);
+    let app = app.clone();
+    glib::MainContext::default().spawn_local(async move {
+        while let Some(change) = rx.next().await {
+            match change {
+                screensaver::Change::Started => {
+                    if ctx.borrow().shown {
+                        hide_window(&ctx);
+                        ctx.borrow_mut().restore_after_screensaver = true;
+                        // Hyprland gives the keyboard back to the window that
+                        // had it before the overlay: once as the hide starts
+                        // and again at the unmap. That focus can take
+                        // fullscreen away, so put it back after each one.
+                        let _ = thread::Builder::new()
+                            .name("super-desktop-screensaver-focus".to_string())
+                            .spawn(|| {
+                                thread::sleep(Duration::from_millis(100));
+                                screensaver::settle_screensaver();
+                                thread::sleep(crate::window::HIDE_FALLBACK + Duration::from_millis(100));
+                                screensaver::settle_screensaver();
+                            });
+                    }
+                }
+                screensaver::Change::Ended => {
+                    let restore = std::mem::take(&mut ctx.borrow_mut().restore_after_screensaver);
+                    if restore && !ctx.borrow().shown {
+                        show_window(&ctx, &app);
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Hyprland can fire both the keysym and physical-key binding on one release.
@@ -1340,6 +1441,14 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let presented = shown && live_window(ctx).is_some_and(|win| win.review_pairing_requests());
             json!({ "ok": true, "presented": presented }).to_string()
         }
+        // `super-desktop tour`: show the overlay with the welcome tour open.
+        "tour" => {
+            let shown = show_window(ctx, app);
+            if let Some(win) = live_window(ctx).filter(|_| shown) {
+                win.open_welcome_tour();
+            }
+            json!({ "ok": shown, "visible": shown }).to_string()
+        }
         // The pairing notification was clicked.
         "pairing-review" => {
             let presented =
@@ -1438,7 +1547,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let shared = ctx.borrow().local_workspace.state();
             let state = shared.borrow();
             json!({"workspace": state::effective_workspace_dir(&state),
-                "recentDirectories": state.recent_dirs,
+                "recentDirectories": state::shared_recent_dirs(&state),
                 "usedDirectories": state.used_dirs}).to_string()
         }
         "add-term-in" => {
@@ -1456,7 +1565,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             show_window(ctx, app);
             if let Some(win) = &ctx.borrow().window {
                 let id = win.create_new_terminal_in(agent, None, None, None, Some(&directory));
-                return json!({"ok":tmux::session_alive(&id),"id":id}).to_string();
+                return json!({"ok":tmux::session_exists(&id),"id":id}).to_string();
             }
             json!({"ok":false,"error":"desktop_unavailable"}).to_string()
         }
@@ -1465,7 +1574,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let agent = parts.get(1).unwrap_or(&"shell");
             if let Some(win) = &ctx.borrow().window {
                 let id = win.create_new_terminal(agent, None, None, None);
-                return json!({ "ok": tmux::session_alive(&id), "id": id }).to_string();
+                return json!({ "ok": tmux::session_exists(&id), "id": id }).to_string();
             }
             json!({ "ok": false, "error": "desktop_unavailable" }).to_string()
         }
@@ -1489,7 +1598,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let before = state.terminals.len();
             state.terminals.retain(|t| t.session_name != *sess);
             let removed = state.terminals.len() != before;
-            if tmux::session_alive(sess) {
+            if tmux::session_exists(sess) {
                 tmux::kill_session(sess);
             }
             if removed {

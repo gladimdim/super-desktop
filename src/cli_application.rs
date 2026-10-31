@@ -1,7 +1,7 @@
 //! Explicit owner-client lifecycle orchestration over the existing local IPC.
 //! No startup on reads; a connected mutation is never automatically resent.
 use crate::cli::{render_reply, Output};
-use crate::cli_extended::{json_requested, valid_id, Options};
+use crate::cli_extended::{respond, valid_id, Options};
 use crate::{control, control_journal};
 use serde_json::{json, Value};
 use std::io::{self, Write};
@@ -335,12 +335,7 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             options.json,
         ))
     };
-    Some(build().unwrap_or_else(|m| {
-        render_reply(
-            control::Reply::failure("", "invalid_arguments", m),
-            json_requested(args),
-        )
-    }))
+    respond(args, build)
 }
 
 #[cfg(test)]

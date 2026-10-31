@@ -325,18 +325,14 @@ mod tests {
 
     #[test]
     fn unauthenticated_connections_skip_the_device_lookup() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let _client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+        let (_client, server) = loopback_pair();
         let connection = Connection::plain(server);
         assert!(connection.still_authorized());
     }
 
     #[test]
     fn pushed_back_bytes_are_read_first() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        let (server, _) = listener.accept().unwrap();
+        let (mut client, server) = loopback_pair();
         let mut connection = Connection::plain(server);
         client.write_all(b"cd").unwrap();
         connection.unread(b"ab");

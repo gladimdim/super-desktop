@@ -1,0 +1,462 @@
+//! Plugins from elsewhere: `plugin install <git url | folder>`, `update`,
+//! `approve`, `remove`, and `fork` (make it your own copy to change). An installed plugin keeps a record of where it
+//! came from (`<state>/<id>.source.json`) and does not run until the user
+//! approves it. Plugins made on this PC (`plugin new`, ✨ Create Plugin, a
+//! folder an agent wrote) have no record and run as soon as they are valid.
+use super::{manifest, paths};
+use serde_json::{json, Value};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+/// The plugins folder and the state folder these commands work in.
+#[derive(Clone, Debug)]
+pub struct Places {
+    pub plugins: PathBuf,
+    pub state: PathBuf,
+}
+
+impl Places {
+    /// The user's (or `$SD_PLUGINS_DIR` / `$SD_PLUGINS_STATE_DIR`).
+    pub fn current() -> Self {
+        Self { plugins: paths::plugins_dir(), state: paths::state_dir() }
+    }
+
+    fn source_path(&self, id: &str) -> PathBuf {
+        self.state.join(format!("{id}.source.json"))
+    }
+}
+
+/// Where an installed plugin came from, or `None` for one made here.
+pub fn source(places: &Places, id: &str) -> Option<Value> {
+    fs::read_to_string(places.source_path(id)).ok().and_then(|text| serde_json::from_str(&text).ok())
+}
+
+/// Whether the plugin may run: made here, or installed and approved.
+pub fn approved(places: &Places, id: &str) -> bool {
+    source(places, id).is_none_or(|record| record["approved"] == true)
+}
+
+fn write_source(places: &Places, id: &str, record: &Value) -> Result<(), String> {
+    let path = places.source_path(id);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(record).unwrap_or_default()).map_err(|e| e.to_string())
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// Makes the overlay reload a plugin (it watches the plugin's files).
+fn nudge(dir: &Path) {
+    if let Ok(file) = fs::OpenOptions::new().append(true).open(dir.join(manifest::MANIFEST_FILE)) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
+/// Copies a plugin folder, without its `.git` (a copied plugin is not
+/// updated through git). A file that goes away while it is copied, such as
+/// git's own temporary files, is skipped.
+fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::NotFound;
+        let kind = match entry.file_type() {
+            Ok(kind) => kind,
+            Err(e) if gone(&e) => continue,
+            Err(e) => return Err(e),
+        };
+        let target = to.join(entry.file_name());
+        let copied = if kind.is_dir() {
+            copy_dir(&entry.path(), &target)
+        } else if kind.is_file() {
+            fs::copy(entry.path(), target).map(|_| ())
+        } else {
+            // Symbolic links are not copied: a plugin cannot point outside itself.
+            Ok(())
+        };
+        match copied {
+            Err(e) if gone(&e) => {}
+            other => other?,
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct Installed {
+    pub id: String,
+    pub dir: PathBuf,
+    pub manifest: manifest::Manifest,
+    pub commit: Option<String>,
+}
+
+/// Installs from a git URL or a local folder, not approved.
+pub fn install(places: &Places, source: &str) -> Result<Installed, String> {
+    install_as(places, source, None)
+}
+
+/// Like `install`; with `expected`, refuses a plugin.json with another id
+/// (an entry of the plugin list must install what it says).
+pub fn install_as(places: &Places, source: &str, expected: Option<&str>) -> Result<Installed, String> {
+    let root = &places.plugins;
+    fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    // A hidden folder: the overlay ignores it while it is being filled.
+    let staging = root.join(format!(".install-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    let local = Path::new(source);
+    let result = (|| {
+        let commit = if local.is_dir() {
+            copy_dir(local, &staging).map_err(|e| format!("cannot copy {source}: {e}"))?;
+            None
+        } else {
+            let out = Command::new("git")
+                .args(["clone", "--depth", "1", "--quiet", "--", source])
+                .arg(&staging)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .output()
+                .map_err(|e| format!("cannot run git: {e}"))?;
+            if !out.status.success() {
+                return Err(format!("git clone failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            }
+            git(&staging, &["rev-parse", "HEAD"]).ok()
+        };
+        // The id comes from the manifest; the folder takes its name.
+        let text = fs::read_to_string(staging.join(manifest::MANIFEST_FILE))
+            .map_err(|_| format!("{source} has no {} at its top level", manifest::MANIFEST_FILE))?;
+        let value: Value = serde_json::from_str(&text).map_err(|e| format!("plugin.json is not valid JSON: {e}"))?;
+        let id = value["id"].as_str().unwrap_or("").to_owned();
+        if !manifest::valid_plugin_id(&id) {
+            return Err(format!("plugin.json has an invalid id {id:?}"));
+        }
+        if let Some(expected) = expected.filter(|e| *e != id) {
+            return Err(format!("{source} holds plugin {id:?}, not {expected:?} as the plugin list says; nothing was installed"));
+        }
+        let dir = root.join(&id);
+        if dir.exists() {
+            return Err(format!("a plugin {id:?} is already installed ({}); use `super-desktop plugin update {id}` or remove it first", dir.display()));
+        }
+        // Recorded before the folder appears, so the overlay never runs it unapproved.
+        write_source(places, &id, &json!({
+            "source": source, "commit": commit, "installedAt": now(), "approved": false,
+        }))?;
+        fs::rename(&staging, &dir).map_err(|e| e.to_string())?;
+        let manifest = manifest::load(&dir).map_err(|problems| {
+            format!("installed, but plugin.json has problems: {}", problems.iter().map(|p| p.message.clone()).collect::<Vec<_>>().join("; "))
+        })?;
+        Ok(Installed { id, dir, manifest, commit })
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+pub fn approve(places: &Places, id: &str) -> Result<(), String> {
+    let mut record = source(places, id).ok_or_else(|| format!("{id:?} was made on this PC; it needs no approval"))?;
+    record["approved"] = json!(true);
+    record["approvedAt"] = json!(now());
+    write_source(places, id, &record)?;
+    nudge(&places.plugins.join(id));
+    Ok(())
+}
+
+/// What `make_own` did.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Owned {
+    /// It was someone else's until now (false: made here or owned already).
+    pub forked_now: bool,
+    /// Where it came from, for a plugin that was installed.
+    pub upstream: Option<String>,
+}
+
+/// Agent settings a plugin's author may have shipped. They can run commands
+/// (hooks, MCP servers) as soon as an agent opens in the folder, so a fork
+/// drops them; SUPER DESKTOP's own skill is written again afterwards.
+const AGENT_SETTINGS: &[&str] = &[".claude", ".mcp.json", ".codex", ".cursor", ".gemini", ".vscode"];
+
+/// Makes an installed, approved plugin the user's own copy, to change with
+/// an agent: same id (its saved values stay), no more updates from its
+/// author (`git pull upstream` still gets them: `origin` becomes
+/// `upstream`), the author's agent settings removed. A plugin made here,
+/// or one already owned, is left as it is.
+pub fn make_own(places: &Places, id: &str) -> Result<Owned, String> {
+    let dir = places.plugins.join(id);
+    if !manifest::valid_plugin_id(id) || !dir.join(manifest::MANIFEST_FILE).is_file() {
+        return Err(format!("no plugin {id:?} in {}", places.plugins.display()));
+    }
+    let Some(mut record) = source(places, id) else {
+        return Ok(Owned { forked_now: false, upstream: None });
+    };
+    let upstream = record["source"].as_str().map(str::to_owned);
+    if record["forked"] == true {
+        return Ok(Owned { forked_now: false, upstream });
+    }
+    if record["approved"] != true {
+        return Err(format!("approve {id:?} first: its code runs as you, and an agent changing it runs it to test"));
+    }
+    if dir.join(".git").exists() && git(&dir, &["remote", "get-url", "origin"]).is_ok() {
+        git(&dir, &["remote", "rename", "origin", "upstream"])?;
+    }
+    for name in AGENT_SETTINGS {
+        let path = dir.join(name);
+        let removed = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+        match removed {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("cannot remove {}: {e}", path.display())),
+            _ => {}
+        }
+    }
+    record["forked"] = json!(true);
+    record["forkedAt"] = json!(now());
+    write_source(places, id, &record)?;
+    nudge(&dir);
+    Ok(Owned { forked_now: true, upstream })
+}
+
+/// "Edit & Enhance" once the user has agreed: installs `id` from
+/// `install_from` when it is not here, approves it, makes it the user's own
+/// copy and puts the plugin skill in it for the agent.
+pub fn fork(places: &Places, id: &str, install_from: Option<&str>) -> Result<Owned, String> {
+    let dir = places.plugins.join(id);
+    if !dir.exists() {
+        let from = install_from.ok_or_else(|| format!("no plugin {id:?} here, and no place to install it from"))?;
+        install_as(places, from, Some(id))?;
+    }
+    if !approved(places, id) {
+        approve(places, id)?;
+    }
+    let owned = make_own(places, id)?;
+    let name = manifest::load(&dir).map(|m| m.name).unwrap_or_else(|_| id.to_owned());
+    super::skill::prepare_for_agents(&dir, id, &name).map_err(|e| format!("cannot add the plugin skill: {e}"))?;
+    Ok(owned)
+}
+
+#[derive(Debug)]
+pub struct Updated {
+    pub from: String,
+    pub to: String,
+    pub changes: String,
+}
+
+/// Fast-forwards an installed plugin from its git source.
+pub fn update(places: &Places, id: &str) -> Result<Updated, String> {
+    let mut record = source(places, id).ok_or_else(|| format!("{id:?} was not installed from a source; edit it in place"))?;
+    let dir = places.plugins.join(id);
+    if record["forked"] == true {
+        return Err(format!("{id:?} is your own copy now; to bring in its author's changes: git -C {} pull upstream HEAD", dir.display()));
+    }
+    if !dir.join(".git").exists() {
+        return Err(format!("{id:?} was installed from a folder, not git; install it again to update"));
+    }
+    let from = git(&dir, &["rev-parse", "HEAD"])?;
+    git(&dir, &["fetch", "--depth", "50", "--quiet", "origin"])?;
+    git(&dir, &["merge", "--ff-only", "--quiet", "FETCH_HEAD"])
+        .map_err(|e| format!("cannot fast-forward (local changes or a rewritten history?): {e}"))?;
+    let to = git(&dir, &["rev-parse", "HEAD"])?;
+    let changes = if from == to { String::new() } else { git(&dir, &["diff", "--stat", &from, &to]).unwrap_or_default() };
+    record["commit"] = json!(to);
+    record["updatedAt"] = json!(now());
+    write_source(places, id, &record)?;
+    nudge(&dir);
+    Ok(Updated { from, to, changes })
+}
+
+/// Moves a plugin's folder to the desktop trash (recoverable) and forgets
+/// its state.
+pub fn remove(places: &Places, id: &str, trash: &Path) -> Result<PathBuf, String> {
+    if !manifest::valid_plugin_id(id) {
+        return Err(format!("invalid plugin id {id:?}"));
+    }
+    let dir = places.plugins.join(id);
+    if !dir.is_dir() {
+        return Err(format!("no plugin {id:?} in {}", places.plugins.display()));
+    }
+    fs::create_dir_all(trash.join("files")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(trash.join("info")).map_err(|e| e.to_string())?;
+    let name = (0..)
+        .map(|n| if n == 0 { format!("sd-plugin-{id}") } else { format!("sd-plugin-{id}.{n}") })
+        .find(|name| !trash.join("files").join(name).exists())
+        .unwrap_or_default();
+    let info = format!(
+        "[Trash Info]\nPath={}\nDeletionDate={}\n",
+        dir.display(),
+        chrono_like_now()
+    );
+    fs::write(trash.join("info").join(format!("{name}.trashinfo")), info).map_err(|e| e.to_string())?;
+    let target = trash.join("files").join(&name);
+    if fs::rename(&dir, &target).is_err() {
+        // Another file system: copy, then delete.
+        copy_dir(&dir, &target).map_err(|e| e.to_string())?;
+        fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+    }
+    for suffix in ["source.json", "data.json", "cards.json", "status.json"] {
+        let _ = fs::remove_file(places.state.join(format!("{id}.{suffix}")));
+    }
+    Ok(target)
+}
+
+/// The user's desktop trash (freedesktop.org).
+pub fn user_trash() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"))
+        .join("Trash")
+}
+
+/// `YYYY-MM-DDThh:mm:ss` in UTC, for the trash's info file.
+fn chrono_like_now() -> String {
+    let secs = now() as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn places(name: &str) -> (PathBuf, Places) {
+        let root = std::env::temp_dir().join(format!("sd-plugins-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let places = Places { plugins: root.join("plugins"), state: root.join("state") };
+        (root, places)
+    }
+
+    #[test]
+    fn plugins_install_waits_for_approval_and_updates_from_git() {
+        if Command::new("git").arg("--version").output().is_err() {
+            eprintln!("skipped: git is not installed");
+            return;
+        }
+        let (root, places) = places("install");
+        let upstream = root.join("upstream");
+        fs::create_dir_all(&upstream).unwrap();
+        let write_plugin = |color: &str| {
+            fs::write(upstream.join("plugin.json"), json!({"id": "shared", "api": 1, "surfaces": [
+                {"id": "main", "slot": "dock.left", "qml": "Dock.qml"}]}).to_string()).unwrap();
+            fs::write(upstream.join("Dock.qml"), format!("import QtQuick\nRectangle {{ color: \"{color}\" }}\n")).unwrap();
+        };
+        let git_in = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(&upstream)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).output().unwrap();
+            assert!(out.status.success(), "{args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        write_plugin("red");
+        git_in(&["init", "-q"]);
+        git_in(&["add", "."]);
+        git_in(&["commit", "-qm", "first"]);
+
+        // A local folder is copied.
+        let copied = install(&places, upstream.to_str().unwrap()).unwrap();
+        assert!(copied.commit.is_none());
+        assert!(copied.dir.join("Dock.qml").is_file());
+        assert!(!copied.dir.join(".git").exists(), "a copy leaves the source's git history behind");
+        assert!(!approved(&places, "shared"), "installed plugins wait for approval");
+        assert!(install(&places, upstream.to_str().unwrap()).is_err(), "a second install refuses to overwrite");
+        let other = install_as(&places, upstream.to_str().unwrap(), Some("other")).unwrap_err();
+        assert!(other.contains("not \"other\""), "{other}");
+        let trash = root.join("trash");
+        let trashed = remove(&places, "shared", &trash).unwrap();
+        assert!(trashed.join("Dock.qml").is_file());
+        assert!(trash.join("info/sd-plugin-shared.trashinfo").is_file());
+        assert!(source(&places, "shared").is_none(), "removing forgets the record");
+
+        // A git URL is cloned, approved, then updated by fast-forward.
+        let url = format!("file://{}", upstream.display());
+        let installed = install(&places, &url).unwrap();
+        assert_eq!(installed.id, "shared");
+        assert!(installed.commit.is_some());
+        assert!(!approved(&places, "shared"));
+        assert!(make_own(&places, "shared").unwrap_err().contains("approve"), "only an approved plugin is made one's own");
+        approve(&places, "shared").unwrap();
+        assert!(approved(&places, "shared"));
+        write_plugin("blue");
+        git_in(&["commit", "-qam", "second"]);
+        let updated = update(&places, "shared").unwrap();
+        assert_ne!(updated.from, updated.to);
+        assert!(updated.changes.contains("Dock.qml"));
+        assert!(fs::read_to_string(places.plugins.join("shared/Dock.qml")).unwrap().contains("blue"));
+        assert!(approved(&places, "shared"), "an update keeps the approval");
+
+        // Made yours: same folder and id, its author's version is `upstream`,
+        // the author's agent settings gone, no more updates.
+        let dir = places.plugins.join("shared");
+        fs::create_dir_all(dir.join(".claude/hooks")).unwrap();
+        fs::write(dir.join(".claude/settings.json"), "{\"hooks\": {}}").unwrap();
+        fs::write(dir.join(".mcp.json"), "{}").unwrap();
+        let owned = make_own(&places, "shared").unwrap();
+        assert_eq!(owned, Owned { forked_now: true, upstream: Some(url.clone()) });
+        assert!(!dir.join(".claude").exists() && !dir.join(".mcp.json").exists());
+        assert!(dir.join("Dock.qml").is_file());
+        assert_eq!(git(&dir, &["remote"]).unwrap(), "upstream");
+        assert!(approved(&places, "shared"));
+        assert!(update(&places, "shared").unwrap_err().contains("your own copy"));
+        assert_eq!(make_own(&places, "shared").unwrap(), Owned { forked_now: false, upstream: Some(url.clone()) });
+        assert!(make_own(&places, "nope").is_err());
+
+        // fork: install, approve and own in one step; the skill for the agent.
+        let fresh = Places { plugins: root.join("plugins2"), state: root.join("state2") };
+        assert!(fork(&fresh, "shared", None).unwrap_err().contains("no place to install"));
+        assert!(fork(&fresh, "other", Some(&url)).is_err(), "the source must hold that id");
+        let owned = fork(&fresh, "shared", Some(&url)).unwrap();
+        assert!(owned.forked_now);
+        assert!(approved(&fresh, "shared") && source(&fresh, "shared").unwrap()["forked"] == true);
+        assert!(fresh.plugins.join("shared/.claude/skills/super-desktop-plugin/SKILL.md").is_file());
+        assert!(fresh.plugins.join("shared/AGENTS.md").is_file());
+
+        // Made here: no record, runs without approval.
+        assert!(approved(&places, "made-here"));
+        assert!(approve(&places, "made-here").is_err());
+        assert!(update(&places, "made-here").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_install_refuses_folders_without_a_manifest() {
+        let (root, places) = places("install-bad");
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let error = install(&places, empty.to_str().unwrap()).unwrap_err();
+        assert!(error.contains("plugin.json"));
+        assert!(manifest::discover(&places.plugins).is_empty(), "nothing is left behind");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_trash_dates_are_iso() {
+        let date = chrono_like_now();
+        assert_eq!(date.len(), 19);
+        assert_eq!(&date[4..5], "-");
+        assert_eq!(&date[10..11], "T");
+    }
+}

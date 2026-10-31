@@ -6,10 +6,10 @@ use std::collections::HashSet;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-struct Frame {
+pub(crate) struct Frame {
     pixels: Vec<u8>,
-    width: i32,
-    height: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
     stride: usize,
     alpha: bool,
     delay: Duration,
@@ -22,7 +22,9 @@ enum Preview {
     Audio(Vec<u8>),
 }
 
-fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
+/// An image's frames (one, or an animated GIF's), at most 1600 pixels on a
+/// side. Runs off GTK's thread; SD Editor's previews use it too.
+pub(crate) fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
     let count = if bytes.starts_with(b"GIF") {
         crate::assets::gif_frames(bytes)?
     } else {
@@ -212,39 +214,13 @@ fn show_links(content: &gtk4::Box, urls: &[String], collapsed: &Collapsed, statu
 const DEFAULT_SIZE: (i32, i32) = (760, 600);
 const MIN_SIZE: (i32, i32) = (460, 400);
 
-/// Where Files panels open: the desktop's overlay, how tall its top bar is,
-/// and the dialog they must stay under.
-struct Host {
-    overlay: glib::WeakRef<gtk4::Overlay>,
-    top: Rc<dyn Fn() -> i32>,
-    ceiling: glib::WeakRef<gtk4::Widget>,
-}
-
-/// An open Files panel. It belongs to no card: it stays until its own ✕.
-struct Open {
-    session: String,
-    panel: Rc<crate::floating_panel::MovablePanel>,
-    generation: Rc<Cell<u64>>,
-}
-
 thread_local! {
-    static HOST: RefCell<Option<Host>> = const { RefCell::new(None) };
-    static OPEN: RefCell<Vec<Open>> = const { RefCell::new(Vec::new()) };
-    /// Where and how big the user last left a Files panel.
-    static LAST: Cell<(Option<(i32, i32)>, Option<(i32, i32)>)> = const { Cell::new((None, None)) };
+    static PANELS: crate::floating_panel::CardPanels = crate::floating_panel::CardPanels::new(DEFAULT_SIZE, MIN_SIZE);
 }
 
-/// Open Files panels in `overlay`, below its bar (`top` tall) and under
-/// `ceiling`, a dialog that stays above them.
-pub fn set_host(overlay: &gtk4::Overlay, top: Rc<dyn Fn() -> i32>, ceiling: &impl IsA<gtk4::Widget>) {
-    HOST.with(|host| {
-        host.replace(Some(Host {
-            overlay: overlay.downgrade(),
-            top,
-            ceiling: ceiling.upcast_ref::<gtk4::Widget>().downgrade(),
-        }))
-    });
-}
+/// Open Files panels, and a card's other panels, in an overlay below its bar
+/// and under a dialog that stays above them.
+pub use crate::floating_panel::set_host;
 
 /// Unsaved Markdown edits in a panel, and whether the user was warned once
 /// that leaving would lose them.
@@ -284,78 +260,30 @@ pub fn button(session: String, title: String) -> gtk4::Button {
 /// Show the Files panel of `session`, bringing it to the front when it is
 /// already open.
 fn open(session: &str, title: &str, collapsed: &Collapsed) {
-    let Some((overlay, top, ceiling)) = HOST.with(|host| {
-        let host = host.borrow();
-        let host = host.as_ref()?;
-        Some((host.overlay.upgrade()?, Rc::clone(&host.top), host.ceiling.upgrade()))
-    }) else {
+    if !PANELS.with(|panels| panels.wants_new(session)) {
         return;
-    };
-    let existing = OPEN.with(|open| {
-        open.borrow().iter().find(|o| o.session == session).map(|o| Rc::clone(&o.panel))
-    });
-    if let Some(panel) = existing {
-        if panel.is_in(&overlay) {
-            panel.raise(ceiling.as_ref());
-            return;
-        }
-        // Left in an overlay that is gone.
-        close(session);
     }
     let drawer = build_drawer(session, title, collapsed);
-    let (mut saved_pos, saved_size) = LAST.get();
-    // Another open panel would hide this one exactly.
-    let others = OPEN.with(|open| open.borrow().len()) as i32;
-    saved_pos = saved_pos.map(|(x, y)| (x + 32 * others, y + 32 * others));
-    let panel = crate::floating_panel::MovablePanel::install(
-        &overlay,
-        &drawer.widget,
-        crate::floating_panel::PanelLayout { default_size: DEFAULT_SIZE, min_size: MIN_SIZE, saved_pos, saved_size },
-        top,
-        Rc::new(|position, size| LAST.set((Some(position), Some(size)))),
-    );
-    panel.raise(ceiling.as_ref());
-    // A press anywhere in a panel brings it above the other panels.
-    let press = gtk4::GestureClick::new();
-    press.set_button(0);
-    press.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    let weak = Rc::downgrade(&panel);
-    let ceiling = ceiling.map(|c| c.downgrade());
-    press.connect_pressed(move |_, _, _, _| {
-        if let Some(panel) = weak.upgrade() {
-            panel.raise(ceiling.as_ref().and_then(|c| c.upgrade()).as_ref());
-        }
-    });
-    drawer.widget.add_controller(press);
     let target = session.to_string();
-    let edits = drawer.edits.clone();
-    let status = drawer.status.clone();
-    drawer.close.connect_clicked(move |_| {
-        if edits.may_leave(&status) {
-            close(&target);
-        }
-    });
-    OPEN.with(|open| {
-        open.borrow_mut().push(Open {
-            session: session.to_string(),
-            panel,
-            generation: Rc::clone(&drawer.generation),
-        })
-    });
+    connect_leaving(&drawer.close, &drawer.edits, &drawer.status, move || close(&target));
+    PANELS.with(|panels| panels.show(session, &drawer.widget, Rc::clone(&drawer.generation), None));
     (drawer.reload)(None);
 }
 
 /// Close the Files panel of `session`; results still loading are dropped.
 fn close(session: &str) {
-    let closed = OPEN.with(|open| {
-        let mut open = open.borrow_mut();
-        let index = open.iter().position(|o| o.session == session)?;
-        Some(open.remove(index))
+    PANELS.with(|panels| panels.close(session));
+}
+
+/// `button` runs `action` unless unsaved Markdown edits hold it back (see
+/// `Edits::may_leave`).
+fn connect_leaving(button: &gtk4::Button, edits: &Edits, status: &gtk4::Label, action: impl Fn() + 'static) {
+    let (edits, status) = (edits.clone(), status.clone());
+    button.connect_clicked(move |_| {
+        if edits.may_leave(&status) {
+            action()
+        }
     });
-    if let Some(closed) = closed {
-        closed.generation.set(closed.generation.get() + 1);
-        closed.panel.remove();
-    }
 }
 
 struct Drawer {
@@ -368,330 +296,361 @@ struct Drawer {
     reload: Rc<dyn Fn(Option<String>)>,
 }
 
-fn clear(container: &gtk4::Box) {
+/// Remove every child of `container`.
+pub(crate) fn clear(container: &gtk4::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
 }
 
-fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawer {
-    let outer = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    outer.add_css_class("mini-terminal");
-    outer.add_css_class("harness-panel");
-    outer.add_css_class("asset-drawer");
-    outer.set_size_request(MIN_SIZE.0, MIN_SIZE.1);
-    // The header is where the panel is dragged from, like a terminal card's.
-    let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-    header.add_css_class("term-header");
-    let badge = gtk4::Label::new(Some("📁"));
-    badge.add_css_class("launcher-head-badge");
-    badge.set_valign(gtk4::Align::Center);
-    header.append(&badge);
-    let titles = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-    titles.set_hexpand(true);
-    titles.set_valign(gtk4::Align::Center);
-    let title = gtk4::Label::new(Some("Files & links"));
-    title.add_css_class("term-title");
-    title.set_halign(gtk4::Align::Start);
-    let subtitle = gtk4::Label::new(Some(card_title));
-    subtitle.add_css_class("launcher-subtitle");
-    subtitle.set_halign(gtk4::Align::Start);
-    subtitle.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-    titles.append(&title);
-    titles.append(&subtitle);
-    header.append(&titles);
-    let close = gtk4::Button::with_label("✕");
-    close.set_tooltip_text(Some("Close Files & links"));
-    close.add_css_class("term-btn");
-    close.set_valign(gtk4::Align::Center);
-    header.append(&close);
-    outer.append(&header);
-
+/// A card panel's body below its header: a column with a 12px margin at the
+/// top and sides. Panels with no footer add the bottom margin.
+pub(crate) fn panel_body(outer: &gtk4::Box) -> gtk4::Box {
     let body = gtk4::Box::new(gtk4::Orientation::Vertical, 8);
     body.set_vexpand(true);
     body.set_margin_top(12);
-    body.set_margin_bottom(12);
     body.set_margin_start(12);
     body.set_margin_end(12);
     outer.append(&body);
+    body
+}
+
+/// Whether `key` with `modifiers` is Ctrl and `letter`, in either case.
+pub(crate) fn is_ctrl_letter(key: gdk::Key, modifiers: gdk::ModifierType, letter: gdk::Key) -> bool {
+    modifiers.contains(gdk::ModifierType::CONTROL_MASK) && (key == letter || key == letter.to_upper())
+}
+
+/// Where a Files panel shows what was chosen: the content area, the
+/// Markdown bar above it, the status line, the counter whose ticket a late
+/// result must still hold, and the unsaved edits.
+#[derive(Clone)]
+struct View {
+    content: gtk4::Box,
+    bar: gtk4::Box,
+    status: gtk4::Label,
+    generation: Rc<Cell<u64>>,
+    edits: Edits,
+}
+
+impl View {
+    /// Start a new preview or listing; results of older ones are dropped.
+    fn next_ticket(&self) -> u64 {
+        self.generation.set(self.generation.get() + 1);
+        self.generation.get()
+    }
+
+    /// Show a loaded preview of `asset`; `ticket` is its place in `generation`.
+    fn show(&self, session: &str, asset: crate::assets::Asset, page: u32, preview: Preview, ticket: u64) {
+        clear(&self.content);
+        clear(&self.bar);
+        self.bar.set_visible(false);
+        self.status.set_text(&format!(
+            "{}{}",
+            asset.name,
+            if asset.kind == "pdf" {
+                format!(" · page {page}")
+            } else {
+                String::new()
+            }
+        ));
+        match preview {
+            Preview::Text(text) => self.content.append(&text_view(&text)),
+            Preview::Audio(bytes) => self.content.append(&audio_preview(bytes)),
+            Preview::Markdown(text) => {
+                let preview =
+                    MarkdownPreview { content: &self.content, bar: &self.bar, status: &self.status, edits: &self.edits };
+                preview.show(session, asset, text, (Rc::clone(&self.generation), ticket));
+            }
+            Preview::Images(frames) => image_preview(&self.content, frames, Rc::clone(&self.generation), ticket),
+        }
+    }
+}
+
+/// Read and decode one file for its preview. Runs off GTK's thread.
+fn load_preview(session: &str, id: &str, page: u32) -> Result<Preview, String> {
+    let _permit = crate::assets::Transfer::acquire().ok_or("Preview busy")?;
+    let (meta, bytes) = crate::assets::read_desktop(session, id)?;
+    if meta.kind == "text" || meta.kind == "markdown" {
+        let text = String::from_utf8(bytes).map_err(|_| "Invalid UTF-8")?;
+        Ok(if meta.kind == "markdown" {
+            Preview::Markdown(text)
+        } else {
+            Preview::Text(preview_text(&text))
+        })
+    } else if meta.kind == "audio" {
+        Ok(Preview::Audio(bytes))
+    } else {
+        let bytes = if meta.kind == "pdf" {
+            crate::asset_pdf::page(bytes, page)?
+        } else {
+            bytes
+        };
+        frames(&bytes).map(Preview::Images)
+    }
+}
+
+/// An image with a zoom slider; an animated one plays while its preview
+/// (`ticket` in `generation`) is still the panel's.
+pub(crate) fn image_preview(content: &gtk4::Box, frames: Vec<Frame>, generation: Rc<Cell<u64>>, ticket: u64) {
+    let picture = gtk4::Picture::new();
+    picture.set_can_shrink(true);
+    let textures: Vec<_> = frames
+        .into_iter()
+        .map(|f| {
+            let texture = gdk::MemoryTexture::new(
+                f.width,
+                f.height,
+                if f.alpha {
+                    gdk::MemoryFormat::R8g8b8a8
+                } else {
+                    gdk::MemoryFormat::R8g8b8
+                },
+                &glib::Bytes::from_owned(f.pixels),
+                f.stride,
+            );
+            (texture, f.delay)
+        })
+        .collect();
+    if let Some((texture, _)) = textures.first() {
+        picture.set_paintable(Some(texture));
+    }
+    picture.set_size_request(400, 300);
+    picture.set_vexpand(true);
+    content.append(&picture);
+    let zoom = gtk4::Scale::with_range(gtk4::Orientation::Horizontal, 1.0, 4.0, 0.25);
+    zoom.set_value(1.0);
+    let weak_picture = picture.downgrade();
+    zoom.connect_value_changed(move |scale| {
+        if let Some(picture) = weak_picture.upgrade() {
+            picture.set_size_request((400.0 * scale.value()) as i32, (300.0 * scale.value()) as i32);
+        }
+    });
+    content.append(&zoom);
+    if textures.len() > 1 {
+        let weak_picture = picture.downgrade();
+        let mut index = 0usize;
+        let mut next = std::time::Instant::now() + textures[0].1;
+        glib::timeout_add_local(Duration::from_millis(30), move || {
+            if generation.get() != ticket {
+                return glib::ControlFlow::Break;
+            }
+            let Some(picture) = weak_picture.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if std::time::Instant::now() >= next {
+                index = (index + 1) % textures.len();
+                picture.set_paintable(Some(&textures[index].0));
+                next = std::time::Instant::now() + textures[index].1;
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+}
+
+/// Previews `asset` (a PDF at `page`), loading it off GTK's thread.
+fn renderer(session: &str, view: &View) -> Rc<dyn Fn(crate::assets::Asset, u32)> {
+    let session = session.to_string();
+    let view = view.clone();
+    Rc::new(move |asset, page| {
+        let ticket = view.next_ticket();
+        clear(&view.content);
+        view.status.set_text("Loading preview…");
+        let view = view.clone();
+        let session = session.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let (reader, id) = (session.clone(), asset.id.clone());
+            let result = gio::spawn_blocking(move || load_preview(&reader, &id, page)).await;
+            if view.generation.get() != ticket {
+                return;
+            }
+            match result {
+                Ok(Ok(preview)) => view.show(&session, asset, page, preview, ticket),
+                Ok(Err(error)) => view.status.set_text(&error.replace('_', " ")),
+                Err(_) => view.status.set_text("Preview worker failed"),
+            }
+        });
+    })
+}
+
+/// Choosing a file to preview: the preview itself, the file shown, its PDF
+/// page, the page buttons, and Back to the list with the path it was made with.
+#[derive(Clone)]
+struct Chooser {
+    render: Rc<dyn Fn(crate::assets::Asset, u32)>,
+    selected: Rc<RefCell<Option<crate::assets::Asset>>>,
+    page: Rc<Cell<u32>>,
+    pages: gtk4::Box,
+    back: gtk4::Button,
+    listed: Rc<RefCell<Option<String>>>,
+}
+
+impl Chooser {
+    fn new(render: Rc<dyn Fn(crate::assets::Asset, u32)>) -> Self {
+        let selected = Rc::new(RefCell::new(None::<crate::assets::Asset>));
+        let page = Rc::new(Cell::new(1u32));
+        let pages = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+        for (label, delta) in [("Previous page", -1i32), ("Next page", 1)] {
+            let button = gtk4::Button::with_label(label);
+            let selected = Rc::clone(&selected);
+            let page = Rc::clone(&page);
+            let render = Rc::clone(&render);
+            button.connect_clicked(move |_| {
+                if let Some(asset) = selected.borrow().as_ref().filter(|a| a.kind == "pdf") {
+                    page.set((page.get() as i32 + delta).clamp(1, 10000) as u32);
+                    render(asset.clone(), page.get());
+                }
+            });
+            pages.append(&button);
+        }
+        pages.set_visible(false);
+        let back = gtk4::Button::with_label("‹ Back");
+        back.set_tooltip_text(Some("Back to the list of files and links"));
+        back.set_visible(false);
+        Chooser { render, selected, page, pages, back, listed: Rc::new(RefCell::new(None)) }
+    }
+
+    /// Preview `item` from its first page.
+    fn choose(&self, item: &crate::assets::Asset) {
+        self.page.set(1);
+        self.back.set_visible(true);
+        self.pages.set_visible(item.kind == "pdf");
+        *self.selected.borrow_mut() = Some(item.clone());
+        (self.render)(item.clone(), 1);
+    }
+}
+
+/// The referenced files, grouped by kind, each a button that previews it.
+fn list_files(content: &gtk4::Box, items: &[crate::assets::Asset], collapsed: &Collapsed, chooser: &Chooser) {
+    for (kind, title) in [("markdown", "Markdown"), ("image", "Images"), ("audio", "Audio"), ("pdf", "PDFs"), ("text", "Text / code")] {
+        let files: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
+        if files.is_empty() { continue; }
+        let rows = group(content, title, files.len(), collapsed);
+        for item in files {
+            let item = item.clone();
+            let button = gtk4::Button::new();
+            let label = gtk4::Label::new(Some(&format!("{}  ·  {} KB", item.relative_path, item.size.div_ceil(1024))));
+            label.set_wrap(true);
+            label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
+            label.set_xalign(0.0);
+            button.set_child(Some(&label));
+            let chooser = chooser.clone();
+            button.connect_clicked(move |_| chooser.choose(&item));
+            rows.append(&button);
+        }
+    }
+    if items.is_empty() {
+        let empty = gtk4::Label::new(Some("No supported files found. Add a workspace-relative path above."));
+        empty.set_wrap(true);
+        content.append(&empty);
+    }
+}
+
+/// Lists the terminal's links and referenced files again, off GTK's thread,
+/// with an extra path the user added.
+fn reloader(session: &str, view: &View, collapsed: &Collapsed, chooser: Chooser) -> Rc<dyn Fn(Option<String>)> {
+    let session = session.to_string();
+    let view = view.clone();
+    let collapsed = Rc::clone(collapsed);
+    Rc::new(move |explicit| {
+        let ticket = view.next_ticket();
+        chooser.pages.set_visible(false);
+        chooser.back.set_visible(false);
+        chooser.listed.replace(explicit.clone());
+        clear(&view.bar);
+        view.bar.set_visible(false);
+        view.edits.dirty.set(false);
+        chooser.selected.borrow_mut().take();
+        clear(&view.content);
+        view.status.set_text("Finding referenced files and links…");
+        let session = session.clone();
+        let view = view.clone();
+        let collapsed = Rc::clone(&collapsed);
+        let chooser = chooser.clone();
+        glib::MainContext::default().spawn_local(async move {
+            let result = gio::spawn_blocking(move || {
+                let urls = links(&crate::tmux::capture_pane_history(&session).unwrap_or_default());
+                (urls, crate::assets::list_desktop(&session, explicit.as_deref()))
+            }).await;
+            if view.generation.get() != ticket { return; }
+            clear(&view.content);
+            match result {
+                Ok((urls, files)) => {
+                    show_links(&view.content, &urls, &collapsed, &view.status);
+                    match files {
+                        Ok(items) => {
+                            view.status.set_text(&format!("{} files · {} links. Choose a file to preview; Back returns to this list.", items.len(), urls.len()));
+                            list_files(&view.content, &items, &collapsed, &chooser);
+                        }
+                        Err(error) => view.status.set_text(&format!("{} links · Files: {}", urls.len(), error.replace('_', " "))),
+                    }
+                }
+                Err(_) => view.status.set_text("Reference lookup failed"),
+            }
+        });
+    })
+}
+
+fn build_drawer(session: &str, card_title: &str, collapsed: &Collapsed) -> Drawer {
+    // The header is where the panel is dragged from, like a terminal card's.
+    let (outer, header) =
+        crate::floating_panel::card_panel(&gtk4::Label::new(Some("📁")), "Files & links", card_title, MIN_SIZE);
+    let close = header.close_button("Close Files & links");
+
+    let body = panel_body(&outer);
+    body.set_margin_bottom(12);
     let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     let path = gtk4::Entry::new();
     path.set_placeholder_text(Some("Workspace-relative file path…"));
     path.set_hexpand(true);
     let add = gtk4::Button::with_label("Add");
     let refresh = gtk4::Button::with_label("Refresh");
+    let view = View {
+        content: gtk4::Box::new(gtk4::Orientation::Vertical, 6),
+        bar: gtk4::Box::new(gtk4::Orientation::Horizontal, 6),
+        status: gtk4::Label::new(Some("Only referenced files inside this terminal’s workspace. No folder scanning.")),
+        generation: Rc::new(Cell::new(0u64)),
+        edits: Edits::default(),
+    };
+    let chooser = Chooser::new(renderer(session, &view));
+    controls.append(&chooser.back);
     controls.append(&path);
     controls.append(&add);
     controls.append(&refresh);
     body.append(&controls);
-    let status = gtk4::Label::new(Some(
-        "Only referenced files inside this terminal’s workspace. No folder scanning.",
-    ));
+    let status = &view.status;
     status.set_wrap(true);
     status.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
     status.set_xalign(0.0);
-    body.append(&status);
+    body.append(status);
     // A Markdown preview's Rendered / Edit switch and Save.
-    let bar = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    bar.set_visible(false);
-    body.append(&bar);
+    view.bar.set_visible(false);
+    body.append(&view.bar);
     let scroll = gtk4::ScrolledWindow::builder()
         .vexpand(true)
         .hexpand(true)
         .min_content_height(120)
         .build();
-    let content = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
-    scroll.set_child(Some(&content));
+    scroll.set_child(Some(&view.content));
     body.append(&scroll);
-    let generation = Rc::new(Cell::new(0u64));
-    let edits = Edits::default();
-    let render: Rc<dyn Fn(crate::assets::Asset, u32)> = {
-        let content = content.clone();
-        let bar = bar.clone();
-        let status = status.clone();
-        let session = session.to_string();
-        let generation = Rc::clone(&generation);
-        let edits = edits.clone();
-        Rc::new(move |asset, page| {
-            generation.set(generation.get() + 1);
-            let ticket = generation.get();
-            clear(&content);
-            status.set_text("Loading preview…");
-            let content = content.clone();
-            let bar = bar.clone();
-            let status = status.clone();
-            let generation = Rc::clone(&generation);
-            let session = session.clone();
-            let edits = edits.clone();
-            glib::MainContext::default().spawn_local(async move {
-                let name = asset.name.clone();
-                let id = asset.id.clone();
-                let reader = session.clone();
-                let result = gio::spawn_blocking(move || {
-                    let _permit = crate::assets::Transfer::acquire().ok_or("Preview busy")?;
-                    let (meta, bytes) = crate::assets::read_desktop(&reader, &id)?;
-                    if meta.kind == "text" || meta.kind == "markdown" {
-                        let text = String::from_utf8(bytes).map_err(|_| "Invalid UTF-8")?;
-                        Ok::<_, String>(if meta.kind == "markdown" {
-                            Preview::Markdown(text)
-                        } else {
-                            Preview::Text(preview_text(&text))
-                        })
-                    } else if meta.kind == "audio" {
-                        Ok(Preview::Audio(bytes))
-                    } else {
-                        let bytes = if meta.kind == "pdf" {
-                            crate::asset_pdf::page(bytes, page)?
-                        } else {
-                            bytes
-                        };
-                        frames(&bytes).map(Preview::Images)
-                    }
-                })
-                .await;
-                if generation.get() != ticket {
-                    return;
-                }
-                match result {
-                    Ok(Ok(preview)) => {
-                        clear(&content);
-                        clear(&bar);
-                        bar.set_visible(false);
-                        status.set_text(&format!(
-                            "{name}{}",
-                            if asset.kind == "pdf" {
-                                format!(" · page {page}")
-                            } else {
-                                String::new()
-                            }
-                        ));
-                        match preview {
-                            Preview::Text(text) => content.append(&text_view(&text)),
-                            Preview::Audio(bytes) => content.append(&audio_preview(bytes)),
-                            Preview::Markdown(text) => {
-                                let preview = MarkdownPreview { content: &content, bar: &bar, status: &status, edits: &edits };
-                                preview.show(&session, asset.clone(), text, (Rc::clone(&generation), ticket));
-                            }
-                            Preview::Images(frames) => {
-                                let picture = gtk4::Picture::new();
-                                picture.set_can_shrink(true);
-                                let textures: Vec<_> = frames
-                                    .into_iter()
-                                    .map(|f| {
-                                        let texture = gdk::MemoryTexture::new(
-                                            f.width,
-                                            f.height,
-                                            if f.alpha {
-                                                gdk::MemoryFormat::R8g8b8a8
-                                            } else {
-                                                gdk::MemoryFormat::R8g8b8
-                                            },
-                                            &glib::Bytes::from_owned(f.pixels),
-                                            f.stride,
-                                        );
-                                        (texture, f.delay)
-                                    })
-                                    .collect();
-                                if let Some((texture, _)) = textures.first() {
-                                    picture.set_paintable(Some(texture));
-                                }
-                                picture.set_size_request(400, 300);
-                                picture.set_vexpand(true);
-                                content.append(&picture);
-                                let zoom = gtk4::Scale::with_range(
-                                    gtk4::Orientation::Horizontal,
-                                    1.0,
-                                    4.0,
-                                    0.25,
-                                );
-                                zoom.set_value(1.0);
-                                let weak_picture = picture.downgrade();
-                                zoom.connect_value_changed(move |scale| {
-                                    if let Some(picture) = weak_picture.upgrade() {
-                                        picture.set_size_request(
-                                            (400.0 * scale.value()) as i32,
-                                            (300.0 * scale.value()) as i32,
-                                        );
-                                    }
-                                });
-                                content.append(&zoom);
-                                if textures.len() > 1 {
-                                    let weak_picture = picture.downgrade();
-                                    let mut index = 0usize;
-                                    let mut next = std::time::Instant::now() + textures[0].1;
-                                    glib::timeout_add_local(Duration::from_millis(30), move || {
-                                        if generation.get() != ticket {
-                                            return glib::ControlFlow::Break;
-                                        }
-                                        let Some(picture) = weak_picture.upgrade() else {
-                                            return glib::ControlFlow::Break;
-                                        };
-                                        if std::time::Instant::now() >= next {
-                                            index = (index + 1) % textures.len();
-                                            picture.set_paintable(Some(&textures[index].0));
-                                            next = std::time::Instant::now() + textures[index].1;
-                                        }
-                                        glib::ControlFlow::Continue
-                                    });
-                                }
-                            }
-                        }
-                    }
-                    Ok(Err(error)) => status.set_text(&error.replace('_', " ")),
-                    Err(_) => status.set_text("Preview worker failed"),
-                }
-            });
-        })
-    };
-    let selected = Rc::new(RefCell::new(None::<crate::assets::Asset>));
-    let page = Rc::new(Cell::new(1u32));
-    let pages = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    for (label, delta) in [("Previous page", -1i32), ("Next page", 1)] {
-        let button = gtk4::Button::with_label(label);
-        let selected = Rc::clone(&selected);
-        let page = Rc::clone(&page);
-        let render = Rc::clone(&render);
-        button.connect_clicked(move |_| {
-            if let Some(asset) = selected.borrow().as_ref().filter(|a| a.kind == "pdf") {
-                page.set((page.get() as i32 + delta).clamp(1, 10000) as u32);
-                render(asset.clone(), page.get());
-            }
-        });
-        pages.append(&button);
-    }
-    pages.set_visible(false);
-    body.append(&pages);
-    let reload: Rc<dyn Fn(Option<String>)> = {
-        let session = session.to_string();
-        let generation = Rc::clone(&generation);
-        let content = content.clone();
-        let bar = bar.clone();
-        let status = status.clone();
-        let collapsed = Rc::clone(collapsed);
-        let edits = edits.clone();
-        Rc::new(move |explicit| {
-            generation.set(generation.get() + 1);
-            let ticket = generation.get();
-            pages.set_visible(false);
-            clear(&bar);
-            bar.set_visible(false);
-            edits.dirty.set(false);
-            selected.borrow_mut().take();
-            clear(&content);
-            status.set_text("Finding referenced files and links…");
-            let session = session.clone();
-            let generation = Rc::clone(&generation);
-            let content = content.clone();
-            let status = status.clone();
-            let render = Rc::clone(&render);
-            let selected = Rc::clone(&selected);
-            let page = Rc::clone(&page);
-            let pages = pages.clone();
-            let collapsed = Rc::clone(&collapsed);
-            glib::MainContext::default().spawn_local(async move {
-                let result = gio::spawn_blocking(move || {
-                    let urls = links(&crate::tmux::capture_pane_history(&session).unwrap_or_default());
-                    (urls, crate::assets::list_desktop(&session, explicit.as_deref()))
-                }).await;
-                if generation.get() != ticket { return; }
-                clear(&content);
-                match result {
-                    Ok((urls, files)) => {
-                        show_links(&content, &urls, &collapsed, &status);
-                        match files {
-                            Ok(items) => {
-                                status.set_text(&format!("{} files · {} links. Choose a file to preview; Refresh returns to this list.", items.len(), urls.len()));
-                                for (kind, title) in [("markdown", "Markdown"), ("image", "Images"), ("audio", "Audio"), ("pdf", "PDFs"), ("text", "Text / code")] {
-                                    let files: Vec<_> = items.iter().filter(|item| item.kind == kind).collect();
-                                    if files.is_empty() { continue; }
-                                    let rows = group(&content, title, files.len(), &collapsed);
-                                    for item in files {
-                                        let item = item.clone();
-                                        let button = gtk4::Button::new();
-                                        let label = gtk4::Label::new(Some(&format!("{}  ·  {} KB", item.relative_path, item.size.div_ceil(1024))));
-                                        label.set_wrap(true);
-                                        label.set_wrap_mode(gtk4::pango::WrapMode::WordChar);
-                                        label.set_xalign(0.0);
-                                        button.set_child(Some(&label));
-                                        let render = Rc::clone(&render); let selected = Rc::clone(&selected); let page = Rc::clone(&page); let pages = pages.clone();
-                                        button.connect_clicked(move |_| { page.set(1); pages.set_visible(item.kind == "pdf"); *selected.borrow_mut() = Some(item.clone()); render(item.clone(), 1); });
-                                        rows.append(&button);
-                                    }
-                                }
-                                if items.is_empty() {
-                                    let empty = gtk4::Label::new(Some("No supported files found. Add a workspace-relative path above."));
-                                    empty.set_wrap(true);
-                                    content.append(&empty);
-                                }
-                            }
-                            Err(error) => status.set_text(&format!("{} links · Files: {}", urls.len(), error.replace('_', " "))),
-                        }
-                    }
-                    Err(_) => status.set_text("Reference lookup failed"),
-                }
-            });
-        })
-    };
-    refresh.connect_clicked({
+    body.append(&chooser.pages);
+    let (back, listed) = (chooser.back.clone(), Rc::clone(&chooser.listed));
+    let reload = reloader(session, &view, collapsed, chooser);
+    connect_leaving(&back, &view.edits, &view.status, {
         let reload = Rc::clone(&reload);
-        let edits = edits.clone();
-        let status = status.clone();
-        move |_| {
-            if edits.may_leave(&status) {
-                reload(None)
-            }
+        move || {
+            let path = listed.borrow().clone();
+            reload(path)
         }
     });
-    add.connect_clicked({
+    connect_leaving(&refresh, &view.edits, &view.status, {
         let reload = Rc::clone(&reload);
-        let edits = edits.clone();
-        let status = status.clone();
-        move |_| {
-            if edits.may_leave(&status) {
-                reload(Some(path.text().to_string()))
-            }
-        }
+        move || reload(None)
     });
+    connect_leaving(&add, &view.edits, &view.status, {
+        let reload = Rc::clone(&reload);
+        move || reload(Some(path.text().to_string()))
+    });
+    let View { status, generation, edits, .. } = view;
     Drawer { widget: outer, close, status, edits, generation, reload }
 }
 
@@ -826,7 +785,7 @@ impl MarkdownPreview<'_> {
             let save = save.downgrade();
             move |_, key, _, modifiers| {
                 let Some(save) = save.upgrade() else { return glib::Propagation::Proceed };
-                if modifiers.contains(gdk::ModifierType::CONTROL_MASK) && matches!(key, gdk::Key::s | gdk::Key::S) {
+                if is_ctrl_letter(key, modifiers, gdk::Key::s) {
                     if save.is_sensitive() {
                         save.emit_clicked();
                     }
@@ -952,6 +911,39 @@ mod tests {
         show_links(&links_content, &["https://example.org/".into()], &collapsed, &status);
         assert!(links_content.first_child().unwrap().is::<gtk4::Expander>());
 
+        // Back shows only on a preview and lists again with the path the list was made with.
+        let view = View {
+            content: gtk4::Box::new(gtk4::Orientation::Vertical, 6),
+            bar: gtk4::Box::new(gtk4::Orientation::Horizontal, 6),
+            status: gtk4::Label::new(None),
+            generation: Rc::new(Cell::new(0u64)),
+            edits: Edits::default(),
+        };
+        let chosen = Rc::new(RefCell::new(Vec::new()));
+        let chooser = Chooser::new({
+            let chosen = Rc::clone(&chosen);
+            Rc::new(move |asset: crate::assets::Asset, page| chosen.borrow_mut().push((asset.name, page)))
+        });
+        let reload = reloader("test_missing_asset_terminal", &view, &collapsed, chooser.clone());
+        reload(Some("out/plan.md".into()));
+        assert!(!chooser.back.is_visible());
+        let asset = crate::assets::Asset {
+            id: "id".into(),
+            name: "plan.md".into(),
+            relative_path: "out/plan.md".into(),
+            mime_type: "text/markdown".into(),
+            kind: "markdown".into(),
+            size: 9,
+            modified: 0,
+        };
+        chooser.choose(&asset);
+        assert!(chooser.back.is_visible());
+        assert_eq!(*chosen.borrow(), [("plan.md".to_string(), 1)]);
+        assert_eq!(chooser.listed.borrow().as_deref(), Some("out/plan.md"));
+        let path = chooser.listed.borrow().clone();
+        reload(path);
+        assert!(!chooser.back.is_visible() && chooser.selected.borrow().is_none());
+
         let text = text_view("# Title\n<script>ignored</script>");
         let buffer = text.buffer();
         let literal = buffer.text(&buffer.start_iter(), &buffer.end_iter(), false);
@@ -976,7 +968,7 @@ mod tests {
         overlay.add_overlay(&ceiling);
         set_host(&overlay, Rc::new(|| 46), &ceiling);
         let collapsed: Collapsed = Rc::new(RefCell::new(HashSet::new()));
-        let open_count = || OPEN.with(|open| open.borrow().len());
+        let open_count = || PANELS.with(crate::floating_panel::CardPanels::len);
         // Opened as its own panel in the overlay, under the dialog that stays on top.
         open("test_files_a", "Claude", &collapsed);
         assert_eq!(open_count(), 1);

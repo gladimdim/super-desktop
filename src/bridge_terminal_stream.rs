@@ -306,7 +306,7 @@ fn wait_for_change(activity: &Activity, seen: ActivityState, captured_at: Instan
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{TcpListener, TcpStream};
+    use std::net::TcpStream;
 
     fn status() -> SessionStatus {
         SessionStatus { status: "IDLE", label: "● IDLE", pid: "1".into(), cmd: "sh".into(), cwd: String::new() }
@@ -413,23 +413,10 @@ mod tests {
     #[test]
     fn stream_pushes_output_promptly_and_ends_with_the_session() {
         let id = format!("sd_term_streamtest_{}", std::process::id());
-        struct Session(String);
-        impl Drop for Session {
-            fn drop(&mut self) {
-                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
-            }
-        }
-        let made = Command::new("tmux").args(["new-session", "-d", "-s", &id, "cat"]).output().unwrap();
-        assert!(made.status.success());
-        let session = Session(id.clone());
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        let session = crate::test_isolation::TmuxSession::start(&id, &[], &["cat"]);
         let server_id = id.clone();
-        let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            stream(&mut Connection::plain(socket), &server_id, true, false);
-        });
+        let (mut client, server) =
+            loopback_server(move |mut socket| stream(&mut socket, &server_id, true, false));
         let first = read_text_frame(&mut client).expect("attached frame");
         assert_eq!(first["id"], id.as_str());
         assert!(first.get("tail").is_none());
@@ -437,8 +424,7 @@ mod tests {
         // Let the idle safety poll settle, then type.
         std::thread::sleep(Duration::from_millis(100));
         let typed = Instant::now();
-        let sent = Command::new("tmux").args(["send-keys", "-t", &id, "-l", "prompt-output-marker"]).output().unwrap();
-        assert!(sent.status.success());
+        crate::test_isolation::tmux(&["send-keys", "-t", &id, "-l", "prompt-output-marker"]);
         let latency = loop {
             let frame = read_text_frame(&mut client).expect("frame after output");
             if frame["tailAnsi"].as_str().is_some_and(|t| t.contains("prompt-output-marker")) {

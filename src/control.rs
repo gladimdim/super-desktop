@@ -135,7 +135,7 @@ impl InputData {
     pub fn validate(&self) -> Result<(), &'static str> {
         if let Self::Prompt { attachments, .. } = self {
             let unique: std::collections::BTreeSet<_> = attachments.iter().collect();
-            if attachments.len() > 4 || unique.len() != attachments.len() || attachments.iter().any(|id| id.len()!=64 || !id.bytes().all(|b| b.is_ascii_hexdigit())) {
+            if attachments.len() > 4 || unique.len() != attachments.len() || attachments.iter().any(|id| !is_hex(id, 64)) {
                 return Err("Use at most four distinct checked asset IDs from terminal files list/add.");
             }
         }
@@ -447,6 +447,14 @@ pub enum Command {
 }
 
 impl Command {
+    /// The wire method: this command's serde `method` tag.
+    pub fn method(&self) -> String {
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|value| value["method"].as_str().map(str::to_owned))
+            .unwrap_or_default()
+    }
+
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
@@ -612,6 +620,12 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
         return Err(denied());
     }
     Ok(())
+}
+
+/// Exactly `len` ASCII hex digits, either case: request ids, pane identities,
+/// revisions, digests and commits.
+pub fn is_hex(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[doc(hidden)]
@@ -1111,12 +1125,18 @@ fn exchange(runtime: &Path, request: &Request, attempted: &mut bool) -> io::Resu
     Ok(reply)
 }
 
+/// `bytes` bytes from the OS CSPRNG as lowercase hex (two characters each).
+/// Reads exactly that much: /dev/urandom never ends, so never `fs::read` it.
+pub fn random_hex(bytes: usize) -> io::Result<String> {
+    let mut buffer = vec![0; bytes];
+    File::open("/dev/urandom")?.read_exact(&mut buffer)?;
+    Ok(buffer.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 pub fn new_request(command: Command) -> io::Result<Request> {
-    let mut bytes = [0; 16];
-    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     Ok(Request {
         control_version: VERSION,
-        request_id: bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        request_id: random_hex(16)?,
         command,
     })
 }
@@ -1124,6 +1144,56 @@ pub fn new_request(command: Command) -> io::Result<Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_command_tag_is_an_advertised_method() {
+        fn tags(value: &Value, out: &mut Vec<String>) {
+            match value {
+                Value::Object(map) => {
+                    if let Some(tag) = map
+                        .get("properties")
+                        .and_then(|p| p.get("method"))
+                        .and_then(|m| m.get("const").or_else(|| m.get("enum").and_then(|e| e.get(0))))
+                        .and_then(Value::as_str)
+                    {
+                        out.push(tag.to_owned());
+                    }
+                    map.values().for_each(|v| tags(v, out));
+                }
+                Value::Array(items) => items.iter().for_each(|v| tags(v, out)),
+                _ => {}
+            }
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(Command)).unwrap();
+        let mut found = Vec::new();
+        tags(&schema, &mut found);
+        let variants = schema["oneOf"].as_array().map_or(0, Vec::len);
+        assert!(variants > 40, "{schema}");
+        assert_eq!(found.len(), variants, "every variant carries its method tag");
+        for tag in &found {
+            assert!(METHODS.contains(&tag.as_str()), "{tag} is not in METHODS");
+        }
+        assert_eq!(Command::Status {}.method(), "app.status");
+        assert_eq!(Command::Lifecycle { id: "card".into() }.method(), "terminal.status");
+        assert_eq!(Command::Viewports { id: "card".into() }.method(), "terminal.viewport.list");
+    }
+    #[test]
+    fn hex_checks_are_exact_length_and_either_case() {
+        assert!(is_hex(&"aB0".repeat(4), 12));
+        assert!(!is_hex(&"a".repeat(63), 64));
+        assert!(!is_hex(&"a".repeat(65), 64));
+        assert!(!is_hex(&format!("{}g", "a".repeat(63)), 64));
+        assert!(!is_hex("", 1));
+    }
+    #[test]
+    fn random_ids_are_lowercase_hex_of_the_requested_size() {
+        for bytes in [4, 8, 16, 24] {
+            let id = random_hex(bytes).unwrap();
+            assert_eq!(id.len(), bytes * 2);
+            assert!(id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{id}");
+        }
+        assert_ne!(random_hex(16).unwrap(), random_hex(16).unwrap());
+        assert_eq!(new_request(Command::Capabilities {}).unwrap().request_id.len(), 32);
+    }
     #[test]
     fn administration_errors_preserve_documented_exit_categories() {
         for (code, expected) in [("denied",4),("operation_failed",8),("configuration_error",8),("unknown_outcome",7),("conflict",5)] {

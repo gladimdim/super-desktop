@@ -66,7 +66,7 @@ def main():
             assert request("/api/v1/harnesses") == (401, {"status": "error", "error": "not_paired"})
             for path in ["/api/v1/desktop/capabilities", "/api/v1/desktop/workspace", "/api/v1/desktop/events", "/api/v1/desktop/commands", "/api/v1/harnesses", "/api/v1/theme", "/api/v1/workspaces", "/api/v1/harnesses/stream", "/api/v1/harnesses/sd_term_probe/input",
                          "/api/v1/harnesses/sd_term_probe/assets", "/api/v1/harnesses/sd_term_probe/assets/id/content",
-                         "/api/v1/harnesses/sd_term_probe/assets/id/pages/1"]:
+                         "/api/v1/harnesses/sd_term_probe/assets/id/pages/1", "/api/v1/harnesses/sd_term_probe/prompts"]:
                 assert request(path)[0] == 401, path
             assert request("/api/v1/pair/state")[0] == 403
             assert request("/api/v1/completions", {"sessions": []})[0] == 401
@@ -108,6 +108,9 @@ def main():
             status, harnesses = request("/api/v1/harnesses", token=token)
             assert status == 200 and set(harnesses) == {"protocolVersion", "timestamp", "harnesses", "usage", "theme"}
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
+            prompts = "/api/v1/harnesses/sd_term_probe/prompts"
+            assert request(prompts, token=token) == (404, {"status": "error", "error": "no_such_session"})
+            assert request(prompts, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             editor_action = "/api/v1/harnesses/sd_term_probe/editor-action"
             assert request(editor_action, {"action": "save", "editor": "vim"}, token=token) == (404, {"status": "error", "error": "no_such_session"})
             assert request(editor_action, {"action": "save", "editor": "vim"}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403

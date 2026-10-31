@@ -211,27 +211,14 @@ impl PairingRequestPanel {
         widget.set_valign(gtk4::Align::Center);
         widget.set_visible(false);
 
-        let header = gtk4::Box::new(gtk4::Orientation::Horizontal, 10);
-        header.add_css_class("term-header");
-        let badge = gtk4::Label::new(Some("⇄"));
-        badge.add_css_class("launcher-head-badge");
-        header.append(&badge);
-        let heading = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
-        heading.set_hexpand(true);
-        let title = gtk4::Label::new(Some("Connection request"));
-        title.add_css_class("term-title");
-        title.set_xalign(0.0);
-        let subtitle = gtk4::Label::new(Some("A device wants to connect to this PC"));
-        subtitle.add_css_class("launcher-subtitle");
-        subtitle.set_xalign(0.0);
-        heading.append(&title);
-        heading.append(&subtitle);
-        header.append(&heading);
-        let close = gtk4::Button::with_label("✕");
-        close.set_tooltip_text(Some("Close. The request keeps waiting until it expires."));
-        close.add_css_class("term-btn");
-        header.append(&close);
-        widget.append(&header);
+        let header = crate::floating_panel::PanelHeader::new(
+            &gtk4::Label::new(Some("⇄")),
+            "Connection request",
+            "A device wants to connect to this PC",
+            false,
+        );
+        let close = header.close_button("Close. The request keeps waiting until it expires.");
+        widget.append(&header.widget);
 
         let pages = gtk4::Stack::new();
         pages.set_transition_type(gtk4::StackTransitionType::Crossfade);
@@ -240,12 +227,12 @@ impl PairingRequestPanel {
         pages.set_hexpand(true);
         widget.append(&pages);
 
-        let loading = page_box();
+        let loading = page_box(PAGE_SPACING);
         loading.append(&help("Checking for connection requests…"));
         pages.add_named(&loading, Some(View::Loading.name()));
 
         // ---- the request ----
-        let request = page_box();
+        let request = page_box(PAGE_SPACING);
         let who = gtk4::Box::new(gtk4::Orientation::Horizontal, 14);
         let icon = gtk4::Image::from_icon_name("network-workgroup-symbolic");
         icon.set_pixel_size(40);
@@ -322,7 +309,7 @@ impl PairingRequestPanel {
         pages.add_named(&request, Some(View::Request.name()));
 
         // ---- after a decision ----
-        let result = page_box();
+        let result = page_box(PAGE_SPACING);
         let result_mark = gtk4::Label::new(None);
         result_mark.add_css_class("pairing-result-mark");
         result_mark.set_xalign(0.0);
@@ -343,7 +330,7 @@ impl PairingRequestPanel {
         pages.add_named(&result, Some(View::Result.name()));
 
         // ---- nothing to decide ----
-        let empty = page_box();
+        let empty = page_box(PAGE_SPACING);
         let empty_title = headline("No requests waiting");
         empty.append(&empty_title);
         let empty_text = help("");
@@ -725,21 +712,26 @@ impl PairingRequestPanel {
     }
 }
 
-fn page_box() -> gtk4::Box {
-    let body = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
+/// Space between the parts of a request page.
+const PAGE_SPACING: i32 = 10;
+
+/// A page of a pairing panel (this one and the Add a PC wizard), its parts
+/// `spacing` apart.
+pub(crate) fn page_box(spacing: i32) -> gtk4::Box {
+    let body = gtk4::Box::new(gtk4::Orientation::Vertical, spacing);
     body.add_css_class("launcher-body");
     body.add_css_class("pc-wizard-page");
     body
 }
 
-fn headline(text: &str) -> gtk4::Label {
+pub(crate) fn headline(text: &str) -> gtk4::Label {
     let label = gtk4::Label::new(Some(text));
     label.add_css_class("settings-entry-title");
     label.set_xalign(0.0);
     label
 }
 
-fn help(text: &str) -> gtk4::Label {
+pub(crate) fn help(text: &str) -> gtk4::Label {
     let label = gtk4::Label::new(Some(text));
     label.add_css_class("settings-entry-summary");
     label.set_wrap(true);
@@ -747,7 +739,7 @@ fn help(text: &str) -> gtk4::Label {
     label
 }
 
-fn primary_button(text: &str) -> gtk4::Button {
+pub(crate) fn primary_button(text: &str) -> gtk4::Button {
     let button = gtk4::Button::with_label(text);
     button.add_css_class("hud-button");
     button.add_css_class("hud-action-primary");
@@ -758,6 +750,7 @@ fn primary_button(text: &str) -> gtk4::Button {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gtk_test::pump_until;
     use serde_json::json;
     use std::sync::Mutex;
 
@@ -844,16 +837,6 @@ mod tests {
     fn approval_panel_flow() {
         // GTK may only be used from one thread per process.
         crate::gtk_test::run_in_child_process("pairing_request_ui::tests::approval_panel_flow_child");
-    }
-
-    fn pump_until(what: &str, done: impl Fn() -> bool) {
-        let context = glib::MainContext::default();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            while context.iteration(false) {}
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(5));
-        }
     }
 
     fn request(id: &str, name: &str, device_type: &str) -> Value {

@@ -33,6 +33,7 @@ def render():
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/cli.html">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
+<meta property="og:locale" content="en_US">
 <meta property="og:url" content="https://superdesktop.dmytrogladkyi.com/cli.html">
 <meta property="og:title" content="SUPER DESKTOP CLI reference">
 <meta property="og:description" content="Commands and JSON results for driving SUPER DESKTOP from scripts and AI agents.">
@@ -47,6 +48,8 @@ def render():
 <meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <style>
+  html, body { overflow-x: hidden; }
+  @supports (overflow: clip) { html, body { overflow-x: clip; } }
   :root { color-scheme: dark; --bg: #0b0e14; --panel: #131722; --text: #e6e9f0; --muted: #a8b2c5; --accent: #22d3ee; --border: #262e42; }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.7 system-ui, sans-serif; }
@@ -69,6 +72,7 @@ def render():
   th { background: var(--panel); }
   footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
   @media (max-width: 600px) { .wrap { padding: 20px 16px 48px; } body { font-size: 16px; } pre { padding: 12px; } }
+  @media (pointer: coarse) { .links a, .contents summary { display: inline-flex; align-items: center; min-height: 44px; } .contents li { margin: 6px 0; } }
 </style>
 </head>
 <body><div class="wrap">

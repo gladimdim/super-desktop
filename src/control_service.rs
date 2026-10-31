@@ -28,38 +28,6 @@ pub struct Query {
 pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
     let id = &request.request_id;
     let data = match request.command {
-        Command::ConnectionRead {..} | Command::ConnectionInvite {..} | Command::ConnectionDecide {..} | Command::ConnectionRevoke {..} | Command::PeerAdd {..} | Command::PeerPairing {..} | Command::PeerRead {..} | Command::PeerCommand {..} | Command::PeerForget {..}
-        | Command::UpdatesCheck {} | Command::UpdatesInstall {..} | Command::UpdatesStatus {..}
-        | Command::Forget {..} | Command::Relaunch {..}
-        | Command::Shortcut {..}
-        | Command::Audit { .. }
-        | Command::Attach { .. }
-        | Command::Viewport { .. }
-        | Command::Viewports { .. }
-        | Command::CardAction { .. }
-        | Command::Files { .. }
-        | Command::FilesEdit { .. }
-        | Command::Preferences { .. }
-        | Command::PreferencesEdit { .. }
-        | Command::Workspace { .. }
-        | Command::WorkspaceEdit { .. }
-        | Command::Input { .. }
-        | Command::Mode { .. }
-        | Command::Close { .. }
-        | Command::Geometry { .. }
-        | Command::Move { .. }
-        | Command::Resize { .. }
-        | Command::Launch { .. }
-        | Command::InspectRequest { .. }
-        | Command::Lifecycle { .. }
-        | Command::Composer { .. } | Command::Runtime { .. }
-        | Command::Capture { .. } => {
-            return Reply::failure(
-                id,
-                "invalid_request",
-                "This request requires a dedicated dispatcher.",
-            )
-        }
         Command::Access {} => json!({"mode":"owner","uid":unsafe {libc::geteuid()},"delegationSupported":false,"sandbox":false,"credentials":[],"scope":"local-control","socketPermissions":"0600","directoryPermissions":"0700"}),
         Command::Capabilities {} => control::capabilities(),
         Command::Status {} => {
@@ -92,6 +60,13 @@ pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
                 return Reply::failure(id, "not_found", "No local harness type has that ID.");
             };
             harness
+        }
+        _ => {
+            return Reply::failure(
+                id,
+                "invalid_request",
+                "This request requires a dedicated dispatcher.",
+            )
         }
     };
     Reply::success(id, data)

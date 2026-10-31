@@ -14,7 +14,6 @@ pub const MIN_NOTE_HEIGHT: i32 = 120;
 pub struct StickyNote {
     pub container: Overlay,
     pub data: Rc<RefCell<NoteData>>,
-    #[cfg_attr(not(test), allow(dead_code))]
     pub text_view: TextView,
     pending_save: Rc<RefCell<Option<glib::SourceId>>>,
 }
@@ -244,16 +243,12 @@ impl StickyNote {
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
             }
             if let Some(c) = container_weak.upgrade() {
-                let (nx, ny) = match (
+                let (nx, ny) = crate::mini_terminal::dragged_origin(
+                    gesture,
                     *grab_offset_update.borrow(),
-                    gesture.current_event().and_then(|e| e.position()),
-                ) {
-                    (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
-                    _ => {
-                        let (sx, sy) = *start_pos_update.borrow();
-                        (sx + offset_x, sy + offset_y)
-                    }
-                };
+                    *start_pos_update.borrow(),
+                    (offset_x, offset_y),
+                );
                 data_drag_update.borrow_mut().x = nx.round() as i32;
                 data_drag_update.borrow_mut().y = ny.round() as i32;
                 on_drag_update(c.upcast(), nx, ny);
@@ -267,21 +262,22 @@ impl StickyNote {
         let on_drag_end_move = Rc::clone(&on_drag_end);
         drag.connect_drag_end(move |gesture, offset_x, offset_y| {
             if let Some(c) = container_weak.upgrade() {
-                let (nx, ny) = match (
+                let (nx, ny) = crate::mini_terminal::dragged_origin(
+                    gesture,
                     *grab_offset_end.borrow(),
-                    gesture.current_event().and_then(|e| e.position()),
-                ) {
-                    (Some((gx, gy)), Some((mx, my))) => (mx - gx, my - gy),
-                    _ => {
-                        let (sx, sy) = *start_pos_end.borrow();
-                        (sx + offset_x, sy + offset_y)
-                    }
-                };
+                    *start_pos_end.borrow(),
+                    (offset_x, offset_y),
+                );
                 let rx = nx.round() as i32;
                 let ry = ny.round() as i32;
                 data_drag_end.borrow_mut().x = rx;
                 data_drag_end.borrow_mut().y = ry;
-                on_drag_end_move(c.upcast(), &data_drag_end.borrow());
+                on_drag_end_move(c.clone().upcast(), &data_drag_end.borrow());
+                // Keep the spot the drop handler clamped the note to.
+                if let Some((x, y)) = crate::mini_terminal::placed_origin(c.upcast_ref()) {
+                    let mut data = data_drag_end.borrow_mut();
+                    (data.x, data.y) = (x, y);
+                }
             }
         });
 
@@ -349,6 +345,12 @@ impl StickyNote {
 
         Self { container, data, text_view, pending_save }
     }
+
+    /// A note on a 1920×1080 screen whose overlay callbacks do nothing.
+    #[cfg(test)]
+    pub fn for_test(data: NoteData) -> Self {
+        Self::new(data, |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {}, |_, _, _, _| {}, || {}, 1920, 1080)
+    }
 }
 
 #[cfg(test)]
@@ -366,28 +368,17 @@ mod tests {
             return;
         }
         let _ = gtk4::init();
-        let note = StickyNote::new(
-            NoteData {
-                id: "test".into(),
-                text: "text".into(),
-                x: 100,
-                y: 100,
-                width: 260,
-                height: 200,
-                color: "omarchy".into(),
-                updated_at: 0.0,
-                tag: 0,
-            },
-            |_, _, _| {},
-            |_, _| {},
-            |_| {},
-            |_| {},
-            |_| {},
-            |_, _, _, _| {},
-            || {},
-            1920,
-            1080,
-        );
+        let note = StickyNote::for_test(NoteData {
+            id: "test".into(),
+            text: "text".into(),
+            x: 100,
+            y: 100,
+            width: 260,
+            height: 200,
+            color: "omarchy".into(),
+            updated_at: 0.0,
+            tag: 0,
+        });
         assert_eq!(count_class(&note.container, "card-resize-zone"), 8);
     }
 
@@ -402,11 +393,8 @@ mod tests {
             return;
         }
         let _ = gtk4::init();
-        let note = StickyNote::new(
-            NoteData { id: "focus".into(), text: "select me".into(), x: 0, y: 0, width: 260, height: 200,
-                color: "omarchy".into(), updated_at: 0.0, tag: 0 },
-            |_, _, _| {}, |_, _| {}, |_| {}, |_| {}, |_| {}, |_, _, _, _| {}, || {}, 1920, 1080,
-        );
+        let note = StickyNote::for_test(NoteData { id: "focus".into(), text: "select me".into(), x: 0, y: 0,
+            width: 260, height: 200, color: "omarchy".into(), updated_at: 0.0, tag: 0 });
         let terminal_stand_in = gtk4::Entry::new();
         let layout = gtk4::Box::new(Orientation::Horizontal, 0);
         layout.append(&note.container);

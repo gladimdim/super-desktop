@@ -14,50 +14,17 @@ fn assert_output_contract<T: serde::de::DeserializeOwned>(name: &str, value: &Va
 
 #[test]
 fn actual_cli_workflow_uses_production_workers_without_a_desktop() {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let Some(root) = std::env::var_os("SD_CLI_ACCEPTANCE_ROOT").map(std::path::PathBuf::from)
-    else {
-        let root = std::path::Path::new("/tmp").join(format!("sd-accept-{}", std::process::id()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&root)
-            .unwrap();
-        std::fs::create_dir(root.join("tmux")).unwrap();
-        let out = Process::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "control_acceptance::actual_cli_workflow_uses_production_workers_without_a_desktop",
-                "--nocapture",
-            ])
-            .env("SD_CLI_ACCEPTANCE_ROOT", &root)
-            .env("HOME", &root)
-            .env("XDG_STATE_HOME", &root)
-            .env("XDG_RUNTIME_DIR", &root)
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("WAYLAND_SOCKET")
-            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(root);
-        assert!(
-            out.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
+    use std::os::unix::fs::PermissionsExt;
+    let Some((root, _tmux)) = crate::test_isolation::private_root("SD_CLI_ACCEPTANCE_ROOT") else {
+        crate::test_isolation::rerun_in_private_root(
+            "control_acceptance::actual_cli_workflow_uses_production_workers_without_a_desktop",
+            "SD_CLI_ACCEPTANCE_ROOT",
+            |root, child| {
+                child.env("XDG_STATE_HOME", root).env("XDG_RUNTIME_DIR", root);
+            },
         );
         return;
     };
-    struct Cleanup;
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = Process::new("tmux").arg("kill-server").output();
-        }
-    }
-    let _cleanup = Cleanup;
     let stub = root.join("stub");
     std::fs::write(
         &stub,
@@ -274,37 +241,19 @@ fn actual_cli_workflow_uses_production_workers_without_a_desktop() {
 
 #[test]
 fn configured_launch_from_both_binaries_delivers_one_prompt_to_an_isolated_stub() {
-    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let Some(root) = std::env::var_os("SD_CONFIGURED_LAUNCH_ROOT").map(std::path::PathBuf::from)
-    else {
-        let root =
-            std::path::Path::new("/tmp").join(format!("sd-launch-accept-{}", std::process::id()));
-        std::fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&root)
-            .unwrap();
-        std::fs::create_dir(root.join("tmux")).unwrap();
-        std::fs::create_dir(root.join("bin")).unwrap();
-        let output=Process::new(std::env::current_exe().unwrap()).args(["--exact","control_acceptance::configured_launch_from_both_binaries_delivers_one_prompt_to_an_isolated_stub","--nocapture"])
-            .env("SD_CONFIGURED_LAUNCH_ROOT",&root).env("HOME",&root).env("XDG_STATE_HOME",&root).env("XDG_RUNTIME_DIR",&root).env("TMUX_TMPDIR",root.join("tmux"))
-            .env("PATH",format!("{}:{}",root.join("bin").display(),std::env::var("PATH").unwrap()))
-            .env_remove("TMUX").env_remove("TMUX_PANE").env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY").env_remove("WAYLAND_SOCKET").env_remove("HYPRLAND_INSTANCE_SIGNATURE").output().unwrap();
-        let _ = std::fs::remove_dir_all(root);
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+    use std::os::unix::fs::PermissionsExt;
+    let Some((root, _tmux)) = crate::test_isolation::private_root("SD_CONFIGURED_LAUNCH_ROOT") else {
+        crate::test_isolation::rerun_in_private_root(
+            "control_acceptance::configured_launch_from_both_binaries_delivers_one_prompt_to_an_isolated_stub",
+            "SD_CONFIGURED_LAUNCH_ROOT",
+            |root, child| {
+                std::fs::create_dir(root.join("bin")).unwrap();
+                let path = format!("{}:{}", root.join("bin").display(), std::env::var("PATH").unwrap());
+                child.env("XDG_STATE_HOME", root).env("XDG_RUNTIME_DIR", root).env("PATH", path);
+            },
         );
         return;
     };
-    struct Cleanup;
-    impl Drop for Cleanup {
-        fn drop(&mut self) {
-            let _ = Process::new("tmux").arg("kill-server").output();
-        }
-    }
-    let _cleanup = Cleanup;
     let cat = root.join("claude");
     std::fs::copy("/usr/bin/cat", &cat).unwrap();
     let script = root.join("bin/claude");

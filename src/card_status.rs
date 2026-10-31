@@ -106,16 +106,11 @@ fn refresh_one(request: &CardRequest, snapshot: Option<&PaneSnapshot>) -> CardUp
     }
 }
 
-fn has_native_metadata(agent: &str) -> bool {
-    crate::harness_metadata::native_agent(agent) || agent.starts_with("custom-")
-}
-
 /// `row` is `None` when tmux no longer lists the session.
 fn from_row(request: &CardRequest, row: Option<&PaneRow>) -> CardUpdate {
     let (session, agent) = (request.session.as_str(), request.agent.as_str());
-    let metadata = row
-        .filter(|_| has_native_metadata(agent))
-        .and_then(|row| crate::harness_metadata::inspect_option(agent, &row.metadata_option));
+    // `inspect_option` answers only for launchers that carry metadata.
+    let metadata = row.and_then(|row| crate::harness_metadata::inspect_option(agent, &row.metadata_option));
     // The preview capture doubles as the status screen; otherwise the status
     // captures only the visible rows, and only if it gets that far. Either is
     // reused while the pane has not changed since the last refresh.
@@ -273,12 +268,7 @@ fn legacy(request: &CardRequest) -> CardUpdate {
         crate::tmux::inspect_status_with_screen(session, agent, screen.as_deref().unwrap_or(""));
     let preview = request.preview_lines.map(|lines| preview_text(screen.as_deref(), &status, lines));
     let oc_id = resolve_oc_id(request);
-    let prompt = crate::bridge::last_user_text(
-        session,
-        agent,
-        oc_id.as_deref(),
-        screen.as_deref().unwrap_or(""),
-    );
+    let prompt = crate::bridge::last_user_text(session, agent, oc_id.as_deref());
     let notice = setup_notice(
         crate::harness_metadata::inspect(session, agent).as_ref(),
         crate::harness_metadata::openclaw_plugin,
@@ -636,7 +626,7 @@ mod tests {
                 assert!(matches!(snapshot.lookup(&session), PaneLookup::Row(_)));
                 // Per-session readers cache metadata for 250 ms; the UI refreshes once a second.
                 std::thread::sleep(std::time::Duration::from_millis(260));
-                let expected = crate::bridge::last_user_text(&session, agent, None, "");
+                let expected = crate::bridge::last_user_text(&session, agent, None);
                 assert_eq!(expected.as_deref(), (index < 2).then_some(*prompt));
                 assert_eq!(refresh_one(&request, Some(&snapshot)).prompt, expected, "batched {agent} {index}");
                 assert_eq!(legacy(&request).prompt, expected, "legacy {agent} {index}");

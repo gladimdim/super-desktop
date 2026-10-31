@@ -32,14 +32,37 @@
   });
 
   /* ── Other replicas ──────────────────────────────────────── */
+  const stages = new Map();
   $$("[data-stage]").forEach((node) => {
     const mirror = node.dataset.stage === "mirror";
     const st = new SD.Stage(node, {
       interactive: !mirror, keys: false, shown: true, pc: node.dataset.pc || "local", theme: node.dataset.theme || null,
-      onAction: (a) => { if (a === "remote") node.querySelectorAll(".pulse").forEach((p) => p.classList.remove("pulse")); },
+      onAction: (a) => {
+        if (a === "remote" || a === "plugin-form") node.querySelectorAll(".sd-topbar > .pulse").forEach((p) => p.classList.remove("pulse"));
+      },
     });
     if (node.dataset.pulse) st.bar.querySelector(node.dataset.pulse).classList.add("pulse");
+    stages.set(node, st);
   });
+
+  /* ── Plugins: what to try, and one first build if nobody starts one ── */
+  const plugStage = $("#plugins-stage");
+  if (plugStage && SD.Plugins) {
+    let used = false;
+    SD.Plugins.on((step, auto) => {
+      if (auto) return;
+      used = true;
+      $$('#plugins .try-hints [data-step="' + step + '"]').forEach((h) => h.classList.add("done"));
+    });
+    plugStage.addEventListener("pointerdown", () => { used = true; });
+    const view = stages.get(plugStage);
+    const visible = () => { const r = plugStage.getBoundingClientRect(); return r.width > 0 && r.bottom > 0 && r.top < innerHeight; };
+    new IntersectionObserver((entries, io) => {
+      if (!entries[0].isIntersecting) return;
+      io.disconnect();
+      setTimeout(() => { if (!used && visible()) SD.Plugins.autoplay(view, () => !used && visible()); }, reduced ? 400 : 1400);
+    }, { threshold: 0.55 }).observe(plugStage);
+  }
 
   const phoneRoot = $("#phone-device");
   if (phoneRoot) new SD.Phone(phoneRoot, { onAction: done });

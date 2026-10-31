@@ -36,7 +36,7 @@ jobs:
           printf '%s\n' 'Server = https://stable-mirror.omarchy.org/$repo/os/$arch' > /etc/pacman.d/mirrorlist
           # Fully align the disposable rolling image with the stable snapshot,
           # including downgrades, before compiling or recording ABI floors.
-          pacman -Syyuu --noconfirm --needed git rust python gtk4 gtk4-layer-shell vte4 tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
+          pacman -Syyuu --noconfirm --needed git rust python gtk4 gtk4-layer-shell vte4 gtksourceview5 tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler qt6-base qt6-declarative
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}

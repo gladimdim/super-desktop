@@ -254,7 +254,7 @@ impl ViewTransform {
     }
 
     /// A host point in viewport pixels.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub fn host_to_view(&self, x: f64, y: f64) -> (f64, f64) {
         let (ox, oy) = self.origin();
         (ox + x * self.scale, oy + y * self.scale)

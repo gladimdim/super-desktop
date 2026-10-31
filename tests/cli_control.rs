@@ -775,6 +775,12 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             (vec!["harness", "list", "--all", "--all"], 2),
             (vec!["terminal", "inspect"], 2),
             (vec!["app", "status", "--all"], 2),
+            // Options between command words keep their original handling.
+            (vec!["harness", "--all", "list"], 0),
+            (vec!["terminal", "--target", "local", "capture", "card-1", "--history", "--lines=37"], 0),
+            (vec!["harness", "--target=local", "launch", "shell", "--cwd", "/tmp", "--request-id", "interleaved-001"], 0),
+            (vec!["terminal", "--target=local", "create", "--cwd", "/tmp", "--request-id", "interleaved-002"], 0),
+            (vec!["harness", "--target=local", "launch", "shell", "--cwd", "/tmp", "--request-id", "interleaved-003", "--show"], 2),
         ] {
             let output = Command::new(executable)
                 .args(&args)
@@ -815,8 +821,18 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
                 assert_eq!(data["requestId"], "shell-001");
                 assert_eq!(data["data"]["harness"], "shell");
             }
-            if args == ["harness", "list", "--all"] {
+            if args == ["harness", "list", "--all"] || args == ["harness", "--all", "list"] {
                 assert_eq!(data["data"]["all"], true);
+            }
+            if args.get(2) == Some(&"launch") && expected == 0 {
+                assert_eq!(data["requestId"], "interleaved-001");
+                assert_eq!(data["data"]["harness"], "shell");
+                assert_eq!(data["data"]["arguments"], serde_json::Value::Null);
+                assert_eq!(data["data"]["allowUnsafeHarness"], false);
+            }
+            if args.get(2) == Some(&"create") {
+                assert_eq!(data["requestId"], "interleaved-002");
+                assert_eq!(data["data"]["harness"], "shell");
             }
         }
     }
@@ -847,6 +863,7 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             vec!["terminal", "move", "card-1", "--x=80", "--y=100", "--expect-epoch=epoch-1", "--expect-revision=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "--request-id=older-move"],
             vec!["terminal", "runtime", "card-1"],
             vec!["terminal", "capture", "card-1"],
+            vec!["harness", "--target", "local", "launch", "claude", "--cwd", "/tmp", "--request-id", "older-interleaved"],
         ] {
             let output = Command::new(executable)
                 .args(args)
@@ -857,6 +874,22 @@ fn cli_local_commands_use_framed_owner_socket_and_report_errors() {
             assert_eq!(output.status.code(), Some(6));
             let reply: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(reply["error"]["code"], "unsupported_command");
+        }
+        // The first daemons' read methods are sent without a capability probe.
+        for args in [
+            vec!["capabilities"],
+            vec!["app", "status"],
+            vec!["terminal", "list"],
+            vec!["harness", "list", "--all"],
+            vec!["harness", "inspect", "shell"],
+        ] {
+            let output = Command::new(executable)
+                .args(&args)
+                .arg("--format=json")
+                .env("XDG_RUNTIME_DIR", &fixture.root)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(0), "{args:?}");
         }
     }
     // Idle clients occupy only the bounded worker pool; excess connections are

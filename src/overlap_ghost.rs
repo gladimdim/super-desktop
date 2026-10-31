@@ -280,8 +280,9 @@ pub struct GhostLayer {
     canvas: Fixed,
     hud: gtk4::Box,
     cards: Rc<RefCell<Vec<Rc<MiniTerminalCard>>>>,
-    screen_w: i32,
-    screen_h: i32,
+    /// The workspace size, where an expanded card is drawn. Follows the
+    /// overlay's allocation (`set_screen_size`).
+    screen: Cell<(i32, i32)>,
     /// False while the overlay slides in or out, or is unmapped: a ghost must
     /// not hang in mid-air at rest poses the cards have not reached yet. No
     /// terminal is paused meanwhile either, since the cards move on their own
@@ -312,12 +313,16 @@ impl GhostLayer {
             canvas: canvas.clone(),
             hud: hud.clone(),
             cards,
-            screen_w,
-            screen_h,
+            screen: Cell::new((screen_w, screen_h)),
             live: Cell::new(true),
             all_drawing: Cell::new(false),
             outlines: RefCell::new(Vec::new()),
         })
+    }
+
+    /// The overlay now has this size (another display or scale).
+    pub fn set_screen_size(&self, width: i32, height: i32) {
+        self.screen.set((width, height));
     }
 
     /// Recompute the outlines, and which terminals draw, from the live cards
@@ -328,11 +333,12 @@ impl GhostLayer {
         }
         let cards = self.cards.borrow().clone();
         let ordered = paint_order(&self.canvas, &cards);
+        let (screen_w, screen_h) = self.screen.get();
         let placements: Vec<TerminalPlacement> = ordered
             .iter()
             .map(|card| TerminalPlacement {
                 session: card.data.borrow().session_name.clone(),
-                rect: card.canvas_rect(self.screen_w, self.screen_h),
+                rect: card.canvas_rect(screen_w, screen_h),
                 user_active: card.user_is_active(),
             })
             .collect();
@@ -354,10 +360,11 @@ impl GhostLayer {
         let hidden = if all_drawing {
             Vec::new()
         } else {
+            let (screen_w, screen_h) = self.screen.get();
             let placements: Vec<DrawPlacement> = ordered
                 .iter()
                 .map(|card| {
-                    let rect = card.canvas_rect(self.screen_w, self.screen_h);
+                    let rect = card.canvas_rect(screen_w, screen_h);
                     DrawPlacement {
                         rect,
                         keep_drawing: card.user_is_active()
@@ -462,11 +469,7 @@ impl GhostLayer {
         }
         if self.buried(visible) {
             for outline in visible {
-                if let Some(last) = self.canvas.last_child() {
-                    if &last != outline {
-                        outline.insert_after(&self.canvas, Some(&last));
-                    }
-                }
+                crate::window::raise_canvas_child(&self.canvas, outline);
             }
         }
         // A new outline is `put` at the top of the canvas, which would leave it

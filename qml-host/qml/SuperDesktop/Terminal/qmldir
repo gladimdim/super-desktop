@@ -1,0 +1,2 @@
+module SuperDesktop.Terminal
+TerminalView 1.0 TerminalView.qml

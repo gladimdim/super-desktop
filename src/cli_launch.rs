@@ -1,7 +1,7 @@
 //! One-shot launch arguments are explicit and never saved as launcher defaults.
 use crate::cli::{render_reply, Output};
-use crate::cli_extended::{json_requested, send, valid_id, Options};
-use crate::control::{Command, Reply};
+use crate::cli_extended::{respond, send, valid_id, Options};
+use crate::control::Command;
 pub(crate) fn run(args: &[String]) -> Option<Output> {
     if args.first().is_some_and(|s| s == "terminal") && args.get(1).is_some_and(|s| s == "composer")
     {
@@ -16,17 +16,11 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
                         id: options.words[2].clone(),
                     },
                     &options,
-                    "terminal.composer",
                 ),
                 options.json,
             ))
         };
-        return Some(build().unwrap_or_else(|m| {
-            render_reply(
-                Reply::failure("", "invalid_arguments", m),
-                json_requested(args),
-            )
-        }));
+        return respond(args, build);
     }
     if args.first().map(String::as_str) == Some("terminal")
         && args
@@ -83,19 +77,9 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
                     expect_pane_identity: pane,
                 }
             };
-            let method = if action == "forget" {
-                "terminal.forget"
-            } else {
-                "terminal.relaunch"
-            };
-            Ok(render_reply(send(command, &o, method), o.json))
+            Ok(render_reply(send(command, &o), o.json))
         };
-        return Some(build().unwrap_or_else(|m| {
-            render_reply(
-                Reply::failure("", "invalid_arguments", m),
-                json_requested(args),
-            )
-        }));
+        return respond(args, build);
     }
     if !matches!(
         args.get(0..2).map(|a| (a[0].as_str(), a[1].as_str())),
@@ -167,14 +151,9 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             if let Some(flow) = crate::cli_launch_flow::Flow::parse(launch.clone(), &options)? {
                 flow.run(&options)
             } else {
-                send(launch, &options, "harness.launch")
+                send(launch, &options)
             };
         Ok(render_reply(reply, options.json))
     };
-    Some(build().unwrap_or_else(|m| {
-        render_reply(
-            Reply::failure("", "invalid_arguments", m),
-            json_requested(args),
-        )
-    }))
+    respond(args, build)
 }

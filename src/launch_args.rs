@@ -73,9 +73,25 @@ pub fn quote(arg: &str) -> String {
         .unwrap_or_else(|_| format!("'{}'", arg.replace('\'', "'\"'\"'")))
 }
 
-/// `arguments` as the settings field shows them: quoted only where needed.
+/// Whether the settings field must wrap `argument`: `parse` reads it back
+/// unchanged when it has no quote, backslash or whitespace, no `#` starting a
+/// comment, and is not empty. Everything else stays bare, like `--model=opus`.
+pub fn needs_quotes(argument: &str) -> bool {
+    argument.is_empty()
+        || argument.starts_with("#")
+        || argument.contains(|c| "\"'\\ \t\n".contains(c) || char::is_control(c))
+}
+
+/// One argument as the settings field shows it: quoted only when `parse`
+/// would otherwise read it back differently.
+pub fn show(argument: &str) -> String {
+    if needs_quotes(argument) { quote(argument) } else { argument.into() }
+}
+
+/// `arguments` as the settings field shows them: quoted only where the field
+/// would otherwise read them back differently.
 pub fn display(arguments: &[String]) -> String {
-    arguments.iter().map(|arg| quote(arg)).collect::<Vec<_>>().join(" ")
+    arguments.iter().map(|argument| show(argument)).collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -104,6 +120,16 @@ mod tests {
         let arguments = words(&["--model", "opus", "be brief", "it's", "$HOME", ""]);
         assert_eq!(parse(&display(&arguments)).unwrap(), arguments);
         assert_eq!(display(&words(&["--tui-mode", "regular"])), "--tui-mode regular");
+    }
+
+    #[test]
+    fn display_quotes_only_words_that_need_it() {
+        assert_eq!(display(&words(&["--model=opus"])), "--model=opus");
+        assert_eq!(display(&words(&["a#b"])), "a#b");
+        assert_eq!(display(&words(&["#tag"])), "'#tag'");
+        assert_eq!(display(&words(&["café", "✓"])), "café ✓");
+        let arguments = words(&["--model=opus", "a#b", "café", "✓", "#tag", ""]);
+        assert_eq!(parse(&display(&arguments)).unwrap(), arguments);
     }
 
     #[test]

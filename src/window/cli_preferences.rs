@@ -7,6 +7,7 @@ fn settings(state: &AppState) -> Value {
     json!([
         {"key":"toolbarSize","value":state.top_bar_size,"default":"large","type":"enum","choices":["small","medium","large"],"writable":true,"restartRequired":false},
         {"key":"sleepLockOnAc","value":state.sleep_lock_on_ac,"default":false,"type":"boolean","writable":cfg!(target_os="linux"),"restartRequired":false},
+        {"key":"bootAutostart","value":state.boot_autostart,"default":false,"type":"boolean","writable":cfg!(target_os="linux"),"restartRequired":false},
         {"key":"workspaceDefault","value":state.workspace_dir,"effective":crate::state::effective_workspace_dir(state),"default":Value::Null,"type":"absolute-directory-or-null","writable":true,"restartRequired":false},
         {"key":"settingsPanelPosition","value":state.settings_panel_pos,"default":Value::Null,"type":"integer-pair-or-null","writable":true,"restartRequired":false},
         {"key":"settingsPanelSize","value":state.settings_panel_size,"default":Value::Null,"type":"integer-pair-or-null","minimum":[660,620],"maximum":[8192,8192],"writable":true,"restartRequired":false},
@@ -26,7 +27,9 @@ impl SuperDesktopWindow {
             if expect_epoch.as_ref()!=Some(&snapshot.epoch)||expect_revision.as_ref()!=Some(&revision){return fail("conflict","Settings changed; preview the shortcut again.");}
             if self.overlay_panels.iter().any(|p|p.is_visible()){return fail("conflict","Close Settings before applying a CLI shortcut.");}
         }else if commit{return fail("invalid_request","Apply requires a preview.");}
-        if commit {let mut state=self.state.borrow_mut();state.toggle_shortcut=Some(combo.clone());crate::state::save_state_async(state.clone());}
+        if commit {
+            persist(&self.state, |s| s.toggle_shortcut = Some(combo.clone()));
+        }
         Reply::success(&request.request_id,json!({"epoch":snapshot.epoch,"revision":revision,"current":state.toggle_shortcut,"combo":combo,"stateSaved":commit}))
     }
 
@@ -154,6 +157,27 @@ impl SuperDesktopWindow {
                                     return fail(
                                         "invalid_arguments",
                                         "sleepLockOnAc requires a JSON boolean.",
+                                    )
+                                }
+                            }
+                        };
+                    }
+                    "bootAutostart" => {
+                        if !cfg!(target_os = "linux") {
+                            return fail(
+                                "unsupported_platform",
+                                "System launch is unsupported on this platform.",
+                            );
+                        }
+                        next.boot_autostart = if v.is_null() {
+                            false
+                        } else {
+                            match v.as_bool() {
+                                Some(v) => v,
+                                None => {
+                                    return fail(
+                                        "invalid_arguments",
+                                        "bootAutostart requires a JSON boolean.",
                                     )
                                 }
                             }
@@ -312,6 +336,7 @@ impl SuperDesktopWindow {
                     self.machine_view.paint_top_bar_size(next.top_bar_size);
                 }
                 "sleepLockOnAc" => crate::sleep_lock::set_enabled(next.sleep_lock_on_ac),
+                "bootAutostart" => crate::boot_autostart::apply(next.boot_autostart),
                 "workspaceDefault" => {
                     let directory = crate::state::effective_workspace_dir(&next);
                     self.ws_bar.show_folder(&directory);

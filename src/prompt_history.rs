@@ -7,7 +7,9 @@ use std::process::Command;
 const OPTION: &str = "@super_desktop_last_prompt";
 const MAX_CHARS: usize = 16_384;
 
+/// Also adds the full text to the terminal's prompt history (`prompt_log`).
 pub fn record(session: &str, text: &str) {
+    crate::prompt_log::append(session, text);
     record_with(Command::new(crate::tmux::tmux_bin()), session, text);
 }
 
@@ -162,22 +164,7 @@ mod tests {
 
     #[test]
     fn submitted_prompt_is_shared_and_survives_response_output() {
-        struct Server(String);
-        impl Server {
-            fn command(&self) -> Command {
-                let mut command = Command::new(crate::tmux::tmux_bin());
-                command
-                    .args(["-L", &self.0, "-f", "/dev/null"])
-                    .env_remove("TMUX");
-                command
-            }
-        }
-        impl Drop for Server {
-            fn drop(&mut self) {
-                let _ = self.command().arg("kill-server").output();
-            }
-        }
-        let server = Server(format!("sd-prompt-test-{}", std::process::id()));
+        let server = crate::test_isolation::TmuxServer::new();
         let session = "sd_term_prompt_test";
         assert!(server
             .command()

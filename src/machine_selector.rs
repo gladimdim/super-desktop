@@ -939,11 +939,8 @@ mod tests {
     use super::*;
 
     fn requeue_sizes(widget: &gtk4::Widget) {
-        widget.queue_resize();
-        let mut child = widget.first_child();
-        while let Some(current) = child {
-            requeue_sizes(&current);
-            child = current.next_sibling();
+        for widget in crate::gtk_test::descendants(widget) {
+            widget.queue_resize();
         }
     }
 
@@ -983,20 +980,7 @@ mod tests {
         snapshot.local.cards[0].layout.y = 5000;
         view.canvas
             .apply(&peer_client::test_peer('a'), &snapshot, true);
-        fn find(widget: &gtk4::Widget, test: &dyn Fn(&gtk4::Widget) -> bool) -> Option<gtk4::Widget> {
-            if test(widget) {
-                return Some(widget.clone());
-            }
-            let mut child = widget.first_child();
-            while let Some(widget) = child {
-                if let Some(found) = find(&widget, test) {
-                    return Some(found);
-                }
-                child = widget.next_sibling();
-            }
-            None
-        }
-        let hide: gtk4::Button = find(view.remote_toolbar.upcast_ref(), &|w| {
+        let hide: gtk4::Button = crate::gtk_test::find_where(view.remote_toolbar.upcast_ref(), |w| {
             w.has_css_class("hud-button-danger")
         })
         .unwrap()
@@ -1205,13 +1189,7 @@ mod tests {
         view.bind_keyboard(&window);
         window.set_child(Some(&view.stack));
         window.present();
-        fn pump() {
-            let until = std::time::Instant::now() + Duration::from_millis(250);
-            while std::time::Instant::now() < until {
-                while glib::MainContext::default().iteration(false) {}
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        let pump = || crate::gtk_test::pump(250);
         pump();
         let pop = view.local_button.popover().unwrap();
         assert!(!pop.is_autohide());

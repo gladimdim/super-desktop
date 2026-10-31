@@ -48,52 +48,22 @@ pub fn strip_from_process_env() {
 }
 
 /// Explicitly preload layer-shell for a child that is itself the overlay
-/// daemon (cold start from `toggle`/`show`).
+/// daemon (cold start from `toggle`/`show`, or the client delegating to the
+/// application). An inherited exact entry is left as it is.
 pub fn preload_layer_shell(command: &mut Command) {
     if !Path::new(LAYER_SHELL_LIBRARY).exists() {
         return;
     }
     let current = std::env::var("LD_PRELOAD").unwrap_or_default();
+    if current.split([':', ' ']).any(|entry| entry == LAYER_SHELL_LIBRARY) {
+        return;
+    }
     let value = if current.is_empty() {
         LAYER_SHELL_LIBRARY.to_string()
     } else {
         format!("{LAYER_SHELL_LIBRARY}:{current}")
     };
     command.env("LD_PRELOAD", value);
-}
-
-/// A tmux server started from a preloaded environment copies `LD_PRELOAD`
-/// into its global environment, and every new pane inherits it. Remove only
-/// the layer-shell entry there; blocking (runs tmux), so call it off the UI
-/// thread.
-pub fn clean_tmux_global_env() {
-    let tmux = crate::tmux::tmux_bin();
-    let Ok(output) = Command::new(&tmux)
-        .args(["show-environment", "-g", "LD_PRELOAD"])
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return; // No server, or the variable is not set.
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let Some(value) = text.trim_end_matches('\n').strip_prefix("LD_PRELOAD=") else {
-        return; // `-LD_PRELOAD` (already removed) or unexpected output.
-    };
-    match strip_layer_shell(value) {
-        None => {}
-        Some(None) => {
-            let _ = Command::new(&tmux)
-                .args(["set-environment", "-g", "-u", "LD_PRELOAD"])
-                .output();
-        }
-        Some(Some(rest)) => {
-            let _ = Command::new(&tmux)
-                .args(["set-environment", "-g", "LD_PRELOAD", &rest])
-                .output();
-        }
-    }
 }
 
 #[cfg(test)]

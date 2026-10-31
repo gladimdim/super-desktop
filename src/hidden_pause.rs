@@ -273,12 +273,6 @@ fn plan(targets: &[Target], listing: &str) -> Vec<(i32, String)> {
     plans
 }
 
-/// The slave device name of a pty master: the tty tmux reports for
-/// the client running on it.
-pub fn pty_name(master: std::os::fd::BorrowedFd<'_>) -> Option<String> {
-    crate::platform::pty::name(master).ok()
-}
-
 fn run(tmux: &dyn Fn() -> Command, args: &[&str]) -> Option<String> {
     let output = tmux().args(args).output().ok()?;
     output
@@ -330,8 +324,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::os::fd::AsFd;
-    use std::os::unix::fs::PermissionsExt;
-    use std::path::PathBuf;
+    use crate::test_isolation::wait_until;
     use std::process::{Child, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -421,19 +414,11 @@ mod tests {
     }
 
     /// Own server, socket and config per test. Never touches the user's tmux.
-    struct Server {
-        directory: PathBuf,
-    }
+    struct Server(crate::test_isolation::TmuxServer);
 
     impl Server {
         fn new(session: &str, columns: u16, rows: u16, program: &str) -> Self {
-            static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
-            let directory =
-                std::env::temp_dir().join(format!("sd-hidden-{}-{serial}", std::process::id()));
-            std::fs::create_dir(&directory).unwrap();
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-            let server = Self { directory };
+            let server = Self(crate::test_isolation::TmuxServer::new());
             let (columns, rows) = (columns.to_string(), rows.to_string());
             server.run(&["new-session", "-d", "-s", session, "-x", &columns, "-y", &rows, program]);
             server.run(&["set-option", "-g", "window-size", "latest"]);
@@ -441,18 +426,11 @@ mod tests {
         }
 
         fn command(&self) -> Command {
-            let mut command = Command::new(crate::tmux::tmux_bin());
-            command
-                .args(["-S", self.directory.join("socket").to_str().unwrap(), "-f", "/dev/null"])
-                .env_remove("TMUX")
-                .env_remove("TMUX_PANE");
-            command
+            self.0.command()
         }
 
         fn run(&self, args: &[&str]) -> String {
-            let out = self.command().args(args).output().expect("tmux must be installed");
-            assert!(out.status.success(), "tmux {args:?}: {}", String::from_utf8_lossy(&out.stderr));
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
+            self.0.run(args)
         }
 
         fn window_size(&self, session: &str) -> String {
@@ -463,7 +441,7 @@ mod tests {
         /// own session (so its process group is orphaned, as under VTE).
         fn attach(&self, session: &str, columns: u16, rows: u16) -> Attached {
             let (master, slave) = crate::platform::pty::open(columns, rows).unwrap();
-            let tty = pty_name(master.as_fd()).expect("pty name");
+            let tty = crate::platform::pty::name(master.as_fd()).expect("pty name");
             let mut command = self.command();
             command
                 .args(["-2", "attach-session", "-t", &format!("={session}")])
@@ -499,13 +477,6 @@ mod tests {
         }
     }
 
-    impl Drop for Server {
-        fn drop(&mut self) {
-            let _ = self.command().arg("kill-server").output();
-            let _ = std::fs::remove_dir_all(&self.directory);
-        }
-    }
-
     struct Attached {
         child: Child,
         bytes: Arc<AtomicUsize>,
@@ -528,14 +499,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
-        }
-    }
-
-    fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !done() {
-            assert!(Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

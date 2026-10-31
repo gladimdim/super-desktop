@@ -104,10 +104,37 @@ mobile terminal output and Linux performance notes.
   describe unreleased plans. Describe shipped, user-facing behavior only.
 - This repository's Markdown is limited to README.md, CLI.md (the public command
   reference), SECURITY.md, these
-  instructions, `assets/logos/` attribution and licenses, and
-  `docs/screenshots/README.md`.
+  instructions, `assets/logos/` attribution and licenses,
+  `docs/screenshots/README.md`, and the plugin skill under `skills/`.
 - If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
   the notes here.
+
+## Plugins (QML surfaces) and their skill
+
+A plugin is a folder in `~/.config/super-desktop/plugins/<id>/` with a
+`plugin.json` and QML. `sd-qml-host` (`qml-host/`, C++/Qt Quick, built by
+`scripts/build-qml-host.sh`) renders each surface off screen and the overlay
+shows its frames (`src/plugins/` without GTK, `src/plugin_ui/` with it).
+`skills/super-desktop-plugin/` is the skill agents follow to write plugins;
+it is built into the binary and copied into every plugin folder, so it is
+the public contract of the plugin API.
+
+- Any change to the plugin API (manifest fields, slots, the `sd` object,
+  `sd.call` methods, errors, limits, the `super-desktop plugin` commands)
+  updates `SKILL.md`, the examples and the tests in the same commit.
+- Plugin API 1 only grows: new optional fields, slots and methods. Never
+  remove, rename or retype anything, or tighten validation. A breaking change
+  is API 2 and needs the user's agreement first.
+- The host protocol between the overlay and `sd-qml-host` grows the same way:
+  unknown messages and fields are ignored on both sides.
+- Keep the examples valid (`cargo test plugins_`) and keep `plugin check` and
+  `plugin snapshot` working without a running overlay: they are how agents
+  see their own work.
+- Plugins never change the bridge or the PC-to-PC protocol, and never feed a
+  card title or a harness prompt.
+- The plugin host never opens a window: it runs on Qt's offscreen platform.
+  Tests point `SD_PLUGINS_DIR` and `SD_PLUGINS_STATE_DIR` at the private test
+  root (`src/test_isolation.rs`).
 
 ## The version changes only for a release
 

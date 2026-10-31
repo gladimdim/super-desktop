@@ -1,6 +1,6 @@
 //! Minimal RFC 6455 WebSocket server support for the harness bridge.
 //!
-//! Deliberately dependency-free and small: the bridge pushes server→client text
+//! Deliberately small: the bridge pushes server→client text
 //! frames and only needs to understand the client→server frames well enough to
 //! notice a close and answer pings. No extensions, no fragmentation of outgoing
 //! messages (payloads here are pane dumps of a few KiB, well under any limit
@@ -10,9 +10,6 @@
 
 use std::io::{self, Read, Write};
 
-/// The magic GUID from RFC 6455 §4.2.2.
-const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-
 const OP_TEXT: u8 = 0x1;
 const OP_BINARY: u8 = 0x2;
 const OP_CLOSE: u8 = 0x8;
@@ -21,7 +18,7 @@ const OP_PONG: u8 = 0xA;
 
 /// `Sec-WebSocket-Accept` for a client's `Sec-WebSocket-Key`.
 pub fn accept_key(key: &str) -> String {
-    base64(&sha1(format!("{key}{WS_GUID}").as_bytes()))
+    tungstenite::handshake::derive_accept_key(key.as_bytes())
 }
 
 /// One decoded frame from the peer.
@@ -162,122 +159,9 @@ pub fn write_close<W: Write>(out: &mut W, code: u16, reason: &str) -> io::Result
     write_frame(out, OP_CLOSE, &payload)
 }
 
-/// SHA-1 (RFC 3174). WebSocket's handshake is the only user, so this stays a
-/// tiny local implementation instead of pulling in a hashing crate.
-pub fn sha1(data: &[u8]) -> [u8; 20] {
-    let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
-    let mut msg = data.to_vec();
-    let bits = (data.len() as u64).wrapping_mul(8);
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bits.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for (i, word) in w.iter_mut().take(16).enumerate() {
-            *word = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for (i, wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | (!b & d), 0x5A82_7999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
-                _ => (b ^ c ^ d, 0xCA62_C1D6),
-            };
-            let tmp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(*wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = tmp;
-        }
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-    }
-
-    let mut out = [0u8; 20];
-    for (i, word) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
-    out
-}
-
-/// Standard base64 with padding.
-pub fn base64(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[(triple >> 18) as usize & 0x3F] as char);
-        out.push(ALPHABET[(triple >> 12) as usize & 0x3F] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(triple >> 6) as usize & 0x3F] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[triple as usize & 0x3F] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn hex(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    #[test]
-    fn test_sha1_matches_published_vectors() {
-        assert_eq!(hex(&sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(hex(&sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
-        assert_eq!(
-            hex(&sha1(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
-            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
-        );
-        // 64 bytes: exercises the "padding needs a second block" path.
-        assert_eq!(
-            hex(&sha1(&vec![b'a'; 64])),
-            "0098ba824b5c16427bd7a1122a5a442a25ec644d"
-        );
-    }
-
-    #[test]
-    fn test_base64_pads_correctly() {
-        assert_eq!(base64(b""), "");
-        assert_eq!(base64(b"f"), "Zg==");
-        assert_eq!(base64(b"fo"), "Zm8=");
-        assert_eq!(base64(b"foo"), "Zm9v");
-        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
-    }
 
     #[test]
     fn test_handshake_accept_key_rfc_example() {

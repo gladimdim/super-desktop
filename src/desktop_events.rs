@@ -632,13 +632,12 @@ mod tests {
         hub: &Arc<Hub>,
         timing: Timing,
     ) -> (Viewer, std::net::TcpStream, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
+        let (client, socket) = loopback_pair();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let address = client.peer_addr().unwrap();
+        let server_socket = socket.try_clone().unwrap();
         let hub = Arc::clone(hub);
-        let (server_socket, handed) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
-            let (socket, _) = listener.accept().unwrap();
-            server_socket.send(socket.try_clone().unwrap()).unwrap();
             let mut connection = Connection::plain(socket);
             let request = read_request(&mut connection, None).expect("upgrade request");
             let subscription = hub.subscribe("device").expect("budget");
@@ -646,12 +645,10 @@ mod tests {
             let source = Arc::clone(&hub.source);
             run_stream(&mut connection, subscription, || Published::of(source.fetch()), timing);
         });
-        let client = std::net::TcpStream::connect(address).unwrap();
-        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let (socket, _) =
             tungstenite::client(format!("ws://{address}/api/v1/desktop/events"), client)
                 .expect("handshake");
-        (Viewer { socket }, handed.recv().unwrap(), server)
+        (Viewer { socket }, server_socket, server)
     }
 
     #[test]
@@ -751,10 +748,6 @@ mod tests {
         drop(hub.subscribe("device").unwrap());
         // Wake the hub so it sees the empty list.
         fake.change(snapshot("e", 2, 0));
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while hub.lock().running && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(!hub.lock().running);
+        crate::test_isolation::wait_until("the hub to stop", || !hub.lock().running);
     }
 }

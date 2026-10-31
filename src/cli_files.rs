@@ -1,6 +1,6 @@
 //! File reads remain data; export writes only an explicitly named new file.
 use crate::cli::{render_reply, Output};
-use crate::cli_extended::{json_requested, opaque, send, valid_id, Options};
+use crate::cli_extended::{opaque, respond, send, valid_id, Options};
 use crate::control::{Command, FilesEdit as Edit, FilesQuery as Read, Reply};
 use base64::Engine;
 use sha2::{Digest, Sha256};
@@ -88,24 +88,14 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             options,
         ))
     };
-    Some(match build() {
-        Ok((command, options)) => {
-            let reply = if options.values.contains_key("--output") {
-                export(command, &options)
-            } else {
-                let method = if command.is_mutation() {
-                    "terminal.files.edit"
-                } else {
-                    "terminal.files.read"
-                };
-                send(command, &options, method)
-            };
-            render_reply(reply, options.json)
-        }
-        Err(message) => render_reply(
-            Reply::failure("", "invalid_arguments", message),
-            json_requested(args),
-        ),
+    respond(args, || {
+        let (command, options) = build()?;
+        let reply = if options.values.contains_key("--output") {
+            export(command, &options)
+        } else {
+            send(command, &options)
+        };
+        Ok(render_reply(reply, options.json))
     })
 }
 fn export(command: Command, options: &Options) -> Reply {
@@ -132,7 +122,6 @@ fn export(command: Command, options: &Options) -> Reply {
                 },
             },
             options,
-            "terminal.files.read",
         );
         if !reply.ok {
             return if output.is_some() {

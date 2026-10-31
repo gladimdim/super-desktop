@@ -1,0 +1,11 @@
+{
+  "id": "agents-menu",
+  "name": "Agents menu",
+  "description": "A top-bar item; click it for a popup listing your AI agents, then pick one to open a new card.",
+  "api": 1,
+  "replacesLaunchers": true,
+  "surfaces": [
+    { "id": "button", "slot": "toolbar.item", "qml": "Toolbar.qml", "size": 96 },
+    { "id": "menu", "slot": "popup", "qml": "Menu.qml", "size": 220, "height": 240 }
+  ]
+}

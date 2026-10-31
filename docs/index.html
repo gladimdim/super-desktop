@@ -3,14 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SUPER DESKTOP — your AI workspace for Omarchy</title>
-<meta name="description" content="SUPER DESKTOP: every AI coding agent on every PC, one shortcut away on Omarchy, and on your Android phone. Direct and encrypted, with no accounts or servers.">
+<title>SUPER DESKTOP — private AI agent workspace for Omarchy Linux and Android</title>
+<meta name="description" content="SUPER DESKTOP runs Claude Code, Codex, OpenCode and every other AI coding agent on your own Linux PCs, one shortcut away, and puts them on your Android phone. No accounts, no API keys, no cloud relay: your devices talk directly and encrypted. Free and open source (GPL-3.0).">
+<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+<meta name="author" content="Dmytro Gladkyi">
+<link rel="alternate" type="text/plain" title="Summary for AI assistants" href="https://superdesktop.dmytrogladkyi.com/llms.txt">
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
+<meta property="og:locale" content="en_US">
 <meta property="og:url" content="https://superdesktop.dmytrogladkyi.com/">
 <meta property="og:title" content="SUPER DESKTOP — every AI agent, one shortcut away">
-<meta property="og:description" content="A hidden workspace for Omarchy: your coding agents on every PC, and on your phone. Direct and encrypted, no accounts.">
+<meta property="og:description" content="Your AI coding agents on every PC and on your phone. Direct and encrypted: no accounts, no API keys, no cloud in between.">
 <meta property="og:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta property="og:image:type" content="image/jpeg">
 <meta property="og:image:width" content="1200">
@@ -18,15 +22,102 @@
 <meta property="og:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="SUPER DESKTOP — every AI agent, one shortcut away">
-<meta name="twitter:description" content="A hidden workspace for Omarchy: your coding agents on every PC, and on your phone. Direct and encrypted, no accounts.">
+<meta name="twitter:description" content="Your AI coding agents on every PC and on your phone. Direct and encrypted: no accounts, no API keys, no cloud in between.">
 <meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
 <meta name="theme-color" content="#090c12">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#website",
+      "url": "https://superdesktop.dmytrogladkyi.com/",
+      "name": "SUPER DESKTOP",
+      "inLanguage": "en",
+      "publisher": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" }
+    },
+    {
+      "@type": "Person",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#author",
+      "name": "Dmytro Gladkyi",
+      "url": "https://github.com/gladimdim"
+    },
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#desktop",
+      "name": "SUPER DESKTOP",
+      "url": "https://superdesktop.dmytrogladkyi.com/",
+      "description": "A hidden workspace for Omarchy Linux (Arch Linux with Hyprland) that runs every AI coding agent (Claude Code, Codex, OpenCode, Aider, Goose, Qwen Code, Cursor Agent and more) in live terminal cards on your own PCs, one shortcut away. Pair other PCs and an Android phone directly and encrypted, with no accounts, no API keys of its own and no cloud relay.",
+      "applicationCategory": "DeveloperApplication",
+      "applicationSubCategory": "AI coding agent workspace",
+      "operatingSystem": "Linux (Omarchy, Arch Linux with Hyprland)",
+      "softwareVersion": "1.7.2",
+      "license": "https://www.gnu.org/licenses/gpl-3.0.html",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "codeRepository": "https://github.com/gladimdim/super-desktop",
+      "downloadUrl": "https://github.com/gladimdim/super-desktop/releases",
+      "installUrl": "https://superdesktop.dmytrogladkyi.com/#install",
+      "screenshot": "https://superdesktop.dmytrogladkyi.com/screenshots/readme-overlay.webp",
+      "image": "https://superdesktop.dmytrogladkyi.com/media/social-card.jpg",
+      "author": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" },
+      "featureList": [
+        "No accounts and no sign-up",
+        "No API keys of its own: uses the AI agents you already have installed and signed in",
+        "No cloud relay or third-party server: PCs and phones connect directly over your network or Tailscale",
+        "Certificate-pinned HTTPS/WSS encryption with on-screen code verification and per-device approval",
+        "No analytics, advertising or tracking",
+        "Supports Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, shells and custom commands",
+        "Live terminal cards with working and finished status",
+        "Open and type into agents on your other PCs",
+        "Android app and Android launcher with live agent terminals and completion alerts",
+        "Command line and local MCP server so AI agents can launch, watch and arrange sessions",
+        "Plugins written by your own AI agent in QML",
+        "SD Editor for files your agents write",
+        "Follows your Omarchy theme"
+      ]
+    },
+    {
+      "@type": "MobileApplication",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#android",
+      "name": "SUPER DESKTOP for Android",
+      "url": "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
+      "description": "Every AI coding agent session on your PCs, on your Android phone: type prompts that run on the PC, get alerts when an agent finishes, send pictures and files. Connects directly to your own PCs with no account.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Android",
+      "installUrl": "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
+      "author": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://superdesktop.dmytrogladkyi.com/#faq",
+      "mainEntity": [
+        {"@type": "Question", "name": "What is SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "SUPER DESKTOP is a free, open-source workspace for your AI coding agents on Omarchy Linux (Arch Linux with Hyprland). Press SUPER SHIFT Q and every agent you run, such as Claude Code or Codex, appears over your screen in its own live terminal card. Press it again and they hide, still running. The same agents are reachable from your other PCs and from your Android phone."}},
+        {"@type": "Question", "name": "Why should I install it?", "acceptedAnswer": {"@type": "Answer", "text": "If you run more than one coding agent, or run them on more than one machine, SUPER DESKTOP keeps them all one shortcut away, shows which ones are working or finished, and lets you answer them from another PC or your phone when you step away. It does this without an account, without its own API keys and without any server in between, so your code and prompts stay on your own devices."}},
+        {"@type": "Question", "name": "Does SUPER DESKTOP send my code, prompts or terminal output anywhere?", "acceptedAnswer": {"@type": "Answer", "text": "No. There are no SUPER DESKTOP servers, no analytics, no advertising and no tracking, and the developer receives none of your data. Prompts, terminal output, files and pictures travel only between your own PCs and phones. Your AI agents still talk to their own providers exactly as they do without SUPER DESKTOP; that traffic is governed by the agent and its provider. See the privacy policy."}},
+        {"@type": "Question", "name": "Do I need an account or API keys?", "acceptedAnswer": {"@type": "Answer", "text": "No. There is nothing to sign up for. SUPER DESKTOP does not call any AI model itself and needs no API keys of its own: it launches the agents you already installed and signed in to, with their own login and their own subscription or keys."}},
+        {"@type": "Question", "name": "Which AI coding agents does it support?", "acceptedAnswer": {"@type": "Answer", "text": "Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any command you add yourself. Every agent installed on the PC gets a launcher in the top bar."}},
+        {"@type": "Question", "name": "Is there a third party, relay or cloud between my devices?", "acceptedAnswer": {"@type": "Answer", "text": "No. Your PCs and phones connect directly over your own network or over Tailscale if you use it. Connections are encrypted (HTTPS and WebSocket with a pinned certificate). Each new device shows the same code on both screens and must be approved on the PC, and you can revoke any phone at any time."}},
+        {"@type": "Question", "name": "Can I use my agents from my phone?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The Android app on Google Play lists every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development."}},
+        {"@type": "Question", "name": "Is it free?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app is free and open source under the GNU GPL version 3. The Android app has a free trial and an optional one-time SUPER DESKTOP Pro purchase handled by Google Play; there is no subscription and no SUPER DESKTOP account."}},
+        {"@type": "Question", "name": "Can AI agents control SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The super-desktop command line lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. super-desktop mcp serve exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with super-desktop plugin snapshot."}},
+        {"@type": "Question", "name": "Which operating systems does it run on?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is available now, iPhone is in development."}},
+        {"@type": "Question", "name": "How do I install it?", "acceptedAnswer": {"@type": "Answer", "text": "Run curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash as your normal user on Omarchy. It installs what is missing, builds the newest release and sets up the shortcut. Run it again to update. An AI assistant with shell access can follow the install steps for AI assistants in the README."}},
+        {"@type": "Question", "name": "Does it work on a headless PC, or before I log in?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Turn on Settings → System launch and the PC starts SUPER DESKTOP by itself, with no screen and nobody logged in. Your agents come back where they were, and your phone can open them, prompt them, start new ones and close them. When you log in, the workspace shows the same agents, still running. For a PC that answers straight from power-on, turn on lingering once with loginctl enable-linger."}},
+        {"@type": "Question", "name": "Do my agents stop when I hide the workspace or close the phone app?", "acceptedAnswer": {"@type": "Answer", "text": "No. Each agent runs in its own terminal session on the PC and keeps working while the workspace is hidden or the phone is away. Open it again and you see where it is."}}
+      ]
+    }
+  ]
+}
+</script>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/site.css">
 <script>document.documentElement.className = "js";</script>
 <script src="assets/demo-model.js" defer></script>
 <script src="assets/demo-stage.js" defer></script>
+<script src="assets/demo-plugins.js" defer></script>
 <script src="assets/demo-phone.js" defer></script>
 <script src="assets/main.js" defer></script>
 </head>
@@ -38,8 +129,11 @@
     <nav class="nav-links" aria-label="Sections">
       <a href="#agents">Agents</a>
       <a href="#phone">Phone</a>
+      <a href="#launcher">Launcher</a>
       <a href="#remote">Other PCs</a>
+      <a href="#plugins">Plugins</a>
       <a href="#cli">For agents</a>
+      <a href="#faq">FAQ</a>
       <a href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </nav>
     <a class="btn primary" href="#install">Install</a>
@@ -49,13 +143,15 @@
 <main id="top">
   <section class="hero">
     <div class="wrap">
+      <a class="announce" href="#launcher"><b>New</b>SUPER DESKTOP Omalauncher: your agents on your home screen <span aria-hidden="true">→</span></a>
       <h1>Every AI agent.<br><span class="grad">One shortcut away.</span></h1>
       <p class="lede">A hidden workspace for Omarchy. Your coding agents live in it, on every PC, and in your pocket.</p>
       <div class="cta">
         <a class="btn primary" href="#install">Install</a>
+        <a class="play-badge" href="#phone" aria-label="Android app: get it on Google Play"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="141" height="42"></a>
         <a class="btn" href="#trailer">▶ Watch the 40-second tour</a>
       </div>
-      <p class="platforms">Omarchy Linux · Android app · iPhone in development · No accounts, no servers</p>
+      <p class="platforms">Omarchy Linux · Android on Google Play · iPhone in development · No accounts, no servers</p>
 
       <div class="demo-frame">
         <div class="try-hints" aria-label="Things to try">
@@ -149,6 +245,23 @@
     </div>
   </section>
 
+  <section class="feature flip reveal-up" id="editor">
+    <div class="wrap">
+      <div class="copy">
+        <p class="eyebrow"><span class="new-badge">NEW IN 1.7.0</span>SD Editor</p>
+        <h2>Edit what your agents write.</h2>
+        <p>The lightning bolt with a pencil in the top bar opens <strong>SD Editor</strong> on your project: its files on the left, tabs on the right, syntax colors from your theme.</p>
+        <p>Find and replace, Save as, Go to line, and previews of images, sound and video. It is a card like the others: drag it, Arrange it, hide it with the rest.</p>
+      </div>
+      <div class="media">
+        <a class="clip" href="screenshots/sd-editor.webp" style="display:block;aspect-ratio:1240/760">
+          <img src="screenshots/sd-editor.webp" loading="lazy" width="1240" height="760" alt="SD Editor: the project's folder tree on the left and a Rust file with syntax colors on the right">
+        </a>
+        <p class="caption">The real editor card, open on SUPER DESKTOP's own source.</p>
+      </div>
+    </div>
+  </section>
+
   <section class="feature wide reveal-up" id="phone">
     <div class="wrap">
       <div class="copy">
@@ -156,7 +269,9 @@
         <h2>Your agents, in your pocket.</h2>
         <p>Every session on your PC shows up on your phone. <strong>Type on the phone; it runs on the PC.</strong></p>
         <p>Get an alert when an agent finishes. Send it pictures and files.</p>
-        <p>Android is out now. iPhone is in development. <a href="connect.html">Connect your phone →</a></p>
+        <p><strong>No screen? No login? Still there.</strong> SUPER DESKTOP can run headless from boot, so your phone reaches your agents on a server or a PC nobody is logged in to.</p>
+        <p>The Android app is out now on Google Play. iPhone is in development.</p>
+        <p class="store"><a class="play-badge large" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="188" height="56"></a> <a href="connect.html">Connect your phone →</a></p>
       </div>
       <div class="media">
         <div class="tabs" role="tablist" aria-label="Phone demo">
@@ -177,6 +292,34 @@
           </div>
           <p class="caption">Real recording: the Android app on an unfolded Galaxy Z Fold.</p>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature wide reveal-up" id="launcher">
+    <div class="wrap">
+      <div class="copy">
+        <p class="eyebrow"><span class="new-badge">NEW · ANDROID LAUNCHER</span>Part of SUPER DESKTOP</p>
+        <h2>SUPER DESKTOP Omalauncher</h2>
+        <p>Your agents, on your home screen. <strong>SUPER DESKTOP Omalauncher</strong> (SD Launcher) is our Android launcher subproduct: a fork of <a href="https://github.com/SimonSchubert/omalauncher">Omalauncher</a> by Simon Schubert, with <strong>SUPER DESKTOP built in</strong>.</p>
+        <p>Keep the Omarchy themes, wallpapers, Android apps and widgets of Omalauncher, and bring your PCs' coding agents into home pages and terminal widgets.</p>
+        <p>A <strong>SUPER DESKTOP page</strong> shows every agent on your PCs, live: what it's doing, its model, folder and last lines. A <strong>terminal widget</strong> stays on one agent and resizes like any widget. Tap ⌨ to type; the terminal on the PC fits the widget.</p>
+        <p>Start and close agents from the home screen. Add pages and widgets from a long press on the home screen. Pair by scanning your PC's QR. It wears your Omarchy theme.</p>
+        <p class="store"><a class="btn primary" href="https://github.com/gladimdim/omalauncher/releases/download/sd-v1.6.0/SD-Launcher-1.6.0.apk">Download SD Launcher 1.6.0 (APK)</a> <a href="https://github.com/gladimdim/omalauncher">Fork source →</a> <a href="https://github.com/gladimdim/omalauncher/releases/tag/sd-v1.6.0">Release notes →</a></p>
+        <p class="caption">Android 10 or newer, arm64. Installs next to your current launcher. Pair with SUPER DESKTOP on your PC to access its agents.</p>
+      </div>
+      <div class="media">
+        <div class="launcher-shots">
+          <figure><img src="screenshots/sd-launcher-page.webp" loading="lazy" width="540" height="1170" alt="A SUPER DESKTOP home page: usage left per provider, then a PC's Codex and Claude Code agents with their status, model, folder and last prompt"><figcaption>A SUPER DESKTOP page</figcaption></figure>
+          <figure><img src="screenshots/sd-launcher-terminal.webp" loading="lazy" width="540" height="1170" alt="An agent's live terminal inside the home page, with a row of keys and a prompt field"><figcaption>A live terminal, with keys</figcaption></figure>
+          <figure><img src="screenshots/sd-launcher-new.webp" loading="lazy" width="540" height="1170" alt="Starting a new agent on the PC: every installed agent type and the recent project folders"><figcaption>Start an agent on the PC</figcaption></figure>
+          <figure><img src="screenshots/sd-launcher-menu.webp" loading="lazy" width="540" height="1170" alt="The home screen's long-press menu with a super desktop row to add a terminal widget or a page"><figcaption>Add pages and widgets</figcaption></figure>
+        </div>
+        <p class="caption">Real screenshots from a phone, in the Tokyo Night theme.</p>
+        <figure class="launcher-landscape">
+          <a href="screenshots/sd-launcher-landscape.webp"><img src="screenshots/sd-launcher-landscape.webp" loading="lazy" width="540" height="249" alt="SUPER DESKTOP Omalauncher in landscape, showing the PC's agent list beside a live Claude Code terminal"></a>
+          <figcaption>Turn your phone sideways: the agent list and live terminal sit side by side. Tap the screenshot to view it on its own.</figcaption>
+        </figure>
       </div>
     </div>
   </section>
@@ -205,6 +348,68 @@
           </div>
           <p class="caption">Real recording: a second, paired PC opened over the local network.</p>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="feature wide reveal-up" id="plugins">
+    <div class="wrap">
+      <div class="copy">
+        <p class="eyebrow"><span class="new-badge">NEW IN 1.6.0</span>Plugins</p>
+        <h2>Use your AI to make it yours.</h2>
+        <p>Say what you want: a dock, a timer, a game. <strong>Your own AI agent writes the plugin</strong>, and you watch it appear on your desktop as it works.</p>
+        <p>Then ask for more. Every save reloads it on screen, in your theme’s colors.</p>
+      </div>
+      <div class="media">
+        <div class="tabs" role="tablist" aria-label="Plugins demo">
+          <button role="tab" type="button" aria-selected="true" aria-controls="plugins-try" id="plugins-try-tab">✋ Try it</button>
+          <button role="tab" type="button" aria-selected="false" aria-controls="plugins-real" id="plugins-real-tab">📷 Real plugins</button>
+        </div>
+        <div class="panel" id="plugins-try" role="tabpanel" aria-labelledby="plugins-try-tab">
+          <div class="try-hints" aria-label="Things to try">
+            <span data-step="form">Click ✨ in the top bar</span>
+            <span data-step="create">Create a plugin</span>
+            <span data-step="enhance">Ask its agent for a change</span>
+            <span data-step="use">Use it: play Snake, start a timer</span>
+          </div>
+          <div class="sd-stage" data-stage="try" data-pulse=".create" id="plugins-stage"></div>
+          <p class="caption">A simulation: the agent’s output is sample text, and it builds one of four sample plugins. In the app, your agent writes the plugin you ask for.</p>
+        </div>
+        <div class="panel" id="plugins-real" role="tabpanel" aria-labelledby="plugins-real-tab" hidden>
+          <div class="plug-gallery">
+            <figure>
+              <img src="media/plugin-clock.webp" loading="lazy" width="144" height="660" alt="A clock dock: hours, minutes, weekday, date and battery">
+              <figcaption><code>dock</code></figcaption>
+            </figure>
+            <figure>
+              <img src="media/plugin-snake.webp" loading="lazy" width="840" height="920" alt="The Snake plugin on a card, with its score and best score">
+              <figcaption><code>card</code> Snake, played with the arrow keys</figcaption>
+            </figure>
+            <div class="col">
+              <figure>
+                <div class="items">
+                  <img src="media/plugin-pomodoro-item.webp" loading="lazy" width="184" height="72" alt="A Pomodoro item in the top bar showing 17:40 left">
+                  <img src="media/plugin-bell.webp" loading="lazy" width="104" height="72" alt="A reminder bell in the top bar">
+                </div>
+                <figcaption><code>toolbar.item</code> A Pomodoro timer and a reminder bell</figcaption>
+              </figure>
+              <figure>
+                <img src="media/plugin-reminder.webp" loading="lazy" width="840" height="632" alt="The Reminder plugin's popup: when, with quick presets, and what">
+                <figcaption><code>popup</code> Reminder: a quick form under its bell</figcaption>
+              </figure>
+            </div>
+          </div>
+          <p class="caption">Real plugins, drawn by SUPER DESKTOP’s plugin host with <code>super-desktop plugin snapshot</code>: the same check agents run to see their work.</p>
+        </div>
+      </div>
+      <div class="plug-ways">
+        <div><b>✨</b><h3>Create with AI</h3><p>Click ✨ in the top bar, say what it should do and where it goes. Claude Code, Codex or another agent builds it.</p></div>
+        <div><b>🪄</b><h3>Edit &amp; Enhance</h3><p>Open an agent on any plugin to change it. A plugin from someone else becomes your own copy first.</p></div>
+        <div><b>🧭</b><h3>Discover</h3><p><strong>Settings → Plugins → Discover</strong> lists shared plugins. One runs only after you approve it, and AI can review it for you first.</p></div>
+        <div><b>📤</b><h3>Share yours</h3><p><code>super-desktop plugin publish</code> checks it is ready for the <a href="https://github.com/gladimdim/super-desktop-plugins">public plugin list</a>.</p></div>
+      </div>
+      <div class="slots" aria-label="Where plugins go">
+        <span>Docks at the edges</span><span>Top-bar items</span><span>Popups</span><span>Panels</span><span>Cards on the desktop</span><span>Full-screen views</span><span>Settings sections</span>
       </div>
     </div>
   </section>
@@ -268,12 +473,77 @@
 
   <section class="center reveal-up" id="private">
     <div class="wrap">
-      <h2>Private by design.</h2>
-      <p>Your PCs and phones talk to each other directly. Nothing sits in between.</p>
+      <p class="eyebrow">Key features</p>
+      <h2>Your agents. Your PC. Your phone.</h2>
+      <p>SUPER DESKTOP connects only your own devices. No account, no cloud, nobody in between.</p>
       <div class="facts">
-        <div><b>🔒</b><h3>No accounts</h3><p>Nothing to sign up for. No cloud.</p></div>
-        <div><b>↔</b><h3>Direct and encrypted</h3><p>Over your own network or Tailscale.</p></div>
-        <div><b>✅</b><h3>You approve each device</h3><p>The same code shows on both screens first.</p></div>
+        <div><b>🔒</b><h3>No data leaks</h3><p>No servers of ours, no analytics, no tracking. Your code, prompts and terminal output stay on your devices.</p></div>
+        <div><b>🔑</b><h3>No API keys</h3><p>It calls no AI model itself. It runs the agents you already installed, with their own login.</p></div>
+        <div><b>🤖</b><h3>Your agents</h3><p>Claude Code, Codex, OpenCode and 15 more, or any command you add. All one shortcut away.</p></div>
+        <div><b>🖥</b><h3>Your PC</h3><p>Everything runs on your own machines. Open source under GPL-3.0, free to install.</p></div>
+        <div><b>📱</b><h3>Your phones</h3><p>Pair your phone with a QR code. Prompt your agents and get alerts when they finish.</p></div>
+        <div><b>↔</b><h3>No third parties, no accounts</h3><p>Direct and encrypted over your network or Tailscale. You approve every device.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="center reveal-up" id="faq">
+    <div class="wrap">
+      <h2>Frequently asked questions</h2>
+      <p>For people, and for the AI assistants they ask.</p>
+      <div class="faq">
+        <details>
+          <summary>What is SUPER DESKTOP?</summary>
+          <p>SUPER DESKTOP is a free, open-source workspace for your AI coding agents on Omarchy Linux (Arch Linux with Hyprland). Press <span class="kbd">SUPER</span> <span class="kbd">SHIFT</span> <span class="kbd">Q</span> and every agent you run, such as Claude Code or Codex, appears over your screen in its own live terminal card. Press it again and they hide, still running. The same agents are reachable from your other PCs and from your Android phone.</p>
+        </details>
+        <details>
+          <summary>Why should I install it?</summary>
+          <p>If you run more than one coding agent, or run them on more than one machine, SUPER DESKTOP keeps them all one shortcut away, shows which ones are working or finished, and lets you answer them from another PC or your phone when you step away. It does this without an account, without its own API keys and without any server in between, so your code and prompts stay on your own devices.</p>
+        </details>
+        <details>
+          <summary>Does SUPER DESKTOP send my code, prompts or terminal output anywhere?</summary>
+          <p>No. There are no SUPER DESKTOP servers, no analytics, no advertising and no tracking, and the developer receives none of your data. Prompts, terminal output, files and pictures travel only between your own PCs and phones. Your AI agents still talk to their own providers exactly as they do without SUPER DESKTOP; that traffic is governed by the agent and its provider. See the <a href="privacy.html">privacy policy</a>.</p>
+        </details>
+        <details>
+          <summary>Do I need an account or API keys?</summary>
+          <p>No. There is nothing to sign up for. SUPER DESKTOP does not call any AI model itself and needs no API keys of its own: it launches the agents you already installed and signed in to, with their own login and their own subscription or keys.</p>
+        </details>
+        <details>
+          <summary>Which AI coding agents does it support?</summary>
+          <p>Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any command you add yourself. Every agent installed on the PC gets a launcher in the top bar.</p>
+        </details>
+        <details>
+          <summary>Is there a third party, relay or cloud between my devices?</summary>
+          <p>No. Your PCs and phones connect directly over your own network or over Tailscale if you use it. Connections are encrypted (HTTPS and WebSocket with a pinned certificate). Each new device shows the same code on both screens and must be approved on the PC, and you can revoke any phone at any time.</p>
+        </details>
+        <details>
+          <summary>Can I use my agents from my phone?</summary>
+          <p>Yes. The <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Android app on Google Play</a> lists every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development.</p>
+        </details>
+        <details>
+          <summary>Is it free?</summary>
+          <p>The desktop app is free and open source under the GNU GPL version 3. The Android app has a free trial and an optional one-time SUPER DESKTOP Pro purchase handled by Google Play; there is no subscription and no SUPER DESKTOP account.</p>
+        </details>
+        <details>
+          <summary>Can AI agents control SUPER DESKTOP?</summary>
+          <p>Yes. The <a href="cli.html">super-desktop command line</a> lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. <code>super-desktop mcp serve</code> exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with <code>super-desktop plugin snapshot</code>.</p>
+        </details>
+        <details>
+          <summary>Which operating systems does it run on?</summary>
+          <p>The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is available now, iPhone is in development.</p>
+        </details>
+        <details>
+          <summary>How do I install it?</summary>
+          <p>Run <code>curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code> as your normal user on Omarchy. It installs what is missing, builds the newest release and sets up the shortcut. Run it again to update. An AI assistant with shell access can follow the <a href="https://github.com/gladimdim/super-desktop#-for-ai-assistants--installing-this-on-someones-omarchy">install steps for AI assistants</a> in the README.</p>
+        </details>
+        <details>
+          <summary>Do my agents stop when I hide the workspace or close the phone app?</summary>
+          <p>No. Each agent runs in its own terminal session on the PC and keeps working while the workspace is hidden or the phone is away. Open it again and you see where it is.</p>
+        </details>
+        <details>
+          <summary>Does it work on a headless PC, or before I log in?</summary>
+          <p>Yes. Turn on <strong>Settings → System launch</strong> and the PC starts SUPER DESKTOP by itself, with no screen and nobody logged in. Your agents come back where they were, and your phone can open them, prompt them, start new ones and close them. When you log in, the workspace shows the same agents, still running. For a PC that answers straight from power-on, turn on lingering once with <code>loginctl enable-linger</code>.</p>
+        </details>
       </div>
     </div>
   </section>
@@ -305,7 +575,7 @@
         <details class="more">
           <summary>Update, or install a specific release</summary>
           <p>Run the same command again to update to the newest release. Your settings, notes and running agents stay. To match an older phone app, pick a release:</p>
-          <div class="cmd"><code id="cmd-version">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v1.1.21 bash</code><button type="button" data-copy="cmd-version">Copy</button></div>
+          <div class="cmd"><code id="cmd-version">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v2.0.2 bash</code><button type="button" data-copy="cmd-version">Copy</button></div>
           <p>All releases: <a href="https://github.com/gladimdim/super-desktop/releases">GitHub releases</a>. Prerequisites and troubleshooting: <a href="https://github.com/gladimdim/super-desktop#readme">installation guide</a>.</p>
         </details>
       </div>
@@ -317,13 +587,17 @@
   <div class="wrap">
     <span><b style="color:var(--bolt)">⚡</b> SUPER DESKTOP</span>
     <nav aria-label="More">
+      <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>
       <a href="connect.html">Connect your phone</a>
+      <a href="#faq">FAQ</a>
+      <a href="llms.txt">For AI assistants</a>
       <a href="cli.html">CLI reference</a>
       <a href="privacy.html">Privacy</a>
       <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a>
       <a href="https://github.com/gladimdim/super-desktop/releases">Releases</a>
       <a href="https://github.com/gladimdim/super-desktop">GitHub</a>
     </nav>
+    <p class="legal">Google Play and the Google Play logo are trademarks of Google LLC.</p>
   </div>
 </footer>
 </body>

@@ -1,0 +1,9 @@
+{
+  "id": "agents-dock",
+  "name": "Agents",
+  "description": "A dock on the right with every agent card and what it is doing; click one to jump to it. ✦ sends the end of that card's terminal to your AI agent for a one-line summary.",
+  "api": 1,
+  "surfaces": [
+    { "id": "main", "slot": "dock.right", "qml": "Dock.qml", "size": 200 }
+  ]
+}

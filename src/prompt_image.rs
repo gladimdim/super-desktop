@@ -17,9 +17,15 @@ pub fn input_guard(session: &str) -> Result<MutexGuard<'static, ()>, String> {
 }
 
 pub fn route(path: &str) -> Option<&str> {
+    harness_route(path, "/image-prompt")
+}
+
+/// The terminal id in `/api/v1/harnesses/<id><suffix>`, when it is a plain id
+/// of at most 128 ASCII letters, digits, `_` and `-`.
+pub fn harness_route<'a>(path: &'a str, suffix: &str) -> Option<&'a str> {
     let id = path
         .strip_prefix("/api/v1/harnesses/")?
-        .strip_suffix("/image-prompt")?;
+        .strip_suffix(suffix)?;
     (!id.is_empty()
         && id.len() <= 128
         && id
@@ -36,7 +42,7 @@ pub fn validate_prompt(text: &str, request: &str) -> Result<(), String> {
     {
         return Err("invalid_prompt".into());
     }
-    if request.len() != 32 || !request.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !crate::control::is_hex(request, 32) {
         return Err("invalid_request_id".into());
     }
     Ok(())
@@ -137,6 +143,11 @@ pub fn submit(
 
 #[cfg(test)]
 mod tests {
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
     use super::*;
     #[test]
     fn rejects_paths_controls_and_invalid_requests() {
@@ -149,7 +160,7 @@ mod tests {
         assert!(validate_prompt("hello\x1b[201~", &"a".repeat(32)).is_err());
         assert!(validate_prompt("hello", "../bad").is_err());
         assert!(normalize("not base64").is_err());
-        assert!(normalize(&crate::ws::base64(b"<svg/>")).is_err());
+        assert!(normalize(&b64(b"<svg/>")).is_err());
     }
     #[test]
     fn composer_requires_empty_native_prompt() {
@@ -182,7 +193,7 @@ mod tests {
         assert_eq!(normalize(&oversized).unwrap_err(), "image_too_large");
         // Same encoded length as the largest permitted image, but padding
         // determines whether the decoded bytes actually fit the limit.
-        let too_many_bytes = crate::ws::base64(&vec![0; MAX_IMAGE + 1]);
+        let too_many_bytes = b64(&vec![0; MAX_IMAGE + 1]);
         assert_eq!(normalize(&too_many_bytes).unwrap_err(), "invalid_image_encoding");
     }
 
@@ -193,7 +204,7 @@ mod tests {
                 .unwrap();
         pixbuf.fill(0xff0000ff);
         let png = pixbuf.save_to_bufferv("png", &[]).unwrap();
-        let bytes = normalize(&crate::ws::base64(&png)).unwrap();
+        let bytes = normalize(&b64(&png)).unwrap();
         assert!(bytes.starts_with(b"\x89PNG"));
     }
 }

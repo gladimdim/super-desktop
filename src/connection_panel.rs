@@ -239,7 +239,7 @@ fn interfaces() -> Option<Vec<Interface>> {
 
 /// Physical links only: Docker and libvirt bridges, veth pairs and VPN
 /// tunnels have no device behind them (Tailscale is reported on its own).
-fn link_kind(name: &str) -> Option<LinkKind> {
+pub(crate) fn link_kind(name: &str) -> Option<LinkKind> {
     let base = Path::new("/sys/class/net").join(name);
     if base.join("wireless").exists() || base.join("phy80211").exists() {
         return Some(LinkKind::Wifi);

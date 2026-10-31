@@ -71,19 +71,11 @@ pub(crate) fn read_process_input(
     );
     let mut stdin = child.0.stdin.take();
     if let Some(pipe) = &stdin {
-        let fd = pipe.as_raw_fd();
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return Err(UNAVAILABLE);
-        }
+        crate::terminal_transport::set_nonblocking(pipe.as_raw_fd()).map_err(|_| UNAVAILABLE)?;
     }
     let mut remaining_input = input.unwrap_or_default();
     let mut pipe = child.0.stdout.take().ok_or(UNAVAILABLE)?;
-    let fd = pipe.as_raw_fd();
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(UNAVAILABLE);
-    }
+    crate::terminal_transport::set_nonblocking(pipe.as_raw_fd()).map_err(|_| UNAVAILABLE)?;
     let mut bytes = Vec::new();
     let mut eof = false;
     loop {
@@ -221,11 +213,14 @@ pub(crate) fn probe(session: &str, deadline: Instant) -> Result<Pane, Failure> {
         "1" => Ok(true),
         _ => Err(UNAVAILABLE),
     };
+    let dead = boolean(4)?;
+    // tmux 3.8 prints no pane_pid once the pane's process has exited.
+    let pid = if dead && fields[3].is_empty() { 0 } else { number(3)? };
     let mut pane = Pane {
         session_id: fields[1].into(),
         pane_id: fields[2].into(),
-        pid: number(3)?,
-        dead: boolean(4)?,
+        pid,
+        dead,
         columns: number(5)?,
         rows: number(6)?,
         history: number(7)?,
@@ -329,12 +324,7 @@ fn observe(
         .find(|card| card.id == *id)
         .ok_or(("not_found", "No saved local terminal card has that ID."))?;
     let session = &card.session_name;
-    if !session.starts_with("sd_term_")
-        || session.len() > 128
-        || !session
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
+    if !crate::tmux::is_owned_session(session) {
         return Err((
             "unsupported_terminal",
             "The saved card does not identify a supported local session.",
@@ -465,7 +455,6 @@ fn lifecycle(card: &TerminalData, pane: &Pane, deadline: Instant) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn request(command: Command) -> Request {
         Request {
@@ -546,62 +535,22 @@ mod tests {
 
     #[test]
     fn cli_terminal_tmux_observation_integration() {
-        let root = std::env::temp_dir().join(format!("sd-observe-{}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
-        std::fs::create_dir(root.join("tmux")).unwrap();
-        let output = Process::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "control_terminal::tests::cli_terminal_tmux_inner",
-                "--nocapture",
-            ])
-            .env("SD_CLI_OBSERVATION_ROOT", &root)
-            .env("TMUX_TMPDIR", root.join("tmux"))
-            .env("HOME", &root)
-            .env("XDG_STATE_HOME", root.join("state"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("DISPLAY")
-            .env_remove("WAYLAND_DISPLAY")
-            .env_remove("WAYLAND_SOCKET")
-            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
-            .env_remove("LD_PRELOAD")
-            .output()
-            .unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-        assert!(
-            output.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+        crate::test_isolation::rerun_in_private_root(
+            "control_terminal::tests::cli_terminal_tmux_inner",
+            "SD_CLI_OBSERVATION_ROOT",
+            |root, child| {
+                child.env("XDG_STATE_HOME", root.join("state"));
+            },
         );
     }
 
     #[test]
     fn cli_terminal_tmux_inner() {
-        let Some(root) = std::env::var_os("SD_CLI_OBSERVATION_ROOT").map(PathBuf::from) else {
+        let Some((root, _tmux)) = crate::test_isolation::private_root("SD_CLI_OBSERVATION_ROOT")
+        else {
             return;
         };
-        struct Cleanup;
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = Process::new("tmux")
-                    .arg("kill-server")
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
-            }
-        }
-        let _cleanup = Cleanup;
-        let run = |args: &[&str]| {
-            let output = Process::new("tmux").args(args).output().unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).unwrap()
-        };
+        let run = crate::test_isolation::tmux;
         let script = root.join("screen.sh");
         std::fs::write(&script, "#!/bin/sh\nprintf '\\033[31mCOLOR_MARK\\033[0m\\n'\ni=0; while [ $i -lt 60 ]; do printf 'HISTORY_%s\\n' \"$i\"; i=$((i+1)); done\nprintf 'UNICODE_✓_日本語\\n'; exec sleep 30\n").unwrap();
         let session = "sd_term_observation";

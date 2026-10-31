@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::RwLock;
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct OmarchyTheme {
     pub name: String,
@@ -42,9 +41,6 @@ pub struct OmarchyTheme {
     pub bright_cyan: String,
     pub bright_blue: String,
     pub bright_magenta: String,
-
-    pub hyprland_active_border: Option<String>,
-    pub hyprland_inactive_border: Option<String>,
 
     pub font_family: String,
     pub font_size: u32,
@@ -86,16 +82,12 @@ impl Default for OmarchyTheme {
             bright_blue: "#84acd2".to_string(),
             bright_magenta: "#ba9dca".to_string(),
 
-            hyprland_active_border: Some("rgba(ece8e5ee) rgba(736f6bee) 45deg".to_string()),
-            hyprland_inactive_border: Some("rgba(2e2d2baa)".to_string()),
-
             font_family: "Adwaita Mono".to_string(),
             font_size: 11,
         }
     }
 }
 
-#[allow(dead_code)]
 impl OmarchyTheme {
     pub fn hex_to_rgba(hex: &str, alpha: f32) -> String {
         let clean = hex.trim().trim_start_matches('#');
@@ -111,12 +103,56 @@ impl OmarchyTheme {
         format!("rgba(20, 20, 20, {:.3})", alpha)
     }
 
-    pub fn rgba_accent(&self, alpha: f32) -> String {
-        Self::hex_to_rgba(&self.accent, alpha)
+    /// A `#rrggbb` colour as linear-free sRGB channels in 0..=1.
+    fn hex_rgb(hex: &str) -> Option<[f64; 3]> {
+        let clean = hex.trim().trim_start_matches('#');
+        let channel = |i: usize| clean.get(i..i + 2).and_then(|c| u8::from_str_radix(c, 16).ok());
+        Some([channel(0)?, channel(2)?, channel(4)?].map(|c| f64::from(c) / 255.0))
     }
 
-    pub fn rgba_bg(&self, alpha: f32) -> String {
-        Self::hex_to_rgba(&self.background, alpha)
+    /// The WCAG contrast ratio of two sRGB colours.
+    pub fn contrast_ratio(a: [f64; 3], b: [f64; 3]) -> f64 {
+        let luminance = |c: [f64; 3]| {
+            let lin = |v: f64| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+        };
+        let (la, lb) = (luminance(a), luminance(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// Text for a fill of `tint` at `alpha` over the theme's panels: the
+    /// first of `candidates` that reads at 4.5:1 on all of them, else the
+    /// most readable of those and the foregrounds. Palettes differ (some
+    /// themes' `bright_red` is darker than `red`, some accents are pale), so
+    /// a fixed pick is unreadable somewhere.
+    pub fn readable_text(&self, tint: &str, alpha: f64, candidates: &[&str]) -> String {
+        let Some(tint) = Self::hex_rgb(tint) else {
+            return self.foreground.clone();
+        };
+        let fills: Vec<[f64; 3]> = [&self.background, &self.dark_background, &self.lighter_background]
+            .into_iter()
+            .filter_map(|base| Self::hex_rgb(base))
+            .map(|base| std::array::from_fn(|i| tint[i] * alpha + base[i] * (1.0 - alpha)))
+            .collect();
+        let worst = |text: &str| {
+            Self::hex_rgb(text).map_or(0.0, |text| {
+                fills.iter().map(|fill| Self::contrast_ratio(text, *fill)).fold(f64::INFINITY, f64::min)
+            })
+        };
+        if let Some(good) = candidates.iter().find(|c| worst(c) >= 4.5) {
+            return good.to_string();
+        }
+        candidates
+            .iter()
+            .copied()
+            .chain([self.foreground.as_str(), self.bright_foreground.as_str()])
+            .max_by(|a, b| worst(a).total_cmp(&worst(b)))
+            .unwrap_or(&self.foreground)
+            .to_string()
+    }
+
+    pub fn rgba_accent(&self, alpha: f32) -> String {
+        Self::hex_to_rgba(&self.accent, alpha)
     }
 
     pub fn rgba_dark_bg(&self, alpha: f32) -> String {
@@ -131,20 +167,8 @@ impl OmarchyTheme {
         Self::hex_to_rgba(&self.lighter_background, alpha)
     }
 
-    pub fn rgba_fg(&self, alpha: f32) -> String {
-        Self::hex_to_rgba(&self.foreground, alpha)
-    }
-
     pub fn rgba_muted(&self, alpha: f32) -> String {
         Self::hex_to_rgba(&self.muted, alpha)
-    }
-
-    pub fn rgba_selection(&self, alpha: f32) -> String {
-        Self::hex_to_rgba(&self.selection, alpha)
-    }
-
-    pub fn to_rgba_color(hex: &str) -> Option<gdk::RGBA> {
-        gdk::RGBA::parse(hex).ok()
     }
 
     pub fn get_ansi_palette(&self) -> Vec<gdk::RGBA> {
@@ -342,6 +366,14 @@ pub fn load_current_theme() -> OmarchyTheme {
     theme
 }
 
+/// The palette an Omarchy `colors.toml` describes, over the defaults.
+#[cfg(test)]
+pub fn from_colors_toml(content: &str) -> OmarchyTheme {
+    let mut theme = OmarchyTheme::default();
+    parse_colors_into(content, &mut theme);
+    theme
+}
+
 fn parse_colors_into(content: &str, theme: &mut OmarchyTheme) {
     for line in content.lines() {
         let line = line.trim();
@@ -380,8 +412,6 @@ fn parse_colors_into(content: &str, theme: &mut OmarchyTheme) {
                 "bright_cyan" => theme.bright_cyan = v.to_string(),
                 "bright_blue" => theme.bright_blue = v.to_string(),
                 "bright_magenta" => theme.bright_magenta = v.to_string(),
-                "hyprland_active_border" => theme.hyprland_active_border = Some(v.to_string()),
-                "hyprland_inactive_border" => theme.hyprland_inactive_border = Some(v.to_string()),
                 _ => {}
             }
         }

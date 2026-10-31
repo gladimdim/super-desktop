@@ -64,8 +64,20 @@ if [[ "$CLEAN" -eq 1 ]]; then
   echo "--> cargo clean (full rebuild)..."
   cargo clean --manifest-path "$SCRIPT_DIR/Cargo.toml"
 fi
+# The libraries the build links against. An update from Settings cannot
+# install packages, so a missing one is named with the command that adds it.
+if command -v pacman >/dev/null 2>&1; then
+  missing="$(pacman -T gtk4 gtk4-layer-shell vte4 gtksourceview5 2>/dev/null | tr '\n' ' ' || true)"
+  if [[ -n "${missing// /}" ]]; then
+    echo "ERROR: missing system packages: $missing" >&2
+    echo "Install them with 'sudo pacman -S --needed $missing', then rebuild (or run the installer again)." >&2
+    exit 1
+  fi
+fi
 echo "--> cargo build --release..."
 cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+echo "--> QML plugin host..."
+"$SCRIPT_DIR/scripts/build-qml-host.sh" release || echo "WARNING: the QML plugin host did not build; plugins stay off" >&2
 
 if [[ ! -x "$RUST_BIN" ]]; then
   echo "ERROR: build produced no binary at $RUST_BIN" >&2

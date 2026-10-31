@@ -4,6 +4,9 @@
 use super::*;
 use serde_json::{json, Value};
 
+#[path = "bridge_pair_code.rs"]
+mod code;
+
 /// Length of the installation ID a SUPER DESKTOP PC sends with its pairing
 /// request: its own bridge ID.
 const DEVICE_ID_LEN: usize = 32;
@@ -27,7 +30,7 @@ fn device_type(body: &Value) -> &str {
 fn device_id(body: &Value) -> String {
     body["deviceId"]
         .as_str()
-        .filter(|id| id.len() == DEVICE_ID_LEN && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .filter(|id| crate::control::is_hex(id, DEVICE_ID_LEN))
         .map(str::to_ascii_lowercase)
         .unwrap_or_default()
 }
@@ -102,30 +105,59 @@ fn requests() -> &'static Mutex<Requests> {
 }
 
 #[derive(Default)]
-struct Invitation { secret: String, expires: f64 }
+struct Invitation {
+    secret: String,
+    expires: f64,
+    /// Made for a TV whose code the owner typed here: its request is approved
+    /// as soon as it arrives.
+    preapproved: bool,
+}
+
+/// Approve a request: a new paired device whose token is saved before it counts.
+fn grant(request: &mut Pending, now: f64) -> Result<(), (u16, &'static str)> {
+    let token = random_hex(24);
+    let mut paired = pair_state().lock().unwrap();
+    paired.refresh();
+    if paired.cfg.devices.len() >= 64 {
+        return Err((409, "revoke_old_devices_first"));
+    }
+    let device_id = random_hex(16);
+    paired.cfg.devices.push(PairedDevice { id: device_id.clone(), name: request.device.clone(), device_type: request.device_type.clone(),
+        token_hash: security::digest(token.as_bytes()), expires: now + 90.0 * 86400.0 });
+    if !paired.save() {
+        paired.cfg.devices.retain(|d| d.id != device_id);
+        return Err((500, "could_not_save_pairing"));
+    }
+    request.decision = Some(true);
+    request.token = Some(token);
+    Ok(())
+}
 static INVITATION: Mutex<Option<Invitation>> = Mutex::new(None);
 
 pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: &str) {
-    let local_only = !matches!(path, "/api/v1/pair" | "/api/v1/pair/poll");
+    let local_only = !matches!(path, "/api/v1/pair" | "/api/v1/pair/poll") && !code::remote(path);
     if local_only && !local {
-        return respond(stream, 403, "Forbidden", &json!({"error":"desktop_approval_only"}));
+        return reply_error(stream, 403, Envelope::Plain, "desktop_approval_only");
     }
     let body: Value = serde_json::from_str(&req.body).unwrap_or(Value::Null);
     let now = now_epoch();
+    if code::handles(path) {
+        return code::handle(stream, req.method.as_str(), path, &body, now);
+    }
     let mut state = requests().lock().unwrap();
     state.prune(now);
     match (req.method.as_str(), path) {
         ("POST", "/api/v1/pair/invitation") => {
             let secret = random_hex(24);
-            *INVITATION.lock().unwrap() = Some(Invitation { secret: secret.clone(), expires: now + 300.0 });
-            respond(stream, 200, "OK", &json!({"v":3,"host":lan_ip(),"port":BRIDGE_PORT,
+            *INVITATION.lock().unwrap() = Some(Invitation { secret: secret.clone(), expires: now + 300.0, preapproved: false });
+            reply_json(stream, 200, &json!({"v":3,"host":lan_ip(),"port":BRIDGE_PORT,
                 "fingerprint":security::fingerprint(),"secret":secret,"expiresIn":300}));
         }
         ("GET", "/api/v1/pair/devices") => {
             let paired = pair_state().lock().unwrap();
             let devices: Vec<_> = paired.cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"deviceType":d.device_type,"expires":d.expires,
                 "active":d.expires > now && security::device_active(&d.token_hash)})).collect();
-            respond(stream, 200, "OK", &json!({"devices":devices}));
+            reply_json(stream, 200, &json!({"devices":devices}));
         }
         ("POST", "/api/v1/pair/revoke") => {
             let mut paired = pair_state().lock().unwrap();
@@ -135,18 +167,18 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             paired.cfg.devices.retain(|d| d.id != id);
             if !paired.save() {
                 paired.cfg.devices = previous;
-                return respond(stream, 500, "Internal Server Error", &json!({"error":"could_not_save_revocation"}));
+                return reply_error(stream, 500, Envelope::Plain, "could_not_save_revocation");
             }
             if let Some(hash) = hash {
                 security::disconnect(&hash);
                 state.entries.retain(|r| !r.token.as_ref().is_some_and(|t| security::equal(&security::digest(t.as_bytes()), &hash)));
             }
-            respond(stream, 200, "OK", &json!({"status":"revoked"}));
+            reply_json(stream, 200, &json!({"status":"revoked"}));
         }
         ("POST", "/api/v1/pair") => {
             let mut invitation = INVITATION.lock().unwrap();
             if !invitation.as_ref().is_some_and(|i| i.expires > now && security::equal(&i.secret, body["secret"].as_str().unwrap_or(""))) {
-                return respond(stream, 403, "Forbidden", &json!({"error":"scan_fresh_desktop_pairing_qr"}));
+                return reply_error(stream, 403, Envelope::Plain, "scan_fresh_desktop_pairing_qr");
             }
             let peer = stream.peer_addr().map(|p| p.ip().to_string()).unwrap_or_default();
             let device: String = body["deviceName"].as_str().unwrap_or("Device")
@@ -160,87 +192,77 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                 paired.cfg.rejected.iter().any(|r| r.matches(&device_id, &device, &peer))
             };
             if blocked {
-                return respond(stream, 403, "Forbidden", &json!({"error":"pairing_blocked"}));
+                return reply_error(stream, 403, Envelope::Plain, "pairing_blocked");
             }
             // Requests are rate-limited by source and globally bounded, including
             // decided requests until expiry, to limit notification spam.
             if state.entries.len() >= 8 || state.entries.iter().any(|p| p.peer == peer) {
-                return respond(stream, 429, "Too Many Requests", &json!({"error":"pairing_request_already_pending_or_rate_limited"}));
+                return reply_error(stream, 429, Envelope::Plain, "pairing_request_already_pending_or_rate_limited");
             }
             let id = random_hex(24);
             let code = format!("{:06}", u32::from_str_radix(&random_hex(4), 16).unwrap() % 1_000_000);
+            let preapproved = invitation.as_ref().is_some_and(|i| i.preapproved);
             state.entries.push(Pending { id: id.clone(), code: code.clone(), device, device_type: device_type(&body).into(),
                 device_id, peer, expires: now + REQUEST_SECS, decision: None, token: None });
             *invitation = None;
-            if !cfg!(test) {
+            // The owner approved a TV by typing its code; anything else waits
+            // for a decision here, as does a TV whose approval can't be saved.
+            let granted = preapproved && state.entries.last_mut().is_some_and(|request| grant(request, now).is_ok());
+            if !granted && !cfg!(test) {
                 std::thread::spawn(announce_request);
             }
-            respond(stream, 202, "Accepted", &json!({"status":"pending","requestId":id,"code":code,"expiresIn":REQUEST_SECS as u64}));
+            reply_json(stream, 202, &json!({"status":"pending","requestId":id,"code":code,"expiresIn":REQUEST_SECS as u64}));
         }
         ("GET", "/api/v1/pair/state") => {
             let pending: Vec<_> = state.entries.iter().filter(|p| p.decision.is_none()).map(|p|
                 json!({"requestId":p.id,"code":p.code,"deviceName":p.device,"deviceType":p.device_type,
                     "address":p.peer,"identified":!p.device_id.is_empty(),
                     "expiresIn":(p.expires - now).max(0.0).ceil() as u64})).collect();
-            respond(stream, 200, "OK", &json!({"requests":pending}));
+            reply_json(stream, 200, &json!({"requests":pending}));
         }
         ("GET", "/api/v1/pair/rejected") => {
             let mut paired = pair_state().lock().unwrap();
             paired.refresh();
             let rejected: Vec<_> = paired.cfg.rejected.iter().map(RejectedDevice::to_json).collect();
-            respond(stream, 200, "OK", &json!({"rejected":rejected}));
+            reply_json(stream, 200, &json!({"rejected":rejected}));
         }
         ("POST", "/api/v1/pair/rejected/remove") => {
             let mut paired = pair_state().lock().unwrap();
             paired.refresh();
             let id = body["id"].as_str().unwrap_or("");
             let Some(removed) = paired.cfg.rejected.iter().find(|r| r.id == id).cloned() else {
-                return respond(stream, 404, "Not Found", &json!({"error":"not_rejected"}));
+                return reply_error(stream, 404, Envelope::Plain, "not_rejected");
             };
             let previous = paired.cfg.rejected.clone();
             paired.cfg.rejected.retain(|r| r.id != id);
             if !paired.save() {
                 paired.cfg.rejected = previous;
-                return respond(stream, 500, "Internal Server Error", &json!({"error":"could_not_save_rejected_list"}));
+                return reply_error(stream, 500, Envelope::Plain, "could_not_save_rejected_list");
             }
             // Its denied request would otherwise rate-limit an immediate retry.
             state.entries.retain(|r| !(r.decision == Some(false) && r.peer == removed.address));
-            respond(stream, 200, "OK", &json!({"status":"removed"}));
+            reply_json(stream, 200, &json!({"status":"removed"}));
         }
         ("POST", "/api/v1/pair/approve" | "/api/v1/pair/deny") => {
             let approve = path.ends_with("/approve");
             let Some(request) = state.decide(body["requestId"].as_str().unwrap_or(""), approve, now) else {
-                return respond(stream, 404, "Not Found", &json!({"error":"request_expired_or_already_decided"}));
+                return reply_error(stream, 404, Envelope::Plain, "request_expired_or_already_decided");
             };
             if !approve {
                 let mut paired = pair_state().lock().unwrap();
                 paired.refresh();
                 let remembered = remember_rejection(&mut paired, request, now);
-                return respond(stream, 200, "OK", &json!({"status":"denied","remembered":remembered}));
+                return reply_json(stream, 200, &json!({"status":"denied","remembered":remembered}));
             }
-            {
-                let token = random_hex(24);
-                let mut paired = pair_state().lock().unwrap();
-                paired.refresh();
-                if paired.cfg.devices.len() >= 64 {
-                    request.decision = None;
-                    return respond(stream, 409, "Conflict", &json!({"error":"revoke_old_devices_first"}));
-                }
-                let device_id = random_hex(16);
-                paired.cfg.devices.push(PairedDevice { id: device_id.clone(), name: request.device.clone(), device_type: request.device_type.clone(),
-                    token_hash: security::digest(token.as_bytes()), expires: now + 90.0 * 86400.0 });
-                if !paired.save() {
-                    paired.cfg.devices.retain(|d| d.id != device_id);
-                    request.decision = None;
-                    return respond(stream, 500, "Internal Server Error", &json!({"error":"could_not_save_pairing"}));
-                }
-                request.token = Some(token);
+            if let Err((status, error)) = grant(request, now) {
+                request.decision = None;
+                return reply_error(stream, status, Envelope::Plain, error);
             }
-            respond(stream, 200, "OK", &json!({"status":"approved"}));
+            reply_json(stream, 200, &json!({"status":"approved"}));
         }
         ("POST", "/api/v1/pair/poll") => {
             let Some(request) = state.entries.iter().find(|p| Some(p.id.as_str()) == body["requestId"].as_str()) else {
-                return respond(stream, 404, "Not Found", &json!({"error":"request_expired"}));
+                return reply_error(stream, 404, Envelope::Plain, "request_expired");
             };
             let result = match request.decision {
                 None => json!({"status":"pending"}),
@@ -252,9 +274,9 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                     json!({"status":"paired","token":request.token,"expires":expires})
                 },
             };
-            respond(stream, 200, "OK", &result);
+            reply_json(stream, 200, &result);
         }
-        _ => respond(stream, 409, "Conflict", &json!({"error":"explicit_desktop_approval_required"})),
+        _ => reply_error(stream, 409, Envelope::Plain, "explicit_desktop_approval_required"),
     }
 }
 
@@ -262,19 +284,27 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
 /// codes: the bridge's own, or `bridge_offline` / `bridge_not_responding` /
 /// `invalid_bridge_response` when it could not answer.
 pub(crate) fn local_request(method: &str, path: &str, body: Value) -> Result<Value, String> {
+    let body = body.to_string();
+    let response = control_exchange(&format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()))?;
+    let result: Value = serde_json::from_str(&response)
+        .map_err(|_| "invalid_bridge_response".to_string())?;
+    if let Some(error) = result["error"].as_str() { return Err(error.to_string()); }
+    Ok(result)
+}
+
+/// Send one raw request over the bridge's control socket and return the body
+/// of its answer (empty without one), or `bridge_offline` /
+/// `bridge_not_responding`.
+pub(super) fn control_exchange(request: &str) -> Result<String, String> {
     let mut stream = std::os::unix::net::UnixStream::connect(security::control_path())
         .map_err(|_| "bridge_offline".to_string())?;
     let not_responding = |_| "bridge_not_responding".to_string();
     stream.set_read_timeout(Some(Duration::from_secs(3))).map_err(not_responding)?;
     stream.set_write_timeout(Some(Duration::from_secs(3))).map_err(not_responding)?;
-    let body = body.to_string();
-    write!(stream, "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).map_err(not_responding)?;
+    stream.write_all(request.as_bytes()).map_err(not_responding)?;
     let mut response = String::new();
     stream.read_to_string(&mut response).map_err(not_responding)?;
-    let result: Value = serde_json::from_str(response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or(""))
-        .map_err(|_| "invalid_bridge_response".to_string())?;
-    if let Some(error) = result["error"].as_str() { return Err(error.to_string()); }
-    Ok(result)
+    Ok(response.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default())
 }
 
 /// The bridge's config as last written, for lists shown while it is stopped.
@@ -313,6 +343,21 @@ pub fn revoke_device(id: &str) -> Result<(), String> {
 }
 pub fn pairing_invitation() -> Result<String, String> {
     local_request("POST", "/api/v1/pair/invitation", json!({})).map(|v| v.to_string())
+}
+
+/// Let TVs ask to pair for the next two minutes; `{"expiresIn":…}`.
+pub fn open_code_pairing() -> Result<String, String> {
+    local_request("POST", "/api/v1/pair/code/open", json!({})).map(|v| v.to_string())
+}
+
+pub fn close_code_pairing() {
+    let _ = local_request("POST", "/api/v1/pair/code/close", json!({}));
+}
+
+/// The code typed for a TV → that TV's name, which can now finish pairing.
+pub fn confirm_pairing_code(code: &str) -> Result<String, String> {
+    local_request("POST", "/api/v1/pair/code/confirm", json!({"code":code}))
+        .map(|v| v["deviceName"].as_str().unwrap_or("The TV").to_string())
 }
 
 /// Rejected devices, oldest first. Still listed while the bridge is stopped.
@@ -447,20 +492,24 @@ mod tests {
         assert!(requests.entries.is_empty());
     }
 
+    /// The HTTP pairing tests share the bridge's requests and invitation, and
+    /// all come from 127.0.0.1, so they run one at a time.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn call(path: &str, method: &str, body: Value, local: bool) -> (u16, Value) {
+        let (mut client, server) = loopback_pair();
+        let mut server = Connection::plain(server);
+        let request = Request { method:method.into(), path:path.into(), body:body.to_string(), headers:HashMap::new(), query:String::new(), keep_alive:false, _upload_slot:None };
+        handle(&mut server, &request, local, path);
+        drop(server);
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        (response.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap())
+    }
+
     #[test] fn http_pairing_never_grants_access_without_local_approval() {
-        fn call(path: &str, method: &str, body: Value, local: bool) -> (u16, Value) {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (server, _) = listener.accept().unwrap();
-            let mut server = Connection::plain(server);
-            let request = Request { method:method.into(), path:path.into(), body:body.to_string(), headers:HashMap::new(), query:String::new(), keep_alive:false, _upload_slot:None };
-            handle(&mut server, &request, local, path);
-            drop(server);
-            let mut response = String::new();
-            client.read_to_string(&mut response).unwrap();
-            (response.split_whitespace().nth(1).unwrap().parse().unwrap(),
-                serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap())
-        }
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(call("/api/v1/pair", "POST", json!({"deviceName":"test","pin":"1234"}), false).0, 403);
         assert_eq!(call("/api/v1/pair/invitation", "POST", json!({}), false).0, 403);
         let invite = call("/api/v1/pair/invitation", "POST", json!({}), true).1;
@@ -514,5 +563,68 @@ mod tests {
         }
         *INVITATION.lock().unwrap() = None;
         requests().lock().unwrap().entries.retain(|p| Some(p.id.as_str()) != id.as_str() && Some(p.id.as_str()) != retry["requestId"].as_str());
+    }
+
+    #[test] fn a_tv_pairs_only_while_the_window_is_open_and_with_the_code_typed_here() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let hexed = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let nonce = [9u8; 16];
+        let (key, commit) = code::tv::request("K7QM4XPA9C0Z", &nonce);
+        let ask = json!({"deviceName":"Living room TV","deviceType":"android","nonce":hexed(&nonce),"commit":commit});
+
+        // Closed window: refused, and only the owner can open it.
+        let closed = call("/api/v1/pair/code", "POST", ask.clone(), false);
+        assert_eq!((closed.0, closed.1["error"].as_str()), (403, Some("pairing_code_mode_off")));
+        assert_eq!(call("/api/v1/pair/code/open", "POST", json!({}), false).0, 403);
+        assert_eq!(call("/api/v1/pair/code/open", "POST", json!({}), true).1["expiresIn"], 120);
+
+        assert_eq!(call("/api/v1/pair/code", "POST", json!({"deviceName":"TV","nonce":"zz","commit":commit}), false).0, 400);
+        let (status, asked) = call("/api/v1/pair/code", "POST", ask.clone(), false);
+        assert_eq!(status, 202, "{asked}");
+        let id = asked["requestId"].clone();
+        assert_eq!(call("/api/v1/pair/code", "POST", ask.clone(), false).0, 429, "one request per address");
+        assert_eq!(call("/api/v1/pair/code/poll", "POST", json!({"requestId":id}), false).1["status"], "pending");
+        assert_eq!(call("/api/v1/pair/code/poll", "POST", json!({"requestId":"unknown"}), false).0, 404);
+        assert!(call("/api/v1/pair/state", "GET", json!({}), true).1["requests"].as_array().unwrap().is_empty(),
+            "a code request never reaches the approval panel");
+
+        // Owner-only state; the owner picks the request by typing its code.
+        assert_eq!(call("/api/v1/pair/code/state", "GET", json!({}), false).0, 403);
+        let listed = call("/api/v1/pair/code/state", "GET", json!({}), true).1;
+        assert_eq!((listed["open"].as_bool(), listed["requests"][0]["ready"].as_bool()), (Some(true), Some(false)));
+        assert_eq!(call("/api/v1/pair/code/confirm", "POST", json!({"code":"K7QM4XPA9C0Z"}), false).0, 403);
+        assert_eq!(call("/api/v1/pair/code/confirm", "POST", json!({"code":"nope"}), true).0, 400);
+        let wrong = call("/api/v1/pair/code/confirm", "POST", json!({"code":"K7QM-4XPA-9C01"}), true);
+        assert_eq!((wrong.0, wrong.1["error"].as_str()), (404, Some("no_matching_device")));
+        let typed = call("/api/v1/pair/code/confirm", "POST", json!({"code":"k7qm-4xpa-9coz"}), true);
+        assert_eq!((typed.0, typed.1["deviceName"].as_str()), (200, Some("Living room TV")));
+
+        // The TV opens the box with its code and pins the certificate inside.
+        let ready = call("/api/v1/pair/code/poll", "POST", json!({"requestId":id}), false).1;
+        assert_eq!(ready["status"], "ready");
+        let invitation = code::tv::open(&key, id.as_str().unwrap(), ready["box"].as_str().unwrap(), ready["mac"].as_str().unwrap()).unwrap();
+        assert_eq!(invitation["fingerprint"], json!(security::fingerprint()));
+
+        // Its pairing request is approved at once, without the panel.
+        let (status, paired) = call("/api/v1/pair", "POST", json!({"deviceName":"Living room TV","deviceType":"android","secret":invitation["secret"]}), false);
+        assert_eq!(status, 202, "{paired}");
+        let polled = call("/api/v1/pair/poll", "POST", json!({"requestId":paired["requestId"]}), false).1;
+        assert_eq!(polled["status"], "paired");
+        assert!(polled["token"].as_str().is_some_and(|t| t.len() == 48));
+        assert_eq!(call("/api/v1/pair", "POST", json!({"deviceName":"again","secret":invitation["secret"]}), false).0, 403, "single use");
+
+        // An ordinary invitation still waits for the owner's decision.
+        let device = call("/api/v1/pair/devices", "GET", json!({}), true).1["devices"].as_array().unwrap().iter()
+            .find(|d| d["name"] == "Living room TV").unwrap()["id"].clone();
+        assert_eq!(call("/api/v1/pair/revoke", "POST", json!({"deviceId":device}), true).0, 200);
+        requests().lock().unwrap().entries.clear();
+        let invite = call("/api/v1/pair/invitation", "POST", json!({}), true).1;
+        let (_, ordinary) = call("/api/v1/pair", "POST", json!({"deviceName":"phone","secret":invite["secret"]}), false);
+        assert_eq!(call("/api/v1/pair/poll", "POST", json!({"requestId":ordinary["requestId"]}), false).1["status"], "pending");
+
+        assert_eq!(call("/api/v1/pair/code/close", "POST", json!({}), true).0, 200);
+        assert_eq!(call("/api/v1/pair/code", "POST", ask, false).1["error"], "pairing_code_mode_off");
+        requests().lock().unwrap().entries.clear();
+        *INVITATION.lock().unwrap() = None;
     }
 }
