@@ -65,10 +65,11 @@ errors without starting another daemon or falling back to terminal commands.
 
 Open **Settings → MCP** to control access. **Enable MCP** gates every tool;
 **Read terminal output**, **Launch harnesses**, **Submit prompts**, **Control terminals**,
-and **Close terminals** gate their corresponding tools. Metadata tools start enabled; these five
-optional permissions start disabled. Disabled tools are omitted from discovery
-and calls return `mcp_disabled`. The controls apply to the next request on an
-existing connection; in-flight calls may finish. Refresh/reconnect the client
+**Close terminals**, **Read sticky notes**, and **Edit sticky notes** gate their corresponding tools.
+Metadata tools start enabled; these optional permissions start disabled. Disabled
+tools are omitted from discovery and calls return `mcp_disabled`. The controls
+apply to the next request on an existing connection; in-flight calls may finish.
+Refresh/reconnect the client
 after enabling tools to update its discovered list.
 
 The page has buttons to copy MCP configuration and agent setup instructions.
@@ -93,18 +94,25 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 | `inspect_request` | `id` (mutation request ID) | Read a historical receipt |
 | `launch_harness` | `harness`, `cwd`, `requestId`; optional `allowUnsafeHarness`, `allowDownload` | Launch a configured harness or `shell`; opt-ins default to false |
 | `submit_prompt` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision`, `expectPaneIdentity` | Submit a guarded text prompt; no attachments |
-
-
 | `send_terminal_text` | Input guards and `requestId`, `text`, optional `enter` | Send literal text (1–4096 UTF-8 bytes); Enter defaults false |
 | `send_terminal_keys` | Input guards and `requestId`, `keys` | Send 1–32 named keys from the schema's allowlist |
 | `interrupt_terminal` | Input guards and `requestId` | Send Ctrl-C to the exact guarded pane |
 | `close_terminal` | Input guards and `requestId`, `confirm=true` | Close the card; requires its separate permission |
 | `launch_with_prompt` | `harness`, absolute `cwd`, `text`, `requestId`; optional launch opt-ins and `readyTimeoutSeconds` | Launch direct Claude, Codex or Grok, wait for an empty recognized composer, record completion baseline and submit guarded text |
 | `wait_for_completion` | `id`, `expectPaneIdentity`, `after`; optional `timeoutSeconds` | Wait for a new native completion after the observed baseline; no terminal-silence heuristic |
+| `list_notes` | None | List note metadata without text; returns workspace epoch and revision guards |
+| `inspect_note` | `id` | Read exact note metadata and text, plus workspace epoch and revision guards |
+| `create_note` | `text`, `requestId`, `expectEpoch`, `expectRevision`; optional `x`, `y`, `width`, `height`, `tag` | Create a note, by default at x=80, y=140, size 260×200, tag 0; the rectangle must fit the canvas; empty text is allowed |
+| `update_note` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision` | Replace note text; empty text is allowed |
+| `delete_note` | `id`, `confirm=true`, `requestId`, `expectEpoch`, `expectRevision` | Delete one exact note after explicit confirmation |
 
 Input guards are `expectEpoch`, `expectRevision`, and `expectPaneIdentity`, obtained
 from `terminal_geometry` and `terminal_runtime`. Each mutation requires a unique
 request ID. Closing requires explicit confirmation as well as the Settings switch.
+Note edits use `expectEpoch` and `expectRevision` from `list_notes` or `inspect_note`;
+the workspace revision can change when notes, cards or the display change. Note
+text is limited to 4096 UTF-8 bytes and permits newline and tab controls only.
+The read and edit note permissions are separate Settings → MCP switches.
 
 For launch-and-wait, call `launch_with_prompt`, then pass its returned card `id`
 and `completionBaseline.paneIdentity` to `wait_for_completion`. Set `after` to

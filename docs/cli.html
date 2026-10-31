@@ -155,10 +155,11 @@ operation support before dispatch; unavailable or older daemons return tool
 errors without starting another daemon or falling back to terminal commands.</p>
 <p>Open <strong>Settings → MCP</strong> to control access. <strong>Enable MCP</strong> gates every tool;
 <strong>Read terminal output</strong>, <strong>Launch harnesses</strong>, <strong>Submit prompts</strong>, <strong>Control terminals</strong>,
-and <strong>Close terminals</strong> gate their corresponding tools. Metadata tools start enabled; these five
-optional permissions start disabled. Disabled tools are omitted from discovery
-and calls return <code>mcp_disabled</code>. The controls apply to the next request on an
-existing connection; in-flight calls may finish. Refresh/reconnect the client
+<strong>Close terminals</strong>, <strong>Read sticky notes</strong>, and <strong>Edit sticky notes</strong> gate their corresponding tools.
+Metadata tools start enabled; these optional permissions start disabled. Disabled
+tools are omitted from discovery and calls return <code>mcp_disabled</code>. The controls
+apply to the next request on an existing connection; in-flight calls may finish.
+Refresh/reconnect the client
 after enabling tools to update its discovered list.</p>
 <p>The page has buttons to copy MCP configuration and agent setup instructions.
 The copied configuration includes the absolute executable path and this
@@ -244,17 +245,70 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 <td><code>id</code>, <code>text</code>, <code>requestId</code>, <code>expectEpoch</code>, <code>expectRevision</code>, <code>expectPaneIdentity</code></td>
 <td>Submit a guarded text prompt; no attachments</td>
 </tr>
+<tr>
+<td><code>send_terminal_text</code></td>
+<td>Input guards and <code>requestId</code>, <code>text</code>, optional <code>enter</code></td>
+<td>Send literal text (1–4096 UTF-8 bytes); Enter defaults false</td>
+</tr>
+<tr>
+<td><code>send_terminal_keys</code></td>
+<td>Input guards and <code>requestId</code>, <code>keys</code></td>
+<td>Send 1–32 named keys from the schema's allowlist</td>
+</tr>
+<tr>
+<td><code>interrupt_terminal</code></td>
+<td>Input guards and <code>requestId</code></td>
+<td>Send Ctrl-C to the exact guarded pane</td>
+</tr>
+<tr>
+<td><code>close_terminal</code></td>
+<td>Input guards and <code>requestId</code>, <code>confirm=true</code></td>
+<td>Close the card; requires its separate permission</td>
+</tr>
+<tr>
+<td><code>launch_with_prompt</code></td>
+<td><code>harness</code>, absolute <code>cwd</code>, <code>text</code>, <code>requestId</code>; optional launch opt-ins and <code>readyTimeoutSeconds</code></td>
+<td>Launch direct Claude, Codex or Grok, wait for an empty recognized composer, record completion baseline and submit guarded text</td>
+</tr>
+<tr>
+<td><code>wait_for_completion</code></td>
+<td><code>id</code>, <code>expectPaneIdentity</code>, <code>after</code>; optional <code>timeoutSeconds</code></td>
+<td>Wait for a new native completion after the observed baseline; no terminal-silence heuristic</td>
+</tr>
+<tr>
+<td><code>list_notes</code></td>
+<td>None</td>
+<td>List note metadata without text; returns workspace epoch and revision guards</td>
+</tr>
+<tr>
+<td><code>inspect_note</code></td>
+<td><code>id</code></td>
+<td>Read exact note metadata and text, plus workspace epoch and revision guards</td>
+</tr>
+<tr>
+<td><code>create_note</code></td>
+<td><code>text</code>, <code>requestId</code>, <code>expectEpoch</code>, <code>expectRevision</code>; optional <code>x</code>, <code>y</code>, <code>width</code>, <code>height</code>, <code>tag</code></td>
+<td>Create a note, by default at x=80, y=140, size 260×200, tag 0; the rectangle must fit the canvas; empty text is allowed</td>
+</tr>
+<tr>
+<td><code>update_note</code></td>
+<td><code>id</code>, <code>text</code>, <code>requestId</code>, <code>expectEpoch</code>, <code>expectRevision</code></td>
+<td>Replace note text; empty text is allowed</td>
+</tr>
+<tr>
+<td><code>delete_note</code></td>
+<td><code>id</code>, <code>confirm=true</code>, <code>requestId</code>, <code>expectEpoch</code>, <code>expectRevision</code></td>
+<td>Delete one exact note after explicit confirmation</td>
+</tr>
 </tbody>
 </table></div>
-<p>| <code>send_terminal_text</code> | Input guards and <code>requestId</code>, <code>text</code>, optional <code>enter</code> | Send literal text (1–4096 UTF-8 bytes); Enter defaults false |
-| <code>send_terminal_keys</code> | Input guards and <code>requestId</code>, <code>keys</code> | Send 1–32 named keys from the schema's allowlist |
-| <code>interrupt_terminal</code> | Input guards and <code>requestId</code> | Send Ctrl-C to the exact guarded pane |
-| <code>close_terminal</code> | Input guards and <code>requestId</code>, <code>confirm=true</code> | Close the card; requires its separate permission |
-| <code>launch_with_prompt</code> | <code>harness</code>, absolute <code>cwd</code>, <code>text</code>, <code>requestId</code>; optional launch opt-ins and <code>readyTimeoutSeconds</code> | Launch direct Claude, Codex or Grok, wait for an empty recognized composer, record completion baseline and submit guarded text |
-| <code>wait_for_completion</code> | <code>id</code>, <code>expectPaneIdentity</code>, <code>after</code>; optional <code>timeoutSeconds</code> | Wait for a new native completion after the observed baseline; no terminal-silence heuristic |</p>
 <p>Input guards are <code>expectEpoch</code>, <code>expectRevision</code>, and <code>expectPaneIdentity</code>, obtained
 from <code>terminal_geometry</code> and <code>terminal_runtime</code>. Each mutation requires a unique
-request ID. Closing requires explicit confirmation as well as the Settings switch.</p>
+request ID. Closing requires explicit confirmation as well as the Settings switch.
+Note edits use <code>expectEpoch</code> and <code>expectRevision</code> from <code>list_notes</code> or <code>inspect_note</code>;
+the workspace revision can change when notes, cards or the display change. Note
+text is limited to 4096 UTF-8 bytes and permits newline and tab controls only.
+The read and edit note permissions are separate Settings → MCP switches.</p>
 <p>For launch-and-wait, call <code>launch_with_prompt</code>, then pass its returned card <code>id</code>
 and <code>completionBaseline.paneIdentity</code> to <code>wait_for_completion</code>. Set <code>after</code> to
 <code>completionBaseline.completionId</code>, or <code>"none"</code> only when the observed ID is null.

@@ -14,6 +14,8 @@ pub struct Config {
     pub prompts: bool,
     pub controls: bool,
     pub close: bool,
+    pub read_notes: bool,
+    pub edit_notes: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -25,6 +27,8 @@ impl Default for Config {
             prompts: false,
             controls: false,
             close: false,
+            read_notes: false,
+            edit_notes: false,
         }
     }
 }
@@ -44,6 +48,8 @@ impl Config {
                 "launch_with_prompt" => self.launch && self.prompts,
                 "send_terminal_text" | "send_terminal_keys" | "interrupt_terminal" => self.controls,
                 "close_terminal" => self.close,
+                "list_notes" | "inspect_note" => self.read_notes,
+                "create_note" | "update_note" | "delete_note" => self.edit_notes,
                 _ => true,
             }
     }
@@ -189,6 +195,8 @@ mod tests {
             prompts: true,
             controls: true,
             close: true,
+            read_notes: true,
+            edit_notes: true,
         };
         save_at(&path, config).unwrap();
         assert_eq!(load_at(&path).unwrap(), config);
@@ -210,6 +218,8 @@ mod tests {
         assert!(load_at(&path).is_err());
         fs::write(&path, b"{\"enabled\":true}").unwrap();
         assert_eq!(load_at(&path).unwrap(), Config::default());
+        let legacy = load_at(&path).unwrap();
+        assert!(!legacy.read_notes && !legacy.edit_notes);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load_at(&path).is_err());
         fs::remove_file(&path).unwrap();
@@ -228,9 +238,20 @@ mod tests {
             "send_terminal_text",
             "close_terminal",
             "launch_with_prompt",
+            "list_notes",
+            "inspect_note",
+            "create_note",
+            "update_note",
+            "delete_note",
         ] {
             assert!(!config.allows(tool));
         }
+        let mut note_permissions = config;
+        note_permissions.read_notes = true;
+        assert!(note_permissions.allows("list_notes") && note_permissions.allows("inspect_note"));
+        assert!(!note_permissions.allows("create_note") && !note_permissions.allows("update_note") && !note_permissions.allows("delete_note"));
+        note_permissions.edit_notes = true;
+        assert!(note_permissions.allows("create_note") && note_permissions.allows("update_note") && note_permissions.allows("delete_note"));
         let config = Config {
             enabled: false,
             read_output: true,
@@ -238,6 +259,8 @@ mod tests {
             prompts: true,
             controls: true,
             close: true,
+            read_notes: true,
+            edit_notes: true,
         };
         for tool in [
             "app_status",
