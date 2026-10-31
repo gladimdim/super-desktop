@@ -174,7 +174,10 @@ fn show_list(popover: &Popover, container: &GtkBox, selected: Option<usize>) {
     scroll.set_propagate_natural_height(true);
     scroll.set_propagate_natural_width(true);
     scroll.set_child(Some(container));
-    // Row heights come from the theme's CSS, so measure them once styled.
+    // Row heights come from the theme's CSS, which applies only once the
+    // rows are in the popover: measure them after attaching. A height taken
+    // before that is too small, and an open popover does not grow later.
+    popover.set_child(Some(&scroll));
     scroll.set_max_content_height(visible_rows_height(container));
     let container_map = container.clone();
     scroll.connect_map(move |scroll| {
@@ -188,7 +191,30 @@ fn show_list(popover: &Popover, container: &GtkBox, selected: Option<usize>) {
         let (scroll, container) = (scroll.clone(), container.clone());
         glib::idle_add_local_once(move || reveal_row(&scroll, &container, index));
     }
-    popover.set_child(Some(&scroll));
+    resize_open_popover(popover);
+}
+
+/// Fit an open list to its new rows. GTK sizes a popover when it opens and
+/// never again on its own (its parent, the field, does not present it on
+/// allocation), and presenting it again does not reliably resize an open
+/// popup; so the list kept the size of its first matches however many later
+/// typing produced. When the wanted size differs, close and reopen it, which
+/// measures it afresh. Typing keeps its focus, caret and inline completion.
+fn resize_open_popover(popover: &Popover) {
+    if !popover.is_visible() {
+        return;
+    }
+    let (_, width, _, _) = popover.measure(Orientation::Horizontal, -1);
+    let (_, height, _, _) = popover.measure(Orientation::Vertical, width);
+    if (width, height) == (popover.width(), popover.height()) {
+        return;
+    }
+    let autohide = popover.is_autohide();
+    popover.popdown();
+    match popover.parent().and_then(|parent| parent.downcast::<Entry>().ok()) {
+        Some(entry) if !autohide => popup_for_entry(popover, &entry),
+        _ => popover.popup(),
+    }
 }
 
 /// Height of the list's first [`RECENT_DIRS_VISIBLE`] rows, with the box's
@@ -234,6 +260,7 @@ fn show_empty_list(popover: &Popover, text: &str) {
     empty.set_halign(Align::Start);
     container.append(&empty);
     popover.set_child(Some(&container));
+    resize_open_popover(popover);
 }
 
 /// One folder in a ▾ list, here or a host's: `[✓] name  path` on the button
@@ -439,8 +466,30 @@ struct CompleteState {
     history: bool,
     /// Skip `changed` while we write the entry from code (inline complete, apply).
     suppress: bool,
-    /// Text as of the last handled `changed`, so Backspace does not re-expand.
+    /// The field's text as of the last handled `changed`, with any inline
+    /// completion in it, and the part of it the user typed. Together they
+    /// tell Backspace (which must not re-expand) from typing over a
+    /// completion; see [`edit_is_deletion`].
+    last_shown: String,
     last_typed: String,
+}
+
+impl CompleteState {
+    /// The field now shows `text` as the user's own, with no inline suffix.
+    fn settle(&mut self, text: String) {
+        self.last_shown = text.clone();
+        self.last_typed = text;
+    }
+}
+
+/// Whether an edit that left `typed` in the field took letters away, so it
+/// must not inline-complete again. Typing a letter over a selected inline
+/// suffix also shortens the field (`G[itHub]`, then `i`, leaves `Gi`), but it
+/// extends what the user typed, so that is typing: comparing only with the
+/// longer text shown before took it for Backspace and dropped the completion
+/// until the next letter.
+fn edit_is_deletion(typed: &str, last_shown: &str, last_typed: &str) -> bool {
+    typed.chars().count() <= last_typed.chars().count() && last_shown.starts_with(typed)
 }
 
 /// GTK4 delegates Entry editing to an internal GtkText child. During real
@@ -512,6 +561,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
         selected: None,
         history: false,
         suppress: false,
+        last_shown: current_dir.clone(),
         last_typed: current_dir.clone(),
     }));
 
@@ -573,10 +623,13 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
         }
         let typed = entry.text().to_string();
         if !entry_is_being_edited(entry) {
-            complete_changed.borrow_mut().last_typed = typed;
+            complete_changed.borrow_mut().settle(typed);
             return;
         }
-        let deleting = typed.len() < complete_changed.borrow().last_typed.len();
+        let deleting = {
+            let c = complete_changed.borrow();
+            edit_is_deletion(&typed, &c.last_shown, &c.last_typed)
+        };
         let current = effective_workspace_dir(&state_changed.borrow());
         let used = collect_used_dirs(&state_changed.borrow());
         let expanded = expand_tilde(&typed);
@@ -587,6 +640,9 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
 
         let caret_at_end = entry.position() as usize >= typed.chars().count();
         let mut shown = typed.clone();
+        // What the user has typed: the field without a selected inline
+        // suffix. A unique folder completed up to its `/` is taken whole.
+        let mut own = typed.clone();
         if caret_at_end && !deleting {
             if let Some(completed) = inline_completion(&typed, &current) {
                 if completed != typed {
@@ -596,6 +652,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
                     complete_changed.borrow_mut().suppress = false;
                     if completed.ends_with('/') {
                         entry.set_position(-1);
+                        own = completed.clone();
                     } else {
                         entry.select_region(from, -1);
                     }
@@ -606,7 +663,8 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
 
         {
             let mut c = complete_changed.borrow_mut();
-            c.last_typed = shown;
+            c.last_shown = shown;
+            c.last_typed = own;
             c.suggestions = suggestions.clone();
             c.selected = c.selected.and_then(|i| {
                 if suggestions.is_empty() {
@@ -702,7 +760,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
                 c.suppress = false;
                 c.selected = None;
                 c.suggestions.clear();
-                c.last_typed = dir;
+                c.settle(dir);
             }
             pop_commit.popdown();
             return;
@@ -711,7 +769,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
             let mut c = complete_commit.borrow_mut();
             c.selected = None;
             c.suggestions.clear();
-            c.last_typed = entry_commit.text().to_string();
+            c.settle(entry_commit.text().to_string());
             pop_commit.popdown();
         }
     });
@@ -742,7 +800,7 @@ pub fn build_workspace_bar<FChange: Fn(AppState) + 'static>(
             let mut c = complete.borrow_mut();
             c.selected = None;
             c.suggestions.clear();
-            c.last_typed = entry.text().to_string();
+            c.settle(entry.text().to_string());
             popover.popdown();
             true
         }) as Rc<dyn Fn() -> bool>
@@ -832,10 +890,13 @@ fn accept_into_field(complete: &Rc<RefCell<CompleteState>>, entry: &Entry) {
         entry.set_text(&dir);
         complete.borrow_mut().suppress = false;
         entry.set_position(-1);
-        return;
+    } else {
+        // Accept an in-progress inline suffix (selection → caret at end).
+        entry.set_position(-1);
     }
-    // Accept an in-progress inline suffix (selection → caret at end).
-    entry.set_position(-1);
+    // Accepted text is the user's own: Backspace then shortens it rather
+    // than completing it again.
+    complete.borrow_mut().settle(entry.text().to_string());
 }
 
 /// Adopt the text in the field as the workspace folder.
@@ -1402,6 +1463,19 @@ mod tests {
     }
 
     #[test]
+    fn test_typing_over_an_inline_suffix_is_not_backspace() {
+        // `G[itHub]`: the user typed `G`, the field shows `GitHub`.
+        let (shown, typed) = ("~/GitHub", "~/G");
+        assert!(!edit_is_deletion("~/Gi", shown, typed), "a letter typed over the suffix");
+        assert!(!edit_is_deletion("~/Go", shown, typed), "a different letter over the suffix");
+        assert!(edit_is_deletion("~/G", shown, typed), "Backspace removes the suffix");
+        assert!(edit_is_deletion("~/", shown, typed), "Backspace again");
+        assert!(edit_is_deletion("~/G", "~/Gi", "~/Gi"), "Backspace with no suffix");
+        assert!(!edit_is_deletion("/x", shown, typed), "the whole field replaced");
+        assert!(edit_is_deletion("", shown, typed), "the field cleared");
+    }
+
+    #[test]
     fn test_matching_used_dirs_requires_existing_and_ranks_prefix() {
         let root = std::env::temp_dir().join(format!("sd-ac-used-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -1798,6 +1872,122 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn autocomplete_popup_grows_and_shrinks_with_its_matches() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::popup_height_child");
+    }
+
+    #[test]
+    fn popup_height_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let root = std::env::temp_dir().join(format!("sd-ws-height-{}", std::process::id()));
+        for name in ["proj-a", "proj-b", "w0", "w1", "w2", "w3", "w4", "w5", "w6", "w7", "w8", "w9"] {
+            fs::create_dir_all(root.join(name)).unwrap();
+        }
+        let root_s = fs::canonicalize(&root).unwrap().to_string_lossy().into_owned();
+        let state = Rc::new(RefCell::new(AppState::default()));
+        let bar = build_workspace_bar(Rc::clone(&state), Rc::new(|_: AppState| {}));
+        let host = gtk4::Window::new();
+        host.set_default_size(600, 500);
+        host.set_child(Some(&bar.widget));
+        host.present();
+        crate::gtk_test::pump(200);
+        let text_child = bar.entry.first_child().expect("GtkEntry text delegate");
+        gtk4::prelude::RootExt::set_focus(&host, Some(&text_child));
+        assert!(entry_is_being_edited(&bar.entry));
+
+        let rows = || count_class(&bar.popover.child().unwrap(), "ws-row");
+        let height = || bar.popover.height();
+        // Typing and Backspace at the end of the field, as a person does.
+        let type_at_end = |text: &str| {
+            let mut pos = bar.entry.text().chars().count() as i32;
+            bar.entry.insert_text(text, &mut pos);
+        };
+        let backspace = |count: i32| {
+            let end = bar.entry.text().chars().count() as i32;
+            bar.entry.delete_text(end - count, end);
+        };
+
+        bar.entry.set_text("");
+        bar.popover.popdown();
+        type_at_end(&format!("{root_s}/pro"));
+        crate::gtk_test::pump_until("two matches", || bar.popover.is_visible() && rows() == 2 && height() > 0);
+        let small = height();
+
+        // Fewer letters, more matches: the open list grows to show them.
+        backspace((bar.entry.text().chars().count() - root_s.chars().count() - 1) as i32);
+        assert_eq!(bar.entry.text().as_str(), format!("{root_s}/"));
+        crate::gtk_test::pump_until("the list to grow", || rows() == SUGGEST_MAX && height() > small * 3);
+        let big = height();
+
+        // More letters, fewer matches: it shrinks back, without leaving
+        // empty space under the rows.
+        type_at_end("p");
+        crate::gtk_test::pump_until("the list to shrink", || rows() == 2 && height() > 0 && height() < big);
+        assert_eq!(height(), small, "two rows take the same height every time");
+        assert!(entry_is_being_edited(&bar.entry), "reopening the list keeps typing in the field");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn inline_completion_survives_typing_over_its_suffix() {
+        crate::gtk_test::run_in_child_process("workspace_bar::tests::inline_over_suffix_child");
+    }
+
+    #[test]
+    fn inline_over_suffix_child() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let _ = gtk4::init();
+        let root = std::env::temp_dir().join(format!("sd-ws-inline-{}", std::process::id()));
+        fs::create_dir_all(root.join("onlyone")).unwrap();
+        let root_s = fs::canonicalize(&root).unwrap().to_string_lossy().into_owned();
+        let state = Rc::new(RefCell::new(AppState::default()));
+        let bar = build_workspace_bar(Rc::clone(&state), Rc::new(|_: AppState| {}));
+        let host = gtk4::Window::new();
+        host.set_child(Some(&bar.widget));
+        host.present();
+        let text = bar.entry.first_child().expect("GtkEntry text delegate");
+        gtk4::prelude::RootExt::set_focus(&host, Some(&text));
+        bar.entry.set_text("");
+        crate::gtk_test::pump(100);
+
+        let full = format!("{root_s}/onlyone");
+        let selected = || {
+            bar.entry.selection_bounds().map(|(start, end)| {
+                bar.entry.text().chars().skip(start as usize).take((end - start) as usize).collect::<String>()
+            })
+        };
+        let mut pos = 0;
+        bar.entry.insert_text(&format!("{root_s}/"), &mut pos);
+        bar.entry.set_position(-1);
+        text.emit_by_name::<()>("insert-at-cursor", &[&"o"]);
+        assert_eq!(bar.entry.text().as_str(), full);
+        assert_eq!(selected().as_deref(), Some("nlyone"));
+
+        // A key press replaces the selected suffix and inserts the letter in
+        // one edit; a paste takes the same path. The completion must stay,
+        // not vanish until the next letter.
+        let clipboard = gtk4::prelude::WidgetExt::clipboard(&bar.entry);
+        clipboard.set_text("n");
+        text.emit_by_name::<()>("paste-clipboard", &[]);
+        crate::gtk_test::pump_until("the pasted letter", || bar.entry.text().as_str() != full || selected().as_deref() != Some("nlyone"));
+        assert_eq!(bar.entry.text().as_str(), full, "typing over the suffix keeps the completion");
+        assert_eq!(selected().as_deref(), Some("lyone"));
+
+        // Backspace removes the suffix and does not bring it back.
+        bar.entry.delete_selection();
+        crate::gtk_test::pump(50);
+        assert_eq!(bar.entry.text().as_str(), format!("{root_s}/on"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Run the deferred rebuild that a ✕ click schedules.
