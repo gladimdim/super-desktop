@@ -497,8 +497,10 @@ configure() {
 -- Set in the overlay: ⚙ Settings → Keyboard shortcut.
 -- Rewritten there on every change; edits inside this block are lost.
 hl.unbind("SUPER + SHIFT + Q")
+o.bind("SUPER + SHIFT + Q", "Super Desktop", hl.dsp.no_op())
 o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle", { release = true })
 hl.unbind("SUPER + SHIFT + code:24")
+o.bind("SUPER + SHIFT + code:24", "Super Desktop", hl.dsp.no_op())
 o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle", { release = true })
 -- <<< super-desktop shortcut <<<
 EOF

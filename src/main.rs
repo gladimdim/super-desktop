@@ -711,9 +711,10 @@ fn run_daemon(start_visible: bool) {
         restore_after_screensaver: false,
     }));
 
-    // Older installs bound the shortcut on press (which repeats while held).
-    // Upgrade in place to a release-bind so a held key is one toggle, not a
-    // strobe, and a second tap during the slide-in can reverse immediately.
+    // Older installs bound the shortcut on press (which repeats while held),
+    // or on release alone (Hyprland then delivers the key-down to the focused
+    // window). Upgrade in place to a release-bind plus a press `no_op`, so a
+    // held key is one toggle and the focused app does not see the key.
     #[cfg(target_os = "linux")]
     shortcut::ensure_release_toggle();
 

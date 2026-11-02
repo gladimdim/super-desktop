@@ -58,6 +58,11 @@ const TOGGLE_COMMAND: &str = "super-desktop toggle";
 /// ignored toggles — and ignoring them made a second tap during the slide-in
 /// do nothing. Release does not repeat.
 const BIND_RELEASE: &str = "{ release = true }";
+/// Press half of the same combo. Hyprland 0.57 does not claim a release bind
+/// on the way down, so the focused window also receives the key (Chrome opens
+/// Help for a bare F1). `no_op` claims that press and runs nothing. The
+/// release bind above is still what toggles.
+const BIND_SWALLOW: &str = "hl.dsp.no_op()";
 
 /// Combinations older `install.sh` runs claimed for the toggle.
 ///
@@ -169,6 +174,9 @@ pub fn managed_block(combo: &str, keycode: Option<u32>) -> String {
     // before this file would win over the bind below.
     for variant in combo_variants(combo, keycode) {
         out.push_str(&format!("hl.unbind(\"{variant}\")\n"));
+        // Press first, so the key is claimed before anything else sees it.
+        // The release line is the one that runs the toggle.
+        out.push_str(&format!("{}\n", swallow_bind_lua(&variant)));
         out.push_str(&format!("{}\n", toggle_bind_lua(&variant)));
     }
     out.push_str(MANAGED_END);
@@ -372,6 +380,12 @@ fn toggle_bind_lua(variant: &str) -> String {
     )
 }
 
+/// Press bind that claims the combo and runs nothing. Same description as the
+/// toggle, so a conflict check still treats it as ours.
+fn swallow_bind_lua(variant: &str) -> String {
+    format!("o.bind(\"{variant}\", \"{BIND_DESCRIPTION}\", {BIND_SWALLOW})")
+}
+
 /// True when every overlay-toggle bind in `lua` already fires on release.
 fn toggle_binds_use_release(lua: &str) -> bool {
     let mut saw = false;
@@ -405,17 +419,44 @@ fn parse_bind_keycode(lua: &str) -> Option<u32> {
     None
 }
 
-/// Rewrite the live `bindings.lua` so the overlay toggle is a release-bind.
+/// True when every overlay-toggle bind has a matching press `no_op`.
+///
+/// The press line quotes the same combo as the release line. A release-only
+/// block (the shape written before Hyprland stopped consuming release-bind
+/// key-downs) returns false, so startup rewrites it.
+fn toggle_presses_swallowed(lua: &str) -> bool {
+    let mut saw = false;
+    for line in lua.lines() {
+        let trimmed = line.trim();
+        if !is_toggle_bind(trimmed) {
+            continue;
+        }
+        saw = true;
+        let Some(combo) = first_string_literal(trimmed) else {
+            return false;
+        };
+        if !lua.lines().any(|other| other.trim() == swallow_bind_lua(&combo)) {
+            return false;
+        }
+    }
+    saw
+}
+
+/// Rewrite the live `bindings.lua` so the overlay toggle is a release-bind
+/// whose press is claimed by a `no_op`.
 ///
 /// Older installs bound on press (and the daemon then had to ignore repeats).
-/// Idempotent: if the file already uses `{ release = true }`, this is a no-op
-/// and does not reload Hyprland.
+/// Release-only installs let the focused window see the key-down. Idempotent:
+/// a block that already has both lines is left alone and does not reload
+/// Hyprland.
 pub fn ensure_release_toggle() {
     let path = bindings_path();
     let Ok(existing) = fs::read_to_string(&path) else {
         return;
     };
-    if !existing.contains(TOGGLE_COMMAND) || toggle_binds_use_release(&existing) {
+    if !existing.contains(TOGGLE_COMMAND)
+        || (toggle_binds_use_release(&existing) && toggle_presses_swallowed(&existing))
+    {
         return;
     }
     let combo = current_combo(
@@ -1102,17 +1143,25 @@ bindd
             installer.contains("release = true"),
             "install.sh must bind on key-release so holding the shortcut does not repeat"
         );
+        assert!(
+            installer.contains("hl.dsp.no_op()"),
+            "install.sh must claim the key-down so the focused window does not see it"
+        );
     }
 
     #[test]
     fn test_toggle_bind_is_a_release_bind() {
         let block = managed_block("SUPER + SHIFT + K", Some(45));
         assert!(toggle_binds_use_release(&block));
+        assert!(toggle_presses_swallowed(&block));
         assert!(block.contains(BIND_RELEASE));
+        assert!(block.contains(&swallow_bind_lua("SUPER + SHIFT + K")));
+        assert!(block.contains(&swallow_bind_lua("SUPER + SHIFT + code:45")));
         assert_eq!(parse_bind_keycode(&block), Some(45));
 
         let press = r#"o.bind("SUPER + SHIFT + Q", "Super Desktop", "super-desktop toggle")"#;
         assert!(!toggle_binds_use_release(press));
+        assert!(!toggle_presses_swallowed(press));
         assert_eq!(parse_bind_keycode(press), None);
     }
 
@@ -1123,11 +1172,34 @@ bindd
         );
         let updated = rewrite_bindings(&press, "SUPER + SHIFT + Q", Some(24));
         assert!(toggle_binds_use_release(&updated));
+        assert!(toggle_presses_swallowed(&updated));
         assert!(updated.contains(&toggle_bind_lua("SUPER + SHIFT + Q")));
+        assert!(updated.contains(&swallow_bind_lua("SUPER + SHIFT + Q")));
         assert_eq!(
             rewrite_bindings(&updated, "SUPER + SHIFT + Q", Some(24)),
             updated,
             "a release-bind rewrite must be idempotent"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_adds_a_press_swallow_to_a_release_only_bind() {
+        // The shape ensure_release_toggle used to leave in place. Hyprland
+        // delivers that key-down to the focused window.
+        let release_only = format!(
+            "{MANAGED_BEGIN}\n{}\n{MANAGED_END}\n",
+            toggle_bind_lua("F1")
+        );
+        assert!(toggle_binds_use_release(&release_only));
+        assert!(!toggle_presses_swallowed(&release_only));
+        let updated = rewrite_bindings(&release_only, "F1", None);
+        assert!(toggle_presses_swallowed(&updated));
+        assert!(updated.contains(&swallow_bind_lua("F1")));
+        assert_eq!(updated.matches(TOGGLE_COMMAND).count(), 1, "got:\n{updated}");
+        assert_eq!(
+            rewrite_bindings(&updated, "F1", None),
+            updated,
+            "adding the swallow must be idempotent"
         );
     }
 }
