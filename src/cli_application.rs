@@ -170,7 +170,7 @@ pub(crate) fn execute(root: &Path, path: &Path, exe: &Path, action: &str, id: &s
             let deadline = Instant::now() + Duration::from_secs(10);
             if action == "restart" {
                 #[cfg(target_os = "linux")]
-                if std::env::var_os("WAYLAND_DISPLAY").is_none()
+                if !crate::platform::display_link::wayland_present()
                     && std::env::var_os("DISPLAY").is_none()
                 {
                     return fail(
@@ -257,7 +257,7 @@ pub(crate) fn execute(root: &Path, path: &Path, exe: &Path, action: &str, id: &s
                 );
             }
             #[cfg(target_os = "linux")]
-            if std::env::var_os("WAYLAND_DISPLAY").is_none()
+            if !crate::platform::display_link::wayland_present()
                 && std::env::var_os("DISPLAY").is_none()
             {
                 return fail(

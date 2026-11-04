@@ -11,7 +11,7 @@
 //! takes them back.
 
 use crate::state::{self, AppState, TerminalData};
-use crate::{crashlog, tmux, Ipc};
+use crate::{crashlog, platform, tmux, Ipc};
 use serde_json::json;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
@@ -44,6 +44,9 @@ pub fn run() {
     }
     eprintln!("SUPER DESKTOP: no display — running headless: cards and the phone bridge, no overlay");
     import_login_environment();
+    // GTK could not use whatever display this process was given. What it starts
+    // reaches the desktop through this path once someone logs in.
+    env::set_var("WAYLAND_DISPLAY", platform::display_link::headless_value());
     crate::launch_args::install(&state::load_state().harness_args);
     crashlog::note_start("daemon (headless)");
     if let Err(error) = thread::Builder::new()
@@ -105,9 +108,10 @@ pub fn is_headless(reply: &str) -> bool {
 
 /// Whether this process could draw an overlay if it were started now.
 pub fn display_available() -> bool {
-    ["WAYLAND_DISPLAY", "DISPLAY", "BROADWAY_DISPLAY"]
-        .iter()
-        .any(|name| env::var_os(name).is_some_and(|value| !value.is_empty()))
+    platform::display_link::wayland_present()
+        || ["DISPLAY", "BROADWAY_DISPLAY"]
+            .iter()
+            .any(|name| env::var_os(name).is_some_and(|value| !value.is_empty()))
 }
 
 /// Return once `checks` probes in a row, `STANDBY_CHECK` apart, found no

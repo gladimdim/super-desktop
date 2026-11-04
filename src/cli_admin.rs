@@ -30,7 +30,7 @@ pub(crate) fn run(args:&[String])->Option<Output> {
             ["doctor"] if options.values.keys().all(|k|matches!(k.as_str(),"--format"|"--target"))=>{
                 let status=send(Command::Status {},&options);
                 let capability=if status.ok {Some(send(Command::Capabilities {},&options))}else{None};
-                let mut reply=Reply::success("",json!({"clientVersion":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"daemon":status,"capabilities":capability,"displayEnvironmentPresent":std::env::var_os("WAYLAND_DISPLAY").is_some()||std::env::var_os("DISPLAY").is_some(),"changesMade":false,"sessionsProbed":false}));
+                let mut reply=Reply::success("",json!({"clientVersion":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"daemon":status,"capabilities":capability,"displayEnvironmentPresent":crate::platform::display_link::wayland_present()||std::env::var_os("DISPLAY").is_some(),"changesMade":false,"sessionsProbed":false}));
                 if !status.ok {reply.ok=false;reply.error=status.error;}
                 reply
             },

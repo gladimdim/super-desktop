@@ -681,6 +681,8 @@ fn run_daemon(start_visible: bool) {
         headless::run();
         return;
     }
+    // Harnesses a headless daemon restored at boot reach this display here.
+    platform::display_link::publish();
     // A headless daemon (Settings → System launch) may own the socket and
     // have changed the saved cards: take over before trusting the state.
     if headless::take_over() {
