@@ -39,6 +39,10 @@ pub struct MachineView {
     remote_button: gtk4::MenuButton,
     remote: gtk4::Box,
     remote_toolbar: gtk4::Box,
+    /// Fits that bar to this display: icons alone when the names do not fit.
+    /// Driven by the frame clock; held for the tests, which have no frames.
+    #[cfg_attr(not(test), allow(dead_code))]
+    top_bar_fit: Rc<crate::window::TopBarFit>,
     selection: RefCell<Selection>,
     canvas: Rc<RemoteCanvas>,
     /// What the canvas shows while the selected PC is connecting or cannot be
@@ -98,7 +102,7 @@ impl MachineView {
         let remote_button = gtk4::MenuButton::new();
         remote_button.add_css_class("machine-selector");
         chrome.append(&remote_button);
-        let brand = gtk4::Label::new(Some("⚡ SUPER DESKTOP"));
+        let brand = gtk4::Label::new(Some(crate::window::BRAND));
         brand.add_css_class("hud-title");
         chrome.append(&brand);
 
@@ -168,7 +172,28 @@ impl MachineView {
             // state and would describe the wrong machine.
             Rc::new(|_: &gtk4::Button, _: &str| false),
         );
-        toolbar.append(&crate::window::top_bar_content(&chrome, &bar.group, &right));
+        let content = crate::window::top_bar_content(&chrome, &bar.group, &right);
+        toolbar.append(&content.widget);
+        // Like the local bar: when the host's launchers do not fit this
+        // display at full size, the brand keeps its icon and the launchers
+        // their logos, and the names come back on a wider one.
+        let top_bar_fit = crate::window::TopBarFit::new(&toolbar, content, vec![
+            crate::window::Trim::Icons {
+                brand,
+                launchers: Rc::new({
+                    let bar = Rc::downgrade(&bar);
+                    move |compact| {
+                        if let Some(bar) = bar.upgrade() {
+                            bar.set_compact(compact);
+                        }
+                    }
+                }),
+            },
+        ]);
+        crate::window::watch_frames(&toolbar, Rc::new({
+            let fit = Rc::clone(&top_bar_fit);
+            move || fit.fit()
+        }));
         remote.append(&toolbar);
         remote.append(&bar.note);
         let canvas = RemoteCanvas::new();
@@ -183,6 +208,7 @@ impl MachineView {
             remote_button,
             remote,
             remote_toolbar: toolbar,
+            top_bar_fit,
             selection: RefCell::new(Selection::default()),
             canvas,
             panel,
@@ -942,6 +968,71 @@ mod tests {
         for widget in crate::gtk_test::descendants(widget) {
             widget.queue_resize();
         }
+    }
+
+    #[test]
+    fn toolbar_remote_trims_names_to_fit_the_display() {
+        crate::gtk_test::run_in_child_process("machine_selector::tests::toolbar_remote_trims_inner");
+    }
+
+    #[test]
+    fn toolbar_remote_trims_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let local = gtk4::Fixed::new();
+        let view = MachineView::new(&local, Rc::new(|| {}), Rc::new(|| {}));
+        view.busy.set(true);
+        view.select(Some(("a".repeat(32), "Host laptop".into())));
+        view.folder_bar.apply("/home/user/project", &[]);
+        view.set_connection(true, "3 consoles");
+        view.stack.set_visible_child_name("remote");
+        let brand: gtk4::Label = crate::gtk_test::find_first(view.remote_toolbar.upcast_ref(), "hud-title").unwrap();
+        let all_keys: Vec<String> = crate::tmux::HARNESS_KEYS.iter().map(|key| key.to_string()).collect();
+        // The frame clock drives this in production; here each width gets the
+        // frames it needs by hand: fit, lay out, again.
+        let settle = |width: i32| {
+            for _ in 0..6 {
+                view.top_bar_fit.fit();
+                view.stack.allocate(width, 600, -1, None);
+            }
+        };
+        let mut compact_fit_somewhere = false;
+        for keys in [all_keys.clone(), all_keys[..2].to_vec()] {
+            view.bar.apply(&crate::harness_bar::HarnessState { keys, custom: Vec::new(), ready: true });
+            for size in [
+                crate::state::TopBarSize::Small,
+                crate::state::TopBarSize::Medium,
+                crate::state::TopBarSize::Large,
+            ] {
+                view.paint_top_bar_size(size);
+                requeue_sizes(view.remote_toolbar.upcast_ref());
+                for width in [1280, 320, 3440, 640, 480, 1024, 360, 2560, 1366, 1920, 800, 320, 3440] {
+                    settle(width);
+                    let available = view.remote_toolbar.width();
+                    assert!(available > width - 40 && available <= width, "{available} for {width}");
+                    // Measure what the names need by showing them, then settle
+                    // again so the bar is back to its own decision.
+                    view.top_bar_fit.force_level(0);
+                    let full = view.top_bar_fit.needed_width();
+                    settle(width);
+                    let expected = usize::from(full > available);
+                    assert_eq!(view.top_bar_fit.level(), expected, "{width} in {size:?}: names need {full}");
+                    assert_eq!(view.bar.compact(), expected == 1);
+                    assert_eq!(brand.text(), if expected == 1 { crate::window::BRAND_ICON } else { crate::window::BRAND });
+                    if expected == 1 && view.top_bar_fit.needed_width() <= available {
+                        compact_fit_somewhere = true;
+                    }
+                    // Fit, 100% and Hide stay at the right edge whatever is given up.
+                    let hide = view.fit_button.parent().unwrap().parent().unwrap();
+                    let bounds = hide.compute_bounds(&view.stack).unwrap();
+                    assert!(bounds.x() >= 0.0 && bounds.x() + bounds.width() <= width as f32 + 0.5, "{bounds:?} at {width}");
+                }
+            }
+        }
+        assert!(compact_fit_somewhere, "some display must fit the host's icons but not its names");
     }
 
     #[test]

@@ -99,13 +99,39 @@ pub fn paint_top_bar_size(bar: &impl IsA<gtk4::Widget>, size: TopBarSize) {
     bar.set_height_request(top_bar_height(size));
 }
 
+/// The brand on the left of both top bars, and what is left of it when the
+/// bar does not fit its display.
+pub const BRAND: &str = "⚡ SUPER DESKTOP";
+pub const BRAND_ICON: &str = "⚡";
+
+/// A top bar's inside: the left group and the launchers in scrolling
+/// viewports, the actions on the right outside every one of them.
+pub struct TopBarContent {
+    pub widget: gtk4::Box,
+    left: gtk4::ScrolledWindow,
+    center: gtk4::ScrolledWindow,
+    right: gtk4::Widget,
+}
+
+impl TopBarContent {
+    /// The width the bar needs to show everything at its natural size, with
+    /// nothing scrolled: what [`TopBarFit`] compares with the allocation.
+    pub fn needed_width(&self) -> i32 {
+        let natural = |widget: &gtk4::Widget| widget.measure(Orientation::Horizontal, -1).1;
+        natural(self.left.upcast_ref())
+            + natural(self.center.upcast_ref())
+            + natural(&self.right)
+            + self.widget.spacing()
+    }
+}
+
 /// The controls on the right are outside every scrolling viewport. The left
 /// and launcher groups share the remaining space and scroll when necessary.
 pub fn top_bar_content(
     left: &impl IsA<gtk4::Widget>,
     launchers: &impl IsA<gtk4::Widget>,
     right: &impl IsA<gtk4::Widget>,
-) -> gtk4::Box {
+) -> TopBarContent {
     let scroll_group = |child: &gtk4::Widget| {
         let scroll = gtk4::ScrolledWindow::new();
         scroll.set_policy(gtk4::PolicyType::External, gtk4::PolicyType::Never);
@@ -113,11 +139,13 @@ pub fn top_bar_content(
         scroll.set_child(Some(child));
         scroll
     };
+    let left = scroll_group(left.as_ref());
+    let center = scroll_group(launchers.as_ref());
     let row = gtk4::CenterBox::new();
     row.set_halign(Align::Fill);
     row.set_valign(Align::Fill);
-    row.set_start_widget(Some(&scroll_group(left.as_ref())));
-    row.set_center_widget(Some(&scroll_group(launchers.as_ref())));
+    row.set_start_widget(Some(&left));
+    row.set_center_widget(Some(&center));
     // Fixed allocates children at their natural size. Do not let long folder
     // names or many launchers inflate the dock beyond its requested width.
     let viewport = gtk4::ScrolledWindow::new();
@@ -130,7 +158,162 @@ pub fn top_bar_content(
     content.set_vexpand(true);
     content.append(&viewport);
     content.append(right);
-    content
+    TopBarContent { widget: content, left, center, right: right.as_ref().clone() }
+}
+
+/// One thing a top bar gives up to fit its display, in the order given up.
+pub enum Trim {
+    /// The shortcut hint after Hide.
+    Hint(Label),
+    /// The brand keeps only its icon, and the launchers show icons without
+    /// names (their tooltips and hover cards still name them).
+    Icons { brand: Label, launchers: Rc<dyn Fn(bool)> },
+}
+
+/// Fits a top bar to the width it was allocated.
+///
+/// Measured, not a breakpoint: whatever the display, the bar shows everything
+/// that fits, and gives up its trims one at a time while the natural width of
+/// its contents is wider than the bar. A trim comes back as soon as the bar
+/// has room for what it would show, after a wider allocation or after a
+/// launcher was turned off. Run from the frame clock (`layout`/`after-paint`),
+/// so it decides with this frame's allocation and its change lands in the
+/// next one; a bar whose width and contents did not change is left alone and
+/// so schedules no frame.
+pub struct TopBarFit {
+    /// Weak: the bar's frame-clock handlers hold this fit.
+    bar: glib::WeakRef<gtk4::Box>,
+    content: TopBarContent,
+    trims: Vec<Trim>,
+    /// How many trims are given up right now.
+    level: Cell<usize>,
+    /// The allocation and the contents' width the last decision was made for.
+    decided: Cell<Option<(i32, i32)>>,
+}
+
+impl TopBarFit {
+    pub fn new(bar: &gtk4::Box, content: TopBarContent, trims: Vec<Trim>) -> Rc<Self> {
+        let fit = Rc::new(Self {
+            bar: bar.downgrade(),
+            content,
+            trims,
+            level: Cell::new(0),
+            decided: Cell::new(None),
+        });
+        fit.apply(0);
+        fit
+    }
+
+    /// Compare the contents with the bar's current allocation and show the
+    /// most that fits. Called every frame; it changes nothing, and measures
+    /// one width, while the bar and its contents stay as they were.
+    pub fn fit(&self) {
+        let Some(bar) = self.bar.upgrade() else {
+            return;
+        };
+        let available = bar.width();
+        if available <= 0 {
+            return;
+        }
+        let need = self.content.needed_width();
+        if self.decided.get() == Some((available, need)) {
+            return;
+        }
+        // Try each level in turn, fewest trims first. GTK measures the
+        // widgets as they are set here, in this call, so nothing of a level
+        // that does not fit is ever drawn.
+        let mut chosen = self.trims.len();
+        for level in 0..=self.trims.len() {
+            self.apply(level);
+            if self.content.needed_width() <= available {
+                chosen = level;
+                break;
+            }
+        }
+        self.apply(chosen);
+        self.decided.set(Some((available, self.content.needed_width())));
+    }
+
+    #[cfg(test)]
+    pub fn level(&self) -> usize {
+        self.level.get()
+    }
+
+    /// The width the bar needs for what it shows right now.
+    #[cfg(test)]
+    pub fn needed_width(&self) -> i32 {
+        self.content.needed_width()
+    }
+
+    /// Show the bar as it is at `level`, to measure what that needs.
+    #[cfg(test)]
+    pub fn force_level(&self, level: usize) {
+        self.apply(level.min(self.trims.len()));
+    }
+
+    fn apply(&self, level: usize) {
+        self.level.set(level);
+        for (index, trim) in self.trims.iter().enumerate() {
+            let trimmed = index < level;
+            match trim {
+                Trim::Hint(hint) => hint.set_visible(!trimmed),
+                Trim::Icons { brand, launchers } => {
+                    let text = if trimmed { BRAND_ICON } else { BRAND };
+                    if brand.text() != text {
+                        brand.set_text(text);
+                    }
+                    launchers(trimmed);
+                }
+            }
+        }
+    }
+}
+
+/// Run `on_frame` on every frame `widget` is drawn in: at `layout` (after the
+/// window's own allocation, since its surface connected first) and again at
+/// `after-paint`, the safety net for a frame whose layout ran before the new
+/// size was allocated. Event-driven, not a tick callback: a tick callback
+/// keeps the frame clock running at the display's refresh rate for as long as
+/// the widget lives. A hidden layer surface may be unrealized and come back
+/// with a new frame clock, which is followed.
+pub fn watch_frames(widget: &impl IsA<gtk4::Widget>, on_frame: Rc<dyn Fn()>) {
+    type Connected = Option<(glib::WeakRef<gtk4::gdk::FrameClock>, Vec<glib::SignalHandlerId>)>;
+    let connected: Rc<RefCell<Connected>> = Rc::new(RefCell::new(None));
+    let disconnect: Rc<dyn Fn()> = {
+        let connected = Rc::clone(&connected);
+        Rc::new(move || {
+            if let Some((clock, handlers)) = connected.borrow_mut().take() {
+                if let Some(clock) = clock.upgrade() {
+                    for handler in handlers {
+                        clock.disconnect(handler);
+                    }
+                }
+            }
+        })
+    };
+    let connect: Rc<dyn Fn(&gtk4::Widget)> = {
+        let disconnect = Rc::clone(&disconnect);
+        Rc::new(move |widget: &gtk4::Widget| {
+            disconnect();
+            let Some(clock) = widget.frame_clock() else {
+                return;
+            };
+            let on_layout = Rc::clone(&on_frame);
+            let on_paint = Rc::clone(&on_frame);
+            let handlers = vec![
+                clock.connect_layout(move |_| on_layout()),
+                clock.connect_after_paint(move |_| on_paint()),
+            ];
+            *connected.borrow_mut() = Some((clock.downgrade(), handlers));
+            on_frame();
+        })
+    };
+    let widget = widget.as_ref();
+    if widget.is_realized() {
+        connect(widget);
+    }
+    widget.connect_realize(move |widget| connect(widget));
+    widget.connect_unrealize(move |_| disconnect());
 }
 
 /// What plugin QML may ask the overlay for (`sd.call`): the same actions as
@@ -283,91 +466,40 @@ pub(crate) fn desktop_overlay(workspace: &impl IsA<gtk4::Widget>) -> Overlay {
     root
 }
 
-fn fit_top_bar(hud: &gtk4::Box, width: i32, brand: &Label, hint: &Label) {
+fn fit_top_bar(hud: &gtk4::Box, width: i32, fit: &TopBarFit) {
     // An unmapped window has no allocation yet. Keep the initial monitor size
     // until the compositor supplies a positive logical width.
     if width <= 0 {
         return;
     }
     if hud.width_request() != width {
+        // The bar is allocated the new width in the next frame; its contents
+        // are fitted there, against that allocation.
         hud.set_width_request(width);
+        return;
     }
-    // Hide's tooltip retains the shortcut when its optional label is hidden.
-    hint.set_visible(width >= 1200);
-    brand.set_visible(width >= 1000);
+    fit.fit();
 }
 
 fn bind_top_bar_width(
     hud: &gtk4::Box,
     window: &impl IsA<gtk4::Window>,
-    brand: &Label,
-    hint: &Label,
+    fit: Rc<TopBarFit>,
     on_allocate: Rc<dyn Fn(i32, i32)>,
 ) {
     // The compositor's allocation is authoritative, never the canvas extents.
-    //
-    // Event-driven, not a tick callback: a tick callback keeps the frame clock
-    // running at the display's refresh rate for as long as the overlay lives,
-    // only to compare two integers. The frame clock's `layout` and
-    // `after-paint` signals fire only on frames GTK produces anyway — every
-    // configure (output, scale or window size change) is such a frame — and
-    // never while the window is unmapped. `layout` runs after the window's
-    // own allocation (its surface connected first), so the bar usually
-    // follows within the same frame; `after-paint` is the safety net for a
-    // frame whose layout ran before the new size was allocated.
-    let fit: Rc<dyn Fn()> = {
-        let window = window.as_ref().downgrade();
-        let hud = hud.downgrade();
-        let brand = brand.clone();
-        let hint = hint.clone();
-        Rc::new(move || {
-            if let (Some(window), Some(hud)) = (window.upgrade(), hud.upgrade()) {
-                fit_top_bar(&hud, window.width(), &brand, &hint);
-                if window.width() > 0 && window.height() > 0 {
-                    on_allocate(window.width(), window.height());
-                }
+    // Every configure (output, scale or window size change) produces a frame,
+    // and `watch_frames` runs this on each one; never while unmapped.
+    let window = window.as_ref().downgrade();
+    let weak = hud.downgrade();
+    watch_frames(hud, Rc::new(move || {
+        if let (Some(window), Some(hud)) = (window.upgrade(), weak.upgrade()) {
+            fit_top_bar(&hud, window.width(), &fit);
+            if window.width() > 0 && window.height() > 0 {
+                on_allocate(window.width(), window.height());
             }
-        })
-    };
-    type Connected = Option<(glib::WeakRef<gtk4::gdk::FrameClock>, Vec<glib::SignalHandlerId>)>;
-    let connected: Rc<RefCell<Connected>> = Rc::new(RefCell::new(None));
-    let disconnect: Rc<dyn Fn()> = {
-        let connected = Rc::clone(&connected);
-        Rc::new(move || {
-            if let Some((clock, handlers)) = connected.borrow_mut().take() {
-                if let Some(clock) = clock.upgrade() {
-                    for handler in handlers {
-                        clock.disconnect(handler);
-                    }
-                }
-            }
-        })
-    };
-    let connect: Rc<dyn Fn(&gtk4::Box)> = {
-        let fit = Rc::clone(&fit);
-        let disconnect = Rc::clone(&disconnect);
-        Rc::new(move |hud: &gtk4::Box| {
-            disconnect();
-            let Some(clock) = hud.frame_clock() else {
-                return;
-            };
-            let on_layout = Rc::clone(&fit);
-            let on_paint = Rc::clone(&fit);
-            let handlers = vec![
-                clock.connect_layout(move |_| on_layout()),
-                clock.connect_after_paint(move |_| on_paint()),
-            ];
-            *connected.borrow_mut() = Some((clock.downgrade(), handlers));
-            fit();
-        })
-    };
-    if hud.is_realized() {
-        connect(hud);
-    }
-    // A hidden layer surface may be unrealized and come back with a new
-    // frame clock: follow it.
-    hud.connect_realize(move |hud| connect(hud));
-    hud.connect_unrealize(move |_| disconnect());
+        }
+    }));
 }
 
 /// Bidirectional slide: `progress` 0 = off-screen edge, 1 = resting on canvas.
@@ -808,7 +940,7 @@ impl SuperDesktopWindow {
         let plugin_slots = crate::plugin_ui::slots::Slots::install(&root_overlay, top_bar_height(state.borrow().top_bar_size));
         hud_left.append(&machine_view.local_button);
 
-        let brand = Label::new(Some("⚡ SUPER DESKTOP"));
+        let brand = Label::new(Some(BRAND));
         brand.add_css_class("hud-title");
         hud_left.append(&brand);
 
@@ -1146,7 +1278,8 @@ impl SuperDesktopWindow {
         });
         refresh_card_buttons();
         plugin_slots.on_change(refresh_card_buttons);
-        hud.append(&top_bar_content(&hud_left, &launchers, &hud_right));
+        let top_bar = top_bar_content(&hud_left, &launchers, &hud_right);
+        hud.append(&top_bar.widget);
 
         // Arrange — icon-only symbolic SVG (themeable via `.hud-icon-btn`).
         let btn_arrange = Button::from_icon_name("sd-arrange-symbolic");
@@ -1207,8 +1340,24 @@ impl SuperDesktopWindow {
         hud_right.append(&hint);
 
         // Layer-shell chooses the output. Its allocated logical width is the
-        // authority, including after a monitor or scale change.
-        bind_top_bar_width(&hud, &win_rc.window, &brand, &hint, Rc::new({
+        // authority, including after a monitor or scale change. What does not
+        // fit it gives up the shortcut hint, then the brand's and the
+        // launchers' names.
+        let top_bar_fit = TopBarFit::new(&hud, top_bar, vec![
+            Trim::Hint(hint.clone()),
+            Trim::Icons {
+                brand: brand.clone(),
+                launchers: Rc::new({
+                    let bar = Rc::downgrade(&harness_bar);
+                    move |compact| {
+                        if let Some(bar) = bar.upgrade() {
+                            bar.set_compact(compact);
+                        }
+                    }
+                }),
+            },
+        ]);
+        bind_top_bar_width(&hud, &win_rc.window, top_bar_fit, Rc::new({
             let owner = Rc::downgrade(&win_rc);
             let previous = Cell::new((0, 0));
             move |width, height| {
@@ -4762,7 +4911,14 @@ mod tests {
         canvas.put(&offscreen, 4000.0, 2000.0);
         window.set_child(Some(&desktop_overlay(&canvas)));
         let observed = Rc::new(Cell::new((0, 0)));
-        bind_top_bar_width(&hud, &window, &Label::new(None), &Label::new(None), Rc::new({
+        let content = top_bar_content(
+            &gtk4::Box::new(Orientation::Horizontal, 0),
+            &gtk4::Box::new(Orientation::Horizontal, 0),
+            &gtk4::Box::new(Orientation::Horizontal, 0),
+        );
+        hud.append(&content.widget);
+        let fit = TopBarFit::new(&hud, content, Vec::new());
+        bind_top_bar_width(&hud, &window, fit, Rc::new({
             let observed = Rc::clone(&observed);
             move |w, h| observed.set((w, h))
         }));
@@ -4786,33 +4942,48 @@ mod tests {
         window.close();
     }
 
-    #[test]
-    fn toolbar_controls_stay_on_screen() {
-        crate::gtk_test::run_in_child_process_needing_large_screen("window::tests::toolbar_controls_inner");
+    /// A top bar like the local one, with a real harness bar: every built-in
+    /// launcher plus `custom` custom ones, a long folder, the right-side
+    /// actions and the shortcut hint. Returns what the toolbar tests need.
+    struct TestTopBar {
+        hud: gtk4::Box,
+        right: gtk4::Box,
+        actions: Vec<Button>,
+        brand: Label,
+        hint: Label,
+        launchers: Rc<crate::harness_bar::HarnessBar>,
+        fit: Rc<TopBarFit>,
+        all_keys: Vec<String>,
+        custom: Vec<crate::harness_bar::CustomButton>,
     }
 
-    #[test]
-    fn toolbar_controls_inner() {
-        if !crate::gtk_test::is_child() {
-            return;
-        }
-        gtk4::init().unwrap();
-        crate::styles::apply_styles();
-        let left = gtk4::Box::new(Orientation::Horizontal, 0);
-        let brand = Label::new(Some("SUPER DESKTOP"));
+    fn test_top_bar(custom_count: usize) -> TestTopBar {
+        let left = gtk4::Box::new(Orientation::Horizontal, 10);
+        let brand = Label::new(Some(BRAND));
+        brand.add_css_class("hud-title");
         left.append(&brand);
         let folder = gtk4::Entry::new();
         folder.set_text(&format!("/home/user/{}", "long-project-folder/".repeat(30)));
         folder.set_width_chars(60);
         left.append(&folder);
-        let launchers = gtk4::Box::new(Orientation::Horizontal, 0);
-        let launcher_buttons: Vec<_> = (0..24)
-            .map(|index| {
-                let button = Button::with_label(&format!("Custom harness {index}"));
-                launchers.append(&button);
-                button
+        let launchers = crate::harness_bar::HarnessBar::new(Rc::new(|_| {}), Rc::new(|_, _| false));
+        let custom: Vec<crate::harness_bar::CustomButton> = (0..custom_count)
+            .map(|index| crate::harness_bar::CustomButton {
+                id: format!("custom-{index}"),
+                name: format!("Custom harness {index}"),
+                icon: "🧩".into(),
             })
             .collect();
+        let all_keys: Vec<String> = crate::tmux::HARNESS_KEYS
+            .iter()
+            .map(|key| key.to_string())
+            .chain(custom.iter().map(|item| item.id.clone()))
+            .collect();
+        launchers.apply(&crate::harness_bar::HarnessState {
+            keys: all_keys.clone(),
+            custom: custom.clone(),
+            ready: true,
+        });
         let right = gtk4::Box::new(Orientation::Horizontal, 10);
         right.set_valign(Align::Center);
         let actions: Vec<_> = [
@@ -4830,56 +5001,217 @@ mod tests {
         })
         .collect();
         let hint = Label::new(Some("[SUPER + SHIFT + Q]"));
+        hint.add_css_class("hud-shortcut");
         right.append(&hint);
         let hud = gtk4::Box::new(Orientation::Horizontal, 0);
         hud.add_css_class("hud-bar");
-        hud.append(&top_bar_content(&left, &launchers, &right));
-        hud.set_width_request(1024);
-        fit_top_bar(&hud, 0, &brand, &hint);
-        assert_eq!(
-            hud.width_request(),
-            1024,
-            "an unmapped window must not collapse the toolbar"
-        );
-        for count in [0, 3, 24] {
-            for (index, button) in launcher_buttons.iter().enumerate() {
-                button.set_visible(index < count);
+        let content = top_bar_content(&left, &launchers.group, &right);
+        hud.append(&content.widget);
+        let fit = TopBarFit::new(&hud, content, vec![
+            Trim::Hint(hint.clone()),
+            Trim::Icons {
+                brand: brand.clone(),
+                launchers: Rc::new({
+                    let bar = Rc::clone(&launchers);
+                    move |compact| bar.set_compact(compact)
+                }),
+            },
+        ]);
+        TestTopBar { hud, right, actions, brand, hint, launchers, fit, all_keys, custom }
+    }
+
+    impl TestTopBar {
+        /// Offer the first `count` launchers.
+        fn offer(&self, count: usize) {
+            self.launchers.apply(&crate::harness_bar::HarnessState {
+                keys: self.all_keys.iter().take(count).cloned().collect(),
+                custom: self.custom.clone(),
+                ready: true,
+            });
+        }
+
+        /// The width the contents need at each level, measured by showing
+        /// each in turn; the bar is left at the level it was.
+        fn needs(&self) -> Vec<i32> {
+            let level = self.fit.level();
+            let needs = (0..=2)
+                .map(|forced| {
+                    self.fit.force_level(forced);
+                    self.fit.needed_width()
+                })
+                .collect();
+            self.fit.force_level(level);
+            needs
+        }
+
+        /// The level a bar `available` pixels wide should settle at: the
+        /// first whose contents fit, or icons alone.
+        fn expected_level(needs: &[i32], available: i32) -> usize {
+            needs.iter().position(|need| *need <= available).unwrap_or(needs.len() - 1)
+        }
+
+        /// What production does over the frames after a width change: fit,
+        /// then lay out with the result, until nothing changes.
+        fn settle(&self, width: i32) {
+            for _ in 0..8 {
+                fit_top_bar(&self.hud, width, &self.fit);
+                let (_, height, _, _) = self.hud.measure(Orientation::Vertical, width);
+                self.hud.allocate(width, height, -1, None);
             }
-            for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
-                paint_top_bar_size(&hud, size);
-                // Shrink, enlarge, then shrink again, as with output/scale changes.
-                // Logical widths also cover scaled outputs, e.g. 1920/1.5=1280
-                // and 2560/2=1280. Cross the compact-label breakpoints both ways.
-                for width in [
-                    1280, 320, 800, 2560, 640, 999, 1000, 1199, 1200, 480, 3440, 1024,
-                ] {
-                    fit_top_bar(&hud, width, &brand, &hint);
-                    assert_eq!(brand.is_visible(), width >= 1000);
-                    assert_eq!(hint.is_visible(), width >= 1200);
-                    let (_, natural, _, _) = hud.measure(Orientation::Horizontal, -1);
-                    assert_eq!(natural, width, "contents must not inflate the dock");
-                    let (_, height, _, _) = hud.measure(Orientation::Vertical, width);
-                    hud.allocate(width, height, -1, None);
-                    let bounds = right.compute_bounds(&hud).unwrap();
-                    assert!(bounds.x() >= 0.0);
-                    // GTK widget coordinates exclude the dock's CSS padding.
+        }
+
+        fn assert_trimmed_to_fit(&self, width: i32, needs: &[i32]) {
+            let available = self.hud.width();
+            assert!(
+                available > width - 40 && available <= width,
+                "the bar's content width {available} must be the display width {width} less its padding"
+            );
+            let expected = Self::expected_level(needs, available);
+            assert_eq!(
+                self.fit.level(), expected,
+                "at {width} (needs {needs:?}) the bar must give up exactly what does not fit"
+            );
+            assert_eq!(self.hint.is_visible(), expected == 0, "the hint goes first at {width}");
+            assert_eq!(
+                self.brand.text(),
+                if expected == 2 { BRAND_ICON } else { BRAND },
+                "the brand keeps only its icon when the names do not fit at {width}"
+            );
+            assert_eq!(self.launchers.compact(), expected == 2, "launchers are icons only at level 2 ({width})");
+            if expected < 2 {
+                assert!(self.fit.needed_width() <= available, "nothing scrolls while names are shown at {width}");
+            }
+            for key in &self.all_keys {
+                if !self.launchers.offered(key) {
+                    continue;
+                }
+                let name = self.custom.iter()
+                    .find(|item| &item.id == key)
+                    .map(|item| item.name.as_str())
+                    .unwrap_or_else(|| crate::harness_bar::harness_label(key).0);
+                let caption = self.launchers.caption_text(key);
+                if expected == 2 {
                     assert!(
-                        (bounds.x() + bounds.width() - hud.width() as f32).abs() < 1.0,
-                        "right controls must meet the display edge at {width}: {bounds:?}"
+                        caption.as_deref().is_none_or(|text| !text.contains(name)),
+                        "{key} must not show its name ({caption:?}) when the bar is icons only at {width}"
                     );
-                    for button in &actions {
-                        let bounds = button.compute_bounds(&hud).unwrap();
-                        assert!(button.is_visible() && button.is_sensitive());
-                        assert!(bounds.width() > 0.0 && bounds.height() > 0.0);
-                        assert!(bounds.x() >= 0.0 && bounds.x() + bounds.width() <= hud.width() as f32);
-                        assert!(
-                            bounds.y() >= 0.0 && bounds.y() + bounds.height() <= hud.height() as f32
-                        );
-                    }
+                } else {
+                    assert!(
+                        caption.as_deref().is_some_and(|text| text.contains(name)),
+                        "{key} must show its name ({caption:?}) when the bar fits at {width}"
+                    );
                 }
             }
         }
 
+        fn assert_actions_on_screen(&self) {
+            let hud = &self.hud;
+            let bounds = self.right.compute_bounds(hud).unwrap();
+            assert!(bounds.x() >= 0.0);
+            // GTK widget coordinates exclude the dock's CSS padding.
+            assert!(
+                (bounds.x() + bounds.width() - hud.width() as f32).abs() < 1.0,
+                "right controls must meet the display edge at {}: {bounds:?}",
+                hud.width()
+            );
+            for button in &self.actions {
+                let bounds = button.compute_bounds(hud).unwrap();
+                assert!(button.is_visible() && button.is_sensitive());
+                assert!(bounds.width() > 0.0 && bounds.height() > 0.0);
+                assert!(bounds.x() >= 0.0 && bounds.x() + bounds.width() <= hud.width() as f32);
+                assert!(bounds.y() >= 0.0 && bounds.y() + bounds.height() <= hud.height() as f32);
+            }
+        }
+    }
+
+    #[test]
+    fn toolbar_trims_names_to_fit_the_display() {
+        crate::gtk_test::run_in_child_process("window::tests::toolbar_trims_inner");
+    }
+
+    #[test]
+    fn toolbar_trims_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let bar = test_top_bar(24);
+        bar.hud.set_width_request(1024);
+        fit_top_bar(&bar.hud, 0, &bar.fit);
+        assert_eq!(
+            bar.hud.width_request(),
+            1024,
+            "an unmapped window must not collapse the toolbar"
+        );
+        assert_eq!(bar.fit.level(), 0, "a bar that was never allocated gives nothing up");
+        // Somewhere, the icons must fit where the names did not: that is the
+        // point of the trim, not only a smaller amount of scrolling.
+        let mut icons_fit_where_names_did_not = false;
+        let mut hint_went_first = false;
+        for count in [0, 3, 12, 36] {
+            bar.offer(count);
+            for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
+                paint_top_bar_size(&bar.hud, size);
+                // Shrink, enlarge, then shrink again, as with output/scale changes.
+                // Logical widths also cover scaled outputs, e.g. 1920/1.5=1280
+                // and 2560/2=1280.
+                for width in [
+                    1280, 320, 800, 2560, 640, 999, 1000, 1199, 1200, 480, 3440, 1024, 1366, 1600, 320, 3440,
+                ] {
+                    bar.settle(width);
+                    let needs = bar.needs();
+                    assert!(needs[0] > needs[1] && needs[1] > needs[2], "each trim must save width: {needs:?}");
+                    bar.assert_trimmed_to_fit(width, &needs);
+                    let (_, natural, _, _) = bar.hud.measure(Orientation::Horizontal, -1);
+                    assert_eq!(natural, width, "contents must not inflate the dock");
+                    bar.assert_actions_on_screen();
+                    let available = bar.hud.width();
+                    if bar.fit.level() == 2 && bar.fit.needed_width() <= available {
+                        icons_fit_where_names_did_not = true;
+                    }
+                    if bar.fit.level() == 1 {
+                        hint_went_first = true;
+                    }
+                }
+            }
+        }
+        assert!(icons_fit_where_names_did_not, "some display must fit the icons but not the names");
+        assert!(hint_went_first, "some display must fit everything but the shortcut hint");
+
+        // A launcher turned on while the bar is icons only is icons only too,
+        // and the bar follows the contents, not only the width: with fewer
+        // launchers the names come back at the same width.
+        bar.offer(bar.all_keys.len());
+        bar.settle(1280);
+        assert_eq!(bar.fit.level(), 2);
+        assert_eq!(bar.launchers.caption_text("custom-23").as_deref(), Some("🧩"));
+        bar.offer(1);
+        bar.settle(1280);
+        assert_eq!(bar.fit.level(), 0, "one launcher fits 1280 with its name and the hint");
+        assert_eq!(bar.brand.text(), BRAND);
+        assert!(bar.hint.is_visible());
+        // And back: more launchers at the same width give the names up again.
+        bar.offer(bar.all_keys.len());
+        bar.settle(1280);
+        assert_eq!(bar.fit.level(), 2);
+    }
+
+    #[test]
+    fn toolbar_controls_stay_on_screen() {
+        crate::gtk_test::run_in_child_process_needing_large_screen("window::tests::toolbar_controls_inner");
+    }
+
+    #[test]
+    fn toolbar_controls_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        crate::styles::apply_styles();
+        let bar = test_top_bar(24);
+        bar.offer(bar.all_keys.len());
+        let hud = bar.hud.clone();
         // Reproduce the real failure: a saved/off-screen card enlarges Fixed's
         // minimum size, then the toolbar follows that oversized window.
         let canvas = Fixed::new();
@@ -4898,14 +5230,14 @@ mod tests {
         window.set_default_size(1024, 600);
         window.set_resizable(false);
         window.set_child(Some(&root));
-        bind_top_bar_width(&hud, &window, &brand, &hint, Rc::new(|_, _| {}));
+        bind_top_bar_width(&hud, &window, Rc::clone(&bar.fit), Rc::new(|_, _| {}));
         window.present();
         let check_mapped = |width: i32| {
             let until = std::time::Instant::now() + Duration::from_secs(3);
             let mut settled = 0;
             while std::time::Instant::now() < until {
                 while glib::MainContext::default().iteration(false) {}
-                let fits = right.compute_bounds(&window).is_some_and(|bounds| {
+                let fits = bar.right.compute_bounds(&window).is_some_and(|bounds| {
                     bounds.width() > 0.0
                         && bounds.x() >= 0.0
                         && bounds.x() + bounds.width() <= window.width() as f32
@@ -4925,9 +5257,9 @@ mod tests {
                 "the mapped window must accept the new size"
             );
             assert_eq!(hud.width_request(), window.width());
-            assert_eq!(brand.is_visible(), width >= 1000);
-            assert_eq!(hint.is_visible(), width >= 1200);
-            let bounds = right.compute_bounds(&window).unwrap();
+            let needs = bar.needs();
+            bar.assert_trimmed_to_fit(width, &needs);
+            let bounds = bar.right.compute_bounds(&window).unwrap();
             assert!(
                 bounds.x() >= 0.0 && bounds.x() + bounds.width() <= window.width() as f32,
                 "mapped controls {bounds:?} exceed window width {}",
@@ -4935,7 +5267,7 @@ mod tests {
             );
             // Visible geometry alone is insufficient: every action must also be
             // hittable through the mapped window and its clipped canvas.
-            for button in &actions {
+            for button in &bar.actions {
                 let bounds = button.compute_bounds(&window).unwrap();
                 let picked = window
                     .pick(

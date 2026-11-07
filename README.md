@@ -445,9 +445,12 @@ prompt, and a shell gets the quoted path after the command.
 Fresh installations show the first three detected harnesses in the toolbar (or
 fewer if fewer are installed). Settings → Harness launchers lets you enable more;
 existing installations keep their selection. Arrange, Settings, and Hide stay at
-the display's right edge, with horizontal scrolling for toolbar groups that do
-not fit on smaller or scaled screens. Narrow displays hide the brand label and
-shortcut hint to leave room for controls; Hide's tooltip still shows the shortcut.
+the display's right edge. When the toolbar does not fit the display at full
+size, it gives things up in order until it does: first the shortcut hint after
+Hide (its tooltip still shows the shortcut), then the brand label shrinks to its
+⚡ icon and the launchers show their logos without names (hover one for its
+name). Everything comes back on a wider display or with fewer launchers turned
+on, and whatever still does not fit scrolls horizontally.
 
 Only launchers actually installed on the machine can be started. Settings →
 Harness launchers lists both detected tools and supported tools that are not

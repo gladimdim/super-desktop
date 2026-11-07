@@ -121,6 +121,30 @@ impl HarnessState {
     }
 }
 
+/// What one launcher says next to (or instead of) its icon.
+struct Caption {
+    label: gtk4::Label,
+    /// The name, with its emoji when the button has no logo image.
+    full: String,
+    /// What is left when the names are hidden: the emoji, or nothing for a
+    /// button whose logo image already stands for it.
+    short: String,
+}
+
+impl Caption {
+    fn of(label: gtk4::Label, full: String, short: String) -> Self {
+        Self { label, full, short }
+    }
+
+    fn paint(&self, compact: bool) {
+        let text = if compact { self.short.as_str() } else { self.full.as_str() };
+        if self.label.text() != text {
+            self.label.set_text(text);
+        }
+        self.label.set_visible(!text.is_empty());
+    }
+}
+
 /// Harness buttons for one workspace, local or remote.
 pub struct HarnessBar {
     /// The launch group, centered in a top bar exactly like the local one.
@@ -130,6 +154,11 @@ pub struct HarnessBar {
     /// into yet.
     pub note: gtk4::Label,
     buttons: RefCell<Vec<(String, gtk4::Button)>>,
+    /// Each launcher's text, keyed like `buttons`, so a bar that does not fit
+    /// its display can show icons alone and bring the names back later.
+    captions: RefCell<Vec<(String, Caption)>>,
+    /// Icons only: the bar is on a display too narrow for the names.
+    compact: Cell<bool>,
     /// Logo images, so a theme switch can swap them like the local bar does.
     images: Rc<RefCell<Vec<(gtk4::Image, String)>>>,
     on_launch: LaunchAction,
@@ -168,6 +197,7 @@ impl HarnessBar {
 
         let light_theme = crate::theme::current_theme().mode == "light";
         let mut buttons = Vec::new();
+        let mut captions = Vec::new();
         let images = Rc::new(RefCell::new(Vec::new()));
         for key in crate::tmux::HARNESS_KEYS.iter().copied() {
             let (name, emoji) = harness_label(key);
@@ -178,11 +208,15 @@ impl HarnessBar {
                 let image = gtk4::Image::from_file(&logo);
                 image.set_pixel_size(crate::brand::BRAND_ICON_SIZE);
                 row.append(&image);
-                row.append(&gtk4::Label::new(Some(name)));
+                let label = gtk4::Label::new(Some(name));
+                row.append(&label);
                 button.set_child(Some(&row));
                 images.borrow_mut().push((image, key.to_string()));
+                captions.push((key.to_string(), Caption::of(label, name.to_string(), String::new())));
             } else {
-                button.set_label(&format!("{emoji} {name}"));
+                let label = gtk4::Label::new(Some(&format!("{emoji} {name}")));
+                button.set_child(Some(&label));
+                captions.push((key.to_string(), Caption::of(label, format!("{emoji} {name}"), emoji.to_string())));
             }
             // Built once and shown or hidden, so the layout never jumps while
             // the user is aiming at a button.
@@ -196,6 +230,8 @@ impl HarnessBar {
             group,
             note,
             buttons: RefCell::new(buttons),
+            captions: RefCell::new(captions),
+            compact: Cell::new(false),
             images,
             on_launch,
             on_hover,
@@ -232,20 +268,30 @@ impl HarnessBar {
                 self.group.remove(&button);
             }
             self.buttons.borrow_mut().retain(|(id, _)| id != &key);
+            self.captions.borrow_mut().retain(|(id, _)| id != &key);
         }
+        let compact = self.compact.get();
         for item in &state.custom {
-            if let Some((_, button)) = self.buttons.borrow().iter().find(|(key, _)| key == &item.id) {
-                button.set_label(&format!("{} {}", item.icon, item.name));
+            let full = format!("{} {}", item.icon, item.name);
+            if let Some((_, button)) = self.buttons.borrow().iter().find(|(key, _)| key == &item.id).cloned() {
+                if let Some((_, caption)) = self.captions.borrow_mut().iter_mut().find(|(key, _)| key == &item.id) {
+                    caption.full = full;
+                    caption.short = item.icon.clone();
+                    caption.paint(compact);
+                }
                 button.set_tooltip_text(Some(&format!("Launch {}", item.name)));
                 continue;
             }
-            let button = gtk4::Button::with_label(&format!("{} {}", item.icon, item.name));
+            let label = gtk4::Label::new(Some(&full));
+            label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+            label.set_max_width_chars(18);
+            let button = gtk4::Button::new();
+            button.set_child(Some(&label));
             button.add_css_class("hud-button");
-            if let Some(label) = button.child().and_downcast::<gtk4::Label>() {
-                label.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-                label.set_max_width_chars(18);
-            }
             button.set_tooltip_text(Some(&format!("Launch {}", item.name)));
+            let caption = Caption::of(label, full, item.icon.clone());
+            caption.paint(compact);
+            self.captions.borrow_mut().push((item.id.clone(), caption));
             let key = item.id.clone();
             let weak = Rc::downgrade(self);
             button.connect_clicked(move |_| {
@@ -351,6 +397,32 @@ impl HarnessBar {
     /// Logo images for the theme-swap pass, like the local toolbar's.
     pub fn brand_images(&self) -> Vec<(gtk4::Image, String)> {
         self.images.borrow().clone()
+    }
+
+    /// Icons only (`true`) or icons with names (`false`). The top bar asks for
+    /// icons when its launchers do not fit the display at full size; the
+    /// tooltips and hover cards still name each harness.
+    pub fn set_compact(&self, compact: bool) {
+        if self.compact.replace(compact) == compact {
+            return;
+        }
+        for (_, caption) in self.captions.borrow().iter() {
+            caption.paint(compact);
+        }
+    }
+
+    #[cfg(test)]
+    pub fn compact(&self) -> bool {
+        self.compact.get()
+    }
+
+    /// The text a launcher shows right now, or `None` when only its logo does.
+    #[cfg(test)]
+    pub fn caption_text(&self, key: &str) -> Option<String> {
+        self.captions.borrow().iter()
+            .find(|(id, _)| id == key)
+            .filter(|(_, caption)| caption.label.is_visible())
+            .map(|(_, caption)| caption.label.text().to_string())
     }
 
     /// The launch buttons, keyed by harness. Used by tests to click one.
@@ -514,6 +586,73 @@ mod tests {
     #[test]
     fn a_remote_bar_offers_exactly_what_the_host_offers() {
         crate::gtk_test::run_in_child_process("harness_bar::tests::bar_inner");
+    }
+
+    #[test]
+    fn toolbar_compact_launchers_keep_their_icons_and_lose_their_names() {
+        crate::gtk_test::run_in_child_process("harness_bar::tests::toolbar_compact_inner");
+    }
+
+    #[test]
+    fn toolbar_compact_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        gtk4::init().unwrap();
+        let bar = HarnessBar::new(Rc::new(|_| {}), Rc::new(|_, _| false));
+        let custom = CustomButton { id: "custom-test".into(), name: "My CLI".into(), icon: "💻".into() };
+        let mut state = HarnessState {
+            keys: crate::tmux::HARNESS_KEYS.iter().map(|key| key.to_string()).chain(["custom-test".to_string()]).collect(),
+            custom: vec![custom.clone()],
+            ready: true,
+        };
+        bar.apply(&state);
+        let names = |key: &str| -> String {
+            if key == custom.id { custom.name.clone() } else { harness_label(key).0.to_string() }
+        };
+        for key in &state.keys {
+            let caption = bar.caption_text(key).unwrap_or_else(|| panic!("{key} shows its name at full size"));
+            assert!(caption.contains(&names(key)), "{key}: {caption}");
+        }
+        let full_width = bar.group.measure(gtk4::Orientation::Horizontal, -1).1;
+
+        bar.set_compact(true);
+        assert!(bar.compact());
+        for key in &state.keys {
+            let caption = bar.caption_text(key);
+            assert!(
+                caption.as_deref().is_none_or(|text| !text.contains(&names(key))),
+                "{key} must show no name when compact: {caption:?}"
+            );
+            // Every launcher still has something to recognize it by: a logo
+            // image, or its emoji.
+            let (_, button) = bar.buttons().into_iter().find(|(id, _)| id == key).unwrap();
+            let has_image = crate::gtk_test::find_where(button.upcast_ref(), |w| w.is::<gtk4::Image>() && w.is_visible()).is_some();
+            assert!(has_image || caption.as_deref().is_some_and(|text| !text.is_empty()), "{key} has no icon left");
+        }
+        assert_eq!(bar.caption_text("custom-test").as_deref(), Some("💻"));
+        let compact_width = bar.group.measure(gtk4::Orientation::Horizontal, -1).1;
+        assert!(compact_width < full_width, "icons alone take less width: {compact_width} vs {full_width}");
+        // The tooltip still names a custom harness.
+        let (_, button) = bar.buttons().into_iter().find(|(id, _)| id == "custom-test").unwrap();
+        assert_eq!(button.tooltip_text().as_deref(), Some("Launch My CLI"));
+
+        // A custom harness added or renamed while compact is compact too.
+        state.custom.push(CustomButton { id: "later".into(), name: "Added later".into(), icon: "🧩".into() });
+        state.keys.push("later".into());
+        state.custom[0].name = "Renamed CLI".into();
+        state.custom[0].icon = "🛠".into();
+        bar.apply(&state);
+        assert_eq!(bar.caption_text("later").as_deref(), Some("🧩"));
+        assert_eq!(bar.caption_text("custom-test").as_deref(), Some("🛠"));
+
+        bar.set_compact(false);
+        assert_eq!(bar.caption_text("later").as_deref(), Some("🧩 Added later"));
+        assert_eq!(bar.caption_text("custom-test").as_deref(), Some("🛠 Renamed CLI"));
+        for key in crate::tmux::HARNESS_KEYS {
+            assert!(bar.caption_text(key).is_some_and(|text| text.contains(harness_label(key).0)));
+        }
+        assert!(bar.group.measure(gtk4::Orientation::Horizontal, -1).1 > compact_width, "the names are back");
     }
 
     #[test]
@@ -700,7 +839,7 @@ mod tests {
         });
         assert!(bar.offered("custom-test") && bar.sensitive("custom-test"));
         let custom = bar.buttons().into_iter().find(|(key, _)| key == "custom-test").unwrap().1;
-        assert_eq!(custom.label().as_deref(), Some("🧭 My CLI"));
+        assert_eq!(bar.caption_text("custom-test").as_deref(), Some("🧭 My CLI"));
         custom.emit_clicked();
         assert_eq!(relaunches.borrow().last().map(String::as_str), Some("custom-test"));
         bar.apply(&HarnessState { keys: vec!["shell".into()], custom: vec![], ready: true });
