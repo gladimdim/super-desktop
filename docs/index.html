@@ -87,7 +87,9 @@
       "description": "Every AI coding agent session on your PCs, on your Android phone: type prompts that run on the PC, get alerts when an agent finishes, send pictures and files. Connects directly to your own PCs with no account.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Android",
-      "installUrl": "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
+      "installUrl": "https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk",
+      "downloadUrl": "https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk",
+      "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "GitHub APK: all features free forever, no trial or purchase"},
       "author": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" }
     },
     {
@@ -100,8 +102,8 @@
         {"@type": "Question", "name": "Do I need an account or API keys?", "acceptedAnswer": {"@type": "Answer", "text": "No. There is nothing to sign up for. SUPER DESKTOP does not call any AI model itself and needs no API keys of its own: it launches the agents you already installed and signed in to, with their own login and their own subscription or keys."}},
         {"@type": "Question", "name": "Which AI coding agents does it support?", "acceptedAnswer": {"@type": "Answer", "text": "Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any command you add yourself. Every agent installed on the PC gets a launcher in the top bar."}},
         {"@type": "Question", "name": "Is there a third party, relay or cloud between my devices?", "acceptedAnswer": {"@type": "Answer", "text": "No. Your PCs and phones connect directly over your own network or over Tailscale if you use it. Connections are encrypted (HTTPS and WebSocket with a pinned certificate). Each new device shows the same code on both screens and must be approved on the PC, and you can revoke any phone at any time."}},
-        {"@type": "Question", "name": "Can I use my agents from my phone?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The Android app on Google Play lists every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development."}},
-        {"@type": "Question", "name": "Is it free?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app is free and open source under the GNU GPL version 3. The Android app has a free trial and an optional one-time SUPER DESKTOP Pro purchase handled by Google Play; there is no subscription and no SUPER DESKTOP account."}},
+        {"@type": "Question", "name": "Can I use my agents from my phone?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The free Android APK on GitHub and the Google Play edition list every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development."}},
+        {"@type": "Question", "name": "Is it free?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app is free and open source under the GNU GPL version 3. The Android APK from GitHub is free forever, with every feature unlocked and no trial or purchase. The Google Play edition keeps its 10-day usage trial and optional one-time SUPER DESKTOP Pro purchase. There is no subscription and no SUPER DESKTOP account."}},
         {"@type": "Question", "name": "Can AI agents control SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The super-desktop command line lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. super-desktop mcp serve exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with super-desktop plugin snapshot."}},
         {"@type": "Question", "name": "Which operating systems does it run on?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is available now, iPhone is in development."}},
         {"@type": "Question", "name": "How do I install it?", "acceptedAnswer": {"@type": "Answer", "text": "Run curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash as your normal user on Omarchy. It installs what is missing, builds the newest release and sets up the shortcut. Run it again to update. An AI assistant with shell access can follow the install steps for AI assistants in the README."}},
@@ -143,15 +145,16 @@
 <main id="top">
   <section class="hero">
     <div class="wrap">
-      <a class="announce" href="#launcher"><b>New</b>SUPER DESKTOP Omalauncher: your agents on your home screen <span aria-hidden="true">→</span></a>
+      <a class="announce" href="#phone"><b>New</b>Android APK: free forever, with every feature unlocked <span aria-hidden="true">→</span></a>
       <h1>Every AI agent.<br><span class="grad">One shortcut away.</span></h1>
       <p class="lede">A hidden workspace for Omarchy. Your coding agents live in it, on every PC, and in your pocket.</p>
       <div class="cta">
         <a class="btn primary" href="#install">Install</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk">Download free Android APK</a>
         <a class="play-badge" href="#phone" aria-label="Android app: get it on Google Play"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="141" height="42"></a>
         <a class="btn" href="#trailer">▶ Watch the 40-second tour</a>
       </div>
-      <p class="platforms">Omarchy Linux · Android on Google Play · iPhone in development · No accounts, no servers</p>
+      <p class="platforms">Omarchy Linux · Free Android APK · Google Play · iPhone in development · No accounts, no servers</p>
 
       <div class="demo-frame">
         <div class="try-hints" aria-label="Things to try">
@@ -270,7 +273,10 @@
         <p>Every session on your PC shows up on your phone. <strong>Type on the phone; it runs on the PC.</strong></p>
         <p>Get an alert when an agent finishes. Send it pictures and files.</p>
         <p><strong>No screen? No login? Still there.</strong> SUPER DESKTOP can run headless from boot, so your phone reaches your agents on a server or a PC nobody is logged in to.</p>
-        <p>The Android app is out now on Google Play. iPhone is in development.</p>
+        <p><strong>The Android APK is now free forever.</strong> Every feature is unlocked: no 10-day trial, no Pro purchase, no subscription. Google Play is not required.</p>
+        <p class="store"><a class="btn primary" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk">Download free APK · 1.6.0</a> <a href="https://github.com/gladimdim/super-desktop/releases/tag/v2.0.4">Release notes →</a></p>
+        <p class="caption">Android 10 or newer, including phones, foldables, tablets and TVs. Open the downloaded APK and allow installation from your browser when Android asks. Get future APK updates from GitHub Releases. It installs alongside the Google Play app; pair your PCs in the new app. Existing SUPER DESKTOP SELF installations update in place.</p>
+        <p>The Google Play edition remains available with its 10-day usage trial and optional one-time Pro purchase. iPhone is in development.</p>
         <p class="store"><a class="play-badge large" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="188" height="56"></a> <a href="connect.html">Connect your phone →</a></p>
       </div>
       <div class="media">
@@ -518,11 +524,11 @@
         </details>
         <details>
           <summary>Can I use my agents from my phone?</summary>
-          <p>Yes. The <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Android app on Google Play</a> lists every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development.</p>
+          <p>Yes. The <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk">free Android APK</a> and the <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play edition</a> list every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development.</p>
         </details>
         <details>
           <summary>Is it free?</summary>
-          <p>The desktop app is free and open source under the GNU GPL version 3. The Android app has a free trial and an optional one-time SUPER DESKTOP Pro purchase handled by Google Play; there is no subscription and no SUPER DESKTOP account.</p>
+          <p>The desktop app is free and open source under the GNU GPL version 3. The Android APK from GitHub is free forever, with every feature unlocked and no trial or purchase. The Google Play edition keeps its 10-day usage trial and optional one-time SUPER DESKTOP Pro purchase. There is no subscription and no SUPER DESKTOP account.</p>
         </details>
         <details>
           <summary>Can AI agents control SUPER DESKTOP?</summary>
@@ -587,6 +593,7 @@
   <div class="wrap">
     <span><b style="color:var(--bolt)">⚡</b> SUPER DESKTOP</span>
     <nav aria-label="More">
+      <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk">Free Android APK</a>
       <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>
       <a href="connect.html">Connect your phone</a>
       <a href="#faq">FAQ</a>

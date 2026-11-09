@@ -1,6 +1,6 @@
 # ⚡ SUPER DESKTOP
 
-> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
+> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 
@@ -161,6 +161,24 @@ Each release's notes give the protocol version and the phone app versions it was
 checked with. From `v1.1.17` on, the protocol only grows, so a newer PC build is
 meant to keep working with older phone apps; pick an older release when its
 notes say your phone app needs it.
+
+### Free Android APK
+
+[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.0.apk): every feature is free forever,
+with no 10-day trial, Pro purchase or subscription. Google Play is not required.
+Android 10 or newer; phones, foldables, tablets and TVs are supported.
+Open the downloaded APK and allow installation from your browser when Android
+asks. Install future updates from GitHub Releases.
+
+The APK installs alongside the Google Play app, with separate settings and
+pairings. Existing SUPER DESKTOP SELF installations update in place. The Google
+Play edition keeps its usage-day trial and one-time Pro purchase.
+[Connect your phone](https://superdesktop.dmytrogladkyi.com/connect.html).
+
+The free APK uses protocol 3 with no new PC minimum. Individual features retain
+their requirements: TV code pairing needs PC 1.8.0+, web previews need 1.9.0+.
+Compatibility is unchanged by removing the trial; this APK has not yet been
+checked end to end against released PC builds.
 
 ### What you get
 
