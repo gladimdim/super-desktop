@@ -61,6 +61,8 @@ def stage(root, binaries, destination, sources=None):
         shutil.copytree(root / "assets" / folder, destination / "usr/share/super-desktop/assets" / folder)
     install(root / "assets/logos/LICENSES.md", "usr/share/licenses/super-desktop-bin/ASSET-LICENSES")
     install(root / "assets/logos/ATTRIBUTION.md", "usr/share/licenses/super-desktop-bin/ASSET-ATTRIBUTION")
+    # The grammars SD Editor's syntax colors are compiled from.
+    install(root / "assets/editor/SYNTAX-LICENSES.txt", "usr/share/licenses/super-desktop-bin/SYNTAX-LICENSES")
     if sources is not None:
         for name in ("THIRD_PARTY_LICENSES.txt", "RUST_LIBRARY_COPYRIGHT.html", "DEPENDENCIES.json"):
             install(sources / name, f"usr/share/licenses/super-desktop-bin/{name}")

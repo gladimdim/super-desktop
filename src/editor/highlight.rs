@@ -428,6 +428,33 @@ mod tests {
             .collect()
     }
 
+    /// The grammars compiled into the binary come from many projects. Their
+    /// license texts ship in `assets/editor/SYNTAX-LICENSES.txt`, which must
+    /// match the grammar set in use. After an update of the grammar crate:
+    /// `SD_WRITE_SYNTAX_LICENSES=1 cargo test editor_syntax_licenses`.
+    #[test]
+    fn editor_syntax_licenses_are_shipped() {
+        let mut text = String::from(
+            "SD Editor colors syntax with grammar definitions compiled into the SUPER DESKTOP\n\
+             binary. They are the set curated by the bat project (https://github.com/sharkdp/bat),\n\
+             packaged by the two-face crate. The licenses of the grammars that ask to be\n\
+             acknowledged follow.\n\n",
+        );
+        let listing = two_face::acknowledgement::listing();
+        let licenses: Vec<_> = listing.for_syntaxes().iter().filter(|license| license.needs_acknowledgement()).collect();
+        assert!(licenses.len() > 10, "the grammar set lists its licenses");
+        for license in licenses {
+            license.write_md(&mut text);
+        }
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/editor/SYNTAX-LICENSES.txt");
+        if std::env::var_os("SD_WRITE_SYNTAX_LICENSES").is_some() {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &text).unwrap();
+        }
+        let shipped = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(shipped == text, "{} is out of date: SD_WRITE_SYNTAX_LICENSES=1 cargo test editor_syntax_licenses", path.display());
+    }
+
     #[test]
     fn editor_syntax_is_found_by_name_extension_and_first_line() {
         let name = |path: &str, first: &str| detect(Path::new(path), first).map(id);

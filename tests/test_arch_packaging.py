@@ -121,7 +121,7 @@ class PackageTests(unittest.TestCase):
     def test_stage_keeps_client_and_application_siblings(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "source"
-            for relative in ("LICENSE", "super-desktop.desktop", "packaging/arch/super-desktop-setup", "assets/logos/LICENSES.md", "assets/logos/ATTRIBUTION.md", "assets/icons/hicolor/test.svg", "bin/super-desktop", "bin/super-desktop-client"):
+            for relative in ("LICENSE", "super-desktop.desktop", "packaging/arch/super-desktop-setup", "assets/logos/LICENSES.md", "assets/logos/ATTRIBUTION.md", "assets/editor/SYNTAX-LICENSES.txt", "assets/icons/hicolor/test.svg", "bin/super-desktop", "bin/super-desktop-client"):
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("fixture\n")
