@@ -44,6 +44,9 @@ pub fn run() {
     }
     eprintln!("SUPER DESKTOP: no display — running headless: cards and the phone bridge, no overlay");
     import_login_environment();
+    // Before any card is restored: a unit from an older build lets systemd kill
+    // the cards' tmux server together with this process.
+    crate::boot_autostart::refresh();
     // GTK could not use whatever display this process was given. What it starts
     // reaches the desktop through this path once someone logs in.
     env::set_var("WAYLAND_DISPLAY", platform::display_link::headless_value());

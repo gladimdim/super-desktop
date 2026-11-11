@@ -74,6 +74,11 @@ fn launcher(home: &Path, package: &str) -> String {
 /// it. No display variables are needed: headless is fine, and where a desktop
 /// session exists the service's daemon is the live one the Hyprland autostart
 /// then defers to.
+///
+/// `KillMode=process`: the cards' tmux server is started by this daemon and so
+/// lives in the service's control group. With systemd's default, the daemon
+/// exiting (Quit, a stop, a crash) would take the server and every harness in
+/// it down too. Sessions outlive the daemon everywhere else; here as well.
 fn unit_text(executable: &str) -> String {
     format!(
         "\
@@ -85,6 +90,7 @@ Description=SUPER DESKTOP daemon at login
 
 [Service]
 ExecStart={executable} daemon
+KillMode=process
 
 [Install]
 WantedBy=default.target
@@ -128,6 +134,27 @@ fn enable_at(home: &Path, systemctl_bin: &str, package: &str) -> Result<(), Stri
         return Err(reason);
     }
     Ok(())
+}
+
+/// Bring a unit an older build wrote up to date, and have systemd read it
+/// again: a reload also applies to the service that is already running. Does
+/// nothing when the setting is off or the unit is current. `true` when the
+/// unit was rewritten.
+fn refresh_at(home: &Path, systemctl_bin: &str, package: &str) -> bool {
+    let path = unit_file(home);
+    let Ok(current) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let executable = launcher(home, package);
+    if executable.is_empty() {
+        return false;
+    }
+    let wanted = unit_text(&executable);
+    if current == wanted || fs::write(&path, wanted).is_err() {
+        return false;
+    }
+    let _ = systemctl_run(systemctl_bin, &["--user", "daemon-reload"]);
+    true
 }
 
 /// Turn the setting off: `systemctl --user disable` first (so systemd drops
@@ -180,6 +207,15 @@ pub fn status() -> String {
 pub fn status() -> String {
     "System launch is unavailable in this macOS build.".to_string()
 }
+
+/// At daemon start: update a unit written by an older build (see `refresh_at`).
+#[cfg(target_os = "linux")]
+pub fn refresh() {
+    refresh_at(&crate::state::home_dir(), "systemctl", PACKAGE_LAUNCHER);
+}
+
+#[cfg(target_os = "macos")]
+pub fn refresh() {}
 
 #[cfg(target_os = "linux")]
 pub fn apply(enabled: bool) {
@@ -256,6 +292,29 @@ mod tests {
         assert!(unit.contains(" daemon"), "{unit}");
         assert!(unit.contains("WantedBy=default.target"), "{unit}");
         assert!(unit.contains(USER_LAUNCHER), "the unit starts the installed launcher");
+        assert!(unit.contains("KillMode=process"), "the daemon's exit must not kill the cards' tmux server: {unit}");
+    }
+
+    #[test]
+    fn refresh_updates_an_older_unit_and_reloads_systemd() {
+        let home = temp_home("refresh");
+        let stub = stub_systemctl(&home, "ok", "exit 0");
+        assert!(!refresh_at(&home, &stub, "/no/super-desktop"), "setting off: nothing to refresh");
+        assert!(!unit_file(&home).is_file(), "refresh never turns the setting on");
+        make_launcher(&home, ".local/bin/super-desktop");
+        fs::create_dir_all(&unit_dir(&home)).expect("unit dir");
+        // What 2.0.4 and earlier wrote: no KillMode.
+        let old = unit_text(&launcher(&home, "/no/super-desktop")).replace("KillMode=process\n", "");
+        assert!(!old.contains("KillMode"));
+        fs::write(&unit_file(&home), &old).expect("seed old unit");
+        assert!(refresh_at(&home, &stub, "/no/super-desktop"), "an older unit is rewritten");
+        let unit = fs::read_to_string(unit_file(&home)).expect("unit must exist");
+        assert!(unit.contains("KillMode=process"), "{unit}");
+        let calls = fs::read_to_string(home.join("calls.log")).expect("stub must have logged");
+        assert_eq!(calls.trim(), "--user daemon-reload");
+        assert!(!refresh_at(&home, &stub, "/no/super-desktop"), "a current unit is left alone");
+        let calls = fs::read_to_string(home.join("calls.log")).expect("stub log");
+        assert_eq!(calls.trim(), "--user daemon-reload", "no second reload");
     }
 
     #[test]

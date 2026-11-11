@@ -3729,6 +3729,32 @@ impl SuperDesktopWindow {
         self.arm_hidden_pause();
     }
 
+    /// Render one small image with the window's renderer while the overlay is
+    /// still unmapped, so the first show does not pay for the renderer's first
+    /// off-screen render. That one is slow where the GPU has gone to sleep
+    /// since the daemon started (a laptop's discrete GPU: one to two seconds
+    /// on the main thread, in the middle of the first slide-in). Right after
+    /// start the GPU is still awake from GTK's own initialization.
+    pub fn prewarm_renderer(&self) {
+        let started = std::time::Instant::now();
+        // Creates the surface and its renderer; the window stays unmapped.
+        WidgetExt::realize(&self.window);
+        let Some(renderer) = self.window.renderer() else {
+            return;
+        };
+        let layout = self.window.create_pango_layout(Some("SUPER DESKTOP 0123456789 ─│┌┐█"));
+        let snapshot = gtk4::Snapshot::new();
+        snapshot.append_color(
+            &gdk::RGBA::BLACK,
+            &gtk4::graphene::Rect::new(0.0, 0.0, 256.0, 64.0),
+        );
+        snapshot.append_layout(&layout, &gdk::RGBA::WHITE);
+        if let Some(node) = snapshot.to_node() {
+            let _ = renderer.render_texture(&node, None);
+        }
+        crate::frame_profile::note_duration("renderer warm-up", started);
+    }
+
     /// The overlay is off screen (unmapped, or built but never shown): pause
     /// the local cards' tmux clients if it stays that way (`hidden_pause`).
     pub fn arm_hidden_pause(&self) {
@@ -4323,6 +4349,39 @@ mod tests {
         card.data.borrow_mut().x = 20;
         window.start_slide_in();
         assert_eq!(path(), out);
+        window.window.close();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renderer_warm_up_leaves_the_overlay_unmapped() {
+        crate::gtk_test::run_in_child_process("window::tests::renderer_warm_up_leaves_the_overlay_unmapped_inner");
+    }
+
+    #[test]
+    fn renderer_warm_up_leaves_the_overlay_unmapped_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-warm-up-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.WarmUpTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let model = crate::workspace_model::LocalWorkspace::new(AppState::default());
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+
+        window.prewarm_renderer();
+        assert!(window.window.is_realized(), "the warm-up needs the window's renderer");
+        assert!(window.window.renderer().is_some());
+        assert!(!window.window.is_mapped(), "the warm-up must never put the overlay on screen");
+        assert!(!window.window.is_visible());
+        // Harmless when repeated (a second warm-up, or one after a show).
+        window.prewarm_renderer();
+        assert!(!window.window.is_mapped());
         window.window.close();
         let _ = std::fs::remove_dir_all(root);
     }

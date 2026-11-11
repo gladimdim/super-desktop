@@ -2590,14 +2590,18 @@ fn freeze_terminal(term: Option<&VteTerminal>, drawing: &VteDrawing, frame: &gtk
     // `WidgetPaintable` only replays the node of the last painted frame, and
     // GTK drops that node as soon as new output queues a redraw: a busy
     // terminal gave an empty image on almost every try.
+    let started = std::time::Instant::now();
     parent.snapshot_child(term, &snapshot);
     let Some(node) = snapshot.to_node() else {
         return false;
     };
+    crate::frame_profile::note_duration("slide freeze: terminal snapshot", started);
     // The border box (VTE's CSS padding lies outside its content origin):
     // the still image takes the whole allocation the terminal leaves.
     let viewport = gtk4::graphene::Rect::new(bounds.x() * scale, bounds.y() * scale, width * scale, height * scale);
+    let started = std::time::Instant::now();
     let texture = renderer.render_texture(&node, Some(&viewport));
+    crate::frame_profile::note_duration("slide freeze: render to image", started);
     frame.set_paintable(Some(&texture));
     drawing.set_frozen(true, Some(term), frame);
     true

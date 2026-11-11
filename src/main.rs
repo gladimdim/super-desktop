@@ -839,6 +839,7 @@ fn run_daemon(start_visible: bool) {
     let _ = thread::Builder::new()
         .name("super-desktop-tmux-env".to_string())
         .spawn(|| {
+            boot_autostart::refresh();
             clean_tmux_global_env();
             tmux_clipboard::install_existing_sessions();
         });
@@ -1194,6 +1195,7 @@ fn warm_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
     let local_state = ctx.borrow().local_workspace.state();
     let win = SuperDesktopWindow::new(app, move || hide_window(&ctx_close), hot_inside, local_state);
     // Not presented: the window stays unmapped until the first show.
+    win.prewarm_renderer();
     win.arm_hidden_pause();
     ctx.borrow_mut().window = Some(win);
 }
