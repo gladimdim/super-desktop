@@ -59,15 +59,15 @@ DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-desktop/source"
 # The oldest Rust that builds the locked dependencies (gtk4 0.11).
 MIN_RUST="1.92"
 
-# The build needs a C compiler, GTK 4, gtk4-layer-shell, VTE and GtkSourceView
-# (SD Editor), and Qt Quick for the plugin host. At run time the app uses tmux
+# The build needs a C compiler, GTK 4, gtk4-layer-shell and VTE, and Qt Quick
+# for the plugin host. At run time the app uses tmux
 # for sessions, wl-clipboard for copying, libnotify for notifications, sqlite
 # for OpenCode card titles, avahi for phone discovery, bubblewrap with poppler
 # for sandboxed PDF previews, and GStreamer's plugins to play sound and video
 # previews.
 PACKAGES=(
     base-devel git curl
-    gtk4 gtk4-layer-shell vte4 gtksourceview5 qt6-base qt6-declarative
+    gtk4 gtk4-layer-shell vte4 qt6-base qt6-declarative
     tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
     gst-plugins-good gst-libav
 )
@@ -124,11 +124,27 @@ preflight() {
     fi
 }
 
+# A package that arrived as another program's dependency is removed together
+# with that program (`pacman -Rns`, which a system update may run), and the app
+# then no longer starts. Record the ones the app needs as installed on purpose.
+keep_packages() {
+    local dependencies=()
+    mapfile -t dependencies < <(pacman -Qdq "${PACKAGES[@]}" 2>/dev/null || true)
+    ((${#dependencies[@]} > 0)) || return 0
+    if command -v sudo >/dev/null 2>&1 &&
+        sudo pacman -D --asexplicit "${dependencies[@]}" </dev/null >/dev/null; then
+        say "✓ Kept as needed by SUPER DESKTOP: ${dependencies[*]}"
+    else
+        warn "Could not mark ${dependencies[*]} as needed. Removing another program may remove them too; keep them with 'sudo pacman -D --asexplicit ${dependencies[*]}'."
+    fi
+}
+
 install_packages() {
     local missing=()
     mapfile -t missing < <(pacman -T "${PACKAGES[@]}")
     if ((${#missing[@]} == 0)); then
         say "✓ System packages present"
+        keep_packages
         return
     fi
     say "Installing system packages: ${missing[*]}"
@@ -139,6 +155,7 @@ install_packages() {
         die "Could not install ${missing[*]}. Install them with 'sudo pacman -S --needed ${missing[*]}' (after 'sudo pacman -Syu' if the package database is out of date), then run the installer again."
     fi
     say "✓ Installed ${missing[*]}"
+    keep_packages
 }
 
 rust_version() {

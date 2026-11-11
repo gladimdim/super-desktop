@@ -941,7 +941,7 @@ progressbar.usage-bar.crit > trough > progress {{ background-color: {usage_crit}
     color: {light_foreground};
 }}
 
-/* SD Editor: a folder tree beside GtkSourceView tabs, in a card. */
+/* SD Editor: a folder tree beside text tabs, in a card. */
 .sd-editor-toolbar {{
     padding: 4px 8px;
     border-bottom: 1px solid {term_hdr_divider};

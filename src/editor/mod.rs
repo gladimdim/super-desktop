@@ -1,6 +1,6 @@
 //! SD Editor: a text editor card on the desktop, next to the terminals. Its
 //! folder's tree is on the left, the open files in tabs on the right, drawn
-//! by GtkSourceView (syntax colors from the Omarchy theme, line numbers,
+//! in GTK's text view (syntax colors from the Omarchy theme, line numbers,
 //! find and replace, undo). Images, sound and video open in preview tabs. It drags, resizes, arranges and slides like any
 //! card. Questions (save changes? a file name) are asked inside the card:
 //! the overlay cannot show system dialogs.
@@ -10,8 +10,10 @@
 //! or other PCs.
 mod doc;
 mod find;
+mod highlight;
 mod media;
 mod scheme;
+mod text;
 mod tree;
 
 pub use doc::Doc;
@@ -19,7 +21,6 @@ pub use doc::Doc;
 use crate::plugin_ui::cards::{CanvasHost, Geometry, PluginCard};
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
-use sourceview5::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
@@ -108,10 +109,11 @@ pub fn cards() -> Vec<Rc<PluginCard>> {
 
 /// The Omarchy theme changed: new colors for every open file.
 pub fn theme_changed() {
-    let scheme = scheme::current();
+    let palette = scheme::Palette::current();
+    scheme::apply_css(&palette);
     for editor in editors() {
         for doc in editor.docs.borrow().iter() {
-            doc.buffer.set_style_scheme(scheme.as_ref());
+            doc.set_palette(&palette);
         }
     }
 }
@@ -326,7 +328,7 @@ pub struct Editor {
     position: gtk4::Label,
     untitled: Cell<u32>,
     /// Kept for the cursor-position handler of the open file.
-    cursor_handler: RefCell<Option<(sourceview5::Buffer, glib::SignalHandlerId)>>,
+    cursor_handler: RefCell<Option<(gtk4::TextBuffer, glib::SignalHandlerId)>>,
 }
 
 fn pretty(path: &Path) -> String {
@@ -656,7 +658,7 @@ impl Editor {
             buffer.disconnect(handler);
         }
         let position = self.position.clone();
-        let show = move |buffer: &sourceview5::Buffer| {
+        let show = move |buffer: &gtk4::TextBuffer| {
             let at = buffer.iter_at_mark(&buffer.get_insert());
             position.set_text(&format!("Ln {}, Col {}", at.line() + 1, at.line_offset() + 1));
         };
@@ -697,7 +699,7 @@ impl Editor {
 
     fn new_file(self: &Rc<Self>) {
         self.untitled.set(self.untitled.get() + 1);
-        self.add_doc(Doc::new(self.untitled.get(), scheme::current().as_ref()));
+        self.add_doc(Doc::new(self.untitled.get(), &scheme::Palette::current()));
     }
 
     /// Opens `path` in a tab (an image, a sound or a video in a preview),
@@ -725,7 +727,7 @@ impl Editor {
             }
             return self.add_preview(media::Preview::new(path, kind));
         }
-        let doc = Doc::new(0, scheme::current().as_ref());
+        let doc = Doc::new(0, &scheme::Palette::current());
         match doc.load(path) {
             Ok(()) => {
                 self.add_doc(doc);
@@ -1302,7 +1304,7 @@ mod tests {
         assert!(!a.is_modified());
         editor.open_file(&project.join("src/main.rs"));
         let main = editor.current().unwrap();
-        assert_eq!(main.buffer.language().map(|l| l.id().to_string()).as_deref(), Some("rust"));
+        assert_eq!(main.language().as_deref(), Some("rust"));
         assert_eq!(editor.docs.borrow().len(), 2);
         editor.open_file(&project.join("a.txt"));
         assert_eq!(editor.docs.borrow().len(), 2, "an open file is not opened twice");
@@ -1374,11 +1376,107 @@ mod tests {
         editor.show_find(false);
         editor.find.search.set_text("their");
         pump_until("the match count", || editor.find.is_open() && a.buffer.selection_bounds().is_some());
+        assert_eq!(editor.find.matches(), 1);
+        let tagged = |doc: &Rc<Doc>, tag: &str| {
+            let tag = doc.buffer.tag_table().lookup(tag).expect("the tag");
+            let mut found = Vec::new();
+            let mut iter = doc.buffer.start_iter();
+            loop {
+                if iter.starts_tag(Some(&tag)) {
+                    let mut end = iter;
+                    end.forward_to_tag_toggle(Some(&tag));
+                    found.push(doc.buffer.text(&iter, &end, true).to_string());
+                }
+                if !iter.forward_to_tag_toggle(Some(&tag)) {
+                    break;
+                }
+            }
+            found
+        };
+        assert_eq!(tagged(&a, scheme::SEARCH_MATCH), ["their"]);
+        // Matches follow the text, ignore case unless asked, and Replace all
+        // is one step for Undo.
+        a.buffer.set_text("Their one\ntheir two\nthe third\n");
+        pump_until("matches after an edit", || editor.find.matches() == 2);
+        assert_eq!(tagged(&a, scheme::SEARCH_MATCH), ["Their", "their"]);
+        editor.find.replace.set_text("our");
+        editor.find.replace_all();
+        assert_eq!(a.text(), "our one\nour two\nthe third\n");
+        assert_eq!(editor.find.matches(), 0);
+        a.buffer.undo();
+        assert_eq!(a.text(), "Their one\ntheir two\nthe third\n");
+        editor.find.step(true);
+        editor.find.replace_one();
+        assert!(a.text().contains("our"), "{}", a.text());
+        editor.find.hide();
+        assert!(tagged(&a, scheme::SEARCH_MATCH).is_empty(), "closing the bar unmarks the matches");
+
+        // Syntax colors, from the grammars built into the binary.
+        editor.open_file(&project.join("src/main.rs"));
+        let main = editor.current().unwrap();
+        main.buffer.set_text("// start\nfn main() {\n    let s = \"hi\";\n}\n");
+        main.finish_coloring();
+        assert_eq!(tagged(&main, scheme::Kind::Comment.tag()), ["// start"]);
+        assert_eq!(tagged(&main, scheme::Kind::Keyword.tag()), ["fn", "let"]);
+        assert_eq!(tagged(&main, scheme::Kind::String.tag()), ["\"hi\""]);
+        // An edit recolors: the first line is no comment any more.
+        let mut start = main.buffer.start_iter();
+        let mut end = main.buffer.iter_at_offset(3);
+        main.buffer.delete(&mut start, &mut end);
+        main.finish_coloring();
+        assert!(tagged(&main, scheme::Kind::Comment.tag()).is_empty());
+
+        // Enter keeps the indentation; Tab, Shift+Tab and Backspace move by
+        // one step of four spaces.
+        main.buffer.set_text("fn main() {\n    one();\n}\n");
+        let at_end_of = |line: i32| {
+            let mut iter = main.buffer.iter_at_line(line).unwrap();
+            iter.forward_to_line_end();
+            main.buffer.place_cursor(&iter);
+        };
+        at_end_of(1);
+        text::new_line(&main.view);
+        assert_eq!(main.text(), "fn main() {\n    one();\n    \n}\n");
+        assert!(text::backspace(&main.view, || false), "in the indentation: back one step");
+        assert_eq!(main.text(), "fn main() {\n    one();\n\n}\n");
+        assert!(!text::backspace(&main.view, || false), "at the start of a line: an ordinary Backspace");
+        text::indent(&main.view);
+        assert_eq!(main.text(), "fn main() {\n    one();\n    \n}\n");
+        main.buffer.insert_at_cursor("ab");
+        text::indent(&main.view);
+        assert_eq!(main.text(), "fn main() {\n    one();\n    ab  \n}\n", "Tab reaches the next stop");
+        main.buffer.select_range(&main.buffer.iter_at_line(0).unwrap(), &main.buffer.iter_at_line(2).unwrap());
+        text::indent(&main.view);
+        assert_eq!(main.text(), "    fn main() {\n        one();\n    ab  \n}\n", "Tab indents the selected lines");
+        text::unindent(&main.view);
+        text::unindent(&main.view);
+        assert_eq!(main.text(), "fn main() {\none();\n    ab  \n}\n");
+        // The cursor's line and the bracket pair at the cursor are marked.
+        main.buffer.place_cursor(&main.buffer.iter_at_line_offset(0, 10).unwrap());
+        text::mark_cursor(&main.buffer);
+        assert_eq!(tagged(&main, scheme::BRACKET), ["{", "}"]);
+        assert_eq!(tagged(&main, scheme::CURRENT_LINE), ["fn main() {\n"]);
+        // Line numbers are drawn in the view's left gutter.
+        assert!(main.view.gutter(gtk4::TextWindowType::Left).is_some());
+        crate::gtk_test::pump(100);
+        main.buffer.set_text("fn main() {}\n");
+        main.buffer.set_modified(false);
+        editor.notebook.set_current_page(editor.notebook.page_num(&a.page));
+        a.buffer.set_text("theirs\n");
+        a.save().unwrap();
+        editor.show_find(false);
+        editor.find.search.set_text("their");
+        pump_until("the match count again", || editor.find.matches() == 1);
         // A picture for a visual check: SD_EDITOR_SHOTS=<dir> cargo test editor_opens.
         if let Some(dir) = std::env::var_os("SD_EDITOR_SHOTS") {
             editor.open_file(&project.join("src/main.rs"));
+            let shown = editor.current().unwrap();
+            shown.buffer.set_text("// A picture of the editor.\nuse std::path::Path;\n\n/// Adds one.\nfn add(x: u32) -> u32 {\n    let label = \"sum\\n\";\n    if x > 41 {\n        return x + 1;\n    }\n    println!(\"{label}{}\", x);\n    x\n}\n");
+            shown.buffer.place_cursor(&shown.buffer.iter_at_line_offset(4, 21).unwrap());
             crate::gtk_test::pump(300);
             crate::gtk_test::save_png(&editor.card.container, &PathBuf::from(dir).join("editor.png"));
+            shown.buffer.set_text("fn main() {}\n");
+            shown.buffer.set_modified(false);
             editor.notebook.set_current_page(editor.notebook.page_num(&a.page));
         }
 
@@ -1410,7 +1508,7 @@ mod tests {
         call(serde_json::json!({"folder": other, "file": "notes.md"})).unwrap();
         pump_until("the second editor", || editors().len() == 2);
         let second = editors().into_iter().find(|e| e.root == other.canonicalize().unwrap()).unwrap();
-        assert_eq!(second.current().unwrap().buffer.language().map(|l| l.id().to_string()).as_deref(), Some("markdown"));
+        assert_eq!(second.current().unwrap().language().as_deref(), Some("markdown"));
         assert_eq!(call(serde_json::json!({"folder": root.join("nope")})).unwrap_err()["code"], "bad_params");
         second.close_now();
 

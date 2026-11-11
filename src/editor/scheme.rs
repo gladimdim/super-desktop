@@ -1,13 +1,91 @@
-//! SD Editor's colors: a GtkSourceView style scheme made from the Omarchy
-//! theme, written to the cache and loaded again when the theme changes.
+//! SD Editor's colors, made from the Omarchy theme: the text view's own
+//! (background, text, selection, cursor) as CSS, and one text tag per kind of
+//! syntax, the current line, matching brackets and search matches.
 use crate::theme::OmarchyTheme;
-use std::cell::Cell;
-use std::path::PathBuf;
+use gtk4::prelude::*;
+use gtk4::{gdk, pango};
 
-pub const ID: &str = "sd-omarchy";
+/// A kind of text the syntax colors tell apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Comment,
+    String,
+    Keyword,
+    Type,
+    Number,
+    Constant,
+    Function,
+    Builtin,
+    Special,
+    Error,
+    Heading,
+    Emphasis,
+    Strong,
+    Link,
+    Added,
+    Removed,
+    Location,
+}
 
-thread_local! {
-    static SEARCH_PATH_ADDED: Cell<bool> = const { Cell::new(false) };
+impl Kind {
+    pub const ALL: [Kind; 17] = [
+        Kind::Comment, Kind::String, Kind::Keyword, Kind::Type, Kind::Number, Kind::Constant,
+        Kind::Function, Kind::Builtin, Kind::Special, Kind::Error, Kind::Heading, Kind::Emphasis,
+        Kind::Strong, Kind::Link, Kind::Added, Kind::Removed, Kind::Location,
+    ];
+
+    /// The name of its text tag.
+    pub fn tag(self) -> &'static str {
+        match self {
+            Kind::Comment => "sd-syntax-comment",
+            Kind::String => "sd-syntax-string",
+            Kind::Keyword => "sd-syntax-keyword",
+            Kind::Type => "sd-syntax-type",
+            Kind::Number => "sd-syntax-number",
+            Kind::Constant => "sd-syntax-constant",
+            Kind::Function => "sd-syntax-function",
+            Kind::Builtin => "sd-syntax-builtin",
+            Kind::Special => "sd-syntax-special",
+            Kind::Error => "sd-syntax-error",
+            Kind::Heading => "sd-syntax-heading",
+            Kind::Emphasis => "sd-syntax-emphasis",
+            Kind::Strong => "sd-syntax-strong",
+            Kind::Link => "sd-syntax-link",
+            Kind::Added => "sd-syntax-added",
+            Kind::Removed => "sd-syntax-removed",
+            Kind::Location => "sd-syntax-location",
+        }
+    }
+}
+
+/// The cursor's line.
+pub const CURRENT_LINE: &str = "sd-current-line";
+/// A bracket next to the cursor and its partner.
+pub const BRACKET: &str = "sd-bracket";
+/// A match of the find bar's text.
+pub const SEARCH_MATCH: &str = "sd-search-match";
+
+/// The editor's colors for one theme, as `#rrggbb`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Palette {
+    pub background: String,
+    pub foreground: String,
+    pub accent: String,
+    pub selection: String,
+    /// The cursor's line: the background, slightly toward the text.
+    pub line: String,
+    /// Line numbers.
+    pub gutter: String,
+    /// Comments: the text faded toward the background, not the theme's
+    /// `muted` (a border color that some themes make nearly invisible).
+    pub comment: String,
+    pub red: String,
+    pub green: String,
+    pub yellow: String,
+    pub orange: String,
+    pub blue: String,
+    pub magenta: String,
+    pub cyan: String,
 }
 
 /// `#rrggbb` → (r, g, b); anything else is gray.
@@ -24,107 +102,131 @@ fn mix(a: &str, b: &str, t: f64) -> String {
     format!("#{:02x}{:02x}{:02x}", step(ar, br), step(ag, bg), step(ab, bb))
 }
 
-/// The scheme for `theme`. Comments are the text faded toward the
-/// background, not the theme's `muted` (a border color that some themes
-/// make nearly invisible on the background).
-pub fn xml(theme: &OmarchyTheme) -> String {
-    let t = theme;
-    let colors = [
-        ("bg", t.background.clone()),
-        ("fg", t.foreground.clone()),
-        ("accent", t.accent.clone()),
-        ("selection", t.selection.clone()),
-        ("line", mix(&t.background, &t.foreground, 0.06)),
-        ("gutter", mix(&t.background, &t.foreground, 0.35)),
-        ("comment", mix(&t.foreground, &t.background, 0.42)),
-        ("red", t.red.clone()),
-        ("green", t.green.clone()),
-        ("yellow", t.yellow.clone()),
-        ("orange", t.orange.clone()),
-        ("blue", t.blue.clone()),
-        ("magenta", t.magenta.clone()),
-        ("cyan", t.cyan.clone()),
-    ];
-    let mut out = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<style-scheme id=\"{ID}\" name=\"SUPER DESKTOP ({})\" version=\"1.0\">\n",
-        escape(&t.name)
-    );
-    for (name, value) in &colors {
-        out.push_str(&format!("  <color name=\"{name}\" value=\"{}\"/>\n", escape(value)));
-    }
-    let styles: &[(&str, &str)] = &[
-        ("text", r#"foreground="fg" background="bg""#),
-        ("selection", r#"foreground="fg" background="selection""#),
-        ("selection-unfocused", r#"foreground="fg" background="selection""#),
-        ("cursor", r#"foreground="accent""#),
-        ("current-line", r#"background="line""#),
-        ("line-numbers", r#"foreground="gutter" background="bg""#),
-        ("current-line-number", r#"foreground="fg" background="line""#),
-        ("bracket-match", r#"foreground="bg" background="accent" bold="true""#),
-        ("bracket-mismatch", r#"foreground="bg" background="red""#),
-        ("search-match", r#"foreground="bg" background="yellow""#),
-        ("def:comment", r#"foreground="comment" italic="true""#),
-        ("def:doc-comment-element", r#"foreground="comment" bold="true""#),
-        ("def:string", r#"foreground="green""#),
-        ("def:character", r#"foreground="green""#),
-        ("def:keyword", r#"foreground="magenta" bold="true""#),
-        ("def:statement", r#"foreground="magenta""#),
-        ("def:type", r#"foreground="yellow""#),
-        ("def:number", r#"foreground="orange""#),
-        ("def:boolean", r#"foreground="orange""#),
-        ("def:constant", r#"foreground="orange""#),
-        ("def:special-constant", r#"foreground="orange""#),
-        ("def:function", r#"foreground="blue""#),
-        ("def:builtin", r#"foreground="cyan""#),
-        ("def:preprocessor", r#"foreground="cyan""#),
-        ("def:special-char", r#"foreground="cyan""#),
-        ("def:identifier", r#"foreground="fg""#),
-        ("def:error", r#"foreground="red" underline="error""#),
-        ("def:warning", r#"foreground="yellow""#),
-        ("def:note", r#"foreground="yellow" bold="true""#),
-        ("def:heading", r#"foreground="blue" bold="true""#),
-        ("def:emphasis", r#"italic="true""#),
-        ("def:strong-emphasis", r#"bold="true""#),
-        ("def:link-destination", r#"foreground="cyan" underline="single""#),
-        ("diff:added-line", r#"foreground="green""#),
-        ("diff:removed-line", r#"foreground="red""#),
-        ("diff:location", r#"foreground="blue""#),
-    ];
-    for (name, attributes) in styles {
-        out.push_str(&format!("  <style name=\"{name}\" {attributes}/>\n"));
-    }
-    out.push_str("</style-scheme>\n");
-    out
+/// A color GTK can use; an unreadable one is gray.
+pub fn rgba(color: &str) -> gdk::RGBA {
+    let (r, g, b) = rgb(color);
+    gdk::RGBA::new(f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0, 1.0)
 }
 
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+/// `color` as `#rrggbb`, whatever the theme file wrote.
+fn hex(color: &str) -> String {
+    let (r, g, b) = rgb(color);
+    format!("#{r:02x}{g:02x}{b:02x}")
 }
 
-fn dir() -> PathBuf {
-    std::env::var_os("XDG_CACHE_HOME")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache"))
-        .join("super-desktop/sourceview")
+impl Palette {
+    pub fn new(theme: &OmarchyTheme) -> Self {
+        let t = theme;
+        Self {
+            background: hex(&t.background),
+            foreground: hex(&t.foreground),
+            accent: hex(&t.accent),
+            selection: hex(&t.selection),
+            line: mix(&t.background, &t.foreground, 0.06),
+            gutter: mix(&t.background, &t.foreground, 0.35),
+            comment: mix(&t.foreground, &t.background, 0.42),
+            red: hex(&t.red),
+            green: hex(&t.green),
+            yellow: hex(&t.yellow),
+            orange: hex(&t.orange),
+            blue: hex(&t.blue),
+            magenta: hex(&t.magenta),
+            cyan: hex(&t.cyan),
+        }
+    }
+
+    /// The current Omarchy theme's.
+    pub fn current() -> Self {
+        Self::new(&crate::theme::current_theme())
+    }
+
+    /// How a kind of syntax is drawn: color, bold, italic, underlined.
+    pub fn look(&self, kind: Kind) -> (&str, bool, bool, bool) {
+        match kind {
+            Kind::Comment => (&self.comment, false, true, false),
+            Kind::String => (&self.green, false, false, false),
+            Kind::Keyword => (&self.magenta, true, false, false),
+            Kind::Type => (&self.yellow, false, false, false),
+            Kind::Number | Kind::Constant => (&self.orange, false, false, false),
+            Kind::Function => (&self.blue, false, false, false),
+            Kind::Builtin | Kind::Special => (&self.cyan, false, false, false),
+            Kind::Error => (&self.red, false, false, true),
+            Kind::Heading => (&self.blue, true, false, false),
+            Kind::Emphasis => (&self.foreground, false, true, false),
+            Kind::Strong => (&self.foreground, true, false, false),
+            Kind::Link => (&self.cyan, false, false, true),
+            Kind::Added => (&self.green, false, false, false),
+            Kind::Removed => (&self.red, false, false, false),
+            Kind::Location => (&self.blue, false, false, false),
+        }
+    }
+
+    /// The text view's own colors.
+    pub fn css(&self) -> String {
+        format!(
+            "textview.sd-editor-text, textview.sd-editor-text > text {{ background-color: {bg}; color: {fg}; caret-color: {accent}; }}\n\
+             textview.sd-editor-text > border {{ background-color: {bg}; }}\n\
+             textview.sd-editor-text > text > selection {{ background-color: {selection}; color: {fg}; }}\n",
+            bg = self.background,
+            fg = self.foreground,
+            accent = self.accent,
+            selection = self.selection,
+        )
+    }
 }
 
-/// The scheme for the current theme, written and loaded; `None` when it
-/// cannot be written (GtkSourceView's own default is used then).
-pub fn current() -> Option<sourceview5::StyleScheme> {
-    let dir = dir();
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{ID}.xml"));
-    let text = xml(&crate::theme::current_theme());
-    if std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-        std::fs::write(&path, text).ok()?;
+/// The tag `name` of `buffer`, made when it is not there yet.
+fn tag(buffer: &gtk4::TextBuffer, name: &str) -> gtk4::TextTag {
+    let table = buffer.tag_table();
+    table.lookup(name).unwrap_or_else(|| {
+        let tag = gtk4::TextTag::new(Some(name));
+        table.add(&tag);
+        tag
+    })
+}
+
+/// Gives `buffer` its tags in `palette`'s colors (again after a theme change).
+/// Later tags win: the current line is under the syntax colors, and brackets
+/// and search matches are over them.
+pub fn style_buffer(buffer: &gtk4::TextBuffer, palette: &Palette) {
+    let line = tag(buffer, CURRENT_LINE);
+    line.set_paragraph_background_rgba(Some(&rgba(&palette.line)));
+    for kind in Kind::ALL {
+        let (color, bold, italic, underlined) = palette.look(kind);
+        let tag = tag(buffer, kind.tag());
+        tag.set_foreground_rgba(Some(&rgba(color)));
+        tag.set_weight(if bold { 700 } else { 400 });
+        tag.set_style(if italic { pango::Style::Italic } else { pango::Style::Normal });
+        tag.set_underline(match (underlined, kind) {
+            (true, Kind::Error) => pango::Underline::Error,
+            (true, _) => pango::Underline::Single,
+            _ => pango::Underline::None,
+        });
     }
-    let manager = sourceview5::StyleSchemeManager::default();
-    if !SEARCH_PATH_ADDED.with(|added| added.replace(true)) {
-        manager.append_search_path(&dir.to_string_lossy());
-    }
-    manager.force_rescan();
-    manager.scheme(ID)
+    let found = tag(buffer, SEARCH_MATCH);
+    found.set_foreground_rgba(Some(&rgba(&palette.background)));
+    found.set_background_rgba(Some(&rgba(&palette.yellow)));
+    let bracket = tag(buffer, BRACKET);
+    bracket.set_foreground_rgba(Some(&rgba(&palette.background)));
+    bracket.set_background_rgba(Some(&rgba(&palette.accent)));
+    bracket.set_weight(700);
+}
+
+thread_local! {
+    static PROVIDER: std::cell::OnceCell<gtk4::CssProvider> = const { std::cell::OnceCell::new() };
+}
+
+/// Loads `palette`'s text view colors for every editor on this display.
+pub fn apply_css(palette: &Palette) {
+    let Some(display) = gdk::Display::default() else { return };
+    PROVIDER.with(|cell| {
+        let provider = cell.get_or_init(|| {
+            let provider = gtk4::CssProvider::new();
+            gtk4::style_context_add_provider_for_display(&display, &provider, gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
+            provider
+        });
+        provider.load_from_string(&palette.css());
+    });
 }
 
 #[cfg(test)]
@@ -133,14 +235,19 @@ mod tests {
 
     #[test]
     fn editor_scheme_follows_the_theme() {
-        let theme = OmarchyTheme { background: "#000000".into(), foreground: "#ffffff".into(), name: "A & B".into(), ..OmarchyTheme::default() };
-        let xml = xml(&theme);
-        assert!(xml.contains(r##"<color name="bg" value="#000000"/>"##), "{xml}");
+        let theme = OmarchyTheme { background: "#000000".into(), foreground: "#FFFFFF".into(), magenta: "#ff00ff".into(), ..OmarchyTheme::default() };
+        let palette = Palette::new(&theme);
+        assert_eq!(palette.background, "#000000");
+        assert_eq!(palette.foreground, "#ffffff");
         // Comments: the text faded 42% toward the background.
-        assert!(xml.contains(r##"<color name="comment" value="#949494"/>"##), "{xml}");
-        assert!(xml.contains("name=\"SUPER DESKTOP (A &amp; B)\""));
-        assert!(xml.contains(r#"<style name="def:keyword" foreground="magenta" bold="true"/>"#));
+        assert_eq!(palette.comment, "#949494");
+        assert_eq!(palette.look(Kind::Keyword), ("#ff00ff", true, false, false));
+        assert_eq!(palette.look(Kind::Comment), ("#949494", false, true, false));
+        assert!(palette.css().contains("background-color: #000000; color: #ffffff;"), "{}", palette.css());
         assert_eq!(mix("#000000", "#ffffff", 0.5), "#808080");
         assert_eq!(rgb("nonsense"), (128, 128, 128));
+        // Every kind has its own tag.
+        let names: std::collections::HashSet<_> = Kind::ALL.iter().map(|k| k.tag()).collect();
+        assert_eq!(names.len(), Kind::ALL.len());
     }
 }

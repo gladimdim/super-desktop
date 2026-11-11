@@ -67,7 +67,7 @@ fi
 # The libraries the build links against. An update from Settings cannot
 # install packages, so a missing one is named with the command that adds it.
 if command -v pacman >/dev/null 2>&1; then
-  missing="$(pacman -T gtk4 gtk4-layer-shell vte4 gtksourceview5 2>/dev/null | tr '\n' ' ' || true)"
+  missing="$(pacman -T gtk4 gtk4-layer-shell vte4 2>/dev/null | tr '\n' ' ' || true)"
   if [[ -n "${missing// /}" ]]; then
     echo "ERROR: missing system packages: $missing" >&2
     echo "Install them with 'sudo pacman -S --needed $missing', then rebuild (or run the installer again)." >&2

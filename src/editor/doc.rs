@@ -1,10 +1,11 @@
-//! One file open in SD Editor: a GtkSourceView buffer and view, its tab, and
+//! One file open in SD Editor: its text buffer and view, its tab, and
 //! loading and saving. Saving replaces the file atomically through GIO,
 //! which keeps its permissions; a change made on disk by another program is
 //! noticed and offered for a reload.
 use gtk4::prelude::*;
 use gtk4::{gio, glib};
-use sourceview5::prelude::*;
+use super::highlight::{self, Highlighter};
+use super::scheme::{self, Palette};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -17,8 +18,12 @@ pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct Doc {
     pub path: RefCell<Option<PathBuf>>,
-    pub buffer: sourceview5::Buffer,
-    pub view: sourceview5::View,
+    pub buffer: gtk4::TextBuffer,
+    pub view: gtk4::TextView,
+    /// The line numbers.
+    gutter: gtk4::DrawingArea,
+    highlighter: Rc<Highlighter>,
+    palette: Rc<RefCell<Palette>>,
     /// The notebook page.
     pub page: gtk4::ScrolledWindow,
     pub tab: gtk4::Box,
@@ -49,22 +54,13 @@ pub fn read(path: &Path) -> Result<String, String> {
 }
 
 impl Doc {
-    pub fn new(untitled: u32, scheme: Option<&sourceview5::StyleScheme>) -> Rc<Self> {
-        let buffer = sourceview5::Buffer::new(None);
-        buffer.set_highlight_syntax(true);
-        buffer.set_highlight_matching_brackets(true);
-        buffer.set_style_scheme(scheme);
-        let view = sourceview5::View::with_buffer(&buffer);
-        view.add_css_class("sd-editor-text");
-        view.set_monospace(true);
-        view.set_show_line_numbers(true);
-        view.set_highlight_current_line(true);
-        view.set_auto_indent(true);
-        view.set_indent_on_tab(true);
-        view.set_smart_backspace(true);
-        view.set_tab_width(4);
-        view.set_insert_spaces_instead_of_tabs(true);
-        view.set_left_margin(6);
+    pub fn new(untitled: u32, palette: &Palette) -> Rc<Self> {
+        let buffer = gtk4::TextBuffer::new(None);
+        scheme::style_buffer(&buffer, palette);
+        scheme::apply_css(palette);
+        let palette = Rc::new(RefCell::new(palette.clone()));
+        let highlighter = Highlighter::new(&buffer);
+        let (view, gutter) = super::text::new_view(&buffer, &palette);
         let page = gtk4::ScrolledWindow::new();
         page.set_child(Some(&view));
         page.set_vexpand(true);
@@ -85,6 +81,9 @@ impl Doc {
             path: RefCell::new(None),
             buffer,
             view,
+            gutter,
+            highlighter,
+            palette,
             page,
             tab,
             close,
@@ -111,6 +110,25 @@ impl Doc {
             Some(path) => path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned()),
             None => format!("Untitled {}", self.untitled),
         }
+    }
+
+    /// The language its syntax is colored as (`rust`), `None` for plain text.
+    #[cfg(test)]
+    pub fn language(&self) -> Option<String> {
+        self.highlighter.language()
+    }
+
+    /// The Omarchy theme changed: its colors.
+    pub fn set_palette(&self, palette: &Palette) {
+        *self.palette.borrow_mut() = palette.clone();
+        scheme::style_buffer(&self.buffer, palette);
+        self.gutter.queue_draw();
+    }
+
+    /// Colors everything that is waiting, at once.
+    #[cfg(test)]
+    pub fn finish_coloring(&self) {
+        self.highlighter.finish();
     }
 
     pub fn is_modified(&self) -> bool {
@@ -188,8 +206,8 @@ impl Doc {
 
     fn set_path(self: &Rc<Self>, path: &Path) {
         *self.path.borrow_mut() = Some(path.to_path_buf());
-        let language = sourceview5::LanguageManager::default().guess_language(Some(path), None);
-        self.buffer.set_language(language.as_ref());
+        let first_line = self.text().lines().next().unwrap_or_default().to_string();
+        self.highlighter.set_syntax(highlight::detect(path, &first_line));
         self.watch(path);
         self.refresh_title();
     }
