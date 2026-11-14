@@ -158,7 +158,7 @@ Captured directly from a Xiaomi Pad 7 Pro (24091RPADG, HyperOS 3) on
 2026-11-14 with `adb exec-out screencap`, in the Last Horizon theme. These
 show the development build of the tiling features shipped in SD Launcher
 1.11.0 (the installed development APK still reports version 1.10.1).
-Resized from 3200 × 2136 to 1440 × 961 and encoded as WebP at quality 88,
+Resized from 3200 × 2136 to 1440 × 961 and encoded as WebP at quality 90,
 with metadata stripped. No UI was composited into the captures.
 
 - `tiling.webp`: Chrome on omarchy.org at left, with two real Linux terminal
@@ -167,11 +167,41 @@ with metadata stripped. No UI was composited into the captures.
   OS:Kernel:Shell:Terminal:CPU:Memory`; the lower runs `uname -sm`,
   `pacman -Q bash foot git` and `df -h /`. All output is from the Pad’s
   actual Arch Linux ARM environment.
-- `floating.webp`: Clock floating over Calculator (Super+T).
-- `finder.webp`: the Super+Space app finder over the tiled desktop.
-- `keys.webp`: the built-in Super+K keyboard shortcut reference.
-- `home.webp`: home widgets, the workspace bar and Last Horizon wallpaper.
-- `apps.webp`: home's app list with both Linux tools and Android apps.
+- `apps-trio.webp`: Chrome on omarchy.org at left, the SUPER DESKTOP usage
+  dashboard at upper right, and YouTube's Omarchy search results at lower right.
+- `floating.webp`: YouTube floating over Chrome and SUPER DESKTOP (Super+T).
+- `pinned.webp`: Chrome popped out on workspace 3 (Super+O), then carried to
+  workspace 1 above the two Linux terminals.
+- `scratchpad.webp`: SUPER DESKTOP moved to the scratchpad (Super+Alt+S) and
+  shown over Chrome and YouTube (Super+S).
+- `fullscreen.webp`: YouTube in full-screen mode, with the workspace bar hidden
+  (Super+F).
+- `finder.webp`: the Super+Space app finder filtered to SUPER DESKTOP over the
+  three-app tiled workspace.
+- `keys.webp`: the built-in Super+K keyboard shortcut reference over those apps.
 
-The carousel also reuses `sd-launcher-landscape.webp` and
-`sd-launcher-terminal.webp`, the earlier real phone captures documented above.
+SUPER DESKTOP shows its live usage dashboard with the PC's session group
+collapsed. YouTube shows search results; no video playback is implied.
+The earlier `home.webp` and `apps.webp` captures remain available but are no
+longer used in the carousel. The phone captures documented above are also
+replaced in the carousel by these Pad window-mode captures.
+
+## SD Launcher built-in SUPER DESKTOP walkthrough (`launcher/`)
+
+Captured on the same Xiaomi Pad and development build on 2026-11-14,
+with the keyboard desktop disabled so the home widgets and Android dock
+are visible. Each is a genuine 3200 × 2136 `adb exec-out screencap`, resized
+to 1440 × 961, stripped of metadata and encoded as WebP at quality 90.
+
+- `embedded-menu.webp`: long-press home exposes the built-in SUPER DESKTOP
+  terminal, usage, page and face choices.
+- `embedded-terminal.webp`: a SUPER DESKTOP home page pinned to a real shell
+  on the paired Omarchy PC, running `fastfetch` and `git log -3 --oneline`
+  in the public SUPER DESKTOP checkout. Commands were sent through the
+  launcher's own prompt field; the output is from the PC, not the tablet.
+- `embedded-usage.webp`: a SUPER DESKTOP usage widget alongside the clock,
+  displaying live statistics from the paired PC.
+
+These are the launcher's native SUPER DESKTOP widgets, distinct from the
+standalone Android app shown in the keyboard-mode carousel. No UI or output
+was composited into the captures.
