@@ -17,7 +17,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.ico">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/launcher/launcher.css?v=sd-widgets">
+<link rel="stylesheet" href="/launcher/launcher.css?v=sd-widget-tour">
 <script src="/launcher/carousel.js" defer></script>
 </head>
 <body>
@@ -95,21 +95,46 @@
       <p>Start agents, send prompts and type into live terminals from home. The work runs on your PC over a direct, encrypted connection. Everything shown here is built into SD Launcher; only the PC needs SUPER DESKTOP installed.</p>
       <p>Home widgets work with touch alone. Linux installation and the keyboard desktop helper are optional.</p>
     </div>
-    <figure class="embedded-shot embedded-primary">
-      <a href="/screenshots/launcher/embedded-terminal.webp"><img src="/screenshots/launcher/embedded-terminal.webp" width="1440" height="961" loading="lazy" alt="SD Launcher's built-in SUPER DESKTOP page showing a live PC terminal running fastfetch and git log, above the Android home dock"></a>
-      <figcaption><h3>A live PC terminal inside your launcher.</h3><p>This is the built-in SUPER DESKTOP page on the Xiaomi Pad. The commands run on the paired Omarchy PC. Open an agent session the same way to read its output, send a prompt or use the live terminal.</p></figcaption>
-    </figure>
-    <div class="embedded-grid">
-      <figure class="embedded-shot">
-        <a href="/screenshots/launcher/embedded-menu.webp"><img src="/screenshots/launcher/embedded-menu.webp" width="1440" height="961" loading="lazy" alt="The launcher's home menu with built-in SUPER DESKTOP terminal, usage, page and face options"></a>
-        <figcaption><h3>1. Add it from home.</h3><p>Long-press an empty area → <strong>super desktop</strong>. Choose <strong>page</strong> for your agents, <strong>terminal</strong> for one session, or <strong>usage</strong> for statistics. Pair your PC from the widget’s settings. <a href="/connect.html">See the PC pairing guide →</a></p></figcaption>
+    <nav class="page-links widget-links" aria-label="Explore the SUPER DESKTOP widget">
+      <a href="#widget-harnesses">Harness list</a>
+      <a href="#widget-machines">Machines</a>
+      <a href="#widget-settings">Settings</a>
+      <a href="#widget-new-harness">Start an agent</a>
+      <a href="#widget-terminal">Live terminal</a>
+      <a href="#widget-usage">Usage</a>
+      <a href="#widget-menu">Add a widget</a>
+    </nav>
+      <figure class="embedded-shot embedded-primary" id="widget-harnesses">
+        <a href="/screenshots/launcher/embedded-harnesses.webp" aria-label="Open full-size screenshot: Your harnesses, live on home."><img src="/screenshots/launcher/embedded-harnesses.webp" width="1440" height="961" loading="lazy" alt="The built-in SUPER DESKTOP widget listing Claude Code, Antigravity and OpenAI Codex sessions grouped under the paired PC"></a>
+        <figcaption><h3>Your harnesses, live on home.</h3><p>See sessions grouped by computer, with their agent, model, project folder, recent output and live status. Tap a harness to open its terminal. This capture shows six sessions on the paired PC.</p></figcaption>
       </figure>
-      <figure class="embedded-shot">
-        <a href="/screenshots/launcher/embedded-usage.webp"><img src="/screenshots/launcher/embedded-usage.webp" width="1440" height="961" loading="lazy" alt="A built-in SUPER DESKTOP usage widget beside the launcher's clock on the Xiaomi Pad home screen"></a>
-        <figcaption><h3>2. Make the widgets yours.</h3><p>Tap a usage card to choose its computer, provider and statistic. Follow plan limits, tokens or active sessions. Keep one terminal close, or use a whole page for your agents. Long-press a widget to move or resize it.</p></figcaption>
+    <div class="embedded-grid">
+      <figure class="embedded-shot" id="widget-machines">
+        <a href="/screenshots/launcher/embedded-machines.webp" aria-label="Open full-size screenshot: Your machines and their connections."><img src="/screenshots/launcher/embedded-machines.webp" width="1440" height="961" loading="lazy" alt="SUPER DESKTOP widget settings showing the paired computer and its connection address choices"></a>
+        <figcaption><h3>Your machines and their connections.</h3><p>See the connected PC, the address currently in use and the available connection routes. Pair another computer from the same panel. This Pad has one paired machine in these captures.</p></figcaption>
+      </figure>
+      <figure class="embedded-shot" id="widget-settings">
+        <a href="/screenshots/launcher/embedded-settings.webp" aria-label="Open full-size screenshot: Choose what this page shows."><img src="/screenshots/launcher/embedded-settings.webp" width="1440" height="961" loading="lazy" alt="SUPER DESKTOP widget settings with computer selection, every-harness and single-session filters, and controls to add widgets"></a>
+        <figcaption><h3>Choose what this page shows.</h3><p>Choose the computers for this page, show every harness or pin one session. Add another page, a terminal widget or a usage widget; each keeps its own settings.</p></figcaption>
+      </figure>
+      <figure class="embedded-shot" id="widget-new-harness">
+        <a href="/screenshots/launcher/embedded-new-harness.webp" aria-label="Open full-size screenshot: Pick an agent and a project."><img src="/screenshots/launcher/embedded-new-harness.webp" width="1440" height="961" loading="lazy" alt="The built-in new-harness picker with OpenAI Codex selected and matching SUPER DESKTOP project folders"></a>
+        <figcaption><h3>Pick an agent and a project.</h3><p>Open + new, choose an available harness and find its working folder on your PC. The Start button launches it on that computer. The screenshot shows the picker before starting a session.</p></figcaption>
+      </figure>
+      <figure class="embedded-shot" id="widget-terminal">
+        <a href="/screenshots/launcher/embedded-terminal.webp" aria-label="Open full-size screenshot: A live PC terminal inside your launcher."><img src="/screenshots/launcher/embedded-terminal.webp" width="1440" height="961" loading="lazy" alt="SD Launcher’s built-in SUPER DESKTOP page showing a live PC terminal running fastfetch and git log above the Android home dock"></a>
+        <figcaption><h3>A live PC terminal inside your launcher.</h3><p>The commands here run on the paired Omarchy PC. Open an agent session the same way to read its output, send a prompt or use the live terminal.</p></figcaption>
+      </figure>
+      <figure class="embedded-shot" id="widget-usage">
+        <a href="/screenshots/launcher/embedded-usage.webp" aria-label="Open full-size screenshot: Keep usage beside your home widgets."><img src="/screenshots/launcher/embedded-usage.webp" width="1440" height="961" loading="lazy" alt="A built-in SUPER DESKTOP usage widget beside the launcher clock on the Xiaomi Pad home screen"></a>
+        <figcaption><h3>Keep usage beside your home widgets.</h3><p>Tap a usage card to choose its computer, provider and statistic. Follow plan limits, tokens or active sessions. Long-press a widget to move or resize it.</p></figcaption>
+      </figure>
+      <figure class="embedded-shot" id="widget-menu">
+        <a href="/screenshots/launcher/embedded-menu.webp" aria-label="Open full-size screenshot: Add it straight from home."><img src="/screenshots/launcher/embedded-menu.webp" width="1440" height="961" loading="lazy" alt="The launcher home menu with built-in SUPER DESKTOP terminal, usage, page and face options"></a>
+        <figcaption><h3>Add it straight from home.</h3><p>Long-press an empty area → super desktop. Choose page for your agents, terminal for one session, or usage for statistics. Pair your PC from the widget’s settings.</p></figcaption>
       </figure>
     </div>
-    <p class="gallery-source">Real captures from the Xiaomi Pad 7 Pro. The page, menu and usage widget above are part of SD Launcher; the standalone SUPER DESKTOP app appears separately in the keyboard-mode carousel.</p>
+    <p class="gallery-source">Real captures from the Xiaomi Pad 7 Pro. Every screen above is part of SD Launcher; the standalone SUPER DESKTOP app appears separately in the keyboard-mode carousel.</p>
     <div class="info-grid">
       <article><h3>Omarchy, in your pocket</h3><p>Omarchy themes and wallpapers, a searchable app list and widgets written in OWL. Edit widgets yourself or ask a coding agent.</p></article>
       <article><h3>Linux when you want it</h3><p>Install Arch Linux ARM from settings for terminals, Linux apps, pacman and coding agents on the device. Linux is optional and needs a 64-bit arm64 device.</p></article>

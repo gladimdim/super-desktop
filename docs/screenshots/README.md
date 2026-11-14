@@ -205,3 +205,20 @@ to 1440 × 961, stripped of metadata and encoded as WebP at quality 90.
 These are the launcher's native SUPER DESKTOP widgets, distinct from the
 standalone Android app shown in the keyboard-mode carousel. No UI or output
 was composited into the captures.
+
+Additional widget walkthrough captures on 2026-11-14, from the same Pad:
+
+- `embedded-harnesses.webp`: the live overview with six sessions on the paired
+  PC, showing Claude Code, Antigravity and OpenAI Codex cards and their statuses.
+- `embedded-settings.webp`: computer selection, all-session or single-session
+  filters, and controls for pages, widgets and paired computers.
+- `embedded-machines.webp`: the paired PC's address chooser expanded, showing
+  the LAN route in use and the alternative Tailscale route. No address changed.
+- `embedded-new-harness.webp`: the new-session picker with OpenAI Codex selected
+  and working folders filtered by `super-desktop`. No session was started.
+
+Only one PC was paired during these captures. The harness overview used
+`adb exec-out screencap`; the other three used `adb shell screencap` followed
+by `adb pull`. All four were resized from 3200 × 2136 to 1440 × 961, stripped
+of metadata and encoded as WebP at quality 90. The widget overview is now the
+lead image of the walkthrough; earlier terminal, usage and menu captures remain.

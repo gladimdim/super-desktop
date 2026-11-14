@@ -99,3 +99,6 @@ tr:last-child td { border-bottom: 0; }
   .widget-callout { grid-template-columns: 1fr; gap: 14px; }
   .widget-callout img { width: 150px; }
 }
+
+.widget-links { margin-top: 0; }
+.embedded-shot[id] { scroll-margin-top: 82px; }
