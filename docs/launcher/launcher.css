@@ -85,3 +85,17 @@ tr:last-child td { border-bottom: 0; }
   .gallery-picker { gap: 6px; }
   .gallery-picker a { font-size: 12px; padding: 8px 11px; }
 }
+
+/* A visible entry to the widget walkthrough before the desktop gallery. */
+.widget-callout { display: grid; grid-template-columns: 180px minmax(0, 1fr); align-items: center; gap: 24px; max-width: 760px; margin: 28px auto 0; padding: 18px; text-align: left; border: 1px solid var(--accent); border-radius: 16px; background: var(--panel); color: var(--text); }
+.widget-callout:hover { text-decoration: none; background: var(--panel2); }
+.widget-callout img { display: block; width: 100%; height: auto; border-radius: 8px; }
+.widget-callout > span { display: grid; gap: 8px; }
+.widget-callout strong { font-size: 21px; line-height: 1.25; }
+.widget-callout span span { font-size: 15px; color: var(--muted); }
+.widget-callout b { font-size: 14px; color: var(--accent); }
+#home { display: block; scroll-margin-top: 82px; }
+@media (max-width: 600px) {
+  .widget-callout { grid-template-columns: 1fr; gap: 14px; }
+  .widget-callout img { width: 150px; }
+}
