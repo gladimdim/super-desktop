@@ -37,3 +37,36 @@ tr:last-child td { border-bottom: 0; }
   td:first-child { width: 44%; }
 }
 @media (max-width: 380px) { .nav .wrap { gap: 8px; } .nav .brand { font-size: 14px; } .nav .btn { padding: 10px; font-size: 12px; } }
+
+/* Screenshots stay uncropped; touch users get native horizontal scrolling. */
+.screenshot-carousel { max-width: 1060px; margin: 44px auto 0; text-align: left; }
+.gallery-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.gallery-heading .eyebrow { margin: 0 0 10px; }
+.gallery-heading h2 { font-size: clamp(21px, 3vw, 30px); line-height: 1.2; margin: 0; letter-spacing: -.02em; }
+.gallery-controls { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.gallery-controls[hidden] { display: none; }
+.gallery-controls button { width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: 24px var(--sans); cursor: pointer; }
+.gallery-controls button:hover { border-color: var(--accent); }
+.gallery-count { font: 13px var(--mono); min-width: 42px; text-align: center; color: var(--muted); }
+.gallery-hint, .gallery-source { font-size: 13px; color: var(--muted); }
+.gallery-track { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: thin; scrollbar-color: var(--border) var(--bg); border: 1px solid var(--border); border-radius: 16px; background: var(--bg2); }
+.gallery-slide { flex: 0 0 100%; min-width: 0; margin: 0; scroll-snap-align: start; }
+.gallery-image { display: flex; align-items: center; justify-content: center; aspect-ratio: 1440 / 961; background: #080a0f; }
+.gallery-image img { width: 100%; height: 100%; object-fit: contain; }
+.gallery-slide figcaption { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px; }
+.gallery-slide h3 { font-size: 21px; line-height: 1.25; margin: 0 0 8px; }
+.gallery-slide p { color: var(--muted); font-size: 15px; margin: 0; max-width: 620px; }
+.gallery-slide .kbd { flex-shrink: 0; max-width: 100%; line-height: 1.5; }
+.gallery-picker { display: flex; gap: 8px; flex-wrap: wrap; margin: 16px 0; }
+.gallery-picker a { display: inline-flex; align-items: center; min-height: 44px; padding: 8px 14px; border: 1px solid var(--border); border-radius: 999px; color: var(--muted); font-size: 14px; }
+.gallery-picker a[aria-current] { background: var(--panel2); border-color: var(--accent); color: var(--text); }
+.gallery-picker a:hover { color: var(--text); text-decoration: none; border-color: var(--accent); }
+@media (max-width: 700px) {
+  .gallery-heading { align-items: flex-start; flex-direction: column; }
+  .gallery-controls { align-self: flex-end; margin-top: -4px; }
+  .gallery-slide figcaption { flex-direction: column; gap: 14px; padding: 18px; }
+  .gallery-slide h3 { font-size: 19px; }
+  .gallery-slide p { font-size: 14px; }
+  .gallery-picker { gap: 6px; }
+  .gallery-picker a { font-size: 12px; padding: 8px 11px; }
+}

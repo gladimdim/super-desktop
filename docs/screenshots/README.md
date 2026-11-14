@@ -151,3 +151,22 @@ wide and encoded as WebP at quality 82.
   side by side in landscape (540 × 249). Converted from the fork's existing
   `docs/superdesktop/media/landscape-split.png` capture at WebP quality 86,
   without resizing.
+
+## SD Launcher keyboard desktop carousel (`launcher/`)
+
+Captured directly from a Xiaomi Pad 7 Pro (24091RPADG, HyperOS 3) on
+2026-11-14 with `adb exec-out screencap`, in the Last Horizon theme. These
+show the development build of the tiling features shipped in SD Launcher
+1.11.0 (the installed development APK still reports version 1.10.1).
+Resized from 3200 × 2136 to 1440 × 961 and encoded as WebP at quality 88,
+with metadata stripped. No UI was composited into the captures.
+
+- `tiling.webp`: Calculator and Clock tiled side by side, beneath the workspace bar.
+- `floating.webp`: Clock floating over Calculator (Super+T).
+- `finder.webp`: the Super+Space app finder over the tiled desktop.
+- `keys.webp`: the built-in Super+K keyboard shortcut reference.
+- `home.webp`: home widgets, the workspace bar and Last Horizon wallpaper.
+- `apps.webp`: home's app list with both Linux tools and Android apps.
+
+The carousel also reuses `sd-launcher-landscape.webp` and
+`sd-launcher-terminal.webp`, the earlier real phone captures documented above.
