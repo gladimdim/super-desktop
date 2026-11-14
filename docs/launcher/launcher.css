@@ -1,0 +1,39 @@
+/* The launcher guide shares the main site's palette, navigation and media styles. */
+section[id] { scroll-margin-top: 82px; }
+.hero { padding-top: 64px; }
+.hero .eyebrow { margin-bottom: 20px; }
+.hero-capture { margin-top: 36px; }
+.page-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px 24px; margin-top: 30px; }
+.info-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+.info-grid article { padding: 24px; border-top: 1px solid var(--border); }
+.info-grid h3 { margin-bottom: 8px; }
+.info-grid p, .guide p, .limits-list { color: var(--muted); }
+.note { border-left: 3px solid var(--accent); padding: 18px 24px; background: var(--panel); border-radius: 0 12px 12px 0; }
+.guide { max-width: 920px; padding-top: 80px; }
+.guide h2 { font-size: clamp(28px, 3.6vw, 40px); line-height: 1.15; margin: 12px 0 24px; letter-spacing: -.025em; }
+.guide h3 { margin-bottom: 8px; }
+.guide p { font-size: 17px; }
+.setup-list { padding-left: 24px; }
+.setup-list > li { padding-left: 12px; margin: 24px 0; }
+.setup-list > li::marker { color: var(--accent); font-weight: 700; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+p code { overflow-wrap: anywhere; color: var(--text); }
+.shortcut-table { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+table { width: 100%; table-layout: fixed; border-collapse: collapse; text-align: left; }
+th, td { padding: 14px 18px; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+th { background: var(--panel); }
+td:first-child { font-family: var(--mono); font-size: 14px; width: 40%; }
+td:last-child { color: var(--muted); }
+tr:last-child td { border-bottom: 0; }
+.limits-list li { margin: 16px 0; }
+.skip-link { position: fixed; top: -100px; left: 12px; z-index: 100; padding: 12px; background: var(--panel); }
+.skip-link:focus { top: 8px; }
+@media (max-width: 900px) { .nav-links { display: none; } .nav .btn { margin-left: auto; } }
+@media (max-width: 700px) {
+  .info-grid { grid-template-columns: 1fr; gap: 0; }
+  .hero { padding-top: 40px; }
+  .guide { padding-top: 56px; }
+  th, td { padding: 12px; }
+  td:first-child { width: 44%; }
+}
+@media (max-width: 380px) { .nav .wrap { gap: 8px; } .nav .brand { font-size: 14px; } .nav .btn { padding: 10px; font-size: 12px; } }

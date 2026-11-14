@@ -52,6 +52,13 @@ Then verify with `super-desktop status` and `hyprctl configerrors`, and ask the 
 
 The user installs and signs in to their AI agents separately; SUPER DESKTOP does not install agents or provide their accounts.
 
+## SD Launcher
+
+SD Launcher 1.11.0 is the Android home-screen fork of Omalauncher with SUPER DESKTOP pages, terminal widgets and usage widgets. It also has an opt-in experimental tiling desktop for Android 13+ with a hardware keyboard and an adb helper, tested on Xiaomi Pad 7 Pro / HyperOS 3 only. The launcher itself needs Android 10+; optional Linux needs 64-bit arm64. Restart the helper after every reboot and app update. Three-finger touchscreen swipes work; HyperOS touchpad swipes remain unresolved.
+
+- [SD Launcher download, setup and keyboard shortcuts](https://superdesktop.dmytrogladkyi.com/launcher/)
+- [SD Launcher release notes](https://github.com/gladimdim/omalauncher/releases/tag/sd-v1.11.0)
+
 ## Docs
 
 - [FAQ](https://superdesktop.dmytrogladkyi.com/#faq)
