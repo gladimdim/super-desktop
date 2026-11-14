@@ -222,3 +222,12 @@ Only one PC was paired during these captures. The harness overview used
 by `adb pull`. All four were resized from 3200 × 2136 to 1440 × 961, stripped
 of metadata and encoded as WebP at quality 90. The widget overview is now the
 lead image of the walkthrough; earlier terminal, usage and menu captures remain.
+
+## Android Studio and camera
+
+- `android-studio-sessions.webp`: the native Studio Sessions screen in demo mode.
+- `android-camera-attachment.webp`: a confirmed camera photo staged beside a prompt.
+
+Captured on an isolated Android 14 emulator on 2026-11-14. Demo PCs contain
+synthetic sessions; the camera image is the emulator camera's scene. Both
+captures are 540 × 1200 WebP, resized from 1080 × 2400 at quality 86.

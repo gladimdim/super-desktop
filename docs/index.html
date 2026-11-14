@@ -83,12 +83,13 @@
       "@type": "MobileApplication",
       "@id": "https://superdesktop.dmytrogladkyi.com/#android",
       "name": "SUPER DESKTOP for Android",
+      "softwareVersion": "2.0.0",
       "url": "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
       "description": "Every AI coding agent session on your PCs, on your Android phone: type prompts that run on the PC, get alerts when an agent finishes, send pictures and files. Connects directly to your own PCs with no account.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Android",
-      "installUrl": "https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk",
-      "downloadUrl": "https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk",
+      "installUrl": "https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk",
+      "downloadUrl": "https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk",
       "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD", "description": "GitHub APK: all features free forever, no trial or purchase"},
       "author": { "@id": "https://superdesktop.dmytrogladkyi.com/#author" }
     },
@@ -145,12 +146,12 @@
 <main id="top">
   <section class="hero">
     <div class="wrap">
-      <a class="announce" href="#phone"><b>New</b>Android APK: free forever, with every feature unlocked <span aria-hidden="true">→</span></a>
+      <a class="announce" href="#phone"><b>New</b>Android APK: new Studio design and camera attachments <span aria-hidden="true">→</span></a>
       <h1>Every AI agent.<br><span class="grad">One shortcut away.</span></h1>
       <p class="lede">A hidden workspace for Omarchy. Your coding agents live in it, on every PC, and in your pocket.</p>
       <div class="cta">
         <a class="btn primary" href="#install">Install</a>
-        <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk">Download free Android APK</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk">Download free Android APK</a>
         <a class="play-badge" href="#phone" aria-label="Android app: get it on Google Play"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="141" height="42"></a>
         <a class="btn" href="#trailer">▶ Watch the 40-second tour</a>
       </div>
@@ -272,19 +273,29 @@
         <h2>Your agents, in your pocket.</h2>
         <p>Every session on your PC shows up on your phone. <strong>Type on the phone; it runs on the PC.</strong></p>
         <p>Get an alert when an agent finishes. Send it pictures and files.</p>
+        <p><strong>Meet Studio, the new look for the free APK.</strong> Clearer session cards, larger usage values and a roomier prompt composer, with all your Omarchy themes still supported.</p>
+        <p><strong>Show your agent what you see.</strong> Tap <strong>＋ → Camera</strong>, take and confirm a photo, then send it with your prompt. Review or remove the thumbnail before sending.</p>
         <p><strong>No screen? No login? Still there.</strong> SUPER DESKTOP can run headless from boot, so your phone reaches your agents on a server or a PC nobody is logged in to.</p>
         <p><strong>The Android APK is now free forever.</strong> Every feature is unlocked: no 10-day trial, no Pro purchase, no subscription. Google Play is not required.</p>
-        <p class="store"><a class="btn primary" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk">Download free APK · 1.6.1</a> <a href="https://github.com/gladimdim/super-desktop/releases/tag/v2.0.4">Release notes →</a></p>
-        <p class="caption">Android 10 or newer, including phones, foldables, tablets and TVs. Open the downloaded APK and allow installation from your browser when Android asks. Get future APK updates from GitHub Releases. It installs alongside the Google Play app; pair your PCs in the new app. Existing SUPER DESKTOP SELF installations update in place.</p>
+        <p class="store"><a class="btn primary" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk">Download free APK · 2.0.0</a> <a href="https://github.com/gladimdim/super-desktop/releases/tag/v2.0.5">Release notes →</a></p>
+        <p class="caption"><a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk.sha256">SHA-256 checksum</a>. Android 10 or newer, including phones, foldables, tablets and TVs. Open the downloaded APK and allow installation from your browser when Android asks. Get future APK updates from GitHub Releases. It installs alongside the Google Play app; pair your PCs in the new app. Existing SUPER DESKTOP SELF installations update in place.</p>
         <p>The Google Play edition remains available with its 10-day usage trial and optional one-time Pro purchase. iPhone is in development.</p>
         <p class="store"><a class="play-badge large" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="188" height="56"></a> <a href="connect.html">Connect your phone →</a></p>
       </div>
       <div class="media">
         <div class="tabs" role="tablist" aria-label="Phone demo">
-          <button role="tab" type="button" aria-selected="true" aria-controls="phone-try" id="phone-try-tab">✋ Try it</button>
+          <button role="tab" type="button" aria-selected="true" aria-controls="phone-studio" id="phone-studio-tab">Studio</button>
+          <button role="tab" type="button" aria-selected="false" aria-controls="phone-try" id="phone-try-tab">✋ Try it</button>
           <button role="tab" type="button" aria-selected="false" aria-controls="phone-watch" id="phone-watch-tab">▶ Watch it</button>
         </div>
-        <div class="panel" id="phone-try" role="tabpanel" aria-labelledby="phone-try-tab">
+        <div class="panel" id="phone-studio" role="tabpanel" aria-labelledby="phone-studio-tab">
+          <div class="studio-screens">
+            <a href="screenshots/android-studio-sessions.webp"><img src="screenshots/android-studio-sessions.webp" width="540" height="1200" loading="lazy" alt="Studio sessions screen with usage cards and agents grouped by computer"></a>
+            <a href="screenshots/android-camera-attachment.webp"><img src="screenshots/android-camera-attachment.webp" width="540" height="1200" loading="lazy" alt="A camera photo attached above the Studio prompt composer, ready to send"></a>
+          </div>
+          <p class="caption">The Android app in demo mode: Studio sessions and a photo captured with the emulator camera.</p>
+        </div>
+        <div class="panel" id="phone-try" role="tabpanel" aria-labelledby="phone-try-tab" hidden>
           <div class="phone-row">
             <div class="mirror"><div class="sd-stage" data-stage="mirror"></div><p class="caption">This PC, live.</p></div>
             <div id="phone-device"></div>
@@ -296,7 +307,7 @@
             <video muted loop playsinline preload="none" poster="media/phone.webp" src="media/phone.mp4" aria-label="The Android app on an unfolded phone showing live sessions"></video>
             <button class="play" type="button">▶ Play</button>
           </div>
-          <p class="caption">Real recording: the Android app on an unfolded Galaxy Z Fold.</p>
+          <p class="caption">Earlier app interface, recorded on an unfolded Galaxy Z Fold.</p>
         </div>
       </div>
     </div>
@@ -525,7 +536,7 @@
         </details>
         <details>
           <summary>Can I use my agents from my phone?</summary>
-          <p>Yes. The <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk">free Android APK</a> and the <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play edition</a> list every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development.</p>
+          <p>Yes. The <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk">free Android APK</a> and the <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play edition</a> list every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. An iPhone app is in development.</p>
         </details>
         <details>
           <summary>Is it free?</summary>
@@ -594,7 +605,7 @@
   <div class="wrap">
     <span><b style="color:var(--bolt)">⚡</b> SUPER DESKTOP</span>
     <nav aria-label="More">
-      <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk">Free Android APK</a>
+      <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk">Free Android APK</a>
       <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>
       <a href="connect.html">Connect your phone</a>
       <a href="#faq">FAQ</a>

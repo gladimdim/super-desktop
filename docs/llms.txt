@@ -4,7 +4,7 @@
 
 Website: https://superdesktop.dmytrogladkyi.com/
 Source: https://github.com/gladimdim/super-desktop
-Free Android APK: https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk
+Free Android APK: https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk
 Google Play edition: https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop
 Author: Dmytro Gladkyi (independent developer)
 Current desktop release: 2.0.5
@@ -27,6 +27,7 @@ It is not a fit for Windows or macOS desktops (the desktop app is Omarchy/Arch w
 - No accounts and no third parties: nothing to sign up for. PCs and phones connect directly over the local network or Tailscale using certificate-pinned HTTPS/WSS. Each device shows a matching code on both screens and must be approved on the PC; phones can be revoked at any time.
 - Your agents: Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a shell, or any custom command.
 - Your PC: everything runs locally. Each agent runs in its own tmux-backed terminal and keeps running while the workspace is hidden. With Settings → System launch it also runs headless from boot (no display, nobody logged in): saved agents are restored and the phone can open, prompt, start and close them.
+- GitHub APK 2.0.0 (15): Studio refreshes sessions, usage cards, Settings and the prompt composer while retaining all Omarchy themes. Choose + → Camera to take a photo and attach it to a prompt, then press Send.
 - Your phones: the Android app lists every session on the user's PCs, sends prompts that run on the PC, sends pictures and files, and alerts when an agent finishes. SD Launcher (an Omalauncher fork) puts agents on the Android home screen as pages and terminal widgets.
 - Price: the desktop app is free. The Android APK from GitHub is free forever with every feature unlocked, no trial and no purchase. The Google Play edition keeps its 10-day usage trial and optional one-time Pro purchase; no subscription.
 

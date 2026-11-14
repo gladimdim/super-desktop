@@ -715,3 +715,7 @@ footer .legal { flex-basis: 100%; margin: 0; font-size: 12px; }
   .brand, footer a, details.more summary { display: inline-flex; align-items: center; min-height: 44px; }
   details.more summary { display: list-item; padding: 10px 0; }
 }
+
+/* Native Studio screens from the Android app. */
+.studio-screens { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.studio-screens img { display: block; width: 100%; height: auto; border-radius: 10px; }

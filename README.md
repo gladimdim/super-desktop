@@ -1,6 +1,6 @@
 # ⚡ SUPER DESKTOP
 
-> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
+> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 
@@ -165,7 +165,7 @@ notes say your phone app needs it.
 
 ### Free Android APK
 
-[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.4/SUPER-DESKTOP-1.6.1.apk): every feature is free forever,
+[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk): every feature is free forever,
 with no 10-day trial, Pro purchase or subscription. Google Play is not required.
 Android 10 or newer; phones, foldables, tablets and TVs are supported.
 Open the downloaded APK and allow installation from your browser when Android
@@ -178,8 +178,15 @@ Play edition keeps its usage-day trial and one-time Pro purchase.
 
 The free APK uses protocol 3 with no new PC minimum. Individual features retain
 their requirements: TV code pairing needs PC 1.8.0+, web previews need 1.9.0+.
-Compatibility is unchanged by removing the trial; this APK has not yet been
-checked end to end against released PC builds.
+**2.0.0 (15)** brings Studio: clearer session cards, usage values, Settings and
+a refreshed composer, with all Omarchy themes retained. **＋ → Camera** takes
+a photo, adds its preview to the draft, and sends it only when you press Send.
+Camera capture needs a compatible camera app and the existing camera permission.
+No protocol change or new PC minimum. Compatibility checked on Android 14
+emulators: PC **2.0.5** with released Play **1.5.1 (12)** and new Play
+**2.0.0 (15)** (pairing, sessions, terminal output and text prompts); the new
+build also sent a camera photo to the PC. Oldest/newest PC tested: 2.0.5.
+The separate Play build keeps its usage-day trial and one-time Pro unlock.
 
 ### What you get
 
