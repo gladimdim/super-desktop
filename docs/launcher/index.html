@@ -163,15 +163,16 @@
     </ol>
   </section>
 
-  <section class="guide wrap" id="setup"><p class="eyebrow">OPTIONAL DESKTOP SETUP</p><h2>Bring a keyboard. Start the helper.</h2>
-    <p>The tiling desktop stays off until you set it up. It requires Android 13 or newer and a hardware keyboard. Development testing has been on a Xiaomi Pad 7 Pro running HyperOS 3.</p>
+  <section class="guide wrap" id="setup"><p class="eyebrow">OPTIONAL DESKTOP SETUP</p><h2>Enable tiling on the device. No PC, no Shizuku.</h2>
+    <p>The tiling desktop stays off until you set it up. It requires Android 13 or newer, Wi-Fi (for Wireless debugging), and a hardware keyboard. Development testing has been on a Xiaomi Pad 7 Pro running HyperOS 3.</p>
     <ol class="setup-list">
-      <li><h3>Connect the tablet over adb</h3><p>Enable USB debugging in Android’s developer options, connect to your computer and accept its debugging authorization. If several devices are connected, select the tablet with <code>ANDROID_SERIAL</code>.</p></li>
-      <li><h3>Run this on your computer</h3><p>The helper lets the launcher put apps on their own displays and send them input. Run it again after <strong>every reboot and every app update</strong>.</p>
+      <li><h3>Open Keyboard &amp; desktop settings</h3><p>In SD Launcher, open <strong>Settings → Keyboard &amp; desktop</strong>. The <strong>Tiling readiness</strong> card at the top shows what is still missing.</p></li>
+      <li><h3>Allow desktop shortcuts (Accessibility)</h3><p>Find <strong>accessibility (tiling shortcuts)</strong> and tap <strong>turn on</strong>, then enable <strong>Accessibility → Downloaded apps → Tiling desktop shortcuts</strong>.</p><p>If it is greyed out as a restricted setting on Android 13+, tap <strong>app info</strong> in Keyboard &amp; desktop, open the <strong>⋮</strong> menu in the top-right corner, tap <strong>Allow restricted settings</strong>, and then enable the service.</p><p>On HyperOS, also enable <strong>Autostart</strong> for SD Launcher so its services can return after the system stops it behind a locked screen.</p></li>
+      <li><h3>Pair Wireless Debugging once</h3><p>Make sure <strong>Developer options</strong> are unlocked (tap <em>Build number</em> / <em>OS version</em> 7 times in Android Settings) and <strong>Wi-Fi</strong> is connected.</p><p>In <strong>Keyboard &amp; desktop</strong>, tap <strong>pair wireless</strong> → <strong>developer options</strong>, turn on <strong>Wireless debugging</strong>, and open <strong>Pair device with pairing code</strong>. Keep the 6-digit pairing dialog open (using split-screen or a floating window), enter the 6-digit code in SD Launcher, and tap <strong>pair &amp; start</strong>.</p><p><em>Xiaomi HyperOS / MIUI:</em> if window tiling or key injection is blocked, also enable <strong>USB debugging (Security settings)</strong> in Developer options.</p><p><em>Prefer a PC instead?</em> You can still start the helper over USB ADB:</p>
         <pre><code id="helper-command">adb shell 'CLASSPATH=$(pm path com.gladimdim.sdlauncher | head -1 | cut -d: -f2) setsid app_process /system/bin dev.gladimdim.tiling.helper.HelperMain com.gladimdim.sdlauncher &gt;/dev/null 2&gt;&amp;1 &lt;/dev/null &amp;'</code></pre>
         <p>From a checkout of the launcher repository, you can run <code>scripts/tiling-helper.sh</code> instead.</p>
       </li>
-      <li><h3>Allow the desktop shortcuts</h3><p>The helper enables the <strong>Tiling desktop shortcuts</strong> accessibility service and recovers it when Android stops it. If you need to enable it manually, find it in Android’s Accessibility settings under downloaded apps. A sideloaded APK may first need <strong>Allow restricted settings</strong> in its app info.</p><p>On HyperOS, also enable <strong>Autostart</strong> for SD Launcher so its services can return after the system stops it behind a locked screen.</p></li>
+      <li><h3>After a reboot</h3><p>Android turns Wireless debugging off when the device restarts. You do <strong>not</strong> need to pair again: connect to Wi-Fi, toggle <strong>Wireless debugging</strong> back on, and SD Launcher will reconnect and start the helper (or tap <strong>start helper</strong> in <strong>Keyboard &amp; desktop</strong>).</p></li>
       <li><h3>Connect your hardware keyboard</h3><p>Open an app with <span class="kbd">Super + Space</span>. Open the shortcut list with <span class="kbd">Super + K</span>. <span class="kbd">Super + Shift + D</span> leaves the desktop or brings it back. Detaching the keyboard returns the windows to ordinary Android apps.</p></li>
     </ol>
   </section>
@@ -218,7 +219,7 @@ super + shift + a = ChatGPT</code></pre>
       <li>HyperOS keeps Super with a bare arrow, Super+Tab, Super+D, Super+L and Super+slash for itself. Use Super+Alt+arrows to focus windows.</li>
       <li>Apps in the tiling desktop use the hardware keyboard; the on-screen keyboard stays hidden.</li>
       <li>The final 80% pop-out size has passed build checks but has not yet been verified on the Pad.</li>
-      <li>No root is needed. The adb helper must be started again after a reboot or update.</li>
+      <li>No root or Shizuku is needed. After a reboot or update, turn Wireless debugging back on (on Wi-Fi) and SD Launcher restarts the helper on-device.</li>
     </ul>
     <p><a href="https://github.com/gladimdim/omalauncher/issues">Report an issue</a> with your device, Android version and the keys or gestures involved.</p>
   </section>
