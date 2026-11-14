@@ -161,7 +161,12 @@ show the development build of the tiling features shipped in SD Launcher
 Resized from 3200 × 2136 to 1440 × 961 and encoded as WebP at quality 88,
 with metadata stripped. No UI was composited into the captures.
 
-- `tiling.webp`: Calculator and Clock tiled side by side, beneath the workspace bar.
+- `tiling.webp`: Chrome on omarchy.org at left, with two real Linux terminal
+  windows at right. Recaptured on 2026-11-14 and encoded at WebP quality 90.
+  The upper terminal runs `fastfetch --logo-type small --logo arch --structure
+  OS:Kernel:Shell:Terminal:CPU:Memory`; the lower runs `uname -sm`,
+  `pacman -Q bash foot git` and `df -h /`. All output is from the Pad’s
+  actual Arch Linux ARM environment.
 - `floating.webp`: Clock floating over Calculator (Super+T).
 - `finder.webp`: the Super+Space app finder over the tiled desktop.
 - `keys.webp`: the built-in Super+K keyboard shortcut reference.
