@@ -1,6 +1,6 @@
 # ⚡ SUPER DESKTOP
 
-> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.2.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
+> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.3.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 
@@ -165,7 +165,7 @@ notes say your phone app needs it.
 
 ### Free Android APK
 
-[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.2.apk): every feature is free forever,
+[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.3.apk): every feature is free forever,
 with no 10-day trial, Pro purchase or subscription. Google Play is not required.
 Android 10 or newer; phones, foldables, tablets and TVs are supported.
 Open the downloaded APK and allow installation from your browser when Android
@@ -178,6 +178,12 @@ Play edition keeps its usage-day trial and one-time Pro purchase.
 
 The free APK uses protocol 3 with no new PC minimum. Individual features retain
 their requirements: TV code pairing needs PC 1.8.0+, web previews need 1.9.0+.
+**2.0.3 (18)** reconnects Sessions when the phone changes networks. Retry tries
+each saved connectable address and shows **Cannot connect** if they all fail.
+On a physical keyboard, Ctrl+Enter sends and Enter adds a new line.
+Protocol 3 applies with the existing PC requirements. No released PC was
+checked end to end for this patch.
+
 **2.0.2 (17)** separates Send from the message field and adds physical-keyboard
 Enter to send (Shift+Enter for a new line). Holding Enter does not repeat sends.
 Protocol 3 and PC requirements are unchanged. The fixes were confirmed on

@@ -4,7 +4,7 @@
 
 Website: https://superdesktop.dmytrogladkyi.com/
 Source: https://github.com/gladimdim/super-desktop
-Free Android APK: https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.0.apk
+Free Android APK: https://github.com/gladimdim/super-desktop/releases/download/v2.0.5/SUPER-DESKTOP-2.0.3.apk
 Google Play edition: https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop
 Author: Dmytro Gladkyi (independent developer)
 Current desktop release: 2.0.5
