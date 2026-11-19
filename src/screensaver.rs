@@ -79,6 +79,18 @@ impl Tracker {
     }
 }
 
+/// Class of the window an `openwindow` line opened, whatever window it is.
+pub fn opened_class(line: &str) -> Option<&str> {
+    let (event, data) = line.split_once(">>")?;
+    if event != "openwindow" {
+        return None;
+    }
+    let mut fields = data.splitn(4, ',');
+    let _address = fields.next()?;
+    let _workspace = fields.next()?;
+    fields.next()
+}
+
 /// Address of a screensaver window this `openwindow` line opened.
 fn opened_address(line: &str) -> Option<&str> {
     let (event, data) = line.split_once(">>")?;
@@ -197,9 +209,10 @@ fn event_socket() -> Option<PathBuf> {
 }
 
 /// Follow Hyprland's events for the life of the daemon, calling `notify` on
-/// every screensaver start and end. Blocks; run it on its own thread. Returns
-/// at once outside Hyprland.
-pub fn watch(notify: impl Fn(Change)) {
+/// every screensaver start and end, and `opened` with the class of every
+/// window that opens (see `focus_guard`). Blocks; run it on its own thread.
+/// Returns at once outside Hyprland.
+pub fn watch(notify: impl Fn(Change), opened: impl Fn(&str)) {
     let Some(path) = event_socket() else {
         return;
     };
@@ -215,6 +228,9 @@ pub fn watch(notify: impl Fn(Change)) {
                 }
                 if let Some(change) = tracker.feed(&line) {
                     notify(change);
+                }
+                if let Some(class) = opened_class(&line) {
+                    opened(class);
                 }
             }
         }
@@ -251,6 +267,16 @@ mod tests {
         assert_eq!(tracker.feed("garbage"), None);
         assert_eq!(tracker.feed("openwindow>>5a1f,1,org.omarchy.screensaver,Title, with, commas"), Some(Change::Started));
         assert_eq!(tracker.feed("closewindow>>77"), None);
+    }
+
+    #[test]
+    fn focus_guard_open_line_yields_any_window_class() {
+        assert_eq!(opened_class("openwindow>>5a1f,1,steam_app_42,Game, with, commas"), Some("steam_app_42"));
+        assert_eq!(opened_class("openwindow>>5a1f,1,org.omarchy.screensaver,Screensaver"), Some("org.omarchy.screensaver"));
+        assert_eq!(opened_class("openwindow>>5a1f,special:x,,"), Some(""));
+        assert_eq!(opened_class("closewindow>>5a1f"), None);
+        assert_eq!(opened_class("activewindow>>steam,x"), None);
+        assert_eq!(opened_class("openwindow>>5a1f"), None);
     }
 
     #[test]

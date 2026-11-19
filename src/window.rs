@@ -60,7 +60,18 @@ thread_local! {
     /// From the start of a hide until the next show, the overlay's keyboard
     /// and pointer belong to the desktop again (see `release_input`).
     static INPUT_RELEASED: Cell<bool> = const { Cell::new(false) };
+    /// Counts keyboard-mode changes, so the focus guard only undoes its own
+    /// `Exclusive` (see `reclaim_keyboard`).
+    static KEYBOARD_MODE_CHANGES: Cell<u64> = const { Cell::new(0) };
+    /// Pairs background windows opening with the overlay losing the keyboard.
+    static FOCUS_GUARD: RefCell<crate::focus_guard::FocusGuard> =
+        RefCell::new(crate::focus_guard::FocusGuard::default());
 }
+
+/// How long the focus guard holds the keyboard `Exclusive` before it goes
+/// back to on demand. Hyprland moves the keyboard as it applies the commit;
+/// on demand then keeps it until something else takes it.
+const RECLAIM_HOLD: Duration = Duration::from_millis(200);
 
 /// Set the overlay's layer-shell keyboard interactivity.
 ///
@@ -69,8 +80,58 @@ thread_local! {
 /// fire for that must not take the keyboard back while the overlay slides out.
 pub(crate) fn set_overlay_keyboard_mode(window: &impl IsA<gtk4::Window>, mode: KeyboardMode) {
     if overlay_keyboard_mode_allowed(mode, INPUT_RELEASED.with(Cell::get)) {
+        KEYBOARD_MODE_CHANGES.with(|changes| changes.set(changes.get().wrapping_add(1)));
         window.set_keyboard_mode(mode);
     }
+}
+
+/// The overlay is on screen and owns its input (not hidden, not sliding out).
+fn overlay_owns_input(window: &impl IsA<gtk4::Window>) -> bool {
+    window.as_ref().is_visible() && !INPUT_RELEASED.with(Cell::get)
+}
+
+/// Take the keyboard back from a window that opened under the overlay.
+///
+/// `Exclusive` makes Hyprland give the layer the keyboard; going back to on
+/// demand afterwards keeps it there while desktop keys still work once the
+/// user moves elsewhere. An `Exclusive` overlay (an expanded card, the folder
+/// field) never loses the keyboard this way, and is left alone.
+fn reclaim_keyboard(window: &ApplicationWindow) {
+    if !overlay_owns_input(window) || window.keyboard_mode() != KeyboardMode::OnDemand {
+        return;
+    }
+    set_overlay_keyboard_mode(window, KeyboardMode::Exclusive);
+    let ours = KEYBOARD_MODE_CHANGES.with(Cell::get);
+    let window = window.clone();
+    glib::timeout_add_local_once(RECLAIM_HOLD, move || {
+        // Anything that set a mode since (a card expanding, the folder field,
+        // a hide) decides the mode now.
+        if KEYBOARD_MODE_CHANGES.with(Cell::get) == ours
+            && window.keyboard_mode() == KeyboardMode::Exclusive
+        {
+            set_overlay_keyboard_mode(&window, KeyboardMode::OnDemand);
+        }
+    });
+}
+
+/// Follow the overlay's keyboard for the focus guard (`focus_guard`).
+fn install_focus_guard(window: &ApplicationWindow) {
+    // Passive: it only answers whether the pointer is over the overlay.
+    let pointer = EventControllerMotion::new();
+    window.add_controller(pointer.clone());
+    window.connect_is_active_notify(move |window| {
+        if window.is_active() || !overlay_owns_input(window) {
+            FOCUS_GUARD.with(|guard| guard.borrow_mut().reset());
+            return;
+        }
+        let pointer_left = !pointer.contains_pointer();
+        let reclaim = FOCUS_GUARD.with(|guard| {
+            guard.borrow_mut().keyboard_lost(std::time::Instant::now(), pointer_left)
+        });
+        if reclaim {
+            reclaim_keyboard(window);
+        }
+    });
 }
 
 fn overlay_keyboard_mode_allowed(mode: KeyboardMode, input_released: bool) -> bool {
@@ -731,6 +792,7 @@ impl SuperDesktopWindow {
         // A new overlay owns its input until its first hide.
         INPUT_RELEASED.with(|released| released.set(false));
         set_overlay_keyboard_mode(&window, KeyboardMode::OnDemand);
+        install_focus_guard(&window);
         window.add_css_class("super-desktop-window");
         crate::frame_profile::watch(&window, "overlay");
 
@@ -3617,6 +3679,22 @@ impl SuperDesktopWindow {
         (self.settings_refresh)();
     }
 
+    /// A window opened somewhere on the desktop (Hyprland's `openwindow`).
+    /// If it took the keyboard from the overlay, or is about to, the overlay
+    /// takes it back (see `focus_guard`).
+    pub fn window_opened_elsewhere(&self) {
+        if !overlay_owns_input(&self.window) {
+            return;
+        }
+        let has_keyboard = self.window.is_active();
+        let reclaim = FOCUS_GUARD.with(|guard| {
+            guard.borrow_mut().window_opened(std::time::Instant::now(), has_keyboard)
+        });
+        if reclaim {
+            reclaim_keyboard(&self.window);
+        }
+    }
+
     /// Re-map a window that was hidden with `hide_now`.
     ///
     /// Every card, VTE and `tmux attach` client is still alive, so the overlay
@@ -3779,12 +3857,14 @@ impl SuperDesktopWindow {
     /// through; `reclaim_input` undoes both on the next show.
     fn release_input(&self) {
         INPUT_RELEASED.with(|released| released.set(true));
+        FOCUS_GUARD.with(|guard| guard.borrow_mut().reset());
         set_overlay_keyboard_mode(&self.window, KeyboardMode::None);
         crate::desktop_shell::set_pointer_input(&self.window, false);
     }
 
     fn reclaim_input(&self) {
         INPUT_RELEASED.with(|released| released.set(false));
+        FOCUS_GUARD.with(|guard| guard.borrow_mut().reset());
         crate::desktop_shell::set_pointer_input(&self.window, true);
     }
 

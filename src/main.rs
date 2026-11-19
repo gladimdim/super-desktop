@@ -90,6 +90,7 @@ mod shortcut;
 mod sleep_lock;
 mod boot_autostart;
 mod screensaver;
+mod focus_guard;
 mod state;
 mod startup;
 mod sticky_note;
@@ -1238,12 +1239,21 @@ fn toggle_window(ctx: &Rc<RefCell<AppContext>>, app: &Application) -> bool {
 /// would draw over it) and bring it back afterwards if it was on screen.
 #[cfg(target_os = "linux")]
 fn follow_screensaver(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
-    let (tx, mut rx) = futures_channel::mpsc::unbounded::<screensaver::Change>();
+    // `None`: a window opened, for the focus guard (`focus_guard`).
+    let (tx, mut rx) = futures_channel::mpsc::unbounded::<Option<screensaver::Change>>();
+    let opened_tx = tx.clone();
     if let Err(error) = thread::Builder::new()
         .name("super-desktop-screensaver".to_string())
-        .spawn(move || screensaver::watch(|change| {
-            let _ = tx.unbounded_send(change);
-        }))
+        .spawn(move || screensaver::watch(
+            |change| {
+                let _ = tx.unbounded_send(Some(change));
+            },
+            |class| {
+                if !focus_guard::ignores_class(class) {
+                    let _ = opened_tx.unbounded_send(None);
+                }
+            },
+        ))
     {
         eprintln!("SUPER DESKTOP: could not follow the screensaver: {error}");
         return;
@@ -1252,6 +1262,15 @@ fn follow_screensaver(ctx: &Rc<RefCell<AppContext>>, app: &Application) {
     let app = app.clone();
     glib::MainContext::default().spawn_local(async move {
         while let Some(change) = rx.next().await {
+            let Some(change) = change else {
+                // Only the live overlay can lose the keyboard to it.
+                if ctx.borrow().shown {
+                    if let Some(win) = live_window(&ctx) {
+                        win.window_opened_elsewhere();
+                    }
+                }
+                continue;
+            };
             match change {
                 screensaver::Change::Started => {
                     if ctx.borrow().shown {
