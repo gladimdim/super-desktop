@@ -2316,6 +2316,7 @@ impl SuperDesktopWindow {
             crate::card_source::CardSource::Local,
         );
         let card = Rc::new(card);
+        card.set_first_icon_spot(self.first_icon_spot(sw, sh));
         card.keyboard_digit.set(crate::terminal_picker::next_digit(
             term_cards.borrow().iter().filter_map(|card| card.keyboard_digit.get())
         ));
@@ -2328,6 +2329,44 @@ impl SuperDesktopWindow {
         // A new card can land on top of an existing one (they cascade 32px):
         // its outline shows up right away while the user works in neither.
         ghosts.refresh();
+    }
+
+    /// Where a local card's icon lands the first time it is minimized: the
+    /// first free spot in rows of icons that fill from the bottom-left corner
+    /// to the right, then the row above (see `first_free_icon_slot`).
+    fn first_icon_spot(&self, sw: i32, sh: i32) -> Rc<dyn Fn(&str, i32) -> Option<(i32, i32)>> {
+        let cards = Rc::clone(&self.terminal_cards);
+        let window = self.window.downgrade();
+        let hud = self.hud.clone();
+        let state = Rc::clone(&self.state);
+        Rc::new(move |session: &str, side: i32| {
+            let (width, height) = live_workspace_size(&window, (sw, sh));
+            let size = state.try_borrow().ok()?.top_bar_size;
+            let top = hud.height().max(top_bar_height(size)) + ICON_ROW_GAP;
+            let (dock_left, dock_right) = crate::plugin_ui::slots::insets();
+            // Only other icons take a spot: an icon may land under an open
+            // card, as an icon dragged there does.
+            let icons: Vec<(i32, i32, i32, i32)> = cards
+                .try_borrow()
+                .ok()?
+                .iter()
+                .filter_map(|card| {
+                    let data = card.data.try_borrow().ok()?;
+                    if !data.iconified || data.session_name == session {
+                        return None;
+                    }
+                    let (x, y) = displayed_pos(&data);
+                    Some((x as i32, y as i32, data.width, data.height))
+                })
+                .collect();
+            let area = IconArea {
+                left: ICON_ROW_GAP + dock_left,
+                top,
+                right: width - ICON_ROW_GAP - dock_right,
+                bottom: height - ICON_ROW_GAP,
+            };
+            Some(first_free_icon_slot(&icons, area, side, ICON_ROW_GAP))
+        })
     }
 
     pub fn auto_arrange(&self) {
@@ -3972,6 +4011,43 @@ fn live_workspace_size(window: &glib::WeakRef<ApplicationWindow>, fallback: (i32
     window.upgrade().map(|w| allocated_workspace_size(&w, fallback)).unwrap_or(fallback)
 }
 
+/// The margin around the icon rows and the gap between icons.
+const ICON_ROW_GAP: i32 = 12;
+
+/// The part of the workspace minimized icons fill.
+#[derive(Clone, Copy, Debug)]
+struct IconArea {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+/// The first spot, in rows from the bottom of `area` upwards and in each row
+/// from left to right, where a `side` px icon overlaps none of `icons`
+/// (`x, y, width, height`). When every spot is taken it shares the
+/// bottom-left one.
+fn first_free_icon_slot(icons: &[(i32, i32, i32, i32)], area: IconArea, side: i32, gap: i32) -> (i32, i32) {
+    let side = side.max(1);
+    let step = side + gap.max(0);
+    let first = (area.left, (area.bottom - side).max(area.top));
+    let overlaps = |x: i32, y: i32| {
+        icons.iter().any(|&(ix, iy, iw, ih)| x < ix + iw && ix < x + side && y < iy + ih && iy < y + side)
+    };
+    let mut y = area.bottom - side;
+    while y >= area.top {
+        let mut x = area.left;
+        while x + side <= area.right {
+            if !overlaps(x, y) {
+                return (x, y);
+            }
+            x += step;
+        }
+        y -= step;
+    }
+    first
+}
+
 /// Keep a dragged or dropped card's origin where its header can be grabbed
 /// again: past the left margin, below the top bar, and with its grip on screen.
 fn clamp_card_origin<T: PartialOrd + From<i32>>(x: T, y: T, (sw, sh): (i32, i32)) -> (T, T) {
@@ -4145,6 +4221,65 @@ fn apply_terminal_expand(
 mod tests {
     use super::*;
 
+    // A 1000×700 workspace below a 58 px top bar, 128 px icons, 12 px gaps:
+    // seven icons fit in a row (12 + 7×140 = 992), rows start at y=560.
+    const AREA: IconArea = IconArea { left: 12, top: 70, right: 988, bottom: 688 };
+
+    #[test]
+    fn icon_slots_start_bottom_left() {
+        assert_eq!(first_free_icon_slot(&[], AREA, 128, 12), (12, 560));
+    }
+
+    #[test]
+    fn icon_slots_fill_the_row_left_to_right_then_the_row_above() {
+        let mut icons = Vec::new();
+        let mut placed = Vec::new();
+        for _ in 0..9 {
+            let (x, y) = first_free_icon_slot(&icons, AREA, 128, 12);
+            placed.push((x, y));
+            icons.push((x, y, 128, 128));
+        }
+        assert_eq!(
+            placed,
+            vec![
+                (12, 560), (152, 560), (292, 560), (432, 560), (572, 560), (712, 560), (852, 560),
+                (12, 420), (152, 420),
+            ]
+        );
+    }
+
+    #[test]
+    fn icon_slots_reuse_a_gap_left_by_a_moved_icon() {
+        // The second icon of the bottom row was dragged away.
+        let icons = [(12, 560, 128, 128), (292, 560, 128, 128), (500, 200, 128, 128)];
+        assert_eq!(first_free_icon_slot(&icons, AREA, 128, 12), (152, 560));
+    }
+
+    #[test]
+    fn icon_slots_skip_a_spot_an_icon_dropped_across() {
+        // Dropped between two spots, it takes both.
+        let icons = [(80, 600, 128, 128)];
+        assert_eq!(first_free_icon_slot(&icons, AREA, 128, 12), (292, 560));
+    }
+
+    #[test]
+    fn icon_slots_share_bottom_left_when_full_or_tiny() {
+        let mut icons = Vec::new();
+        for row in 0..5 {
+            for col in 0..7 {
+                icons.push((12 + col * 140, 560 - row * 140, 128, 128));
+            }
+        }
+        assert_eq!(first_free_icon_slot(&icons, AREA, 128, 12), (12, 560));
+        let tiny = IconArea { left: 12, top: 70, right: 100, bottom: 150 };
+        assert_eq!(first_free_icon_slot(&[], tiny, 128, 12), (12, 70));
+    }
+
+    #[test]
+    fn icon_slots_follow_the_icon_side_of_a_scaled_view() {
+        assert_eq!(first_free_icon_slot(&[(12, 624, 64, 64)], AREA, 64, 12), (88, 624));
+    }
+
     #[test]
     fn cli_notes_preserve_live_text_and_guard_edits() {
         crate::gtk_test::run_in_child_process("window::tests::cli_notes_inner");
@@ -4263,6 +4398,78 @@ mod tests {
         assert_eq!(model.state().borrow().toggle_shortcut.as_deref(),Some("SUPER + F8"));
         assert_eq!(window.cli_shortcut(&model,&shortcut,false).exit_code(),5,"old workspace revision must fail after shortcut state changes");
         window.window.close(); drop(old);
+        crate::state::flush_state_saves_checked().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn icon_slots_first_minimize_fills_from_bottom_left() {
+        crate::gtk_test::run_in_child_process("window::tests::icon_slots_first_minimize_inner");
+    }
+
+    #[test]
+    fn icon_slots_first_minimize_inner() {
+        if !crate::gtk_test::is_child() { return; }
+        let root = std::env::temp_dir().join(format!("sd-icon-slots-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "TMUX_TMPDIR"] {
+            std::env::set_var(name, &root);
+        }
+        std::env::remove_var("TMUX");
+        std::env::remove_var("TMUX_PANE");
+        gtk4::init().unwrap();
+        let app = gtk4::Application::new(Some("com.superdesktop.IconSlotsTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+        app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+        let card_json = |id: &str, x: i32, extra: serde_json::Value| {
+            let mut value = serde_json::json!({
+                "id":id, "session_name":id, "agent_type":"shell", "command":"/bin/false",
+                "x":x, "y":150, "width":400, "height":300, "restored_width":400, "restored_height":300,
+                "created_at":0.0
+            });
+            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            serde_json::from_value::<TerminalData>(value).unwrap()
+        };
+        let mut state = AppState::default();
+        state.terminals.push(card_json("sd_icon_a", 100, serde_json::json!({})));
+        state.terminals.push(card_json("sd_icon_b", 300, serde_json::json!({})));
+        // Minimized before, and dragged to a spot of its own.
+        state.terminals.push(card_json("sd_icon_old", 500, serde_json::json!({
+            "iconified":true, "width":128, "height":128, "icon_x":600, "icon_y":200
+        })));
+        let model = crate::workspace_model::LocalWorkspace::new(state);
+        let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+        let (sh, (dock_left, _)) = (window.screen_height(), crate::plugin_ui::slots::insets());
+        let bottom = sh - ICON_ROW_GAP - crate::mini_terminal::ICON_SIZE;
+        let icon = |id: &str| {
+            let card = window.any_terminal_card(id).unwrap();
+            let data = card.data.borrow();
+            (data.icon_x, data.icon_y)
+        };
+
+        // The first minimize takes the bottom-left spot, the next one the spot
+        // to its right; neither stays where its card stood.
+        assert!(window.any_terminal_card("sd_icon_a").unwrap().set_iconified(true));
+        assert_eq!(icon("sd_icon_a"), (Some(ICON_ROW_GAP + dock_left), Some(bottom)));
+        assert!(window.any_terminal_card("sd_icon_b").unwrap().set_iconified(true));
+        assert_eq!(icon("sd_icon_b"), (Some(ICON_ROW_GAP + dock_left + 140), Some(bottom)));
+
+        // A moved icon keeps its spot through restore and minimize.
+        let a = window.any_terminal_card("sd_icon_a").unwrap();
+        set_displayed_pos(&mut a.data.borrow_mut(), 700, 300);
+        assert!(a.set_iconified(false));
+        assert!(a.set_iconified(true));
+        assert_eq!(icon("sd_icon_a"), (Some(700), Some(300)));
+        let old = window.any_terminal_card("sd_icon_old").unwrap();
+        assert!(old.set_iconified(false));
+        assert!(old.set_iconified(true));
+        assert_eq!(icon("sd_icon_old"), (Some(600), Some(200)));
+
+        crate::state::flush_state_saves_checked().unwrap();
+        let saved = crate::state::load_state();
+        let saved_icon = |id: &str| saved.terminals.iter().find(|t| t.id == id).map(|t| (t.icon_x, t.icon_y)).unwrap();
+        assert_eq!(saved_icon("sd_icon_b"), (Some(ICON_ROW_GAP + dock_left + 140), Some(bottom)));
+        assert_eq!(saved_icon("sd_icon_a"), (Some(700), Some(300)));
+        window.window.close();
         crate::state::flush_state_saves_checked().unwrap();
         let _ = std::fs::remove_dir_all(root);
     }

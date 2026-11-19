@@ -546,6 +546,10 @@ impl CardChrome {
 /// One of the card's own actions, stored after construction so a remote command
 /// runs exactly the code the matching local button or gesture runs.
 type CardAction = Rc<RefCell<Option<Rc<dyn Fn()>>>>;
+/// Where a card's icon goes the first time it is minimized, given the card's
+/// session and the icon's side; `None` keeps it where the card stood. Set by
+/// the local workspace (see `SuperDesktopWindow::first_icon_spot`).
+type IconSpot = Rc<RefCell<Option<Rc<dyn Fn(&str, i32) -> Option<(i32, i32)>>>>>;
 type GeometryAction = Rc<RefCell<Option<Rc<dyn Fn(crate::card_resize::Rect)>>>>;
 
 pub struct MiniTerminalCard {
@@ -613,6 +617,7 @@ pub struct MiniTerminalCard {
     /// not grow a second copy of an action that could drift from the button's.
     iconify_action: CardAction,
     restore_action: CardAction,
+    first_icon_spot: IconSpot,
     cli_mode_change: Rc<Cell<bool>>,
     cli_tag_buttons: Rc<RefCell<Vec<glib::WeakRef<Button>>>>,
     geometry_commit: GeometryAction,
@@ -1148,6 +1153,7 @@ impl MiniTerminalCard {
             workspace: Rc::new(Cell::new((screen_w, screen_h))),
             iconify_action: Rc::new(RefCell::new(None)),
             restore_action: Rc::new(RefCell::new(None)),
+            first_icon_spot: Rc::new(RefCell::new(None)),
             cli_mode_change: Rc::new(Cell::new(false)),
             cli_tag_buttons: Rc::clone(&tag_sync),
             geometry_commit: Rc::new(RefCell::new(None)),
@@ -1205,6 +1211,7 @@ impl MiniTerminalCard {
             let fit = Rc::clone(&card.fit);
             let on_save = Rc::clone(&on_drag_end);
             let jump = card.jump.clone();
+            let first_icon_spot = Rc::clone(&card.first_icon_spot);
             Rc::new(move || {
                 if expanded.replace(false) {
                     chrome.paint_expanded(false);
@@ -1213,6 +1220,20 @@ impl MiniTerminalCard {
                 jump.hide();
                 // The icon of a remote card is the host's, at the view's scale.
                 let side = icon_side(fit.get().2);
+                // An icon that never had a spot of its own takes the first free
+                // one in the icon rows; after that it keeps where it was left.
+                let first_spot = {
+                    let d = data.borrow();
+                    let provider = first_icon_spot.borrow().clone();
+                    match provider {
+                        Some(provider) if d.icon_x.is_none() || d.icon_y.is_none() => {
+                            let session = d.session_name.clone();
+                            drop(d);
+                            provider(&session, side)
+                        }
+                        _ => None,
+                    }
+                };
                 {
                     let mut d = data.borrow_mut();
                     if d.width > side || d.height > side {
@@ -1222,6 +1243,9 @@ impl MiniTerminalCard {
                     d.width = side;
                     d.height = side;
                     d.iconified = true;
+                    if let Some((x, y)) = first_spot {
+                        (d.icon_x, d.icon_y) = (Some(x), Some(y));
+                    }
                     // Minimizing returns to the remembered icon spot.
                     seed_icon_pos(&mut d);
                     chrome.compact.restore.set_tooltip_text(Some(&format!(
@@ -1618,6 +1642,11 @@ impl MiniTerminalCard {
     /// Returns whether the state changed, so a caller can tell "already there"
     /// from "cannot". A remote command must not invent a state the local UI
     /// could not reach, which is why the action, not the geometry, is reused.
+    /// Decide where this card's icon goes the first time it is minimized.
+    pub fn set_first_icon_spot(&self, spot: Rc<dyn Fn(&str, i32) -> Option<(i32, i32)>>) {
+        *self.first_icon_spot.borrow_mut() = Some(spot);
+    }
+
     pub fn set_iconified(&self, iconified: bool) -> bool {
         if self.data.borrow().iconified == iconified || self.is_expanded() {
             return false;
