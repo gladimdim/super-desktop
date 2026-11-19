@@ -1790,15 +1790,21 @@ pub fn stop_bridge() -> Result<(), String> {
     stop_bridge_inner()
 }
 
+/// The bridge process exactly (`pkill -f`, extended regex): its own binary as
+/// the first word, then the subcommand. A looser pattern also matched any
+/// process whose command text merely mentioned "super-desktop harness-bridge",
+/// such as an agent's shell command in a card, and killed it.
+const BRIDGE_PROCESS: &str = "^([^ ]*/)?super-desktop harness-bridge( |$)";
+
 fn stop_bridge_inner() -> Result<(), String> {
     // pkill exits 1 when nothing matched — that means already stopped.
-    if pkill_bridge(&["-f", "super-desktop harness-bridge"])? == 1 {
+    if pkill_bridge(&["-f", BRIDGE_PROCESS])? == 1 {
         return Ok(());
     }
     if wait_port_free() {
         return Ok(());
     }
-    let _ = pkill_bridge(&["-9", "-f", "super-desktop harness-bridge"]);
+    let _ = pkill_bridge(&["-9", "-f", BRIDGE_PROCESS]);
     if wait_port_free() {
         return Ok(());
     }

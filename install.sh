@@ -599,8 +599,13 @@ reload_hyprland() {
     fi
 }
 
+# The daemon exactly: its binary as the first word, then `daemon` (the same
+# pattern rebuild.sh stops it with). A looser one also matches any process
+# whose command text mentions both words.
+DAEMON_PROCESS='^([^ ]*/)?super-desktop daemon( |$)'
+
 daemon_running() {
-    pgrep -f "super-desktop.*daemon" >/dev/null 2>&1
+    pgrep -f "$DAEMON_PROCESS" >/dev/null 2>&1
 }
 
 # A running daemon (and its bridge) still runs the previous build.

@@ -28,6 +28,12 @@ BIN_DST="$HOME/.local/bin/super-desktop"
 RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"
 CONFIG_DIR="$HOME/.config/super-desktop"
 SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/super-desktop.sock"
+# The daemon and the bridge exactly: their own binary as the first word, then
+# the subcommand. A looser `super-desktop.*daemon` also matched any process
+# whose command text merely mentioned both, such as an agent's shell command in
+# a card, and killed it.
+DAEMON_PROCESS='^([^ ]*/)?super-desktop daemon( |$)'
+BRIDGE_PROCESS='^([^ ]*/)?super-desktop harness-bridge( |$)'
 
 # install.sh sets Rust up in ~/.cargo without adding it to shell profiles.
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -99,13 +105,13 @@ stop_desktop() {
   elif [[ -x "$BIN_SRC" ]]; then
     "$BIN_SRC" kill >/dev/null 2>&1 || true
   fi
-  pkill -f "super-desktop.*daemon" >/dev/null 2>&1 || true
+  pkill -f "$DAEMON_PROCESS" >/dev/null 2>&1 || true
   # The bridge is a separate process. Leaving it running would keep serving
   # the previous binary after a successful daemon rebuild.
-  pkill -f "super-desktop harness-bridge" >/dev/null 2>&1 || true
+  pkill -f "$BRIDGE_PROCESS" >/dev/null 2>&1 || true
   # Give IPC `kill` a moment, then drop a stale socket file if the daemon is gone.
   sleep 0.5
-  if [[ -S "$SOCK" ]] && ! pgrep -f "super-desktop.*daemon" >/dev/null 2>&1; then
+  if [[ -S "$SOCK" ]] && ! pgrep -f "$DAEMON_PROCESS" >/dev/null 2>&1; then
     rm -f "$SOCK"
     echo "    removed stale socket $SOCK"
   fi
@@ -137,7 +143,7 @@ all_daemons_fresh() {
   local now oldest=0
   now=$(date +%s)
   local pids pid age
-  pids=$(pgrep -f "super-desktop.*daemon" || true)
+  pids=$(pgrep -f "$DAEMON_PROCESS" || true)
   if [[ -z "$pids" ]]; then
     return 1
   fi
