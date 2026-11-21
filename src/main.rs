@@ -1,4 +1,6 @@
 mod desktop_shell;
+#[cfg(target_os = "linux")]
+mod egl_vendor;
 #[cfg(target_os = "macos")]
 mod macos_shortcut;
 #[cfg(target_os = "macos")]
@@ -675,6 +677,12 @@ fn main() {
 }
 
 fn run_daemon(start_visible: bool) {
+    // Before GTK and before any thread: render on the GPU that shows the
+    // screen, not a hybrid laptop's sleeping NVIDIA GPU.
+    #[cfg(target_os = "linux")]
+    if egl_vendor::prefer_display_gpu() {
+        startup::mark("EGL vendor: Mesa (no screen on the NVIDIA GPU)");
+    }
     let mut initial_state = state::load_state();
     sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     if let Err(error) = gtk4::init() {

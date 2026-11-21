@@ -32,16 +32,18 @@ struct Trajectory {
 /// Critically-damped spring (rad/s). With the launch impulse the cards are
 /// within 1% of the target after about 6.5/ω, and `spring_settled` reports
 /// rest after about 9/ω.
-/// Appear is a touch slower so high-refresh screens get more in-between
-/// frames: 99% at ~300ms (ω=15 took ~420ms, and ~570ms to settle).
-const SLIDE_OMEGA_IN: f64 = 22.0;
+/// A toggle must feel done within 100ms: the slide-in is 99% there at
+/// ~92ms on a 240 Hz panel (~100ms at 60 Hz) and reports rest at ~150ms
+/// (ω=22 took ~300ms, and ~400ms to settle).
+const SLIDE_OMEGA_IN: f64 = 70.0;
 /// Hide is stiffer so a reverse during appear still clears the screen
-/// promptly: 99% off-screen at ~230ms, before `HIDE_FALLBACK` unmaps.
-const SLIDE_OMEGA_OUT: f64 = 28.0;
+/// promptly: 99% off-screen at ~83ms, before `HIDE_FALLBACK` unmaps.
+const SLIDE_OMEGA_OUT: f64 = 80.0;
 /// Initial speed (progress / second) when starting from rest. A spring at v=0
 /// eases in; this impulse makes the first frames shoot in from the edge.
-const SLIDE_LAUNCH_IN: f64 = 5.5;
-const SLIDE_LAUNCH_OUT: f64 = 7.5;
+/// About a quarter of ω, as before: fast off the edge, no overshoot.
+const SLIDE_LAUNCH_IN: f64 = 17.5;
+const SLIDE_LAUNCH_OUT: f64 = 21.5;
 const SLIDE_SETTLE_X: f64 = 0.0015;
 const SLIDE_SETTLE_V: f64 = 0.025;
 /// Extra pixels past the HUD's own height so it is fully off-screen at progress 0.
@@ -52,9 +54,8 @@ const HUD_MIN_HEIGHT: i32 = 56;
 /// Hide must not wait forever on Hyprland vsync. A local LLM (LM Studio /
 /// llama.cpp) can fill the GPU so frame callbacks never run, which used to
 /// leave the overlay mapped after Toggle. The hide spring is 99% off-screen
-/// at ~230ms; the last fraction of a percent would take another ~100ms to
-/// report rest, so this unmaps on time either way.
-pub(crate) const HIDE_FALLBACK: Duration = Duration::from_millis(280);
+/// at ~83ms and reports rest at ~130ms, so this unmaps on time either way.
+pub(crate) const HIDE_FALLBACK: Duration = Duration::from_millis(150);
 
 thread_local! {
     /// From the start of a hide until the next show, the overlay's keyboard
@@ -4565,7 +4566,7 @@ mod tests {
     fn hide_fallback_does_not_wait_on_a_stuck_compositor() {
         // The fallback must fire after the cards are visually gone, and well
         // before a frozen overlay feels like a hang.
-        assert!(HIDE_FALLBACK >= Duration::from_millis(200));
+        assert!(HIDE_FALLBACK >= Duration::from_millis(120));
         assert!(HIDE_FALLBACK <= Duration::from_millis(400));
         let (x, _) = slide_pose_at(1.0, -SLIDE_LAUNCH_OUT, 0.0, SLIDE_OMEGA_OUT, HIDE_FALLBACK);
         assert!(x < 0.01, "the fallback unmaps cards still {:.1}% on screen", x * 100.0);
@@ -5226,10 +5227,17 @@ mod tests {
     fn slides_finish_their_visible_motion_quickly() {
         // Hyprland adds nothing on top (the install rule turns layer fades
         // off), so these are the latencies the user sees on every toggle.
-        let (x, _) = slide_pose_at(0.0, SLIDE_LAUNCH_IN, 1.0, SLIDE_OMEGA_IN, Duration::from_millis(320));
-        assert!(x > 0.99, "slide-in only {:.1}% there after 320ms", x * 100.0);
-        let (x, _) = slide_pose_at(1.0, -SLIDE_LAUNCH_OUT, 0.0, SLIDE_OMEGA_OUT, Duration::from_millis(250));
-        assert!(x < 0.01, "slide-out still {:.1}% on screen after 250ms", x * 100.0);
+        // Target: a toggle is done within 100ms, either way.
+        let (x, _) = slide_pose_at(0.0, SLIDE_LAUNCH_IN, 1.0, SLIDE_OMEGA_IN, Duration::from_millis(100));
+        assert!(x > 0.99, "slide-in only {:.1}% there after 100ms", x * 100.0);
+        let (x, _) = slide_pose_at(1.0, -SLIDE_LAUNCH_OUT, 0.0, SLIDE_OMEGA_OUT, Duration::from_millis(100));
+        assert!(x < 0.01, "slide-out still {:.1}% on screen after 100ms", x * 100.0);
+        // Critically damped from the launch impulse: never past the target.
+        let mut pose = (0.0, SLIDE_LAUNCH_IN);
+        for _ in 0..240 {
+            pose = spring_step(pose.0, pose.1, 1.0, 1.0 / 240.0, SLIDE_OMEGA_IN);
+            assert!(pose.0 <= 1.0 + 1e-9, "slide-in overshoots to {}", pose.0);
+        }
     }
 
     #[test]
@@ -5727,10 +5735,11 @@ mod tests {
         assert!(x > 0.0 && x < 1.0, "one 240 Hz frame must advance, got {x}");
 
         // Reverse: same pose, new target. One frame later we are still near x,
-        // not teleported to 1.0 or 0.0.
+        // not teleported to 1.0 or 0.0: the frame moves no further than the
+        // one before it did (from 0 to x).
         let (x2, v2) = spring_step(x, v, 0.0, 1.0 / 240.0, SLIDE_OMEGA_OUT);
         assert!(
-            (x2 - x).abs() < 0.05,
+            (x2 - x).abs() <= x && x2 > 0.0 && x2 < 1.0,
             "a reverse must not jump, {x} -> {x2}"
         );
         assert!(v2 < v, "target 0 must decelerate / reverse velocity, {v} -> {v2}");
