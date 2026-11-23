@@ -462,9 +462,10 @@ fn append_resume_flag(base: &str, flag: &str, markers: &[&str]) -> String {
 /// before ids were persisted) diverge instead of live-sharing one session
 /// where Ctrl+C / output in one card leaks into all others.
 ///
-/// Agents without a non-interactive resume mechanism (shell, antigravity,
-/// grok, unknown) relaunch fresh, exactly like before. An explicit shell
-/// command is never decorated with agent flags.
+/// Shell, Grok and unknown agents relaunch fresh. Antigravity does the same
+/// because the card has no attributable conversation ID yet. Its explicit
+/// resume command can select a supplied conversation without guessing.
+/// An explicit shell command is never decorated with agent flags.
 ///
 /// DeepSeek Harness (`dsh-tui`) relaunches fresh too. Its bare `--resume`
 /// reads one global `~/.dsh-tui/resume.txt` (the last session any dsh-tui

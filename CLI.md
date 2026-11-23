@@ -1247,9 +1247,10 @@ new-card placement. It requires geometry/pane guards and
 It does not promise a fresh conversation or recovery of interrupted work.
 
 `terminal resume ID --native-session NATIVE_ID` performs the same replacement
-with an explicit native selector. Direct Claude and Codex executables accept an
-exact UUID; OpenCode accepts an exact `ses_` ID. Shell wrappers, other harnesses,
-and saved commands already selecting resume modes are refused. The receipt
+with an explicit native selector. Direct Claude, Codex and Antigravity CLI
+executables accept an exact UUID. OpenCode accepts an exact `ses_` ID. Shell
+wrappers, other harnesses, and saved commands already selecting resume modes
+are refused. The receipt
 reports the requested conversation, not verified native resumption. Neither
 replacement command submits a new prompt. The old pane must still exist;
 missing-session cards can be forgotten and a launcher started explicitly.

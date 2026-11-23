@@ -11,17 +11,32 @@ fn prepare(card:&crate::state::TerminalData,native:Option<&str>)->Result<Prepare
     if card.command.is_empty()||card.command.len()>32768||card.command.contains('\0'){return Err(("invalid_state","The recorded command is invalid."));}
     let mut command=card.command.clone();
     if let Some(native)=native{
-        let mut words=shlex::split(&command).ok_or(("unsupported_resume","Recorded launcher is not a direct command."))?;
-        if words.first().and_then(|s|std::path::Path::new(s).file_name()).and_then(|s|s.to_str())!=Some(card.agent_type.as_str()){return Err(("unsupported_resume","Resume requires a direct Claude, Codex or OpenCode executable."));}
+        let args = if crate::antigravity::is_launcher(&card.agent_type) {
+            crate::antigravity::interactive_args(&command)
+        } else {
+            shlex::split(&command).filter(|words| {
+                words.first().and_then(|s| std::path::Path::new(s).file_name()).and_then(|s| s.to_str())
+                    == Some(card.agent_type.as_str())
+            })
+        };
+        let Some(mut words) = args else {
+            return Err(("unsupported_resume", "Resume requires a direct Claude, Codex, OpenCode or Antigravity CLI command."));
+        };
         let valid_uuid=native.len()==36&&native.bytes().enumerate().all(|(i,b)|if [8,13,18,23].contains(&i){b==b'-'}else{b.is_ascii_hexdigit()});
-        let bad=match card.agent_type.as_str(){
-            "claude"=>{if !valid_uuid{return Err(("invalid_arguments","Claude resume requires an exact session UUID."));}vec!["--resume","--continue","--fork-session","-r","-c"]},
-            "codex"=>{if !valid_uuid{return Err(("invalid_arguments","Codex resume requires an exact thread UUID."));}vec!["resume","fork","exec","--last"]},
-            "opencode"=>{if !native.starts_with("ses_")||native.len()>128||!native.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'){return Err(("invalid_arguments","OpenCode requires an exact ses_ session ID."));}vec!["--session","--continue","--fork","-s","-c"]},
+        let (selector, conflicts): (&str, &[&str]) = match card.agent_type.as_str(){
+            "claude"=>{if !valid_uuid{return Err(("invalid_arguments","Claude resume requires an exact session UUID."));}("--resume", &["--resume","--continue","--fork-session","-r","-c"])},
+            "codex"=>{if !valid_uuid{return Err(("invalid_arguments","Codex resume requires an exact thread UUID."));}("resume", &["resume","fork","exec","--last"])},
+            "opencode"=>{if !native.starts_with("ses_")||native.len()>128||!native.bytes().all(|b|b.is_ascii_alphanumeric()||b==b'_'){return Err(("invalid_arguments","OpenCode requires an exact ses_ session ID."));}("--session", &["--session","--continue","--fork","-s","-c"])},
+            "antigravity" | "agy" => {
+                if !valid_uuid {
+                    return Err(("invalid_arguments", "Antigravity resume requires an exact conversation UUID."));
+                }
+                ("--conversation", &["--conversation", "--continue", "-c"])
+            }
             _=>return Err(("unsupported_resume","Native resume is unsupported for this harness.")),
         };
-        if words.iter().skip(1).any(|w|bad.contains(&w.split('=').next().unwrap())){return Err(("unsupported_resume","The saved command already selects a resume mode; launch explicitly instead."));}
-        words.extend(match card.agent_type.as_str(){"claude"=>vec!["--resume".into(),native.into()],"codex"=>vec!["resume".into(),native.into()],_=>vec!["--session".into(),native.into()]});
+        if words.iter().skip(1).any(|w|conflicts.contains(&w.split('=').next().unwrap())){return Err(("unsupported_resume","The saved command already selects a resume mode; launch explicitly instead."));}
+        words.extend([selector.into(), native.into()]);
         command=words.iter().map(|w|crate::launch_args::quote(w)).collect::<Vec<_>>().join(" ");
     }
     Ok(Prepared {harness:card.agent_type.clone(),directory:cwd.clone(),command})
@@ -62,5 +77,26 @@ pub fn execute(root:&std::path::Path,request:&Request,deadline:Instant,mut ui:im
         assert!(prepare(&card,Some("--last")).is_err());card.command="/bin/sh -c codex".into();assert!(prepare(&card,Some(id)).is_err());
         card.command="codex resume --last".into();assert!(prepare(&card,Some(id)).is_err());
         card.agent_type="shell".into();card.command="/bin/sh".into();assert!(prepare(&card,Some(id)).is_err());assert!(prepare(&card,None).is_ok());
+    }
+
+    #[test]
+    fn antigravity_resume_selects_the_exact_conversation() {
+        let mut card: crate::state::TerminalData = serde_json::from_value(json!({
+            "id": "x", "session_name": "x", "agent_type": "antigravity",
+            "command": "/bin/agy --model 'some model'",
+            "x": 0, "y": 0, "workspace_dir": "/", "created_at": 1
+        })).unwrap();
+        let id = "12345678-1234-1234-1234-123456789abc";
+        assert_eq!(
+            shlex::split(&prepare(&card, Some(id)).unwrap().command).unwrap(),
+            ["/bin/agy", "--model", "some model", "--conversation", id]
+        );
+        assert!(prepare(&card, Some("12345678")).is_err());
+        for command in ["antigravity --conversation=previous", "agy -c", "agy --continue", "agy acp", "wrapper agy"] {
+            card.command = command.into();
+            assert!(prepare(&card, Some(id)).is_err());
+        }
+        card.command = "antigravity".into();
+        assert!(prepare(&card, Some(id)).is_ok());
     }
 }
