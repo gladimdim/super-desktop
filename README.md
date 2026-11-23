@@ -1,6 +1,6 @@
 # ⚡ SUPER DESKTOP
 
-> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.7/SUPER-DESKTOP-2.1.0.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
+> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 
@@ -137,6 +137,7 @@ follows the `master` branch instead, until you install a release again with
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
+| `v2.0.8` | 3 |
 | `v2.0.7` | 3 |
 | `v2.0.6` | 3 |
 | `v2.0.5` | 3 |
@@ -167,7 +168,7 @@ notes say your phone app needs it.
 
 ### Free Android APK
 
-[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.7/SUPER-DESKTOP-2.1.0.apk): every feature is free forever,
+[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk): every feature is free forever,
 with no 10-day trial, Pro purchase or subscription. Google Play is not required.
 Android 10 or newer; phones, foldables, tablets and TVs are supported.
 Open the downloaded APK and allow installation from your browser when Android
@@ -180,6 +181,11 @@ Play edition keeps its usage-day trial and one-time Pro purchase.
 
 The free APK uses protocol 3 with no new PC minimum. Individual features retain
 their requirements: TV code pairing needs PC 1.8.0+, web previews need 1.9.0+.
+**2.2.0 (20)** adds Antigravity CLI shortcuts above the keyboard. Tap
+**/resume** and **Send** for Antigravity’s conversation picker. New direct
+Antigravity sessions on PC **2.0.8** use inline scrollback when the CLI supports
+per-session rendering settings.
+
 **2.1.0 (19)** adds voice prompts: in an AI harness terminal, tap the microphone,
 speak, and send the clip with your prompt. The agent transcribes it on your PC
 with a speech-to-text tool installed there (for example whisper.cpp). The app
