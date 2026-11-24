@@ -56,7 +56,7 @@
       </p>
       <p class="lede">Run a private local Telegram worker on your Omarchy PC using your own bot token. Zero third-party relay servers, zero open ports — works behind NAT and on headless machines.</p>
       <div class="cta">
-        <a class="btn primary" href="#setup">Setup in 4 steps ↓</a>
+        <a class="btn primary" href="#setup">Setup in 5 steps ↓</a>
         <a class="btn" href="#features">What you can do</a>
         <a class="btn" href="https://github.com/gladimdim/super-desktop/blob/master/guides/TELEGRAM.md">Markdown guide on GitHub</a>
       </div>
@@ -98,16 +98,16 @@
             </div>
             <div class="tg-topic-list" role="tablist" aria-label="Sample Forum Topics">
               <button type="button" class="tg-topic-btn" role="tab" aria-selected="true" data-topic-target="topic-claude">
-                <span class="tg-topic-title">🟡 ⚡ Claude Code · super-desktop</span>
+                <span class="tg-topic-title">⚡ Claude Code · super-desktop</span>
                 <span class="tg-topic-sub">Waiting · Fix auth flow + 📎 Files</span>
               </button>
               <button type="button" class="tg-topic-btn" role="tab" aria-selected="false" data-topic-target="topic-codex">
-                <span class="tg-topic-title">🟢 🤖 Codex · api-server</span>
+                <span class="tg-topic-title">🤖 Codex · api-server</span>
                 <span class="tg-topic-sub">Working · Add rate limiter (/screen)</span>
               </button>
               <button type="button" class="tg-topic-btn" role="tab" aria-selected="false" data-topic-target="topic-opencode">
-                <span class="tg-topic-title">✅ 🔮 OpenCode · web-app</span>
-                <span class="tg-topic-sub">Finished · Build release notes</span>
+                <span class="tg-topic-title">🔮 OpenCode · web-app</span>
+                <span class="tg-topic-sub">Done · Build release notes summary</span>
               </button>
             </div>
           </div>
@@ -117,7 +117,7 @@
             <div class="tg-chat-pane" id="topic-claude">
               <div class="tg-chat-head">
                 <div>
-                  <strong>🟡 ⚡ Claude Code · super-desktop — Fix auth flow</strong><br>
+                  <strong>⚡ Claude Code · super-desktop — Fix auth flow</strong><br>
                   <span>Linked to card sd_term_1</span>
                 </div>
                 <span class="tg-badge">Waiting</span>
@@ -171,7 +171,7 @@
             <div class="tg-chat-pane" id="topic-codex" hidden>
               <div class="tg-chat-head">
                 <div>
-                  <strong>🟢 🤖 Codex · api-server — Add rate limiter</strong><br>
+                  <strong>🤖 Codex · api-server — Add rate limiter</strong><br>
                   <span>Linked to card sd_term_2</span>
                 </div>
                 <span class="tg-badge">Working</span>
@@ -206,14 +206,14 @@ test burst_window_recovers_after_tick ... ok</pre>
               </div>
             </div>
 
-            <!-- Topic 3: OpenCode Finished -->
+            <!-- Topic 3: OpenCode Done report -->
             <div class="tg-chat-pane" id="topic-opencode" hidden>
               <div class="tg-chat-head">
                 <div>
-                  <strong>✅ 🔮 OpenCode · web-app — Build release notes</strong><br>
+                  <strong>🔮 OpenCode · web-app — Build release notes</strong><br>
                   <span>Linked to card sd_term_3</span>
                 </div>
-                <span class="tg-badge">Finished</span>
+                <span class="tg-badge">Done</span>
               </div>
               <div class="tg-pinned">
                 <div><b>Pinned</b> ✅ <strong>OpenCode</strong> · <code>~/GitHub/web-app</code> · Status: <code>✓ FINISHED</code></div>
@@ -221,13 +221,15 @@ test burst_window_recovers_after_tick ... ok</pre>
               </div>
               <div class="tg-messages">
                 <div class="tg-bubble">
-                  <div class="tg-bubble-head">✅ Finished · 🔮 OpenCode · <code>~/GitHub/web-app</code></div>
-                  <p>Prompt: <em>Summarize commits since last release into CHANGELOG.md</em></p>
+                  <div class="tg-bubble-head">✅ Done · 🔮 OpenCode · <code>~/GitHub/web-app</code></div>
+                  <p><em>Summarize commits since last release into CHANGELOG.md</em></p>
+                  <pre>Updated CHANGELOG.md with 14 grouped entries and verified markdown links. All checks pass cleanly.</pre>
                   <div class="tg-kb">
                     <div class="tg-kb-row">
                       <span class="tg-kbtn">📷 Screen</span>
                       <span class="tg-kbtn">📜 History</span>
                       <span class="tg-kbtn">📎 Files</span>
+                      <span class="tg-kbtn hl">📱 Open App</span>
                     </div>
                   </div>
                 </div>
@@ -384,8 +386,8 @@ test burst_window_recovers_after_tick ... ok</pre>
 
   <section class="guide" id="setup">
     <p class="eyebrow">STEP BY STEP</p>
-    <h2>Setup in four steps.</h2>
-    <p class="sub">Takes about two minutes. You stay the owner of your bot token, your Telegram pairing, and every permission switch.</p>
+    <h2>Setup in five steps (with screenshots).</h2>
+    <p class="sub">Takes about two minutes. You stay the sole owner of your bot token, your Telegram pairing, your Tailscale URL, and every permission switch.</p>
 
     <div class="step">
       <div class="num" aria-hidden="true">1</div>
@@ -394,45 +396,75 @@ test burst_window_recovers_after_tick ... ok</pre>
         <ol>
           <li>Open Telegram and message the official verified <strong><code>@BotFather</code></strong> bot with <code>/newbot</code>.</li>
           <li>Pick a display name (for example <code>My Super Desktop</code>) and a unique username ending in <code>bot</code> (for example <code>my_superdesktop_bot</code>).</li>
-          <li>Copy the bot token (looks like <code>123456789:ABC...</code>) and keep it private.</li>
+          <li>Copy the HTTP API token (looks like <code>123456789:ABC...</code>) and keep it private.</li>
         </ol>
-        <p>No extra <code>@BotFather</code> settings are needed: group invites work out of the box, and making the bot Admin in your Forum group lets it read topic messages while keeping Group Privacy Mode on.</p>
+        <p><strong>Privacy note:</strong> Leave <code>@BotFather</code> Group Privacy Mode enabled — promoting the bot to Admin in your private 2-member Forum group already lets it receive messages in topics.</p>
       </div>
     </div>
 
     <div class="step">
       <div class="num" aria-hidden="true">2</div>
       <div>
-        <h3><span class="pill pc">PC</span> Save the token &amp; enable the worker</h3>
+        <h3><span class="pill pc">PC</span> Save the token, enable the bot, and pair your account</h3>
         <ol>
           <li>Press <span class="kbd">Super</span> + <span class="kbd">Shift</span> + <span class="kbd">Q</span> → open <strong>⚙ Settings → Telegram</strong>.</li>
-          <li>Paste your <code>@BotFather</code> token and click <strong>Save &amp; verify</strong> (verifies directly with <code>api.telegram.org</code> and shows your bot's <code>@username</code>).</li>
-          <li>Turn on <strong>Enable Telegram bot</strong>. Nothing runs until you switch it on.</li>
+          <li>Under <strong>Bot setup (BYOB)</strong>, paste your <code>@BotFather</code> token, click <strong>Save &amp; verify</strong> (checks <code>api.telegram.org/getMe</code>), and switch <strong>Enable Telegram bot</strong> on until the green <code>Running</code> chip appears.</li>
+          <li>Under <strong>Account pairing</strong>, click <strong>Pair Telegram account</strong> to generate a single-use QR code and <code>t.me/&lt;bot&gt;?start=…</code> invite link.</li>
+          <li>Scan or tap the link in Telegram, hit <strong>Start</strong>, confirm the <strong>6-digit comparison code</strong> matches on both screens, and click <strong>Approve</strong> on your PC. Access locks to your numeric Telegram <code>user_id</code> only.</li>
         </ol>
+        <figure class="shot-card">
+          <a href="/telegram/screenshots/settings-bot-pair.webp" target="_blank" rel="noopener">
+            <img src="/telegram/screenshots/settings-bot-pair.webp" width="718" height="719" loading="lazy" alt="SUPER DESKTOP Settings → Telegram showing Bot setup with Running status and Account pairing with single-use QR code, invite link, 6-digit comparison code, and Approve/Reject buttons">
+          </a>
+          <figcaption><strong>Settings → Telegram (Bot &amp; Pairing):</strong> Token stays masked on disk (<code>0600</code>), QR/deep link expires after 5 minutes, and desktop approval verifies the 6-digit code.</figcaption>
+        </figure>
       </div>
     </div>
 
     <div class="step">
       <div class="num" aria-hidden="true">3</div>
       <div>
-        <h3><span class="pill pc">PC</span> + <span class="pill">Telegram</span> Pair your Telegram account</h3>
+        <h3><span class="pill">Telegram</span> Link a 2-member Forum Topics supergroup (recommended)</h3>
         <ol>
-          <li>Click <strong>Pair Telegram account</strong> on your PC to generate a single-use <code>t.me/&lt;bot&gt;?start=…</code> invite link and QR code.</li>
-          <li>Open the link in Telegram and tap <strong>Start</strong>.</li>
-          <li>Check that the <strong>6-digit code</strong> matches on both screens, then click <strong>Approve</strong> on your PC. Access locks to your numeric Telegram <code>user_id</code>.</li>
+          <li>In Telegram, create a new <strong>private group</strong> and add <strong>only your bot</strong> (<strong>2 members max</strong> — if any third person is in the group, <code>/linkforum</code> refuses to link).</li>
+          <li>Open Group Info → <strong>Edit → Topics → Enable</strong> so topics are turned on.</li>
+          <li>Open <strong>Administrators → Add Admin → select your bot</strong> and turn on <strong>Manage Topics</strong> and <strong>Pin Messages</strong> (so each topic can silently pin its live status card and delete closed card topics cleanly).</li>
+          <li>Open the group's <strong>General</strong> topic and send <code>/linkforum</code>. SUPER DESKTOP pins a live Dashboard in General and spawns one color-tagged topic per running card — with zero status-rename spam and automatic <strong>✅ Done</strong> output reports as soon as a turn finishes.</li>
         </ol>
+        <figure class="shot-card">
+          <a href="/telegram/screenshots/settings-forum-miniapp.webp" target="_blank" rel="noopener">
+            <img src="/telegram/screenshots/settings-forum-miniapp.webp" width="718" height="719" loading="lazy" alt="SUPER DESKTOP Settings → Telegram showing Forum Topics controls (Sync topics now, Unlink forum, Auto-create and Delete on close switches) and Mini Web App (Tailscale) configuration">
+          </a>
+          <figcaption><strong>Forum Topics &amp; Mini Web App card:</strong> Toggle automatic topic creation/deletion, trigger manual resyncs, or click <strong>Auto-setup Tailscale Serve</strong> in one click.</figcaption>
+        </figure>
       </div>
     </div>
 
     <div class="step">
       <div class="num" aria-hidden="true">4</div>
       <div>
-        <h3><span class="pill">Telegram</span> Link a 2-member Forum group (optional, recommended)</h3>
+        <h3><span class="pill pc">PC</span> Choose your permissions</h3>
+        <p>By default, only <strong>Notifications</strong> and <strong>Redact common secrets</strong> start enabled. Turn on only the controls you want from Telegram — changes take effect immediately without restarting cards:</p>
+        <ul>
+          <li>Enable <strong>Read terminal output</strong> to receive full <strong>✅ Done</strong> result summaries, <code>Waiting</code> snippets, <code>/screen</code>, <code>/history</code>, <code>/live</code>, <code>📎 Files</code>, and the Mini Web App terminal.</li>
+          <li>Enable <strong>Submit prompts</strong> and <strong>Control keys</strong> to reply directly from topics, approve prompts with <code>Yes</code>/<code>No</code>, or send interrupts.</li>
+        </ul>
+        <figure class="shot-card">
+          <a href="/telegram/screenshots/settings-permissions.webp" target="_blank" rel="noopener">
+            <img src="/telegram/screenshots/settings-permissions.webp" width="718" height="719" loading="lazy" alt="SUPER DESKTOP Settings → Telegram Permissions list with granular toggles for Notifications, Read terminal output, Submit prompts, Control keys, Shell input, Launch, Close, Attachments, and Redact common secrets">
+          </a>
+          <figcaption><strong>Granular Permissions:</strong> Every risky action defaults Off; secret redaction masks API tokens, Bearer headers, <code>.env</code> secrets, and PEM keys before sending.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num" aria-hidden="true">5</div>
+      <div>
+        <h3><span class="pill">Phone</span> Open the Mini Web App or message any topic</h3>
         <ol>
-          <li>Create a new <strong>private group</strong> with <strong>only you and your bot</strong> (2 members max — any extra member is refused automatically for privacy).</li>
-          <li>In Group Settings, enable <strong>Topics</strong>.</li>
-          <li>In <strong>Administrators</strong>, promote your bot to Admin with <strong>Manage Topics</strong> (and optionally <strong>Pin Messages</strong> so each topic pins its live status header silently).</li>
-          <li>Open the group's <strong>General</strong> topic and send <code>/linkforum</code>. Every open card immediately gets its own live topic.</li>
+          <li>Turn on <strong>Tailscale</strong> on your phone (if using the Mini Web App below) and tap <strong>⚡ Open App</strong> or send <code>/app</code> in your 1:1 bot chat.</li>
+          <li>Or jump into your linked Forum group: tap any topic, reply directly to steer that harness, tap inline Quick Keys, or check <code>/usage</code> in <strong>General</strong>.</li>
         </ol>
       </div>
     </div>
@@ -441,7 +473,34 @@ test burst_window_recovers_after_tick ... ok</pre>
   <section class="guide" id="mini-app">
     <p class="eyebrow">OPTIONAL · PRIVATE TAILNET UI</p>
     <h2>Telegram Mini Web App via Tailscale.</h2>
-    <p class="sub">Want a full Android-like experience right inside Telegram — live colored ANSI terminal over WebSocket, weekly allowance meters, swipeable Quick Keys, and interactive image/PDF/code previews? Serve the embedded UI on <code>127.0.0.1:7789</code> and wrap it privately inside your own Tailscale tailnet using <code>tailscale serve</code> (never public Funnel).</p>
+    <p class="sub">Want a full Android-like experience right inside Telegram — live colored ANSI terminal over WebSocket, automatic <strong>live Omarchy theme syncing</strong> (dark &amp; light), weekly allowance meters, swipeable Quick Keys, and interactive image/PDF/code previews? Serve the embedded UI on <code>127.0.0.1:7789</code> and wrap it privately inside your own Tailscale tailnet using <code>tailscale serve</code> (never public Funnel).</p>
+
+    <div class="miniapp-gallery" aria-label="Telegram Mini Web App mobile screenshots">
+      <figure class="phone-shot">
+        <a href="/telegram/screenshots/miniapp-sessions.webp" target="_blank" rel="noopener">
+          <img src="/telegram/screenshots/miniapp-sessions.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App Sessions list showing Claude Code Waiting, OpenAI Codex Working, OpenCode Finished, and Antigravity Idle cards styled with the live Omarchy palette">
+        </a>
+        <figcaption><strong>1. Live Cards &amp; + New</strong>Tapping any card opens its live WebSocket stream; header and palette follow your active Omarchy theme automatically.</figcaption>
+      </figure>
+      <figure class="phone-shot">
+        <a href="/telegram/screenshots/miniapp-terminal.webp" target="_blank" rel="noopener">
+          <img src="/telegram/screenshots/miniapp-terminal.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App live colored ANSI terminal with test pass output, approval prompt, swipeable Quick Keys strip, and prompt input bar">
+        </a>
+        <figcaption><strong>2. Live ANSI Terminal</strong>Full 16/256/truecolor ANSI stream, <code>A−/A+</code> font sizing, swipeable <code>Yes/No/1/2/↑/↓/Tab</code> Quick Keys, and attachment uploads.</figcaption>
+      </figure>
+      <figure class="phone-shot">
+        <a href="/telegram/screenshots/miniapp-usage.webp" target="_blank" rel="noopener">
+          <img src="/telegram/screenshots/miniapp-usage.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App Usage tab showing Weekly Allowance and 5-hour progress bars for Claude Code, OpenAI Codex, and Antigravity">
+        </a>
+        <figcaption><strong>3. Weekly Allowance</strong>Track weekly &amp; 5-hour usage bars, percentages left, reset countdowns, and Cloud Code quotas across providers.</figcaption>
+      </figure>
+      <figure class="phone-shot">
+        <a href="/telegram/screenshots/miniapp-files.webp" target="_blank" rel="noopener">
+          <img src="/telegram/screenshots/miniapp-files.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App Files & Previews drawer showing All, Images, Docs, and Links filters with PNG, PDF, Markdown, and URL entries">
+        </a>
+        <figcaption><strong>4. Files &amp; Previews</strong>Filter Images, Docs, and Links per card, preview rendered PDF pages inline, read redacted markdown logs, or open links.</figcaption>
+      </figure>
+    </div>
 
     <h3 id="use-this-prompt-to-setup" style="margin-top:26px;">Use this prompt to setup</h3>
     <p class="sub">Paste this prompt into <strong>Claude Code, Codex, OpenCode, Antigravity, Grok</strong>, or any AI coding agent on your Linux PC to configure Tailscale Serve and enable the Mini Web App safely without exposing any tokens.</p>
@@ -482,11 +541,16 @@ Steps:
       <div>
         <h3>Manual setup &amp; optional <code>@BotFather</code> Forum Topic deep links</h3>
         <ol>
-          <li>Ensure <strong>MagicDNS</strong> and <strong>HTTPS Certificates</strong> are enabled in Tailscale Admin → DNS and Tailscale is running on your PC and phone.</li>
-          <li>Click <strong>Auto-setup Tailscale Serve</strong> in <strong>⚙ Settings → Telegram → Mini Web App</strong>, or run <code>tailscale serve --bg --https=8443 http://127.0.0.1:7789</code> and save your <code>https://&lt;pc&gt;.&lt;tailnet&gt;.ts.net:8443</code> URL.</li>
-          <li><em>Optional for Forum Topic buttons:</em> Message <code>@BotFather</code> → <code>/newapp</code>, register a short name (e.g. <code>superdesktop</code>) pointing to that URL, and paste it in <strong>Settings → Telegram</strong>. Every card topic immediately gets a <strong>📱 Open App</strong> deep link button.</li>
+          <li>Ensure <strong>MagicDNS</strong> and <strong>HTTPS Certificates</strong> are enabled in <a href="https://login.tailscale.com/admin/dns" target="_blank" rel="noopener">Tailscale Admin → DNS</a>, and Tailscale is running on both your PC and your phone.</li>
+          <li>Toggle <strong>Enable Telegram Mini Web App</strong> on in <strong>⚙ Settings → Telegram</strong>, then click <strong>Auto-setup Tailscale Serve</strong> (or run <code>tailscale serve --bg --https=8443 http://127.0.0.1:7789</code>) and verify your <code>https://&lt;pc&gt;.&lt;tailnet&gt;.ts.net:8443</code> URL saves cleanly.</li>
+          <li>In your 1:1 chat with your bot, tap <strong>⚡ Open App</strong> or send <code>/app</code> (works on Android, iOS, and Telegram Desktop while connected to your tailnet).</li>
+          <li><em>Optional for Forum Topic buttons:</em> Message <code>@BotFather</code> → <code>/newapp</code>, pick your bot, register a short name (e.g. <code>superdesktop</code>) pointing to your Tailscale Serve URL, and paste it in <strong>BotFather short name</strong>. Every card topic and <code>✅ Done</code> report gains a <strong>📱 Open App</strong> deep link directly to that card.</li>
         </ol>
       </div>
+    </div>
+
+    <div class="note">
+      <strong>Multiple laptops &amp; Linux servers?</strong> Telegram's Bot API allows only one active poller per bot token (sharing one token across two machines causes <code>409 Conflict</code>). Simply create one <code>@BotFather</code> bot per machine (e.g. <code>@sd_laptop_bot</code> and <code>@sd_server_bot</code>) and group them — along with their Forum groups — into a single <strong>Telegram Chat Folder</strong>. Each machine runs independently with its own Tailscale Serve Mini App and its own live Omarchy theme.
     </div>
   </section>
 

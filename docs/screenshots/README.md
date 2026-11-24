@@ -239,3 +239,15 @@ Android 14 emulator. Sessions and the Codex voice draft come from public APK
 2.2.0 (20). The harness picker, Claude Code terminal, Files & links and Markdown
 preview come from Play 2.1.0 (19). Each slide links to a full 648 × 1440 WebP
 and includes an 864 × 560 detail cropped from the original 1080 × 2400 capture.
+
+## Telegram guide (`../telegram/screenshots/`)
+
+- `settings-bot-pair.webp`, `settings-forum-miniapp.webp`, `settings-permissions.webp`:
+  the real GTK4 **Settings → Telegram** cards rendered off screen on a private
+  Broadway display by the opt-in test
+  `harness_settings::telegram_settings_page::tests::telegram_settings_screenshots`
+  with synthetic bot/pairing/Tailscale sample values (718 × 719 WebP at quality 90).
+- `miniapp-sessions.webp`, `miniapp-terminal.webp`, `miniapp-usage.webp`,
+  `miniapp-files.webp`: `src/telegram/webapp_ui.html` rendered in headless
+  Chromium at `390 × 844` (`2x`, 780 × 1688 WebP at quality 90) against a sample
+  mock server using the Tokyo Night palette and synthetic sessions/usage/files.

@@ -1294,4 +1294,212 @@ mod tests {
         }
         let _copy_prompt = find_btn("telegram-miniapp-copy-prompt");
     }
+
+    #[test]
+    fn telegram_settings_screenshots() {
+        if std::env::var_os("SD_TELEGRAM_SHOTS").is_none() {
+            return;
+        }
+        crate::gtk_test::run_in_child_process(
+            "harness_settings::telegram_settings_page::tests::telegram_settings_screenshots_inner",
+        );
+    }
+
+    #[test]
+    fn telegram_settings_screenshots_inner() {
+        if !crate::gtk_test::is_child() {
+            return;
+        }
+        let Some(out) = std::env::var_os("SD_TELEGRAM_SHOTS").map(std::path::PathBuf::from) else {
+            return;
+        };
+        std::fs::create_dir_all(&out).unwrap();
+        gtk4::init().unwrap();
+        gtk4::Settings::default()
+            .unwrap()
+            .set_gtk_application_prefer_dark_theme(true);
+        crate::styles::apply_styles();
+
+        let cfg = Config {
+            enabled: true,
+            bot_token: "123456789:sample-bot-token-not-real".into(),
+            bot_id: Some(123456789),
+            bot_username: Some("my_superdesktop_bot".into()),
+            allowed_user: None,
+            forum: Some(config::ForumConfig {
+                chat_id: -1001234567890,
+                title: "My PC Agents".into(),
+                linked_at: unix_now(),
+            }),
+            auto_sync_topics: true,
+            archive_closed_topics: true,
+            permissions: config::Permissions {
+                notifications: true,
+                redact_secrets: true,
+                read_output: true,
+                prompts: true,
+                controls: true,
+                ..config::Permissions::default()
+            },
+            mini_app: config::MiniAppConfig {
+                enabled: true,
+                listen_port: 7789,
+                public_url: "https://workstation.tailnet.ts.net:8443".into(),
+                short_name: "superdesktop".into(),
+            },
+            ..Config::default()
+        };
+        let mut rt = RuntimeState::default();
+        rt.worker_status = config::WorkerStatus {
+            state: "running".into(),
+            pid: Some(4242),
+            bot_username: Some("my_superdesktop_bot".into()),
+            last_poll_at: unix_now(),
+            last_error: None,
+        };
+        rt.topics.push(config::TopicBinding {
+            card_id: "sd_term_1".into(),
+            thread_id: 77,
+            topic_name: "⚡ Claude Code · super-desktop".into(),
+            ..config::TopicBinding::default()
+        });
+        let invite = config::PendingInvite {
+            secret: "sampleInviteToken987".into(),
+            created_at: unix_now(),
+            expires_at: unix_now() + 300,
+        };
+        let req = config::PendingRequest {
+            request_id: "req_sample".into(),
+            user_id: 987654321,
+            chat_id: 987654321,
+            username: Some("alex".into()),
+            first_name: "Alex".into(),
+            code: "482915".into(),
+            requested_at: unix_now(),
+            expires_at: unix_now() + 180,
+        };
+
+        let cfg_store = Arc::new(Mutex::new(cfg));
+        let hooks = Hooks {
+            load_config: {
+                let s = Arc::clone(&cfg_store);
+                Arc::new(move || Ok(s.lock().unwrap().clone()))
+            },
+            save_config: {
+                let s = Arc::clone(&cfg_store);
+                Arc::new(move |next| {
+                    *s.lock().unwrap() = next.clone();
+                    Ok(())
+                })
+            },
+            load_runtime: {
+                let r = rt.clone();
+                Arc::new(move || Ok(r.clone()))
+            },
+            load_invite: {
+                let inv = invite.clone();
+                Arc::new(move || Ok(Some(inv.clone())))
+            },
+            load_pending_request: {
+                let req = req.clone();
+                Arc::new(move || Ok(Some(req.clone())))
+            },
+            request_sync: Arc::new(|| Ok(())),
+            verify_token: Arc::new(|_| {
+                Ok(BotUser {
+                    id: 123456789,
+                    is_bot: true,
+                    first_name: "My Super Desktop".into(),
+                    username: Some("my_superdesktop_bot".into()),
+                })
+            }),
+            start_worker: Arc::new(|| Ok(())),
+            stop_worker: Arc::new(|| Ok(())),
+            worker_running: Arc::new(|| true),
+            start_invite: {
+                let inv = invite.clone();
+                Arc::new(move || {
+                    Ok((
+                        inv.clone(),
+                        Some("https://t.me/my_superdesktop_bot?start=sampleInviteToken987".into()),
+                    ))
+                })
+            },
+            approve_pending: {
+                let s = Arc::clone(&cfg_store);
+                Arc::new(move |_| Ok(s.lock().unwrap().allowed_user.clone().unwrap()))
+            },
+            reject_pending: Arc::new(|_| Ok(())),
+            revoke_user: Arc::new(|| Ok(())),
+            clear_rejected: Arc::new(|| Ok(())),
+            unlink_forum: Arc::new(|| Ok(())),
+            detect_tailscale: Arc::new(|port| webapp::TailscaleInfo {
+                installed: true,
+                running: true,
+                dns_name: Some("workstation.tailnet.ts.net".into()),
+                serve_url: Some("https://workstation.tailnet.ts.net:8443".into()),
+                suggested_url: Some("https://workstation.tailnet.ts.net:8443".into()),
+                serve_command: format!("tailscale serve --bg --https=8443 http://127.0.0.1:{port}"),
+            }),
+            setup_tailscale: Arc::new(|_, https_port| {
+                Ok(format!("https://workstation.tailnet.ts.net:{https_port}"))
+            }),
+        };
+
+        let content = Box::new(Orientation::Vertical, 0);
+        content.set_margin_start(16);
+        content.set_margin_end(16);
+        content.set_margin_top(12);
+        content.set_margin_bottom(16);
+        let refresh = build_with_hooks(&content, hooks);
+        refresh();
+
+        let scroller = gtk4::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk4::PolicyType::Never)
+            .vscrollbar_policy(gtk4::PolicyType::Automatic)
+            .child(&content)
+            .build();
+
+        let frame = Box::new(Orientation::Vertical, 0);
+        frame.add_css_class("mini-terminal");
+        frame.add_css_class("harness-panel");
+        let header_badge = Label::new(Some("💬"));
+        let header = crate::floating_panel::PanelHeader::new(
+            &header_badge,
+            "Telegram",
+            "Bot · pairing · Forum Topics · Mini Web App",
+            false,
+        );
+        frame.append(&header.widget);
+        scroller.set_vexpand(true);
+        frame.append(&scroller);
+
+        let window = gtk4::Window::new();
+        window.add_css_class("super-desktop");
+        window.set_default_size(720, 760);
+        window.set_child(Some(&frame));
+        window.present();
+        crate::gtk_test::pump(800);
+
+        // Shot 1: Bot token + Running status + Account pairing QR & approval box.
+        crate::gtk_test::save_png(&frame, &out.join("settings-bot-pair.png"));
+
+        // Shot 2: Forum Topics & Mini Web App (Tailscale).
+        let miniapp_anchor = crate::gtk_test::find_where(content.upcast_ref(), |w| {
+            w.widget_name() == "telegram-sync-topics"
+        });
+        let adj = scroller.vadjustment();
+        let forum_y = miniapp_anchor
+            .and_then(|w| w.compute_bounds(&content))
+            .map(|b| (f64::from(b.y()) - 120.0).max(0.0))
+            .unwrap_or_else(|| (adj.upper() - adj.page_size()) * 0.45);
+        adj.set_value(forum_y.min((adj.upper() - adj.page_size()).max(0.0)));
+        crate::gtk_test::pump(300);
+        crate::gtk_test::save_png(&frame, &out.join("settings-forum-miniapp.png"));
+
+        // Shot 3: Permissions switches at bottom.
+        adj.set_value((adj.upper() - adj.page_size()).max(0.0));
+        crate::gtk_test::pump(300);
+        crate::gtk_test::save_png(&frame, &out.join("settings-permissions.png"));
+    }
 }
