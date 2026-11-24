@@ -4,14 +4,14 @@
 
 ## Supported AI harnesses
 
-Claude Code, OpenCode and Pi now have scoped native metadata adapters for new
+Claude Code, OpenCode, Pi, and Grok CLI (`grok`) now have scoped native metadata adapters for new
 terminal sessions. They report conversation names where available, submitted
 prompts, working/idle, permission waits and errors. Codex uses its own rollout
-events and conversation index. OpenClaw TUI is discoverable after installation;
-its status and titles come from a SUPER DESKTOP gateway plugin. **Settings →
-Harness launchers** shows under the OpenClaw row whether that plugin is connected,
-with **Connect** and **Restart gateway** buttons to set it up, and a new OpenClaw
-card without it shows a one-time "OpenClaw status needs setup" hint. Until a native
+events and conversation index (automatically passing `--no-daemon` when Codex
+supports it so rollout tracking stays isolated per card). OpenClaw TUI, Antigravity
+CLI (`agy`), and Hermes Agent (`hermes`) support gateway/hook/plugin integration
+from **Settings → Harness launchers** (**Connect** button), reporting titles,
+turns, and status while preserving any existing user hooks. Until a native
 adapter reports, a card uses the prompt typed into it and the on-screen status, so
 it is never left blank. Launcher availability alone does not
 mean a harness has a verified native adapter. T3 Code is no longer offered (it runs
@@ -26,17 +26,18 @@ older sessions. Unsupported terminal editing (such as history recall) keeps the
 previous tracked prompt rather than guessing from the response screen.
 
 Regular terminal cards use the command that launched the task, never output
-lines. Newly created plain Bash terminals record the submitted shell command,
+lines. Newly created plain `bash`, `zsh`, and `fish` terminals record the submitted
+shell command (via temporary shell-title hooks that preserve user dotfiles),
 including history recall and Tab completion, and keep it after the task finishes.
 Input sent to the running task cannot replace this title. Existing terminals and
 other shells use the foreground process's arguments when available, then tracked
-input; exact original quoting, aliases, and pipelines require the Bash hook.
+input; exact original quoting, aliases, and pipelines require the shell hooks.
 Titles remain shortened to fit the card. This also applies to remote PC and
 Android labels; AI harness prompt titles are unchanged.
 
 | | |
 |---|---|
-| 🌌 Antigravity CLI | `agy` / `antigravity` — install with `mise use -g agy` or `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, sign in once by running `agy`. For phone scrollback set `"altScreenMode": "never"` in `~/.gemini/antigravity-cli/settings.json` (there is no per-launch flag). |
+| 🌌 Antigravity CLI | `agy` / `antigravity` — install with `mise use -g agy` or `curl -fsSL https://antigravity.google/cli/install.sh \| bash`, sign in once by running `agy`. Passes `--settings` for inline scrollback when supported by `agy` (or set `"altScreenMode": "never"` in `~/.gemini/antigravity-cli/settings.json` on older versions). |
 | ⚡ Claude Code | `claude` |
 | 🤖 OpenAI Codex | `codex` |
 | 🔮 OpenCode | `opencode` |
@@ -53,6 +54,8 @@ Android labels; AI harness prompt titles are unchanged.
 | 🌙 Kimi Code | `kimi` |
 | 🧰 Kiro CLI | `kiro-cli` |
 | 🎯 Cursor Agent | `cursor-agent` |
+| 🔌 Amp | `amp` |
+| 🛸 GitHub Copilot | `copilot` |
 | 🐑 Herder worker | `herder worker` (job supervisor, not an interactive chat) |
 | 💻 Shell | `bash` / `zsh` / `fish` |
 
@@ -114,7 +117,7 @@ Herder retains its fallback until a verified SVG is available. See
 
 ## Terminal copy and paste
 
-Hold **Ctrl** and hover a web link (http/https) in a terminal card: it is underlined with a hand cursor, and **Ctrl+click** opens it in your default browser. A link that tmux wrapped onto several rows is only found on its first row.
+Hold **Ctrl** and hover a web link (http/https) in a terminal card: it is underlined with a hand cursor, and **Ctrl+click** opens it in your default browser — including links that wrapped across multiple terminal rows.
 
 In local and remote PC terminal cards, select text and press **Ctrl+Shift+C**
 to copy, or **Ctrl+Shift+V** to paste the desktop clipboard. **Ctrl+C** keeps

@@ -39,7 +39,7 @@ For Arch packages, version pinning, protocol compatibility, charger sleep lock, 
 | **[How to SETUP Telegram Bot + Group](guides/TELEGRAM.md)** | Create your own `@BotFather` bot, pair your account, link a 2-member Forum Topics group (1 card = 1 topic), and configure permissions. |
 | **[Installation, Packages, Versions & Power](guides/INSTALL.md)** | Source/clone updates, Arch packages (`super-desktop-setup`), version pinning, protocol compatibility table, sleep lock, headless login launch. |
 | **[Android App, Free APK & Phone Bridge](guides/MOBILE.md)** | Free Android APK download & changelog, LAN/Tailscale phone bridge, TV code pairing, mobile scrollback, voice/photo/file attachments. |
-| **[Supported AI Harnesses, Terminals & SD Editor](guides/HARNESSES.md)** | 19 supported harnesses, native adapters, custom & cloned launchers, launch parameters, terminal copy/paste, built-in SD Editor. |
+| **[Supported AI Harnesses, Terminals & SD Editor](guides/HARNESSES.md)** | 21 harnesses + shell, native adapters, custom & cloned launchers, launch parameters, terminal copy/paste, built-in SD Editor. |
 | **[Use Another PC's Harnesses](guides/REMOTE_PCS.md)** | Pair two PCs, stream live remote workspaces, zoom/pan controls, and troubleshooting. |
 | **[Plugins (QML Surfaces)](guides/PLUGINS.md)** | Build QML surfaces with AI, discover/install community plugins, edit locally, and publish. |
 | **[Local MCP Access & CLI Quick Reference](guides/MCP_AND_CLI.md)** | Local stdio MCP server, structured CLI commands, idempotency receipts, and [complete CLI reference](CLI.md). |
@@ -74,7 +74,13 @@ For Arch packages, version pinning, protocol compatibility, charger sleep lock, 
 | Pointer in the top-left corner, held 2s | Show / hide SUPER DESKTOP (8×8 px zone, no keyboard involved) |
 | `Ctrl + N` | New note |
 | `Ctrl + T` | New terminal |
+| `Alt + Space` / `Ctrl + Shift + K` | Command Palette (also `Ctrl + K` outside terminal focus) — jump to cards, run `/` commands, or launch harnesses |
+| `Ctrl + Shift + /` | Slash command launcher for the focused AI harness card |
+| `Alt + W` | Jump to the next `WAITING` or `ERROR` card |
+| `Alt + [` / `Alt + ]` | Cycle recently used cards |
+| `Ctrl + Shift + F` / `M` / `P` / `O` / `A` | Expand, minimize, prompt history, files & links, or attach files on the focused card |
 | Double-click terminal/header | Expand to 80% / collapse back |
+| Right-click terminal header | Card menu (slash commands, restart fresh, resume conversation, prompt history, files & links, attach files) |
 | Click the 📁 folder field | Choose the working directory for new harness cards (`Enter` = home, `▾` = folders used before) |
 
 ---
