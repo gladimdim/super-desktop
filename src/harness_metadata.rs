@@ -51,6 +51,7 @@ impl Launch {
 /// wrappers keep working unchanged; they must opt in to a native adapter.
 pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
     let command = crate::antigravity::launch_command(agent, command);
+    let command = crate::codex_launch::launch_command(agent, &command);
     prepare_with_root(session, agent, &command, root())
 }
 

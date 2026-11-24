@@ -52,7 +52,7 @@ pub fn parse_pane_grid(text: &str) -> Option<crate::desktop_protocol::TerminalSi
 /// tmux versions reject the per-session form; the call then fails and the
 /// previous behaviour remains instead of us mutating the server options.
 pub(in crate::tmux) fn pin_client_exit(session_name: &str) {
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["set-option", "-t", session_name, "detach-on-destroy", "on"])
         .output();
     // Same moments (create/attach): make mouse copies reach the clipboard.
@@ -180,7 +180,7 @@ pub(in crate::tmux) fn start_session(session_name: &str, agent_type: &str, comma
     let launch = crate::harness_metadata::prepare(session_name, agent_type, &launch);
     let cwd = resolve_workspace_dir(workspace_dir);
 
-    let mut tmux = Command::new("tmux");
+    let mut tmux = Command::new(tmux_bin());
     tmux.args([
         "new-session",
         "-d",
@@ -218,7 +218,7 @@ pub(in crate::tmux) fn start_session(session_name: &str, agent_type: &str, comma
 
 /// True when a tmux session with this name already exists on the server.
 pub fn session_exists(session_name: &str) -> bool {
-    Command::new("tmux")
+    Command::new(tmux_bin())
         .args(["has-session", "-t", session_name])
         .output()
         .map(|o| o.status.success())
@@ -239,7 +239,7 @@ pub fn unique_session_name() -> String {
 }
 
 pub fn kill_session(session_name: &str) {
-    let _ = Command::new("tmux")
+    let _ = Command::new(tmux_bin())
         .args(["kill-session", "-t", session_name])
         .output();
 }
@@ -354,7 +354,7 @@ pub fn send_keys(session_name: &str, agent: &str, text: &str, enter: bool) -> Re
     let settle = enter && !text.is_empty() && settles_before_enter(agent);
     let before = if settle { capture_visible_screen(session_name) } else { None };
     if !text.is_empty() {
-        let out = Command::new("tmux")
+        let out = Command::new(tmux_bin())
             .args(["send-keys", "-t", session_name, "-l", "--", text])
             .output()
             .map_err(|e| e.to_string())?;
@@ -366,7 +366,7 @@ pub fn send_keys(session_name: &str, agent: &str, text: &str, enter: bool) -> Re
         settle_before_enter(before.as_deref(), || capture_visible_screen(session_name));
     }
     if enter {
-        let out = Command::new("tmux")
+        let out = Command::new(tmux_bin())
             .args(["send-keys", "-t", session_name, "Enter"])
             .output()
             .map_err(|e| e.to_string())?;

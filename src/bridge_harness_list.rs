@@ -334,7 +334,7 @@ pub(super) fn stream(stream: &mut Connection) {
 fn live_sessions(state: &crate::state::AppState, snapshot: Option<&PaneSnapshot>) -> Vec<String> {
     let mut sessions: Vec<String> = match snapshot {
         Some(snapshot) => snapshot.sessions().filter(|s| s.starts_with("sd_term_")).cloned().collect(),
-        None => Command::new("tmux")
+        None => Command::new(crate::tmux::tmux_bin())
             .args(["list-sessions", "-F", "#{session_name}"])
             .output()
             .ok()

@@ -359,6 +359,11 @@ pub fn composer_has_draft(command: &str, screen: &str) -> Option<bool> {
 
 /// Whether `line` shows any character outside a dim (placeholder) style.
 fn has_bright_text(line: &str) -> bool {
+    has_bright_text_excluding(line, |_| false)
+}
+
+/// Whether `line` shows any non-ignored character outside a dim (placeholder) style.
+pub(crate) fn has_bright_text_excluding(line: &str, ignore: impl Fn(char) -> bool) -> bool {
     let mut dim = false;
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -384,7 +389,7 @@ fn has_bright_text(line: &str) -> bool {
             }
             continue;
         }
-        if !c.is_whitespace() && !dim {
+        if !c.is_whitespace() && !ignore(c) && !dim {
             return true;
         }
     }

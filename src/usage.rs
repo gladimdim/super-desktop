@@ -34,12 +34,24 @@ pub fn launch_line(agent_key: &str) -> String {
 /// `None` means Omarchy tracks no quota for that button (plain tooltip only).
 pub fn usage_id_for_agent(agent: &str) -> Option<&'static str> {
     match agent {
-        "antigravity" => Some("antigravity"),
+        "antigravity" | "agy" => Some("agy"),
         "claude" => Some("claude"),
         "codex" => Some("codex"),
         "grok" => Some("grok"),
-        // OpenCode has no dedicated Omarchy collector; its Fireworks backend
-        // record explicitly mentions opencode, so surface that.
+        "opencode" => Some("opencode"),
+        "hermes" => Some("hermes"),
+        "cursor" => Some("cursor"),
+        "dsh" => Some("deepseek"),
+        "kimi" => Some("kimi"),
+        "qwen" => Some("qwen"),
+        "copilot" => Some("copilot"),
+        _ => None,
+    }
+}
+
+fn usage_fallback_id(id: &str) -> Option<&'static str> {
+    match id {
+        "agy" => Some("antigravity"),
         "opencode" => Some("fireworks"),
         _ => None,
     }
@@ -94,24 +106,113 @@ pub struct ProviderUsage {
     pub updated_at: String,
 }
 
-fn usage_file(id: &str) -> PathBuf {
+fn usage_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home)
-        .join(".local/state/omarchy/agents/usage")
-        .join(format!("{id}.json"))
+    PathBuf::from(home).join(".local/state/omarchy/agents/usage")
+}
+
+fn read_usage_value(dir: &PathBuf, id: &str) -> Option<(&'static str, Value)> {
+    let read = |candidate: &str| {
+        let raw = fs::read_to_string(dir.join(format!("{candidate}.json"))).ok()?;
+        let value: Value = serde_json::from_str(&raw).ok()?;
+        value.is_object().then_some(value)
+    };
+    if let Some(value) = read(id) {
+        let static_id: &'static str = match id {
+            "codex" => "codex",
+            "claude" => "claude",
+            "agy" => "agy",
+            "antigravity" => "antigravity",
+            "grok" => "grok",
+            "opencode" => "opencode",
+            "fireworks" => "fireworks",
+            "hermes" => "hermes",
+            "copilot" => "copilot",
+            "cursor" => "cursor",
+            "deepseek" => "deepseek",
+            "kimi" => "kimi",
+            "qwen" => "qwen",
+            "ollama" => "ollama",
+            "openrouter" => "openrouter",
+            "vibe" => "vibe",
+            "zai" => "zai",
+            "devin" => "devin",
+            "minimax" => "minimax",
+            "synthetic" => "synthetic",
+            "local" => "local",
+            _ => return None,
+        };
+        return Some((static_id, value));
+    }
+    let fallback = usage_fallback_id(id)?;
+    read(fallback).map(|value| (fallback, value))
+}
+
+fn has_active_usage(value: &Value) -> bool {
+    value.get("ready").and_then(Value::as_bool) == Some(true)
+        || value
+            .get("limits")
+            .and_then(Value::as_array)
+            .is_some_and(|limits| !limits.is_empty())
+        || opt_u64(value, "todayTotalTokens").is_some_and(|n| n > 0)
+        || opt_u64(value, "todayPrompts").is_some_and(|n| n > 0)
+        || opt_u64(value, "todaySessions").is_some_and(|n| n > 0)
+        || opt_u64(value, "totalPrompts").is_some_and(|n| n > 0)
+        || opt_u64(value, "totalSessions").is_some_and(|n| n > 0)
 }
 
 /// Public, allowlisted usage snapshots for the launcher header. Reads the
 /// collector cache only; credentials and arbitrary collector fields stay local.
 pub fn launcher_usage() -> Vec<Value> {
-    ["codex", "claude", "antigravity", "grok", "fireworks"]
-        .iter()
-        .filter_map(|id| {
-            let raw = fs::read_to_string(usage_file(id)).ok()?;
-            let value: Value = serde_json::from_str(&raw).ok()?;
-            launcher_usage_snapshot(id, &value)
-        })
-        .collect()
+    launcher_usage_in(&usage_dir())
+}
+
+fn launcher_usage_in(dir: &std::path::Path) -> Vec<Value> {
+    const PRIMARY: &[&str] = &["codex", "claude", "agy", "grok", "opencode"];
+    const EXTRA: &[&str] = &[
+        "fireworks",
+        "hermes",
+        "copilot",
+        "cursor",
+        "deepseek",
+        "kimi",
+        "qwen",
+        "ollama",
+        "openrouter",
+        "vibe",
+        "zai",
+        "devin",
+        "minimax",
+        "synthetic",
+        "local",
+    ];
+    let dir = dir.to_path_buf();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for &id in PRIMARY {
+        if let Some((resolved, value)) = read_usage_value(&dir, id) {
+            seen.insert(resolved);
+            if let Some(snapshot) = launcher_usage_snapshot(resolved, &value) {
+                out.push(snapshot);
+            }
+        }
+    }
+    for &id in EXTRA {
+        if seen.contains(id) {
+            continue;
+        }
+        let Some((resolved, value)) = read_usage_value(&dir, id) else {
+            continue;
+        };
+        if !has_active_usage(&value) {
+            continue;
+        }
+        seen.insert(resolved);
+        if let Some(snapshot) = launcher_usage_snapshot(resolved, &value) {
+            out.push(snapshot);
+        }
+    }
+    out
 }
 
 fn launcher_usage_snapshot(id: &str, value: &Value) -> Option<Value> {
@@ -177,11 +278,16 @@ fn sum_model_tokens(v: &Value) -> u64 {
 /// Load cached Omarchy usage data for a provider id. Pure file read, no
 /// network — safe to call on hover on the UI thread.
 pub fn load_usage(id: &str) -> Option<ProviderUsage> {
-    let content = fs::read_to_string(usage_file(id)).ok()?;
-    let v: Value = serde_json::from_str(&content).ok()?;
-    if !v.is_object() {
-        return None;
-    }
+    load_usage_in(&usage_dir(), id)
+}
+
+fn load_usage_in(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
+    let parse = |candidate: &str| -> Option<Value> {
+        let content = fs::read_to_string(dir.join(format!("{candidate}.json"))).ok()?;
+        let v: Value = serde_json::from_str(&content).ok()?;
+        v.is_object().then_some(v)
+    };
+    let v = parse(id).or_else(|| usage_fallback_id(id).and_then(parse))?;
 
     let mut limits = Vec::new();
     if let Some(arr) = v.get("limits").and_then(|l| l.as_array()) {
@@ -510,10 +616,53 @@ mod tests {
         assert_eq!(usage_id_for_agent("claude"), Some("claude"));
         assert_eq!(usage_id_for_agent("codex"), Some("codex"));
         assert_eq!(usage_id_for_agent("grok"), Some("grok"));
-        assert_eq!(usage_id_for_agent("antigravity"), Some("antigravity"));
-        assert_eq!(usage_id_for_agent("opencode"), Some("fireworks"));
+        assert_eq!(usage_id_for_agent("antigravity"), Some("agy"));
+        assert_eq!(usage_id_for_agent("agy"), Some("agy"));
+        assert_eq!(usage_id_for_agent("opencode"), Some("opencode"));
+        assert_eq!(usage_id_for_agent("hermes"), Some("hermes"));
+        assert_eq!(usage_id_for_agent("cursor"), Some("cursor"));
+        assert_eq!(usage_id_for_agent("dsh"), Some("deepseek"));
+        assert_eq!(usage_id_for_agent("kimi"), Some("kimi"));
+        assert_eq!(usage_id_for_agent("qwen"), Some("qwen"));
+        assert_eq!(usage_id_for_agent("copilot"), Some("copilot"));
         assert_eq!(usage_id_for_agent("shell"), None);
         assert_eq!(usage_id_for_agent("bogus"), None);
+    }
+
+    #[test]
+    fn usage_collectors_prefer_current_ids_fall_back_and_filter_inactive_extras() {
+        let dir = std::env::temp_dir().join(format!(
+            "sd-usage-test-{}",
+            crate::tmux::unique_session_name()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        // Fallback when agy.json is absent.
+        fs::write(dir.join("antigravity.json"), r#"{"name":"Antigravity Legacy","ready":true,"totalPrompts":5}"#).unwrap();
+        assert_eq!(load_usage_in(&dir, "agy").unwrap().name, "Antigravity Legacy");
+        // Current id wins when present.
+        fs::write(dir.join("agy.json"), r#"{"name":"Gemini","ready":true,"totalPrompts":9}"#).unwrap();
+        assert_eq!(load_usage_in(&dir, "agy").unwrap().name, "Gemini");
+        // OpenCode falls back to fireworks.json when opencode.json is missing.
+        fs::write(dir.join("fireworks.json"), r#"{"name":"Fireworks","ready":true,"todayTotalTokens":100}"#).unwrap();
+        assert_eq!(load_usage_in(&dir, "opencode").unwrap().name, "Fireworks");
+
+        fs::write(dir.join("codex.json"), r#"{"name":"Codex","ready":true}"#).unwrap();
+        // Active extra collector vs inactive placeholder collector.
+        fs::write(dir.join("hermes.json"), r#"{"name":"Hermes","ready":false,"todayPrompts":0,"totalPrompts":0}"#).unwrap();
+        fs::write(dir.join("kimi.json"), r#"{"name":"Kimi","ready":true,"todayPrompts":2,"secret":"drop"}"#).unwrap();
+
+        let snap = launcher_usage_in(&dir);
+        let ids: Vec<_> = snap.iter().map(|v| v["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["codex", "agy", "fireworks", "kimi"]);
+        assert!(snap[3].get("secret").is_none());
+
+        // When opencode.json exists, both opencode and active fireworks appear without duplicates.
+        fs::write(dir.join("opencode.json"), r#"{"name":"OpenCode","ready":true,"totalPrompts":12}"#).unwrap();
+        let snap2 = launcher_usage_in(&dir);
+        let ids2: Vec<_> = snap2.iter().map(|v| v["id"].as_str().unwrap()).collect();
+        assert_eq!(ids2, vec!["codex", "agy", "opencode", "fireworks", "kimi"]);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

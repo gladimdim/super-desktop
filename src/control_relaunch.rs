@@ -31,7 +31,7 @@ fn prepare(card:&crate::state::TerminalData,native:Option<&str>)->Result<Prepare
                 if !valid_uuid {
                     return Err(("invalid_arguments", "Antigravity resume requires an exact conversation UUID."));
                 }
-                ("--conversation", &["--conversation", "--continue", "-c"])
+                ("--conversation", &["--conversation", "--continue", "-c", "--resume", "-r"])
             }
             _=>return Err(("unsupported_resume","Native resume is unsupported for this harness.")),
         };
@@ -92,7 +92,16 @@ pub fn execute(root:&std::path::Path,request:&Request,deadline:Instant,mut ui:im
             ["/bin/agy", "--model", "some model", "--conversation", id]
         );
         assert!(prepare(&card, Some("12345678")).is_err());
-        for command in ["antigravity --conversation=previous", "agy -c", "agy --continue", "agy acp", "wrapper agy"] {
+        for command in [
+            "antigravity --conversation=previous",
+            "agy -c",
+            "agy --continue",
+            "agy -r",
+            "agy --resume",
+            "antigravity --resume=previous",
+            "agy acp",
+            "wrapper agy",
+        ] {
             card.command = command.into();
             assert!(prepare(&card, Some(id)).is_err());
         }

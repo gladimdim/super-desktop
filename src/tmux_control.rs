@@ -170,7 +170,7 @@ impl Control {
     }
 
     fn spawn(session: &str, activity: Option<Arc<Activity>>) -> Result<Self, String> {
-        Self::spawn_with_command(session, activity, Command::new("tmux"))
+        Self::spawn_with_command(session, activity, Command::new(crate::tmux::tmux_bin()))
     }
 
     fn spawn_with_command(session: &str, activity: Option<Arc<Activity>>, mut command: Command) -> Result<Self, String> {

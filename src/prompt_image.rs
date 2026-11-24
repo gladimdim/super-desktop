@@ -104,13 +104,23 @@ fn composer_line(screen: &str) -> Option<&str> {
         .find_map(|line| line.split_once('›').map(|(_, content)| content))
 }
 
+fn is_sparkle(c: char) -> bool {
+    ('\u{2800}'..='\u{28ff}').contains(&c)
+}
+
+fn is_draft_chip(trimmed: &str) -> bool {
+    (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        || trimmed.contains("[Pasted ")
+        || trimmed.contains("[Image ")
+}
+
 /// Codex's idle animation paints braille "sparkles" across the composer row, in and
 /// around its own placeholder (`›⠁Ask Codex to do anything⡀   ⠂ …`). They are
 /// decoration the user never typed, so they are removed before the row is read.
 fn without_sparkles(plain: &str) -> String {
     plain
         .chars()
-        .filter(|c| !('\u{2800}'..='\u{28ff}').contains(c))
+        .filter(|&c| !is_sparkle(c))
         .collect()
 }
 
@@ -119,9 +129,14 @@ pub(crate) fn empty_composer(screen: &str) -> bool {
         return false;
     };
     let plain = without_sparkles(&crate::tmux::strip_terminal_escapes(line));
-    // Codex 0.154: placeholder is dim, actual draft text isn't. Unknown UI fails closed.
-    plain.trim().is_empty()
-        || (line.contains("\x1b[2m") && plain.trim() == "Ask Codex to do anything")
+    let trimmed = plain.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    // Codex renders placeholders in dim style; real draft text is non-dim,
+    // and dim paste/image chips (`[Pasted text …]`, `[Image …]`) count as drafts.
+    !crate::prompt_attachments::has_bright_text_excluding(line, is_sparkle)
+        && !is_draft_chip(trimmed)
 }
 
 /// The single-image route: one image and the prompt, delivered like any
@@ -178,10 +193,18 @@ mod tests {
         assert!(!empty_composer("› ⠁ already typing ⡀\n"));
         assert!(!empty_composer("› already typing\n"));
         assert!(!empty_composer("› [Image #1]\n"));
+        assert!(!empty_composer("› \x1b[2m[Image #1]\x1b[0m\n"));
         assert!(!empty_composer("Choose a model\n"));
         assert!(!empty_composer(
             "› \x1b[2m[Pasted text #1 +10 lines]\x1b[0m\n"
         ));
+        assert!(empty_composer(
+            "\x1b[1m›\x1b[0m \x1b[2mImprove documentation in @filename\x1b[0m\n"
+        ));
+        assert!(empty_composer(
+            "\x1b[1m›\x1b[0m \x1b[2;39mAsk anything...\x1b[0m\n"
+        ));
+        assert!(!empty_composer("› \x1b[2mHint\x1b[0m typed\n"));
     }
     #[test]
     fn image_encoding_remains_strict_before_pixel_decoding() {

@@ -115,7 +115,7 @@ pub fn pane_snapshot_format() -> String {
 /// One `tmux list-panes -a` for every card. `None` when tmux did not answer
 /// (bounded in time and size so a stuck server cannot pile up workers).
 pub fn pane_snapshot() -> Option<PaneSnapshot> {
-    let mut command = Command::new("tmux");
+    let mut command = Command::new(tmux_bin());
     command.args(["list-panes", "-a", "-F", &pane_snapshot_format()]);
     let bytes = crate::workspace_model::bounded_output(command)?;
     Some(parse_pane_snapshot(&String::from_utf8_lossy(&bytes)))
@@ -221,7 +221,7 @@ pub fn capture_pane_history(session_name: &str) -> Option<String> {
 /// Join terminal soft wraps for desktop and phone file discovery, without
 /// changing captures used for display, status, links or terminal streaming.
 pub fn capture_file_references(session_name: &str) -> Option<String> {
-    capture_file_references_with(Command::new("tmux"), session_name)
+    capture_file_references_with(Command::new(tmux_bin()), session_name)
 }
 
 pub(in crate::tmux) fn capture_file_references_with(mut command: Command, session_name: &str) -> Option<String> {
@@ -453,7 +453,7 @@ pub(in crate::tmux) fn command_stdout(command: &mut Command) -> Option<String> {
 
 /// `command_stdout` of `tmux <args>`.
 pub(in crate::tmux) fn tmux_stdout(args: &[&str]) -> Option<String> {
-    command_stdout(Command::new("tmux").args(args))
+    command_stdout(Command::new(tmux_bin()).args(args))
 }
 
 /// `stdout` trimmed; `None` when that leaves nothing.

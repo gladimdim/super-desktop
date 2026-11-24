@@ -432,7 +432,7 @@ pub fn collect_watched(ids: &[String]) -> (Vec<Completion>, Watched) {
     // The metadata option comes from the same listing: a per-session
     // `show-options -t =<session>` names a pane target, which tmux rejects
     // ("no such session"), so native adapters were never reported.
-    let output = std::process::Command::new("tmux")
+    let output = std::process::Command::new(crate::tmux::tmux_bin())
         .args(["list-panes", "-a", "-F", PANE_LISTING])
         .output();
     let panes = output

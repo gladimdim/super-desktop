@@ -57,6 +57,7 @@ mod attachment_view;
 mod bridge;
 mod card_resize;
 mod antigravity;
+mod codex_launch;
 mod arrange;
 mod card_status;
 mod crashlog;
