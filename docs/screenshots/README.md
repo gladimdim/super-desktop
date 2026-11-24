@@ -236,4 +236,5 @@ captures are 540 × 1200 WebP, resized from 1080 × 2400 at quality 86.
 
 The homepage shows the public Android APK 2.2.0 (20) in demo mode on an
 isolated Android 14 phone emulator. The Sessions view and Codex voice draft
-were captured at 1080 × 2400 and resized to 648 × 1440 WebP.
+were captured at 1080 × 2400 and resized to 648 × 1440 WebP. The gallery
+links to those full screens from 864 × 560 detail crops of the original captures.
