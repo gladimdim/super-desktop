@@ -41,6 +41,8 @@ pub fn get_agent_config(agent_type: &str) -> AgentConfig {
         "kimi" => agent("Kimi Code", "🌙", &["kimi"], &[]),
         "kiro" => agent("Kiro CLI", "🧰", &["kiro-cli"], &[]),
         "cursor" => agent("Cursor Agent", "🎯", &["cursor-agent"], &[]),
+        "amp" => agent("Amp", "🔌", &["amp"], &[]),
+        "copilot" => agent("GitHub Copilot", "🛸", &["copilot"], &[]),
         // Useful alongside terminal agents, but not an interactive
         // coding-agent chat. Keep its actual role visible.
         "herder" => agent("Herder worker", "🐑", &["herder"], &["worker"]),
@@ -100,6 +102,8 @@ pub const HARNESS_KEYS: &[&str] = &[
     "kimi",
     "kiro",
     "cursor",
+    "amp",
+    "copilot",
     "herder",
     // Retired (see RETIRED_HARNESSES): kept launchable, listed last.
     "gemini",

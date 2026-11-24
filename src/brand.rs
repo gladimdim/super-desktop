@@ -235,7 +235,7 @@ mod tests {
         for agent in crate::tmux::HARNESS_KEYS
             .iter()
             .copied()
-            .filter(|key| *key != "herder")
+            .filter(|key| !matches!(*key, "herder" | "amp" | "copilot"))
         {
             for light in [false, true] {
                 let name = logo_filename(agent, light).unwrap();

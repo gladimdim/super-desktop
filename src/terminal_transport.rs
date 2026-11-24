@@ -182,7 +182,7 @@ impl PtyAttachment {
         }
         let count = self.master.write(bytes)?;
         for prompt in self.prompt_input.feed(&bytes[..count]) {
-            crate::prompt_history::record(&self.session, &prompt);
+            crate::prompt_history::record_typed_session(&self.session, &prompt);
         }
         Ok(count)
     }

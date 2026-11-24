@@ -296,8 +296,76 @@ fn native(session: &str, agent: &str, persisted: Option<&str>) -> Option<(Vec<(S
                 .collect();
             Some((trimmed, cut, "hermes"))
         }
+        "aider" => {
+            let cwd = crate::tmux::tmux_stdout(&[
+                "display-message",
+                "-p",
+                "-t",
+                &format!("={session}:"),
+                "#{pane_current_path}",
+            ])?;
+            let workspace = Path::new(cwd.trim());
+            let (rows, cut) = aider_prompts(workspace, MAX_PROMPTS)?;
+            if rows.is_empty() {
+                return None;
+            }
+            Some((rows, cut, "aider"))
+        }
         _ => None,
     }
+}
+
+fn parse_aider_timestamp(header: &str) -> Option<i64> {
+    let raw = header.strip_prefix("# ")?.trim();
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))
+        .ok()
+        .map(|dt| dt.and_utc().timestamp_millis())
+}
+
+/// Read user prompts from `<workspace>/.aider.input.history`, oldest first,
+/// skipping slash commands and anything `is_user_prompt` rejects.
+pub fn aider_prompts(workspace: &Path, limit: usize) -> Option<(Vec<(String, Option<i64>)>, bool)> {
+    let history = workspace.join(".aider.input.history");
+    let mut file = fs::File::open(history).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let (bytes, file_cut) = crate::harness_record::read_jsonl_tail(&mut file, &meta, 256 * 1024)?;
+    let content = String::from_utf8_lossy(&bytes);
+    let mut prompts: Vec<(String, Option<i64>)> = Vec::new();
+    let mut cur_at: Option<i64> = None;
+    let mut cur_lines: Vec<String> = Vec::new();
+    let flush = |cur_lines: &mut Vec<String>, cur_at: Option<i64>, out: &mut Vec<(String, Option<i64>)>| {
+        if cur_lines.is_empty() {
+            return;
+        }
+        let text = cur_lines.join("\n");
+        cur_lines.clear();
+        let trimmed = text.trim();
+        if !trimmed.starts_with('/') && is_user_prompt(trimmed) {
+            out.push((trimmed.to_string(), cur_at));
+        }
+    };
+    for line in content.lines() {
+        if let Some(ts) = parse_aider_timestamp(line) {
+            flush(&mut cur_lines, cur_at, &mut prompts);
+            cur_at = Some(ts);
+        } else if let Some(body) = line.strip_prefix('+') {
+            cur_lines.push(body.to_string());
+        } else if line.starts_with('#') {
+            flush(&mut cur_lines, cur_at, &mut prompts);
+            cur_at = None;
+        }
+    }
+    flush(&mut cur_lines, cur_at, &mut prompts);
+    let mut truncated = file_cut;
+    if limit > 0 && prompts.len() > limit {
+        truncated = true;
+        prompts.drain(..prompts.len() - limit);
+    }
+    Some((prompts, truncated))
 }
 
 /// `session`'s prompts, newest first.
@@ -432,5 +500,27 @@ mod tests {
         assert_eq!(parse_iso("2026-10-07T09:12:03.250Z"), Some(1_791_364_323_250));
         assert_eq!(parse_iso("2026-10-07T12:12:03+03:00"), Some(1_791_364_323_000));
         assert_eq!(parse_iso("yesterday"), None);
+    }
+
+    #[test]
+    fn card_title_aider_history_parses_multiline_and_skips_slash_and_synthetic() {
+        let dir = temp_dir("aider");
+        fs::create_dir_all(&dir).unwrap();
+        let content = concat!(
+            "# 2026-10-07 09:12:03.250000\n",
+            "+/add src/main.rs\n",
+            "# 2026-10-07 09:13:00.000000\n",
+            "+<task-notification>bg</task-notification>\n",
+            "# 2026-10-07 09:14:00.000000\n",
+            "+Fix retry backoff\n",
+            "+and add unit tests\n",
+        );
+        fs::write(dir.join(".aider.input.history"), content).unwrap();
+        let (rows, cut) = aider_prompts(&dir, 10).unwrap();
+        assert!(!cut);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "Fix retry backoff\nand add unit tests");
+        assert!(rows[0].1.is_some());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

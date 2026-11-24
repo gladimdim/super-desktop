@@ -452,7 +452,7 @@ pub(in crate::tmux) fn command_stdout(command: &mut Command) -> Option<String> {
 }
 
 /// `command_stdout` of `tmux <args>`.
-pub(in crate::tmux) fn tmux_stdout(args: &[&str]) -> Option<String> {
+pub(crate) fn tmux_stdout(args: &[&str]) -> Option<String> {
     command_stdout(Command::new(tmux_bin()).args(args))
 }
 

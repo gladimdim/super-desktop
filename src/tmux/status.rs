@@ -134,6 +134,26 @@ pub(in crate::tmux) fn agent_screen_indicates_work(agent_type: &str, screen: &st
     }
 }
 
+/// Detect explicit confirmation prompts Aider shows when waiting for the user.
+pub(in crate::tmux) fn aider_screen_waiting(screen: &str, height: usize) -> bool {
+    let plain = strip_terminal_escapes(screen);
+    let lines: Vec<&str> = recent_status_lines(&plain, height).collect();
+    lines
+        .into_iter()
+        .rev()
+        .take(4)
+        .any(|raw| {
+            let lower = raw.trim().to_ascii_lowercase();
+            lower.contains("(y)es/(n)o")
+                || lower.contains("[y/n]")
+                || lower.contains("[y/n/a/d]")
+                || (lower.contains("add ") && lower.contains(" to the chat?"))
+                || lower.contains("run shell command?")
+                || lower.contains("create new file?")
+                || lower.contains("apply edit?")
+        })
+}
+
 /// Spinner verbs dsh-TUI 0.11.0 picks one of per turn (`SPINNER_VERBS`), in
 /// its English and Chinese UI (`spinner-verb-*`).
 pub(in crate::tmux) const DSH_SPINNER_VERBS: &[&str] = &[
@@ -339,7 +359,23 @@ pub fn status_for_pane(
 
     // Other agents use conservative visible status indicators. Child
     // process existence alone says nothing about a response in progress.
-    let busy = screen().is_some_and(|text| agent_screen_indicates_work(agent_type, &text, row.height));
+    let captured = screen();
+    if agent_type == "aider"
+        && captured
+            .as_deref()
+            .is_some_and(|text| aider_screen_waiting(text, row.height))
+    {
+        return SessionStatus {
+            status: "WAITING",
+            label: "◌ WAITING",
+            pid: display_pid,
+            cmd: display_cmd,
+            cwd,
+        };
+    }
+    let busy = captured
+        .as_deref()
+        .is_some_and(|text| agent_screen_indicates_work(agent_type, text, row.height));
     working_or_idle(busy, display_pid, display_cmd, cwd)
 }
 

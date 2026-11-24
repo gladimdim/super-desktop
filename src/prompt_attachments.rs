@@ -343,15 +343,39 @@ pub fn composer_has_draft(command: &str, screen: &str) -> Option<bool> {
         "opencode" => Some(
             crate::tmux::extract_composer_draft(screen).is_some_and(|draft| !draft.trim().is_empty()),
         ),
-        // Claude Code, Grok and Hermes (a Python process) draw `❯ ` then the draft.
-        "claude" | "grok" | "python" => {
-            let line = screen
+        // Claude Code, Grok, Hermes, OpenClaw, Reasonix, DSH, Crush, Amp & Copilot draw `❯` or `›`.
+        "claude" | "grok" | "python" | "hermes" | "openclaw" | "reasonix" | "dsh-tui" | "dst"
+        | "crush" | "amp" | "copilot" => {
+            let rest = screen
                 .trim_end()
                 .lines()
                 .rev()
                 .take(16)
-                .find_map(|line| line.split_once('❯').map(|(_, rest)| rest))?;
-            Some(has_bright_text(line))
+                .find_map(|line| {
+                    line.split_once('❯')
+                        .or_else(|| line.split_once('›'))
+                        .map(|(_, rest)| rest)
+                })?;
+            Some(has_bright_text(rest))
+        }
+        // Antigravity, Pi & Aider draw `❯` or `> ` at the start of the composer box.
+        "agy" | "antigravity" | "pi" | "aider" => {
+            let rest = screen
+                .trim_end()
+                .lines()
+                .rev()
+                .take(16)
+                .find_map(|line| {
+                    line.split_once('❯').map(|(_, rest)| rest).or_else(|| {
+                        let trimmed = line.trim_start_matches(['│', ' ']);
+                        trimmed.strip_prefix("> ").or_else(|| {
+                            trimmed
+                                .strip_prefix('>')
+                                .filter(|rest| rest.is_empty() || rest.starts_with('\x1b'))
+                        })
+                    })
+                })?;
+            Some(has_bright_text(rest))
         }
         _ => None,
     }
@@ -864,6 +888,20 @@ mod tests {
         // No composer to read: unknown, never a guess.
         assert_eq!(composer_has_draft("pi", "────\n\n────\n"), None);
         assert_eq!(composer_has_draft("claude", "Choose a model\n"), None);
+
+        // Expanded harness composer detection (placeholder vs bright draft).
+        assert_eq!(composer_has_draft("agy", "│ > \x1b[2mType a message\x1b[0m\n"), Some(false));
+        assert_eq!(composer_has_draft("agy", "│ > fix bug\n"), Some(true));
+        assert_eq!(composer_has_draft("pi", "> \x1b[2mAsk anything\x1b[0m\n"), Some(false));
+        assert_eq!(composer_has_draft("pi", "> add tests\n"), Some(true));
+        assert_eq!(composer_has_draft("hermes", "⚕ ❯ \x1b[2mMessage\x1b[0m\n"), Some(false));
+        assert_eq!(composer_has_draft("hermes", "⚕ ❯ list files\n"), Some(true));
+        assert_eq!(composer_has_draft("aider", "> \n"), Some(false));
+        assert_eq!(composer_has_draft("aider", "> refactor auth\n"), Some(true));
+        assert_eq!(composer_has_draft("crush", "❯ \x1b[2mplaceholder\x1b[0m\n"), Some(false));
+        assert_eq!(composer_has_draft("crush", "❯ draft text\n"), Some(true));
+        assert_eq!(composer_has_draft("amp", "› draft text\n"), Some(true));
+        assert_eq!(composer_has_draft("copilot", "❯ draft text\n"), Some(true));
     }
 
     /// Put an image and a file into a live harness's composer the way `submit`

@@ -51,8 +51,8 @@ pub use status::{
 };
 #[cfg(test)]
 pub(in crate::tmux) use status::{
-    agent_screen_indicates_work, explicit_turn_status, foreground_job_from_stat,
-    screen_indicates_work,
+    agent_screen_indicates_work, aider_screen_waiting, explicit_turn_status,
+    foreground_job_from_stat, screen_indicates_work,
 };
 pub(crate) use status::get_direct_children;
 
@@ -71,7 +71,8 @@ pub(in crate::tmux) use capture::{
     capture_file_references_with, capture_pane_raw, capture_reusable, retain_captures_in,
     reuse_or_capture, CaptureCache, CaptureKind, CAPTURE_REUSE_MAX,
 };
-pub(in crate::tmux) use capture::{command_stdout, non_empty, recent_status_lines, tmux_display, tmux_stdout};
+pub(in crate::tmux) use capture::{command_stdout, non_empty, recent_status_lines, tmux_display};
+pub(crate) use capture::tmux_stdout;
 
 #[allow(unused_imports)]
 pub use opencode::{

@@ -6,29 +6,104 @@ pub fn is_regular(agent: &str) -> bool {
     matches!(agent, "shell" | "bash" | "terminal")
 }
 
-/// Instrument plain Bash launches only; explicit commands and other shells
-/// keep their original invocation and use the process/input fallback.
+/// Instrument plain Bash, Zsh, and Fish launches cleanly; explicit commands
+/// and wrapped invocations keep their original invocation and use the
+/// process/input fallback.
 pub fn launch_command(agent: &str, command: &str) -> String {
-    if !is_regular(agent) || !matches!(command, "bash" | "/bin/bash" | "/usr/bin/bash") {
+    if !is_regular(agent) {
         return command.to_string();
     }
     let Some(home) = std::env::var_os("HOME") else {
         return command.to_string();
     };
-    let directory = Path::new(&home).join(".local/state/super-desktop");
-    let script = directory.join("shell-title.bash");
-    if install_script(&directory, &script).is_err() {
-        return command.to_string();
+    let state_dir = Path::new(&home).join(".local/state/super-desktop");
+    match command {
+        "bash" | "/bin/bash" | "/usr/bin/bash" => {
+            let script = state_dir.join("shell-title.bash");
+            if install_file(&state_dir, &script, include_bytes!("../assets/shell-title.bash")).is_err() {
+                return command.to_string();
+            }
+            format!(
+                "{command} --rcfile {}",
+                crate::harness_metadata::shell_quote(&script.to_string_lossy())
+            )
+        }
+        "zsh" | "/bin/zsh" | "/usr/bin/zsh" => {
+            let zdotdir = state_dir.join("zsh");
+            let zshenv = concat!(
+                "if [[ -n \"$SD_ORIG_ZDOTDIR\" && -f \"$SD_ORIG_ZDOTDIR/.zshenv\" ]]; then\n",
+                "    source \"$SD_ORIG_ZDOTDIR/.zshenv\"\n",
+                "elif [[ -z \"$SD_ORIG_ZDOTDIR\" && -f \"$HOME/.zshenv\" ]]; then\n",
+                "    source \"$HOME/.zshenv\"\n",
+                "fi\n",
+                "export ZDOTDIR=\"$SD_ZSH_STATE_DIR\"\n",
+            );
+            let zprofile = concat!(
+                "if [[ -n \"$SD_ORIG_ZDOTDIR\" && -f \"$SD_ORIG_ZDOTDIR/.zprofile\" ]]; then\n",
+                "    source \"$SD_ORIG_ZDOTDIR/.zprofile\"\n",
+                "elif [[ -z \"$SD_ORIG_ZDOTDIR\" && -f \"$HOME/.zprofile\" ]]; then\n",
+                "    source \"$HOME/.zprofile\"\n",
+                "fi\n",
+            );
+            let zshrc = format!(
+                concat!(
+                    "if [[ -n \"$SD_ORIG_ZDOTDIR\" ]]; then\n",
+                    "    export ZDOTDIR=\"$SD_ORIG_ZDOTDIR\"\n",
+                    "    [[ -f \"$ZDOTDIR/.zshrc\" ]] && source \"$ZDOTDIR/.zshrc\"\n",
+                    "else\n",
+                    "    unset ZDOTDIR\n",
+                    "    [[ -f \"$HOME/.zshrc\" ]] && source \"$HOME/.zshrc\"\n",
+                    "fi\n",
+                    "unset SD_ORIG_ZDOTDIR SD_ZSH_STATE_DIR\n",
+                    "{}"
+                ),
+                include_str!("../assets/shell-title.zsh")
+            );
+            let zlogin = concat!(
+                "if [[ -n \"${ZDOTDIR:-}\" && -f \"$ZDOTDIR/.zlogin\" ]]; then\n",
+                "    source \"$ZDOTDIR/.zlogin\"\n",
+                "elif [[ -f \"$HOME/.zlogin\" ]]; then\n",
+                "    source \"$HOME/.zlogin\"\n",
+                "fi\n",
+            );
+            if install_file(&zdotdir, &zdotdir.join(".zshenv"), zshenv.as_bytes()).is_err()
+                || install_file(&zdotdir, &zdotdir.join(".zprofile"), zprofile.as_bytes()).is_err()
+                || install_file(&zdotdir, &zdotdir.join(".zshrc"), zshrc.as_bytes()).is_err()
+                || install_file(&zdotdir, &zdotdir.join(".zlogin"), zlogin.as_bytes()).is_err()
+            {
+                return command.to_string();
+            }
+            let zdir_str = zdotdir.to_string_lossy();
+            let mut envs = Vec::new();
+            if let Ok(orig) = std::env::var("ZDOTDIR") {
+                if !orig.is_empty() && orig != zdir_str {
+                    envs.push(crate::harness_metadata::shell_quote(&format!("SD_ORIG_ZDOTDIR={orig}")));
+                }
+            }
+            envs.push(crate::harness_metadata::shell_quote(&format!("SD_ZSH_STATE_DIR={zdir_str}")));
+            envs.push(crate::harness_metadata::shell_quote(&format!("ZDOTDIR={zdir_str}")));
+            format!("env {} {command}", envs.join(" "))
+        }
+        "fish" | "/bin/fish" | "/usr/bin/fish" => {
+            let script = state_dir.join("shell-title.fish");
+            if install_file(&state_dir, &script, include_bytes!("../assets/shell-title.fish")).is_err() {
+                return command.to_string();
+            }
+            let source_cmd = format!(
+                "source {}",
+                crate::harness_metadata::shell_quote(&script.to_string_lossy())
+            );
+            format!(
+                "{command} -C {}",
+                crate::harness_metadata::shell_quote(&source_cmd)
+            )
+        }
+        _ => command.to_string(),
     }
-    format!(
-        "{command} --rcfile '{}'",
-        script.to_string_lossy().replace('\'', "'\\''")
-    )
 }
 
-fn install_script(directory: &Path, script: &Path) -> std::io::Result<()> {
-    let content = include_bytes!("../assets/shell-title.bash");
-    if fs::read(script).ok().as_deref() == Some(content.as_slice()) {
+fn install_file(directory: &Path, target: &Path, content: &[u8]) -> std::io::Result<()> {
+    if fs::read(target).ok().as_deref() == Some(content) {
         return Ok(());
     }
     fs::create_dir_all(directory)?;
@@ -37,7 +112,7 @@ fn install_script(directory: &Path, script: &Path) -> std::io::Result<()> {
         .unwrap_or_default()
         .as_nanos();
     let temporary = directory.join(format!(".shell-title-{}-{stamp}", std::process::id()));
-    let result = fs::write(&temporary, content).and_then(|_| fs::rename(&temporary, script));
+    let result = fs::write(&temporary, content).and_then(|_| fs::rename(&temporary, target));
     let _ = fs::remove_file(temporary);
     result
 }
@@ -224,5 +299,26 @@ mod tests {
         assert_eq!(foreground_command(child.id()), None);
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn launch_command_instruments_plain_bash_zsh_and_fish_only() {
+        let bash = launch_command("shell", "bash");
+        assert!(bash.starts_with("bash --rcfile "));
+        assert!(bash.contains("shell-title.bash"));
+
+        let zsh = launch_command("shell", "/bin/zsh");
+        assert!(zsh.starts_with("env "));
+        assert!(zsh.contains("ZDOTDIR="));
+        assert!(zsh.ends_with(" /bin/zsh"));
+
+        let fish = launch_command("terminal", "fish");
+        assert!(fish.starts_with("fish -C "));
+        assert!(fish.contains("shell-title.fish"));
+
+        for untouched in ["zsh -c 'echo hi'", "fish script.fish", "tmux attach"] {
+            assert_eq!(launch_command("shell", untouched), untouched);
+        }
+        assert_eq!(launch_command("claude", "bash"), "bash");
     }
 }

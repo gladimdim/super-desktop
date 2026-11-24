@@ -373,15 +373,16 @@ pub(in crate::mini_terminal) fn spawn_vte(
     }
 
     // Observe bytes VTE sends, not key labels or the response painted on screen.
+    let agent_type = data.borrow().agent_type.clone();
     let prompt_session = session.clone();
+    let typed_agent = agent_type.clone();
     let prompt_input = RefCell::new(crate::prompt_history::InputTracker::default());
     crate::card_source::connect_host_input(&term, move |bytes| {
         for prompt in prompt_input.borrow_mut().feed(bytes) {
-            crate::prompt_history::record(&prompt_session, &prompt);
+            crate::prompt_history::record_typed(&typed_agent, &prompt_session, &prompt);
         }
     });
 
-    let agent_type = data.borrow().agent_type.clone();
     let cmd = data.borrow().command.clone();
     let agent_session_id = data.borrow().agent_session_id.clone();
     // The folder this card was created in (the top bar's field at that time),

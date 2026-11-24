@@ -34,6 +34,8 @@ pub fn harness_label(key: &str) -> (&'static str, &'static str) {
         "kimi" => ("Kimi", "🌙"),
         "kiro" => ("Kiro", "🧰"),
         "cursor" => ("Cursor", "🎯"),
+        "amp" => ("Amp", "🔌"),
+        "copilot" => ("Copilot", "🛸"),
         "herder" => ("Herder", "🐑"),
         _ => ("Shell", "💻"),
     }
@@ -61,6 +63,8 @@ pub fn harness_tooltip(key: &str) -> &'static str {
         "kimi" => "Launch Kimi Code",
         "kiro" => "Launch Kiro CLI",
         "cursor" => "Launch Cursor Agent CLI",
+        "amp" => "Launch Amp CLI",
+        "copilot" => "Launch GitHub Copilot CLI",
         "herder" => "Launch Herder job worker (not an interactive chat)",
         _ => "Launch Terminal Shell",
     }

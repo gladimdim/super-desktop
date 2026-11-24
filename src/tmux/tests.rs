@@ -620,6 +620,7 @@ fn test_new_catalog_uses_installed_cli_commands() {
         ("qwen", "qwen", &[][..]), ("crush", "crush", &[][..]),
         ("kimi", "kimi", &[][..]), ("herder", "herder", &["worker"][..]),
         ("kiro", "kiro-cli", &[][..]), ("cursor", "cursor-agent", &[][..]),
+        ("amp", "amp", &[][..]), ("copilot", "copilot", &[][..]),
     ] {
         assert!(HARNESS_KEYS.contains(&key));
         let cfg = get_agent_config(key);
@@ -1626,4 +1627,26 @@ fn pane_stamp_changes_with_output_only() {
     }
     assert!(screen.contains(marker), "output was not captured again: {screen:?}");
     assert_ne!(row().stamp, Some(stamp));
+}
+
+#[test]
+fn goose_exact_session_resume_and_aider_waiting_prompts() {
+    let all = |_: &str, _: &str| true;
+    assert_eq!(
+        resume_command_with("goose", Some("/usr/bin/goose session"), Some("feat-auth"), &all),
+        "/usr/bin/goose session --name feat-auth --resume"
+    );
+    assert_eq!(
+        resume_command_with("goose", Some("/usr/bin/goose session --name feat-auth --resume"), Some("feat-auth"), &all),
+        "/usr/bin/goose session --name feat-auth --resume"
+    );
+    assert_eq!(
+        resume_command_with("goose", Some("/usr/bin/goose session"), None, &all),
+        "/usr/bin/goose session"
+    );
+
+    assert!(aider_screen_waiting("Add src/main.rs to the chat? (Y)es/(N)o [Yes]: ", 24));
+    assert!(aider_screen_waiting("Run shell command? (Y)es/(N)o [No]: ", 24));
+    assert!(aider_screen_waiting("Apply edit? [y/n/a/d]: ", 24));
+    assert!(!aider_screen_waiting("Waiting for prompt\n> ", 24));
 }

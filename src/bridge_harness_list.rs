@@ -67,10 +67,57 @@ fn preview_with_directory(screen: &str, kind: &str, display_dir: &str) -> String
     preview
 }
 
+fn is_effort_word(word: &str) -> bool {
+    matches!(
+        word,
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra" | "auto"
+    )
+}
+
+fn find_effort_in(text: &str) -> Option<String> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .find(|w| is_effort_word(&w.to_ascii_lowercase()))
+        .map(|w| w.to_ascii_lowercase())
+}
+
+fn looks_like_model_token(token: &str) -> bool {
+    let lower = token.to_ascii_lowercase();
+    let prefixes = [
+        "claude-", "gpt-", "o3", "o4", "gemini-", "grok-", "deepseek-", "qwen", "llama",
+        "mistral", "hermes-",
+    ];
+    if prefixes.iter().any(|p| lower.starts_with(p)) {
+        return true;
+    }
+    const PROVIDERS: &[&str] = &[
+        "anthropic/", "openai/", "google/", "xai/", "openrouter/", "deepseek/", "groq/",
+        "mistral/", "ollama/",
+    ];
+    PROVIDERS.iter().any(|p| lower.starts_with(p) && lower.len() > p.len())
+}
+
+fn named_model_phrase(segment: &str) -> Option<String> {
+    let words: Vec<&str> = segment.split_whitespace().collect();
+    for pair in words.windows(2) {
+        let head = pair[0];
+        let ver = pair[1].trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.');
+        let family_ok = matches!(head, "Opus" | "Sonnet" | "Haiku" | "Gemini" | "Claude" | "Grok");
+        let ver_ok = ver.chars().next().is_some_and(|c| c.is_ascii_digit());
+        if family_ok && ver_ok {
+            return Some(format!("{head} {ver}"));
+        }
+    }
+    None
+}
+
 /// Read only recognized status-footer formats from the current pane bottom.
 /// Never infer settings from global defaults or conversation history.
 fn harness_model_effort(agent: &str, screen: &str) -> (Option<String>, Option<String>) {
-    for line in screen.lines().rev().take(6).map(str::trim) {
+    for raw_line in screen.lines().rev().take(6) {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("MODEL ") {
             if let Some((model, effort)) = rest.split_once("EFFORT ") {
                 let model = model.trim();
@@ -80,16 +127,75 @@ fn harness_model_effort(agent: &str, screen: &str) -> (Option<String>, Option<St
                 }
             }
         }
-        if agent == "codex" {
-            if let Some((settings, _)) = line.split_once(" · ") {
-                let mut parts = settings.split_whitespace();
-                if let (Some(model), Some(effort), None) = (parts.next(), parts.next(), parts.next()) {
-                    if (model.starts_with("gpt-") || model.starts_with("o3") || model.starts_with("o4"))
-                        && matches!(effort, "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra") {
-                        return (Some(model.to_string()), Some(effort.to_string()));
+        match agent {
+            "codex" => {
+                if let Some((settings, _)) = line.split_once(" · ") {
+                    let mut parts = settings.split_whitespace();
+                    if let (Some(model), Some(effort), None) = (parts.next(), parts.next(), parts.next()) {
+                        if (model.starts_with("gpt-") || model.starts_with("o3") || model.starts_with("o4"))
+                            && is_effort_word(effort)
+                        {
+                            return (Some(model.to_string()), Some(effort.to_string()));
+                        }
                     }
                 }
             }
+            "hermes" => {
+                if line.starts_with('⚕') {
+                    for seg in line.trim_start_matches('⚕').split('│').map(str::trim) {
+                        if seg.is_empty() || seg.starts_with(['/', '~', '⏱']) {
+                            continue;
+                        }
+                        if let Some(tok) = seg.split_whitespace().find(|t| looks_like_model_token(t)) {
+                            return (Some(tok.trim_end_matches([',', ')']).to_string()), find_effort_in(line));
+                        }
+                    }
+                }
+            }
+            "pi" => {
+                if let Some(tok) = line.split_whitespace().find(|t| {
+                    let t = t.trim_matches(['(', ')', '·', '|', '│', ',']);
+                    looks_like_model_token(t) && t.contains('/')
+                }) {
+                    let model = tok.trim_matches(['(', ')', '·', '|', '│', ',']).to_string();
+                    return (Some(model), find_effort_in(line));
+                }
+            }
+            "grok" => {
+                if let Some(tok) = line
+                    .split_whitespace()
+                    .find(|t| t.trim_matches(['(', ')', '·', '|', '│']).to_ascii_lowercase().starts_with("grok-"))
+                {
+                    let model = tok.trim_matches(['(', ')', '·', '|', '│']).to_string();
+                    return (Some(model), find_effort_in(line));
+                }
+            }
+            "claude" if line.contains('·') || line.contains('│') => {
+                if let Some(tok) = line
+                    .split_whitespace()
+                    .find(|t| t.trim_matches(['(', ')', '·', '|', '│']).to_ascii_lowercase().starts_with("claude-"))
+                {
+                    let model = tok.trim_matches(['(', ')', '·', '|', '│']).to_string();
+                    return (Some(model), find_effort_in(line));
+                }
+                for seg in line.split(['·', '│']).map(str::trim) {
+                    if let Some(name) = named_model_phrase(seg) {
+                        return (Some(name), find_effort_in(line));
+                    }
+                }
+            }
+            "antigravity" | "agy" if line.contains('·') || line.contains('│') => {
+                if let Some(tok) = line.split_whitespace().find(|t| looks_like_model_token(t.trim_matches(['(', ')', '·', '|', '│']))) {
+                    let model = tok.trim_matches(['(', ')', '·', '|', '│']).to_string();
+                    return (Some(model), find_effort_in(line));
+                }
+                for seg in line.split(['·', '│']).map(str::trim) {
+                    if let Some(name) = named_model_phrase(seg) {
+                        return (Some(name), find_effort_in(line));
+                    }
+                }
+            }
+            _ => {}
         }
     }
     (None, None)
@@ -510,6 +616,32 @@ mod tests {
             (Some("deepseek-v4-flash".into()), Some("auto".into())));
         assert_eq!(super::harness_model_effort("codex", &format!("gpt-6-astra high · old\n{}", "blank\n".repeat(8))), (None, None));
         assert_eq!(super::harness_model_effort("shell", "gpt-6-astra high · text"), (None, None));
+
+        assert_eq!(
+            super::harness_model_effort("hermes", "⚕ claude-sonnet-4-5 │ ⏱ 1.2s │ ~/repo"),
+            (Some("claude-sonnet-4-5".into()), None)
+        );
+        assert_eq!(
+            super::harness_model_effort("pi", "anthropic/claude-opus-4-6 (high) · ~/repo"),
+            (Some("anthropic/claude-opus-4-6".into()), Some("high".into()))
+        );
+        assert_eq!(
+            super::harness_model_effort("claude", "Opus 4.6 · high · 42% context"),
+            (Some("Opus 4.6".into()), Some("high".into()))
+        );
+        assert_eq!(
+            super::harness_model_effort("grok", "grok-4 · medium · ~/app"),
+            (Some("grok-4".into()), Some("medium".into()))
+        );
+        assert_eq!(
+            super::harness_model_effort("antigravity", "Gemini 3 Pro │ ~/app"),
+            (Some("Gemini 3".into()), None)
+        );
+        // Ordinary prose without footer delimiters must not be misparsed.
+        assert_eq!(
+            super::harness_model_effort("claude", "Let us compare Opus 4.6 and Sonnet in prose."),
+            (None, None)
+        );
     }
 
     #[test]

@@ -173,6 +173,9 @@ pub(in crate::tmux) fn resume_command_with(
             "hermes" if exists(agent_type, id) => {
                 return append_resume_flag(&base, &format!("--resume {id}"), &["--resume", "--continue", "-r", "-c"]);
             }
+            "goose" => {
+                return append_resume_flag(&base, &format!("--name {id} --resume"), &["--name", "-n", "--resume", "-r"]);
+            }
             _ => {}
         }
     }
