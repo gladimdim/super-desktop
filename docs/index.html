@@ -73,7 +73,7 @@
         "Live terminal cards with working and finished status",
         "Open and type into agents on your other PCs",
         "Android app, Android launcher, and an iPhone and iPad app with live agent terminals and completion alerts",
-        "Bring-your-own Telegram bot with 1-card-1-topic Forum groups, live status badges, inline approvals, and Files & Previews",
+        "Bring-your-own Telegram bot with a live Telegram Mini Web App (colored ANSI terminal, swipeable Quick Keys, Usage, Files & Previews, and live Omarchy theme over private Tailscale Serve) plus 1-card-1-topic Forum groups with approvals",
         "Command line and local MCP server so AI agents can launch, watch and arrange sessions",
         "Plugins written by your own AI agent in QML",
         "SD Editor for files your agents write",
@@ -118,7 +118,7 @@
         {"@type": "Question", "name": "Which AI coding agents does it support?", "acceptedAnswer": {"@type": "Answer", "text": "Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any command you add yourself. Every agent installed on the PC gets a launcher in the top bar."}},
         {"@type": "Question", "name": "Is there a third party, relay or cloud between my devices?", "acceptedAnswer": {"@type": "Answer", "text": "No. Your PCs and phones connect directly over your own network or over Tailscale if you use it. Connections are encrypted (HTTPS and WebSocket with a pinned certificate). Each new device shows the same code on both screens and must be approved on the PC, and you can revoke any phone at any time."}},
         {"@type": "Question", "name": "Can I use my agents from my phone?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The free Android APK on GitHub and the Google Play edition list every session on your PCs. Type on the phone and it runs on the PC, get an alert when an agent finishes, and send it pictures and files. SD Launcher puts the same agents on your Android home screen as pages and terminal widgets. The iPhone and iPad app, SUPER DESKTOP: AI Agents, is on the App Store and pairs the same way."}},
-        {"@type": "Question", "name": "Can I control SUPER DESKTOP from Telegram?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Create your own @BotFather bot, pair one Telegram account on your PC, and optionally link a private 2-member Forum Topics supergroup where every terminal card gets its own topic with live status updates, Yes/No/Ctrl-C approval buttons, screen captures, and Files & Previews. Your PC runs a local worker making outbound HTTPS requests to api.telegram.org with no open ports or third-party relay servers."}},
+        {"@type": "Question", "name": "Can I control SUPER DESKTOP from Telegram?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Create your own @BotFather bot, pair one Telegram account on your PC, and launch the built-in Telegram Mini Web App (/app over private Tailscale Serve) for a full live colored ANSI terminal, Quick Keys, AI provider Usage bars, Files & Previews, and live Omarchy theme syncing inside mobile and desktop Telegram. You can also link a private 2-member Forum Topics supergroup where every terminal card gets its own topic with live status updates and Yes/No/Ctrl-C approval buttons. Your PC runs a local worker making outbound HTTPS requests to api.telegram.org with no open ports or third-party relay servers."}},
         {"@type": "Question", "name": "Is it free?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app is free and open source under the GNU GPL version 3. The Android APK from GitHub is free forever, with every feature unlocked and no trial or purchase. The Google Play edition and the App Store edition for iPhone and iPad keep a 10-day usage trial and an optional one-time SUPER DESKTOP Pro purchase. There is no subscription and no SUPER DESKTOP account."}},
         {"@type": "Question", "name": "Can AI agents control SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The super-desktop command line lets an agent list, launch, watch and arrange sessions, and every change is safe to retry. super-desktop mcp serve exposes the same operations to MCP clients over stdio, with no network listener; launching, prompting and closing stay off until you allow them in Settings → MCP. Agents can also write plugins for SUPER DESKTOP and check them with super-desktop plugin snapshot."}},
         {"@type": "Question", "name": "Which operating systems does it run on?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app runs on Omarchy, which is Arch Linux with the Hyprland compositor. The phone apps connect to it: Android is on Google Play and as a free APK, and iPhone and iPad are on the App Store."}},
@@ -173,7 +173,7 @@
         <a class="play-badge" href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466" aria-label="Download SUPER DESKTOP on the App Store"><img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download on the App Store" width="120" height="40"></a>
         <a class="btn" href="#trailer">▶ Watch the 40-second tour</a>
       </div>
-      <p class="platforms">Omarchy Linux · Free Android APK · Google Play · iPhone and iPad on the App Store · Telegram Bot · No accounts, no servers</p>
+      <p class="platforms">Omarchy Linux · Free Android APK · Google Play · iPhone and iPad on the App Store · Telegram Bot &amp; Mini Web App · No accounts, no servers</p>
 
       <div class="demo-frame">
         <div class="try-hints" aria-label="Things to try">
@@ -419,41 +419,58 @@
   <section class="feature flip reveal-up" id="telegram">
     <div class="wrap">
       <div class="copy">
-        <p class="eyebrow"><span class="new-badge">NEW · BYOB</span>Telegram Bot &amp; Forum Topics</p>
-        <h2>Your own Telegram bot. One topic per agent.</h2>
-        <p>Create a bot via <code>@BotFather</code>, connect it in <strong>⚙ Settings → Telegram</strong>, and control your PC's terminals from any Telegram app — behind NAT or headless, with zero open ports and no relay server.</p>
-        <p>Link a private <strong>2-member Forum group</strong> so every card gets a live status topic (<code>🟢</code> <code>🟡</code> <code>✅</code>), pinned status header with one-tap approvals, and <strong>📎 Files</strong> to send referenced images, PDFs, and links straight to chat.</p>
-        <p class="store"><a class="btn primary" href="/telegram/">Setup &amp; usage guide →</a> <a href="/telegram/#screens">See setup &amp; usage screens →</a></p>
+        <p class="eyebrow"><span class="new-badge">NEW · BYOB</span>Telegram Bot, Forum Topics &amp; Mini Web App</p>
+        <h2>Your own Telegram bot — plus a full live Mini Web App.</h2>
+        <p>Create a bot via <code>@BotFather</code>, connect it in <strong>⚙ Settings → Telegram</strong>, and run your PC’s AI agents straight from Telegram — behind NAT or headless, with zero open ports and no third-party relay server.</p>
+        <p>Tap <strong>⚡ Open App</strong> (or send <code>/app</code>) to launch the built-in <strong>Telegram Mini Web App</strong> over your private <strong>Tailscale Serve</strong> tailnet: live colored ANSI terminals, swipeable Quick Keys, AI provider <strong>Usage</strong> meters, <strong>Files &amp; Previews</strong>, and your desktop’s live <strong>Omarchy theme</strong> synced on the fly — in mobile and desktop Telegram, with no separate app install.</p>
+        <p>Pair it with a private <strong>2-member Forum group</strong> so every card also gets a dedicated status topic (<code>🟢</code> <code>🟡</code> <code>✅</code>), pinned status header with one-tap approvals, and <strong>📎 Files</strong> in chat.</p>
+        <p class="store"><a class="btn primary" href="/telegram/#mini-app">Explore Mini Web App &amp; setup →</a> <a class="btn" href="/telegram/">Bot &amp; Forum guide</a></p>
       </div>
       <div class="media">
-        <div class="tg-teaser" aria-label="Telegram Forum Topics preview">
-          <div class="tg-teaser-bar">
-            <strong>✈ My PC Agents · Forum Topics</strong>
-            <span>2 members · you + @my_sd_bot</span>
-          </div>
-          <div class="tg-teaser-topics">
-            <div class="tg-teaser-row active">
-              <span>🟡 ⚡ Claude Code · super-desktop</span>
-              <b>Waiting · 📎 Files</b>
+        <div class="tg-showcase">
+          <div class="tg-miniapp-card">
+            <div class="tg-miniapp-head">
+              <strong>⚡ Telegram Mini Web App</strong>
+              <span>Live ANSI · Usage · Omarchy theme</span>
             </div>
-            <div class="tg-teaser-row">
-              <span>🟢 🤖 Codex · api-server</span>
-              <b>Working</b>
-            </div>
-            <div class="tg-teaser-row">
-              <span>✅ 🔮 OpenCode · web-app</span>
-              <b>Finished</b>
+            <div class="tg-miniapp-strip">
+              <a href="/telegram/#mini-app" aria-label="Telegram Mini Web App Sessions list preview">
+                <img src="/telegram/screenshots/miniapp-sessions.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App Sessions list synced to the live Omarchy palette">
+              </a>
+              <a href="/telegram/#mini-app" aria-label="Telegram Mini Web App live ANSI terminal preview">
+                <img src="/telegram/screenshots/miniapp-terminal.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App live colored ANSI terminal with swipeable Quick Keys and prompt bar">
+              </a>
             </div>
           </div>
-          <div class="tg-teaser-card">
-            <div class="tg-teaser-pin"><b>Pinned</b> 🟡 <strong>Claude Code</strong> · <code>~/super-desktop</code> · <code>◌ WAITING</code></div>
-            <p>Approve action or tap <strong>📎 Files</strong> to view referenced screenshots, PDFs, Markdown, and links.</p>
-            <div class="tg-teaser-btns">
-              <span class="hl">Yes</span><span>No</span><span>1</span><span>2</span><span>📷 Screen</span><span class="hl">📎 Files</span>
+          <div class="tg-teaser" aria-label="Telegram Forum Topics preview">
+            <div class="tg-teaser-bar">
+              <strong>✈ My PC Agents · Forum Topics</strong>
+              <span>2 members · you + @my_sd_bot</span>
+            </div>
+            <div class="tg-teaser-topics">
+              <div class="tg-teaser-row active">
+                <span>🟡 ⚡ Claude Code · super-desktop</span>
+                <b>Waiting · 📎 Files</b>
+              </div>
+              <div class="tg-teaser-row">
+                <span>🟢 🤖 Codex · api-server</span>
+                <b>Working</b>
+              </div>
+              <div class="tg-teaser-row">
+                <span>✅ 🔮 OpenCode · web-app</span>
+                <b>Finished</b>
+              </div>
+            </div>
+            <div class="tg-teaser-card">
+              <div class="tg-teaser-pin"><b>Pinned</b> 🟡 <strong>Claude Code</strong> · <code>~/super-desktop</code> · <code>◌ WAITING</code></div>
+              <p>Approve action or tap <strong>📎 Files</strong> to view referenced screenshots, PDFs, Markdown, and links.</p>
+              <div class="tg-teaser-btns">
+                <span class="hl">Yes</span><span>No</span><span>1</span><span>2</span><span>📷 Screen</span><span class="hl">📎 Files</span>
+              </div>
             </div>
           </div>
         </div>
-        <p class="caption">Sample Forum group with live card statuses, approval buttons, and Files &amp; Previews. <a href="/telegram/">Open interactive preview &amp; setup →</a></p>
+        <p class="caption">Real <a href="/telegram/#mini-app">Mini Web App</a> screens (Sessions &amp; live ANSI terminal) plus a 2-member <a href="/telegram/">Forum Topics</a> group. <a href="/telegram/#mini-app">See all screens &amp; 1-click setup →</a></p>
       </div>
     </div>
   </section>
@@ -656,7 +673,7 @@
         </details>
         <details>
           <summary>Can I control SUPER DESKTOP from Telegram?</summary>
-          <p>Yes. Create your own <code>@BotFather</code> bot and enable it in <strong>⚙ Settings → Telegram</strong>. Your PC runs a local worker making outbound HTTPS requests to Telegram with zero open ports. Link a private 2-member Forum group for 1-card-1-topic control, live status headers, inline approvals, and <strong>📎 Files</strong>. <a href="/telegram/">See the Telegram setup &amp; usage guide</a>.</p>
+          <p>Yes. Create your own <code>@BotFather</code> bot and enable it in <strong>⚙ Settings → Telegram</strong>. Tap <strong>⚡ Open App</strong> (<code>/app</code>) for the live-themed <a href="/telegram/#mini-app">Telegram Mini Web App</a> (live colored ANSI terminals, Quick Keys, Usage meters, and Files &amp; Previews over private Tailscale Serve), or link a private 2-member Forum group for 1-card-1-topic control, live status headers, and inline approvals. <a href="/telegram/">See the Telegram &amp; Mini Web App guide</a>.</p>
         </details>
         <details>
           <summary>Is it free?</summary>
@@ -729,7 +746,7 @@
       <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>
       <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466">App Store</a>
       <a href="connect.html">Connect your phone</a>
-      <a href="/telegram/">Telegram bot</a>
+      <a href="/telegram/">Telegram bot &amp; Mini App</a>
       <a href="#faq">FAQ</a>
       <a href="llms.txt">For AI assistants</a>
       <a href="cli.html">CLI reference</a>

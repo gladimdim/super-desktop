@@ -754,3 +754,13 @@ footer .legal { flex-basis: 100%; margin: 0; font-size: 12px; }
 .tg-teaser-btns { display: flex; flex-wrap: wrap; gap: 6px; }
 .tg-teaser-btns span { padding: 5px 10px; border-radius: 7px; font-size: 12px; font-weight: 600; background: rgba(255, 255, 255, .06); border: 1px solid rgba(255, 255, 255, .1); color: var(--text); }
 .tg-teaser-btns span.hl { border-color: rgba(34, 211, 238, .45); color: var(--accent); }
+
+/* Landing showcase combining Mini Web App real screenshots + Forum Topics card */
+.tg-showcase { display: grid; gap: 12px; }
+.tg-miniapp-card { background: #0c111b; border: 1px solid var(--border); border-radius: 12px; padding: 14px; display: grid; gap: 10px; }
+.tg-miniapp-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; font-size: 13.5px; }
+.tg-miniapp-head span { color: var(--accent); font-size: 12px; font-weight: 600; }
+.tg-miniapp-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.tg-miniapp-strip a { display: block; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); background: #070a10; transition: border-color .15s ease, transform .15s ease; }
+.tg-miniapp-strip a:hover { border-color: rgba(34, 211, 238, .55); transform: translateY(-2px); }
+.tg-miniapp-strip img { display: block; width: 100%; height: auto; aspect-ratio: 780 / 1688; object-fit: cover; object-position: top; max-height: 360px; }
