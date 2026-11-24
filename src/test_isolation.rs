@@ -61,6 +61,7 @@ extern "C" fn isolate() {
     // A window built by a test loads plugins: never the user's own.
     std::env::set_var("SD_PLUGINS_DIR", root.join("plugins"));
     std::env::set_var("SD_PLUGINS_STATE_DIR", root.join("plugin-state"));
+    std::env::set_var("SD_TELEGRAM_STATE_DIR", root.join("telegram"));
     std::env::set_var(ROOT_ENV, &root);
     unsafe { libc::atexit(cleanup) };
 }
@@ -343,6 +344,7 @@ mod tests {
         assert!(crate::platform::runtime::socket_path().starts_with(&root));
         assert!(PathBuf::from(std::env::var_os("SD_PLUGINS_DIR").unwrap()).starts_with(&root));
         assert!(PathBuf::from(std::env::var_os("SD_PLUGINS_STATE_DIR").unwrap()).starts_with(&root));
+        assert!(PathBuf::from(std::env::var_os("SD_TELEGRAM_STATE_DIR").unwrap()).starts_with(&root));
 
         let tmux = |args: &[&str]| Command::new("tmux").args(args).stderr(Stdio::null()).output();
         let Ok(version) = tmux(&["-V"]) else {

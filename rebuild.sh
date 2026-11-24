@@ -34,6 +34,7 @@ SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/super-desktop.sock"
 # a card, and killed it.
 DAEMON_PROCESS='^([^ ]*/)?super-desktop daemon( |$)'
 BRIDGE_PROCESS='^([^ ]*/)?super-desktop harness-bridge( |$)'
+TELEGRAM_PROCESS='^([^ ]*/)?super-desktop telegram-bot( |$)'
 
 # install.sh sets Rust up in ~/.cargo without adding it to shell profiles.
 CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
@@ -109,8 +110,15 @@ stop_desktop() {
   # The bridge is a separate process. Leaving it running would keep serving
   # the previous binary after a successful daemon rebuild.
   pkill -f "$BRIDGE_PROCESS" >/dev/null 2>&1 || true
+  pkill -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
   # Give IPC `kill` a moment, then drop a stale socket file if the daemon is gone.
   sleep 0.5
+  # telegram-bot can sit inside a 25s HTTPS getUpdates long-poll on SIGTERM;
+  # force-stop it so the fresh daemon always spawns the new worker binary.
+  if pgrep -f "$TELEGRAM_PROCESS" >/dev/null 2>&1; then
+    pkill -KILL -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
+    sleep 0.2
+  fi
   if [[ -S "$SOCK" ]] && ! pgrep -f "$DAEMON_PROCESS" >/dev/null 2>&1; then
     rm -f "$SOCK"
     echo "    removed stale socket $SOCK"

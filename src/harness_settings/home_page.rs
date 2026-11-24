@@ -76,6 +76,7 @@ pub(in crate::harness_settings) struct HomePage {
     pub(in crate::harness_settings) btn_top_bar: Button,
     pub(in crate::harness_settings) btn_editor: Button,
     pub(in crate::harness_settings) btn_mcp: Button,
+    pub(in crate::harness_settings) btn_telegram: Button,
     pub(in crate::harness_settings) btn_plugins: Button,
     pub(in crate::harness_settings) btn_sleep_lock: Button,
     pub(in crate::harness_settings) btn_system_launch: Button,
@@ -158,6 +159,33 @@ pub(in crate::harness_settings) fn home_page() -> HomePage {
 
     let (btn_mcp, _) = settings_entry("⚙", "MCP", "Control local agent access and copy connection instructions.", "settings-mcp-entry");
     root.append(&btn_mcp);
+    let (btn_telegram, telegram_trailing) = settings_entry(
+        "✈",
+        "Telegram",
+        "Control harnesses from your own Telegram bot and Forum Topics.",
+        "settings-telegram-entry",
+    );
+    let telegram_chip = chip("Off");
+    telegram_chip.add_css_class("telegram-status-chip");
+    telegram_trailing.prepend(&telegram_chip);
+    root.append(&btn_telegram);
+    let telegram_refresh = crate::launcher_settings::background_refresh(
+        crate::harness_settings::telegram_settings_page::home_status_summary,
+        move |label| {
+            if telegram_chip.text().as_str() != label {
+                telegram_chip.set_text(label);
+            }
+        },
+    );
+    btn_telegram.connect_map({
+        let refresh = Rc::clone(&telegram_refresh);
+        move |_| refresh()
+    });
+    crate::launcher_settings::tick_while_mapped(
+        &[btn_telegram.clone().upcast()],
+        Duration::from_secs(2),
+        move || telegram_refresh(),
+    );
     let (btn_plugins, _) = settings_entry("🧩", "Plugins", "Create widgets, docks, panels and games with AI; turn plugins on or off.", "settings-plugins-entry");
     root.append(&btn_plugins);
 
@@ -245,6 +273,7 @@ pub(in crate::harness_settings) fn home_page() -> HomePage {
         btn_top_bar,
         btn_editor,
         btn_mcp,
+        btn_telegram,
         btn_plugins,
         btn_sleep_lock,
         btn_system_launch,

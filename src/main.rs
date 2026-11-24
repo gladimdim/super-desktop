@@ -99,6 +99,7 @@ mod startup;
 mod sticky_note;
 mod styles;
 mod tag;
+mod telegram;
 mod theme;
 mod tmux;
 mod tmux_clipboard;
@@ -551,6 +552,11 @@ fn main() {
         return;
     }
 
+    if action == "telegram-bot" {
+        telegram::serve();
+        return;
+    }
+
     if action == "harnesses" {
         bridge::print_once();
         return;
@@ -863,6 +869,13 @@ fn run_daemon(start_visible: bool) {
         .spawn(bridge::supervise_bridge)
     {
         eprintln!("SUPER DESKTOP: could not start bridge supervision: {error}");
+    }
+
+    if let Err(error) = thread::Builder::new()
+        .name("super-desktop-telegram-watch".to_string())
+        .spawn(telegram::supervise)
+    {
+        eprintln!("SUPER DESKTOP: could not start telegram supervision: {error}");
     }
 
     // Warm the UI right after start, never on the startup path: startup stays
@@ -1662,6 +1675,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             // process alive with no window — which is how a "killed" daemon
             // used to stay around holding the socket.
             let _ = fs::remove_file(get_socket_path());
+            let _ = telegram::stop_worker();
             if let Some(win) = live_window(ctx) {
                 win.resume_hidden_clients();
             }

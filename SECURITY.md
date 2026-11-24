@@ -435,6 +435,41 @@ State lives in `~/.local/state/omarchy/harness-bridge/`. Keep `tls-identity.json
 private (0600). Loss/replacement requires pairing again. The optional
 `SUPER_DESKTOP_BRIDGE_STATE_DIR` isolates state for tests or separate instances.
 
+## Telegram bot (optional, bring-your-own-bot)
+
+When enabled in **Settings → Telegram**, SUPER DESKTOP runs a detached
+`super-desktop telegram-bot` worker that connects outbound over HTTPS directly
+to `api.telegram.org` using the user's own `@BotFather` bot token:
+
+- **Zero developer relay**: no central server exists in the path; the user's PC
+  is the only client polling Telegram. When disabled or unconfigured, no worker
+  process runs and no network requests occur.
+- **Private credential storage**: `config.json` and `runtime.json` under
+  `${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop/telegram/` require an
+  owner-only directory (`0700`) and owner-only regular files (`0600`), refusing
+  symlinks, loose permissions, or oversized/corrupt files. Bot tokens are masked
+  out of error messages and worker status.
+- **Desktop-approved single-owner pairing**: pairing uses a single-use 192-bit
+  deep-link secret (300 s expiry) followed by an explicit desktop **Approve /
+  Reject** confirmation with a 6-digit comparison code (180 s expiry). Only the
+  approved numeric `user_id` is authorized; strangers are silently ignored, and
+  access can be revoked immediately from Settings.
+- **Private 2-member Forum Topics**: `/linkforum` validates that the target
+  supergroup has Topics enabled, the bot has `can_manage_topics`, and the
+  member count is `<= 2` (owner + bot only), refusing larger groups.
+- **Granular permissions & stale-update guard**: notifications and secret
+  redaction start enabled; terminal screen capture, harness prompts, control
+  keys, shell input, card launch, card close, and file attachments start
+  disabled. Updates older than 120 seconds (or predating worker startup) are
+  dropped on reconnect so queued commands do not execute unexpectedly after a
+  reboot or outage.
+- **Telegram cloud visibility**: Telegram Bot API does not support secret-chat
+  end-to-end encryption. Messages, screenshots/captures, and attachments sent
+  through the bot traverse and are stored by Telegram's servers. Best-effort
+  secret redaction masks common API keys, tokens, PEM private keys, and `.env`
+  secret assignments, but is not a security boundary against arbitrary secrets
+  printed in a terminal.
+
 ## Verification
 
 `cargo test --bin super-desktop`

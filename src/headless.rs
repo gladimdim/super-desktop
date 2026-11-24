@@ -58,6 +58,12 @@ pub fn run() {
     {
         eprintln!("SUPER DESKTOP: could not start bridge supervision: {error}");
     }
+    if let Err(error) = thread::Builder::new()
+        .name("super-desktop-telegram-watch".into())
+        .spawn(|| crate::telegram::supervise_while(|| SERVING.load(Ordering::SeqCst)))
+    {
+        eprintln!("SUPER DESKTOP: could not start telegram supervision: {error}");
+    }
     // At start there is nothing to wait for. After a hand-over, give the
     // desktop daemon time to bind before deciding it is gone.
     let mut quiet_checks = 1;
@@ -185,7 +191,10 @@ fn serve(listener: UnixListener, inode: u64) {
         match after {
             After::Continue => {}
             After::Yield => return,
-            After::Quit => std::process::exit(0),
+            After::Quit => {
+                let _ = crate::telegram::stop_worker();
+                std::process::exit(0);
+            }
         }
     }
 }

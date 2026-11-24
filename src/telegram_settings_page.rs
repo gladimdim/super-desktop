@@ -1,0 +1,1030 @@
+//! Settings → Telegram page: BYOB bot token, desktop pairing approval, Forum Topics, and permissions.
+use crate::telegram::api::BotUser;
+use crate::telegram::config::{
+    self, unix_now, Config, RuntimeState,
+};
+use crate::telegram::pairing;
+use gtk4::glib;
+use gtk4::prelude::*;
+use gtk4::{Align, Box, Button, DrawingArea, Entry, Label, Orientation, Switch};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::Arc;
+use std::time::Duration;
+
+#[derive(Clone)]
+struct Hooks {
+    load_config: Arc<dyn Fn() -> std::io::Result<Config> + Send + Sync>,
+    save_config: Arc<dyn Fn(&Config) -> std::io::Result<()> + Send + Sync>,
+    load_runtime: Arc<dyn Fn() -> std::io::Result<RuntimeState> + Send + Sync>,
+    load_invite: Arc<dyn Fn() -> std::io::Result<Option<config::PendingInvite>> + Send + Sync>,
+    load_pending_request:
+        Arc<dyn Fn() -> std::io::Result<Option<config::PendingRequest>> + Send + Sync>,
+    request_sync: Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>,
+    verify_token: Arc<dyn Fn(&str) -> Result<BotUser, String> + Send + Sync>,
+    start_worker: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    stop_worker: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    worker_running: Arc<dyn Fn() -> bool + Send + Sync>,
+    start_invite:
+        Arc<dyn Fn() -> Result<(config::PendingInvite, Option<String>), String> + Send + Sync>,
+    approve_pending: Arc<dyn Fn(&str) -> Result<config::AllowedUser, String> + Send + Sync>,
+    reject_pending: Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>,
+    revoke_user: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    clear_rejected: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    unlink_forum: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+}
+
+impl Hooks {
+    fn live() -> Self {
+        Self {
+            load_config: Arc::new(config::load_config),
+            save_config: Arc::new(config::save_config),
+            load_runtime: Arc::new(config::load_runtime),
+            load_invite: Arc::new(config::load_invite),
+            load_pending_request: Arc::new(config::load_pending_request),
+            request_sync: Arc::new(config::request_topic_sync),
+            verify_token: Arc::new(crate::telegram::verify_token),
+            start_worker: Arc::new(crate::telegram::start_worker),
+            stop_worker: Arc::new(crate::telegram::stop_worker),
+            worker_running: Arc::new(crate::telegram::worker_running),
+            start_invite: Arc::new(pairing::start_invite_default),
+            approve_pending: Arc::new(|id| {
+                let dir = pairing::default_state_dir()?;
+                pairing::approve_pending(&dir, id)
+            }),
+            reject_pending: Arc::new(|id| {
+                let dir = pairing::default_state_dir()?;
+                pairing::reject_pending(&dir, id)
+            }),
+            revoke_user: Arc::new(|| {
+                let dir = pairing::default_state_dir()?;
+                pairing::revoke_user(&dir)
+            }),
+            clear_rejected: Arc::new(|| {
+                let dir = pairing::default_state_dir()?;
+                pairing::clear_rejected(&dir)
+            }),
+            unlink_forum: Arc::new(|| {
+                let dir = pairing::default_state_dir()?;
+                pairing::unlink_forum(&dir)
+            }),
+        }
+    }
+}
+
+pub fn home_status_summary() -> &'static str {
+    let Ok(cfg) = config::load_config() else {
+        return "Err";
+    };
+    if !cfg.should_run() {
+        return "Off";
+    }
+    if let Ok(Some(req)) = config::load_pending_request() {
+        if req.expires_at >= unix_now() {
+            return "Review";
+        }
+    }
+    if let Ok(rt) = config::load_runtime() {
+        if rt.worker_status.state == "error" {
+            return "Error";
+        }
+    }
+    if crate::telegram::worker_running() {
+        if cfg.allowed_user.is_some() {
+            "Online"
+        } else {
+            "Pair"
+        }
+    } else {
+        "Starting"
+    }
+}
+
+fn text(body: &Box, value: &str) -> Label {
+    let label = Label::new(Some(value));
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_max_width_chars(62);
+    body.append(&label);
+    label
+}
+
+fn switch_row(body: &Box, name: &str, title: &str, description: &str) -> Switch {
+    let row = Box::new(Orientation::Horizontal, 12);
+    let words = Box::new(Orientation::Vertical, 4);
+    words.set_hexpand(true);
+    text(&words, title).add_css_class("settings-entry-title");
+    text(&words, description).add_css_class("launcher-note");
+    let toggle = Switch::new();
+    toggle.set_widget_name(name);
+    toggle.set_valign(Align::Center);
+    toggle.update_property(&[gtk4::accessible::Property::Label(title)]);
+    row.append(&words);
+    row.append(&toggle);
+    body.append(&row);
+    toggle
+}
+
+pub fn build(root: &Box) -> Rc<dyn Fn()> {
+    build_with_hooks(root, Hooks::live())
+}
+
+fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
+    let painting = Rc::new(Cell::new(false));
+
+    // --- Section 1: Bot setup (BYOB) ---
+    let (_, bot_body) = crate::launcher_settings::section_card(root, "", "Bot setup (BYOB)");
+    text(
+        &bot_body,
+        "Create your own bot in Telegram via @BotFather (/newbot) and paste its token here. Your PC connects directly to api.telegram.org — no relay server ever sees your prompts or terminal output.",
+    );
+
+    let bot_status_row = Box::new(Orientation::Horizontal, 8);
+    let bot_chip = crate::launcher_settings::chip("Stopped");
+    bot_chip.set_widget_name("telegram-status-chip");
+    let bot_status_label = Label::new(Some("Not configured"));
+    bot_status_label.add_css_class("launcher-note");
+    bot_status_label.set_xalign(0.0);
+    bot_status_label.set_wrap(true);
+    bot_status_label.set_hexpand(true);
+    bot_status_row.append(&bot_chip);
+    bot_status_row.append(&bot_status_label);
+    bot_body.append(&bot_status_row);
+
+    let token_row = Box::new(Orientation::Horizontal, 8);
+    let token_entry = Entry::new();
+    token_entry.set_widget_name("telegram-token-entry");
+    token_entry.add_css_class("ws-entry");
+    token_entry.set_visibility(false);
+    token_entry.set_hexpand(true);
+    token_entry.set_placeholder_text(Some("Paste @BotFather token (e.g. 123456789:ABC...)"));
+    token_row.append(&token_entry);
+
+    let btn_save_token = Button::with_label("Save & verify");
+    btn_save_token.set_widget_name("telegram-save-token");
+    btn_save_token.add_css_class("launcher-btn");
+    btn_save_token.add_css_class("launcher-btn-primary");
+    token_row.append(&btn_save_token);
+
+    let btn_clear_token = Button::with_label("Clear");
+    btn_clear_token.set_widget_name("telegram-clear-token");
+    btn_clear_token.add_css_class("launcher-btn");
+    token_row.append(&btn_clear_token);
+    bot_body.append(&token_row);
+
+    let token_feedback = text(&bot_body, "");
+    token_feedback.add_css_class("launcher-note");
+    token_feedback.set_visible(false);
+
+    let enable_toggle = switch_row(
+        &bot_body,
+        "telegram-enabled",
+        "Enable Telegram bot",
+        "Run the background Telegram worker on this PC while SUPER DESKTOP is running (desktop or headless).",
+    );
+
+    // --- Section 2: Account pairing ---
+    let (_, pair_body) = crate::launcher_settings::section_card(root, "", "Account pairing");
+    text(
+        &pair_body,
+        "Only one Telegram account can control this PC. Every pairing link is single-use and requires your approval here.",
+    );
+
+    let owner_label = text(&pair_body, "No Telegram account paired yet.");
+    owner_label.add_css_class("settings-entry-title");
+
+    let pair_actions = Box::new(Orientation::Horizontal, 8);
+    let btn_pair = Button::with_label("Pair Telegram account");
+    btn_pair.set_widget_name("telegram-pair-btn");
+    btn_pair.add_css_class("launcher-btn");
+    btn_pair.add_css_class("launcher-btn-primary");
+    pair_actions.append(&btn_pair);
+
+    let btn_revoke = Button::with_label("Revoke access");
+    btn_revoke.set_widget_name("telegram-revoke-btn");
+    btn_revoke.add_css_class("launcher-btn");
+    btn_revoke.add_css_class("launcher-btn-danger");
+    pair_actions.append(&btn_revoke);
+
+    let btn_clear_rejected = Button::with_label("Clear rejected");
+    btn_clear_rejected.set_widget_name("telegram-clear-rejected");
+    btn_clear_rejected.add_css_class("launcher-btn");
+    pair_actions.append(&btn_clear_rejected);
+    pair_body.append(&pair_actions);
+
+    let invite_box = Box::new(Orientation::Vertical, 6);
+    invite_box.set_visible(false);
+    let qr_code: Rc<RefCell<Option<qrcode::QrCode>>> = Rc::new(RefCell::new(None));
+    let qr = DrawingArea::new();
+    qr.set_content_width(180);
+    qr.set_content_height(180);
+    qr.set_halign(Align::Start);
+    qr.add_css_class("invite-qr");
+    qr.set_draw_func({
+        let qr_code = Rc::clone(&qr_code);
+        move |_, cr, width, height| {
+            let Some(code) = qr_code.borrow().clone() else {
+                return;
+            };
+            let size = code.width();
+            let unit = (width.min(height) as f64 / (size + 8) as f64).floor().max(1.0);
+            let offset_x = (width as f64 - (size + 8) as f64 * unit) / 2.0;
+            let offset_y = (height as f64 - (size + 8) as f64 * unit) / 2.0;
+            cr.set_source_rgb(1.0, 1.0, 1.0);
+            let _ = cr.paint();
+            cr.set_source_rgb(0.0, 0.0, 0.0);
+            for y in 0..size {
+                for x in 0..size {
+                    if code[(x, y)] == qrcode::Color::Dark {
+                        cr.rectangle(
+                            offset_x + (x + 4) as f64 * unit,
+                            offset_y + (y + 4) as f64 * unit,
+                            unit,
+                            unit,
+                        );
+                    }
+                }
+            }
+            let _ = cr.fill();
+        }
+    });
+    invite_box.append(&qr);
+
+    let invite_link_row = Box::new(Orientation::Horizontal, 8);
+    let invite_link_entry = Entry::new();
+    invite_link_entry.add_css_class("ws-entry");
+    invite_link_entry.set_editable(false);
+    invite_link_entry.set_hexpand(true);
+    let btn_copy_invite = Button::with_label("Copy link");
+    btn_copy_invite.set_widget_name("telegram-copy-invite");
+    btn_copy_invite.add_css_class("launcher-btn");
+    btn_copy_invite.add_css_class("launcher-btn-primary");
+    invite_link_row.append(&invite_link_entry);
+    invite_link_row.append(&btn_copy_invite);
+    invite_box.append(&invite_link_row);
+
+    btn_copy_invite.connect_clicked({
+        let invite_link_entry = invite_link_entry.clone();
+        let token_feedback = token_feedback.clone();
+        move |button| {
+            button.clipboard().set_text(&invite_link_entry.text());
+            token_feedback.set_text("Pairing link copied to clipboard.");
+            token_feedback.set_visible(true);
+        }
+    });
+
+    let invite_hint = text(
+        &invite_box,
+        "Open the link in Telegram (or send /start <secret> to your bot), then approve the matching code below.",
+    );
+    invite_hint.add_css_class("launcher-hint");
+    pair_body.append(&invite_box);
+
+    let pending_box = Box::new(Orientation::Vertical, 6);
+    pending_box.set_widget_name("telegram-pending-box");
+    pending_box.set_visible(false);
+    let pending_info = text(&pending_box, "");
+    pending_info.add_css_class("settings-entry-title");
+    let pending_code_label = text(&pending_box, "");
+    pending_code_label.add_css_class("monospace");
+    let pending_btns = Box::new(Orientation::Horizontal, 8);
+    let btn_approve = Button::with_label("Approve");
+    btn_approve.set_widget_name("telegram-approve-btn");
+    btn_approve.add_css_class("launcher-btn");
+    btn_approve.add_css_class("launcher-btn-primary");
+    let btn_reject = Button::with_label("Reject");
+    btn_reject.set_widget_name("telegram-reject-btn");
+    btn_reject.add_css_class("launcher-btn");
+    btn_reject.add_css_class("launcher-btn-danger");
+    pending_btns.append(&btn_approve);
+    pending_btns.append(&btn_reject);
+    pending_box.append(&pending_btns);
+    pair_body.append(&pending_box);
+
+    // --- Section 3: Forum Topics ---
+    let (_, forum_body) = crate::launcher_settings::section_card(root, "", "Forum Topics");
+    text(
+        &forum_body,
+        "Optional 1-card-1-topic mode: create a private group with just you and your bot, enable Topics in Group Settings, promote the bot to Admin (Manage Topics), and send /linkforum inside General.",
+    );
+    let forum_status = text(&forum_body, "Not linked to a Forum group.");
+    forum_status.add_css_class("launcher-note");
+
+    let forum_actions = Box::new(Orientation::Horizontal, 8);
+    let btn_sync_topics = Button::with_label("Sync topics now");
+    btn_sync_topics.set_widget_name("telegram-sync-topics");
+    btn_sync_topics.add_css_class("launcher-btn");
+    let btn_unlink_forum = Button::with_label("Unlink forum");
+    btn_unlink_forum.set_widget_name("telegram-unlink-forum");
+    btn_unlink_forum.add_css_class("launcher-btn");
+    forum_actions.append(&btn_sync_topics);
+    forum_actions.append(&btn_unlink_forum);
+    forum_body.append(&forum_actions);
+
+    let auto_topics_toggle = switch_row(
+        &forum_body,
+        "telegram-auto-topics",
+        "Auto-create a topic for each card",
+        "Automatically open a Forum Topic when a terminal card starts.",
+    );
+    let archive_topics_toggle = switch_row(
+        &forum_body,
+        "telegram-archive-topics",
+        "Close topic when a card closes",
+        "Archive the card's Forum Topic automatically once the terminal is closed.",
+    );
+
+    // --- Section 4: Permissions ---
+    let (_, perm_body) = crate::launcher_settings::section_card(root, "", "Permissions");
+    text(
+        &perm_body,
+        "Choose what your paired Telegram account is allowed to inspect or trigger. Note: Telegram Bot API messages are processed by Telegram servers (not end-to-end encrypted).",
+    );
+    let perm_specs = [
+        ("telegram-notifications", "Notifications", "Push alerts when an agent finishes, waits for input, or hits an error."),
+        ("telegram-read-output", "Read terminal output", "Allow /screen and /history screen captures. Output may contain sensitive text."),
+        ("telegram-prompts", "Submit prompts", "Allow sending text prompts to AI harness cards."),
+        ("telegram-controls", "Control keys", "Allow Yes/No/1/2/Enter/Esc/Ctrl-C actions."),
+        ("telegram-shell-input", "Allow shell input", "Allow typing text or control keys into plain Shell cards (higher risk)."),
+        ("telegram-launch", "Launch new cards", "Allow /new to start harnesses in remembered project folders."),
+        ("telegram-close", "Close cards", "Allow closing cards from Telegram after confirmation."),
+        ("telegram-attachments", "Receive attachments", "Allow photos, files, and voice clips to be staged privately for harnesses."),
+        ("telegram-redact", "Redact common secrets", "Best-effort masking of API keys, tokens, and PEM blocks before sending output."),
+    ];
+    let mut perm_switches = Vec::with_capacity(perm_specs.len());
+    for (name, title, desc) in perm_specs {
+        perm_switches.push(switch_row(&perm_body, name, title, desc));
+    }
+
+    let pending_req_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    let token_loaded = Rc::new(Cell::new(false));
+    let verifying = Rc::new(Cell::new(false));
+
+    let paint: Rc<
+        dyn Fn(
+            &Config,
+            &RuntimeState,
+            Option<&config::PendingInvite>,
+            Option<&config::PendingRequest>,
+            bool,
+        ),
+    > = Rc::new({
+        let painting = Rc::clone(&painting);
+        let token_loaded = Rc::clone(&token_loaded);
+        let verifying = Rc::clone(&verifying);
+        let bot_chip = bot_chip.clone();
+        let bot_status_label = bot_status_label.clone();
+        let token_entry = token_entry.clone();
+        let enable_toggle = enable_toggle.clone();
+        let owner_label = owner_label.clone();
+        let btn_pair = btn_pair.clone();
+        let btn_revoke = btn_revoke.clone();
+        let btn_clear_rejected = btn_clear_rejected.clone();
+        let invite_box = invite_box.clone();
+        let invite_link_entry = invite_link_entry.clone();
+        let qr_code = Rc::clone(&qr_code);
+        let qr = qr.clone();
+        let pending_box = pending_box.clone();
+        let pending_info = pending_info.clone();
+        let pending_code_label = pending_code_label.clone();
+        let pending_req_id = Rc::clone(&pending_req_id);
+        let forum_status = forum_status.clone();
+        let btn_sync_topics = btn_sync_topics.clone();
+        let btn_unlink_forum = btn_unlink_forum.clone();
+        let auto_topics_toggle = auto_topics_toggle.clone();
+        let archive_topics_toggle = archive_topics_toggle.clone();
+        let perm_switches = perm_switches.clone();
+        move |cfg: &Config,
+              rt: &RuntimeState,
+              invite: Option<&config::PendingInvite>,
+              pending_req: Option<&config::PendingRequest>,
+              alive: bool| {
+            painting.set(true);
+            let now = unix_now();
+
+            if !token_loaded.get() && !verifying.get() {
+                token_entry.set_text(&cfg.bot_token);
+                token_loaded.set(true);
+            }
+            enable_toggle.set_active(cfg.enabled);
+            enable_toggle.set_sensitive(!cfg.bot_token.trim().is_empty());
+
+            let (chip_txt, status_txt) = if !cfg.should_run() {
+                ("Stopped", "Bot is disabled or has no token.".to_string())
+            } else if rt.worker_status.state == "error" {
+                (
+                    "Error",
+                    rt.worker_status
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "Telegram worker error.".to_string()),
+                )
+            } else if alive {
+                let handle = cfg
+                    .bot_username
+                    .as_deref()
+                    .map(|u| format!("@{u}"))
+                    .unwrap_or_else(|| "bot".to_string());
+                ("Running", format!("Polling api.telegram.org as {handle}."))
+            } else {
+                ("Starting", "Waiting for Telegram worker…".to_string())
+            };
+            bot_chip.set_text(chip_txt);
+            bot_status_label.set_text(&status_txt);
+
+            if let Some(owner) = cfg.allowed_user.as_ref() {
+                let handle = owner
+                    .username
+                    .as_deref()
+                    .map(|u| format!(" (@{u})"))
+                    .unwrap_or_default();
+                owner_label.set_text(&format!(
+                    "Paired with {}{} · ID {}",
+                    owner.first_name, handle, owner.user_id
+                ));
+                btn_revoke.set_visible(true);
+                btn_pair.set_label("Re-pair account");
+            } else {
+                owner_label.set_text("No Telegram account paired yet.");
+                btn_revoke.set_visible(false);
+                btn_pair.set_label("Pair Telegram account");
+            }
+            btn_pair.set_sensitive(cfg.should_run());
+            btn_clear_rejected.set_visible(!cfg.rejected_user_ids.is_empty());
+            btn_clear_rejected.set_label(&format!(
+                "Clear rejected ({})",
+                cfg.rejected_user_ids.len()
+            ));
+
+            if let Some(invite) = invite.filter(|i| i.expires_at >= now) {
+                let link = cfg
+                    .bot_username
+                    .as_deref()
+                    .filter(|u| !u.is_empty())
+                    .map(|u| format!("https://t.me/{u}?start={}", invite.secret))
+                    .unwrap_or_else(|| format!("/start {}", invite.secret));
+                invite_link_entry.set_text(&link);
+                *qr_code.borrow_mut() = qrcode::QrCode::new(link.as_bytes()).ok();
+                qr.set_visible(qr_code.borrow().is_some());
+                qr.queue_draw();
+                invite_box.set_visible(true);
+            } else {
+                invite_box.set_visible(false);
+            }
+
+            if let Some(req) = pending_req.filter(|r| r.expires_at >= now) {
+                let handle = req
+                    .username
+                    .as_deref()
+                    .map(|u| format!(" (@{u})"))
+                    .unwrap_or_default();
+                pending_info.set_text(&format!(
+                    "Pairing request from {}{} · ID {}",
+                    req.first_name, handle, req.user_id
+                ));
+                pending_code_label.set_text(&format!(
+                    "Comparison code: {}",
+                    pairing::format_code(&req.code)
+                ));
+                *pending_req_id.borrow_mut() = Some(req.request_id.clone());
+                pending_box.set_visible(true);
+            } else {
+                *pending_req_id.borrow_mut() = None;
+                pending_box.set_visible(false);
+            }
+
+            if let Some(forum) = cfg.forum.as_ref() {
+                let active_topics = rt
+                    .topics
+                    .iter()
+                    .filter(|t| !t.closed && !t.deleted_in_telegram)
+                    .count();
+                forum_status.set_text(&format!(
+                    "Linked to \"{}\" · {active_topics} active topic(s)",
+                    forum.title
+                ));
+                btn_sync_topics.set_visible(true);
+                btn_unlink_forum.set_visible(true);
+            } else {
+                forum_status.set_text("Not linked to a Forum group.");
+                btn_sync_topics.set_visible(false);
+                btn_unlink_forum.set_visible(false);
+            }
+            auto_topics_toggle.set_active(cfg.auto_sync_topics);
+            archive_topics_toggle.set_active(cfg.archive_closed_topics);
+
+            let p = cfg.permissions;
+            for (idx, val) in [
+                p.notifications,
+                p.read_output,
+                p.prompts,
+                p.controls,
+                p.shell_input,
+                p.launch,
+                p.close,
+                p.attachments,
+                p.redact_secrets,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                perm_switches[idx].set_active(val);
+                perm_switches[idx].set_sensitive(cfg.enabled);
+            }
+            painting.set(false);
+        }
+    });
+
+    let refresh: Rc<dyn Fn()> = Rc::new({
+        let hooks = hooks.clone();
+        let paint = Rc::clone(&paint);
+        let token_feedback = token_feedback.clone();
+        move || match ((hooks.load_config)(), (hooks.load_runtime)()) {
+            (Ok(cfg), Ok(rt)) => {
+                let invite = (hooks.load_invite)().ok().flatten();
+                let pending = (hooks.load_pending_request)().ok().flatten();
+                let alive = (hooks.worker_running)();
+                paint(&cfg, &rt, invite.as_ref(), pending.as_ref(), alive);
+            }
+            _ => {
+                paint(&Config::disabled(), &RuntimeState::default(), None, None, false);
+                token_feedback.set_text("Telegram settings could not be read; access is blocked.");
+                token_feedback.set_visible(true);
+            }
+        }
+    });
+
+    // Save & verify token on a background thread.
+    btn_save_token.connect_clicked({
+        let hooks = hooks.clone();
+        let token_entry = token_entry.clone();
+        let token_feedback = token_feedback.clone();
+        let btn_save_token = btn_save_token.clone();
+        let verifying = Rc::clone(&verifying);
+        let token_loaded = Rc::clone(&token_loaded);
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let token = token_entry.text().trim().to_string();
+            if token.is_empty() {
+                token_feedback.set_text("Paste a bot token from @BotFather first.");
+                token_feedback.set_visible(true);
+                return;
+            }
+            verifying.set(true);
+            btn_save_token.set_sensitive(false);
+            token_feedback.set_text("Verifying token with api.telegram.org…");
+            token_feedback.set_visible(true);
+            let hooks = hooks.clone();
+            let btn_save_token = btn_save_token.clone();
+            let token_feedback = token_feedback.clone();
+            let verifying = Rc::clone(&verifying);
+            let token_loaded = Rc::clone(&token_loaded);
+            let refresh = Rc::clone(&refresh);
+            glib::MainContext::default().spawn_local(async move {
+                let res = gtk4::gio::spawn_blocking(move || -> Result<BotUser, String> {
+                    let me = (hooks.verify_token)(&token)?;
+                    let mut cfg = (hooks.load_config)().map_err(|e| e.to_string())?;
+                    cfg.bot_token = token;
+                    cfg.bot_id = Some(me.id);
+                    cfg.bot_username = me.username.clone();
+                    cfg.enabled = true;
+                    (hooks.save_config)(&cfg).map_err(|e| e.to_string())?;
+                    let _ = (hooks.stop_worker)();
+                    let _ = (hooks.start_worker)();
+                    Ok(me)
+                })
+                .await;
+                verifying.set(false);
+                btn_save_token.set_sensitive(true);
+                match res {
+                    Ok(Ok(me)) => {
+                        token_loaded.set(false);
+                        let name = me.username.as_deref().unwrap_or(&me.first_name);
+                        token_feedback.set_text(&format!("Saved and verified @{name}."));
+                    }
+                    Ok(Err(err)) => {
+                        token_feedback.set_text(&err);
+                    }
+                    Err(_) => {
+                        token_feedback.set_text("Verification task failed.");
+                    }
+                }
+                token_feedback.set_visible(true);
+                refresh();
+            });
+        }
+    });
+
+    btn_clear_token.connect_clicked({
+        let hooks = hooks.clone();
+        let token_entry = token_entry.clone();
+        let token_loaded = Rc::clone(&token_loaded);
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let mut cfg = (hooks.load_config)().unwrap_or_default();
+            cfg.bot_token.clear();
+            cfg.bot_id = None;
+            cfg.bot_username = None;
+            cfg.enabled = false;
+            cfg.allowed_user = None;
+            cfg.forum = None;
+            if let Err(err) = (hooks.save_config)(&cfg) {
+                token_feedback.set_text(&format!("Could not clear token: {err}"));
+                token_feedback.set_visible(true);
+            } else {
+                token_entry.set_text("");
+                token_loaded.set(true);
+                token_feedback.set_text("Token cleared and Telegram bot stopped.");
+                token_feedback.set_visible(true);
+                let stop = hooks.stop_worker.clone();
+                let _ = gtk4::gio::spawn_blocking(move || {
+                    let _ = stop();
+                });
+            }
+            refresh();
+        }
+    });
+
+    enable_toggle.connect_active_notify({
+        let hooks = hooks.clone();
+        let painting = Rc::clone(&painting);
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |toggle| {
+            if painting.get() {
+                return;
+            }
+            let mut cfg = (hooks.load_config)().unwrap_or_default();
+            cfg.enabled = toggle.is_active();
+            if (hooks.save_config)(&cfg).is_err() {
+                token_feedback.set_text("Could not save Telegram settings.");
+                token_feedback.set_visible(true);
+                refresh();
+                return;
+            }
+            let start = hooks.start_worker.clone();
+            let stop = hooks.stop_worker.clone();
+            let enable = cfg.enabled;
+            let refresh = Rc::clone(&refresh);
+            glib::MainContext::default().spawn_local(async move {
+                let _ = gtk4::gio::spawn_blocking(move || {
+                    if enable {
+                        let _ = start();
+                    } else {
+                        let _ = stop();
+                    }
+                })
+                .await;
+                refresh();
+            });
+        }
+    });
+
+    btn_pair.connect_clicked({
+        let hooks = hooks.clone();
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            match (hooks.start_invite)() {
+                Ok(_) => token_feedback.set_visible(false),
+                Err(err) => {
+                    token_feedback.set_text(&err);
+                    token_feedback.set_visible(true);
+                }
+            }
+            refresh();
+        }
+    });
+
+    btn_approve.connect_clicked({
+        let hooks = hooks.clone();
+        let pending_req_id = Rc::clone(&pending_req_id);
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let Some(req_id) = pending_req_id.borrow().clone() else {
+                return;
+            };
+            if let Err(err) = (hooks.approve_pending)(&req_id) {
+                token_feedback.set_text(&err);
+                token_feedback.set_visible(true);
+            }
+            refresh();
+        }
+    });
+
+    btn_reject.connect_clicked({
+        let hooks = hooks.clone();
+        let pending_req_id = Rc::clone(&pending_req_id);
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let Some(req_id) = pending_req_id.borrow().clone() else {
+                return;
+            };
+            if let Err(err) = (hooks.reject_pending)(&req_id) {
+                token_feedback.set_text(&err);
+                token_feedback.set_visible(true);
+            }
+            refresh();
+        }
+    });
+
+    btn_revoke.connect_clicked({
+        let hooks = hooks.clone();
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            if let Err(err) = (hooks.revoke_user)() {
+                token_feedback.set_text(&err);
+                token_feedback.set_visible(true);
+            }
+            refresh();
+        }
+    });
+
+    btn_clear_rejected.connect_clicked({
+        let hooks = hooks.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let _ = (hooks.clear_rejected)();
+            refresh();
+        }
+    });
+
+    btn_sync_topics.connect_clicked({
+        let hooks = hooks.clone();
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            if (hooks.request_sync)().is_ok() {
+                token_feedback.set_text("Topic sync requested.");
+                token_feedback.set_visible(true);
+            }
+            refresh();
+        }
+    });
+
+    btn_unlink_forum.connect_clicked({
+        let hooks = hooks.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let _ = (hooks.unlink_forum)();
+            refresh();
+        }
+    });
+
+    auto_topics_toggle.connect_active_notify({
+        let hooks = hooks.clone();
+        let painting = Rc::clone(&painting);
+        let refresh = Rc::clone(&refresh);
+        move |toggle| {
+            if painting.get() {
+                return;
+            }
+            let mut cfg = (hooks.load_config)().unwrap_or_default();
+            cfg.auto_sync_topics = toggle.is_active();
+            let _ = (hooks.save_config)(&cfg);
+            refresh();
+        }
+    });
+
+    archive_topics_toggle.connect_active_notify({
+        let hooks = hooks.clone();
+        let painting = Rc::clone(&painting);
+        let refresh = Rc::clone(&refresh);
+        move |toggle| {
+            if painting.get() {
+                return;
+            }
+            let mut cfg = (hooks.load_config)().unwrap_or_default();
+            cfg.archive_closed_topics = toggle.is_active();
+            let _ = (hooks.save_config)(&cfg);
+            refresh();
+        }
+    });
+
+    for (index, toggle) in perm_switches.iter().enumerate() {
+        let hooks = hooks.clone();
+        let painting = Rc::clone(&painting);
+        let token_feedback = token_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        toggle.connect_active_notify(move |toggle| {
+            if painting.get() {
+                return;
+            }
+            let mut cfg = (hooks.load_config)().unwrap_or_else(|_| Config::disabled());
+            let v = toggle.is_active();
+            match index {
+                0 => cfg.permissions.notifications = v,
+                1 => cfg.permissions.read_output = v,
+                2 => cfg.permissions.prompts = v,
+                3 => cfg.permissions.controls = v,
+                4 => cfg.permissions.shell_input = v,
+                5 => cfg.permissions.launch = v,
+                6 => cfg.permissions.close = v,
+                7 => cfg.permissions.attachments = v,
+                _ => cfg.permissions.redact_secrets = v,
+            }
+            if (hooks.save_config)(&cfg).is_err() {
+                token_feedback.set_text("Could not save Telegram permissions.");
+                token_feedback.set_visible(true);
+            }
+            refresh();
+        });
+    }
+
+    crate::launcher_settings::tick_while_mapped(
+        &[root.clone().upcast()],
+        Duration::from_millis(1500),
+        {
+            let refresh = Rc::clone(&refresh);
+            move || refresh()
+        },
+    );
+
+    refresh();
+    refresh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn telegram_settings_page_persists_toggles_and_pairing_ui() {
+        if !crate::gtk_test::is_child() {
+            crate::gtk_test::run_in_child_process(
+                "harness_settings::telegram_settings_page::tests::telegram_settings_page_persists_toggles_and_pairing_ui",
+            );
+            return;
+        }
+        gtk4::init().expect("private GTK display");
+        let cfg_store = Arc::new(Mutex::new(Config {
+            enabled: true,
+            bot_token: "123456:TESTTOKEN".into(),
+            bot_id: Some(123456),
+            bot_username: Some("sd_test_bot".into()),
+            ..Config::default()
+        }));
+        let rt_store = Arc::new(Mutex::new(RuntimeState::default()));
+        let invite_store: Arc<Mutex<Option<config::PendingInvite>>> = Arc::new(Mutex::new(None));
+        let req_store = Arc::new(Mutex::new(Some(config::PendingRequest {
+            request_id: "req1".into(),
+            user_id: 42,
+            chat_id: 42,
+            username: Some("dmytro".into()),
+            first_name: "Dmytro".into(),
+            code: "654321".into(),
+            requested_at: unix_now(),
+            expires_at: unix_now() + 180,
+        })));
+        let fail_save_flag = Arc::new(Mutex::new(false));
+
+        let hooks = Hooks {
+            load_config: {
+                let s = Arc::clone(&cfg_store);
+                Arc::new(move || Ok(s.lock().unwrap().clone()))
+            },
+            save_config: {
+                let s = Arc::clone(&cfg_store);
+                let fail = Arc::clone(&fail_save_flag);
+                Arc::new(move |cfg| {
+                    if *fail.lock().unwrap() {
+                        Err(std::io::Error::other("disk error"))
+                    } else {
+                        *s.lock().unwrap() = cfg.clone();
+                        Ok(())
+                    }
+                })
+            },
+            load_runtime: {
+                let s = Arc::clone(&rt_store);
+                Arc::new(move || Ok(s.lock().unwrap().clone()))
+            },
+            load_invite: {
+                let s = Arc::clone(&invite_store);
+                Arc::new(move || Ok(s.lock().unwrap().clone()))
+            },
+            load_pending_request: {
+                let s = Arc::clone(&req_store);
+                Arc::new(move || Ok(s.lock().unwrap().clone()))
+            },
+            request_sync: Arc::new(|| Ok(())),
+            verify_token: Arc::new(|_| {
+                Ok(BotUser {
+                    id: 123456,
+                    is_bot: true,
+                    first_name: "SD".into(),
+                    username: Some("sd_test_bot".into()),
+                })
+            }),
+            start_worker: Arc::new(|| Ok(())),
+            stop_worker: Arc::new(|| Ok(())),
+            worker_running: Arc::new(|| true),
+            start_invite: {
+                let inv_store = Arc::clone(&invite_store);
+                let req_store = Arc::clone(&req_store);
+                Arc::new(move || {
+                    let invite = config::PendingInvite {
+                        secret: "sec123".into(),
+                        created_at: unix_now(),
+                        expires_at: unix_now() + 300,
+                    };
+                    *inv_store.lock().unwrap() = Some(invite.clone());
+                    *req_store.lock().unwrap() = None;
+                    Ok((
+                        invite,
+                        Some("https://t.me/sd_test_bot?start=sec123".into()),
+                    ))
+                })
+            },
+            approve_pending: {
+                let c = Arc::clone(&cfg_store);
+                let r = Arc::clone(&req_store);
+                Arc::new(move |req_id| {
+                    let req = r.lock().unwrap().take().unwrap();
+                    assert_eq!(req.request_id, req_id);
+                    let user = config::AllowedUser {
+                        user_id: req.user_id,
+                        chat_id: req.chat_id,
+                        username: req.username,
+                        first_name: req.first_name,
+                        paired_at: unix_now(),
+                    };
+                    c.lock().unwrap().allowed_user = Some(user.clone());
+                    Ok(user)
+                })
+            },
+            reject_pending: Arc::new(|_| Ok(())),
+            revoke_user: {
+                let c = Arc::clone(&cfg_store);
+                Arc::new(move || {
+                    c.lock().unwrap().allowed_user = None;
+                    Ok(())
+                })
+            },
+            clear_rejected: Arc::new(|| Ok(())),
+            unlink_forum: Arc::new(|| Ok(())),
+        };
+
+        let root = Box::new(Orientation::Vertical, 10);
+        let refresh = build_with_hooks(&root, hooks);
+        let find_switch = |name: &str| -> Switch {
+            crate::gtk_test::find_where(root.upcast_ref(), |w| w.widget_name() == name)
+                .and_then(|w| w.downcast().ok())
+                .unwrap()
+        };
+        let find_btn = |name: &str| -> Button {
+            crate::gtk_test::find_where(root.upcast_ref(), |w| w.widget_name() == name)
+                .and_then(|w| w.downcast().ok())
+                .unwrap()
+        };
+        let token_entry: Entry = crate::gtk_test::find_where(root.upcast_ref(), |w| {
+            w.widget_name() == "telegram-token-entry"
+        })
+        .and_then(|w| w.downcast().ok())
+        .unwrap();
+
+        // User typing into token_entry is NOT overwritten by refresh ticks.
+        token_entry.set_text("typed-new-token");
+        refresh();
+        assert_eq!(token_entry.text(), "typed-new-token");
+
+        // Copy link button exists on the invite box.
+        let _copy_btn = find_btn("telegram-copy-invite");
+
+        let read_out = find_switch("telegram-read-output");
+        let prompts = find_switch("telegram-prompts");
+        let shell_in = find_switch("telegram-shell-input");
+        assert!(!read_out.is_active() && !prompts.is_active() && !shell_in.is_active());
+        read_out.set_active(true);
+        prompts.set_active(true);
+        assert!(cfg_store.lock().unwrap().permissions.read_output);
+        assert!(cfg_store.lock().unwrap().permissions.prompts);
+
+        // Failed save reverts switch state.
+        *fail_save_flag.lock().unwrap() = true;
+        shell_in.set_active(true);
+        assert!(!shell_in.is_active());
+        assert!(!cfg_store.lock().unwrap().permissions.shell_input);
+        *fail_save_flag.lock().unwrap() = false;
+
+        // Pending pairing request is shown and Approve binds owner.
+        let pending_box = crate::gtk_test::find_where(root.upcast_ref(), |w| {
+            w.widget_name() == "telegram-pending-box"
+        })
+        .unwrap();
+        assert!(pending_box.property::<bool>("visible"));
+        find_btn("telegram-approve-btn").emit_clicked();
+        assert_eq!(cfg_store.lock().unwrap().allowed_user.as_ref().unwrap().user_id, 42);
+        assert!(!pending_box.property::<bool>("visible"));
+
+        // Revoke clears allowed user.
+        find_btn("telegram-revoke-btn").emit_clicked();
+        assert!(cfg_store.lock().unwrap().allowed_user.is_none());
+        refresh();
+    }
+}

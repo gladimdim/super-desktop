@@ -890,8 +890,8 @@ fn panel_gtk_structure_child() {
     let pages = find_all::<gtk4::Widget>(&panel.widget, "harness-page");
     assert_eq!(
         pages.len(),
-        20,
-        "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + system launch + updates + harness parameters page + a plugin's page"
+        21,
+        "hub + five destinations + SD Editor + plugins + custom harness page + seven Connections pages + system launch + updates + harness parameters page + a plugin's page + Telegram"
     );
     let sections: Vec<usize> = pages
         .iter()
@@ -899,10 +899,10 @@ fn panel_gtk_structure_child() {
         .collect();
     // hub, shortcut, harnesses, custom, top bar, SD Editor, MCP, plugins,
     // overview, add, invitation, PCs, phones, rejected, network, sleep,
-    // system launch, updates, harness parameters, a plugin's page
-    assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1, 1, 0]);
+    // system launch, updates, Telegram, harness parameters, a plugin's page
+    assert_eq!(sections, vec![0, 1, 2, 1, 1, 1, 2, 0, 1, 0, 2, 2, 3, 1, 2, 1, 1, 1, 4, 1, 0]);
     assert_eq!(count_class(&panel.widget, "launcher-section-num"), 0);
-    assert_eq!(count_class(&panel.widget, "launcher-section-title"), 22);
+    assert_eq!(count_class(&panel.widget, "launcher-section-title"), 26);
     assert_eq!(count_class(&panel.widget, "settings-firewall-warning"), 1);
 
     // The card opens on the hub, and ← appears on every destination page.
@@ -926,6 +926,7 @@ fn panel_gtk_structure_child() {
         ("settings-sleep-lock-entry", 15, "Sleep lock"),
         ("settings-system-launch-entry", 16, "System launch"),
         ("settings-updates-entry", 17, "Updates"),
+        ("settings-telegram-entry", 18, "Telegram"),
     ] {
         let button = find_all::<Button>(&panel.widget, class)
             .into_iter()

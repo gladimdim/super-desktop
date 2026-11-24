@@ -17,6 +17,8 @@
 
 #[path = "mcp_settings_page.rs"]
 mod mcp_settings_page;
+#[path = "telegram_settings_page.rs"]
+pub(in crate::harness_settings) mod telegram_settings_page;
 
 pub(in crate::harness_settings) use gtk4::gdk;
 pub(in crate::harness_settings) use gtk4::glib;
@@ -74,6 +76,7 @@ pub(in crate::harness_settings) enum SettingsPage {
     TopBar,
     Editor,
     Mcp,
+    Telegram,
     Plugins,
     /// One plugin's page, titled with its name.
     PluginDetail,
@@ -98,6 +101,7 @@ impl SettingsPage {
             Self::TopBar => ("▤", "Top bar", "Choose the desktop dock size"),
             Self::Editor => ("✎", "SD Editor", "The built-in text editor"),
             Self::Mcp => ("⚙", "MCP", "Local agent access and connection setup"),
+            Self::Telegram => ("✈", "Telegram", "Your private Telegram bot and Forum Topics"),
             Self::SleepLock => ("☀", "Sleep lock", "Keep harnesses available on charger power"),
             Self::SystemLaunch => ("⚡", "System launch", "Start the daemon when this PC starts"),
             Self::Updates => ("⟳", "Updates", "Newer versions from GitHub"),
@@ -242,6 +246,9 @@ pub fn build_harness_settings_panel(
     let mcp_root = settings_page_root();
     let refresh_mcp = mcp_settings_page::build(&mcp_root);
 
+    let telegram_root = settings_page_root();
+    let refresh_telegram = telegram_settings_page::build(&telegram_root);
+
     let plugins_root = settings_page_root();
     let plugin_detail_root = settings_page_root();
     let plugin_title: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
@@ -303,6 +310,7 @@ pub fn build_harness_settings_panel(
         (SettingsPage::SleepLock, page_scroll(&sleep_root).upcast()),
         (SettingsPage::SystemLaunch, page_scroll(&system_launch_root).upcast()),
         (SettingsPage::Updates, page_scroll(&updates_root).upcast()),
+        (SettingsPage::Telegram, page_scroll(&telegram_root).upcast()),
         (SettingsPage::HarnessArgs, page_scroll(&args.root).upcast()),
         (SettingsPage::PluginDetail, page_scroll(&plugin_detail_root).upcast()),
     ]);
@@ -318,6 +326,7 @@ pub fn build_harness_settings_panel(
     let current_page = Rc::new(Cell::new(SettingsPage::Home));
     let nav: Rc<dyn Fn(SettingsPage)> = {
         let refresh_mcp = refresh_mcp.clone();
+        let refresh_telegram = refresh_telegram.clone();
         let connection_pages = Rc::clone(&connection_pages);
         let check_updates = Rc::clone(&check_updates);
         let btn_back = btn_back.clone();
@@ -362,6 +371,7 @@ pub fn build_harness_settings_panel(
             subtitle.set_label(summary);
             match page {
                 SettingsPage::Mcp => refresh_mcp(),
+                SettingsPage::Telegram => refresh_telegram(),
                 SettingsPage::Updates => check_updates(true),
                 SettingsPage::Connections(_) => (connection_pages.refresh)(),
                 _ => {}
@@ -375,6 +385,7 @@ pub fn build_harness_settings_panel(
         (&home.btn_top_bar, SettingsPage::TopBar),
         (&home.btn_editor, SettingsPage::Editor),
         (&home.btn_mcp, SettingsPage::Mcp),
+        (&home.btn_telegram, SettingsPage::Telegram),
         (&home.btn_plugins, SettingsPage::Plugins),
         (&home.btn_connections, SettingsPage::Connections(ConnectionPage::Overview)),
         (&home.btn_sleep_lock, SettingsPage::SleepLock),
