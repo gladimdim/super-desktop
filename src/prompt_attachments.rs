@@ -55,11 +55,22 @@ pub enum Kind {
 
 /// One attachment, validated: an image is re-encoded to PNG from its decoded
 /// pixels, a file is kept byte for byte. `name` is already safe to store.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Attachment {
     pub kind: Kind,
     pub name: String,
     pub bytes: Vec<u8>,
+}
+
+/// Parsed phone attachment prompt request, including optional PC voice-to-text flags.
+#[derive(Debug)]
+pub struct ParsedRequest {
+    pub text: String,
+    pub request: String,
+    pub attachments: Vec<Attachment>,
+    pub transcribe_voice: bool,
+    pub typed_text: Option<String>,
+    pub voice: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -71,6 +82,12 @@ struct Body<'a> {
     request_id: Option<Cow<'a, str>>,
     #[serde(default, borrow)]
     attachments: Vec<Item<'a>>,
+    #[serde(default)]
+    transcribe_voice: bool,
+    #[serde(default, borrow)]
+    typed_text: Option<Cow<'a, str>>,
+    #[serde(default)]
+    voice: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -86,10 +103,19 @@ struct Item<'a> {
 
 /// The prompt, its request ID and its attachments, from the phone's JSON.
 /// Strings are borrowed from the body: an upload is never copied whole.
+#[allow(dead_code)]
 pub fn parse(body: &str) -> Result<(String, String, Vec<Attachment>), String> {
+    let parsed = parse_request(body)?;
+    Ok((parsed.text, parsed.request, parsed.attachments))
+}
+
+pub fn parse_request(body: &str) -> Result<ParsedRequest, String> {
     let body: Body = serde_json::from_str(body).map_err(|_| "bad_json")?;
     let request = body.request_id.as_deref().ok_or("invalid_request_id")?;
     validate_prompt(&body.text, request)?;
+    if let Some(typed) = body.typed_text.as_deref() {
+        validate_prompt(typed, request)?;
+    }
     if body.attachments.is_empty() {
         return Err("missing_attachments".into());
     }
@@ -118,7 +144,84 @@ pub fn parse(body: &str) -> Result<(String, String, Vec<Attachment>), String> {
         };
         attachments.push(Attachment { kind, name: safe_name(&item.name, kind), bytes });
     }
-    Ok((body.text.into_owned(), request.to_string(), attachments))
+    Ok(ParsedRequest {
+        text: body.text.into_owned(),
+        request: request.to_string(),
+        attachments,
+        transcribe_voice: body.transcribe_voice,
+        typed_text: body.typed_text.map(Cow::into_owned),
+        voice: body.voice,
+    })
+}
+
+pub fn is_voice_attachment(attachment: &Attachment) -> bool {
+    attachment.kind == Kind::File
+        && (attachment.name.to_ascii_lowercase().ends_with(".wav")
+            || crate::transcribe::looks_like_wav(&attachment.bytes))
+}
+
+pub struct TranscribedVoice {
+    pub combined_text: String,
+    pub transcript: String,
+    pub engine: &'static str,
+    pub remaining: Vec<Attachment>,
+}
+
+/// If the phone asked to transcribe voice clips on the PC, attempt Whisper STT
+/// on every voice WAV attachment before staging files. Returns `None` on
+/// unavailability, failure, or empty speech so callers fall back seamlessly to
+/// delivering the raw WAV attachment under `[Voice prompt]`.
+pub fn resolve_voice_transcription_with(
+    parsed: &ParsedRequest,
+    mut transcribe: impl FnMut(&[u8]) -> Result<(String, &'static str), &'static str>,
+) -> Option<TranscribedVoice> {
+    if !parsed.transcribe_voice || parsed.voice == Some(false) {
+        return None;
+    }
+    if !parsed.attachments.iter().any(is_voice_attachment) {
+        return None;
+    }
+    let mut spoken_parts = Vec::new();
+    let mut remaining = Vec::new();
+    let mut engine_used = None;
+    for attachment in &parsed.attachments {
+        if is_voice_attachment(attachment) {
+            let Ok((text, engine)) = transcribe(&attachment.bytes) else {
+                return None;
+            };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            spoken_parts.push(trimmed.to_string());
+            engine_used = Some(engine);
+        } else {
+            remaining.push(attachment.clone());
+        }
+    }
+    let transcript = spoken_parts.join(" ");
+    let base_typed = match parsed.typed_text.as_deref() {
+        Some(t) => t.trim(),
+        None => {
+            let trimmed = parsed.text.trim();
+            if matches!(trimmed, "[Voice prompt]" | "[Voice note]") {
+                ""
+            } else {
+                trimmed
+            }
+        }
+    };
+    let combined_text = if base_typed.is_empty() {
+        transcript.clone()
+    } else {
+        format!("{base_typed}\n\n{transcript}")
+    };
+    Some(TranscribedVoice {
+        combined_text,
+        transcript,
+        engine: engine_used?,
+        remaining,
+    })
 }
 
 /// Strict base64: only the canonical encoding of the bytes it decodes to.
@@ -561,7 +664,11 @@ pub fn submit(
     if !authorized() {
         return Err("device_revoked".into());
     }
-    let paths = stage(&store_dir()?, &request_key(owner, session, request), attachments)?;
+    let paths = if attachments.is_empty() {
+        Vec::new()
+    } else {
+        stage(&store_dir()?, &request_key(owner, session, request), attachments)?
+    };
     if !authorized() {
         return Err("device_revoked".into());
     }
@@ -1102,5 +1209,35 @@ mod tests {
         let many: Vec<PathBuf> = (0..=MAX_LOCAL_ATTACHMENTS).map(|_| doc.clone()).collect();
         assert_eq!(insert_local(shell, &many), Err("too_many_attachments".into()));
         assert_eq!(std::fs::read(&shell_out).unwrap(), format!("\x1b[200~ {} {} \x1b[201~", shell_quote(&doc), shell_quote(&odd)).as_bytes());
+    }
+
+    #[test]
+    fn voice_transcription_replaces_wav_only_when_requested_and_non_empty() {
+        let wav = b"RIFF\x24\x00\x00\x00WAVEdata\x00\x00\x00\x00".to_vec();
+        let doc = b"hello".to_vec();
+        let request_id = "a".repeat(32);
+        let body = serde_json::json!({
+            "requestId": request_id,
+            "text": "[Voice prompt]",
+            "typedText": "Check logs",
+            "transcribeVoice": true,
+            "voice": true,
+            "attachments": [
+                {"kind": "file", "name": "voice-1.wav", "dataBase64": STANDARD.encode(&wav)},
+                {"kind": "file", "name": "notes.txt", "dataBase64": STANDARD.encode(&doc)}
+            ]
+        })
+        .to_string();
+        let parsed = parse_request(&body).unwrap();
+        assert!(parsed.transcribe_voice);
+        let resolved = resolve_voice_transcription_with(&parsed, |_| Ok(("run tests now".into(), "whisper-cpp"))).unwrap();
+        assert_eq!(resolved.transcript, "run tests now");
+        assert_eq!(resolved.combined_text, "Check logs\n\nrun tests now");
+        assert_eq!(resolved.engine, "whisper-cpp");
+        assert_eq!(resolved.remaining.len(), 1);
+        assert_eq!(resolved.remaining[0].name, "notes.txt");
+
+        // Unavailable Whisper falls back cleanly to raw attachments.
+        assert!(resolve_voice_transcription_with(&parsed, |_| Err("stt_unavailable")).is_none());
     }
 }

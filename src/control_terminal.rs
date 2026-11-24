@@ -407,6 +407,8 @@ fn lifecycle(card: &TerminalData, pane: &Pane, deadline: Instant) -> Result<Valu
         supported: false,
         state: "unknown".into(),
         completion_id: None,
+        attention: None,
+        attention_id: None,
     };
     let mut native = false;
     if !pane.dead {

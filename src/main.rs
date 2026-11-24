@@ -33,6 +33,7 @@ mod assets;
 mod asset_references;
 mod asset_history;
 mod completion;
+mod transcribe;
 mod custom_harness;
 mod prompt_image;
 mod prompt_attachments;
@@ -1662,6 +1663,29 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             } else {
                 json!({ "ok": false, "error": "no_such_session", "id": sess }).to_string()
             }
+        }
+        "relaunch-term" => {
+            let Some(sess) = parts.get(1) else {
+                return json!({ "ok": false, "error": "missing_session" }).to_string();
+            };
+            if !sess.starts_with("sd_term_") {
+                return json!({ "ok": false, "error": "foreign_session" }).to_string();
+            }
+            let mode = parts.get(2).copied().unwrap_or("fresh");
+            let Some(resume) = (match mode {
+                "fresh" => Some(false),
+                "resume" => Some(true),
+                _ => None,
+            }) else {
+                return json!({ "ok": false, "error": "invalid_mode", "id": sess }).to_string();
+            };
+            if let Some(win) = &ctx.borrow().window {
+                return match win.relaunch_terminal(sess, resume) {
+                    Ok(()) => json!({ "ok": true, "id": sess, "mode": mode }).to_string(),
+                    Err(err) => json!({ "ok": false, "error": err, "id": sess }).to_string(),
+                };
+            }
+            json!({ "ok": false, "error": "desktop_unavailable", "id": sess }).to_string()
         }
         "reload-theme" | "refresh-theme" | "theme-reload" => {
             let t = styles::reload_styles();

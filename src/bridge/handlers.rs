@@ -208,6 +208,48 @@ pub(in crate::bridge) fn handle_close_harness(stream: &mut Connection, req: &Req
     }
 }
 
+/// `POST /api/v1/harnesses/<id>/relaunch` — restart a card fresh or resume its conversation.
+pub(in crate::bridge) fn handle_relaunch_harness(stream: &mut Connection, req: &Request, id: &str) {
+    if !require_pairing(stream, &req.headers, Envelope::Plain) {
+        return;
+    }
+    if !id.starts_with("sd_term_") {
+        return reply_error(stream, 404, Envelope::Plain, "no_such_session");
+    }
+    let Ok(body) = serde_json::from_str::<serde_json::Value>(&req.body) else {
+        return reply_error(stream, 400, Envelope::Plain, "bad_json");
+    };
+    let mode = match body.get("mode") {
+        None => "fresh",
+        Some(v) => match v.as_str() {
+            Some("fresh") => "fresh",
+            Some("resume") => "resume",
+            _ => return reply_error(stream, 400, Envelope::Plain, "invalid_mode"),
+        },
+    };
+    match crate::ipc_request(&format!("relaunch-term {id} {mode}")) {
+        crate::Ipc::Reply(reply) => {
+            let result: serde_json::Value =
+                serde_json::from_str(&reply).unwrap_or(serde_json::Value::Null);
+            if result.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return reply_json(stream, 200, &result);
+            }
+            match result.get("error").and_then(|v| v.as_str()) {
+                Some("no_such_session") => reply_error(stream, 404, Envelope::Plain, "no_such_session"),
+                Some("unsupported_resume") => reply_error(stream, 400, Envelope::Plain, "unsupported_resume"),
+                Some("invalid_arguments") => reply_error(stream, 400, Envelope::Plain, "invalid_arguments"),
+                Some("invalid_state") => reply_error(stream, 409, Envelope::Plain, "invalid_state"),
+                Some("desktop_unavailable") => reply_error(stream, 503, Envelope::Plain, "desktop_unavailable"),
+                _ => reply_error(stream, 500, Envelope::Plain, "relaunch_failed"),
+            }
+        }
+        crate::Ipc::NoDaemon => reply_error(stream, 503, Envelope::Plain, "desktop_not_running"),
+        crate::Ipc::Stalled => {
+            reply_error(stream, 504, Envelope::Plain, "relaunch_timeout_check_machine_before_retry")
+        }
+    }
+}
+
 pub(in crate::bridge) fn creation_command(agent: &str, body: &serde_json::Value) -> Option<String> {
     if let Some(value) = body.get("workspace") {
         let directory = value.as_str().and_then(crate::state::clean_dir)?;
@@ -268,6 +310,28 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
         if !require_pairing(stream, &req.headers, Envelope::Plain) { return; }
         return previews::handle(stream, req);
     }
+    if req.method == "POST" && crate::transcribe::route(path) {
+        if !require_pairing(stream, &req.headers, Envelope::Plain) {
+            return;
+        }
+        stream.streaming();
+        stream.persist = false;
+        let wav = match crate::transcribe::parse_request(&req.body) {
+            Ok(bytes) => bytes,
+            Err(error) => return reply_error(stream, 400, Envelope::Plain, error),
+        };
+        return match crate::transcribe::transcribe_wav(&wav) {
+            Ok((text, engine)) => reply_json(
+                stream,
+                200,
+                &serde_json::json!({"text": text, "engine": engine}),
+            ),
+            Err("stt_unavailable") => {
+                reply_error(stream, 501, Envelope::Plain, "stt_unavailable")
+            }
+            Err(error) => reply_error(stream, 502, Envelope::Plain, error),
+        };
+    }
     if req.method == "POST" {
         let image = crate::prompt_image::route(path);
         if let Some(session) = image.or_else(|| crate::prompt_attachments::route(path)) {
@@ -278,17 +342,47 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
             // Uploads run under their own long deadline: never reuse the socket.
             stream.persist = false;
             let owner = security::digest(bearer(&req.headers).as_bytes());
+            let mut transcribed: Option<(String, &'static str)> = None;
             let result = if image.is_some() {
                 let body = serde_json::from_str(&req.body).unwrap_or_default();
                 crate::prompt_image::submit(session, &owner, &body, || stream.still_authorized())
             } else {
-                crate::prompt_attachments::parse(&req.body).and_then(|(text, request, attachments)| {
-                    crate::prompt_attachments::submit(session, &owner, &text, &request, &attachments, || stream.still_authorized())
+                crate::prompt_attachments::parse_request(&req.body).and_then(|parsed| {
+                    if let Some(voiced) = crate::prompt_attachments::resolve_voice_transcription_with(
+                        &parsed,
+                        crate::transcribe::transcribe_wav,
+                    ) {
+                        transcribed = Some((voiced.transcript, voiced.engine));
+                        crate::prompt_attachments::submit(
+                            session,
+                            &owner,
+                            &voiced.combined_text,
+                            &parsed.request,
+                            &voiced.remaining,
+                            || stream.still_authorized(),
+                        )
+                    } else {
+                        crate::prompt_attachments::submit(
+                            session,
+                            &owner,
+                            &parsed.text,
+                            &parsed.request,
+                            &parsed.attachments,
+                            || stream.still_authorized(),
+                        )
+                    }
                 })
             };
             wake_terminal_streams(session);
             return match result {
-                Ok(()) => reply_json(stream, 200, &serde_json::json!({"status":"submitted"})),
+                Ok(()) => {
+                    let body = if let Some((transcript, engine)) = transcribed {
+                        serde_json::json!({"status": "submitted", "transcript": transcript, "engine": engine})
+                    } else {
+                        serde_json::json!({"status": "submitted"})
+                    };
+                    reply_json(stream, 200, &body)
+                }
                 Err(error) => reply_error(stream, 409, Envelope::Plain, error),
             };
         }
@@ -434,6 +528,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                     ("GET", "prompts") => return handle_prompts(stream, req, id),
                     ("POST", "keys") => return handle_keys(stream, req, id),
                     ("POST", "editor-action") => return handle_editor_action(stream, req, id),
+                    ("POST", "relaunch") => return handle_relaunch_harness(stream, req, id),
                     _ => {}
                 }
             }
@@ -561,6 +656,12 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                 return;
             }
             reply_json(stream, 200, &theme_document());
+        }
+        ("GET", "/api/v1/transcribe") => {
+            if !require_pairing(stream, &req.headers, Envelope::Plain) {
+                return;
+            }
+            reply_json(stream, 200, &crate::transcribe::status_json());
         }
         // Full document on connect, then on every change (1s poll).
         ("GET", "/api/v1/harnesses/stream") => {

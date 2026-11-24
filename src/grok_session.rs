@@ -1,6 +1,7 @@
 //! Launch-scoped session tracking, status, completion, history, and resume helpers for Grok CLI.
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs::{self, File},
@@ -26,8 +27,14 @@ pub struct GrokCompletion {
     pub events_path: PathBuf,
     pub state: &'static str,
     pub completion_id: Option<String>,
+    pub attention: Option<&'static str>,
+    pub attention_id: Option<String>,
     pub title: Option<String>,
     pub prompt: Option<String>,
+}
+
+fn hex_id(input: &str) -> String {
+    format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 
 pub fn sessions_dir() -> Option<PathBuf> {
@@ -341,14 +348,50 @@ pub fn inspect_completion_in(dir: &Path, session_id: &str) -> Option<GrokComplet
     let prompt = prompts_in(dir, 1).into_iter().next().map(|(p, _)| p);
 
     match status.0 {
-        "running" | "waiting" => Some(GrokCompletion {
+        "running" => Some(GrokCompletion {
             dir: dir.to_path_buf(),
             events_path,
             state: "working",
             completion_id: None,
+            attention: None,
+            attention_id: None,
             title,
             prompt,
         }),
+        "waiting" => {
+            let wait_key = lines
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(idx, line)| {
+                    let ev = parse_event_line(line)?;
+                    let kind = ev
+                        .get("type")
+                        .or_else(|| ev.get("event"))
+                        .and_then(Value::as_str)?;
+                    if kind == "permission_requested" || kind == "phase_changed" {
+                        let ts = ev.get("timestamp").and_then(Value::as_str).unwrap_or("");
+                        let turn = ev
+                            .get("turn_number")
+                            .and_then(Value::as_u64)
+                            .map(|n| n.to_string())
+                            .unwrap_or_default();
+                        return Some(format!("{kind}:{turn}:{ts}:{idx}"));
+                    }
+                    None
+                })
+                .unwrap_or_else(|| "waiting".to_string());
+            Some(GrokCompletion {
+                dir: dir.to_path_buf(),
+                events_path,
+                state: "working",
+                completion_id: None,
+                attention: Some("waiting"),
+                attention_id: Some(hex_id(&format!("grok:{session_id}:waiting:{wait_key}"))),
+                title,
+                prompt,
+            })
+        }
         "idle" => {
             let ended = lines.iter().enumerate().rev().find_map(|(idx, line)| {
                 let ev = parse_event_line(line)?;
@@ -363,27 +406,43 @@ pub fn inspect_completion_in(dir: &Path, session_id: &str) -> Option<GrokComplet
                 .get("outcome")
                 .and_then(Value::as_str)
                 .unwrap_or("completed");
-            if matches!(outcome, "error" | "failed" | "aborted" | "cancelled") {
-                return Some(GrokCompletion {
-                    dir: dir.to_path_buf(),
-                    events_path,
-                    state: "error",
-                    completion_id: None,
-                    title,
-                    prompt,
-                });
-            }
             let turn_key = ev
                 .get("turn_number")
                 .and_then(Value::as_u64)
                 .map(|n| format!("turn-{n}"))
                 .or_else(|| ev.get("timestamp").and_then(Value::as_str).map(str::to_owned))
                 .unwrap_or_else(|| format!("line-{idx}"));
+            if matches!(outcome, "error" | "failed") {
+                return Some(GrokCompletion {
+                    dir: dir.to_path_buf(),
+                    events_path,
+                    state: "error",
+                    completion_id: None,
+                    attention: Some("error"),
+                    attention_id: Some(hex_id(&format!("grok:{session_id}:error:{turn_key}"))),
+                    title,
+                    prompt,
+                });
+            }
+            if matches!(outcome, "aborted" | "cancelled") {
+                return Some(GrokCompletion {
+                    dir: dir.to_path_buf(),
+                    events_path,
+                    state: "error",
+                    completion_id: None,
+                    attention: None,
+                    attention_id: None,
+                    title,
+                    prompt,
+                });
+            }
             Some(GrokCompletion {
                 dir: dir.to_path_buf(),
                 events_path,
                 state: "completed",
-                completion_id: Some(format!("grok:{session_id}:{turn_key}")),
+                completion_id: Some(hex_id(&format!("grok:{session_id}:{turn_key}"))),
+                attention: None,
+                attention_id: None,
                 title,
                 prompt,
             })
@@ -625,6 +684,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(inspect_status_in(&dir), Some(("waiting", "Waiting")));
+        let c_wait = inspect_completion_in(&dir, "sess-1").unwrap();
+        assert_eq!(c_wait.state, "working");
+        assert_eq!(c_wait.attention, Some("waiting"));
+        assert!(c_wait.attention_id.as_deref().is_some_and(|id| id.len() == 64));
 
         fs::write(
             dir.join("events.jsonl"),
@@ -632,6 +695,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(inspect_status_in(&dir), Some(("running", "Running")));
+        let c_run = inspect_completion_in(&dir, "sess-1").unwrap();
+        assert_eq!(c_run.attention, None);
+        assert_eq!(c_run.attention_id, None);
+
+        fs::write(
+            dir.join("events.jsonl"),
+            "{\"type\":\"turn_started\",\"turn_number\":2}\n{\"type\":\"turn_ended\",\"turn_number\":2,\"outcome\":\"failed\"}\n",
+        )
+        .unwrap();
+        let c_err = inspect_completion_in(&dir, "sess-1").unwrap();
+        assert_eq!(c_err.state, "error");
+        assert_eq!(c_err.attention, Some("error"));
+        assert!(c_err.attention_id.as_deref().is_some_and(|id| id.len() == 64));
 
         fs::write(
             dir.join("events.jsonl"),
@@ -641,7 +717,12 @@ mod tests {
         assert_eq!(inspect_status_in(&dir), Some(("idle", "Idle")));
         let c2 = inspect_completion_in(&dir, "sess-1").unwrap();
         assert_eq!(c2.state, "completed");
-        assert_eq!(c2.completion_id.as_deref(), Some("grok:sess-1:turn-2"));
+        assert_eq!(
+            c2.completion_id.as_deref(),
+            Some(hex_id("grok:sess-1:turn-2").as_str())
+        );
+        assert_eq!(c2.attention, None);
+        assert_eq!(c2.attention_id, None);
         assert_eq!(c2.title.as_deref(), Some("Fix cache bug"));
         assert_eq!(c2.prompt.as_deref(), Some("Fix the login redirect"));
         assert_eq!(

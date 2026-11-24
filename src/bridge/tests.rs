@@ -565,16 +565,26 @@ fn replies_keep_their_exact_status_lines_headers_and_bodies() {
     let browser = "GET /api/v1/ping HTTP/1.1\r\nOrigin: https://x\r\nConnection: close\r\n\r\n".to_string();
     let browser_upload = format!("POST /api/v1/harnesses/{live}/image-prompt HTTP/1.1\r\nOrigin: https://x\r\nConnection: close\r\n\r\n");
     let oversized = |route: &str| format!("POST /api/v1/harnesses/{live}/{route} HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n", paired_token());
+    let oversized_transcribe = format!("POST /api/v1/transcribe HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 999999999\r\nConnection: close\r\n\r\n", paired_token());
     let cases = [
         (browser, "403 Forbidden", r#"{"error":"browser_access_disabled"}"#.to_string()),
         (browser_upload, "403 Forbidden", r#"{"error":"browser_access_disabled"}"#.into()),
         (http("GET", "/api/v1/desktop/capabilities", None, ""), "401 Unauthorized", r#"{"error":"not_paired"}"#.into()),
         (http("GET", "/api/v1/harnesses", None, ""), "401 Unauthorized", r#"{"error":"not_paired","status":"error"}"#.into()),
+        (http("GET", "/api/v1/transcribe", None, ""), "401 Unauthorized", r#"{"error":"not_paired"}"#.into()),
         (http("POST", &format!("/api/v1/harnesses/{live}/image-prompt"), None, "{}"), "401 Unauthorized", r#"{"error":"not_paired"}"#.into()),
         (oversized("image-prompt"), "413 Payload Too Large", r#"{"error":"image_too_large"}"#.into()),
         (oversized("attachment-prompt"), "413 Payload Too Large", r#"{"error":"attachments_too_large"}"#.into()),
+        (oversized_transcribe, "413 Payload Too Large", r#"{"error":"audio_too_large"}"#.into()),
+        (http("GET", "/api/v1/transcribe", token, ""), "200 OK", crate::transcribe::status_json().to_string()),
+        (http("POST", "/api/v1/transcribe", token, "nope"), "400 Bad Request", r#"{"error":"bad_json"}"#.into()),
+        (http("POST", "/api/v1/transcribe", token, "{}"), "400 Bad Request", r#"{"error":"empty_audio"}"#.into()),
         (http("GET", "/api/v1/nope", None, ""), "404 Not Found", r#"{"error":"not found"}"#.into()),
         (http("GET", "/api/v1/theme", token, ""), "200 OK", theme_document().to_string()),
+        (http("POST", "/api/v1/harnesses/other/relaunch", token, "{}"), "404 Not Found", r#"{"error":"not found"}"#.into()),
+        (http("POST", &format!("/api/v1/harnesses/{live}/relaunch"), token, "nope"), "400 Bad Request", r#"{"error":"bad_json"}"#.into()),
+        (http("POST", &format!("/api/v1/harnesses/{live}/relaunch"), token, r#"{"mode":"bogus"}"#), "400 Bad Request", r#"{"error":"invalid_mode"}"#.into()),
+        (http("POST", &format!("/api/v1/harnesses/{missing}/relaunch"), token, r#"{"mode":"fresh"}"#), "503 Service Unavailable", r#"{"error":"desktop_not_running"}"#.into()),
         (http("GET", "/api/v1/desktop/commands", token, ""), "405 Method Not Allowed", r#"{"error":"method_not_allowed"}"#.into()),
         (http("POST", "/api/v1/desktop/commands", token, "nope"), "400 Bad Request", r#"{"error":"invalid_command"}"#.into()),
         (http("POST", "/api/v1/desktop/commands", token, &command("another-machine")), "409 Conflict", r#"{"error":"wrong_machine"}"#.into()),
@@ -625,7 +635,7 @@ fn replies_keep_their_exact_status_lines_headers_and_bodies() {
 fn every_status_the_bridge_sends_has_its_reason_phrase() {
     let mut codes: Vec<u16> = crate::desktop_protocol::COMMAND_ERRORS.iter()
         .map(|error| crate::desktop_protocol::command_status(error)).collect();
-    codes.extend([200, 201, 202, 400, 401, 403, 404, 405, 409, 413, 429, 500, 502, 503, 504]);
+    codes.extend([200, 201, 202, 400, 401, 403, 404, 405, 409, 413, 429, 500, 501, 502, 503, 504]);
     for code in codes {
         assert_ne!(reason_phrase(code), "Unknown", "{code}");
     }
@@ -674,4 +684,26 @@ fn test_bridge_log_sits_next_to_the_bridge_config() {
         state_path().parent(),
         "the bridge log belongs in the harness-bridge state dir"
     );
+}
+
+#[test]
+fn completion_json_omits_absent_attention_and_includes_present_attention() {
+    let base = crate::completion::Completion {
+        id: "sd_term_a".into(),
+        supported: true,
+        state: "working".into(),
+        completion_id: None,
+        attention: None,
+        attention_id: None,
+    };
+    let plain = serde_json::to_value(&base).unwrap();
+    assert!(plain.get("attention").is_none());
+    assert!(plain.get("attentionId").is_none());
+
+    let mut waiting = base;
+    waiting.attention = Some("waiting".into());
+    waiting.attention_id = Some("f".repeat(64));
+    let alerted = serde_json::to_value(&waiting).unwrap();
+    assert_eq!(alerted["attention"], "waiting");
+    assert_eq!(alerted["attentionId"], "f".repeat(64));
 }

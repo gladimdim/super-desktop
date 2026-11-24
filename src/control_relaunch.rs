@@ -59,6 +59,51 @@ fn prepare(card:&crate::state::TerminalData,native:Option<&str>)->Result<Prepare
     }
     Ok(Prepared {harness:card.agent_type.clone(),directory:cwd.clone(),command})
 }
+
+/// Resolve a fresh restart or conversation resume for a live desktop card
+/// requested over the phone bridge (`POST /api/v1/harnesses/<id>/relaunch`).
+pub fn prepare_for_bridge(
+    card: &crate::state::TerminalData,
+    resume: bool,
+    live_native_session: Option<&str>,
+) -> Result<Prepared, (&'static str, &'static str)> {
+    let cwd = match card.workspace_dir.as_deref() {
+        Some(dir) => {
+            let path = std::path::Path::new(dir);
+            if !path.is_absolute() || !path.is_dir() || dir.contains('\0') {
+                return Err(("invalid_state", "The recorded workspace is unavailable."));
+            }
+            dir.to_string()
+        }
+        None => crate::tmux::resolve_workspace_dir(None),
+    };
+    if card.command.len() > 32768 || card.command.contains('\0') {
+        return Err(("invalid_state", "The recorded command is invalid."));
+    }
+    let custom = (!card.command.is_empty()).then_some(card.command.as_str());
+    if !resume {
+        return Ok(Prepared {
+            harness: card.agent_type.clone(),
+            directory: cwd,
+            command: crate::tmux::resolve_command(&card.agent_type, custom),
+        });
+    }
+    if crate::shell_title::is_regular(&card.agent_type) {
+        return Err(("unsupported_resume", "Shell sessions do not have a conversation to resume."));
+    }
+    let native = live_native_session.or(card.agent_session_id.as_deref());
+    let command = crate::tmux::resolve_resume_command_in(
+        &card.agent_type,
+        custom,
+        native,
+        Some(&cwd),
+    );
+    Ok(Prepared {
+        harness: card.agent_type.clone(),
+        directory: cwd,
+        command,
+    })
+}
 pub fn execute(root:&std::path::Path,request:&Request,deadline:Instant,mut ui:impl FnMut(Action)->Result<UiResult,()>,adopt:impl FnOnce(crate::state::TerminalData,Instant)->Result<(),()>)->Reply{
     crate::control_journal::execute(root,request,|new_id|{
         let fail=|code,message|Reply::failure(&request.request_id,code,message);
@@ -162,5 +207,34 @@ pub fn execute(root:&std::path::Path,request:&Request,deadline:Instant,mut ui:im
             shlex::split(&prepare(&hermes, Some("hermes-42")).unwrap().command).unwrap(),
             ["/usr/bin/hermes", "--cli", "--resume", "hermes-42"]
         );
+    }
+
+    #[test]
+    fn bridge_relaunch_prepares_fresh_or_resume_and_rejects_shells_on_resume() {
+        let cwd = std::env::temp_dir().to_string_lossy().into_owned();
+        let claude: crate::state::TerminalData = serde_json::from_value(json!({
+            "id": "c", "session_name": "sd_term_c", "agent_type": "claude",
+            "command": "/bin/claude --model opus",
+            "x": 0, "y": 0, "workspace_dir": cwd, "created_at": 1
+        }))
+        .unwrap();
+        let fresh = prepare_for_bridge(&claude, false, None).unwrap();
+        assert!(fresh.command.starts_with("/bin/claude --model opus"));
+        assert!(!fresh.command.contains("--continue"));
+        assert!(!fresh.command.contains("--resume"));
+        let resumed = prepare_for_bridge(&claude, true, None).unwrap();
+        assert!(resumed.command.contains("--continue") || resumed.command.contains("--resume"));
+
+        let shell: crate::state::TerminalData = serde_json::from_value(json!({
+            "id": "s", "session_name": "sd_term_s", "agent_type": "shell",
+            "command": "/bin/sh",
+            "x": 0, "y": 0, "workspace_dir": "/", "created_at": 1
+        }))
+        .unwrap();
+        match prepare_for_bridge(&shell, true, None) {
+            Err((code, _)) => assert_eq!(code, "unsupported_resume"),
+            Ok(_) => panic!("shell resume should fail"),
+        }
+        assert!(prepare_for_bridge(&shell, false, None).is_ok());
     }
 }

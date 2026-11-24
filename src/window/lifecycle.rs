@@ -9,6 +9,20 @@ impl SuperDesktopWindow {
         close_session_card(&self.terminal_cards, &self.canvas, &self.state, &self.ghosts, sess)
     }
 
+    pub fn relaunch_terminal(&self, sess: &str, resume: bool) -> Result<(), &'static str> {
+        let card = self
+            .terminal_cards
+            .borrow()
+            .iter()
+            .find(|c| c.data.borrow().session_name == sess)
+            .cloned()
+            .ok_or("no_such_session")?;
+        let snapshot = card.data.borrow().clone();
+        crate::control_relaunch::prepare_for_bridge(&snapshot, resume, None).map_err(|(code, _)| code)?;
+        card.restart(resume);
+        Ok(())
+    }
+
     /// Move one local card to a host-pixel origin and raise it.
     ///
     /// Used when a remote viewer drops the card. The icon and the open card

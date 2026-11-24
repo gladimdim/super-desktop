@@ -18,6 +18,18 @@ pub struct Completion {
     pub supported: bool,
     pub state: String,
     pub completion_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_id: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct ParsedTail {
+    state: String,
+    completion_id: Option<String>,
+    attention: Option<String>,
+    attention_id: Option<String>,
 }
 
 fn unknown(id: &str) -> Completion {
@@ -28,15 +40,20 @@ fn unknown(id: &str) -> Completion {
     }
 }
 
-fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
+fn parse_tail_detail(bytes: &[u8], identity: &str) -> ParsedTail {
     // A partially written newer event could be a new turn or cancellation.
     if !bytes.is_empty() && !bytes.ends_with(b"\n") {
-        return ("unknown".into(), None);
+        return ParsedTail {
+            state: "unknown".into(),
+            ..Default::default()
+        };
     }
     let mut state = "unknown";
     let mut completed = None;
+    let mut attention: Option<&'static str> = None;
+    let mut attention_id: Option<String> = None;
     // Ignore an unfinished final JSON line. Never scan text inside response bodies.
-    for record in json_lines(bytes) {
+    for (index, record) in json_lines(bytes).enumerate() {
         if record["type"] != "event_msg" {
             continue;
         }
@@ -45,25 +62,52 @@ fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
             Some("task_started" | "turn_started" | "user_message") => {
                 state = "working";
                 completed = None;
+                attention = None;
+                attention_id = None;
             }
             // An interrupted turn says nothing about the next state.
             Some("turn_aborted") => {
                 state = "unknown";
                 completed = None;
+                attention = None;
+                attention_id = None;
+            }
+            Some("approval_requested" | "request_user_input") => {
+                attention = Some("waiting");
+                let turn = event["turn_id"].as_str().unwrap_or("");
+                let call = event["call_id"].as_str().unwrap_or("");
+                attention_id = Some(format!(
+                    "{:x}",
+                    Sha256::digest(format!("{identity}\0waiting\0{turn}\0{call}\0{index}"))
+                ));
             }
             // Explicit turn failures (Codex >= 0.1xx reports a usage limit as
             // `task_complete` with an `error` object and no final message).
-            Some("task_failed" | "error") => {
+            Some(kind @ ("task_failed" | "error")) => {
                 state = "error";
                 completed = None;
+                attention = Some("error");
+                let turn = event["turn_id"].as_str().unwrap_or("");
+                attention_id = Some(format!(
+                    "{:x}",
+                    Sha256::digest(format!("{identity}\0error\0{kind}\0{turn}\0{index}"))
+                ));
             }
             Some("task_complete") if event["error"].is_object() => {
                 state = "error";
                 completed = None;
+                attention = Some("error");
+                let turn = event["turn_id"].as_str().unwrap_or("");
+                attention_id = Some(format!(
+                    "{:x}",
+                    Sha256::digest(format!("{identity}\0error\0task_complete\0{turn}\0{index}"))
+                ));
             }
             Some("task_complete") => {
                 state = "unknown";
                 completed = None;
+                attention = None;
+                attention_id = None;
                 if let (Some(turn), Some(message)) = (
                     event["turn_id"].as_str(),
                     event["last_agent_message"].as_str(),
@@ -80,7 +124,18 @@ fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
             _ => {}
         }
     }
-    (state.into(), completed)
+    ParsedTail {
+        state: state.into(),
+        completion_id: completed,
+        attention: attention.map(str::to_string),
+        attention_id,
+    }
+}
+
+#[cfg(test)]
+fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
+    let parsed = parse_tail_detail(bytes, identity);
+    (parsed.state, parsed.completion_id)
 }
 
 /// Cached `rollout` answers: `(found_at, pane start time, answer)`.
@@ -358,7 +413,7 @@ fn prompt_records(bytes: &[u8]) -> Vec<crate::harness_record::PromptRecord> {
 }
 
 /// A rollout's parsed tail, or `None` when it is not an interactive CLI rollout.
-type Inspected = Option<(String, Option<String>)>;
+type Inspected = Option<ParsedTail>;
 static CACHE: OnceLock<Mutex<HashMap<String, (Stamp, Inspected)>>> = OnceLock::new();
 
 pub(crate) fn inspect(id: &str, pid: u32) -> Completion {
@@ -389,12 +444,14 @@ fn inspect_rollout(id: &str, found: Option<(PathBuf, String)>) -> Completion {
         if file.metadata().ok().map(|after| stamp(&after)) != Some(before) {
             return None;
         }
-        Some(parse_tail(&tail, &identity))
+        Some(parse_tail_detail(&tail, &identity))
     });
-    if let Some((state, completion_id)) = parsed {
+    if let Some(parsed) = parsed {
         result.supported = true;
-        result.state = state;
-        result.completion_id = completion_id;
+        result.state = parsed.state;
+        result.completion_id = parsed.completion_id;
+        result.attention = parsed.attention;
+        result.attention_id = parsed.attention_id;
     }
     result
 }
@@ -471,6 +528,8 @@ pub fn collect_watched(ids: &[String]) -> (Vec<Completion>, Watched) {
                             supported: true,
                             state: found.state.into(),
                             completion_id: found.completion_id,
+                            attention: found.attention.map(str::to_string),
+                            attention_id: found.attention_id,
                         })
                     } else {
                         unknown(id)
@@ -528,8 +587,20 @@ fn session_panes<'a>(listing: &'a str, id: &str) -> Vec<(u32, &'a str)> {
 }
 
 pub(crate) fn native_completion(id: &str, metadata: &crate::harness_metadata::Metadata) -> Completion {
+    let (attention, attention_id) = if matches!(metadata.status.as_str(), "waiting" | "error") {
+        (Some(metadata.status.clone()), metadata.attention_id.clone())
+    } else {
+        (None, None)
+    };
     if !crate::harness_record::reports_completion(&metadata.agent) || !metadata.completion_supported {
-        return unknown(id);
+        return Completion {
+            id: id.into(),
+            supported: false,
+            state: "unknown".into(),
+            completion_id: None,
+            attention,
+            attention_id,
+        };
     }
     let state = match metadata.status.as_str() {
         "working" => "working",
@@ -545,6 +616,8 @@ pub(crate) fn native_completion(id: &str, metadata: &crate::harness_metadata::Me
         } else {
             None
         },
+        attention,
+        attention_id,
     }
 }
 
@@ -614,8 +687,33 @@ mod tests {
         assert_eq!(parse_tail(format!("{started}{message}").as_bytes(), "a").0, "working");
         // An interrupt still reports UNKNOWN, and the phone API keeps its three states.
         assert_eq!(parse_tail(format!("{started}{}", event("turn_aborted")).as_bytes(), "a").0, "unknown");
-        let failed = Completion { id: "t".into(), supported: true, state: "error".into(), completion_id: None };
-        assert_eq!(api_state(failed).state, "unknown");
+        let failed = Completion {
+            id: "t".into(),
+            supported: true,
+            state: "error".into(),
+            completion_id: None,
+            attention: Some("error".into()),
+            attention_id: Some("b".repeat(64)),
+        };
+        let mapped = api_state(failed);
+        assert_eq!(mapped.state, "unknown");
+        assert_eq!(mapped.attention.as_deref(), Some("error"));
+
+        let wait_log = format!("{started}{}", event("approval_requested"));
+        let wait_parsed = parse_tail_detail(wait_log.as_bytes(), "a");
+        assert_eq!(wait_parsed.state, "working");
+        assert_eq!(wait_parsed.completion_id, None);
+        assert_eq!(wait_parsed.attention.as_deref(), Some("waiting"));
+        assert!(wait_parsed.attention_id.as_deref().is_some_and(|id| id.len() == 64));
+
+        let err_parsed = parse_tail_detail(format!("{DONE}{started}{USAGE_LIMIT}").as_bytes(), "a");
+        assert_eq!(err_parsed.state, "error");
+        assert_eq!(err_parsed.attention.as_deref(), Some("error"));
+        assert!(err_parsed.attention_id.as_deref().is_some_and(|id| id.len() == 64));
+        // A new turn clears attention cleanly.
+        let cleared = parse_tail_detail(format!("{wait_log}{}", event("task_started")).as_bytes(), "a");
+        assert_eq!(cleared.attention, None);
+        assert_eq!(cleared.attention_id, None);
     }
 
     const DONE: &str = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\",\"last_agent_message\":\"Done\"}}\n";

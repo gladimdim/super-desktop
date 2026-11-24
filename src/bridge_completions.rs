@@ -287,6 +287,8 @@ mod tests {
             supported: true,
             state: state.into(),
             completion_id: id.map(str::to_string),
+            attention: None,
+            attention_id: None,
         }
     }
 
@@ -296,6 +298,10 @@ mod tests {
         assert_eq!(working, etag(&[completion("working", None)]), "stable across calls");
         assert_ne!(working, etag(&[completion("completed", Some("abc"))]));
         assert_ne!(etag(&[completion("completed", Some("abc"))]), etag(&[completion("completed", Some("abd"))]));
+        let mut waiting = completion("working", None);
+        waiting.attention = Some("waiting".into());
+        waiting.attention_id = Some("e".repeat(64));
+        assert_ne!(working, etag(&[waiting]));
         assert_eq!(working.len(), 32);
     }
 

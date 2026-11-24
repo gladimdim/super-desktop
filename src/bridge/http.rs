@@ -72,6 +72,11 @@ pub(in crate::bridge) fn read_request(stream: &mut Connection, admission: Option
             crate::prompt_attachments::UPLOAD_DEADLINE,
             "attachments_too_large",
         )),
+        "POST" if crate::transcribe::route(&path) => Some((
+            crate::transcribe::MAX_BODY,
+            crate::transcribe::UPLOAD_DEADLINE,
+            "audio_too_large",
+        )),
         _ => None,
     };
     if headers.contains_key("transfer-encoding") { return None; }
@@ -139,6 +144,7 @@ pub(in crate::bridge) fn reason_phrase(code: u16) -> &'static str {
         413 => "Payload Too Large",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
+        501 => "Not Implemented",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         504 => "Gateway Timeout",

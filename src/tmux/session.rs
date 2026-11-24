@@ -244,6 +244,17 @@ pub fn kill_session(session_name: &str) {
         .output();
 }
 
+/// Kill `session_name` and start a new session under the same name running `command`.
+pub fn restart_with_command(
+    session_name: &str,
+    agent_type: &str,
+    command: &str,
+    workspace_dir: Option<&str>,
+) -> bool {
+    kill_session(session_name);
+    start_session(session_name, agent_type, command, workspace_dir) == Started::Yes
+}
+
 /// Kill `session_name` and start a clean session under the same name using its
 /// original launch command, bypassing `--continue` / `resume` flags.
 pub fn restart_fresh(
@@ -252,9 +263,8 @@ pub fn restart_fresh(
     custom_command: Option<&str>,
     workspace_dir: Option<&str>,
 ) {
-    kill_session(session_name);
     let cmd = resolve_command(agent_type, custom_command);
-    let _ = start_session(session_name, agent_type, &cmd, workspace_dir);
+    let _ = restart_with_command(session_name, agent_type, &cmd, workspace_dir);
 }
 
 /// (Re)create `session_name` unless it is alive, resuming a persisted per-card

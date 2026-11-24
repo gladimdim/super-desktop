@@ -29,6 +29,8 @@ pub struct Metadata {
     pub observed_at_ms: u64,
     pub completion_supported: bool,
     pub completion_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_id: Option<String>,
     pub claude_turn: u64,
     pub claude_turn_active: bool,
     /// Claude Code's transcript for `native_session`, from its hooks. Read
@@ -266,7 +268,34 @@ pub fn record_inner(kind: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+static ATTENTION_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn sync_attention_id(data: &mut Metadata, prev_status: &str) {
+    if !matches!(data.status.as_str(), "waiting" | "error") {
+        data.attention_id = None;
+        return;
+    }
+    if data.status == prev_status && data.attention_id.is_some() {
+        return;
+    }
+    use sha2::{Digest, Sha256};
+    let seq = ATTENTION_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    data.attention_id = Some(format!(
+        "{:x}",
+        Sha256::digest(format!(
+            "attention\0{}\0{}\0{}\0{}\0{}\0{}\0{seq}",
+            data.agent,
+            data.pid,
+            data.process_start,
+            data.native_session,
+            data.status,
+            data.observed_at_ms
+        ))
+    ));
+}
+
 pub fn apply(data: &mut Metadata, event: &Value) {
+    let prev_status = data.status.clone();
     if let Some(session) = event["session"].as_str() {
         if !session.is_empty() && data.native_session != session {
             data.native_session = session.into();
@@ -276,6 +305,7 @@ pub fn apply(data: &mut Metadata, event: &Value) {
             data.model.clear();
             data.status = "unknown".into();
             data.completion_id = None;
+            data.attention_id = None;
             data.completion_supported = false;
             data.claude_turn_active = false;
         }
@@ -331,6 +361,7 @@ pub fn apply(data: &mut Metadata, event: &Value) {
     if reports_completion(&data.agent) && event["completionSupported"] == true {
         data.completion_supported = true;
     }
+    sync_attention_id(data, &prev_status);
 }
 
 /// Native adapters that report explicit turn completions.
@@ -339,6 +370,7 @@ pub fn reports_completion(agent: &str) -> bool {
 }
 
 pub fn apply_antigravity(data: &mut Metadata, input: &Value) {
+    let prev_status = data.status.clone();
     let session = input["conversationId"]
         .as_str()
         .or_else(|| input["session_id"].as_str())
@@ -351,6 +383,7 @@ pub fn apply_antigravity(data: &mut Metadata, input: &Value) {
         data.model.clear();
         data.status = "unknown".into();
         data.completion_id = None;
+        data.attention_id = None;
         data.completion_supported = false;
         data.claude_turn_active = false;
     }
@@ -374,9 +407,11 @@ pub fn apply_antigravity(data: &mut Metadata, input: &Value) {
     if let Some(model) = input["model"].as_str().map(clean).filter(|s| !s.is_empty()) {
         data.model = model;
     }
+    sync_attention_id(data, &prev_status);
 }
 
 pub fn apply_hermes(data: &mut Metadata, input: &Value) {
+    let prev_status = data.status.clone();
     let hook = input["hook"].as_str().unwrap_or("");
     if let Some(session) = input["session_id"]
         .as_str()
@@ -391,6 +426,7 @@ pub fn apply_hermes(data: &mut Metadata, input: &Value) {
             data.model.clear();
             data.status = "unknown".into();
             data.completion_id = None;
+            data.attention_id = None;
             data.completion_supported = false;
             data.claude_turn_active = false;
         }
@@ -436,6 +472,7 @@ pub fn apply_hermes(data: &mut Metadata, input: &Value) {
         }
         _ => {}
     }
+    sync_attention_id(data, &prev_status);
 }
 
 pub fn apply_claude(data: &mut Metadata, input: &Value) {
@@ -1043,8 +1080,20 @@ mod tests {
         assert_eq!(hermes.prompt, "Tune indexes");
         apply_hermes(&mut hermes, &json!({"hook":"approval_request","session_id":"h-1"}));
         assert_eq!(hermes.status, "waiting");
+        let first_wait_id = hermes.attention_id.clone().expect("waiting needs attention_id");
+        assert_eq!(first_wait_id.len(), 64);
+        assert!(first_wait_id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')));
+        // Repeated waiting event keeps the same attention_id instead of re-alerting.
+        apply_hermes(&mut hermes, &json!({"hook":"approval_request","session_id":"h-1"}));
+        assert_eq!(hermes.attention_id.as_deref(), Some(first_wait_id.as_str()));
         apply_hermes(&mut hermes, &json!({"hook":"post_llm","session_id":"h-1"}));
         assert_eq!(hermes.status, "idle");
+        assert!(hermes.attention_id.is_none());
+        apply_hermes(&mut hermes, &json!({"hook":"api_error","session_id":"h-1"}));
+        assert_eq!(hermes.status, "error");
+        let error_id = hermes.attention_id.clone().expect("error needs attention_id");
+        assert_eq!(error_id.len(), 64);
+        assert_ne!(error_id, first_wait_id);
 
         let mut agy = Metadata {
             agent: "antigravity".into(),
