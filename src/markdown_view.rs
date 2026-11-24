@@ -148,6 +148,8 @@ struct Writer {
     item_start: bool,
     table: Option<Table>,
     images: Vec<String>,
+    link_styled: Vec<bool>,
+    link_tagged: Vec<bool>,
 }
 
 impl Writer {
@@ -161,6 +163,8 @@ impl Writer {
             item_start: false,
             table: None,
             images: Vec::new(),
+            link_styled: Vec::new(),
+            link_tagged: Vec::new(),
         }
     }
 
@@ -240,12 +244,22 @@ impl Writer {
             Tag::Strong => self.styles.push("bold".into()),
             Tag::Strikethrough => self.styles.push("strike".into()),
             Tag::Link { dest_url, .. } => {
-                let name = format!("{LINK}{dest_url}");
-                if self.buffer.tag_table().lookup(&name).is_none() {
-                    self.buffer.tag_table().add(&gtk4::TextTag::builder().name(&name).build());
+                if dest_url.contains('\0') || dest_url.len() > 8192 {
+                    self.link_styled.push(false);
+                    self.link_tagged.push(false);
+                } else {
+                    let is_web = web_link(&dest_url).is_some();
+                    if is_web {
+                        self.styles.push("link-style".into());
+                    }
+                    self.link_styled.push(is_web);
+                    let name = format!("{LINK}{dest_url}");
+                    if self.buffer.tag_table().lookup(&name).is_none() {
+                        self.buffer.tag_table().add(&gtk4::TextTag::builder().name(&name).build());
+                    }
+                    self.styles.push(name);
+                    self.link_tagged.push(true);
                 }
-                self.styles.push("link-style".into());
-                self.styles.push(name);
             }
             Tag::Image { dest_url, .. } => {
                 self.styles.push("dim".into());
@@ -292,8 +306,12 @@ impl Writer {
                 self.styles.pop();
             }
             TagEnd::Link => {
-                self.styles.pop();
-                self.styles.pop();
+                if self.link_tagged.pop() == Some(true) {
+                    self.styles.pop();
+                }
+                if self.link_styled.pop() == Some(true) {
+                    self.styles.pop();
+                }
             }
             TagEnd::Image => {
                 let target = self.images.pop().unwrap_or_default();

@@ -194,7 +194,7 @@ pub(in crate::tmux) fn is_executable(path: &Path) -> bool {
 }
 
 pub(in crate::tmux) fn with_default_args<S: AsRef<str>>(path: &str, args: &[S]) -> String {
-    std::iter::once(path.to_string())
+    std::iter::once(crate::launch_args::quote(path))
         .chain(args.iter().map(|arg| crate::launch_args::quote(arg.as_ref())))
         .collect::<Vec<_>>()
         .join(" ")
@@ -305,7 +305,8 @@ pub(in crate::tmux) fn resolve_command_with(agent_type: &str, custom: Option<&st
             return npx_fallback_command(package, args);
         }
     }
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    crate::launch_args::quote(&shell)
 }
 
 // Permission flags already present must not suppress a missing display-mode

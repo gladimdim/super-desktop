@@ -115,7 +115,17 @@ fn lock(root: &Path) -> io::Result<Lock> {
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(&path)?;
-    control::private_file(&path, false)?;
+    let path_meta = control::private_file(&path, false)?;
+    let fd_meta = file.metadata()?;
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fd_meta.dev() != path_meta.dev() || fd_meta.ino() != path_meta.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "journal lock replaced",
+            ));
+        }
+    }
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -239,7 +249,15 @@ fn execute_reserved(root:&Path,id:&str,payload:&impl Serialize,target:impl FnOnc
     let held = if release { drop(_lock); None } else { Some(_lock) };
     let reply = apply(&entry.card_id);
     let _held = held;
-    entry.reply = Some(reply.clone());
+    let mut stored_reply = reply.clone();
+    if let Some(obj) = stored_reply.data.as_mut().and_then(serde_json::Value::as_object_mut) {
+        if obj.contains_key("token") || obj.contains_key("socket") {
+            obj.remove("token");
+            obj.remove("socket");
+            obj.insert("credentialsIncluded".into(), serde_json::json!(false));
+        }
+    }
+    entry.reply = Some(stored_reply);
     let temporary = root.join(format!(".{id}.{}.tmp", std::process::id()));
     // A leftover temporary file is evidence of an interrupted write, never
     // something to truncate or trust. Keep the pending receipt on any failure.

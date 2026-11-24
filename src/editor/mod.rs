@@ -180,12 +180,34 @@ fn saved_path() -> PathBuf {
 
 /// Writes which editors are open, where and with which files.
 fn persist() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     if RESTORING.with(Cell::get) {
         return;
     }
     let saved = Saved { editors: editors().iter().map(|e| e.saved()).collect() };
     if let Ok(text) = serde_json::to_string_pretty(&saved) {
-        let _ = std::fs::write(saved_path(), text);
+        let path = saved_path();
+        if let Some(parent) = path.parent() {
+            let _ = crate::control::ensure_private_dir(parent);
+        }
+        let nonce = crate::control::random_hex(8)
+            .unwrap_or_else(|_| format!("{}", std::process::id()));
+        let tmp = path.with_file_name(format!(".editors.json.{nonce}.tmp"));
+        let res = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&tmp)
+            .and_then(|mut f| {
+                f.write_all(text.as_bytes())?;
+                f.flush()?;
+                std::fs::rename(&tmp, &path)
+            });
+        if res.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -1074,11 +1096,17 @@ impl Editor {
         let old_name = name.clone();
         self.prompt.ask(&format!("Rename {name} to"), Some(&name), "Rename", None, move |answer| {
             let (Some(editor), Answer::Yes(new_name)) = (weak.upgrade(), answer) else { return };
-            if new_name.is_empty() || new_name.contains('/') || new_name == old_name {
+            if new_name.is_empty()
+                || new_name == "."
+                || new_name == ".."
+                || new_name.contains('/')
+                || new_name.contains('\0')
+                || new_name == old_name
+            {
                 return;
             }
             let to = from.with_file_name(&new_name);
-            if to.exists() {
+            if std::fs::symlink_metadata(&to).is_ok() {
                 return editor.say(&format!("{} exists already", pretty(&to)));
             }
             if let Err(e) = std::fs::rename(&from, &to) {

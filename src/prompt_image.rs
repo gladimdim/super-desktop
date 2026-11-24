@@ -48,6 +48,56 @@ pub fn validate_prompt(text: &str, request: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 24 || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let w = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let h = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((w, h))
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || !bytes.starts_with(b"\xff\xd8\xff") {
+        return None;
+    }
+    let mut i = 2usize;
+    while i + 1 < bytes.len() {
+        while i < bytes.len() && bytes[i] == 0xff {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let marker = bytes[i];
+        i += 1;
+        if marker == 0x00 || marker == 0x01 || (0xd0..=0xd9).contains(&marker) {
+            continue;
+        }
+        if i + 2 > bytes.len() {
+            break;
+        }
+        let seg_len = u16::from_be_bytes([bytes[i], bytes[i + 1]]) as usize;
+        if seg_len < 2 || i + seg_len > bytes.len() {
+            break;
+        }
+        let is_sof = matches!(
+            marker,
+            0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf
+        );
+        if is_sof {
+            if seg_len < 7 {
+                return None;
+            }
+            let h = u16::from_be_bytes([bytes[i + 3], bytes[i + 4]]) as u32;
+            let w = u16::from_be_bytes([bytes[i + 5], bytes[i + 6]]) as u32;
+            return Some((w, h));
+        }
+        i += seg_len;
+    }
+    None
+}
+
 pub(crate) fn normalize(encoded: &str) -> Result<Vec<u8>, String> {
     if encoded.len() > (MAX_IMAGE + 2) / 3 * 4 || encoded.as_bytes().contains(&0) {
         return Err("image_too_large".into());
@@ -58,8 +108,18 @@ pub(crate) fn normalize(encoded: &str) -> Result<Vec<u8>, String> {
         return Err("invalid_image_encoding".into());
     }
     // Only JPEG/PNG. Reject SVG, animated formats and arbitrary files regardless of MIME.
-    if !bytes.starts_with(b"\xff\xd8\xff") && !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+    let dims = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        png_dimensions(&bytes)
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        jpeg_dimensions(&bytes)
+    } else {
         return Err("unsupported_image_type".into());
+    };
+    let Some((w, h)) = dims else {
+        return Err("invalid_or_oversized_image".into());
+    };
+    if w == 0 || h == 0 || w > 2048 || h > 2048 {
+        return Err("invalid_or_oversized_image".into());
     }
     let bad_size = std::rc::Rc::new(std::cell::Cell::new(false));
     let flag = bad_size.clone();
@@ -229,5 +289,11 @@ mod tests {
         let png = pixbuf.save_to_bufferv("png", &[]).unwrap();
         let bytes = normalize(&b64(&png)).unwrap();
         assert!(bytes.starts_with(b"\x89PNG"));
+
+        // Synthetic 60000x60000 PNG IHDR dimension bomb is rejected pre-decode.
+        let mut bomb = png.clone();
+        bomb[16..20].copy_from_slice(&60000u32.to_be_bytes());
+        bomb[20..24].copy_from_slice(&60000u32.to_be_bytes());
+        assert_eq!(normalize(&b64(&bomb)).unwrap_err(), "invalid_or_oversized_image");
     }
 }

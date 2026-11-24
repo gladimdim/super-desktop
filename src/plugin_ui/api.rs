@@ -42,12 +42,21 @@ thread_local! {
     static HOOKS: RefCell<Option<Hooks>> = const { RefCell::new(None) };
     static CARD_COMMANDS: RefCell<Option<CardCommands>> = const { RefCell::new(None) };
     static WORKSPACE_FOLDER: RefCell<Option<Rc<dyn Fn() -> Value>>> = const { RefCell::new(None) };
+    static OPEN_CUSTOM_CARD: RefCell<Option<Rc<dyn Fn(&str, &str, Option<&str>) -> Result<String, String>>>> = const { RefCell::new(None) };
 }
 
 /// Set by the overlay: `{folder, recent}`, the folder chosen in the top bar
 /// (where new agent cards start) and the ones chosen before.
 pub fn set_workspace_folder(source: Rc<dyn Fn() -> Value>) {
     WORKSPACE_FOLDER.with(|cell| *cell.borrow_mut() = Some(source));
+}
+
+pub fn set_open_custom_card(open: Rc<dyn Fn(&str, &str, Option<&str>) -> Result<String, String>>) {
+    OPEN_CUSTOM_CARD.with(|cell| *cell.borrow_mut() = Some(open));
+}
+
+pub fn open_custom_card(harness: &str, folder: &str, cmd: Option<&str>) -> Option<Result<String, String>> {
+    OPEN_CUSTOM_CARD.with(|cell| cell.borrow().as_ref().map(|f| f(harness, folder, cmd)))
 }
 
 pub fn set_hooks(hooks: Hooks) {
@@ -149,13 +158,43 @@ pub fn call_async(spec: &SurfaceSpec, method: &str, params: &Value, done: Box<dy
             Ok(command) => command,
             Err(e) => return done(Err(e)),
         };
+        if ACTIVE_NOTIFY.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_NOTIFY {
+            ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return done(Err(error("busy", "too many notifications open right now", "Dismiss an existing notification first.")));
+        }
         super_desktop::plugins::paths::append_log(&spec.plugin_id, &format!("[{}] call notify (with actions)", spec.surface_id));
-        // notify-send waits for a click on an action, or for the notification to close.
+        // notify-send waits for a click on an action, or for the notification to close (capped at 300s).
         let handle = gtk4::gio::spawn_blocking(move || {
             let mut command = command;
-            let output = command.stdin(std::process::Stdio::null()).stderr(std::process::Stdio::null()).output()
-                .map_err(|e| error("unavailable", format!("notify-send failed: {e}"), "Install libnotify."))?;
-            let chosen = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let mut child = match command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    return Err(error("unavailable", format!("notify-send failed: {e}"), "Install libnotify."));
+                }
+            };
+            let started = std::time::Instant::now();
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break,
+                    Ok(None) if started.elapsed() >= std::time::Duration::from_secs(300) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        return Ok(json!({"action": Value::Null}));
+                    }
+                    Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(e) => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                        return Err(error("unavailable", format!("notify-send failed: {e}"), "Install libnotify."));
+                    }
+                }
+            }
+            let out = child.wait_with_output().ok();
+            ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let chosen = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
             Ok(json!({"action": if chosen.is_empty() { Value::Null } else { Value::String(chosen) }}))
         });
         gtk4::glib::spawn_future_local(async move {
@@ -234,7 +273,7 @@ pub fn call_async(spec: &SurfaceSpec, method: &str, params: &Value, done: Box<dy
         }
         let enter = params.get("enter").and_then(Value::as_bool).unwrap_or(false);
         Box::new(move || {
-            crate::tmux::send_keys(&session, &harness, &text, enter)
+            crate::tmux::send_keys_unrecorded(&session, &harness, &text, enter)
                 .map(|()| json!({}))
                 .map_err(|e| error("unavailable", format!("could not type into the card: {e}"), "The card may have just closed."))
         })
@@ -285,7 +324,26 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
             if !std::path::Path::new(&folder).is_dir() {
                 return Err(error("bad_params", format!("{folder} is not a folder"), "Give an absolute path to an existing folder, or leave folder out for the top bar's."));
             }
-            let file = params.get("file").and_then(Value::as_str).map(std::path::PathBuf::from);
+            let raw_file = params.get("file").and_then(Value::as_str);
+            let file = if let Some(raw) = raw_file {
+                let p = std::path::Path::new(raw);
+                if p.is_absolute()
+                    || raw.starts_with("~/")
+                    || raw == "~"
+                    || p.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::RootDir | std::path::Component::Prefix(_)))
+                {
+                    return Err(error("bad_params", format!("file {raw:?} must stay inside the folder"), "Pass a relative path inside the folder (no .. or ~/)."));
+                }
+                let joined = std::path::Path::new(&folder).join(p);
+                if let (Ok(canon_dir), Ok(canon_file)) = (std::path::Path::new(&folder).canonicalize(), joined.canonicalize()) {
+                    if !canon_file.starts_with(&canon_dir) {
+                        return Err(error("bad_params", format!("file {raw:?} escapes the folder"), "Pass a file inside the folder."));
+                    }
+                }
+                Some(p.to_path_buf())
+            } else {
+                None
+            };
             // After this call returns: opening moves the keyboard.
             let (opened, plugin) = (folder.clone(), spec.plugin_id.clone());
             gtk4::glib::idle_add_local_once(move || {
@@ -393,7 +451,13 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                     .map_err(|message| error("bad_params", message, "Declare the surface in plugin.json with \"slot\": \"popup\"."))?;
                 // Where in the caller it opens: x, y (and width, height) in
                 // the caller's own coordinates; else beside the whole caller.
-                let number = |name: &str| params.get(name).and_then(Value::as_f64).filter(|n| n.is_finite());
+                let number = |name: &str| {
+                    params
+                        .get(name)
+                        .and_then(Value::as_f64)
+                        .filter(|n| n.is_finite())
+                        .map(|n| n.clamp(-32768.0, 32768.0))
+                };
                 let rect = number("x").zip(number("y")).map(|(x, y)| {
                     (x, y, number("width").unwrap_or(0.0).max(0.0), number("height").unwrap_or(0.0).max(0.0))
                 });
@@ -428,7 +492,17 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 .map_err(|message| error("bad_params", message, "Resize a popup while it is open, usually from the popup itself."))
         }
         "notify" => {
-            let mut command = notify_command(spec, params)?;
+            if ACTIVE_NOTIFY.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_NOTIFY {
+                ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return Err(error("busy", "too many notifications sent at once", "Wait a moment before sending more."));
+            }
+            let mut command = match notify_command(spec, params) {
+                Ok(c) => c,
+                Err(e) => {
+                    ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    return Err(e);
+                }
+            };
             let spawned = command
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -438,10 +512,14 @@ pub fn call(spec: &SurfaceSpec, method: &str, params: &Value) -> Result<Value, V
                 Ok(mut child) => {
                     std::thread::spawn(move || {
                         let _ = child.wait();
+                        ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     });
                     Ok(json!({}))
                 }
-                Err(e) => Err(error("unavailable", format!("notify-send failed: {e}"), "Install libnotify.")),
+                Err(e) => {
+                    ACTIVE_NOTIFY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(error("unavailable", format!("notify-send failed: {e}"), "Install libnotify."))
+                }
             }
         }
         "sound.play" => {
@@ -498,7 +576,9 @@ fn sound_path(spec: &SurfaceSpec, params: &Value) -> Result<std::path::PathBuf, 
         let relative = std::path::Path::new(file);
         let inside = !file.is_empty() && relative.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir));
         let path = spec.dir.join(relative);
-        if !inside || !path.is_file() {
+        let safe_regular = std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
+            && spec.dir.canonicalize().ok().zip(path.canonicalize().ok()).is_some_and(|(r, p)| p.starts_with(r));
+        if !inside || !safe_regular {
             return Err(error("bad_params", format!("no sound file {file:?} in the plugin folder"), "Pass a .wav, .oga or .ogg file relative to the plugin folder, e.g. {file: \"ding.wav\"}, or a system sound {name: \"complete\"}."));
         }
         return Ok(path);
@@ -516,6 +596,10 @@ fn sound_path(spec: &SurfaceSpec, params: &Value) -> Result<std::path::PathBuf, 
     }
     Err(error("bad_params", "sound.play needs {file} or {name}", "Pass {file: \"ding.wav\"} (in the plugin folder) or {name: \"complete\"}."))
 }
+
+/// Notifications waiting or spawning now; more at once is refused.
+static ACTIVE_NOTIFY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const MAX_NOTIFY: usize = 8;
 
 /// Sounds playing now; more at once is refused.
 static PLAYING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

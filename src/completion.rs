@@ -314,9 +314,37 @@ fn stamp(meta: &std::fs::Metadata) -> Stamp {
     (meta.dev(), meta.ino(), meta.len(), meta.mtime(), meta.mtime_nsec())
 }
 
+fn is_proc_fd_path(path: &Path) -> bool {
+    let mut comps = path.components();
+    matches!(
+        (comps.next(), comps.next(), comps.next(), comps.next(), comps.next(), comps.next()),
+        (
+            Some(std::path::Component::RootDir),
+            Some(std::path::Component::Normal(p)),
+            Some(std::path::Component::Normal(pid)),
+            Some(std::path::Component::Normal(fd_dir)),
+            Some(std::path::Component::Normal(fd_num)),
+            None,
+        ) if p == "proc"
+            && fd_dir == "fd"
+            && pid.to_str().is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            && fd_num.to_str().is_some_and(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+    )
+}
+
 /// A regular file this user owns, opened with its metadata.
 fn open_owned(path: &Path) -> Option<(File, std::fs::Metadata)> {
-    let file = File::open(path).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = if is_proc_fd_path(path) {
+        libc::O_NONBLOCK | libc::O_CLOEXEC
+    } else {
+        libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+        .ok()?;
     let meta = file.metadata().ok()?;
     (meta.is_file() && meta.uid() == unsafe { libc::geteuid() }).then_some((file, meta))
 }

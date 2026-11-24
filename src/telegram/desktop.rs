@@ -225,7 +225,7 @@ pub struct LiveDesktopBackend;
 
 impl LiveDesktopBackend {
     fn verify_owned_session(card_id: &str) -> Result<(), String> {
-        if !card_id.starts_with("sd_term_") || !crate::tmux::session_exists(card_id) {
+        if !crate::tmux::is_owned_session(card_id) || !crate::tmux::session_exists(card_id) {
             return Err("Card is no longer running.".into());
         }
         Ok(())
@@ -615,7 +615,7 @@ impl DesktopBackend for LiveDesktopBackend {
     }
 
     fn close_card(&self, card_id: &str) -> Result<(), String> {
-        if !card_id.starts_with("sd_term_") {
+        if !crate::tmux::is_owned_session(card_id) {
             return Err("Invalid card ID.".into());
         }
         match crate::ipc_request(&format!("close-term {card_id}")) {

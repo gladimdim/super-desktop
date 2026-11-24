@@ -77,6 +77,7 @@ pub(in crate::tmux) fn codex_rollout_exists(sessions: &std::path::Path, id: &str
 /// Claude and Codex use UUIDs, OpenCode `ses_…`.
 pub fn is_resumable_id(id: &str) -> bool {
     (1..=128).contains(&id.len())
+        && !id.starts_with('-')
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
@@ -145,36 +146,41 @@ pub(in crate::tmux) fn resume_command_with(
     }
     // Exact per-card resume wins over "latest" heuristics.
     if agent_type == "opencode" {
-        if let Some(id) = agent_session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(id) = agent_session_id
+            .map(str::trim)
+            .filter(|s| opencode::is_valid_opencode_session_id(s))
+        {
             if base.contains("--session") {
                 return base;
             }
-            return format!("{base} --session {id}");
+            let qid = crate::launch_args::quote(id);
+            return format!("{base} --session {qid}");
         }
     }
     if let Some(id) = agent_session_id.map(str::trim).filter(|id| is_resumable_id(id)) {
+        let qid = crate::launch_args::quote(id);
         match agent_type {
             "claude" if exists(agent_type, id) => {
-                return append_resume_flag(&base, &format!("--resume {id}"), &["--continue", "--resume"]);
+                return append_resume_flag(&base, &format!("--resume {qid}"), &["--continue", "--resume"]);
             }
             // Global flags before the subcommand parse fine under clap.
             "codex" if exists(agent_type, id) => {
-                return append_resume_flag(&base, &format!("resume {id}"), &["resume"]);
+                return append_resume_flag(&base, &format!("resume {qid}"), &["resume"]);
             }
             "grok" if exists(agent_type, id) => {
-                return append_resume_flag(&base, &format!("--resume {id}"), &["--resume", "--continue", "-r", "-c"]);
+                return append_resume_flag(&base, &format!("--resume {qid}"), &["--resume", "--continue", "-r", "-c"]);
             }
             "pi" if exists(agent_type, id) => {
-                return append_resume_flag(&base, &format!("--session {id}"), &["--session", "--session-id", "--continue", "--resume", "-c", "-r"]);
+                return append_resume_flag(&base, &format!("--session {qid}"), &["--session", "--session-id", "--continue", "--resume", "-c", "-r"]);
             }
             "antigravity" | "agy" if exists(agent_type, id) => {
-                return append_resume_flag(&base, &format!("--conversation {id}"), &["--conversation", "--continue", "--resume", "-c", "-r"]);
+                return append_resume_flag(&base, &format!("--conversation {qid}"), &["--conversation", "--continue", "--resume", "-c", "-r"]);
             }
             "hermes" if exists(agent_type, id) => {
-                return append_resume_flag(&base, &format!("--resume {id}"), &["--resume", "--continue", "-r", "-c"]);
+                return append_resume_flag(&base, &format!("--resume {qid}"), &["--resume", "--continue", "-r", "-c"]);
             }
             "goose" => {
-                return append_resume_flag(&base, &format!("--name {id} --resume"), &["--name", "-n", "--resume", "-r"]);
+                return append_resume_flag(&base, &format!("--name {qid} --resume"), &["--name", "-n", "--resume", "-r"]);
             }
             _ => {}
         }

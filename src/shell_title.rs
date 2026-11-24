@@ -103,16 +103,26 @@ pub fn launch_command(agent: &str, command: &str) -> String {
 }
 
 fn install_file(directory: &Path, target: &Path, content: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     if fs::read(target).ok().as_deref() == Some(content) {
         return Ok(());
     }
-    fs::create_dir_all(directory)?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = directory.join(format!(".shell-title-{}-{stamp}", std::process::id()));
-    let result = fs::write(&temporary, content).and_then(|_| fs::rename(&temporary, target));
+    crate::control::ensure_private_dir(directory)?;
+    let nonce = crate::control::random_hex(8)
+        .unwrap_or_else(|_| format!("{}", std::process::id()));
+    let temporary = directory.join(format!(".shell-title-{nonce}.tmp"));
+    let result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&temporary)
+        .and_then(|mut f| {
+            f.write_all(content)?;
+            f.flush()?;
+            fs::rename(&temporary, target)
+        });
     let _ = fs::remove_file(temporary);
     result
 }

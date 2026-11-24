@@ -6,8 +6,26 @@ use super_desktop::cli_legacy::{self, Dial};
 use super_desktop::{cli, harness_record, platform, preload};
 
 fn request(path: &Path, command: &str) -> std::io::Result<Option<String>> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let parent = path.parent().ok_or(std::io::ErrorKind::InvalidInput)?;
+    match super_desktop::control::private_dir(parent) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+        Ok(m) if m.uid() != unsafe { libc::geteuid() } || !m.file_type().is_socket() => {
+            return Err(std::io::ErrorKind::PermissionDenied.into())
+        }
+        _ => {}
+    }
     match cli_legacy::dial(UnixStream::connect(path)) {
-        Dial::Connected(stream) => exchange(stream, command).map(Some),
+        Dial::Connected(stream) => {
+            super_desktop::control::check_peer(&stream)?;
+            exchange(stream, command).map(Some)
+        }
         Dial::Missing | Dial::Refused => Ok(None),
         Dial::Failed(e) => Err(e),
     }

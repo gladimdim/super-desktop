@@ -14,13 +14,17 @@ pub fn record(session: &str, text: &str) {
 }
 
 fn record_with(mut command: Command, session: &str, text: &str) {
+    if !crate::tmux::is_owned_session(session) {
+        return;
+    }
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
         return;
     }
     let title = crate::tmux::truncate_prompt_title(&text);
+    let target = format!("={session}:");
     let _ = command
-        .args(["set-option", "-t", session, OPTION, &title])
+        .args(["set-option", "-t", &target, OPTION, &title])
         .output();
 }
 
@@ -29,8 +33,12 @@ pub fn last(session: &str) -> Option<String> {
 }
 
 fn last_with(mut command: Command, session: &str) -> Option<String> {
+    if !crate::tmux::is_owned_session(session) {
+        return None;
+    }
+    let target = format!("={session}:");
     let out = command
-        .args(["show-options", "-qv", "-t", session, OPTION])
+        .args(["show-options", "-qv", "-t", &target, OPTION])
         .output()
         .ok()?;
     if !out.status.success() {

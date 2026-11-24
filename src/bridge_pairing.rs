@@ -154,13 +154,15 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                 "fingerprint":security::fingerprint(),"secret":secret,"expiresIn":300}));
         }
         ("GET", "/api/v1/pair/devices") => {
-            let paired = pair_state().lock().unwrap();
+            let mut paired = pair_state().lock().unwrap();
+            paired.refresh();
             let devices: Vec<_> = paired.cfg.devices.iter().map(|d| json!({"id":d.id,"name":d.name,"deviceType":d.device_type,"expires":d.expires,
                 "active":d.expires > now && security::device_active(&d.token_hash)})).collect();
             reply_json(stream, 200, &json!({"devices":devices}));
         }
         ("POST", "/api/v1/pair/revoke") => {
             let mut paired = pair_state().lock().unwrap();
+            paired.refresh();
             let id = body["deviceId"].as_str().unwrap_or("");
             let previous = paired.cfg.devices.clone();
             let hash = previous.iter().find(|d| d.id == id).map(|d| d.token_hash.clone());
@@ -261,7 +263,12 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
             reply_json(stream, 200, &json!({"status":"approved"}));
         }
         ("POST", "/api/v1/pair/poll") => {
-            let Some(request) = state.entries.iter().find(|p| Some(p.id.as_str()) == body["requestId"].as_str()) else {
+            let wanted = body["requestId"].as_str().unwrap_or("");
+            let Some(request) = state
+                .entries
+                .iter()
+                .find(|p| !wanted.is_empty() && security::equal(&p.id, wanted))
+            else {
                 return reply_error(stream, 404, Envelope::Plain, "request_expired");
             };
             let result = match request.decision {
@@ -269,8 +276,15 @@ pub(super) fn handle(stream: &mut Connection, req: &Request, local: bool, path: 
                 Some(false) => json!({"status":"denied"}),
                 Some(true) => {
                     let paired = pair_state().lock().unwrap();
-                    let expires = request.token.as_ref().and_then(|token| paired.cfg.devices.iter()
-                        .find(|d| d.token_hash == security::digest(token.as_bytes())).map(|d| d.expires));
+                    let expires = request.token.as_ref().and_then(|token| {
+                        let hash = security::digest(token.as_bytes());
+                        paired
+                            .cfg
+                            .devices
+                            .iter()
+                            .find(|d| security::equal(&d.token_hash, &hash))
+                            .map(|d| d.expires)
+                    });
                     json!({"status":"paired","token":request.token,"expires":expires})
                 },
             };

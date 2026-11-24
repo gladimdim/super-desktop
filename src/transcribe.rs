@@ -4,12 +4,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
 use std::borrow::Cow;
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::io::{Read, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 pub const ROUTE: &str = "/api/v1/transcribe";
@@ -19,8 +19,7 @@ pub const MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_BODY: usize = MAX_AUDIO_BYTES / 3 * 4 + 4 + 4096;
 pub const UPLOAD_DEADLINE: Duration = Duration::from_secs(60);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(45);
-
-static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
+const MAX_OUTPUT_BYTES: u64 = 64 * 1024;
 
 const MODEL_NAMES: &[&str] = &[
     "ggml-base.en.bin",
@@ -177,10 +176,30 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(prefix: &str) -> Result<Self, &'static str> {
-        let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{seq}", std::process::id()));
-        fs::create_dir_all(&dir).map_err(|_| "transcription_failed")?;
-        Ok(Self(dir))
+        let base = std::env::var_os("XDG_RUNTIME_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .map(|p| p.join("super-desktop/transcribe"))
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .map(|p| p.join(".local/state/super-desktop/transcribe"))
+            })
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("sd-transcribe-u{}", unsafe { libc::geteuid() }))
+            });
+        crate::control::ensure_private_dir(&base).map_err(|_| "transcription_failed")?;
+        for _ in 0..8 {
+            let nonce = crate::control::random_hex(16).map_err(|_| "transcription_failed")?;
+            let dir = base.join(format!("{prefix}-{nonce}"));
+            match DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => return Ok(Self(dir)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return Err("transcription_failed"),
+            }
+        }
+        Err("transcription_failed")
     }
 
     fn path(&self) -> &Path {
@@ -232,6 +251,7 @@ pub fn transcribe_wav_with(
             .create_new(true)
             .write(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&wav_path)
             .map_err(|_| "transcription_failed")?;
         file.write_all(wav).map_err(|_| "transcription_failed")?;
@@ -253,39 +273,67 @@ pub fn transcribe_wav_with(
     };
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::null())
+        .process_group(0);
 
     let mut child = cmd.spawn().map_err(|_| "transcription_failed")?;
+    let pgid = child.id() as libc::pid_t;
+    let stdout_pipe = child.stdout.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout_pipe {
+            let _ = out.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf);
+        }
+        buf
+    });
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() >= timeout => {
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = reader.join();
                 return Err("transcription_timeout");
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(15)),
             Err(_) => {
+                unsafe { libc::kill(-pgid, libc::SIGKILL) };
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = reader.join();
                 return Err("transcription_failed");
             }
         }
     };
-    let output = child.wait_with_output().map_err(|_| "transcription_failed")?;
+    let stdout_bytes = reader.join().unwrap_or_default();
     if !status.success() {
         return Err("transcription_failed");
     }
 
     let raw = match backend {
-        SttBackend::WhisperCli { .. } => String::from_utf8_lossy(&output.stdout).into_owned(),
+        SttBackend::WhisperCli { .. } => String::from_utf8_lossy(&stdout_bytes).into_owned(),
         SttBackend::WhisperCtranslate2 { .. } | SttBackend::OpenAiWhisper { .. } => {
             let txt = temp.path().join("clip.txt");
-            match fs::read_to_string(&txt) {
-                Ok(text) => text,
-                Err(_) => String::from_utf8_lossy(&output.stdout).into_owned(),
-            }
+            let from_file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&txt)
+                .ok()
+                .and_then(|f| {
+                    let meta = f.metadata().ok()?;
+                    if !meta.is_file()
+                        || meta.uid() != unsafe { libc::geteuid() }
+                        || meta.nlink() != 1
+                    {
+                        return None;
+                    }
+                    let mut buf = Vec::new();
+                    f.take(MAX_OUTPUT_BYTES).read_to_end(&mut buf).ok()?;
+                    Some(String::from_utf8_lossy(&buf).into_owned())
+                });
+            from_file.unwrap_or_else(|| String::from_utf8_lossy(&stdout_bytes).into_owned())
         }
     };
     Ok((clean_transcript(&raw), backend.engine_name()))

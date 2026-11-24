@@ -311,6 +311,7 @@ impl TelegramApi for MockApi {
             chat_type: "supergroup".into(),
             title: Some("SD Topics".into()),
             is_forum: Some(true),
+            username: None,
         }))
     }
 
@@ -1030,6 +1031,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         },
         ..Config::default()
     };
+    save_config_at(&dir.join("config.json"), &cfg).unwrap();
     let mut rt = RuntimeState::default();
     let mut router = Router::new(999, Some("sd_test_bot".into()), now);
 
@@ -1057,6 +1059,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         chat_type: "supergroup".into(),
         title: Some("Normal Group".into()),
         is_forum: Some(false),
+        username: None,
     });
     router.handle_update(
         &api,
@@ -1079,6 +1082,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         chat_type: "supergroup".into(),
         title: Some("My PC Topics".into()),
         is_forum: Some(true),
+        username: None,
     });
     router.handle_update(
         &api,
@@ -2871,13 +2875,29 @@ fn telegram_mini_app_init_data_hmac_and_http_ws_end_to_end() {
     assert!(ansi.contains("[REDACTED]"));
     assert!(!ansi.contains("sk-ant-"));
 
-    // Assets & PDF preview endpoints
+    // Assets & PDF preview endpoints (Bearer header required, ?token= query rejected)
+    assert_eq!(
+        http.get(format!("{base}/api/cards/sd_term_app/pdf/{pdf_id}/1?token={tok}"))
+            .send()
+            .unwrap()
+            .status(),
+        401
+    );
     let pdf_png = http
-        .get(format!("{base}/api/cards/sd_term_app/pdf/{pdf_id}/1?token={tok}"))
+        .get(format!("{base}/api/cards/sd_term_app/pdf/{pdf_id}/1"))
+        .bearer_auth(&tok)
         .send()
         .unwrap();
     assert_eq!(pdf_png.status(), 200);
     assert_eq!(pdf_png.bytes().unwrap().as_ref(), b"PDFPAGE1");
+    assert_eq!(
+        http.get(format!("{base}/api/cards/sd_term_app/asset/{pdf_id}"))
+            .bearer_auth(&tok)
+            .send()
+            .unwrap()
+            .status(),
+        415
+    );
 
     // Prompt & Key POST endpoints
     assert_eq!(
@@ -2895,12 +2915,21 @@ fn telegram_mini_app_init_data_hmac_and_http_ws_end_to_end() {
         .unwrap()
         .contains(&("sd_term_app".into(), "hello mini app".into())));
 
-    // Live WebSocket upgrade, receives ANSI frame, sends key, receives ping/close cleanly
+    // Live WebSocket upgrade via single-use ticket, receives ANSI frame, sends key, receives ping/close cleanly
+    let ws_ticket_res: serde_json::Value = http
+        .post(format!("{base}/api/ws-ticket"))
+        .bearer_auth(&tok)
+        .json(&json!({ "cardId": "sd_term_app" }))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let ws_ticket = ws_ticket_res["ticket"].as_str().unwrap().to_string();
     {
         let mut ws = TcpStream::connect(("127.0.0.1", server.listen_port)).unwrap();
         ws.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
         let upgrade = format!(
-            "GET /ws/terminal/sd_term_app?token={tok} HTTP/1.1\r\n\
+            "GET /ws/terminal/sd_term_app?ticket={ws_ticket} HTTP/1.1\r\n\
              Host: 127.0.0.1:{}\r\n\
              Upgrade: websocket\r\n\
              Connection: Upgrade\r\n\
@@ -2974,6 +3003,49 @@ fn telegram_mini_app_init_data_hmac_and_http_ws_end_to_end() {
             .unwrap()
             .contains(&("sd_term_app".into(), NamedKey::Tab)));
     }
+
+    // Single-use WS ticket cannot be replayed once consumed above, and prompts=false blocks /attachment.
+    {
+        let mut ws_replay = TcpStream::connect(("127.0.0.1", server.listen_port)).unwrap();
+        ws_replay.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        let replay_req = format!(
+            "GET /ws/terminal/sd_term_app?ticket={ws_ticket} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n",
+            server.listen_port
+        );
+        ws_replay.write_all(replay_req.as_bytes()).unwrap();
+        let mut replay_resp = [0u8; 256];
+        let n = ws_replay.read(&mut replay_resp).unwrap_or(0);
+        let head = String::from_utf8_lossy(&replay_resp[..n]);
+        assert!(head.contains("401") || head.contains("403"), "ticket replay accepted: {head:?}");
+    }
+    shared_cfg.lock().unwrap().permissions = Permissions {
+        prompts: false,
+        attachments: true,
+        ..Permissions::default()
+    };
+    let attach_denied = http
+        .post(format!("{base}/api/cards/sd_term_app/attachment"))
+        .bearer_auth(&tok)
+        .header("content-type", "application/octet-stream")
+        .header("x-filename", "note.txt")
+        .body("secret".as_bytes().to_vec())
+        .send()
+        .unwrap();
+    assert_eq!(attach_denied.status(), 403);
+    assert_eq!(
+        http.post(format!("{base}/api/cards/sd_term_app/attachment"))
+            .header("content-length", "20000000")
+            .body("")
+            .send()
+            .map(|r| r.status().as_u16())
+            .unwrap_or(401),
+        401
+    );
 
     // Revoking owner invalidates Bearer token immediately
     shared_cfg.lock().unwrap().allowed_user = None;

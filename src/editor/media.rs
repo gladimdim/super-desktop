@@ -176,7 +176,30 @@ impl Preview {
         let (weak, path) = (Rc::downgrade(self), self.path.borrow().clone());
         glib::MainContext::default().spawn_local(async move {
             let decoded = gio::spawn_blocking(move || {
-                let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read the image: {e}"))?;
+                use std::io::Read;
+                use std::os::unix::fs::OpenOptionsExt;
+
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+                    .open(&path)
+                    .map_err(|e| format!("Cannot read the image: {e}"))?;
+                let meta = file
+                    .metadata()
+                    .map_err(|e| format!("Cannot inspect the image: {e}"))?;
+                if !meta.is_file() {
+                    return Err("Not a regular file.".to_string());
+                }
+                if meta.len() > MAX_IMAGE_BYTES {
+                    return Err("Image is larger than 64 MB.".to_string());
+                }
+                let mut bytes = Vec::with_capacity(meta.len().min(MAX_IMAGE_BYTES) as usize);
+                file.take(MAX_IMAGE_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| format!("Cannot read the image: {e}"))?;
+                if bytes.len() as u64 > MAX_IMAGE_BYTES {
+                    return Err("Image is larger than 64 MB.".to_string());
+                }
                 crate::asset_view::frames(&bytes)
             }).await;
             let Some(preview) = weak.upgrade() else { return };

@@ -1206,6 +1206,7 @@ mod tests {
                 serve_url: None,
                 suggested_url: Some("https://my-pc.tailnet.ts.net:8443".into()),
                 serve_command: format!("tailscale serve --bg --https=8443 http://127.0.0.1:{port}"),
+                funnel_enabled: false,
             }),
             setup_tailscale: Arc::new(|_, https_port| {
                 Ok(format!("https://my-pc.tailnet.ts.net:{https_port}"))
@@ -1440,6 +1441,7 @@ mod tests {
                 serve_url: Some("https://workstation.tailnet.ts.net:8443".into()),
                 suggested_url: Some("https://workstation.tailnet.ts.net:8443".into()),
                 serve_command: format!("tailscale serve --bg --https=8443 http://127.0.0.1:{port}"),
+                funnel_enabled: false,
             }),
             setup_tailscale: Arc::new(|_, https_port| {
                 Ok(format!("https://workstation.tailnet.ts.net:{https_port}"))

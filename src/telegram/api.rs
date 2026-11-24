@@ -167,6 +167,8 @@ pub struct ChatInfo {
     #[serde(default)]
     pub title: Option<String>,
     #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
     pub is_forum: Option<bool>,
 }
 

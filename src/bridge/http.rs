@@ -19,6 +19,9 @@ pub(in crate::bridge) fn find_subslice(hay: &[u8], needle: &[u8]) -> Option<usiz
 }
 
 pub(in crate::bridge) fn read_request(stream: &mut Connection, admission: Option<&security::Admission>) -> Option<Request> {
+    if let Some(guard) = admission {
+        guard.set_deadline(Some(std::time::Instant::now() + Duration::from_secs(5)));
+    }
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .ok()?;
@@ -100,7 +103,10 @@ pub(in crate::bridge) fn read_request(stream: &mut Connection, admission: Option
         }
         let token = bearer(&headers);
         stream.credential(token);
-        if let Some(guard) = admission { guard.identify(token); }
+        if let Some(guard) = admission {
+            guard.identify(token);
+            guard.set_deadline(Some(std::time::Instant::now() + deadline));
+        }
         stream.upload_deadline(deadline);
     } else if content_len > 16384 { return None; }
     // Bytes past this request's body belong to the next pipelined request.

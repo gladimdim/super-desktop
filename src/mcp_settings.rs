@@ -132,18 +132,42 @@ pub fn save_at(path: &Path, config: Config) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Invalid settings path"))?;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(parent)?;
-    let metadata = fs::symlink_metadata(parent)?;
-    if !metadata.is_dir()
-        || metadata.uid() != unsafe { libc::getuid() }
-        || metadata.mode() & 0o022 != 0
+    if !parent.is_absolute()
+        || parent
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Invalid settings path",
+        ));
+    }
+    let mut cur = PathBuf::new();
+    for comp in parent.components() {
+        cur.push(comp.as_os_str());
+        match fs::symlink_metadata(&cur) {
+            Ok(m) if m.is_dir() && !m.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "Unsafe MCP settings directory",
+                ))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                fs::DirBuilder::new().mode(0o700).create(&cur)?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    let parent_meta = fs::symlink_metadata(parent)?;
+    if !parent_meta.is_dir()
+        || parent_meta.file_type().is_symlink()
+        || parent_meta.uid() != unsafe { libc::getuid() }
+        || parent_meta.mode() & 0o022 != 0
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            "MCP settings directory must be owned by this user and not writable by others",
+            "Unsafe MCP settings directory",
         ));
     }
     let nonce = crate::control::new_request(crate::control::Command::Status {})?.request_id;
@@ -153,6 +177,7 @@ pub fn save_at(path: &Path, config: Config) -> io::Result<()> {
             .write(true)
             .create_new(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&temp)?;
         serde_json::to_writer_pretty(&mut file, &config)?;
         file.write_all(b"\n")?;

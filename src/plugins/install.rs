@@ -29,20 +29,70 @@ impl Places {
 
 /// Where an installed plugin came from, or `None` for one made here.
 pub fn source(places: &Places, id: &str) -> Option<Value> {
-    fs::read_to_string(places.source_path(id)).ok().and_then(|text| serde_json::from_str(&text).ok())
+    if !manifest::valid_plugin_id(id) {
+        return None;
+    }
+    let path = places.source_path(id);
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return None;
+    }
+    fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str(&text).ok())
 }
 
-/// Whether the plugin may run: made here, or installed and approved.
+/// Whether the plugin may run: made here (no source file), or installed and approved.
+/// Fails closed if the source file exists on disk but is unreadable or corrupt JSON.
 pub fn approved(places: &Places, id: &str) -> bool {
-    source(places, id).is_none_or(|record| record["approved"] == true)
+    if !manifest::valid_plugin_id(id) {
+        return false;
+    }
+    let path = places.source_path(id);
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return false;
+        }
+    }
+    match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str::<Value>(&text).is_ok_and(|record| record["approved"] == true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+/// Removes saved runtime/approval files for `id` (used after trashing from UI).
+pub fn forget_state(places: &Places, id: &str) {
+    if !manifest::valid_plugin_id(id) {
+        return;
+    }
+    for suffix in ["source.json", "data.json", "cards.json", "status.json", "log", "log.1"] {
+        let _ = fs::remove_file(places.state.join(format!("{id}.{suffix}")));
+    }
 }
 
 fn write_source(places: &Places, id: &str, record: &Value) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !manifest::valid_plugin_id(id) {
+        return Err(format!("invalid plugin id {id:?}"));
+    }
     let path = places.source_path(id);
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        paths::ensure_private_dir(dir).map_err(|e| e.to_string())?;
     }
-    fs::write(&path, serde_json::to_string_pretty(record).unwrap_or_default()).map_err(|e| e.to_string())
+    let nonce = crate::control::random_hex(8).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("source.{nonce}.tmp"));
+    let body = serde_json::to_string_pretty(record).unwrap_or_default();
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = f.write_all(body.as_bytes()).and_then(|()| fs::rename(&tmp, &path)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(())
 }
 
 fn now() -> u64 {
@@ -51,6 +101,13 @@ fn now() -> u64 {
 
 fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     let out = Command::new("git")
+        .args([
+            "-c", "core.symlinks=false",
+            "-c", "submodule.recurse=false",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "core.fsmonitor=false",
+            "-c", "protocol.ext.allow=never",
+        ])
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -61,6 +118,25 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
+}
+
+/// Removes any symbolic links anywhere inside `root` (e.g., from git clone/update).
+fn strip_symlinks(root: &Path) {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        for entry in fs::read_dir(&cur).into_iter().flatten().flatten() {
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            let path = entry.path();
+            if ft.is_symlink() {
+                let _ = fs::remove_file(&path);
+            } else if ft.is_dir() {
+                stack.push(path);
+            }
+        }
     }
 }
 
@@ -117,13 +193,16 @@ pub fn install(places: &Places, source: &str) -> Result<Installed, String> {
     install_as(places, source, None)
 }
 
+static INSTALL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Like `install`; with `expected`, refuses a plugin.json with another id
 /// (an entry of the plugin list must install what it says).
 pub fn install_as(places: &Places, source: &str, expected: Option<&str>) -> Result<Installed, String> {
     let root = &places.plugins;
-    fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    paths::ensure_private_dir(root).map_err(|e| e.to_string())?;
     // A hidden folder: the overlay ignores it while it is being filled.
-    let staging = root.join(format!(".install-{}", std::process::id()));
+    let seq = INSTALL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = root.join(format!(".install-{}-{seq}", std::process::id()));
     let _ = fs::remove_dir_all(&staging);
     let local = Path::new(source);
     let result = (|| {
@@ -132,7 +211,14 @@ pub fn install_as(places: &Places, source: &str, expected: Option<&str>) -> Resu
             None
         } else {
             let out = Command::new("git")
-                .args(["clone", "--depth", "1", "--quiet", "--", source])
+                .args([
+                    "-c", "core.symlinks=false",
+                    "-c", "submodule.recurse=false",
+                    "-c", "core.hooksPath=/dev/null",
+                    "-c", "core.fsmonitor=false",
+                    "-c", "protocol.ext.allow=never",
+                    "clone", "--depth", "1", "--quiet", "--", source,
+                ])
                 .arg(&staging)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .output()
@@ -140,6 +226,7 @@ pub fn install_as(places: &Places, source: &str, expected: Option<&str>) -> Resu
             if !out.status.success() {
                 return Err(format!("git clone failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
             }
+            strip_symlinks(&staging);
             git(&staging, &["rev-parse", "HEAD"]).ok()
         };
         // The id comes from the manifest; the folder takes its name.
@@ -192,7 +279,48 @@ pub struct Owned {
 /// Agent settings a plugin's author may have shipped. They can run commands
 /// (hooks, MCP servers) as soon as an agent opens in the folder, so a fork
 /// drops them; SUPER DESKTOP's own skill is written again afterwards.
-const AGENT_SETTINGS: &[&str] = &[".claude", ".mcp.json", ".codex", ".cursor", ".gemini", ".vscode"];
+const AGENT_SETTINGS: &[&str] = &[
+    ".claude", ".mcp.json", ".codex", ".cursor", ".gemini", ".vscode",
+    "opencode.json", "opencode.jsonc", ".opencode", ".aider.conf.yml",
+    ".goose", ".crush", ".crush.json", ".kiro", ".amp", ".pi", ".qwen",
+    ".copilot", ".envrc", "CLAUDE.md", "AGENTS.md", "GEMINI.md",
+];
+
+fn remove_author_agent_settings(dir: &Path) -> Result<(), String> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(cur) = stack.pop() {
+        for entry in fs::read_dir(&cur).into_iter().flatten().flatten() {
+            let name_os = entry.file_name();
+            let name = name_os.to_string_lossy();
+            if name == ".git" {
+                continue;
+            }
+            let Ok(ft) = entry.file_type() else { continue };
+            let path = entry.path();
+            if AGENT_SETTINGS.contains(&name.as_ref()) || name.starts_with(".aider") {
+                let res = if !ft.is_symlink() && ft.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                if let Err(e) = res {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(format!("cannot remove {}: {e}", path.display()));
+                    }
+                }
+            } else if !ft.is_symlink() && ft.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    let copilot = dir.join(".github/copilot-instructions.md");
+    if let Err(e) = fs::remove_file(&copilot) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            return Err(format!("cannot remove {}: {e}", copilot.display()));
+        }
+    }
+    Ok(())
+}
 
 /// Makes an installed, approved plugin the user's own copy, to change with
 /// an agent: same id (its saved values stay), no more updates from its
@@ -217,14 +345,7 @@ pub fn make_own(places: &Places, id: &str) -> Result<Owned, String> {
     if dir.join(".git").exists() && git(&dir, &["remote", "get-url", "origin"]).is_ok() {
         git(&dir, &["remote", "rename", "origin", "upstream"])?;
     }
-    for name in AGENT_SETTINGS {
-        let path = dir.join(name);
-        let removed = if path.is_dir() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
-        match removed {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(format!("cannot remove {}: {e}", path.display())),
-            _ => {}
-        }
-    }
+    remove_author_agent_settings(&dir)?;
     record["forked"] = json!(true);
     record["forkedAt"] = json!(now());
     write_source(places, id, &record)?;
@@ -236,6 +357,9 @@ pub fn make_own(places: &Places, id: &str) -> Result<Owned, String> {
 /// `install_from` when it is not here, approves it, makes it the user's own
 /// copy and puts the plugin skill in it for the agent.
 pub fn fork(places: &Places, id: &str, install_from: Option<&str>) -> Result<Owned, String> {
+    if !manifest::valid_plugin_id(id) {
+        return Err(format!("invalid plugin id {id:?}"));
+    }
     let dir = places.plugins.join(id);
     if !dir.exists() {
         let from = install_from.ok_or_else(|| format!("no plugin {id:?} here, and no place to install it from"))?;
@@ -259,6 +383,9 @@ pub struct Updated {
 
 /// Fast-forwards an installed plugin from its git source.
 pub fn update(places: &Places, id: &str) -> Result<Updated, String> {
+    if !manifest::valid_plugin_id(id) {
+        return Err(format!("invalid plugin id {id:?}"));
+    }
     let mut record = source(places, id).ok_or_else(|| format!("{id:?} was not installed from a source; edit it in place"))?;
     let dir = places.plugins.join(id);
     if record["forked"] == true {
@@ -271,6 +398,7 @@ pub fn update(places: &Places, id: &str) -> Result<Updated, String> {
     git(&dir, &["fetch", "--depth", "50", "--quiet", "origin"])?;
     git(&dir, &["merge", "--ff-only", "--quiet", "FETCH_HEAD"])
         .map_err(|e| format!("cannot fast-forward (local changes or a rewritten history?): {e}"))?;
+    strip_symlinks(&dir);
     let to = git(&dir, &["rev-parse", "HEAD"])?;
     let changes = if from == to { String::new() } else { git(&dir, &["diff", "--stat", &from, &to]).unwrap_or_default() };
     record["commit"] = json!(to);

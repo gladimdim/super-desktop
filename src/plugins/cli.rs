@@ -261,25 +261,42 @@ fn check(flags: &Flags) -> Result<i32, String> {
 fn check_report(dir: &Path) -> Value {
     match manifest::load(dir) {
         Err(problems) => json!({"ok": false, "dir": dir, "manifest": problems, "surfaces": []}),
-        Ok(m) => match host_or_error() {
-            Err(error) => json!({"ok": false, "dir": dir, "manifest": [], "surfaces": [], "host": error}),
-            Ok(host) => {
-                let surfaces: Vec<Value> = m.surfaces.iter().map(|s| {
-                    let mut result = check_qml(&host, &m.qml_path(s), &dir);
-                    result["surface"] = json!(s.id);
-                    result["slot"] = json!(s.slot.name());
-                    result
-                }).collect();
-                // A warning at load is almost always a real bug (an undefined
-                // name, a binding loop), so it fails the check too, like a
-                // lint error; lint advice does not.
+        Ok(m) => {
+            if !install::approved(&install::Places::current(), &m.id) {
                 let findings = lint::lint(&m);
-                let ok = surfaces.iter().all(|s| {
-                    s["ok"] == true && s["warnings"].as_array().is_none_or(Vec::is_empty)
-                }) && findings.iter().all(|f| f.level != lint::Level::Error);
-                json!({"ok": ok, "dir": dir, "id": m.id, "manifest": [], "surfaces": surfaces, "lint": findings})
+                let msg = format!(
+                    "Plugin {:?} is not approved yet: QML execution was skipped. Review its files and run `super-desktop plugin approve {}` before running check.",
+                    m.id, m.id
+                );
+                return json!({
+                    "ok": false,
+                    "dir": dir,
+                    "id": m.id,
+                    "manifest": [{"field": "", "message": msg, "hint": "Inspect QML files first; run `super-desktop plugin approve <id>` if trusted."}],
+                    "surfaces": [],
+                    "lint": findings,
+                });
             }
-        },
+            match host_or_error() {
+                Err(error) => json!({"ok": false, "dir": dir, "manifest": [], "surfaces": [], "host": error}),
+                Ok(host) => {
+                    let surfaces: Vec<Value> = m.surfaces.iter().map(|s| {
+                        let mut result = check_qml(&host, &m.qml_path(s), &dir);
+                        result["surface"] = json!(s.id);
+                        result["slot"] = json!(s.slot.name());
+                        result
+                    }).collect();
+                    // A warning at load is almost always a real bug (an undefined
+                    // name, a binding loop), so it fails the check too, like a
+                    // lint error; lint advice does not.
+                    let findings = lint::lint(&m);
+                    let ok = surfaces.iter().all(|s| {
+                        s["ok"] == true && s["warnings"].as_array().is_none_or(Vec::is_empty)
+                    }) && findings.iter().all(|f| f.level != lint::Level::Error);
+                    json!({"ok": ok, "dir": dir, "id": m.id, "manifest": [], "surfaces": surfaces, "lint": findings})
+                }
+            }
+        }
     }
 }
 
@@ -370,6 +387,12 @@ fn snapshot_report(flags: &Flags, saved: Option<&Path>) -> Result<(Value, PathBu
     let m = manifest::load(&dir).map_err(|problems| {
         format!("plugin.json has problems; run `super-desktop plugin check`: {}", problems[0].message)
     })?;
+    if !install::approved(&install::Places::current(), &m.id) {
+        return Err(format!(
+            "plugin {:?} is not approved yet; review its code and run `super-desktop plugin approve {}` first",
+            m.id, m.id
+        ));
+    }
     let surface = match flags.get("surface") {
         Some(id) => m.surfaces.iter().find(|s| s.id == id).ok_or_else(|| format!("no surface {id:?}"))?,
         None => &m.surfaces[0],
@@ -380,6 +403,8 @@ fn snapshot_report(flags: &Flags, saved: Option<&Path>) -> Result<(Value, PathBu
     let height: i32 = flags.number("height")?.unwrap_or(default_h);
     let scale: f64 = flags.number("scale")?.unwrap_or(1.0);
     let wait: u32 = flags.number("wait")?.unwrap_or(300);
+    let work = paths::create_private_temp_dir("snapshot")
+        .map_err(|e| format!("cannot create private temp dir: {e}"))?;
     let out = flags.get("out").map(PathBuf::from).unwrap_or_else(|| {
         std::env::temp_dir().join(format!("{}-{}.png", m.id, surface.id))
     });
@@ -390,6 +415,7 @@ fn snapshot_report(flags: &Flags, saved: Option<&Path>) -> Result<(Value, PathBu
             let text = std::fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?;
             let value: Value = serde_json::from_str(&text).map_err(|e| format!("{file} is not valid JSON: {e}"))?;
             if !value.is_object() {
+                let _ = std::fs::remove_dir_all(&work);
                 return Err(format!("{file} must hold one JSON object, like sd.values: {{\"key\": value}}"));
             }
             value
@@ -399,8 +425,25 @@ fn snapshot_report(flags: &Flags, saved: Option<&Path>) -> Result<(Value, PathBu
             .filter(Value::is_object)
             .unwrap_or_else(|| json!({})),
     };
-    let data = std::env::temp_dir().join(format!("sd-snapshot-{}-{}.json", m.id, std::process::id()));
-    std::fs::write(&data, values.to_string()).map_err(|e| format!("cannot write {}: {e}", data.display()))?;
+    let data = work.join("values.json");
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&data)
+            .map_err(|e| {
+                let _ = std::fs::remove_dir_all(&work);
+                format!("cannot write {}: {e}", data.display())
+            })?;
+        if let Err(e) = f.write_all(values.to_string().as_bytes()) {
+            let _ = std::fs::remove_dir_all(&work);
+            return Err(format!("cannot write {}: {e}", data.display()));
+        }
+    }
     let mut steps: Vec<String> = flags.all("do").into_iter().map(str::to_owned).collect();
     if let Some(file) = flags.get("steps") {
         steps.push(std::fs::read_to_string(file).map_err(|e| format!("cannot read {file}: {e}"))?);
@@ -422,7 +465,7 @@ fn snapshot_report(flags: &Flags, saved: Option<&Path>) -> Result<(Value, PathBu
         command.args(["--theme", theme.trim()]);
     }
     let output = command.output();
-    let _ = std::fs::remove_file(&data);
+    let _ = std::fs::remove_dir_all(&work);
     let output = output.map_err(|e| format!("cannot run {}: {e}", host.display()))?;
     let mut report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|_| json!({
         "ok": false, "errors": [{"message": String::from_utf8_lossy(&output.stderr).trim().to_owned()}],
@@ -482,8 +525,8 @@ fn preview(flags: &Flags) -> Result<i32, String> {
     // A whole scale (fractional ones leave edge pixels unpainted), drawn
     // down to fit when it is too big.
     let scale = (560.0 / f64::from(lw.max(1))).min(560.0 / f64::from(lh.max(1))).ceil().clamp(1.0, 3.0);
-    let work = std::env::temp_dir().join(format!("sd-preview-{}-{}", m.id, std::process::id()));
-    std::fs::create_dir_all(&work).map_err(|e| format!("cannot create {}: {e}", work.display()))?;
+    let work = paths::create_private_temp_dir("preview")
+        .map_err(|e| format!("cannot create private preview folder: {e}"))?;
     let mut shots: Vec<(&manifest::Surface, PathBuf, f64, f64)> = Vec::new();
     for s in &chosen {
         let png = work.join(format!("{}.png", s.id));
@@ -692,6 +735,9 @@ fn logs(flags: &Flags) -> Result<i32, String> {
     let [id] = flags.positional.as_slice() else {
         return Err("logs needs one plugin id".into());
     };
+    if !manifest::valid_plugin_id(id) {
+        return Err(format!("invalid plugin id {id:?}"));
+    }
     let lines: usize = flags.number("lines")?.unwrap_or(80);
     match std::fs::read_to_string(paths::log_path(id)) {
         Ok(text) => {
@@ -727,13 +773,15 @@ fn doctor(as_json: bool) -> i32 {
         "Install qt6-declarative, then update SUPER DESKTOP (or run scripts/build-qml-host.sh in its folder).");
     if let Some(host) = &host {
         // Draw something real: Qt Quick, Controls and the built-in terminal module.
-        let dir = std::env::temp_dir().join(format!("sd-plugin-doctor-{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        let qml = dir.join("Doctor.qml");
-        let png = dir.join("doctor.png");
-        let rendered = std::fs::write(&qml, DOCTOR_QML).ok().and_then(|()| {
-            Command::new(host).arg("--snapshot").arg(&qml).arg("--out").arg(&png)
-                .args(["--width", "64", "--height", "32", "--wait", "50"]).output().ok()
+        let rendered = paths::create_private_temp_dir("doctor").ok().and_then(|dir| {
+            let qml = dir.join("Doctor.qml");
+            let png = dir.join("doctor.png");
+            let out = std::fs::write(&qml, DOCTOR_QML).ok().and_then(|()| {
+                Command::new(host).arg("--snapshot").arg(&qml).arg("--out").arg(&png)
+                    .args(["--width", "64", "--height", "32", "--wait", "50"]).output().ok()
+            });
+            let _ = std::fs::remove_dir_all(&dir);
+            out
         });
         let report: Value = rendered.as_ref().and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or(Value::Null);
         let ok = report["ok"] == true && report["paintedFraction"].as_f64().unwrap_or(0.0) > 0.5;
@@ -743,7 +791,6 @@ fn doctor(as_json: bool) -> i32 {
             })
         };
         add("qml-render", ok, detail, "Qt Quick could not draw: check that qt6-declarative is installed and matches qt6-base.");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     let root = paths::plugins_dir();

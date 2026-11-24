@@ -225,12 +225,20 @@ pub fn capture_file_references(session_name: &str) -> Option<String> {
 }
 
 pub(in crate::tmux) fn capture_file_references_with(mut command: Command, session_name: &str) -> Option<String> {
-    command_stdout(command.args(["capture-pane", "-p", "-J", "-t", session_name, "-S", "-300"]))
+    if session_name.is_empty() || session_name.starts_with('-') {
+        return None;
+    }
+    let target = format!("={session_name}:");
+    command_stdout(command.args(["capture-pane", "-p", "-J", "-t", &target, "-S", "-300"]))
 }
 
 /// Visible rows only: the status fallback for screen-based agents.
 pub fn capture_visible_screen(session_name: &str) -> Option<String> {
-    tmux_stdout(&["capture-pane", "-p", "-t", session_name])
+    if session_name.is_empty() || session_name.starts_with('-') {
+        return None;
+    }
+    let target = format!("={session_name}:");
+    tmux_stdout(&["capture-pane", "-p", "-t", &target])
 }
 
 /// Capture tmux's real terminal styling as ANSI SGR sequences. The bridge
@@ -248,12 +256,16 @@ pub(in crate::tmux) fn capture_pane(session_name: &str, ansi: bool, history: u32
 
 /// `capture-pane` output, blank or not; `None` when tmux failed.
 pub(in crate::tmux) fn capture_pane_raw(session_name: &str, ansi: bool, history: u32) -> Option<String> {
+    if session_name.is_empty() || session_name.starts_with('-') {
+        return None;
+    }
     let start = format!("-{history}");
+    let target = format!("={session_name}:");
     let mut args = vec!["capture-pane"];
     if ansi {
         args.push("-e");
     }
-    args.extend(["-p", "-t", session_name, "-S", &start]);
+    args.extend(["-p", "-t", &target, "-S", &start]);
     tmux_stdout(&args)
 }
 

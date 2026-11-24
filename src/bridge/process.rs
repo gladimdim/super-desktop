@@ -100,9 +100,28 @@ pub(in crate::bridge) fn start_bridge_inner() -> Result<(), String> {
     // the bridge must still start (it would otherwise fail with a confusing
     // "Read-only file system" instead of serving).
     let log_path = bridge_log_path();
+    if let Some(parent) = log_path.parent() {
+        let _ = crate::control::ensure_private_dir(parent);
+    }
     // Keep the last run's diagnostics when recovering an unexpected exit.
-    let _ = fs::rename(&log_path, log_path.with_file_name("bridge.previous.log"));
-    let log = fs::File::create(log_path).ok();
+    let prev_path = log_path.with_file_name("bridge.previous.log");
+    let _ = fs::remove_file(&prev_path);
+    if fs::symlink_metadata(&log_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        let _ = fs::remove_file(&log_path);
+    } else {
+        let _ = fs::rename(&log_path, &prev_path);
+    }
+    let log = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&log_path)
+            .ok()
+    };
     let log_err = log.as_ref().and_then(|f| f.try_clone().ok());
 
     let mut command = Command::new(&exe);
@@ -243,7 +262,9 @@ pub(in crate::bridge) fn stop_bridge_inner() -> Result<(), String> {
 }
 
 pub(in crate::bridge) fn pkill_bridge(args: &[&str]) -> Result<i32, String> {
+    let uid = unsafe { libc::geteuid() }.to_string();
     let st = Command::new("pkill")
+        .args(["-u", &uid])
         .args(args)
         .status()
         .map_err(|e| e.to_string())?;
@@ -268,8 +289,7 @@ pub(in crate::bridge) fn wait_port_free() -> bool {
 // ---------- firewall (UFW) ----------
 
 pub(in crate::bridge) fn firewall_marker_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/state/omarchy/harness-bridge/firewall_open")
+    crate::state::home_dir().join(".local/state/omarchy/harness-bridge/firewall_open")
 }
 
 /// (label, unlock_button_enabled). Non-root readable; falls back to our own

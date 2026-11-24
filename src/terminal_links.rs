@@ -38,8 +38,24 @@ pub fn clean_link(token: &str) -> Option<String> {
         .flatten()
         .min()?;
     let mut candidate = &token[start..];
-    if candidate.len() > 8192 {
+    if candidate.len() > 8192
+        || candidate
+            .chars()
+            .any(|c| c.is_whitespace() || (c as u32) < 0x20 || c as u32 == 0x7f)
+    {
         return None;
+    }
+    if let Some(after_scheme) = candidate
+        .split_once("://")
+        .map(|(_, rest)| rest)
+    {
+        let authority = after_scheme
+            .split(['/', '?', '#'])
+            .next()
+            .unwrap_or("");
+        if authority.contains('\\') {
+            return None;
+        }
     }
     loop {
         let old = candidate;
@@ -281,6 +297,8 @@ mod tests {
         assert!(clean_link("javascript:alert(1)").is_none());
         assert!(clean_link("https://user:secret@example.org").is_none());
         assert!(clean_link("https://").is_none());
+        assert!(clean_link("https://evil.com\\@good.com").is_none());
+        assert!(clean_link("https://example.org/a\nb").is_none());
         assert!(clean_link(&format!("https://example.org/{}", "a".repeat(9000))).is_none());
     }
 

@@ -27,7 +27,7 @@ thread_local! {
 }
 
 /// The agent to edit a plugin with: the one used last, else Claude, else
-/// the first offered. `None` when no agent is offered.
+/// the first offered. `None` when no agent is offered. Never selects raw `shell`/`herder`.
 pub fn preferred_harness() -> Option<String> {
     let offered: Vec<String> = super::api::hooks()
         .map(|h| (h.harnesses)())
@@ -35,6 +35,7 @@ pub fn preferred_harness() -> Option<String> {
         .unwrap_or_default()
         .iter()
         .filter_map(|h| h["id"].as_str().map(str::to_owned))
+        .filter(|id| !matches!(id.as_str(), "shell" | "herder"))
         .collect();
     let last = LAST_HARNESS.with(|last| last.borrow().clone());
     last.filter(|id| offered.contains(id))
@@ -105,6 +106,7 @@ pub fn open() {
         .unwrap_or_default()
         .iter()
         .filter_map(|h| Some((h["id"].as_str()?.to_owned(), h["name"].as_str()?.to_owned())))
+        .filter(|(id, _)| !matches!(id.as_str(), "shell" | "herder"))
         .collect();
     let harness_names: Vec<&str> = harnesses.iter().map(|(_, name)| name.as_str()).collect();
     let harness = gtk4::DropDown::from_strings(&harness_names);

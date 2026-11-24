@@ -423,11 +423,23 @@ pub fn request_topic_sync() -> io::Result<()> {
     request_topic_sync_at(&state_dir()?, unix_now())
 }
 
-pub fn config_mtime() -> Option<SystemTime> {
-    config_path()
-        .ok()
-        .and_then(|path| fs::metadata(path).ok())
-        .and_then(|meta| meta.modified().ok())
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FileStamp {
+    pub dev: u64,
+    pub ino: u64,
+    pub len: u64,
+    pub modified: Option<SystemTime>,
+}
+
+pub fn file_stamp(path: &Path) -> Option<FileStamp> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = fs::metadata(path).ok()?;
+    Some(FileStamp {
+        dev: meta.dev(),
+        ino: meta.ino(),
+        len: meta.len(),
+        modified: meta.modified().ok(),
+    })
 }
 
 pub fn should_run_from_disk() -> bool {

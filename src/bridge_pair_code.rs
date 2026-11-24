@@ -176,7 +176,12 @@ pub(super) fn handle(stream: &mut Connection, method: &str, path: &str, body: &V
             reply_json(stream, 202, &json!({"status":"pending","requestId":id,"expiresIn":REQUEST_SECS as u64}));
         }
         ("POST", "/api/v1/pair/code/poll") => {
-            let Some(request) = codes.entries.iter().find(|r| Some(r.id.as_str()) == body["requestId"].as_str()) else {
+            let wanted = body["requestId"].as_str().unwrap_or("");
+            let Some(request) = codes
+                .entries
+                .iter()
+                .find(|r| !wanted.is_empty() && security::equal(&r.id, wanted))
+            else {
                 return reply_error(stream, 404, Envelope::Plain, "request_expired");
             };
             let result = match &request.sealed {

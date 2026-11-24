@@ -50,7 +50,9 @@ pub fn run() {
     // GTK could not use whatever display this process was given. What it starts
     // reaches the desktop through this path once someone logs in.
     env::set_var("WAYLAND_DISPLAY", platform::display_link::headless_value());
-    crate::launch_args::install(&state::load_state().harness_args);
+    let headless_state = state::load_state();
+    crate::launch_args::install(&headless_state.harness_args);
+    crate::sleep_lock::set_enabled(headless_state.sleep_lock_on_ac);
     crashlog::note_start("daemon (headless)");
     if let Err(error) = thread::Builder::new()
         .name("super-desktop-bridge-watch".into())
@@ -141,10 +143,28 @@ fn wait_until_no_daemon(checks: u32) {
 }
 
 fn bind() -> Option<(UnixListener, u64)> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     let path = crate::get_socket_path();
-    let _ = fs::remove_file(&path);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = crate::control::private_dir(parent) {
+            eprintln!("SUPER DESKTOP: unsafe headless runtime dir {}: {error}", parent.display());
+            return None;
+        }
+    }
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.uid() != unsafe { libc::geteuid() } || !meta.file_type().is_socket() {
+            eprintln!("SUPER DESKTOP: refusing unsafe socket file {}", path.display());
+            return None;
+        }
+        let _ = fs::remove_file(&path);
+    }
     match UnixListener::bind(&path) {
         Ok(listener) => {
+            if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+                eprintln!("SUPER DESKTOP: cannot secure {}: {error}", path.display());
+                let _ = fs::remove_file(&path);
+                return None;
+            }
             let inode = fs::metadata(&path).map(|meta| meta.ino()).unwrap_or(0);
             Some((listener, inode))
         }
@@ -171,6 +191,9 @@ fn serve(listener: UnixListener, inode: u64) {
     let path = crate::get_socket_path();
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
+        if crate::control::check_peer(&stream).is_err() {
+            continue;
+        }
         let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
         let Some(command) = crate::read_ipc_command(&mut stream) else { continue };
         // The bridge's change feed needs the overlay's workspace model. A
@@ -229,7 +252,7 @@ fn answer(command: &str) -> (String, After) {
         }
         "close-term" => match parts.get(1) {
             None => json!({"ok": false, "error": "missing_session"}),
-            Some(session) if !session.starts_with("sd_term_") => {
+            Some(session) if !tmux::is_owned_session(session) => {
                 json!({"ok": false, "error": "foreign_session"})
             }
             Some(session) => close_card(session),
@@ -313,10 +336,10 @@ fn new_card(
 fn close_card(session: &str) -> serde_json::Value {
     let mut state = state::load_state();
     let removed = remove_card(&mut state, session);
-    if tmux::session_exists(session) {
-        tmux::kill_session(session);
-    }
     if removed {
+        if tmux::session_exists(session) {
+            tmux::kill_session(session);
+        }
         state::save_state(&state);
         json!({"ok": true, "id": session})
     } else {
@@ -376,7 +399,7 @@ fn import_login_environment() {
     let reader = thread::spawn(move || {
         let mut output = Vec::new();
         if let Some(stdout) = stdout.as_mut() {
-            let _ = stdout.read_to_end(&mut output);
+            let _ = stdout.take(1024 * 1024).read_to_end(&mut output);
         }
         output
     });
@@ -402,7 +425,13 @@ fn login_variables(output: &[u8], is_set: impl Fn(&str) -> bool) -> Vec<(String,
     String::from_utf8_lossy(output)
         .split('\0')
         .filter_map(|entry| entry.split_once('='))
-        .filter(|(name, _)| !name.is_empty() && !matches!(*name, "_" | "PWD" | "OLDPWD" | "SHLVL"))
+        .filter(|(name, value)| {
+            !name.is_empty()
+                && !name.contains('=')
+                && !name.contains('\0')
+                && !value.contains('\0')
+                && !matches!(*name, "_" | "PWD" | "OLDPWD" | "SHLVL")
+        })
         .filter(|(name, _)| *name == "PATH" || !is_set(name))
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect()

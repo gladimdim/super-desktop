@@ -498,15 +498,25 @@ where
         let bytes = unsafe { std::slice::from_raw_parts(text as *const u8, n) };
         forward(bytes);
     }
+    unsafe extern "C" fn destroy<F>(
+        data: gtk4::glib::ffi::gpointer,
+        _closure: *mut gtk4::glib::gobject_ffi::GClosure,
+    ) {
+        if !data.is_null() {
+            unsafe { drop(Box::from_raw(data as *mut F)) };
+        }
+    }
     let boxed = Box::new(forward);
     unsafe {
-        gtk4::glib::signal::connect_raw(
+        gtk4::glib::gobject_ffi::g_signal_connect_data(
             terminal.as_ptr() as *mut gtk4::glib::gobject_ffi::GObject,
             c"commit".as_ptr(),
             Some(std::mem::transmute::<*const (), unsafe extern "C" fn()>(
                 trampoline::<F> as *const (),
             )),
-            Box::into_raw(boxed),
+            Box::into_raw(boxed) as gtk4::glib::ffi::gpointer,
+            Some(destroy::<F>),
+            0,
         );
     }
 }

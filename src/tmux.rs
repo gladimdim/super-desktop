@@ -35,8 +35,8 @@ pub(in crate::tmux) use resume::{
 
 pub use session::{
     create_session, ensure_session_with_inventory, kill_session, parse_pane_grid,
-    resolve_workspace_dir, restart_fresh, send_keys, session_exists, settle_before_enter,
-    settles_before_enter, SessionInventory,
+    resolve_workspace_dir, restart_fresh, send_keys, send_keys_unrecorded, session_exists,
+    settle_before_enter, settles_before_enter, SessionInventory,
 };
 #[cfg(test)]
 pub use session::{pane_grid, unique_session_name};

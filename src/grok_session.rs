@@ -62,6 +62,7 @@ pub fn url_encode_cwd(cwd: &str) -> String {
 
 pub fn is_valid_session_id(id: &str) -> bool {
     !id.is_empty()
+        && !id.starts_with('-')
         && id.len() <= 128
         && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
         && id.chars().any(|c| c.is_ascii_alphanumeric())
@@ -275,12 +276,21 @@ pub fn title_for_pid(pid: u32, cwd: Option<&str>) -> Option<String> {
 }
 
 fn read_tail_lines(path: &Path) -> Option<Vec<String>> {
-    let mut file = File::open(path).ok()?;
-    let len = file.metadata().ok()?.len();
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
+        return None;
+    }
+    let len = meta.len();
     let offset = len.saturating_sub(TAIL_BYTES);
     file.seek(SeekFrom::Start(offset)).ok()?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).ok()?;
+    file.take(TAIL_BYTES + 1024).read_to_end(&mut buf).ok()?;
     let text = String::from_utf8_lossy(&buf);
     let lines: Vec<String> = text
         .lines()

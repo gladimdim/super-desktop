@@ -38,7 +38,7 @@ fn creation_workspace_is_explicit_and_invalid_paths_never_fall_back() {
 }
 #[test]
 fn persistent_input_keeps_order_and_acknowledges_errors() {
-    let id = format!("sd_perf_test_{}", std::process::id());
+    let id = format!("sd_term_perf_test_{}", std::process::id());
     let _session = TmuxSession::start(&id, &[], &["cat"]);
     let server_id = id.clone();
     let (mut client, worker) = loopback_server(move |mut stream| stream_keys(&mut stream, &server_id));
@@ -78,7 +78,7 @@ fn persistent_input_submits_after_a_harness_reads_the_text_as_a_paste() {
     // of each other as one paste; a Return inside it is a newline in the
     // draft. Return sent straight after the text used to land there, so
     // the prompt sat in the composer unsent.
-    let id = format!("sd_paste_test_{}", std::process::id());
+    let id = format!("sd_term_paste_test_{}", std::process::id());
     let script = std::env::temp_dir().join(format!("{id}.py"));
     std::fs::write(&script, r#"
 import os, select, tty
@@ -117,7 +117,7 @@ fn persistent_input_reopens_a_failed_tmux_connection() {
     // One failed tmux command used to poison the socket's control client,
     // so every later phone input was refused with "tmux connection must
     // be reopened" until the phone dropped the socket.
-    let id = format!("sd_reopen_test_{}", std::process::id());
+    let id = format!("sd_term_reopen_test_{}", std::process::id());
     let _session = TmuxSession::start(&id, &[], &["cat"]);
     let server_id = id.clone();
     let (mut client, worker) = loopback_server(move |mut stream| stream_keys(&mut stream, &server_id));

@@ -19,14 +19,14 @@ pub struct PairingReply {
 }
 
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
         diff |= x ^ y;
     }
-    diff == 0
+    std::hint::black_box(diff) == 0 && a.len() == b.len()
 }
 
 pub fn format_code(code: &str) -> String {
@@ -143,7 +143,12 @@ pub fn handle_pairing_start(
     };
 
     // Single-use invitation is consumed immediately on valid match.
-    let _ = clear_invite_at(state_dir);
+    if clear_invite_at(state_dir).is_err() {
+        return PairingReply {
+            reply_html: Some("Could not consume pairing invitation safely on PC.".to_string()),
+            pending_created: false,
+        };
+    }
     let req = PendingRequest {
         request_id,
         user_id: from.id,
@@ -209,6 +214,13 @@ pub fn approve_pending(state_dir: &Path, request_id: &str) -> Result<AllowedUser
         first_name: req.first_name,
         paired_at: now,
     };
+    if cfg
+        .allowed_user
+        .as_ref()
+        .is_some_and(|prev| prev.user_id != allowed.user_id)
+    {
+        cfg.forum = None;
+    }
     cfg.allowed_user = Some(allowed.clone());
     cfg.rejected_user_ids.retain(|&id| id != allowed.user_id);
     save_config_at(&cfg_path, &cfg).map_err(|e| e.to_string())?;
@@ -279,6 +291,12 @@ pub fn link_forum(
                 .into(),
         );
     }
+    if chat.username.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+        return Err(
+            "Refused: this Forum Supergroup has a public @username. Create a private supergroup without a public link."
+                .into(),
+        );
+    }
     let member = api
         .get_chat_member(chat_id, bot_id)
         .map_err(|e| e.to_string())?;
@@ -299,13 +317,24 @@ pub fn link_forum(
         .title
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| "SUPER DESKTOP Forum".to_string());
-    cfg.forum = Some(ForumConfig {
+    let owner_id = cfg
+        .allowed_user
+        .as_ref()
+        .map(|u| u.user_id)
+        .ok_or_else(|| "Pair your Telegram account in Settings → Telegram first.".to_string())?;
+    let cfg_path = state_dir.join("config.json");
+    let mut fresh = load_config_at(&cfg_path).map_err(|e| e.to_string())?;
+    if !fresh.should_run() || fresh.allowed_user.as_ref().map(|u| u.user_id) != Some(owner_id) {
+        return Err("Telegram owner changed or was revoked; /linkforum aborted.".into());
+    }
+    fresh.forum = Some(ForumConfig {
         chat_id,
         title: title.clone(),
         linked_at: now,
     });
     runtime.topics.clear();
-    save_config_at(&state_dir.join("config.json"), cfg).map_err(|e| e.to_string())?;
+    save_config_at(&cfg_path, &fresh).map_err(|e| e.to_string())?;
+    *cfg = fresh;
     save_runtime_at(&state_dir.join("runtime.json"), runtime).map_err(|e| e.to_string())?;
     Ok(title)
 }

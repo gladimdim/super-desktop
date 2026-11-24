@@ -455,20 +455,55 @@ to `api.telegram.org` using the user's own `@BotFather` bot token:
   approved numeric `user_id` is authorized; strangers are silently ignored, and
   access can be revoked immediately from Settings.
 - **Private 2-member Forum Topics**: `/linkforum` validates that the target
-  supergroup has Topics enabled, the bot has `can_manage_topics`, and the
-  member count is `<= 2` (owner + bot only), refusing larger groups.
+  supergroup has Topics enabled, has no public `@username`, the bot has
+  `can_manage_topics`, and the member count is `<= 2` (owner + bot only),
+  refusing larger or public groups. Linked forums are periodically re-audited
+  and automatically unlinked if privacy invariants fail or on re-pair.
 - **Granular permissions & stale-update guard**: notifications and secret
   redaction start enabled; terminal screen capture, harness prompts, control
   keys, shell input, card launch, card close, and file attachments start
-  disabled. Updates older than 120 seconds (or predating worker startup) are
-  dropped on reconnect so queued commands do not execute unexpectedly after a
-  reboot or outage.
+  disabled. Card titles, last prompts, ANSI terminal streams, and reference
+  links are redacted when `redact_secrets` is enabled. Updates older than 120
+  seconds (or predating worker startup) are dropped on reconnect so queued
+  commands do not execute unexpectedly after a reboot or outage.
+- **Telegram Mini Web App (`super-desktop telegram-bot`)**: when enabled, the
+  loopback HTTP/WS server binds `127.0.0.1` only, validates Telegram WebApp
+  HMAC-SHA256 `initData` with strict 3600 s hard TTL and `paired_at` binding,
+  issues random bearer tokens for `/api/*` and single-use 15-second
+  `/api/ws-ticket` WebSocket tickets, enforces per-response CSP nonces, checks
+  permissions and `Origin`/`Sec-Fetch-Site` before reading upload bodies or
+  upgrading sockets, and invalidates sessions immediately on disable or owner
+  revocation.
 - **Telegram cloud visibility**: Telegram Bot API does not support secret-chat
   end-to-end encryption. Messages, screenshots/captures, and attachments sent
   through the bot traverse and are stored by Telegram's servers. Best-effort
   secret redaction masks common API keys, tokens, PEM private keys, and `.env`
   secret assignments, but is not a security boundary against arbitrary secrets
   printed in a terminal.
+
+## Agent plugins (`sd-qml-host`)
+
+Plugin folders under `~/.config/super-desktop/plugins/<id>/` require explicit
+owner approval before loading or starting QML surfaces. Plugin IDs accept only
+lowercase ASCII letters, digits, and internal hyphens (`[a-z0-9][a-z0-9-]*`),
+and manifest paths and icon sources refuse path traversal and external
+directories via symlink checks. `sd-qml-host` runs offscreen
+with resource bounds, QML local file/network read restrictions (`QML_XHR` and
+local filesystem reads disabled), `O_NOFOLLOW`/`0700` state/temp directories,
+bounded HTTP fetch response sizes, explicit LLM host/consent enforcement, and
+owned `sd_term_*` session scoping for any PTY operations.
+
+## Desktop UI, editor & local files
+
+State directories and temporary writes use owner-only (`0700` / `0600`)
+`O_NOFOLLOW | O_CLOEXEC` exclusive creates without falling back to shared `/tmp`
+directories. Text/image previews and Markdown views enforce size bounds and
+non-blocking regular-file checks, reject XML `<!DOCTYPE`/`<!ENTITY` payloads in
+SVG image previews, restrict links to validated `http://`/`https://` authorities,
+sanitize Omarchy hex colors and font names before CSS generation, escape Pango
+markup in desktop notifications, validate Hyprland shortcut combinations and Git
+refs against injection, and isolate daemon/bridge logs and process signals to
+the current user (`uid`).
 
 ## Verification
 

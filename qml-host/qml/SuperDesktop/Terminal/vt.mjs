@@ -169,9 +169,12 @@ export class Screen {
                 this.params = "";
             } else if (code < 0x20) {
                 this.control(code);
-            } else {
+            } else if ((code >= 0x30 && code <= 0x3f) || (code >= 0x20 && code <= 0x2f)) {
                 this.params += ch;
                 if (this.params.length > 64) { this.state = "ground"; this.params = ""; }
+            } else {
+                this.state = "ground";
+                this.params = "";
             }
             return;
         case "osc":
@@ -332,8 +335,13 @@ export class Screen {
         if (raw.length && "?>=<".includes(raw[0])) { prefix = raw[0]; raw = raw.slice(1); }
         const intermediate = raw.match(/[ -\/]+$/);
         if (intermediate) raw = raw.slice(0, -intermediate[0].length);
-        const p = raw.length ? raw.split(";").map(v => (v === "" ? NaN : parseInt(v.split(":")[0], 10))) : [];
-        const arg = (i, d) => (Number.isNaN(p[i]) || p[i] === undefined || p[i] === 0 ? d : p[i]);
+        const maxParam = prefix ? 65535 : Math.max(this.rows, this.cols, 1000);
+        const p = raw.length ? raw.split(";").map(v => {
+            if (v === "") return NaN;
+            const n = parseInt(v.split(":")[0], 10);
+            return Number.isNaN(n) || n < 0 ? 0 : Math.min(n, maxParam);
+        }) : [];
+        const arg = (i, d) => (Number.isNaN(p[i]) || p[i] === undefined || p[i] <= 0 ? d : Math.min(p[i], maxParam));
         if (prefix === "?") { if (final === "h" || final === "l") this.privateMode(p, final === "h"); return; }
         if (prefix === ">" || prefix === "=" || prefix === "<") {
             if (final === "c" && prefix === ">") this.respond("\x1b[>0;10;1c");
@@ -379,11 +387,11 @@ export class Screen {
             this.x = 0;
             break;
         }
-        case "S": this.scrollUpInRegion(arg(0, 1)); break;
-        case "T": this.scrollDown(arg(0, 1)); break;
+        case "S": this.scrollUpInRegion(Math.min(arg(0, 1), this.bottom - this.top + 1)); break;
+        case "T": this.scrollDown(Math.min(arg(0, 1), this.bottom - this.top + 1)); break;
         case "r": {
             const top = arg(0, 1) - 1, bottom = arg(1, this.rows) - 1;
-            if (top < bottom && bottom < this.rows) {
+            if (top >= 0 && top < bottom && bottom < this.rows) {
                 this.top = top;
                 this.bottom = bottom;
                 this.moveTo(0, 0);
@@ -400,9 +408,10 @@ export class Screen {
             break;
         case "c": if (!p[0]) this.respond("\x1b[?1;2c"); break;
         case "g": if (!p[0]) this.tabs.delete(this.x); else if (p[0] === 3) this.tabs.clear(); break;
-        case "I": this.tab(arg(0, 1)); break;
+        case "I": this.tab(Math.min(arg(0, 1), this.cols)); break;
         case "Z": {
-            for (let i = 0; i < arg(0, 1); i++) {
+            const steps = Math.min(arg(0, 1), this.cols);
+            for (let i = 0; i < steps; i++) {
                 let prev = 0;
                 for (let c = this.x - 1; c > 0; c--) if (this.tabs.has(c)) { prev = c; break; }
                 this.x = prev;
@@ -499,7 +508,7 @@ export class Screen {
             else if (n === 38 || n === 48) {
                 let color = null;
                 if (p[i + 1] === 5 && p[i + 2] !== undefined) {
-                    const index = p[i + 2];
+                    const index = Math.max(0, Math.min(255, p[i + 2] | 0));
                     color = index < 16 ? index : xterm256(index);
                     i += 2;
                 } else if (p[i + 1] === 2 && p[i + 4] !== undefined) {

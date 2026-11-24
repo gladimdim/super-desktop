@@ -271,6 +271,13 @@ installed_checkout() {
 # SUPER_DESKTOP_VERSION as "", "latest", "master" or a tag vX.Y.Z (1.1.17 is
 # v1.1.17). A branch named with SUPER_DESKTOP_BRANCH is followed.
 resolve_release() {
+    if [[ ! "$BRANCH" =~ ^[A-Za-z0-9._/-]+$ || "$BRANCH" == -* || "$BRANCH" == *..* ]]; then
+        die "SUPER_DESKTOP_BRANCH contains invalid characters."
+    fi
+    if [[ "$REPO_URL" == -* || "$REPO_URL" =~ [[:space:]] ]] ||
+        [[ ! "$REPO_URL" =~ ^(https://|ssh://|git@) ]]; then
+        die "SUPER_DESKTOP_REPO must be an https://, ssh://, or git@ repository URL."
+    fi
     if [[ -z "$RELEASE" && -n "${SUPER_DESKTOP_BRANCH:-}" ]]; then
         RELEASE=master
     fi
@@ -350,11 +357,11 @@ follow_branch() {
         return
     fi
     say "Switching $dir to $BRANCH..."
-    git -C "$dir" fetch --quiet --no-tags origin "$BRANCH" </dev/null ||
+    git -C "$dir" fetch --quiet --no-tags origin -- "$BRANCH" </dev/null ||
         die "Could not fetch $BRANCH from $REPO_URL. Check the network connection and run the installer again."
-    git -C "$dir" checkout --quiet -B "$BRANCH" "origin/$BRANCH" ||
+    git -C "$dir" checkout --quiet -B "$BRANCH" "origin/$BRANCH" -- ||
         die "Could not switch $dir to $BRANCH."
-    git -C "$dir" branch --quiet --set-upstream-to="origin/$BRANCH" "$BRANCH" >/dev/null 2>&1 || true
+    git -C "$dir" branch --quiet --set-upstream-to="origin/$BRANCH" -- "$BRANCH" >/dev/null 2>&1 || true
 }
 
 # Move the clone to the newest release. A clone on a branch with commits that
@@ -435,7 +442,7 @@ prepare_source() {
         mkdir -p "$(dirname "$dir")"
         # Clone the branch, then check the release out: `git clone --branch <tag>`
         # prints a confusing "is not a commit!" warning for an annotated tag.
-        git -c advice.detachedHead=false clone --branch "$BRANCH" "$REPO_URL" "$dir" </dev/null ||
+        git -c advice.detachedHead=false clone --branch "$BRANCH" -- "$REPO_URL" "$dir" </dev/null ||
             die "Could not clone $REPO_URL. Check the network connection and run the installer again."
         update_checkout "$dir"
     fi
@@ -473,7 +480,9 @@ configure() {
     fi
 
     # 2. Install desktop entry.
-    sed "s|^Exec=.*|Exec=$BIN_DST toggle|g" "$SRC/super-desktop.desktop" >"$APP_DST"
+    EXEC_LINE="Exec=$BIN_DST toggle" awk '{
+        if ($0 ~ /^Exec=/) { print ENVIRON["EXEC_LINE"] } else { print }
+    }' "$SRC/super-desktop.desktop" >"$APP_DST"
     say "✓ Installed desktop entry to $APP_DST"
 
     # 3. Add the overlay's toggle binding to ~/.config/hypr/bindings.lua.
@@ -571,11 +580,14 @@ EOF
     mkdir -p "$hook_dir"
     cat <<'EOF' >"$hook_file"
 #!/usr/bin/env bash
-if which super-desktop >/dev/null 2>&1; then
+BIN="$HOME/.local/bin/super-desktop"
+if [[ -x "$BIN" ]]; then
+    "$BIN" reload-theme >/dev/null 2>&1 || true
+elif command -v super-desktop >/dev/null 2>&1; then
     super-desktop reload-theme >/dev/null 2>&1 || true
 fi
 EOF
-    chmod +x "$hook_file"
+    chmod 700 "$hook_file"
     say "✓ Installed Omarchy theme hook to $hook_file"
 }
 
@@ -605,7 +617,7 @@ reload_hyprland() {
 DAEMON_PROCESS='^([^ ]*/)?super-desktop daemon( |$)'
 
 daemon_running() {
-    pgrep -f "$DAEMON_PROCESS" >/dev/null 2>&1
+    pgrep -u "$(id -u)" -f "$DAEMON_PROCESS" >/dev/null 2>&1
 }
 
 # A running daemon (and its bridge) still runs the previous build.

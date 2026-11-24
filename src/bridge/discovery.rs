@@ -177,7 +177,10 @@ pub(in crate::bridge) const BROWSE_TIMEOUT: Duration = Duration::from_secs(3);
 pub(in crate::bridge) fn browse_once(port: u16) -> bool {
     let mut command = Command::new("avahi-browse");
     command.args(["-rtp", MDNS_SERVICE_TYPE]);
-    any_output_line(command, BROWSE_TIMEOUT, |line| browse_line_matches(line, port))
+    let own_host = hostname();
+    any_output_line(command, BROWSE_TIMEOUT, |line| {
+        browse_line_matches_host(line, port, Some(&own_host))
+    })
 }
 
 /// Run `command` until a line of its stdout satisfies `found` (true), or it
@@ -244,14 +247,35 @@ pub(in crate::bridge) fn any_output_line(mut command: Command, timeout: Duration
 ///
 /// Resolve lines look like
 /// `=;wlo1;IPv4;Name\032With\032Spaces;_omarchy-harness._tcp;local;host.local;192.168.50.219;8759;"ver=1"`.
+#[cfg(test)]
 pub(in crate::bridge) fn browse_line_matches(line: &str, port: u16) -> bool {
+    browse_line_matches_host(line, port, None)
+}
+
+fn browse_line_matches_host(line: &str, port: u16, expected_host: Option<&str>) -> bool {
     if !line.starts_with('=') {
         return false;
     }
     let fields: Vec<&str> = line.split(';').collect();
     // 4 = service type, 8 = port (6 = host, 7 = address, 9 = TXT).
-    fields.get(4) == Some(&MDNS_SERVICE_TYPE)
-        && fields.get(8).and_then(|p| p.parse::<u16>().ok()) == Some(port)
+    if fields.get(4) != Some(&MDNS_SERVICE_TYPE)
+        || fields.get(8).and_then(|p| p.parse::<u16>().ok()) != Some(port)
+    {
+        return false;
+    }
+    if let Some(own) = expected_host.map(str::trim).filter(|s| !s.is_empty()) {
+        let own_short = own.split('.').next().unwrap_or(own);
+        let Some(host) = fields.get(6).map(|s| s.trim().trim_end_matches('.')) else {
+            return false;
+        };
+        let host_short = host.split('.').next().unwrap_or(host);
+        if !host.eq_ignore_ascii_case(own)
+            && !host_short.eq_ignore_ascii_case(own_short)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// State file the 📱 panel reads to show whether discovery is live.

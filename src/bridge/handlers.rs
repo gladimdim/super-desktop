@@ -263,6 +263,8 @@ pub(in crate::bridge) fn creation_command(agent: &str, body: &serde_json::Value)
 pub(in crate::bridge) const KEEP_ALIVE_IDLE: Duration = Duration::from_secs(30);
 /// Requests served on one connection before it is closed.
 pub(in crate::bridge) const KEEP_ALIVE_MAX_REQUESTS: usize = 200;
+pub(in crate::bridge) static ACTIVE_PORT: std::sync::atomic::AtomicU16 =
+    std::sync::atomic::AtomicU16::new(0);
 
 /// Serve one connection: a single request, or several with HTTP/1.1
 /// keep-alive. Every request is parsed, checked (browser origin, pairing,
@@ -273,6 +275,11 @@ pub(in crate::bridge) fn serve_connection(mut stream: Connection, admission: Opt
     let mut served = 0;
     while handle_client(&mut stream, admission.as_ref()) {
         served += 1;
+        if let Some(adm) = admission.as_ref() {
+            adm.set_deadline(Some(
+                std::time::Instant::now() + KEEP_ALIVE_IDLE + std::time::Duration::from_secs(5),
+            ));
+        }
         if served >= KEEP_ALIVE_MAX_REQUESTS || !stream.await_next_request(KEEP_ALIVE_IDLE) {
             break;
         }
@@ -297,17 +304,18 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
     if req.headers.contains_key("origin") || req.headers.contains_key("sec-fetch-site") {
         return reply_error(stream, 403, Envelope::Plain, "browser_access_disabled");
     }
-    if let Some(guard) = admission { guard.identify(bearer(&req.headers)); }
     // Recheck on each stream I/O as well as closing the socket: TLS may already
-    // have buffered input when a device is revoked.
+    // have buffered input when a device is revoked. Identify only after auth!
     if authorize(&req.headers) {
         let token = bearer(&req.headers);
+        if let Some(guard) = admission { guard.identify(token); }
         security::note_activity(token);
         stream.credential(token);
     }
     let path = req.path.as_str();
     if path == "/api/v1/previews" || path.starts_with("/api/v1/previews/") {
         if !require_pairing(stream, &req.headers, Envelope::Plain) { return; }
+        if let Some(guard) = admission { guard.set_deadline(None); }
         return previews::handle(stream, req);
     }
     if req.method == "POST" && crate::transcribe::route(path) {
@@ -315,6 +323,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
             return;
         }
         stream.streaming();
+        if let Some(guard) = admission { guard.set_deadline(None); }
         stream.persist = false;
         let wav = match crate::transcribe::parse_request(&req.body) {
             Ok(bytes) => bytes,
@@ -339,6 +348,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                 return;
             }
             stream.streaming();
+            if let Some(guard) = admission { guard.set_deadline(None); }
             // Uploads run under their own long deadline: never reuse the socket.
             stream.persist = false;
             let owner = security::digest(bearer(&req.headers).as_bytes());
@@ -348,9 +358,14 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                 crate::prompt_image::submit(session, &owner, &body, || stream.still_authorized())
             } else {
                 crate::prompt_attachments::parse_request(&req.body).and_then(|parsed| {
-                    if let Some(voiced) = crate::prompt_attachments::resolve_voice_transcription_with(
+                    crate::prompt_attachments::verify_session_ready(session)?;
+                    if !stream.still_authorized() {
+                        return Err("device_revoked".into());
+                    }
+                    if let Some(voiced) = crate::prompt_attachments::resolve_voice_transcription_checked(
                         &parsed,
-                        crate::transcribe::transcribe_wav,
+                        &|| stream.still_authorized(),
+                        &mut crate::transcribe::transcribe_wav,
                     ) {
                         transcribed = Some((voiced.transcript, voiced.engine));
                         crate::prompt_attachments::submit(
@@ -403,6 +418,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
             // Authenticated asset work has its own bounded renderer timeout;
             // the initial TLS/header/body deadline no longer applies.
             stream.streaming();
+            if let Some(guard) = admission { guard.set_deadline(None); }
             let Some(_permit) = crate::assets::Transfer::acquire() else {
                 return reply_error(stream, 429, Envelope::Plain, "asset_transfer_busy");
             };
@@ -513,7 +529,10 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                         if !require_live_session(stream, req, id, Envelope::Plain) {
                             return;
                         }
-                        if ws_upgrade(stream, req) { return stream_keys(stream, id); }
+                        if ws_upgrade(stream, req) {
+                            if let Some(guard) = admission { guard.set_deadline(None); }
+                            return stream_keys(stream, id);
+                        }
                         return reply_error(stream, 400, Envelope::Plain, "expected_websocket");
                     }
                     ("GET", "stream") => {
@@ -521,7 +540,10 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                             return;
                         }
                         return match ws_upgrade(stream, req) {
-                            true => terminal_stream::stream(stream, id, terminal_stream::ansi_only(&req.query), terminal_stream::viewport_requested(&req.query)),
+                            true => {
+                                if let Some(guard) = admission { guard.set_deadline(None); }
+                                terminal_stream::stream(stream, id, terminal_stream::ansi_only(&req.query), terminal_stream::viewport_requested(&req.query))
+                            }
                             false => reply_error(stream, 400, Envelope::Status, "expected_websocket"),
                         };
                     }
@@ -556,6 +578,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
             if !ws_upgrade(stream, req) {
                 return reply_error(stream, 400, Envelope::Plain, "expected_websocket");
             }
+            if let Some(guard) = admission { guard.set_deadline(None); }
             return desktop::attach_terminal(stream, target);
         }
     }
@@ -601,6 +624,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
                 if !ws_upgrade(stream, req) {
                     return reply_error(stream, 400, Envelope::Plain, "expected_websocket");
                 }
+                if let Some(guard) = admission { guard.set_deadline(None); }
                 desktop_events::serve(stream, subscription);
             } else {
                 desktop::get_workspace(stream);
@@ -671,6 +695,7 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
             if !ws_upgrade(stream, req) {
                 return reply_error(stream, 400, Envelope::Status, "expected_websocket");
             }
+            if let Some(guard) = admission { guard.set_deadline(None); }
             harness_list::stream(stream);
         }
         _ => reply_error(stream, 404, Envelope::Plain, "not found"),
@@ -681,7 +706,13 @@ pub(in crate::bridge) fn route(stream: &mut Connection, req: &Request, admission
 pub fn serve(port: u16) {
     let tls = security::tls_config().expect("Cannot load TLS identity; refusing insecure fallback");
     let listener = match TcpListener::bind(("0.0.0.0", port)) {
-        Ok(l) => l,
+        Ok(l) => {
+            ACTIVE_PORT.store(
+                l.local_addr().map(|a| a.port()).unwrap_or(port),
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            l
+        }
         Err(e) => {
             eprintln!("{SERVICE_NAME}: failed to bind 0.0.0.0:{port}: {e}");
             std::process::exit(1);

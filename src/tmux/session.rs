@@ -52,8 +52,12 @@ pub fn parse_pane_grid(text: &str) -> Option<crate::desktop_protocol::TerminalSi
 /// tmux versions reject the per-session form; the call then fails and the
 /// previous behaviour remains instead of us mutating the server options.
 pub(in crate::tmux) fn pin_client_exit(session_name: &str) {
+    if !is_owned_session(session_name) {
+        return;
+    }
+    let exact = format!("={session_name}:");
     let _ = Command::new(tmux_bin())
-        .args(["set-option", "-t", session_name, "detach-on-destroy", "on"])
+        .args(["set-option", "-t", &exact, "detach-on-destroy", "on"])
         .output();
     // Same moments (create/attach): make mouse copies reach the clipboard.
     crate::tmux_clipboard::install_session(session_name);
@@ -180,6 +184,7 @@ pub(in crate::tmux) fn start_session(session_name: &str, agent_type: &str, comma
     let launch = crate::harness_metadata::prepare(session_name, agent_type, &launch);
     let cwd = resolve_workspace_dir(workspace_dir);
 
+    let exact = format!("={session_name}:");
     let mut tmux = Command::new(tmux_bin());
     tmux.args([
         "new-session",
@@ -192,9 +197,10 @@ pub(in crate::tmux) fn start_session(session_name: &str, agent_type: &str, comma
         "120",
         "-y",
         "35",
+        "--",
         &launch.command,
     ]);
-    tmux.args([";", "set-option", "-t", session_name, "detach-on-destroy", "on"]);
+    tmux.args([";", "set-option", "-t", &exact, "detach-on-destroy", "on"]);
     if let Some(hook) = crate::tmux_clipboard::session_hook_args(session_name) {
         tmux.arg(";").args(hook);
     }
@@ -218,8 +224,12 @@ pub(in crate::tmux) fn start_session(session_name: &str, agent_type: &str, comma
 
 /// True when a tmux session with this name already exists on the server.
 pub fn session_exists(session_name: &str) -> bool {
+    if !is_owned_session(session_name) {
+        return false;
+    }
+    let exact = format!("={session_name}");
     Command::new(tmux_bin())
-        .args(["has-session", "-t", session_name])
+        .args(["has-session", "-t", &exact])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -239,8 +249,12 @@ pub fn unique_session_name() -> String {
 }
 
 pub fn kill_session(session_name: &str) {
+    if !is_owned_session(session_name) {
+        return;
+    }
+    let exact = format!("={session_name}");
     let _ = Command::new(tmux_bin())
-        .args(["kill-session", "-t", session_name])
+        .args(["kill-session", "-t", &exact])
         .output();
 }
 
@@ -374,11 +388,24 @@ pub(in crate::tmux) fn settle_before_enter_within(
 /// begins with a dash from being read as a flag. For a harness `agent`,
 /// Return waits until the typed text has settled ([settle_before_enter]).
 pub fn send_keys(session_name: &str, agent: &str, text: &str, enter: bool) -> Result<(), String> {
+    send_keys_inner(session_name, agent, text, enter, true)
+}
+
+/// Sends keystrokes to a tmux session without recording prompt history (used by plugins).
+pub fn send_keys_unrecorded(session_name: &str, agent: &str, text: &str, enter: bool) -> Result<(), String> {
+    send_keys_inner(session_name, agent, text, enter, false)
+}
+
+fn send_keys_inner(session_name: &str, agent: &str, text: &str, enter: bool, record_prompt: bool) -> Result<(), String> {
+    if !super::is_owned_session(session_name) && !session_name.starts_with("sd_plugin_api_") {
+        return Err("invalid_session".to_string());
+    }
+    let target = format!("={session_name}:");
     let settle = enter && !text.is_empty() && settles_before_enter(agent);
     let before = if settle { capture_visible_screen(session_name) } else { None };
     if !text.is_empty() {
         let out = Command::new(tmux_bin())
-            .args(["send-keys", "-t", session_name, "-l", "--", text])
+            .args(["send-keys", "-t", &target, "-l", "--", text])
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
@@ -390,14 +417,14 @@ pub fn send_keys(session_name: &str, agent: &str, text: &str, enter: bool) -> Re
     }
     if enter {
         let out = Command::new(tmux_bin())
-            .args(["send-keys", "-t", session_name, "Enter"])
+            .args(["send-keys", "-t", &target, "Enter"])
             .output()
             .map_err(|e| e.to_string())?;
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
         }
     }
-    if enter && !text.trim().is_empty() {
+    if record_prompt && enter && !text.trim().is_empty() {
         crate::prompt_history::record(session_name, text);
     }
     Ok(())

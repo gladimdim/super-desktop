@@ -77,9 +77,8 @@ pub fn complete(request: &Request) -> Result<Value, Value> {
 fn run_provider(provider: &str, request: &Request) -> Result<Value, Value> {
     let binary = crate::tmux::which(provider).ok_or_else(|| unavailable(format!("{provider} is gone")))?;
     let system = system_prompt(request);
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let workdir = std::env::temp_dir().join(format!("sd-plugin-llm-{}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&workdir).map_err(|e| unavailable(format!("cannot create a work folder: {e}")))?;
+    let workdir = super_desktop::plugins::paths::create_private_temp_dir("llm")
+        .map_err(|e| unavailable(format!("cannot create a work folder: {e}")))?;
     let answer_file = workdir.join("answer.txt");
     let mut command = Command::new(binary);
     let input = if provider == "claude" {
@@ -90,7 +89,10 @@ fn run_provider(provider: &str, request: &Request) -> Result<Value, Value> {
         }
         request.prompt.clone()
     } else {
-        command.args(["exec", "--skip-git-repo-check", "--ephemeral", "--sandbox", "read-only", "--output-last-message"])
+        command.args([
+            "exec", "--skip-git-repo-check", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+            "-c", "mcp_servers={}", "--sandbox", "read-only", "--output-last-message",
+        ])
             .arg(&answer_file)
             .arg("-");
         format!("{system}\n\n{}", request.prompt)
@@ -100,7 +102,17 @@ fn run_provider(provider: &str, request: &Request) -> Result<Value, Value> {
         if provider == "claude" {
             parse_claude(&stdout)
         } else {
-            let text = std::fs::read_to_string(&answer_file).map_err(|_| unavailable("Codex gave no answer".into()))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .open(&answer_file)
+                .map_err(|_| unavailable("Codex gave no answer".into()))?;
+            let mut text = String::new();
+            let _ = Read::by_ref(&mut f).take(2 * 1024 * 1024).read_to_string(&mut text);
+            if text.trim().is_empty() {
+                return Err(unavailable("Codex gave no answer".into()));
+            }
             Ok((text, "codex default".to_owned()))
         }
     });
@@ -137,14 +149,14 @@ fn run(command: &mut Command, dir: &std::path::Path, input: &str) -> Result<Stri
     let mut stdout = child.stdout.take().ok_or_else(|| unavailable("no stdout".into()))?;
     let mut stderr = child.stderr.take().ok_or_else(|| unavailable("no stderr".into()))?;
     let out = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stdout.read_to_string(&mut text);
-        text
+        let mut buf = Vec::new();
+        let _ = Read::by_ref(&mut stdout).take(2 * 1024 * 1024).read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
     });
     let err = std::thread::spawn(move || {
-        let mut text = String::new();
-        let _ = stderr.read_to_string(&mut text);
-        text
+        let mut buf = Vec::new();
+        let _ = Read::by_ref(&mut stderr).take(256 * 1024).read_to_end(&mut buf);
+        String::from_utf8_lossy(&buf).into_owned()
     });
     let started = Instant::now();
     let status = loop {

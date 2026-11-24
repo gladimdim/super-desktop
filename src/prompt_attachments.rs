@@ -171,9 +171,18 @@ pub struct TranscribedVoice {
 /// on every voice WAV attachment before staging files. Returns `None` on
 /// unavailability, failure, or empty speech so callers fall back seamlessly to
 /// delivering the raw WAV attachment under `[Voice prompt]`.
+#[cfg(test)]
 pub fn resolve_voice_transcription_with(
     parsed: &ParsedRequest,
     mut transcribe: impl FnMut(&[u8]) -> Result<(String, &'static str), &'static str>,
+) -> Option<TranscribedVoice> {
+    resolve_voice_transcription_checked(parsed, &|| true, &mut transcribe)
+}
+
+pub fn resolve_voice_transcription_checked(
+    parsed: &ParsedRequest,
+    authorized: &dyn Fn() -> bool,
+    transcribe: &mut dyn FnMut(&[u8]) -> Result<(String, &'static str), &'static str>,
 ) -> Option<TranscribedVoice> {
     if !parsed.transcribe_voice || parsed.voice == Some(false) {
         return None;
@@ -185,6 +194,9 @@ pub fn resolve_voice_transcription_with(
     let mut remaining = Vec::new();
     let mut engine_used = None;
     for attachment in &parsed.attachments {
+        if !authorized() {
+            return None;
+        }
         if is_voice_attachment(attachment) {
             let Ok((text, engine)) = transcribe(&attachment.bytes) else {
                 return None;
@@ -211,11 +223,18 @@ pub fn resolve_voice_transcription_with(
             }
         }
     };
-    let combined_text = if base_typed.is_empty() {
+    let mut combined_text = if base_typed.is_empty() {
         transcript.clone()
     } else {
         format!("{base_typed}\n\n{transcript}")
     };
+    if combined_text.len() > 4096 {
+        let mut end = 4096;
+        while !combined_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        combined_text.truncate(end);
+    }
     Some(TranscribedVoice {
         combined_text,
         transcript,
@@ -624,6 +643,23 @@ pub fn prepare(
     Ok(())
 }
 
+pub fn verify_session_ready(session: &str) -> Result<(), &'static str> {
+    let state = crate::state::load_state();
+    let terminal = state
+        .terminals
+        .iter()
+        .find(|t| t.session_name == session)
+        .ok_or("no_such_session")?;
+    if !crate::tmux::session_exists(session) {
+        return Err("no_such_session");
+    }
+    let status = crate::tmux::inspect_status(session, &terminal.agent_type);
+    if status.status == "EXITED" {
+        return Err("no_such_session");
+    }
+    Ok(())
+}
+
 /// Stage the attachments and submit them with the prompt as one turn.
 pub fn submit(
     session: &str,
@@ -664,11 +700,7 @@ pub fn submit(
     if !authorized() {
         return Err("device_revoked".into());
     }
-    let paths = if attachments.is_empty() {
-        Vec::new()
-    } else {
-        stage(&store_dir()?, &request_key(owner, session, request), attachments)?
-    };
+    let paths = stage(&store_dir()?, &request_key(owner, session, request), attachments)?;
     if !authorized() {
         return Err("device_revoked".into());
     }

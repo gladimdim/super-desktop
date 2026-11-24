@@ -84,10 +84,17 @@ pub(in crate::tmux) fn sqlite_query_uncached(db: &std::path::Path, sql: &str, mo
         "-readonly",
         "-noheader",
         mode,
+        "--",
         db.to_str()?,
         sql,
     ]))
     .and_then(non_empty)
+}
+
+pub fn is_valid_opencode_session_id(id: &str) -> bool {
+    id.starts_with("ses_")
+        && id.len() <= 128
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Read `/proc/<pid>/cmdline` as a space-joined string (`None` when the
@@ -103,10 +110,13 @@ pub fn extract_session_flag(cmdline: &str) -> Option<String> {
     let mut words = cmdline.split_whitespace();
     while let Some(w) = words.next() {
         if w == "--session" {
-            return words.next().filter(|s| !s.is_empty()).map(|s| s.to_string());
+            return words
+                .next()
+                .filter(|s| is_valid_opencode_session_id(s))
+                .map(|s| s.to_string());
         }
         if let Some(id) = w.strip_prefix("--session=") {
-            if !id.is_empty() {
+            if is_valid_opencode_session_id(id) {
                 return Some(id.to_string());
             }
         }

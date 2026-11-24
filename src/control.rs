@@ -622,6 +622,51 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Ensures `dir` exists as an owner-only (`0700`) non-symlink directory,
+/// rejecting symlinks and widening permissions down to owner-only if needed.
+#[doc(hidden)]
+pub fn ensure_private_dir(dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    if !dir.is_absolute()
+        || dir
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(denied());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(dir) {
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "unsafe directory path"));
+        }
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(denied());
+        }
+        if metadata.mode() & 0o077 != 0 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = dir.parent() {
+        if !parent.as_os_str().is_empty() && parent != Path::new("/") {
+            if let Ok(meta) = fs::symlink_metadata(parent) {
+                if meta.file_type().is_symlink() || !meta.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "unsafe parent directory path",
+                    ));
+                }
+            } else {
+                ensure_private_dir(parent)?;
+            }
+        }
+    }
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => ensure_private_dir(dir),
+        Err(e) => Err(e),
+    }
+}
+
 /// Exactly `len` ASCII hex digits, either case: request ids, pane identities,
 /// revisions, digests and commits.
 pub fn is_hex(value: &str, len: usize) -> bool {

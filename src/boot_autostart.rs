@@ -79,7 +79,20 @@ fn launcher(home: &Path, package: &str) -> String {
 /// lives in the service's control group. With systemd's default, the daemon
 /// exiting (Quit, a stop, a crash) would take the server and every harness in
 /// it down too. Sessions outlive the daemon everywhere else; here as well.
+fn escape_systemd_exec_arg(path: &str) -> Result<String, String> {
+    if path.is_empty() || path.chars().any(|c| c.is_control()) {
+        return Err("invalid launcher path for systemd unit".to_string());
+    }
+    let escaped = path.replace('%', "%%").replace('\\', "\\\\").replace('"', "\\\"");
+    if escaped.contains([' ', '\t', '"', '\\']) {
+        Ok(format!("\"{escaped}\""))
+    } else {
+        Ok(escaped)
+    }
+}
+
 fn unit_text(executable: &str) -> String {
+    let exec = escape_systemd_exec_arg(executable).unwrap_or_else(|_| executable.to_string());
     format!(
         "\
 # SUPER DESKTOP Settings → System launch. Turning the setting off
@@ -89,7 +102,7 @@ fn unit_text(executable: &str) -> String {
 Description=SUPER DESKTOP daemon at login
 
 [Service]
-ExecStart={executable} daemon
+ExecStart={exec} daemon
 KillMode=process
 
 [Install]
@@ -118,6 +131,36 @@ fn systemctl_run(bin: &str, args: &[&str]) -> Result<String, String> {
     Ok(stdout)
 }
 
+fn write_unit_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(format!("refusing unsafe unit path {}", path.display()));
+        }
+    }
+    let nonce = crate::control::random_hex(8)
+        .unwrap_or_else(|_| format!("{}", std::process::id()));
+    let tmp = path.with_file_name(format!(".{UNIT_NAME}.{nonce}.tmp"));
+    let res = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(contents.as_bytes())?;
+            f.sync_all()?;
+            fs::rename(&tmp, path)
+        });
+    if let Err(e) = res {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("could not write {}: {e}", path.display()));
+    }
+    Ok(())
+}
+
 /// Turn the setting on: write the unit, then `systemctl --user enable` it. A
 /// failed enable leaves the file (an installed unit that no target wants never
 /// starts) and says so; turning the setting off removes it.
@@ -126,10 +169,14 @@ fn enable_at(home: &Path, systemctl_bin: &str, package: &str) -> Result<(), Stri
     if executable.is_empty() {
         return Err("SUPER DESKTOP's installed launcher was not found — nothing to start at login.".into());
     }
+    let _ = escape_systemd_exec_arg(&executable)?;
     let directory = unit_dir(home);
+    if fs::symlink_metadata(&directory).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("refusing symlinked unit directory {}", directory.display()));
+    }
     fs::create_dir_all(&directory).map_err(|e| format!("could not create {}: {e}", directory.display()))?;
     let path = unit_file(home);
-    fs::write(&path, unit_text(&executable)).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    write_unit_atomic(&path, &unit_text(&executable))?;
     if let Err(reason) = systemctl_run(systemctl_bin, &["--user", "enable", UNIT_NAME]) {
         return Err(reason);
     }
@@ -142,15 +189,18 @@ fn enable_at(home: &Path, systemctl_bin: &str, package: &str) -> Result<(), Stri
 /// unit was rewritten.
 fn refresh_at(home: &Path, systemctl_bin: &str, package: &str) -> bool {
     let path = unit_file(home);
+    if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return false;
+    }
     let Ok(current) = fs::read_to_string(&path) else {
         return false;
     };
     let executable = launcher(home, package);
-    if executable.is_empty() {
+    if executable.is_empty() || escape_systemd_exec_arg(&executable).is_err() {
         return false;
     }
     let wanted = unit_text(&executable);
-    if current == wanted || fs::write(&path, wanted).is_err() {
+    if current == wanted || write_unit_atomic(&path, &wanted).is_err() {
         return false;
     }
     let _ = systemctl_run(systemctl_bin, &["--user", "daemon-reload"]);

@@ -64,10 +64,13 @@ Item {
         if (priv.pty) priv.pty.write(text);
     }
 
-    /// Pastes `text` (bracketed when the program asked for it).
+    /// Pastes `text` (bracketed when the program asked for it). Strip ESC and
+    /// unsafe C0 control bytes so pasted text cannot break out of bracketed paste.
     function paste(text) {
         if (!text) return;
-        send(priv.screen.bracketedPaste ? "\x1b[200~" + text + "\x1b[201~" : text.replace(/\n/g, "\r"));
+        const clean = String(text).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, "");
+        if (!clean) return;
+        send(priv.screen.bracketedPaste ? "\x1b[200~" + clean + "\x1b[201~" : clean.replace(/\n/g, "\r"));
     }
 
     /// Draws `text` as if the program printed it.

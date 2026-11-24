@@ -157,11 +157,19 @@ pub fn start_time(pid: u32) -> Option<String> {
     crate::platform::process::start_time(pid)
 }
 
+pub fn open_owned_regular(path: &Path) -> Option<(fs::File, fs::Metadata)> {
+    use std::os::unix::fs::MetadataExt;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    (meta.is_file() && meta.uid() == unsafe { libc::geteuid() }).then_some((file, meta))
+}
+
 pub fn read(path: &Path) -> Option<Metadata> {
-    let file = fs::File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
+    let (file, _) = open_owned_regular(path)?;
     serde_json::from_reader(file.take(LIMIT)).ok()
 }
 pub fn atomic_write(path: &Path, value: &impl Serialize) -> std::io::Result<()> {
@@ -170,15 +178,20 @@ pub fn atomic_write(path: &Path, value: &impl Serialize) -> std::io::Result<()> 
 pub fn atomic_bytes(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let temp = path.with_extension(format!("{}-{serial}.tmp", std::process::id()));
+    let rand = crate::control::random_hex(6)
+        .unwrap_or_else(|_| format!("{serial}"));
+    let temp = path.with_extension(format!("{}-{serial}-{rand}.tmp", std::process::id()));
     let mut file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(&temp)?;
-    file.write_all(bytes)?;
-    fs::rename(temp, path)
+    if let Err(err) = file.write_all(bytes).and_then(|()| fs::rename(&temp, path)) {
+        let _ = fs::remove_file(&temp);
+        return Err(err);
+    }
+    Ok(())
 }
 
 pub fn now_ms() -> u64 {
@@ -210,18 +223,26 @@ pub fn record(kind: &str) {
     }
 }
 pub fn record_inner(kind: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::MetadataExt;
     let path = PathBuf::from(std::env::var("SD_HARNESS_FILE")?);
-    if Some(path.parent().ok_or("missing parent")?) != root().as_deref() {
+    let parent = path.parent().ok_or("missing parent")?;
+    if Some(parent) != root().as_deref() {
         return Err("invalid metadata path".into());
     }
+    let _ = crate::control::private_dir(parent);
     let input: Value = serde_json::from_reader(std::io::stdin().take(LIMIT))?;
+    let lock_path = path.with_extension("lock");
     let lock = fs::OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
         .mode(0o600)
-        .open(path.with_extension("lock"))?;
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(&lock_path)?;
+    if !lock.metadata().is_ok_and(|m| m.is_file() && m.uid() == unsafe { libc::geteuid() }) {
+        return Err("unsafe metadata lock".into());
+    }
     // flock is released when this descriptor closes, including on early return.
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
         return Err(std::io::Error::last_os_error().into());
@@ -581,11 +602,7 @@ pub struct TranscriptScan {
 }
 
 pub fn claude_transcript(path: &Path, session: &str) -> Option<TranscriptScan> {
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
+    let (mut file, metadata) = open_owned_regular(path)?;
     let (bytes, _) = read_jsonl_tail(&mut file, &metadata, 256 * 1024)?;
     Some(claude_transcript_scan(&bytes, session))
 }
@@ -678,12 +695,21 @@ fn message_content_text(message: &Value) -> Option<String> {
     })
 }
 
+fn has_parent_component(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
 fn is_pi_transcript(path: &Path) -> bool {
-    path.is_absolute() && path.extension().is_some_and(|ext| ext == "jsonl")
+    path.is_absolute()
+        && !has_parent_component(path)
+        && path.extension().is_some_and(|ext| ext == "jsonl")
 }
 
 fn is_antigravity_transcript(path: &Path) -> bool {
-    path.is_absolute() && path.extension().is_some_and(|ext| ext == "jsonl")
+    path.is_absolute()
+        && !has_parent_component(path)
+        && path.extension().is_some_and(|ext| ext == "jsonl")
 }
 
 /// Extract plain user request text from an Antigravity `transcript.jsonl` content field,
@@ -724,6 +750,9 @@ fn claude_injected(record: &Value) -> bool {
 /// transcript file.
 fn is_claude_transcript(path: &Path, session: &str) -> bool {
     path.is_absolute()
+        && !has_parent_component(path)
+        && !session.is_empty()
+        && !session.contains(['/', '\\', '\0'])
         && path.extension().is_some_and(|ext| ext == "jsonl")
         && path.file_stem().is_some_and(|stem| stem == session)
 }
@@ -743,11 +772,7 @@ pub fn claude_prompts(path: &Path, session: &str, limit: u64) -> Option<(Vec<Pro
     if !is_claude_transcript(path, session) {
         return None;
     }
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
+    let (mut file, metadata) = open_owned_regular(path)?;
     let (bytes, cut) = read_jsonl_tail(&mut file, &metadata, limit)?;
     Some((claude_prompt_records(&bytes, session), cut))
 }
@@ -803,11 +828,7 @@ pub fn claude_last_assistant_message(
     if !is_claude_transcript(path, session) {
         return None;
     }
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
+    let (mut file, metadata) = open_owned_regular(path)?;
     let (bytes, _) = read_jsonl_tail(&mut file, &metadata, limit)?;
     claude_last_assistant_message_from_bytes(&bytes, session)
 }
@@ -841,11 +862,7 @@ pub fn pi_last_assistant_message(path: &Path, limit: u64) -> Option<String> {
     if !is_pi_transcript(path) {
         return None;
     }
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
+    let (mut file, metadata) = open_owned_regular(path)?;
     let (bytes, _) = read_jsonl_tail(&mut file, &metadata, limit)?;
     pi_last_assistant_message_from_bytes(&bytes)
 }
@@ -879,11 +896,7 @@ pub fn pi_prompts(path: &Path, limit: u64) -> Option<(Vec<PromptRecord>, bool)> 
     if !is_pi_transcript(path) {
         return None;
     }
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
+    let (mut file, metadata) = open_owned_regular(path)?;
     let (bytes, cut) = read_jsonl_tail(&mut file, &metadata, limit)?;
     Some((pi_prompt_records(&bytes), cut))
 }
@@ -913,11 +926,7 @@ pub fn antigravity_prompts(path: &Path, limit: u64) -> Option<(Vec<PromptRecord>
     if !is_antigravity_transcript(path) {
         return None;
     }
-    let mut file = fs::File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file() {
-        return None;
-    }
+    let (mut file, metadata) = open_owned_regular(path)?;
     let (bytes, cut) = read_jsonl_tail(&mut file, &metadata, limit)?;
     Some((antigravity_prompt_records(&bytes), cut))
 }

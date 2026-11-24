@@ -162,12 +162,9 @@ mod dedup {
     /// of one request id cannot both reach it.
     pub(super) fn reserve(device: &str, epoch: &str, request_id: &str) -> Reservation {
         let mut live = live();
-        // Entries from another epoch can never be replayed meaningfully.
-        live.retain(|entry| entry.epoch == epoch);
-        if let Some(entry) = live
-            .iter()
-            .find(|entry| entry.device == device && entry.request_id == request_id)
-        {
+        if let Some(entry) = live.iter().find(|entry| {
+            entry.device == device && entry.epoch == epoch && entry.request_id == request_id
+        }) {
             return match entry.answer.clone() {
                 Some(answer) => Reservation::Cached(answer),
                 None => Reservation::Uncertain,
@@ -207,6 +204,7 @@ mod dedup {
     /// uncertain on purpose: its outcome must never be guessed.
     pub(super) fn record(device: &str, epoch: &str, request_id: &str, answer: Answer) {
         let mut live = live();
+        live.retain(|entry| entry.epoch == epoch);
         if let Some(entry) = live.iter_mut().find(|entry| {
             entry.device == device && entry.epoch == epoch && entry.request_id == request_id
         }) {
@@ -284,6 +282,7 @@ pub(super) fn command(stream: &mut Connection, device: &str, body: &str) {
     let outcome = match serde_json::from_value::<CommandOutcome>(parsed.clone()) {
         Ok(outcome) => outcome,
         Err(_) => {
+            dedup::release(device, &request.expected_epoch, &request.request_id);
             // The owner answered without a typed outcome: it could not read its
             // own workspace, so nothing here was applied.
             let error = parsed["error"]
@@ -705,5 +704,21 @@ mod tests {
                 document.len()
             )
         );
+    }
+
+    #[test]
+    fn dedup_entries_are_isolated_across_devices_and_epochs() {
+        let epoch = "reply-test-epoch";
+        let req_id = format!("iso-{}", std::process::id());
+        assert!(matches!(dedup::reserve("dev-a", epoch, &req_id), dedup::Reservation::Fresh));
+        dedup::record(
+            "dev-a",
+            epoch,
+            &req_id,
+            dedup::Answer { code: 200, document: "{}".into() },
+        );
+        assert!(matches!(dedup::reserve("dev-b", epoch, &req_id), dedup::Reservation::Fresh));
+        dedup::release("dev-b", epoch, &req_id);
+        assert!(matches!(dedup::reserve("dev-a", epoch, &req_id), dedup::Reservation::Cached(_)));
     }
 }

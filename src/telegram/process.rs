@@ -21,10 +21,19 @@ pub fn worker_running() -> bool {
     let Ok(path) = lock_path() else {
         return false;
     };
-    if !path.exists() {
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return false;
+        }
+    } else {
         return false;
     }
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
+    let Ok(file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    else {
         return false;
     };
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -41,12 +50,22 @@ fn read_locked_pid() -> Option<i32> {
     let mut text = String::new();
     OpenOptions::new()
         .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
         .open(path)
         .ok()?
         .take(32)
         .read_to_string(&mut text)
         .ok()?;
     text.trim().parse::<i32>().ok().filter(|&pid| pid > 1)
+}
+
+fn pid_is_telegram_bot(pid: i32) -> bool {
+    let Ok(raw) = fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    let args: Vec<&[u8]> = raw.split(|&b| b == 0).filter(|s| !s.is_empty()).collect();
+    args.first().is_some_and(|a| a.ends_with(b"super-desktop"))
+        && args.get(1).is_some_and(|a| *a == b"telegram-bot")
 }
 
 fn self_exe() -> Result<PathBuf, String> {
@@ -91,13 +110,18 @@ fn start_worker_inner() -> Result<(), String> {
         &log_file_path,
         log_file_path.with_file_name("telegram.previous.log"),
     );
-    let log = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&log_file_path)
-        .ok();
+    let log = if fs::symlink_metadata(&log_file_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        None
+    } else {
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&log_file_path)
+            .ok()
+    };
     let log_err = log.as_ref().and_then(|f| f.try_clone().ok());
 
     let mut command = Command::new(&exe);
@@ -141,11 +165,12 @@ fn stop_worker_inner() -> Result<(), String> {
         mark_stopped();
         return Ok(());
     }
-    if let Some(pid) = read_locked_pid() {
+    let uid = unsafe { libc::getuid() }.to_string();
+    if let Some(pid) = read_locked_pid().filter(|&p| pid_is_telegram_bot(p)) {
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     }
     let _ = Command::new("pkill")
-        .args(["-f", TELEGRAM_PROCESS])
+        .args(["-u", &uid, "-f", TELEGRAM_PROCESS])
         .status();
 
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -157,11 +182,11 @@ fn stop_worker_inner() -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 
-    if let Some(pid) = read_locked_pid() {
+    if let Some(pid) = read_locked_pid().filter(|&p| pid_is_telegram_bot(p)) {
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
     }
     let _ = Command::new("pkill")
-        .args(["-9", "-f", TELEGRAM_PROCESS])
+        .args(["-u", &uid, "-9", "-f", TELEGRAM_PROCESS])
         .status();
 
     let deadline = Instant::now() + Duration::from_secs(1);

@@ -127,6 +127,7 @@ impl Options {
 /// 1 to `max` ASCII letters, digits, `_` and `-`: card, harness and request ids.
 pub(crate) fn valid_id(id: &str, max: usize) -> bool {
     !id.is_empty()
+        && !id.starts_with('-')
         && id.len() <= max
         && id
             .bytes()

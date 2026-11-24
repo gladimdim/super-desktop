@@ -268,6 +268,7 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
     ws: null,
     wsRetry: 0,
     wsTimer: null,
+    previewBlobUrl: null,
     followBottom: true,
     filesFilter: 'all',
     references: null,
@@ -296,19 +297,30 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
     const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
     return (0.299 * r + 0.587 * g + 0.114 * b) > 145 ? '#091216' : '#ffffff';
   }
+  function safeHexColor(v, fb = '') {
+    const s = String(v || '').trim();
+    return /^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(s) ? s : fb;
+  }
+  function clearPreviewBlob() {
+    if (state.previewBlobUrl) {
+      try { URL.revokeObjectURL(state.previewBlobUrl); } catch (_) {}
+      state.previewBlobUrl = null;
+    }
+  }
   function applyTheme(t) {
     if (!t) return;
     const r = document.documentElement.style;
-    const set = (k, v) => { if (v) r.setProperty(k, v); };
-    const bg = t.background || '#10100f';
-    const surface = t.lighterBackground || bg;
-    const accent = t.accent || t.cyan;
+    const set = (k, v) => { const c = safeHexColor(v); if (c) r.setProperty(k, c); };
+    const bg = safeHexColor(t.background, '#10100f');
+    const surface = safeHexColor(t.lighterBackground, bg);
+    const accent = safeHexColor(t.accent) || safeHexColor(t.cyan, '#5ca3ad');
+    const fg = safeHexColor(t.foreground, '#ece8e5');
     set('--bg', bg); set('--surface', surface);
-    set('--surface2', t.selection || `color-mix(in srgb, ${t.foreground || '#ece8e5'} 10%, ${bg})`);
-    set('--border', t.foreground ? `color-mix(in srgb, ${t.foreground} 16%, ${bg})` : '');
-    set('--term-bg', t.darkerBackground || t.darkBackground || bg);
+    r.setProperty('--surface2', safeHexColor(t.selection) || `color-mix(in srgb, ${fg} 10%, ${bg})`);
+    r.setProperty('--border', `color-mix(in srgb, ${fg} 16%, ${bg})`);
+    set('--term-bg', safeHexColor(t.darkerBackground) || safeHexColor(t.darkBackground) || bg);
     set('--fg', t.foreground); set('--muted', t.muted); set('--accent', accent);
-    set('--accent-fg', accentFgFor(accent));
+    r.setProperty('--accent-fg', accentFgFor(accent));
     set('--orange', t.orange); set('--green', t.green); set('--yellow', t.yellow);
     set('--red', t.red); set('--cyan', t.cyan); set('--blue', t.blue); set('--magenta', t.magenta);
     if (Array.isArray(t.ansi16)) t.ansi16.forEach((c, i) => set('--ansi-' + i, c));
@@ -322,10 +334,16 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
   }
 
   const ANSI16_NAMES = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15];
+  function clampByte(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(255, n | 0));
+  }
   function color256(n) {
-    if (n < 16) return `var(--ansi-${n})`;
-    if (n >= 232) { const g = 8 + (n - 232) * 10; return `rgb(${g},${g},${g})`; }
-    const idx = n - 16, b = idx % 6, g = ((idx / 6) | 0) % 6, r = (idx / 36) | 0;
+    const idx256 = clampByte(n);
+    if (idx256 < 16) return `var(--ansi-${idx256})`;
+    if (idx256 >= 232) { const g = 8 + (idx256 - 232) * 10; return `rgb(${g},${g},${g})`; }
+    const idx = idx256 - 16, b = idx % 6, g = ((idx / 6) | 0) % 6, r = (idx / 36) | 0;
     const v = (c) => c ? 55 + c * 40 : 0;
     return `rgb(${v(r)},${v(g)},${v(b)})`;
   }
@@ -376,7 +394,8 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
         else if ((c === 38 || c === 48) && k + 2 < codes.length && codes[k + 1] === 5) {
           const col = color256(codes[k + 2]); if (c === 38) fg = col; else bg = col; k += 2;
         } else if ((c === 38 || c === 48) && k + 4 < codes.length && codes[k + 1] === 2) {
-          const col = `rgb(${codes[k+2]},${codes[k+3]},${codes[k+4]})`; if (c === 38) fg = col; else bg = col; k += 4;
+          const col = `rgb(${clampByte(codes[k+2])},${clampByte(codes[k+3])},${clampByte(codes[k+4])})`;
+          if (c === 38) fg = col; else bg = col; k += 4;
         }
       }
       i = mIdx + 1;
@@ -525,7 +544,7 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
     const canInput = !card.isShell || perms.shellInput;
     const canPrompt = perms.prompts && canInput;
     const canControl = perms.controls && canInput;
-    const canAttach = perms.attachments && canInput;
+    const canAttach = perms.attachments && canPrompt;
     $('btn-close-card').classList.toggle('hidden', !perms.close);
     $('btn-files').classList.toggle('hidden', !perms.readOutput);
     $('btn-attach').classList.toggle('hidden', !canAttach);
@@ -601,11 +620,22 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
     }
   }
 
-  function connectWs(cardId) {
+  async function connectWs(cardId) {
     closeWs();
     if (!state.bootstrap?.permissions?.readOutput || !state.token) return;
+    let ticketData;
+    try {
+      ticketData = await apiFetch('/api/ws-ticket', { method: 'POST', body: JSON.stringify({ cardId }) });
+    } catch (_) {
+      if (state.selectedCardId !== cardId) return;
+      setConn('Reconnecting…', 'warn');
+      const delay = Math.min(5000, 500 * Math.pow(2, state.wsRetry++));
+      state.wsTimer = setTimeout(() => { if (state.selectedCardId === cardId) connectWs(cardId); }, delay);
+      return;
+    }
+    if (state.selectedCardId !== cardId || !ticketData?.ticket) return;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${location.host}/ws/terminal/${encodeURIComponent(cardId)}?token=${encodeURIComponent(state.token)}`;
+    const url = `${proto}//${location.host}/ws/terminal/${encodeURIComponent(cardId)}?ticket=${encodeURIComponent(ticketData.ticket)}`;
     const ws = new WebSocket(url);
     state.ws = ws;
     ws.onopen = () => { state.wsRetry = 0; setConn('Live WS', 'ok'); };
@@ -659,6 +689,7 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
   async function openFilesDrawer() {
     const cid = state.selectedCardId; if (!cid) return;
     $('files-modal').classList.remove('hidden');
+    clearPreviewBlob();
     state.previewHtml = '';
     $('files-body').innerHTML = '<div class="empty">Loading references…</div>';
     try {
@@ -692,26 +723,53 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
     });
     if (!assets.length && !links.length) html += '<div class="empty">No matching references.</div>';
     const body = $('files-body'); body.innerHTML = html;
+    const prevImg = $('preview-img');
+    if (prevImg && state.previewBlobUrl) prevImg.src = state.previewBlobUrl;
+    const pdfImg = $('preview-pdf-img');
+    if (pdfImg) {
+      if (state.previewBlobUrl) pdfImg.src = state.previewBlobUrl;
+      pdfImg.addEventListener('error', () => { pdfImg.alt = 'No further page'; });
+    }
+    const prevBtn = $('pdf-prev'), nextBtn = $('pdf-next');
+    if (prevBtn && state.pdfState) prevBtn.onclick = () => { if (state.pdfState.page > 1) { state.pdfState.page--; renderPdfPreview(); } };
+    if (nextBtn && state.pdfState) nextBtn.onclick = () => { state.pdfState.page++; renderPdfPreview(); };
     body.querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', () => { state.filesFilter = b.dataset.f; renderFilesBody(); }));
     body.querySelectorAll('[data-url]').forEach((n) => n.addEventListener('click', () => {
-      if (tg && tg.openLink) tg.openLink(n.dataset.url); else window.open(n.dataset.url, '_blank');
+      const u = n.dataset.url || '';
+      if (!/^https?:\/\//i.test(u)) { showToast('Blocked non-HTTP URL'); return; }
+      if (tg && tg.openLink) tg.openLink(u); else window.open(u, '_blank', 'noopener,noreferrer');
     }));
     body.querySelectorAll('[data-aid]').forEach((n) => n.addEventListener('click', () => previewAsset(n.dataset.aid, n.dataset.kind, n.dataset.name)));
   }
 
+  async function fetchAuthedBlobUrl(path) {
+    const headers = state.token ? { 'Authorization': 'Bearer ' + state.token } : {};
+    const res = await fetch(path, { headers });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    return URL.createObjectURL(blob);
+  }
+
   async function previewAsset(aid, kind, name) {
     const cid = encodeURIComponent(state.selectedCardId);
-    const tok = encodeURIComponent(state.token || '');
     if (kind === 'image') {
-      state.previewHtml = `<div style="margin-bottom:6px;font-weight:700;">🖼 ${esc(name)}</div><img src="/api/cards/${cid}/asset/${encodeURIComponent(aid)}?token=${tok}" alt="${esc(name)}">`;
-      renderFilesBody();
+      try {
+        const blobUrl = await fetchAuthedBlobUrl(`/api/cards/${cid}/asset/${encodeURIComponent(aid)}`);
+        clearPreviewBlob();
+        state.previewBlobUrl = blobUrl;
+        state.previewHtml = `<div style="margin-bottom:6px;font-weight:700;">🖼 ${esc(name)}</div><img id="preview-img" alt="${esc(name)}">`;
+        renderFilesBody();
+      } catch (err) { showToast(err.message); }
     } else if (kind === 'pdf') {
       state.pdfState = { aid, name, page: 1 };
       await renderPdfPreview();
     } else {
       try {
-        const res = await fetch(`/api/cards/${cid}/asset/${encodeURIComponent(aid)}?token=${tok}`);
+        const headers = state.token ? { 'Authorization': 'Bearer ' + state.token } : {};
+        const res = await fetch(`/api/cards/${cid}/asset/${encodeURIComponent(aid)}`, { headers });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const txt = await res.text();
+        clearPreviewBlob();
         state.previewHtml = `<div style="margin-bottom:6px;font-weight:700;">📝 ${esc(name)}</div><pre>${esc(txt)}</pre>`;
         renderFilesBody();
       } catch (err) { showToast(err.message); }
@@ -721,17 +779,21 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
   async function renderPdfPreview() {
     const p = state.pdfState; if (!p) return;
     const cid = encodeURIComponent(state.selectedCardId);
-    const tok = encodeURIComponent(state.token || '');
-    const src = `/api/cards/${cid}/pdf/${encodeURIComponent(p.aid)}/${p.page}?token=${tok}`;
-    state.previewHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+    const header = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
       <b>📕 ${esc(p.name)} · Page ${p.page}</b><span class="spacer"></span>
       <button class="btn" id="pdf-prev" ${p.page<=1?'disabled':''}>◀</button>
       <button class="btn" id="pdf-next">▶</button>
-    </div><img src="${src}" onerror="this.alt='No further page';">`;
+    </div>`;
+    try {
+      const blobUrl = await fetchAuthedBlobUrl(`/api/cards/${cid}/pdf/${encodeURIComponent(p.aid)}/${p.page}`);
+      clearPreviewBlob();
+      state.previewBlobUrl = blobUrl;
+      state.previewHtml = `${header}<img id="preview-pdf-img" alt="${esc(p.name)}">`;
+    } catch (_) {
+      clearPreviewBlob();
+      state.previewHtml = `${header}<div class="empty">No further page</div>`;
+    }
     renderFilesBody();
-    const prev = $('pdf-prev'), next = $('pdf-next');
-    if (prev) prev.onclick = () => { if (p.page > 1) { p.page--; renderPdfPreview(); } };
-    if (next) next.onclick = () => { p.page++; renderPdfPreview(); };
   }
 
   $('term-pre').addEventListener('scroll', () => {
@@ -761,7 +823,7 @@ label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-rad
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPromptText($('prompt-input').value); }
   });
   $('btn-files').addEventListener('click', openFilesDrawer);
-  $('files-close').addEventListener('click', () => $('files-modal').classList.add('hidden'));
+  $('files-close').addEventListener('click', () => { clearPreviewBlob(); $('files-modal').classList.add('hidden'); });
   $('files-refresh').addEventListener('click', openFilesDrawer);
   $('btn-attach').addEventListener('click', () => $('attach-input').click());
   $('attach-input').addEventListener('change', async (e) => {

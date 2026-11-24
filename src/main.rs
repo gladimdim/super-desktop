@@ -413,6 +413,18 @@ fn ipc_request(cmd: &str) -> Ipc {
 }
 
 fn ipc_request_at(sock_path: &std::path::Path, cmd: &str) -> Ipc {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Some(parent) = sock_path.parent() else {
+        return Ipc::Stalled;
+    };
+    if crate::control::private_dir(parent).is_err() {
+        return Ipc::Stalled;
+    }
+    if let Ok(meta) = fs::symlink_metadata(sock_path) {
+        if meta.uid() != unsafe { libc::geteuid() } || !meta.file_type().is_socket() {
+            return Ipc::Stalled;
+        }
+    }
     ipc_request_with(sock_path, cmd, true, |path| UnixStream::connect(path))
 }
 
@@ -423,7 +435,12 @@ fn ipc_request_with(
     connect: impl FnOnce(&std::path::Path) -> std::io::Result<UnixStream>,
 ) -> Ipc {
     let mut stream = match cli_legacy::dial(connect(sock_path)) {
-        Dial::Connected(s) => s,
+        Dial::Connected(s) => {
+            if crate::control::check_peer(&s).is_err() {
+                return Ipc::Stalled;
+            }
+            s
+        }
         Dial::Missing => return Ipc::NoDaemon,
         // Connection refused: the file is a leftover from a daemon that is
         // gone. Clear it so the daemon we start can bind cleanly.
@@ -699,7 +716,6 @@ fn run_daemon(start_visible: bool) {
         startup::mark("EGL vendor: Mesa (no screen on the NVIDIA GPU)");
     }
     let mut initial_state = state::load_state();
-    sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     if let Err(error) = gtk4::init() {
         eprintln!("SUPER DESKTOP cannot initialize its display: {error}");
         headless::run();
@@ -711,8 +727,9 @@ fn run_daemon(start_visible: bool) {
     // have changed the saved cards: take over before trusting the state.
     if headless::take_over() {
         initial_state = state::load_state();
-        sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     }
+    // Spawn sleep-lock thread only after single-threaded display/env setup settles.
+    sleep_lock::set_enabled(initial_state.sleep_lock_on_ac);
     // Before any card is restored: restores resolve through these too.
     launch_args::install(&initial_state.harness_args);
     startup::mark("GTK initialized");
@@ -925,19 +942,26 @@ fn run_daemon(start_visible: bool) {
 
 #[cfg(target_os = "linux")]
 fn ensure_omarchy_theme_hook() {
-    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let hook_dir = PathBuf::from(&home).join(".config/omarchy/hooks/theme-set.d");
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let hook_dir = state::home_dir().join(".config/omarchy/hooks/theme-set.d");
     let hook_file = hook_dir.join("super-desktop");
-    if !hook_file.exists() {
-        let _ = fs::create_dir_all(&hook_dir);
-        let content = "#!/usr/bin/env bash\nsuper-desktop reload-theme >/dev/null 2>&1 || true\n";
-        if fs::write(&hook_file, content).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = fs::set_permissions(&hook_file, fs::Permissions::from_mode(0o755));
-            }
-        }
+    if fs::symlink_metadata(&hook_file).is_ok() {
+        return;
+    }
+    if fs::symlink_metadata(&hook_dir).is_ok_and(|m| m.file_type().is_symlink()) {
+        return;
+    }
+    let _ = fs::create_dir_all(&hook_dir);
+    let content = "#!/usr/bin/env bash\nBIN=\"$HOME/.local/bin/super-desktop\"\nif [[ -x \"$BIN\" ]]; then\n    \"$BIN\" reload-theme >/dev/null 2>&1 || true\nelif command -v super-desktop >/dev/null 2>&1; then\n    super-desktop reload-theme >/dev/null 2>&1 || true\nfi\n";
+    if let Ok(mut f) = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&hook_file)
+    {
+        let _ = f.write_all(content.as_bytes());
     }
 }
 
@@ -1387,8 +1411,21 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
         Ipc::NoDaemon => {}
     }
 
-    // No live listener: any file left behind is stale.
-    let _ = fs::remove_file(&sock_path);
+    // No live listener: any file left behind is stale (only unlink an owned socket).
+    if let Some(parent) = sock_path.parent() {
+        if let Err(e) = crate::control::private_dir(parent) {
+            eprintln!("Unsafe IPC runtime directory {}: {e}", parent.display());
+            std::process::exit(1);
+        }
+    }
+    if let Ok(meta) = fs::symlink_metadata(&sock_path) {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        if meta.uid() != unsafe { libc::geteuid() } || !meta.file_type().is_socket() {
+            eprintln!("Refusing to remove unsafe IPC socket {}", sock_path.display());
+            std::process::exit(1);
+        }
+        let _ = fs::remove_file(&sock_path);
+    }
 
     let listener = match UnixListener::bind(&sock_path) {
         Ok(l) => l,
@@ -1400,12 +1437,19 @@ fn start_ipc_thread(ipc_tx: futures_channel::mpsc::UnboundedSender<IpcMessage>) 
             std::process::exit(1);
         }
     };
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600));
+    }
 
     watch_socket_ownership(&sock_path);
 
     thread::spawn(move || {
         for stream in listener.incoming() {
             if let Ok(mut s) = stream {
+                if crate::control::check_peer(&s).is_err() {
+                    continue;
+                }
                 let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
                 if let Some(cmd) = read_ipc_command(&mut s) {
                     // A long-lived change feed for the bridge's desktop event
@@ -1447,9 +1491,13 @@ const MAX_IPC_COMMAND: usize = 16 * 1024;
 /// mid-command is given two seconds, not the sequential listener forever.
 /// `None` for an empty or failed read.
 fn read_ipc_command(stream: &mut impl Read) -> Option<String> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut command = Vec::new();
     let mut chunk = [0u8; 4096];
     while command.last() != Some(&b'\n') && command.len() < MAX_IPC_COMMAND {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         match stream.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => command.extend_from_slice(&chunk[..n]),
@@ -1624,8 +1672,12 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             json!({"ok":false,"error":"desktop_unavailable"}).to_string()
         }
         "add-term" => {
+            let agent = *parts.get(1).unwrap_or(&"shell");
+            if !tmux::HARNESS_KEYS.contains(&agent)
+                && !state::load_state().custom_harnesses.iter().any(|item| item.id == agent && item.validate().is_ok()) {
+                return json!({"ok":false,"error":"unsupported_harness"}).to_string();
+            }
             show_window(ctx, app);
-            let agent = parts.get(1).unwrap_or(&"shell");
             if let Some(win) = &ctx.borrow().window {
                 let id = win.create_new_terminal(agent, None, None, None);
                 return json!({ "ok": tmux::session_exists(&id), "id": id }).to_string();
@@ -1636,7 +1688,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let Some(sess) = parts.get(1) else {
                 return json!({ "ok": false, "error": "missing_session" }).to_string();
             };
-            if !sess.starts_with("sd_term_") {
+            if !tmux::is_owned_session(sess) {
                 return json!({ "ok": false, "error": "foreign_session" }).to_string();
             }
             if let Some(win) = &ctx.borrow().window {
@@ -1652,10 +1704,10 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let before = state.terminals.len();
             state.terminals.retain(|t| t.session_name != *sess);
             let removed = state.terminals.len() != before;
-            if tmux::session_exists(sess) {
-                tmux::kill_session(sess);
-            }
             if removed {
+                if tmux::session_exists(sess) {
+                    tmux::kill_session(sess);
+                }
                 state::normalize_terminal_order(&mut state);
                 let snapshot = state.clone();
                 drop(state);
@@ -1669,7 +1721,7 @@ fn handle_ipc_command(cmd: &str, ctx: &Rc<RefCell<AppContext>>, app: &Applicatio
             let Some(sess) = parts.get(1) else {
                 return json!({ "ok": false, "error": "missing_session" }).to_string();
             };
-            if !sess.starts_with("sd_term_") {
+            if !tmux::is_owned_session(sess) {
                 return json!({ "ok": false, "error": "foreign_session" }).to_string();
             }
             let mode = parts.get(2).copied().unwrap_or("fresh");
@@ -1805,9 +1857,12 @@ mod ipc_tests {
 
     /// Private dir so this test can never touch the user's real daemon.
     fn private_runtime_dir(tag: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
         let dir = env::temp_dir().join(format!("sd-ipc-{}-{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create temp runtime dir");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+            .expect("chmod temp runtime dir");
         dir
     }
 

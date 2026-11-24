@@ -141,10 +141,11 @@ pub fn start(prepared: &Prepared, session: &str, deadline: Instant) -> Result<Te
     // tmux may fall back when -c disappears. Guard the actual launcher too so
     // a directory removed after validation cannot execute it elsewhere.
     let guarded = format!(
-        "cd -- {} && {}",
+        "cd -- {} || exit 1; {}",
         crate::launch_args::quote(&prepared.directory),
         launch.command
     );
+    let exact_session = format!("={session}:");
     tmux(
         &[
             "new-session",
@@ -157,13 +158,14 @@ pub fn start(prepared: &Prepared, session: &str, deadline: Instant) -> Result<Te
             "120",
             "-y",
             "35",
+            "--",
             &guarded,
         ],
         deadline,
     )?;
     // Pin the attach behavior before allowing a card to attach to the session.
     tmux(
-        &["set-option", "-t", session, "detach-on-destroy", "on"],
+        &["set-option", "-t", &exact_session, "detach-on-destroy", "on"],
         deadline,
     )?;
     launch.register(session);

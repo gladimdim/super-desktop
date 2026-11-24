@@ -53,18 +53,42 @@ fn stamp() -> String {
 /// compared with the built-in one, not just the version stamp: a plugin
 /// shared by someone else may carry an altered copy.
 pub fn install(plugin_dir: &Path) -> io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
     let dir = plugin_dir.join(SKILL_DIR);
     for (relative, contents) in SKILL_FILES {
         let path = dir.join(relative);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "refusing symlink in plugin skill"));
+        }
         if fs::read(&path).is_ok_and(|current| current == contents.as_bytes()) {
             continue;
         }
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, contents)?;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        use std::io::Write;
+        f.write_all(contents.as_bytes())?;
     }
-    fs::write(dir.join(STAMP), stamp())
+    let stamp_path = dir.join(STAMP);
+    if fs::symlink_metadata(&stamp_path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "refusing symlink skill stamp"));
+    }
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&stamp_path)?;
+    use std::io::Write;
+    f.write_all(stamp().as_bytes())
 }
 
 const AGENTS_MD: &str = "# SUPER DESKTOP plugin: {name}
@@ -419,11 +443,27 @@ impl Template {
 /// The skill, and an AGENTS.md (with CLAUDE.md pointing at it) when the
 /// plugin has none: what any agent opened in the folder reads first.
 pub fn prepare_for_agents(dir: &Path, id: &str, name: &str) -> io::Result<()> {
-    if !dir.join("AGENTS.md").exists() {
-        fs::write(dir.join("AGENTS.md"), AGENTS_MD.replace("{name}", name).replace("{id}", id))?;
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let agents_path = dir.join("AGENTS.md");
+    if fs::symlink_metadata(&agents_path).is_err() {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&agents_path)?;
+        f.write_all(AGENTS_MD.replace("{name}", name).replace("{id}", id).as_bytes())?;
     }
-    if !dir.join("CLAUDE.md").exists() {
-        fs::write(dir.join("CLAUDE.md"), "@AGENTS.md\n")?;
+    let claude_path = dir.join("CLAUDE.md");
+    if fs::symlink_metadata(&claude_path).is_err() {
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&claude_path)?;
+        f.write_all(b"@AGENTS.md\n")?;
     }
     install(dir)
 }

@@ -30,6 +30,8 @@ pub fn page(pdf: Vec<u8>, page: u32) -> Result<Vec<u8>, String> {
             "--symlink",
             "usr/lib",
             "/lib64",
+            "--size",
+            "33554432",
             "--tmpfs",
             "/tmp",
             "--proc",

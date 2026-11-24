@@ -150,12 +150,19 @@ pub fn cached() -> Option<(Vec<Entry>, u64)> {
 pub fn fetch() -> Result<(Vec<Entry>, Vec<String>), String> {
     let from = source();
     let text = if from.starts_with("https://") || from.starts_with("http://") {
-        let out = Command::new("curl")
-            .args(["--fail", "--silent", "--show-error", "--location", "--max-time", "20", "--max-filesize", &MAX_BYTES.to_string(), "--", &from])
+        let mut cmd = Command::new("curl");
+        cmd.args(["--fail", "--silent", "--show-error", "--location", "--max-time", "20", "--max-filesize", &MAX_BYTES.to_string()]);
+        if from.starts_with("https://") {
+            cmd.args(["--proto", "=https", "--proto-redir", "=https"]);
+        }
+        let out = cmd.args(["--", &from])
             .output()
             .map_err(|e| format!("cannot run curl ({e}); install curl to see the plugin list"))?;
         if !out.status.success() {
             return Err(format!("could not get the plugin list: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        if out.stdout.len() > MAX_BYTES {
+            return Err("the plugin list exceeds the 1 MiB size limit".to_owned());
         }
         String::from_utf8(out.stdout).map_err(|_| "the plugin list is not text".to_owned())?
     } else {
@@ -164,7 +171,7 @@ pub fn fetch() -> Result<(Vec<Entry>, Vec<String>), String> {
     let parsed = parse(&text)?;
     let path = cache_path();
     if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+        let _ = paths::ensure_private_dir(dir);
     }
     let _ = std::fs::write(&path, &text);
     Ok(parsed)
@@ -174,15 +181,39 @@ fn previews_dir() -> PathBuf {
     paths::state_dir().join("previews")
 }
 
-/// A PNG file of at most MAX_PREVIEW_BYTES.
+/// Maximum width/height and total pixels allowed for plugin previews (anti-PNG-bomb).
+const MAX_PREVIEW_DIM: u32 = 4096;
+const MAX_PREVIEW_PIXELS: u64 = 8_388_608;
+
+/// A non-symlink PNG file of at most MAX_PREVIEW_BYTES with bounded IHDR dimensions.
 pub fn is_preview(path: &std::path::Path) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    if meta.len() == 0 || meta.len() as usize > MAX_PREVIEW_BYTES {
+    let Ok(meta) = std::fs::symlink_metadata(path) else { return false };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() == 0 || meta.len() as usize > MAX_PREVIEW_BYTES {
         return false;
     }
-    let mut head = [0u8; 8];
+    let mut head = [0u8; 24];
     use std::io::Read;
-    std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && head == *b"\x89PNG\r\n\x1a\n"
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+    else {
+        return false;
+    };
+    if file.read_exact(&mut head).is_err() {
+        return false;
+    }
+    if &head[..8] != b"\x89PNG\r\n\x1a\n" || &head[8..16] != b"\x00\x00\x00\x0dIHDR" {
+        return false;
+    }
+    let width = u32::from_be_bytes([head[16], head[17], head[18], head[19]]);
+    let height = u32::from_be_bytes([head[20], head[21], head[22], head[23]]);
+    width > 0
+        && height > 0
+        && width <= MAX_PREVIEW_DIM
+        && height <= MAX_PREVIEW_DIM
+        && u64::from(width) * u64::from(height) <= MAX_PREVIEW_PIXELS
 }
 
 /// The entry's preview picture, downloaded once and kept (blocking: run it
@@ -200,12 +231,18 @@ pub fn preview(entry: &Entry, again: bool) -> Option<PathBuf> {
             return None;
         }
     }
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = paths::ensure_private_dir(&dir);
     let part = dir.join(format!("{}.part", entry.id));
-    let fetched = Command::new("curl")
-        .args(["--fail", "--silent", "--location", "--max-time", "20", "--max-filesize", &MAX_PREVIEW_BYTES.to_string(), "--output"])
+    let _ = std::fs::remove_file(&part);
+    let preview_url = entry.preview_url();
+    let mut cmd = Command::new("curl");
+    cmd.args(["--fail", "--silent", "--location", "--max-time", "20", "--max-filesize", &MAX_PREVIEW_BYTES.to_string()]);
+    if preview_url.starts_with("https://") {
+        cmd.args(["--proto", "=https", "--proto-redir", "=https"]);
+    }
+    let fetched = cmd.arg("--output")
         .arg(&part)
-        .args(["--", &entry.preview_url()])
+        .args(["--", &preview_url])
         .status()
         .is_ok_and(|s| s.success());
     if fetched && is_preview(&part) && std::fs::rename(&part, &path).is_ok() {
@@ -342,7 +379,10 @@ mod tests {
         // preview.png from the repository, kept; a missing one is remembered.
         let raw = dir.join("raw");
         std::fs::create_dir_all(raw.join("you/clock/HEAD")).unwrap();
-        std::fs::write(raw.join("you/clock/HEAD/preview.png"), b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let mut png_head = Vec::from(b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".as_slice());
+        png_head.extend_from_slice(&1280u32.to_be_bytes());
+        png_head.extend_from_slice(&640u32.to_be_bytes());
+        std::fs::write(raw.join("you/clock/HEAD/preview.png"), &png_head).unwrap();
         std::env::set_var("SD_PLUGIN_RAW_BASE", format!("file://{}", raw.display()));
         let clock = &entries[1];
         let shown = preview(clock, false).unwrap();

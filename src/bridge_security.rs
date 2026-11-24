@@ -9,20 +9,50 @@ pub(super) fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 pub(super) fn equal(a: &str, b: &str) -> bool {
-    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |v, (a,b)| v | (a ^ b)) == 0
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    let mut diff = (ab.len() ^ bb.len()) as u8;
+    let max_len = ab.len().max(bb.len());
+    for i in 0..max_len {
+        let x = ab.get(i).copied().unwrap_or(0);
+        let y = bb.get(i).copied().unwrap_or(0);
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0 && ab.len() == bb.len()
 }
 pub(super) fn control_path() -> PathBuf { state_path().with_file_name("control.sock") }
 
 #[derive(Serialize, Deserialize)]
 struct Identity { certificate: Vec<u8>, key: Vec<u8> }
 pub(super) fn tls_config() -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::MetadataExt;
     let path = state_path().with_file_name("tls-identity.json");
-    let identity: Identity = match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes)?,
+    if let Some(parent) = path.parent() {
+        let _ = crate::control::ensure_private_dir(parent);
+    }
+    let identity: Identity = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+    {
+        Ok(f) => {
+            let meta = f.metadata()?;
+            if !meta.is_file() || meta.uid() != unsafe { libc::geteuid() } {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe tls-identity.json").into());
+            }
+            let mut bytes = Vec::new();
+            f.take(64 * 1024).read_to_end(&mut bytes)?;
+            serde_json::from_slice(&bytes)?
+        }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             let generated = rcgen::generate_simple_self_signed(vec!["super-desktop.local".into()])?;
             let identity = Identity { certificate: generated.cert.der().to_vec(), key: generated.signing_key.serialize_der() };
-            let mut file = fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&path)?;
             file.write_all(&serde_json::to_vec(&identity)?)?;
             file.sync_all()?;
             identity
@@ -189,8 +219,18 @@ impl Connection {
     /// second, and the device list sits behind the global pairing mutex).
     pub(super) fn still_authorized(&self) -> bool {
         let Some(hash) = self.credential_hash.as_ref() else { return true };
-        self.auth.check(std::time::Instant::now(), || pair_state().lock().map(|p|
-            p.cfg.devices.iter().any(|d| d.expires > now_epoch() && equal(hash, &d.token_hash))).unwrap_or(false))
+        self.auth.check(std::time::Instant::now(), || {
+            pair_state()
+                .lock()
+                .map(|mut p| {
+                    p.refresh();
+                    p.cfg
+                        .devices
+                        .iter()
+                        .any(|d| d.expires > now_epoch() && equal(hash, &d.token_hash))
+                })
+                .unwrap_or(false)
+        })
     }
 }
 impl Read for Connection {
@@ -253,7 +293,10 @@ impl Admission {
         Some(Self(id))
     }
     pub(super) fn identify(&self, token: &str) {
-        if let Ok(mut clients) = CLIENTS.lock() { if let Some(c) = clients.iter_mut().find(|c| c.0 == self.0) { c.2 = digest(token.as_bytes()); c.4 = None; } }
+        if let Ok(mut clients) = CLIENTS.lock() { if let Some(c) = clients.iter_mut().find(|c| c.0 == self.0) { c.2 = digest(token.as_bytes()); } }
+    }
+    pub(super) fn set_deadline(&self, deadline: Option<std::time::Instant>) {
+        if let Ok(mut clients) = CLIENTS.lock() { if let Some(c) = clients.iter_mut().find(|c| c.0 == self.0) { c.4 = deadline; } }
     }
 }
 impl Drop for Admission { fn drop(&mut self) { if let Ok(mut c) = CLIENTS.lock() { c.retain(|c| c.0 != self.0); } } }
@@ -264,13 +307,28 @@ pub(super) fn disconnect(hash: &str) {
     }
 }
 pub(super) fn serve_control() -> io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = control_path();
+    let parent = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    crate::control::private_dir(parent)?;
+    if let Ok(meta) = fs::symlink_metadata(&path) {
+        if meta.uid() != unsafe { libc::geteuid() } || !meta.file_type().is_socket() {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "unsafe control socket"));
+        }
+    }
     if UnixStream::connect(&path).is_ok() { return Err(io::Error::new(io::ErrorKind::AddrInUse,"control socket already active")) }
-    if path.exists() { fs::remove_file(&path)?; }
+    if fs::symlink_metadata(&path).is_ok() { fs::remove_file(&path)?; }
     let listener = UnixListener::bind(&path)?;
     fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
     // Sequential owner-only requests cannot create unbounded threads.
-    std::thread::spawn(move || { for socket in listener.incoming().flatten() { serve_connection(Connection::local(socket), None); } });
+    std::thread::spawn(move || {
+        for socket in listener.incoming().flatten() {
+            if crate::control::check_peer(&socket).is_err() {
+                continue;
+            }
+            serve_connection(Connection::local(socket), None);
+        }
+    });
     // Enforce a total handshake/header/body deadline even if a TLS peer trickles
     // bytes fast enough to avoid individual socket read timeouts.
     std::thread::spawn(|| loop {
@@ -280,8 +338,11 @@ pub(super) fn serve_control() -> io::Result<()> {
             drop(CLIENTS_ADMITTED.wait_while(clients, |clients| clients.is_empty()));
         }
         std::thread::sleep(WATCHDOG_INTERVAL);
-        let expired: Vec<String> = pair_state().lock().map(|s| s.cfg.devices.iter()
-            .filter(|d| d.expires <= now_epoch()).map(|d| d.token_hash.clone()).collect()).unwrap_or_default();
+        let expired: Vec<String> = pair_state().lock().map(|mut s| {
+            s.refresh();
+            s.cfg.devices.iter()
+                .filter(|d| d.expires <= now_epoch()).map(|d| d.token_hash.clone()).collect()
+        }).unwrap_or_default();
         if let Ok(clients) = CLIENTS.lock() {
             for (_,_,hash,socket,deadline) in clients.iter() {
                 if deadline.is_some_and(|d| std::time::Instant::now() >= d) || expired.iter().any(|h| equal(h,hash)) {

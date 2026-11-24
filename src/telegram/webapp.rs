@@ -10,7 +10,9 @@ use super::config::{
     mask_token_in_text, unix_now, Config, DEFAULT_MINI_APP_HTTPS_PORT, DEFAULT_MINI_APP_PORT,
 };
 use super::desktop::{normalize_telegram_image, CardSummary, DesktopBackend, NamedKey};
-use super::redact::redact_ansi_preserving;
+use super::redact::{
+    redact_ansi_preserving, redact_known_secrets, redact_link_text, sanitize_terminal_text,
+};
 use super::topics::quick_slash_commands;
 use crate::prompt_attachments::{safe_name, Attachment, Kind, MAX_TOTAL};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -30,6 +32,10 @@ use std::time::{Duration, Instant};
 const UI_HTML: &str = include_str!("webapp_ui.html");
 const INIT_DATA_MAX_AGE_SECS: u64 = 300;
 const SESSION_TTL_SECS: u64 = 1800;
+const SESSION_HARD_TTL_SECS: u64 = 3600;
+const WS_TICKET_TTL_SECS: u64 = 15;
+const MAX_WS_TICKETS: usize = 64;
+const WS_MAX_LIFETIME_SECS: u64 = 1800;
 const MAX_SESSIONS: usize = 32;
 const MAX_CONNS: usize = 32;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
@@ -218,6 +224,23 @@ pub struct TailscaleInfo {
     pub serve_url: Option<String>,
     pub suggested_url: Option<String>,
     pub serve_command: String,
+    pub funnel_enabled: bool,
+}
+
+fn has_funnel_enabled(val: &Value) -> bool {
+    match val {
+        Value::Object(map) => map.iter().any(|(k, v)| {
+            (k.eq_ignore_ascii_case("AllowFunnel")
+                && match v {
+                    Value::Bool(b) => *b,
+                    Value::Object(inner) => inner.values().any(|iv| iv.as_bool() == Some(true)),
+                    _ => false,
+                })
+                || has_funnel_enabled(v)
+        }),
+        Value::Array(arr) => arr.iter().any(has_funnel_enabled),
+        _ => false,
+    }
 }
 
 fn find_serve_url(val: &Value, listen_port: u16) -> Option<String> {
@@ -272,6 +295,7 @@ pub fn detect_tailscale_info(listen_port: u16) -> TailscaleInfo {
         {
             if let Ok(val) = serde_json::from_slice::<Value>(&serve_out.stdout) {
                 info.serve_url = find_serve_url(&val, port);
+                info.funnel_enabled = has_funnel_enabled(&val);
             }
         }
     }
@@ -362,13 +386,24 @@ Steps:
 struct SessionEntry {
     token: String,
     user_id: i64,
+    paired_at: u64,
     token_fp: [u8; 32],
+    created_at: u64,
     last_seen: u64,
+}
+
+#[derive(Clone)]
+struct WsTicketEntry {
+    ticket: String,
+    session_token: String,
+    card_id: String,
+    expires_at: u64,
 }
 
 #[derive(Default)]
 struct SessionStore {
     entries: VecDeque<SessionEntry>,
+    ws_tickets: VecDeque<WsTicketEntry>,
 }
 
 fn bot_token_fingerprint(bot_token: &str) -> [u8; 32] {
@@ -378,29 +413,44 @@ fn bot_token_fingerprint(bot_token: &str) -> [u8; 32] {
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (&x, &y) in a.iter().zip(b.iter()) {
+    let mut diff = (a.len() ^ b.len()) as u8;
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
         diff |= x ^ y;
     }
-    std::hint::black_box(diff) == 0
+    std::hint::black_box(diff) == 0 && a.len() == b.len()
 }
 
 impl SessionStore {
-    fn issue(&mut self, cfg: &Config, user_id: i64, now_unix: u64) -> Result<String, String> {
+    fn prune_expired(&mut self, now_unix: u64) {
+        self.entries.retain(|e| {
+            now_unix.saturating_sub(e.last_seen) <= SESSION_TTL_SECS
+                && now_unix.saturating_sub(e.created_at) <= SESSION_HARD_TTL_SECS
+        });
+        self.ws_tickets.retain(|t| now_unix <= t.expires_at);
+    }
+
+    fn issue(
+        &mut self,
+        cfg: &Config,
+        user_id: i64,
+        paired_at: u64,
+        now_unix: u64,
+    ) -> Result<String, String> {
         let token = super_desktop::control::random_hex(32).map_err(|e| e.to_string())?;
         let fp = bot_token_fingerprint(&cfg.bot_token);
-        self.entries
-            .retain(|e| now_unix.saturating_sub(e.last_seen) <= SESSION_TTL_SECS);
+        self.prune_expired(now_unix);
         while self.entries.len() >= MAX_SESSIONS {
             self.entries.pop_front();
         }
         self.entries.push_back(SessionEntry {
             token: token.clone(),
             user_id,
+            paired_at,
             token_fp: fp,
+            created_at: now_unix,
             last_seen: now_unix,
         });
         Ok(token)
@@ -408,16 +458,20 @@ impl SessionStore {
 
     fn validate(&mut self, token: &str, cfg: &Config, now_unix: u64) -> bool {
         if !cfg.should_run() || !cfg.mini_app.enabled {
+            self.entries.clear();
+            self.ws_tickets.clear();
             return false;
         }
         let Some(owner) = cfg.allowed_user.as_ref() else {
+            self.entries.clear();
+            self.ws_tickets.clear();
             return false;
         };
         let fp = bot_token_fingerprint(&cfg.bot_token);
-        self.entries
-            .retain(|e| now_unix.saturating_sub(e.last_seen) <= SESSION_TTL_SECS);
+        self.prune_expired(now_unix);
         for entry in &mut self.entries {
             if entry.user_id == owner.user_id
+                && entry.paired_at == owner.paired_at
                 && entry.token_fp == fp
                 && ct_eq(entry.token.as_bytes(), token.as_bytes())
             {
@@ -426,6 +480,52 @@ impl SessionStore {
             }
         }
         false
+    }
+
+    fn issue_ws_ticket(
+        &mut self,
+        session_token: &str,
+        card_id: &str,
+        now_unix: u64,
+    ) -> Result<String, String> {
+        let ticket = super_desktop::control::random_hex(24).map_err(|e| e.to_string())?;
+        self.prune_expired(now_unix);
+        while self.ws_tickets.len() >= MAX_WS_TICKETS {
+            self.ws_tickets.pop_front();
+        }
+        self.ws_tickets.push_back(WsTicketEntry {
+            ticket: ticket.clone(),
+            session_token: session_token.to_string(),
+            card_id: card_id.to_string(),
+            expires_at: now_unix.saturating_add(WS_TICKET_TTL_SECS),
+        });
+        Ok(ticket)
+    }
+
+    fn consume_ws_ticket(
+        &mut self,
+        ticket: &str,
+        card_id: &str,
+        cfg: &Config,
+        now_unix: u64,
+    ) -> Option<String> {
+        self.prune_expired(now_unix);
+        let pos = self.ws_tickets.iter().position(|t| {
+            t.card_id == card_id
+                && now_unix <= t.expires_at
+                && ct_eq(t.ticket.as_bytes(), ticket.as_bytes())
+        })?;
+        let entry = self.ws_tickets.remove(pos)?;
+        self.validate(&entry.session_token, cfg, now_unix)
+            .then_some(entry.session_token)
+    }
+}
+
+struct ConnGuard(Arc<AtomicUsize>);
+
+impl Drop for ConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -473,9 +573,11 @@ impl MiniAppServer {
                             let sessions = Arc::clone(&sessions);
                             let stop_conn = Arc::clone(&stop_loop);
                             conns.fetch_add(1, Ordering::SeqCst);
+                            let conn_guard = ConnGuard(conns);
                             let _ = thread::Builder::new()
                                 .name("tg-miniapp-conn".into())
                                 .spawn(move || {
+                                    let _conn_guard = conn_guard;
                                     handle_connection(
                                         stream,
                                         cfg_reader,
@@ -483,7 +585,6 @@ impl MiniAppServer {
                                         sessions,
                                         stop_conn,
                                     );
-                                    conns.fetch_sub(1, Ordering::SeqCst);
                                 });
                         }
                         Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -518,19 +619,31 @@ impl Drop for MiniAppServer {
     }
 }
 
-struct ParsedHttp {
+struct ParsedHttpHead {
     method: String,
     path: String,
     query: String,
     headers: BTreeMap<String, String>,
-    body: Vec<u8>,
+    content_len: usize,
+    initial_body: Vec<u8>,
 }
 
-fn read_http_request(stream: &mut TcpStream) -> Option<ParsedHttp> {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+fn valid_http_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'))
+}
+
+fn read_http_headers(stream: &mut TcpStream) -> Option<ParsedHttpHead> {
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut buf = vec![0u8; MAX_HEADER_BYTES];
     let mut total = 0usize;
     let header_end = loop {
+        let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+            return None;
+        };
+        let _ = stream.set_read_timeout(Some(rem));
         let n = stream.read(&mut buf[total..]).ok()?;
         if n == 0 {
             return None;
@@ -543,58 +656,105 @@ fn read_http_request(stream: &mut TcpStream) -> Option<ParsedHttp> {
             return None;
         }
     };
-    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
-    let mut lines = head.lines();
+    let head = std::str::from_utf8(&buf[..header_end - 4]).ok()?;
+    let mut lines = head.split("\r\n");
     let req_line = lines.next()?;
-    let mut parts = req_line.split_whitespace();
+    let mut parts = req_line.split(' ');
     let method = parts.next()?.to_ascii_uppercase();
     let raw_target = parts.next()?;
+    let version = parts.next()?;
+    if parts.next().is_some() || !version.starts_with("HTTP/1.") {
+        return None;
+    }
     let (path, query) = match raw_target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (raw_target.to_string(), String::new()),
     };
     let mut headers = BTreeMap::new();
     for line in lines {
-        if let Some((k, v)) = line.split_once(':') {
-            let key = k.trim().to_ascii_lowercase();
-            if headers.insert(key, v.trim().to_string()).is_some() {
-                return None;
-            }
+        let (k, v) = line.split_once(':')?;
+        if !valid_http_header_name(k) {
+            return None;
+        }
+        let key = k.to_ascii_lowercase();
+        if headers.insert(key, v.trim().to_string()).is_some() {
+            return None;
         }
     }
     if headers.contains_key("transfer-encoding") {
         return None;
     }
-    let content_len: usize = headers
-        .get("content-length")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let max_body = if path.ends_with("/attachment") {
-        MAX_UPLOAD_BODY_BYTES
-    } else {
-        MAX_JSON_BODY_BYTES
+    let content_len: usize = match headers.get("content-length") {
+        Some(v) => v.trim().parse::<usize>().ok()?,
+        None => 0,
     };
-    if content_len > max_body {
+    Some(ParsedHttpHead {
+        method,
+        path,
+        query,
+        headers,
+        content_len,
+        initial_body: buf[header_end..total].to_vec(),
+    })
+}
+
+fn read_http_body(
+    stream: &mut TcpStream,
+    head: &ParsedHttpHead,
+    max_body: usize,
+    deadline_secs: u64,
+) -> Option<Vec<u8>> {
+    if head.content_len > max_body {
         return None;
     }
-    let mut body = Vec::with_capacity(content_len);
-    let initial = total.saturating_sub(header_end).min(content_len);
-    body.extend_from_slice(&buf[header_end..header_end + initial]);
-    while body.len() < content_len {
-        let mut tmp = vec![0u8; (content_len - body.len()).min(16 * 1024)];
+    let mut body = Vec::with_capacity(head.content_len.min(64 * 1024));
+    let initial = head.initial_body.len().min(head.content_len);
+    body.extend_from_slice(&head.initial_body[..initial]);
+    let deadline = Instant::now() + Duration::from_secs(deadline_secs);
+    while body.len() < head.content_len {
+        let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+            return None;
+        };
+        let _ = stream.set_read_timeout(Some(rem));
+        let mut tmp = vec![0u8; (head.content_len - body.len()).min(16 * 1024)];
         let n = stream.read(&mut tmp).ok()?;
         if n == 0 {
             return None;
         }
         body.extend_from_slice(&tmp[..n]);
     }
-    Some(ParsedHttp {
-        method,
-        path,
-        query,
-        headers,
-        body,
-    })
+    Some(body)
+}
+
+fn write_http_response_with_headers(
+    stream: &mut TcpStream,
+    code: u16,
+    reason: &str,
+    content_type: &str,
+    csp: &str,
+    extra_headers: &str,
+    body: &[u8],
+) {
+    let clean_ct: String = content_type
+        .chars()
+        .filter(|&c| c != '\r' && c != '\n')
+        .collect();
+    let header = format!(
+        "HTTP/1.1 {code} {reason}\r\n\
+         Content-Type: {clean_ct}\r\n\
+         Content-Length: {}\r\n\
+         Cache-Control: no-store\r\n\
+         X-Content-Type-Options: nosniff\r\n\
+         Referrer-Policy: no-referrer\r\n\
+         Content-Security-Policy: {csp}\r\n\
+         {extra_headers}\
+         Connection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(10)));
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
 }
 
 fn write_http_response(
@@ -604,20 +764,38 @@ fn write_http_response(
     content_type: &str,
     body: &[u8],
 ) {
-    let header = format!(
-        "HTTP/1.1 {code} {reason}\r\n\
-         Content-Type: {content_type}\r\n\
-         Content-Length: {}\r\n\
-         Cache-Control: no-store\r\n\
-         X-Content-Type-Options: nosniff\r\n\
-         Referrer-Policy: no-referrer\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; frame-ancestors https://web.telegram.org https://*.telegram.org;\r\n\
-         Connection: close\r\n\r\n",
-        body.len()
+    write_http_response_with_headers(
+        stream,
+        code,
+        reason,
+        content_type,
+        "default-src 'none'; frame-ancestors 'none';",
+        "",
+        body,
     );
-    let _ = stream.write_all(header.as_bytes());
-    let _ = stream.write_all(body);
-    let _ = stream.flush();
+}
+
+fn serve_ui_html(stream: &mut TcpStream) {
+    let Ok(nonce) = super_desktop::control::random_hex(16) else {
+        reply_err(stream, 500, "Internal Server Error", "RNG unavailable.");
+        return;
+    };
+    let html = UI_HTML.replace("<script>", &format!("<script nonce=\"{nonce}\">"));
+    let csp = format!(
+        "default-src 'self'; script-src 'nonce-{nonce}' https://telegram.org; \
+         style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; \
+         connect-src 'self' ws: wss:; base-uri 'none'; object-src 'none'; \
+         form-action 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org;"
+    );
+    write_http_response_with_headers(
+        stream,
+        200,
+        "OK",
+        "text/html; charset=utf-8",
+        &csp,
+        "",
+        html.as_bytes(),
+    );
 }
 
 fn reply_json(stream: &mut TcpStream, code: u16, reason: &str, value: &Value) {
@@ -639,63 +817,65 @@ fn query_param(query: &str, wanted: &str) -> Option<String> {
     None
 }
 
-fn extract_bearer_or_query(req: &ParsedHttp) -> Option<String> {
-    if let Some(auth) = req.headers.get("authorization") {
-        if let Some(tok) = auth
-            .strip_prefix("Bearer ")
-            .or_else(|| auth.strip_prefix("bearer "))
-        {
-            let trimmed = tok.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+fn extract_bearer_token(headers: &BTreeMap<String, String>) -> Option<String> {
+    let auth = headers.get("authorization")?;
+    let tok = auth
+        .strip_prefix("Bearer ")
+        .or_else(|| auth.strip_prefix("bearer "))?;
+    let trimmed = tok.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn split_origin(origin: &str) -> Option<(&str, &str)> {
+    if let Some(rest) = origin.strip_prefix("https://") {
+        (!rest.contains('/')).then_some(("https", rest))
+    } else if let Some(rest) = origin.strip_prefix("http://") {
+        (!rest.contains('/')).then_some(("http", rest))
+    } else {
+        None
+    }
+}
+
+fn allowed_origin(headers: &BTreeMap<String, String>, cfg: &Config) -> bool {
+    if let Some(sfs) = headers.get("sec-fetch-site") {
+        if sfs.eq_ignore_ascii_case("cross-site") {
+            return false;
+        }
+    }
+    let Some(origin) = headers.get("origin") else {
+        return true;
+    };
+    let Some((o_scheme, o_host)) = split_origin(origin) else {
+        return false;
+    };
+    if let Some(pub_url) = cfg.mini_app.normalized_url() {
+        if let Some((p_scheme, p_host)) = split_origin(&pub_url) {
+            if o_scheme.eq_ignore_ascii_case(p_scheme) && o_host.eq_ignore_ascii_case(p_host) {
+                return true;
             }
         }
     }
-    query_param(&req.query, "token").filter(|t| !t.trim().is_empty())
-}
-
-fn origin_host(origin: &str) -> Option<&str> {
-    let rest = origin
-        .strip_prefix("https://")
-        .or_else(|| origin.strip_prefix("http://"))?;
-    Some(rest.split('/').next().unwrap_or(""))
-}
-
-fn allowed_post_origin(req: &ParsedHttp, cfg: &Config) -> bool {
-    let Some(origin) = req.headers.get("origin") else {
-        return true;
-    };
-    let Some(o_host) = origin_host(origin) else {
-        return false;
-    };
-    if req
-        .headers
+    headers
         .get("host")
         .is_some_and(|h| h.eq_ignore_ascii_case(o_host))
-    {
-        return true;
-    }
-    if req
-        .headers
-        .get("x-forwarded-host")
-        .is_some_and(|h| h.eq_ignore_ascii_case(o_host))
-    {
-        return true;
-    }
-    if let Some(pub_url) = cfg.mini_app.normalized_url() {
-        if origin_host(&pub_url).is_some_and(|h| h.eq_ignore_ascii_case(o_host)) {
-            return true;
-        }
-    }
-    false
 }
 
-fn card_json(card: &CardSummary) -> Value {
+fn redact_card_field(raw: &str, cfg: &Config) -> String {
+    let masked = mask_token_in_text(raw, &cfg.bot_token);
+    if cfg.permissions.redact_secrets {
+        redact_known_secrets(&masked)
+    } else {
+        masked
+    }
+}
+
+fn card_json(card: &CardSummary, cfg: &Config) -> Value {
     let quick_cmds: Vec<&str> = if card.is_shell {
         Vec::new()
     } else {
         quick_slash_commands(&card.agent_type).to_vec()
     };
+    let clean_title = card.title.as_deref().map(|t| redact_card_field(t, cfg));
     json!({
         "id": card.id,
         "agentType": card.agent_type,
@@ -705,12 +885,22 @@ fn card_json(card: &CardSummary) -> Value {
         "label": card.label,
         "model": card.model,
         "effort": card.effort,
-        "title": card.title,
+        "title": clean_title,
         "directoryDisplay": card.directory_display,
         "tag": card.tag,
         "isShell": card.is_shell,
         "quickSlashCommands": quick_cmds,
     })
+}
+
+fn valid_hex_color(raw: &str, fallback: &str) -> String {
+    let s = raw.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        if (hex.len() == 6 || hex.len() == 8) && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return s.to_string();
+        }
+    }
+    fallback.to_string()
 }
 
 fn usage_item_json(p: &super::desktop::ProviderUsageSummary) -> Value {
@@ -765,7 +955,7 @@ fn check_card_input_perm(cfg: &Config, card: &CardSummary, need: &str) -> Result
     let allowed = match need {
         "prompt" => cfg.permissions.prompts,
         "control" => cfg.permissions.controls,
-        "attachment" => cfg.permissions.attachments,
+        "attachment" => cfg.permissions.attachments && cfg.permissions.prompts,
         _ => false,
     };
     if !allowed {
@@ -778,39 +968,65 @@ fn check_card_input_perm(cfg: &Config, card: &CardSummary, need: &str) -> Result
 }
 
 fn build_bootstrap_json(cfg: &Config, backend: &dyn DesktopBackend) -> Value {
-    let cards: Vec<Value> = backend.list_cards().iter().map(card_json).collect();
-    let usage: Vec<Value> = backend.usage_summary().iter().map(usage_item_json).collect();
-    let workspaces = backend
-        .workspace_choices()
-        .map(|w| json!({ "current": w.current, "recent": w.recent }))
-        .unwrap_or_else(|_| json!({ "current": "", "recent": [] }));
-    let harnesses: Vec<Value> = backend
-        .available_harnesses()
-        .into_iter()
-        .map(|h| json!({ "id": h.id, "name": h.name, "icon": h.icon }))
+    let cards: Vec<Value> = backend
+        .list_cards()
+        .iter()
+        .map(|c| card_json(c, cfg))
         .collect();
+    let usage: Vec<Value> = backend.usage_summary().iter().map(usage_item_json).collect();
+    let (workspaces, harnesses) = if cfg.permissions.launch {
+        let ws = backend
+            .workspace_choices()
+            .map(|w| json!({ "current": w.current, "recent": w.recent }))
+            .unwrap_or_else(|_| json!({ "current": "", "recent": [] }));
+        let hs: Vec<Value> = backend
+            .available_harnesses()
+            .into_iter()
+            .map(|h| json!({ "id": h.id, "name": h.name, "icon": h.icon }))
+            .collect();
+        (ws, hs)
+    } else {
+        (json!({ "current": "", "recent": [] }), Vec::new())
+    };
     let t = crate::theme::current_theme_fresh();
+    let dark_bg = valid_hex_color(&t.dark_background, "#1c1b1a");
+    let bg = valid_hex_color(&t.background, "#10100f");
+    let fg = valid_hex_color(&t.foreground, "#ece8e5");
     let theme = json!({
         "name": t.name,
-        "mode": t.mode,
-        "background": t.background,
-        "darkBackground": t.dark_background,
-        "darkerBackground": t.darker_background,
-        "lighterBackground": t.lighter_background,
-        "selection": t.selection,
-        "foreground": t.foreground,
-        "muted": t.muted,
-        "accent": t.accent,
-        "green": t.green,
-        "yellow": t.yellow,
-        "red": t.red,
-        "orange": t.orange,
-        "cyan": t.cyan,
-        "blue": t.blue,
-        "magenta": t.magenta,
+        "mode": if t.mode == "light" { "light" } else { "dark" },
+        "background": bg,
+        "darkBackground": dark_bg,
+        "darkerBackground": valid_hex_color(&t.darker_background, &dark_bg),
+        "lighterBackground": valid_hex_color(&t.lighter_background, &bg),
+        "selection": valid_hex_color(&t.selection, "#22201d"),
+        "foreground": fg,
+        "muted": valid_hex_color(&t.muted, "#8f8a84"),
+        "accent": valid_hex_color(&t.accent, "#5ca3ad"),
+        "green": valid_hex_color(&t.green, "#88ad7c"),
+        "yellow": valid_hex_color(&t.yellow, "#dbb471"),
+        "red": valid_hex_color(&t.red, "#d95750"),
+        "orange": valid_hex_color(&t.orange, "#d47844"),
+        "cyan": valid_hex_color(&t.cyan, "#5ca3ad"),
+        "blue": valid_hex_color(&t.blue, "#6b93b8"),
+        "magenta": valid_hex_color(&t.magenta, "#a688b5"),
         "ansi16": [
-            t.dark_background, t.red, t.green, t.yellow, t.blue, t.magenta, t.cyan, t.foreground,
-            t.muted, t.bright_red, t.bright_green, t.bright_yellow, t.bright_blue, t.bright_magenta, t.bright_cyan, t.bright_foreground
+            valid_hex_color(&t.dark_background, "#1c1b1a"),
+            valid_hex_color(&t.red, "#d95750"),
+            valid_hex_color(&t.green, "#88ad7c"),
+            valid_hex_color(&t.yellow, "#dbb471"),
+            valid_hex_color(&t.blue, "#6b93b8"),
+            valid_hex_color(&t.magenta, "#a688b5"),
+            valid_hex_color(&t.cyan, "#5ca3ad"),
+            valid_hex_color(&t.foreground, "#d1cdc9"),
+            valid_hex_color(&t.muted, "#736f6b"),
+            valid_hex_color(&t.bright_red, "#ea6861"),
+            valid_hex_color(&t.bright_green, "#9ec292"),
+            valid_hex_color(&t.bright_yellow, "#e8c484"),
+            valid_hex_color(&t.bright_blue, "#84acd2"),
+            valid_hex_color(&t.bright_magenta, "#ba9dca"),
+            valid_hex_color(&t.bright_cyan, "#72bac5"),
+            valid_hex_color(&t.bright_foreground, "#ece8e5"),
         ],
     });
     let p = cfg.permissions;
@@ -840,18 +1056,12 @@ fn handle_connection(
     sessions: Arc<Mutex<SessionStore>>,
     stop: Arc<AtomicBool>,
 ) {
-    let Some(req) = read_http_request(&mut stream) else {
+    let Some(req) = read_http_headers(&mut stream) else {
         return;
     };
     let cfg = cfg_reader();
     if req.method == "GET" && (req.path == "/" || req.path == "/index.html") {
-        write_http_response(
-            &mut stream,
-            200,
-            "OK",
-            "text/html; charset=utf-8",
-            UI_HTML.as_bytes(),
-        );
+        serve_ui_html(&mut stream);
         return;
     }
     if req.method == "GET" && req.path == "/health" {
@@ -878,18 +1088,24 @@ fn handle_connection(
         return;
     };
 
-    if req.method == "POST" && !allowed_post_origin(&req, &cfg) {
-        reply_err(&mut stream, 403, "Forbidden", "Cross-origin POST rejected.");
-        return;
+    if (req.method != "GET" && req.method != "HEAD") || req.path.starts_with("/ws/terminal/") {
+        if !allowed_origin(&req.headers, &cfg) {
+            reply_err(&mut stream, 403, "Forbidden", "Cross-origin request rejected.");
+            return;
+        }
     }
 
     if req.method == "POST" && req.path == "/api/auth" {
+        let Some(body_bytes) = read_http_body(&mut stream, &req, MAX_JSON_BODY_BYTES, 10) else {
+            reply_err(&mut stream, 400, "Bad Request", "Invalid or oversized auth body.");
+            return;
+        };
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct AuthReq {
             init_data: String,
         }
-        let Ok(body) = serde_json::from_slice::<AuthReq>(&req.body) else {
+        let Ok(body) = serde_json::from_slice::<AuthReq>(&body_bytes) else {
             reply_err(&mut stream, 400, "Bad Request", "Expected JSON {initData}.");
             return;
         };
@@ -907,7 +1123,11 @@ fn handle_connection(
                 return;
             }
         };
-        let Ok(token) = sessions.lock().unwrap().issue(&cfg, verified.user_id, now) else {
+        let Ok(token) = sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .issue(&cfg, verified.user_id, owner.paired_at, now)
+        else {
             reply_err(
                 &mut stream,
                 500,
@@ -929,18 +1149,105 @@ fn handle_connection(
         return;
     }
 
-    // All remaining routes require a valid session token.
     let now = unix_now();
-    let Some(tok) = extract_bearer_or_query(&req) else {
+
+    // WebSocket terminal stream authenticates with a single-use short-lived ticket from POST /api/ws-ticket.
+    if req.method == "GET" {
+        if let Some(card_id) = req.path.strip_prefix("/ws/terminal/") {
+            let is_upgrade = req
+                .headers
+                .get("upgrade")
+                .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+                && req.headers.get("connection").is_some_and(|v| {
+                    v.split(',')
+                        .any(|tok| tok.trim().eq_ignore_ascii_case("upgrade"))
+                });
+            let Some(ws_key) = req.headers.get("sec-websocket-key").cloned() else {
+                reply_err(&mut stream, 400, "Bad Request", "Missing Sec-WebSocket-Key.");
+                return;
+            };
+            if !is_upgrade {
+                reply_err(&mut stream, 400, "Bad Request", "Expected WebSocket upgrade.");
+                return;
+            }
+            if !cfg.permissions.read_output {
+                reply_err(&mut stream, 403, "Forbidden", "Read terminal output is disabled.");
+                return;
+            }
+            let Some(ticket) = query_param(&req.query, "ticket").filter(|t| !t.trim().is_empty()) else {
+                reply_err(&mut stream, 401, "Unauthorized", "Missing WebSocket ticket.");
+                return;
+            };
+            let Some(tok) = sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .consume_ws_ticket(&ticket, card_id, &cfg, now)
+            else {
+                reply_err(&mut stream, 401, "Unauthorized", "Invalid or expired WebSocket ticket.");
+                return;
+            };
+            if crate::ws::handshake(&mut stream, &ws_key).is_ok() {
+                run_ws_stream(stream, card_id, &tok, cfg_reader, backend, sessions, stop);
+            }
+            return;
+        }
+    }
+
+    // All remaining /api/* routes require a Bearer session token in the Authorization header.
+    let Some(tok) = extract_bearer_token(&req.headers) else {
         reply_err(&mut stream, 401, "Unauthorized", "Missing session token.");
         return;
     };
-    if !sessions.lock().unwrap().validate(&tok, &cfg, now) {
+    if !sessions
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .validate(&tok, &cfg, now)
+    {
         reply_err(
             &mut stream,
             401,
             "Unauthorized",
             "Session expired or revoked — reopen Mini App.",
+        );
+        return;
+    }
+
+    if req.method == "POST" && req.path == "/api/ws-ticket" {
+        if !cfg.permissions.read_output {
+            reply_err(&mut stream, 403, "Forbidden", "Read terminal output is disabled.");
+            return;
+        }
+        let Some(body_bytes) = read_http_body(&mut stream, &req, MAX_JSON_BODY_BYTES, 10) else {
+            reply_err(&mut stream, 400, "Bad Request", "Invalid or oversized body.");
+            return;
+        };
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct TicketReq {
+            card_id: String,
+        }
+        let Ok(body) = serde_json::from_slice::<TicketReq>(&body_bytes) else {
+            reply_err(&mut stream, 400, "Bad Request", "Expected JSON {cardId}.");
+            return;
+        };
+        let cards = backend.list_cards();
+        if !cards.iter().any(|c| c.id == body.card_id) {
+            reply_err(&mut stream, 404, "Not Found", "Card is no longer running.");
+            return;
+        }
+        let Ok(ticket) = sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .issue_ws_ticket(&tok, &body.card_id, now)
+        else {
+            reply_err(&mut stream, 500, "Internal Server Error", "Could not issue WebSocket ticket.");
+            return;
+        };
+        reply_json(
+            &mut stream,
+            200,
+            "OK",
+            &json!({ "ticket": ticket, "expiresIn": WS_TICKET_TTL_SECS }),
         );
         return;
     }
@@ -956,13 +1263,17 @@ fn handle_connection(
             reply_err(&mut stream, 403, "Forbidden", "Launch is disabled in Settings → Telegram.");
             return;
         }
+        let Some(body_bytes) = read_http_body(&mut stream, &req, MAX_JSON_BODY_BYTES, 10) else {
+            reply_err(&mut stream, 400, "Bad Request", "Invalid or oversized launch body.");
+            return;
+        };
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct LaunchReq {
             agent_type: String,
             workspace: String,
         }
-        let Ok(body) = serde_json::from_slice::<LaunchReq>(&req.body) else {
+        let Ok(body) = serde_json::from_slice::<LaunchReq>(&body_bytes) else {
             reply_err(&mut stream, 400, "Bad Request", "Invalid launch payload.");
             return;
         };
@@ -971,23 +1282,6 @@ fn handle_connection(
             Err(err) => reply_err(&mut stream, 400, "Bad Request", &err),
         }
         return;
-    }
-
-    if req.method == "GET" {
-        if let Some(card_id) = req.path.strip_prefix("/ws/terminal/") {
-            let Some(ws_key) = req.headers.get("sec-websocket-key").cloned() else {
-                reply_err(&mut stream, 400, "Bad Request", "Missing Sec-WebSocket-Key.");
-                return;
-            };
-            if !cfg.permissions.read_output {
-                reply_err(&mut stream, 403, "Forbidden", "Read terminal output is disabled.");
-                return;
-            }
-            if crate::ws::handshake(&mut stream, &ws_key).is_ok() {
-                run_ws_stream(stream, card_id, &tok, cfg_reader, backend, sessions, stop);
-            }
-            return;
-        }
     }
 
     let Some(rest) = req.path.strip_prefix("/api/cards/") else {
@@ -1009,7 +1303,7 @@ fn handle_connection(
             match backend.capture_ansi_screen(card_id, 200) {
                 Ok(raw) => {
                     let ansi = redact_ansi_preserving(&raw, &cfg.bot_token, cfg.permissions.redact_secrets);
-                    reply_json(&mut stream, 200, "OK", &json!({ "ansi": ansi, "card": card_json(card) }));
+                    reply_json(&mut stream, 200, "OK", &json!({ "ansi": ansi, "card": card_json(card, &cfg) }));
                 }
                 Err(err) => reply_err(&mut stream, 500, "Internal Server Error", &err),
             }
@@ -1027,7 +1321,7 @@ fn handle_connection(
                         "mimeType": a.mime_type, "kind": a.kind, "size": a.size,
                     })).collect();
                     let links: Vec<String> = refs.links.into_iter()
-                        .map(|l| mask_token_in_text(&l, &cfg.bot_token))
+                        .map(|l| redact_link_text(&l, &cfg.bot_token, cfg.permissions.redact_secrets).0)
                         .collect();
                     reply_json(&mut stream, 200, "OK", &json!({ "assets": assets, "links": links }));
                 }
@@ -1042,12 +1336,41 @@ fn handle_connection(
             }
             match backend.read_asset(card_id, asset_id) {
                 Ok((asset, bytes)) => {
-                    if asset.kind == "text" || asset.kind == "markdown" || asset.mime_type.starts_with("text/") {
+                    let extra = "Content-Disposition: attachment; filename=\"download\"\r\n";
+                    let sandbox_csp = "default-src 'none'; sandbox;";
+                    if asset.kind == "pdf" || asset.mime_type.eq_ignore_ascii_case("application/pdf") {
+                        reply_err(
+                            &mut stream,
+                            415,
+                            "Unsupported Media Type",
+                            "Use /pdf/<id>/<page> for PDF previews.",
+                        );
+                    } else if asset.kind == "text"
+                        || asset.kind == "markdown"
+                        || asset.mime_type.starts_with("text/")
+                    {
                         let raw = String::from_utf8_lossy(&bytes);
-                        let clean = redact_ansi_preserving(&raw, &cfg.bot_token, cfg.permissions.redact_secrets);
-                        write_http_response(&mut stream, 200, "OK", "text/plain; charset=utf-8", clean.as_bytes());
+                        let clean =
+                            sanitize_terminal_text(&raw, &cfg.bot_token, cfg.permissions.redact_secrets);
+                        write_http_response_with_headers(
+                            &mut stream,
+                            200,
+                            "OK",
+                            "text/plain; charset=utf-8",
+                            sandbox_csp,
+                            extra,
+                            clean.as_bytes(),
+                        );
                     } else {
-                        write_http_response(&mut stream, 200, "OK", &asset.mime_type, &bytes);
+                        write_http_response_with_headers(
+                            &mut stream,
+                            200,
+                            "OK",
+                            &asset.mime_type,
+                            sandbox_csp,
+                            extra,
+                            &bytes,
+                        );
                     }
                 }
                 Err(err) => reply_err(&mut stream, 404, "Not Found", &err),
@@ -1076,11 +1399,15 @@ fn handle_connection(
                 reply_err(&mut stream, 403, "Forbidden", msg);
                 return;
             }
+            let Some(body_bytes) = read_http_body(&mut stream, &req, MAX_JSON_BODY_BYTES, 10) else {
+                reply_err(&mut stream, 400, "Bad Request", "Invalid or oversized prompt body.");
+                return;
+            };
             #[derive(Deserialize)]
             struct PromptReq {
                 text: String,
             }
-            let Ok(body) = serde_json::from_slice::<PromptReq>(&req.body) else {
+            let Ok(body) = serde_json::from_slice::<PromptReq>(&body_bytes) else {
                 reply_err(&mut stream, 400, "Bad Request", "Expected JSON {text}.");
                 return;
             };
@@ -1095,11 +1422,15 @@ fn handle_connection(
                 reply_err(&mut stream, 403, "Forbidden", msg);
                 return;
             }
+            let Some(body_bytes) = read_http_body(&mut stream, &req, MAX_JSON_BODY_BYTES, 10) else {
+                reply_err(&mut stream, 400, "Bad Request", "Invalid or oversized key body.");
+                return;
+            };
             #[derive(Deserialize)]
             struct KeyReq {
                 code: String,
             }
-            let Ok(body) = serde_json::from_slice::<KeyReq>(&req.body) else {
+            let Ok(body) = serde_json::from_slice::<KeyReq>(&body_bytes) else {
                 reply_err(&mut stream, 400, "Bad Request", "Expected JSON {code}.");
                 return;
             };
@@ -1118,6 +1449,14 @@ fn handle_connection(
                 reply_err(&mut stream, 403, "Forbidden", msg);
                 return;
             }
+            if req.content_len > MAX_UPLOAD_BODY_BYTES {
+                reply_err(&mut stream, 413, "Payload Too Large", "Attachment exceeds size limit.");
+                return;
+            }
+            let Some(body_bytes) = read_http_body(&mut stream, &req, MAX_UPLOAD_BODY_BYTES, 120) else {
+                reply_err(&mut stream, 400, "Bad Request", "Incomplete or timed out upload body.");
+                return;
+            };
             #[derive(Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct AttachReq {
@@ -1128,7 +1467,7 @@ fn handle_connection(
                 #[serde(default)]
                 is_image: bool,
             }
-            let Ok(body) = serde_json::from_slice::<AttachReq>(&req.body) else {
+            let Ok(body) = serde_json::from_slice::<AttachReq>(&body_bytes) else {
                 reply_err(&mut stream, 400, "Bad Request", "Invalid attachment payload.");
                 return;
             };
@@ -1213,9 +1552,16 @@ fn run_ws_stream(
         }
     });
 
+    let stream_started = Instant::now();
+    let mut last_ping = Instant::now();
     let mut last_payload = String::new();
     let mut last_auth_check = Instant::now() - Duration::from_secs(10);
     while !stop.load(Ordering::SeqCst) {
+        if stream_started.elapsed() >= Duration::from_secs(WS_MAX_LIFETIME_SECS) {
+            let _ = crate::ws::write_close(&mut stream, 1000, "session_limit");
+            break;
+        }
+
         let mut pending: Vec<WsClientEvent> = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             pending.push(ev);
@@ -1245,8 +1591,20 @@ fn run_ws_stream(
                     let _ = crate::ws::write_pong(&mut stream, &p);
                 }
                 WsClientEvent::Frame(crate::ws::Frame::Text(txt)) => {
+                    let cfg = cfg_reader();
+                    if !sessions
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .validate(token, &cfg, unix_now())
+                        || !cfg.permissions.read_output
+                    {
+                        let _ = crate::ws::write_close(&mut stream, 4001, "unauthorized");
+                        let _ = stream.shutdown(Shutdown::Both);
+                        let _ = reader_handle.join();
+                        return;
+                    }
+                    last_auth_check = Instant::now();
                     if let Ok(val) = serde_json::from_str::<Value>(&txt) {
-                        let cfg = cfg_reader();
                         let cards = backend.list_cards();
                         if let Some(card) = cards.iter().find(|c| c.id == card_id) {
                             match val["type"].as_str() {
@@ -1278,8 +1636,19 @@ fn run_ws_stream(
         let cfg = cfg_reader();
         if last_auth_check.elapsed() >= Duration::from_secs(2) {
             last_auth_check = Instant::now();
-            if !sessions.lock().unwrap().validate(token, &cfg, unix_now()) || !cfg.permissions.read_output {
+            if !sessions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .validate(token, &cfg, unix_now())
+                || !cfg.permissions.read_output
+            {
                 let _ = crate::ws::write_close(&mut stream, 4001, "unauthorized");
+                break;
+            }
+        }
+        if last_ping.elapsed() >= Duration::from_secs(30) {
+            last_ping = Instant::now();
+            if crate::ws::write_ping(&mut stream, b"kp").is_err() {
                 break;
             }
         }
@@ -1294,7 +1663,7 @@ fn run_ws_stream(
             let frame = serde_json::to_string(&json!({
                 "type": "frame",
                 "ansi": ansi,
-                "card": card_json(card),
+                "card": card_json(card, &cfg),
             }))
             .unwrap_or_default();
             if frame != last_payload {

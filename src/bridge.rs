@@ -138,7 +138,7 @@ pub(in crate::bridge) use http::{
 pub(in crate::bridge) use http::reason_phrase;
 
 pub use handlers::serve;
-pub(in crate::bridge) use handlers::{serve_connection, session_meta};
+pub(in crate::bridge) use handlers::{serve_connection, session_meta, ACTIVE_PORT};
 #[cfg(test)]
 pub(in crate::bridge) use handlers::{creation_command, stream_keys, stream_keys_as};
 

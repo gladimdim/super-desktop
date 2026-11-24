@@ -1,8 +1,8 @@
 //! Push notifications for FINISHED, WAITING, and ERROR card transitions.
 use super::api::{ApiError, InlineKeyboardMarkup, TelegramApi};
-use super::config::{Config, RuntimeState};
+use super::config::{mask_token_in_text, Config, RuntimeState};
 use super::desktop::{CardSummary, DesktopBackend};
-use super::redact::{escape_html, truncate_chars};
+use super::redact::{escape_html, redact_known_secrets, truncate_chars};
 use super::topics::{
     card_action_keyboard_with_app, extract_done_summary, format_assistant_done_summary,
     screen_shows_active_work, tail_output_snippet, waiting_keyboard,
@@ -199,7 +199,13 @@ impl NotifierState {
                         if let Some(prompt) =
                             card.last_prompt.as_deref().filter(|p| !p.trim().is_empty())
                         {
-                            let short_prompt = truncate_chars(prompt.trim(), 140);
+                            let masked = mask_token_in_text(prompt.trim(), &cfg.bot_token);
+                            let redacted = if cfg.permissions.redact_secrets {
+                                redact_known_secrets(&masked)
+                            } else {
+                                masked
+                            };
+                            let short_prompt = truncate_chars(&redacted, 140);
                             html.push_str(&format!("\n<i>{}</i>", escape_html(&short_prompt)));
                         }
                         if let Some((text, is_prose)) = summary {
@@ -254,7 +260,14 @@ impl NotifierState {
                         if let Some(prompt) =
                             card.last_prompt.as_deref().filter(|p| !p.trim().is_empty())
                         {
-                            html.push_str(&format!("\nPrompt: <i>{}</i>", escape_html(prompt)));
+                            let masked = mask_token_in_text(prompt.trim(), &cfg.bot_token);
+                            let redacted = if cfg.permissions.redact_secrets {
+                                redact_known_secrets(&masked)
+                            } else {
+                                masked
+                            };
+                            let short_prompt = truncate_chars(&redacted, 180);
+                            html.push_str(&format!("\nPrompt: <i>{}</i>", escape_html(&short_prompt)));
                         }
                         if cfg.permissions.read_output {
                             if let Ok(raw) = backend.capture_screen(&card.id, 0) {

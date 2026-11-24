@@ -1,9 +1,9 @@
 //! Detached `super-desktop telegram-bot` worker process: long polling + topic/notification sync.
 use super::api::{ApiError, BotUser, TelegramApi, TelegramClient};
 use super::config::{
-    config_mtime, ensure_private_dir, load_config_at, load_runtime_at, lock_path,
+    ensure_private_dir, file_stamp, load_config_at, load_runtime_at, lock_path,
     mask_token_in_text, save_config_at, save_runtime_at, state_dir, take_topic_sync_request_at,
-    unix_now, Config, RuntimeState,
+    unix_now, Config, FileStamp, RuntimeState,
 };
 use super::desktop::{DesktopBackend, LiveDesktopBackend, ProviderUsageSummary};
 use super::notifier::NotifierState;
@@ -17,8 +17,8 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
 
 static SIGNAL_STOP: AtomicBool = AtomicBool::new(false);
 
@@ -53,6 +53,7 @@ fn acquire_worker_lock(path: &Path) -> Result<File, String> {
         .write(true)
         .create(true)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(|e| format!("Cannot open Telegram worker lock: {e}"))?;
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -67,10 +68,11 @@ fn acquire_worker_lock(path: &Path) -> Result<File, String> {
 
 struct SharedState {
     cfg: Config,
+    cfg_snapshot: Arc<RwLock<Config>>,
     runtime: RuntimeState,
     router: Router,
     notifier: NotifierState,
-    config_mtime: Option<SystemTime>,
+    config_stamp: Option<FileStamp>,
 }
 
 fn sync_menu_button(client: &TelegramClient, cfg: &Config) {
@@ -89,7 +91,7 @@ fn sync_menu_button(client: &TelegramClient, cfg: &Config) {
 fn reconcile_mini_app_server(
     server: &mut Option<MiniAppServer>,
     cfg: &Config,
-    shared: &Arc<Mutex<SharedState>>,
+    cfg_snapshot: &Arc<RwLock<Config>>,
 ) {
     let want_port = (cfg.should_run() && cfg.mini_app.enabled).then(|| cfg.mini_app.effective_port());
     if server.as_ref().map(|s| s.listen_port) == want_port {
@@ -99,9 +101,12 @@ fn reconcile_mini_app_server(
         old.stop();
     }
     if let Some(port) = want_port {
-        let shared_cfg = Arc::clone(shared);
-        let cfg_reader: Arc<dyn Fn() -> Config + Send + Sync> =
-            Arc::new(move || shared_cfg.lock().unwrap().cfg.clone());
+        let snap = Arc::clone(cfg_snapshot);
+        let cfg_reader: Arc<dyn Fn() -> Config + Send + Sync> = Arc::new(move || {
+            snap.read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+        });
         let backend: Arc<dyn DesktopBackend + Send + Sync> = Arc::new(LiveDesktopBackend);
         match MiniAppServer::spawn(port, cfg_reader, backend) {
             Ok(srv) => *server = Some(srv),
@@ -119,11 +124,11 @@ fn reload_config_if_changed(
     client: &TelegramClient,
     stop: &AtomicBool,
 ) -> bool {
-    let new_mtime = config_mtime();
-    if new_mtime == guard.config_mtime {
+    let new_stamp = file_stamp(cfg_path);
+    if new_stamp == guard.config_stamp {
         return false;
     }
-    guard.config_mtime = new_mtime;
+    guard.config_stamp = new_stamp;
     let Ok(new_cfg) = load_config_at(cfg_path) else {
         return false;
     };
@@ -132,7 +137,9 @@ fn reload_config_if_changed(
         return false;
     }
     let mut runtime_dirty = false;
-    let prev_user = guard.cfg.allowed_user.as_ref().map(|u| u.user_id);
+    let prev_owner = guard.cfg.allowed_user.clone();
+    let prev_user = prev_owner.as_ref().map(|u| u.user_id);
+    let new_user = new_cfg.allowed_user.as_ref().map(|u| u.user_id);
     if prev_user.is_none() {
         if let Some(owner) = new_cfg.allowed_user.as_ref() {
             let _ = client.send_message(
@@ -153,7 +160,7 @@ fn reload_config_if_changed(
         guard.runtime.live_streams.clear();
         runtime_dirty = true;
     }
-    if new_cfg.allowed_user.is_none() {
+    if new_cfg.allowed_user.is_none() || prev_user != new_user {
         guard.runtime.active_card_id = None;
         guard.runtime.topics.clear();
         guard.runtime.message_card_map.clear();
@@ -163,11 +170,21 @@ fn reload_config_if_changed(
         guard.runtime.last_dashboard_edit_at = 0;
         guard.runtime.live_streams.clear();
         runtime_dirty = true;
+        if let Some(prev) = prev_owner {
+            if new_cfg
+                .allowed_user
+                .as_ref()
+                .is_none_or(|n| n.chat_id != prev.chat_id)
+            {
+                let _ = client.set_chat_menu_button(Some(prev.chat_id), None);
+            }
+        }
     }
     if guard.cfg.allowed_user != new_cfg.allowed_user || guard.cfg.mini_app != new_cfg.mini_app {
         sync_menu_button(client, &new_cfg);
     }
-    guard.cfg = new_cfg;
+    guard.cfg = new_cfg.clone();
+    *guard.cfg_snapshot.write().unwrap_or_else(|e| e.into_inner()) = new_cfg;
     runtime_dirty
 }
 
@@ -276,15 +293,17 @@ pub fn serve() {
     persist_status(&rt_path, &mut runtime, "running", cfg.bot_username.clone(), None);
 
     let stop = Arc::new(AtomicBool::new(false));
+    let cfg_snapshot = Arc::new(RwLock::new(cfg.clone()));
     let shared = Arc::new(Mutex::new(SharedState {
         cfg: cfg.clone(),
+        cfg_snapshot: Arc::clone(&cfg_snapshot),
         runtime,
         router,
         notifier,
-        config_mtime: config_mtime(),
+        config_stamp: file_stamp(&cfg_path),
     }));
     let mut mini_app_server: Option<MiniAppServer> = None;
-    reconcile_mini_app_server(&mut mini_app_server, &cfg, &shared);
+    reconcile_mini_app_server(&mut mini_app_server, &cfg, &cfg_snapshot);
 
     let poller_client = match TelegramClient::new(&token) {
         Ok(c) => c,
@@ -345,7 +364,9 @@ pub fn serve() {
                                 &update,
                                 now,
                             );
-                            guard.cfg = cfg_copy;
+                            guard.cfg = cfg_copy.clone();
+                            *guard.cfg_snapshot.write().unwrap_or_else(|e| e.into_inner()) =
+                                cfg_copy;
                             guard.runtime = rt_copy;
                         }
                         let _ = save_runtime_at(&poller_dir.join("runtime.json"), &guard.runtime);
@@ -390,6 +411,7 @@ pub fn serve() {
 
     let sync_backend = LiveDesktopBackend;
     let mut last_typing: HashMap<String, u64> = HashMap::new();
+    let mut last_forum_audit_at = now;
     while !stop.load(Ordering::SeqCst) && !SIGNAL_STOP.load(Ordering::SeqCst) {
         sleep_interruptible(2, &stop);
         if stop.load(Ordering::SeqCst) || SIGNAL_STOP.load(Ordering::SeqCst) {
@@ -404,13 +426,76 @@ pub fn serve() {
             last_usage_at = now;
         }
 
+        // Periodically verify linked Forum group still satisfies the 2-member + private supergroup guard.
+        let audit_target = if now.saturating_sub(last_forum_audit_at) >= 120 {
+            let guard = shared.lock().unwrap();
+            guard
+                .cfg
+                .forum
+                .clone()
+                .map(|f| (f, guard.cfg.allowed_user.clone()))
+        } else {
+            None
+        };
+        if let Some((forum_cfg, owner_opt)) = audit_target {
+            last_forum_audit_at = now;
+            let mut violation: Option<&str> = None;
+            if let Ok(count) = client.get_chat_member_count(forum_cfg.chat_id) {
+                if count > 2 {
+                    violation = Some("it now has more than 2 members (only you and your bot are allowed)");
+                }
+            }
+            if violation.is_none() {
+                if let Ok(info) = client.get_chat(forum_cfg.chat_id) {
+                    if info.username.as_deref().is_some_and(|u| !u.trim().is_empty()) {
+                        violation = Some("a public @username link was enabled on the group");
+                    } else if info.is_forum != Some(true) {
+                        violation = Some("Forum Topics were disabled on the group");
+                    }
+                }
+            }
+            if let Some(reason) = violation {
+                if let Ok(mut disk_cfg) = load_config_at(&cfg_path) {
+                    let same_owner = disk_cfg.allowed_user.as_ref().map(|u| u.user_id)
+                        == owner_opt.as_ref().map(|o| o.user_id);
+                    let same_forum = disk_cfg.forum.as_ref().map(|f| f.chat_id) == Some(forum_cfg.chat_id);
+                    if same_owner && same_forum {
+                        disk_cfg.forum = None;
+                        if save_config_at(&cfg_path, &disk_cfg).is_ok() {
+                            let mut guard = shared.lock().unwrap();
+                            guard.cfg = disk_cfg.clone();
+                            *guard.cfg_snapshot.write().unwrap_or_else(|e| e.into_inner()) =
+                                disk_cfg;
+                            guard.config_stamp = file_stamp(&cfg_path);
+                            guard.runtime.topics.clear();
+                            guard.runtime.dashboard_message_id = None;
+                            guard.runtime.dashboard_pinned = false;
+                            guard.runtime.last_dashboard_card = None;
+                            guard.runtime.last_dashboard_edit_at = 0;
+                            guard.runtime.live_streams.clear();
+                            let _ = save_runtime_at(&rt_path, &guard.runtime);
+                            if let Some(owner) = owner_opt {
+                                let _ = client.send_message(
+                                    owner.chat_id,
+                                    None,
+                                    &format!("⚠️ Linked Forum group was automatically unlinked because {reason}."),
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let mut guard = shared.lock().unwrap();
         let mut runtime_dirty = reload_config_if_changed(&mut guard, &cfg_path, &token, &client, &stop);
         let latest_cfg = guard.cfg.clone();
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        reconcile_mini_app_server(&mut mini_app_server, &latest_cfg, &shared);
+        reconcile_mini_app_server(&mut mini_app_server, &latest_cfg, &cfg_snapshot);
 
         if guard.cfg.forum.is_some() {
             let cfg_copy = guard.cfg.clone();

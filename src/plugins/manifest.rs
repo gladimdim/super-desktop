@@ -366,7 +366,13 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
         _ => problems.push(problem("api", "missing or invalid \"api\"", "Set \"api\": 1.")),
     }
 
-    let name = object.get("name").and_then(Value::as_str).unwrap_or(&id).trim().to_owned();
+    let raw_name = object.get("name").and_then(Value::as_str).unwrap_or(&id).trim();
+    let name: String = raw_name
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(120)
+        .collect();
+    let name = if name.is_empty() { id.clone() } else { name };
     let description = object.get("description").and_then(Value::as_str).unwrap_or("").to_owned();
     let enabled = match object.get("enabled") {
         None => true,
@@ -438,10 +444,15 @@ pub fn validate(dir: &Path, value: &Value) -> Result<Manifest, Vec<Problem>> {
                     ));
                 }
                 let qml = entry.get("qml").and_then(Value::as_str).unwrap_or("").to_owned();
+                let qml_file = dir.join(&qml);
+                let qml_is_safe = inside(&qml)
+                    && qml.ends_with(".qml")
+                    && std::fs::symlink_metadata(&qml_file).is_ok_and(|m| !m.file_type().is_symlink() && m.is_file())
+                    && dir.canonicalize().ok().zip(qml_file.canonicalize().ok()).is_some_and(|(root, target)| target.starts_with(root));
                 if !inside(&qml) || !qml.ends_with(".qml") {
                     problems.push(problem(field("qml"), format!("invalid qml path {qml:?}"), "Give a .qml file relative to the plugin folder, e.g. \"Dock.qml\"."));
-                } else if !dir.join(&qml).is_file() {
-                    problems.push(problem(field("qml"), format!("{qml} does not exist in the plugin folder"), "Create the file or fix the path."));
+                } else if !qml_is_safe {
+                    problems.push(problem(field("qml"), format!("{qml} does not exist as a regular file inside the plugin folder"), "Create the file inside the plugin folder or fix the path."));
                 }
                 let mut number = |name: &str, range: Option<(i32, i32, i32)>| -> i32 {
                     let Some((min, default, max)) = range else { return 0 };
@@ -866,5 +877,13 @@ mod tests {
         assert_eq!(names, ["alpha", "zeta"]);
         assert!(found[0].manifest.is_err());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn plugins_valid_id_rejects_traversal_dots_and_invalid_chars() {
+        for bad in ["", ".", "..", "../x", "a/b", "-bad", "_bad", "my_plugin", "MyPlugin", "a b"] {
+            assert!(!valid_plugin_id(bad), "expected rejection for {bad:?}");
+        }
+        assert!(valid_plugin_id("my-plugin-1"));
     }
 }

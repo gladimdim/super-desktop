@@ -13,6 +13,9 @@ const QUIET_START: Duration = Duration::from_secs(4);
 
 /// Opens `harness` in `folder`; types `request` when given. Returns at once.
 pub fn open(harness: &str, folder: &std::path::Path, request: Option<String>) -> Result<(), String> {
+    if matches!(harness, "shell" | "herder") {
+        return Err("Plugins can only be edited or reviewed by an AI coding agent, not a raw shell.".into());
+    }
     let hooks = super::api::hooks().ok_or("SUPER DESKTOP is still starting")?;
     let folder = folder.to_str().ok_or("the plugin folder's path is not UTF-8")?;
     let session = (hooks.open_card)(harness, folder)?;
@@ -27,6 +30,39 @@ pub fn open(harness: &str, folder: &std::path::Path, request: Option<String>) ->
             })
             .map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Opens a read-only plugin review card without permission-bypass flags on Claude/Codex,
+/// or falls back to rejecting unsafe raw shells.
+pub fn open_readonly_review(harness: &str, folder: &std::path::Path, request: String) -> Result<(), String> {
+    if matches!(harness, "shell" | "herder") {
+        return Err("Plugins can only be reviewed by an AI coding agent, not a raw shell.".into());
+    }
+    let folder_str = folder.to_str().ok_or("the plugin folder's path is not UTF-8")?;
+    let readonly_cmd = match harness {
+        "claude" => Some(
+            "claude --permission-mode plan --allowedTools Read,Glob,Grep --setting-sources \"\" --strict-mcp-config",
+        ),
+        "codex" => Some("codex --sandbox read-only --ask-for-approval on-request"),
+        _ => None,
+    };
+    let session = match super::api::open_custom_card(harness, folder_str, readonly_cmd) {
+        Some(res) => res?,
+        None => {
+            let hooks = super::api::hooks().ok_or("SUPER DESKTOP is still starting")?;
+            (hooks.open_card)(harness, folder_str)?
+        }
+    };
+    let harness = harness.to_owned();
+    std::thread::Builder::new()
+        .name("sd-plugin-review".into())
+        .spawn(move || {
+            if let Err(e) = type_when_ready(&session, &harness, &request) {
+                eprintln!("SUPER DESKTOP: the plugin review request was not typed into {session}: {e}");
+            }
+        })
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

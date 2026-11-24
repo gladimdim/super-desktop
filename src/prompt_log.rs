@@ -117,6 +117,7 @@ fn append_in(dir: &Path, session: &str, text: &str, at: i64) -> std::io::Result<
         .write(true)
         .truncate(false)
         .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
         .open(dir.join(format!("{session}.lock")))?;
     // The desktop and the bridge both record; flock is released on close.
     if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
@@ -144,6 +145,7 @@ fn append_in(dir: &Path, session: &str, text: &str, at: i64) -> std::io::Result<
             .create(true)
             .append(true)
             .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?
             .write_all(line.as_bytes())?;
     }
@@ -154,10 +156,11 @@ fn append_in(dir: &Path, session: &str, text: &str, at: i64) -> std::io::Result<
 
 /// Oldest first.
 fn read_journal_file(path: &Path) -> Vec<(String, i64)> {
-    let Ok(file) = fs::File::open(path) else {
+    use std::io::Read;
+    let Some((file, _)) = crate::harness_record::open_owned_regular(path) else {
         return Vec::new();
     };
-    BufReader::new(file)
+    BufReader::new(file.take(4 * 1024 * 1024))
         .split(b'\n')
         .map_while(Result::ok)
         .filter_map(|line| {
@@ -326,10 +329,10 @@ fn parse_aider_timestamp(header: &str) -> Option<i64> {
 /// Read user prompts from `<workspace>/.aider.input.history`, oldest first,
 /// skipping slash commands and anything `is_user_prompt` rejects.
 pub fn aider_prompts(workspace: &Path, limit: usize) -> Option<(Vec<(String, Option<i64>)>, bool)> {
+    use std::os::unix::fs::MetadataExt;
     let history = workspace.join(".aider.input.history");
-    let mut file = fs::File::open(history).ok()?;
-    let meta = file.metadata().ok()?;
-    if !meta.is_file() {
+    let (mut file, meta) = crate::harness_record::open_owned_regular(&history)?;
+    if meta.nlink() != 1 {
         return None;
     }
     let (bytes, file_cut) = crate::harness_record::read_jsonl_tail(&mut file, &meta, 256 * 1024)?;

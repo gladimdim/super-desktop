@@ -541,19 +541,32 @@ impl Inner {
                 }
                 let generation = self.generation.get().wrapping_add(1);
                 self.generation.set(generation);
-                // Blocking reads on a thread; handled on the GTK thread.
-                let (tx, mut rx) = futures_channel::mpsc::unbounded::<Option<Packet>>();
+                // Blocking reads on a bounded channel so a noisy host cannot OOM the overlay.
+                let (mut tx, mut rx) = futures_channel::mpsc::channel::<Option<Packet>>(64);
                 std::thread::Builder::new()
                     .name(format!("sd-plugin-{}", self.spec.plugin_id))
                     .spawn(move || loop {
                         match reader.next() {
                             Ok(packet) => {
-                                if tx.unbounded_send(Some(packet)).is_err() {
-                                    return;
+                                let mut pending = Some(packet);
+                                loop {
+                                    match tx.try_send(pending.take()) {
+                                        Ok(()) => break,
+                                        Err(err) if err.is_full() => {
+                                            pending = err.into_inner();
+                                            std::thread::sleep(std::time::Duration::from_millis(2));
+                                        }
+                                        Err(_) => return,
+                                    }
                                 }
                             }
                             Err(_) => {
-                                let _ = tx.unbounded_send(None);
+                                while let Err(err) = tx.try_send(None) {
+                                    if !err.is_full() {
+                                        break;
+                                    }
+                                    std::thread::sleep(std::time::Duration::from_millis(2));
+                                }
                                 return;
                             }
                         }
@@ -625,15 +638,17 @@ impl Inner {
             },
             FromHost::Frame { seq } => {
                 if let Some(buffer) = self.buffer.borrow().as_ref() {
-                    let bytes = glib::Bytes::from(buffer.bytes());
-                    let texture = gdk::MemoryTexture::new(
-                        buffer.width,
-                        buffer.height,
-                        gdk::MemoryFormat::B8g8r8a8Premultiplied,
-                        &bytes,
-                        buffer.stride as usize,
-                    );
-                    self.view.set_texture(texture.upcast());
+                    if let Ok(raw) = buffer.copy_bytes() {
+                        let bytes = glib::Bytes::from_owned(raw);
+                        let texture = gdk::MemoryTexture::new(
+                            buffer.width,
+                            buffer.height,
+                            gdk::MemoryFormat::B8g8r8a8Premultiplied,
+                            &bytes,
+                            buffer.stride as usize,
+                        );
+                        self.view.set_texture(texture.upcast());
+                    }
                 }
                 self.send(&protocol::ack(seq));
             }

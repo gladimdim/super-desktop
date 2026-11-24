@@ -1,5 +1,4 @@
 use gtk4::gdk;
-use std::env;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -297,23 +296,44 @@ impl SeenTheme {
 }
 
 fn theme_name_path() -> PathBuf {
-    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/state/omarchy/current/theme.name")
+    crate::state::home_dir().join(".local/state/omarchy/current/theme.name")
 }
 
 pub fn get_theme_colors_path() -> PathBuf {
-    let home = env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let state_path = PathBuf::from(&home).join(".local/state/omarchy/current/theme/colors.toml");
+    let home = crate::state::home_dir();
+    let state_path = home.join(".local/state/omarchy/current/theme/colors.toml");
     if state_path.exists() {
         return state_path;
     }
 
-    let config_path = PathBuf::from(&home).join(".config/omarchy/current/theme/colors.toml");
+    let config_path = home.join(".config/omarchy/current/theme/colors.toml");
     if config_path.exists() {
         return config_path;
     }
 
     PathBuf::from("/usr/share/omarchy/themes/loca-deserta-dark/colors.toml")
+}
+
+fn is_valid_hex_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.first() == Some(&b'#')
+        && matches!(bytes.len(), 7 | 9)
+        && bytes[1..].iter().all(u8::is_ascii_hexdigit)
+}
+
+fn sanitize_font_family(name: &str) -> Option<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.len() > 96 {
+        return None;
+    }
+    if trimmed
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b' ' | b'-' | b'_' | b'.'))
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -328,9 +348,8 @@ pub fn detect_font_family() -> String {
         if output.status.success() {
             let s = String::from_utf8_lossy(&output.stdout);
             if let Some(first) = s.lines().next() {
-                let name = first.split(',').next().unwrap_or("").trim();
-                if !name.is_empty() {
-                    return name.to_string();
+                if let Some(clean) = sanitize_font_family(first.split(',').next().unwrap_or("")) {
+                    return clean;
                 }
             }
         }
@@ -386,32 +405,32 @@ fn parse_colors_into(content: &str, theme: &mut OmarchyTheme) {
             let v = val.trim().trim_matches('"').trim_matches('\'').trim();
 
             match k {
-                "mode" => theme.mode = v.to_string(),
-                "accent" => theme.accent = v.to_string(),
-                "selection" => theme.selection = v.to_string(),
-                "muted" => theme.muted = v.to_string(),
-                "background" => theme.background = v.to_string(),
-                "dark_background" => theme.dark_background = v.to_string(),
-                "darker_background" => theme.darker_background = v.to_string(),
-                "lighter_background" => theme.lighter_background = v.to_string(),
-                "foreground" => theme.foreground = v.to_string(),
-                "dark_foreground" => theme.dark_foreground = v.to_string(),
-                "light_foreground" => theme.light_foreground = v.to_string(),
-                "bright_foreground" => theme.bright_foreground = v.to_string(),
-                "red" => theme.red = v.to_string(),
-                "yellow" => theme.yellow = v.to_string(),
-                "orange" => theme.orange = v.to_string(),
-                "green" => theme.green = v.to_string(),
-                "cyan" => theme.cyan = v.to_string(),
-                "blue" => theme.blue = v.to_string(),
-                "magenta" => theme.magenta = v.to_string(),
-                "brown" => theme.brown = v.to_string(),
-                "bright_red" => theme.bright_red = v.to_string(),
-                "bright_yellow" => theme.bright_yellow = v.to_string(),
-                "bright_green" => theme.bright_green = v.to_string(),
-                "bright_cyan" => theme.bright_cyan = v.to_string(),
-                "bright_blue" => theme.bright_blue = v.to_string(),
-                "bright_magenta" => theme.bright_magenta = v.to_string(),
+                "mode" if matches!(v, "dark" | "light") => theme.mode = v.to_string(),
+                "accent" if is_valid_hex_color(v) => theme.accent = v.to_string(),
+                "selection" if is_valid_hex_color(v) => theme.selection = v.to_string(),
+                "muted" if is_valid_hex_color(v) => theme.muted = v.to_string(),
+                "background" if is_valid_hex_color(v) => theme.background = v.to_string(),
+                "dark_background" if is_valid_hex_color(v) => theme.dark_background = v.to_string(),
+                "darker_background" if is_valid_hex_color(v) => theme.darker_background = v.to_string(),
+                "lighter_background" if is_valid_hex_color(v) => theme.lighter_background = v.to_string(),
+                "foreground" if is_valid_hex_color(v) => theme.foreground = v.to_string(),
+                "dark_foreground" if is_valid_hex_color(v) => theme.dark_foreground = v.to_string(),
+                "light_foreground" if is_valid_hex_color(v) => theme.light_foreground = v.to_string(),
+                "bright_foreground" if is_valid_hex_color(v) => theme.bright_foreground = v.to_string(),
+                "red" if is_valid_hex_color(v) => theme.red = v.to_string(),
+                "yellow" if is_valid_hex_color(v) => theme.yellow = v.to_string(),
+                "orange" if is_valid_hex_color(v) => theme.orange = v.to_string(),
+                "green" if is_valid_hex_color(v) => theme.green = v.to_string(),
+                "cyan" if is_valid_hex_color(v) => theme.cyan = v.to_string(),
+                "blue" if is_valid_hex_color(v) => theme.blue = v.to_string(),
+                "magenta" if is_valid_hex_color(v) => theme.magenta = v.to_string(),
+                "brown" if is_valid_hex_color(v) => theme.brown = v.to_string(),
+                "bright_red" if is_valid_hex_color(v) => theme.bright_red = v.to_string(),
+                "bright_yellow" if is_valid_hex_color(v) => theme.bright_yellow = v.to_string(),
+                "bright_green" if is_valid_hex_color(v) => theme.bright_green = v.to_string(),
+                "bright_cyan" if is_valid_hex_color(v) => theme.bright_cyan = v.to_string(),
+                "bright_blue" if is_valid_hex_color(v) => theme.bright_blue = v.to_string(),
+                "bright_magenta" if is_valid_hex_color(v) => theme.bright_magenta = v.to_string(),
                 _ => {}
             }
         }
@@ -565,5 +584,20 @@ mod tests {
         let other = files.dir.join("other.toml");
         fs::write(&other, "accent = \"#000000\"\n").unwrap();
         assert!(seen.changed(other, &files.name));
+    }
+
+    #[test]
+    fn colors_and_font_family_reject_css_injection() {
+        let theme = from_colors_toml(concat!(
+            "mode = \"light; }\n* { color: red;\"\n",
+            "accent = \"#ff00aa; } body { display: none;\"\n",
+            "background = \"#123456\"\n",
+        ));
+        assert_eq!(theme.mode, "dark");
+        assert_eq!(theme.accent, OmarchyTheme::default().accent);
+        assert_eq!(theme.background, "#123456");
+
+        assert_eq!(sanitize_font_family("JetBrains Mono"), Some("JetBrains Mono".into()));
+        assert_eq!(sanitize_font_family("Mono\"; } * { color: red;"), None);
     }
 }

@@ -48,7 +48,8 @@ fn target(input: &str) -> Result<(SocketAddr, String), &'static str> {
         _ => return Err("preview_requires_loopback"),
     };
     let port = url.port_or_known_default().ok_or("invalid_preview_port")?;
-    if port < 1024 || port == BRIDGE_PORT {
+    let active_bridge = crate::bridge::ACTIVE_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    if port < 1024 || port == BRIDGE_PORT || (active_bridge > 0 && port == active_bridge) {
         return Err("preview_port_not_allowed");
     }
     let mut path = url.path().to_string();

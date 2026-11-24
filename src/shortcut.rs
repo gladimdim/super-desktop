@@ -145,11 +145,52 @@ pub fn interpret(key: gdk::Key, mods: ModifierType) -> Capture {
     Capture::Combo(parts.join(" + "))
 }
 
+/// Validates a Hyprland shortcut combo before formatting or persisting it
+/// into Lua config (`bindings.lua`).
+pub fn is_valid_combo(combo: &str) -> bool {
+    let combo = combo.trim();
+    if combo.is_empty() || combo.len() > 128 {
+        return false;
+    }
+    let parts: Vec<&str> = combo.split('+').map(str::trim).collect();
+    let Some((key, mods)) = parts.split_last() else {
+        return false;
+    };
+    if key.is_empty() || key.len() > 64 {
+        return false;
+    }
+    let valid_key = if let Some(digits) = key.strip_prefix("code:") {
+        !digits.is_empty() && digits.len() <= 5 && digits.bytes().all(|b| b.is_ascii_digit())
+    } else {
+        key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    };
+    if !valid_key {
+        return false;
+    }
+    mods.iter().all(|m| {
+        matches!(
+            m.to_ascii_uppercase().as_str(),
+            "SUPER"
+                | "CTRL"
+                | "CONTROL"
+                | "ALT"
+                | "SHIFT"
+                | "META"
+                | "WIN"
+                | "MOD1"
+                | "MOD4"
+                | "CAPS"
+                | "CAPS_LOCK"
+                | "CAPSLOCK"
+        )
+    })
+}
+
 /// The combo to display and to fall back on: whatever is stored, or the shipped
 /// default when there is nothing usable.
 pub fn current_combo(stored: Option<&str>) -> String {
     match stored.map(str::trim) {
-        Some(combo) if !combo.is_empty() => combo.to_string(),
+        Some(combo) if is_valid_combo(combo) => combo.to_string(),
         _ => DEFAULT_COMBO.to_string(),
     }
 }
@@ -164,6 +205,11 @@ pub fn bindings_path() -> PathBuf {
 /// The block install.sh's counterpart, for `combo` alone (no physical key
 /// known): the shipped default.
 pub fn managed_block(combo: &str, keycode: Option<u32>) -> String {
+    let combo = if is_valid_combo(combo) {
+        combo.trim()
+    } else {
+        DEFAULT_COMBO
+    };
     let mut out = String::new();
     out.push_str(MANAGED_BEGIN);
     out.push('\n');
@@ -329,6 +375,9 @@ pub fn apply_combo_at(
     combo: &str,
     keycode: Option<u32>,
 ) -> Result<Applied, String> {
+    if !is_valid_combo(combo) {
+        return Err("invalid shortcut combination".to_string());
+    }
     // Read the conflict before writing: afterwards our own bind is in the list.
     let conflict = hyprctl_run(hyprctl_bin, &["binds"])
         .ok()
@@ -679,15 +728,47 @@ fn hyprctl_run(bin: &str, args: &[&str]) -> Result<String, String> {
     Ok(stdout)
 }
 
-/// Replace a file without widening its mode: `bindings.lua` is `0600` on a
-/// default Omarchy setup, and a fresh 0644 file would quietly relax that.
+/// Replace a file without widening its mode or following symlinks: `bindings.lua`
+/// is `0600` on a default Omarchy setup, and a fresh 0644 file would quietly relax that.
 fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
-    let tmp = PathBuf::from(format!("{}.sd-tmp", path.display()));
-    fs::write(&tmp, contents).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-    if let Ok(meta) = fs::metadata(path) {
-        let _ = fs::set_permissions(&tmp, meta.permissions());
+    use std::io::Write;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let mut mode = 0o600;
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(format!("refusing unsafe target {}", path.display()));
+        }
+        if meta.uid() != unsafe { libc::geteuid() } {
+            return Err(format!("refusing unowned target {}", path.display()));
+        }
+        mode = meta.mode() & 0o644;
     }
-    fs::rename(&tmp, path).map_err(|e| format!("could not replace {}: {e}", path.display()))
+    let nonce = crate::control::random_hex(12)
+        .unwrap_or_else(|_| format!("{}", std::process::id()));
+    let tmp_name = format!(
+        ".{}.sd-tmp-{nonce}",
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("bindings.lua")
+    );
+    let tmp = path.with_file_name(tmp_name);
+    let write_res = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(contents.as_bytes())?;
+            f.sync_all()?;
+            fs::rename(&tmp, path)
+        });
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("could not update {}: {e}", path.display()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1201,5 +1282,23 @@ bindd
             updated,
             "adding the swallow must be idempotent"
         );
+    }
+
+    #[test]
+    fn test_invalid_shortcut_combo_is_rejected_for_lua_safety() {
+        for bad in [
+            "",
+            "SUPER + Q\") os.execute(\"id\") --",
+            "SUPER + SHIFT + Q\nhl.exec(\"id\")",
+            "EVIL + Q",
+            "SUPER + code:999999",
+        ] {
+            assert!(!is_valid_combo(bad), "{bad:?}");
+            assert_eq!(current_combo(Some(bad)), DEFAULT_COMBO);
+            assert!(apply_combo_at(Path::new("/nonexistent/bindings.lua"), "false", bad, None).is_err());
+        }
+        assert!(is_valid_combo("SUPER + SHIFT + Q"));
+        assert!(is_valid_combo("SUPER + code:24"));
+        assert!(is_valid_combo("F1"));
     }
 }

@@ -64,6 +64,20 @@ impl Notifier {
     }
 }
 
+#[cfg(not(test))]
+fn escape_pango(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub fn dispatch(notification: Notification) {
     #[cfg(test)]
     {
@@ -87,6 +101,8 @@ pub fn dispatch(notification: Notification) {
         }
         std::thread::spawn(move || {
             let urgency = if notification.critical { "critical" } else { "normal" };
+            let title = escape_pango(&notification.title);
+            let body = escape_pango(&notification.body);
             let _ = std::process::Command::new("notify-send")
                 .args([
                     "-a",
@@ -94,8 +110,8 @@ pub fn dispatch(notification: Notification) {
                     "-u",
                     urgency,
                     "--",
-                    &notification.title,
-                    &notification.body,
+                    &title,
+                    &body,
                 ])
                 .output();
         });

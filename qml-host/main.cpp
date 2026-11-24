@@ -21,6 +21,7 @@
 //       the calls the plugin made and the values it saved.
 
 #include <QGuiApplication>
+#include <QQmlAbstractUrlInterceptor>
 #include <QQmlComponent>
 #include <QQmlContext>
 #include <QQmlEngine>
@@ -90,7 +91,17 @@ class Pty : public QObject {
     Q_PROPERTY(bool running READ running NOTIFY runningChanged)
     Q_PROPERTY(int pid READ pid CONSTANT)
 public:
-    ~Pty() override { terminate(SIGHUP); closeMaster(); }
+    ~Pty() override {
+        terminate(SIGHUP);
+        closeMaster();
+        if (m_pid > 0) {
+            if (::waitpid(m_pid, nullptr, WNOHANG) == 0) {
+                ::kill(m_pid, SIGKILL);
+                ::waitpid(m_pid, nullptr, 0);
+            }
+            m_pid = -1;
+        }
+    }
 
     bool start(const QStringList &argv, const QString &cwd, int cols, int rows, const QVariantMap &env) {
         if (argv.isEmpty()) return false;
@@ -171,9 +182,12 @@ signals:
 private slots:
     void readable() {
         char buffer[65536];
-        for (;;) {
+        size_t total = 0;
+        const size_t kMaxDrainPerTick = 256 * 1024;
+        while (total < kMaxDrainPerTick) {
             const ssize_t n = ::read(m_master, buffer, sizeof buffer);
             if (n > 0) {
+                total += static_cast<size_t>(n);
                 const QString text = m_decoder.decode(QByteArrayView(buffer, n));
                 if (!text.isEmpty()) emit output(text);
                 continue;
@@ -183,27 +197,48 @@ private slots:
             finished();  // EOF or EIO: the program closed the terminal.
             return;
         }
+        QTimer::singleShot(0, this, &Pty::readable);
     }
 
 private:
     void finished() {
         closeMaster();
-        int status = 0, code = -1;
         if (m_pid > 0) {
-            // The slave side is gone; the child is exiting. Reap it.
-            for (int i = 0; i < 200; ++i) {
-                const pid_t r = ::waitpid(m_pid, &status, WNOHANG);
-                if (r == m_pid) {
-                    code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-                    break;
-                }
-                if (r < 0) break;
-                ::usleep(5000);
+            int status = 0;
+            const pid_t r = ::waitpid(m_pid, &status, WNOHANG);
+            if (r == m_pid) {
+                const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+                m_pid = -1;
+                emit runningChanged();
+                emit exited(code);
+                return;
             }
+            QTimer::singleShot(20, this, &Pty::pollExit);
+            return;
         }
         m_pid = -1;
         emit runningChanged();
-        emit exited(code);
+        emit exited(-1);
+    }
+
+    void pollExit() {
+        if (m_pid <= 0) return;
+        int status = 0;
+        const pid_t r = ::waitpid(m_pid, &status, WNOHANG);
+        if (r == m_pid) {
+            const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+            m_pid = -1;
+            emit runningChanged();
+            emit exited(code);
+        } else if (r == 0 && m_reapAttempts++ < 50) {
+            QTimer::singleShot(20, this, &Pty::pollExit);
+        } else {
+            ::kill(m_pid, SIGKILL);
+            ::waitpid(m_pid, nullptr, WNOHANG);
+            m_pid = -1;
+            emit runningChanged();
+            emit exited(-1);
+        }
     }
 
     void closeMaster() {
@@ -218,6 +253,7 @@ private:
 
     int m_master = -1;
     pid_t m_pid = -1;
+    int m_reapAttempts = 0;
     QSocketNotifier *m_notifier = nullptr;
     QStringDecoder m_decoder{QStringDecoder::Utf8};
 };
@@ -436,7 +472,9 @@ public:
         QJsonObject msg{{"t", "call"}, {"id", id}, {"method", method}};
         // plain(): Qt hands a JS object over as a QJSValue, which fromVariant drops.
         if (params.isValid()) msg["params"] = QJsonValue::fromVariant(plain(params));
-        sendMessage(msg);
+        if (!sendMessage(msg)) {
+            m_pending.remove(id);
+        }
     }
 
     // Starts a program detached from this surface (argv list, no shell).
@@ -485,21 +523,40 @@ public:
     // Runs a program and gives `callback({code, stdout, stderr})` when it ends.
     Q_INVOKABLE void exec(const QStringList &argv, const QJSValue &callback = QJSValue()) {
         if (argv.isEmpty()) return;
+        if (m_activeExecs >= 16) {
+            if (callback.isCallable()) {
+                QJSValue cb = callback;
+                cb.call({m_js->toScriptValue(QVariantMap{
+                    {"code", -1}, {"stdout", ""}, {"stderr", "too many concurrent exec processes"}})});
+            }
+            return;
+        }
+        ++m_activeExecs;
         auto *p = new QProcess(this);
         p->setWorkingDirectory(m_pluginDir);
+        auto done = std::make_shared<bool>(false);
         QJSValue cb = callback;
-        connect(p, &QProcess::finished, this, [this, p, cb](int code, QProcess::ExitStatus) mutable {
+        connect(p, &QProcess::finished, this, [this, p, cb, done](int code, QProcess::ExitStatus) mutable {
+            if (*done) return;
+            *done = true;
+            m_activeExecs = std::max(0, m_activeExecs - 1);
             if (cb.isCallable()) {
+                QByteArray out = p->readAllStandardOutput();
+                QByteArray err = p->readAllStandardError();
+                if (out.size() > 2 * 1024 * 1024) out.truncate(2 * 1024 * 1024);
+                if (err.size() > 2 * 1024 * 1024) err.truncate(2 * 1024 * 1024);
                 QJSValue r = m_js->toScriptValue(QVariantMap{
                     {"code", code},
-                    {"stdout", QString::fromUtf8(p->readAllStandardOutput())},
-                    {"stderr", QString::fromUtf8(p->readAllStandardError())}});
+                    {"stdout", QString::fromUtf8(out)},
+                    {"stderr", QString::fromUtf8(err)}});
                 cb.call({r});
             }
             p->deleteLater();
         });
-        connect(p, &QProcess::errorOccurred, this, [this, p, cb](QProcess::ProcessError) mutable {
-            if (p->state() != QProcess::NotRunning) return;
+        connect(p, &QProcess::errorOccurred, this, [this, p, cb, done](QProcess::ProcessError) mutable {
+            if (p->state() != QProcess::NotRunning || *done) return;
+            *done = true;
+            m_activeExecs = std::max(0, m_activeExecs - 1);
             if (cb.isCallable()) {
                 QJSValue r = m_js->toScriptValue(QVariantMap{
                     {"code", -1}, {"stdout", ""}, {"stderr", p->errorString()}});
@@ -564,16 +621,17 @@ private:
         m_valuesJs = toJs(values);
     }
 
-    static QVariant plain(const QVariant &v) {
-        if (v.typeId() == qMetaTypeId<QJSValue>()) return plain(v.value<QJSValue>().toVariant());
+    static QVariant plain(const QVariant &v, int depth = 0) {
+        if (depth > 64) return QVariant();
+        if (v.typeId() == qMetaTypeId<QJSValue>()) return plain(v.value<QJSValue>().toVariant(), depth + 1);
         if (v.typeId() == QMetaType::QVariantMap) {
             QVariantMap map = v.toMap();
-            for (auto it = map.begin(); it != map.end(); ++it) it.value() = plain(it.value());
+            for (auto it = map.begin(); it != map.end(); ++it) it.value() = plain(it.value(), depth + 1);
             return map;
         }
         if (v.typeId() == QMetaType::QVariantList) {
             QVariantList list = v.toList();
-            for (auto &item : list) item = plain(item);
+            for (auto &item : list) item = plain(item, depth + 1);
             return list;
         }
         return v;
@@ -600,6 +658,7 @@ private:
     }
 
     QJSEngine *m_js;
+    int m_activeExecs = 0;
     QString m_pluginDir, m_pluginId, m_surfaceId, m_instanceId;
     bool m_connected;
     QVariantMap m_theme;
@@ -637,6 +696,54 @@ static QVariantMap parseTheme(const QString &json) {
     return theme;
 }
 
+class PluginUrlInterceptor : public QQmlAbstractUrlInterceptor {
+public:
+    PluginUrlInterceptor(const QString &pluginDir, const QStringList &systemImportPaths) {
+        m_pluginRoot = canonicalOrAbs(pluginDir);
+        for (const QString &p : systemImportPaths) {
+            if (p.startsWith("qrc:") || p.startsWith(':')) continue;
+            const QString canon = canonicalOrAbs(p);
+            if (!canon.isEmpty()) m_systemRoots.append(canon);
+        }
+    }
+
+    QUrl intercept(const QUrl &url, DataType type) override {
+        if (type != QmlFile && type != JavaScriptFile && type != QmldirFile) {
+            return url;
+        }
+        const QString scheme = url.scheme();
+        if (scheme == "qrc" || scheme.isEmpty()) {
+            return url;
+        }
+        if (scheme == "file" || url.isLocalFile()) {
+            const QString local = url.toLocalFile();
+            const QString canon = canonicalOrAbs(local);
+            if (within(canon, m_pluginRoot)) return url;
+            for (const QString &sys : m_systemRoots) {
+                if (within(canon, sys)) return url;
+            }
+            return QUrl("qrc:/super-desktop-blocked");
+        }
+        // Block remote http(s):// QML/JS imports or loads.
+        return QUrl("qrc:/super-desktop-blocked");
+    }
+
+private:
+    static QString canonicalOrAbs(const QString &path) {
+        QFileInfo info(path);
+        const QString c = info.canonicalFilePath();
+        return c.isEmpty() ? QDir::cleanPath(info.absoluteFilePath()) : c;
+    }
+    static bool within(const QString &target, const QString &root) {
+        if (root.isEmpty() || target.isEmpty()) return false;
+        if (target == root) return true;
+        return target.startsWith(root.endsWith('/') ? root : root + '/');
+    }
+
+    QString m_pluginRoot;
+    QStringList m_systemRoots;
+};
+
 class Surface : public QObject {
     Q_OBJECT
 public:
@@ -656,6 +763,11 @@ public:
                                             {"message", e.toString()}});
             }
         });
+        // Capture Qt's built-in system import roots before adding the plugin folder,
+        // then restrict QML/JS/qmldir loads to qrc:/, those system roots, and pluginDir.
+        const QStringList systemImports = m_engine->importPathList();
+        m_interceptor = new PluginUrlInterceptor(pluginDir, systemImports);
+        m_engine->addUrlInterceptor(m_interceptor);
         // Plugin-local QML modules and components resolve from the plugin folder.
         m_engine->addImportPath(pluginDir);
         // Components that ship with SUPER DESKTOP (import SuperDesktop.Terminal).
@@ -675,6 +787,8 @@ public:
     ~Surface() override {
         delete m_root;
         delete m_window;
+        if (m_engine && m_interceptor) m_engine->removeUrlInterceptor(m_interceptor);
+        delete m_interceptor;
         if (m_map) munmap(m_map, m_mapSize);
         if (m_memfd >= 0) ::close(m_memfd);
     }
@@ -709,8 +823,8 @@ public:
     }
 
     void resize(int w, int h) {
-        w = std::max(1, w);
-        h = std::max(1, h);
+        w = std::clamp(w, 1, 16384);
+        h = std::clamp(h, 1, 16384);
         m_width = w;
         m_height = h;
         m_window->setGeometry(0, 0, w, h);
@@ -790,20 +904,25 @@ private slots:
 
 private:
     bool ensureBuffer(int pw, int ph, qreal scale) {
+        if (pw <= 0 || ph <= 0 || pw > 16384 || ph > 16384) return false;
+        const size_t stride = size_t(pw) * 4;
+        const size_t need = stride * size_t(ph);
+        if (need == 0 || need > (64u * 1024u * 1024u)) return false;
         if (m_map && pw == m_bufW && ph == m_bufH) return true;
         if (m_map) munmap(m_map, m_mapSize);
         if (m_memfd >= 0) ::close(m_memfd);
         m_map = nullptr;
-        m_memfd = memfd_create("sd-qml-surface", MFD_CLOEXEC);
+        m_memfd = memfd_create("sd-qml-surface", MFD_CLOEXEC | MFD_ALLOW_SEALING);
         if (m_memfd < 0) return false;
-        m_mapSize = size_t(pw) * size_t(ph) * 4;
-        if (ftruncate(m_memfd, m_mapSize) != 0) return false;
+        m_mapSize = need;
+        if (ftruncate(m_memfd, static_cast<off_t>(m_mapSize)) != 0) return false;
+        if (::fcntl(m_memfd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0) return false;
         void *p = mmap(nullptr, m_mapSize, PROT_READ | PROT_WRITE, MAP_SHARED, m_memfd, 0);
         if (p == MAP_FAILED) return false;
         m_map = p;
         m_bufW = pw;
         m_bufH = ph;
-        sendMessage(QJsonObject{{"t", "buffer"}, {"width", pw}, {"height", ph}, {"stride", pw * 4},
+        sendMessage(QJsonObject{{"t", "buffer"}, {"width", pw}, {"height", ph}, {"stride", static_cast<qint64>(stride)},
                                 {"scale", scale}, {"format", "argb32-premultiplied"}},
                     m_memfd);
         return true;
@@ -813,6 +932,7 @@ private:
     QQuickRenderControl *m_control = nullptr;
     QQuickWindow *m_window = nullptr;
     QQmlEngine *m_engine = nullptr;
+    PluginUrlInterceptor *m_interceptor = nullptr;
     QQuickItem *m_root = nullptr;
     SdApi *m_api = nullptr;
     QTimer m_renderTimer;
@@ -1348,8 +1468,10 @@ static bool parseArgs(int argc, char **argv, Args &a) {
     if (a.mode.isEmpty() || a.qml.isEmpty()) return false;
     if (a.pluginDir.isEmpty()) a.pluginDir = QFileInfo(a.qml).absolutePath();
     if (a.pluginId.isEmpty()) a.pluginId = QFileInfo(a.pluginDir).fileName();
-    if (a.width <= 0) a.width = 400;
-    if (a.height <= 0) a.height = 300;
+    a.width = std::clamp(a.width <= 0 ? 400 : a.width, 1, 16384);
+    a.height = std::clamp(a.height <= 0 ? 300 : a.height, 1, 16384);
+    if (!std::isfinite(a.scale) || a.scale <= 0.0) a.scale = 1.0;
+    else a.scale = std::clamp(a.scale, 0.25, 8.0);
     if (a.mode == "snapshot" && a.out.isEmpty()) return false;
     if (a.mode == "serve" && a.fd < 0) return false;
     return true;
@@ -1371,6 +1493,8 @@ int main(int argc, char **argv) {
     // host does not have, and would make plugins look different per machine.
     qunsetenv("QT_QPA_PLATFORMTHEME");
     qunsetenv("QT_STYLE_OVERRIDE");
+    qunsetenv("QML_XHR_ALLOW_FILE_READ");
+    qunsetenv("QML_XHR_ALLOW_FILE_WRITE");
     if (qEnvironmentVariableIsEmpty("QT_QUICK_CONTROLS_STYLE")) qputenv("QT_QUICK_CONTROLS_STYLE", "Basic");
     if (a.scale > 0 && a.scale != 1.0)
         qputenv("QT_SCALE_FACTOR", QByteArray::number(a.scale));

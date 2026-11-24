@@ -31,13 +31,30 @@ pub fn log_path() -> PathBuf {
 /// Every failure is ignored on purpose: logging a panic must never be the thing
 /// that turns one crash into two.
 pub fn append(path: &Path, text: &str) {
+    use std::os::unix::fs::OpenOptionsExt;
     if let Some(dir) = path.parent() {
-        let _ = fs::create_dir_all(dir);
+        if crate::control::ensure_private_dir(dir).is_err() {
+            return;
+        }
     }
-    if fs::metadata(path).map(|m| m.len()).unwrap_or(0) > MAX_BYTES {
-        let _ = fs::rename(path, path.with_extension("log.1"));
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return;
+        }
+        if meta.len() > MAX_BYTES {
+            let rotated = path.with_extension("log.1");
+            if !fs::symlink_metadata(&rotated).is_ok_and(|m| m.file_type().is_symlink()) {
+                let _ = fs::rename(path, rotated);
+            }
+        }
     }
-    if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    {
         let _ = file.write_all(text.as_bytes());
     }
 }

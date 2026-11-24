@@ -174,6 +174,9 @@ impl Control {
     }
 
     fn spawn_with_command(session: &str, activity: Option<Arc<Activity>>, mut command: Command) -> Result<Self, String> {
+        if !crate::tmux::is_owned_session(session) {
+            return Err("foreign_session".into());
+        }
         let flags = if activity.is_some() { "ignore-size" } else { "ignore-size,no-output" };
         let mut child = command.args([
                 "-C",

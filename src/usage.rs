@@ -109,8 +109,7 @@ pub struct ProviderUsage {
 }
 
 fn usage_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/state/omarchy/agents/usage")
+    crate::state::home_dir().join(".local/state/omarchy/agents/usage")
 }
 
 fn read_usage_value(dir: &PathBuf, id: &str) -> Option<(&'static str, Value)> {

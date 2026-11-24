@@ -571,7 +571,7 @@ mod tests {
     fn batched_refresh_matches_per_session_queries() {
         use std::process::Command;
         let sessions: Vec<String> = (0..3)
-            .map(|_| format!("test_sd_{}", crate::tmux::unique_session_name()))
+            .map(|_| format!("sd_term_test_{}", crate::tmux::unique_session_name()))
             .collect();
         struct Cleanup(Vec<String>);
         impl Drop for Cleanup {

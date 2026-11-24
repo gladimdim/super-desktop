@@ -145,18 +145,22 @@ pub fn preview_box(height: i32) -> (gtk4::Overlay, gtk4::Picture) {
 
 /// The middle square of a picture (previews are 2:1; the list shows squares).
 pub fn square_texture(path: &std::path::Path) -> Option<gtk4::gdk::Texture> {
-    let texture = gtk4::gdk::Texture::from_filename(path).ok()?;
-    let (width, height) = (texture.width() as usize, texture.height() as usize);
-    let side = width.min(height);
-    if side == 0 {
+    if !super_desktop::plugins::registry::is_preview(path) {
         return None;
     }
-    let stride = width * 4;
-    let mut data = vec![0u8; stride * height];
+    let texture = gtk4::gdk::Texture::from_filename(path).ok()?;
+    let (width, height) = (usize::try_from(texture.width()).ok()?, usize::try_from(texture.height()).ok()?);
+    let side = width.min(height);
+    if side == 0 || width > 4096 || height > 4096 {
+        return None;
+    }
+    let stride = width.checked_mul(4)?;
+    let total = stride.checked_mul(height)?;
+    let mut data = vec![0u8; total];
     // Downloads as B8G8R8A8 premultiplied.
     texture.download(&mut data, stride);
     let (left, top) = ((width - side) / 2, (height - side) / 2);
-    let mut square = Vec::with_capacity(side * side * 4);
+    let mut square = Vec::with_capacity(side.checked_mul(side)?.checked_mul(4)?);
     for row in top..top + side {
         let start = row * stride + left * 4;
         square.extend_from_slice(&data[start..start + side * 4]);

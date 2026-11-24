@@ -27,6 +27,8 @@ BIN_SRC="$SCRIPT_DIR/target/release/super-desktop-client"
 BIN_DST="$HOME/.local/bin/super-desktop"
 RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"
 CONFIG_DIR="$HOME/.config/super-desktop"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop"
+DAEMON_LOG="$STATE_DIR/daemon.log"
 SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/super-desktop.sock"
 # The daemon and the bridge exactly: their own binary as the first word, then
 # the subcommand. A looser `super-desktop.*daemon` also matched any process
@@ -82,7 +84,7 @@ if command -v pacman >/dev/null 2>&1; then
   fi
 fi
 echo "--> cargo build --release..."
-cargo build --release --manifest-path "$SCRIPT_DIR/Cargo.toml"
+cargo build --release --locked --manifest-path "$SCRIPT_DIR/Cargo.toml"
 echo "--> QML plugin host..."
 "$SCRIPT_DIR/scripts/build-qml-host.sh" release || echo "WARNING: the QML plugin host did not build; plugins stay off" >&2
 
@@ -100,26 +102,28 @@ if [[ "$START_DAEMON" -eq 0 ]]; then
 fi
 
 stop_desktop() {
+  local uid
+  uid="$(id -u)"
   echo "--> Stopping old daemon..."
   if [[ -x "$BIN_DST" ]]; then
     "$BIN_DST" kill >/dev/null 2>&1 || true
   elif [[ -x "$BIN_SRC" ]]; then
     "$BIN_SRC" kill >/dev/null 2>&1 || true
   fi
-  pkill -f "$DAEMON_PROCESS" >/dev/null 2>&1 || true
+  pkill -u "$uid" -f "$DAEMON_PROCESS" >/dev/null 2>&1 || true
   # The bridge is a separate process. Leaving it running would keep serving
   # the previous binary after a successful daemon rebuild.
-  pkill -f "$BRIDGE_PROCESS" >/dev/null 2>&1 || true
-  pkill -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
+  pkill -u "$uid" -f "$BRIDGE_PROCESS" >/dev/null 2>&1 || true
+  pkill -u "$uid" -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
   # Give IPC `kill` a moment, then drop a stale socket file if the daemon is gone.
   sleep 0.5
   # telegram-bot can sit inside a 25s HTTPS getUpdates long-poll on SIGTERM;
   # force-stop it so the fresh daemon always spawns the new worker binary.
-  if pgrep -f "$TELEGRAM_PROCESS" >/dev/null 2>&1; then
-    pkill -KILL -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
+  if pgrep -u "$uid" -f "$TELEGRAM_PROCESS" >/dev/null 2>&1; then
+    pkill -KILL -u "$uid" -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
     sleep 0.2
   fi
-  if [[ -S "$SOCK" ]] && ! pgrep -f "$DAEMON_PROCESS" >/dev/null 2>&1; then
+  if [[ -S "$SOCK" ]] && ! pgrep -u "$uid" -f "$DAEMON_PROCESS" >/dev/null 2>&1; then
     rm -f "$SOCK"
     echo "    removed stale socket $SOCK"
   fi
@@ -127,9 +131,11 @@ stop_desktop() {
 
 start_desktop() {
   echo "--> Starting fresh daemon (hidden)..."
+  mkdir -p "$STATE_DIR"
+  chmod 700 "$STATE_DIR"
   # A separate session survives launcher process-group cleanup as well as
   # terminal hangup; nohup alone only protects against SIGHUP.
-  nohup setsid "$BIN_DST" daemon </dev/null >/tmp/super-desktop-daemon.log 2>&1 & disown || true
+  (umask 077 && nohup setsid "$BIN_DST" daemon </dev/null >"$DAEMON_LOG" 2>&1 & disown) || true
 
   echo "--> Waiting for daemon IPC..."
   for _ in $(seq 1 50); do
@@ -150,8 +156,9 @@ all_daemons_fresh() {
   local mark="$1"
   local now oldest=0
   now=$(date +%s)
-  local pids pid age
-  pids=$(pgrep -f "$DAEMON_PROCESS" || true)
+  local pids pid age uid
+  uid="$(id -u)"
+  pids=$(pgrep -u "$uid" -f "$DAEMON_PROCESS" || true)
   if [[ -z "$pids" ]]; then
     return 1
   fi
@@ -216,7 +223,7 @@ fi
 # 5. Start, then make sure the answering daemon is this build: anything born
 # before the build finished may hold the socket with old code.
 if ! start_desktop; then
-  echo "ERROR: daemon did not answer on $SOCK. See /tmp/super-desktop-daemon.log" >&2
+  echo "ERROR: daemon did not answer on $SOCK. See $DAEMON_LOG" >&2
   exit 1
 fi
 if ! all_daemons_fresh "$BUILD_DONE"; then
@@ -224,7 +231,7 @@ if ! all_daemons_fresh "$BUILD_DONE"; then
   stop_desktop
   BUILD_DONE=$(date +%s)
   if ! start_desktop || ! all_daemons_fresh "$BUILD_DONE"; then
-    echo "ERROR: could not establish a fresh daemon on $SOCK. See /tmp/super-desktop-daemon.log" >&2
+    echo "ERROR: could not establish a fresh daemon on $SOCK. See $DAEMON_LOG" >&2
     exit 1
   fi
 fi

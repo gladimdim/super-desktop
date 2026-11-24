@@ -84,18 +84,20 @@ pub fn popup_rect(area: (i32, i32), top: i32, anchor: Option<((f64, f64, f64, f6
     let (x, y) = match anchor {
         None => ((width - w) / 2, top + POPUP_GAP),
         Some(((ax, ay, aw, ah), side)) => {
-            let (ax, ay, aw, ah) = (ax.round() as i32, ay.round() as i32, aw.round() as i32, ah.round() as i32);
+            let clamp_coord = |v: f64| v.clamp(-32768.0, 32768.0).round() as i32;
+            let clamp_dim = |v: f64| v.clamp(0.0, 32768.0).round() as i32;
+            let (ax, ay, aw, ah) = (clamp_coord(ax), clamp_coord(ay), clamp_dim(aw), clamp_dim(ah));
             match side {
                 PopupSide::Below => {
-                    let below = ay + ah + POPUP_GAP;
-                    let above = ay - POPUP_GAP - h;
-                    let y = if below + h > height - POPUP_MARGIN && above >= POPUP_MARGIN { above } else { below };
-                    (ax + aw / 2 - w / 2, y)
+                    let below = ay.saturating_add(ah).saturating_add(POPUP_GAP);
+                    let above = ay.saturating_sub(POPUP_GAP).saturating_sub(h);
+                    let y = if below.saturating_add(h) > height - POPUP_MARGIN && above >= POPUP_MARGIN { above } else { below };
+                    (ax.saturating_add(aw / 2).saturating_sub(w / 2), y)
                 }
                 PopupSide::Right | PopupSide::Left => {
-                    let right = ax + aw + POPUP_GAP;
-                    let left = ax - POPUP_GAP - w;
-                    let fits_right = right + w <= width - POPUP_MARGIN;
+                    let right = ax.saturating_add(aw).saturating_add(POPUP_GAP);
+                    let left = ax.saturating_sub(POPUP_GAP).saturating_sub(w);
+                    let fits_right = right.saturating_add(w) <= width - POPUP_MARGIN;
                     let fits_left = left >= POPUP_MARGIN;
                     let x = match side {
                         PopupSide::Right if fits_right || !fits_left => right,
@@ -103,7 +105,7 @@ pub fn popup_rect(area: (i32, i32), top: i32, anchor: Option<((f64, f64, f64, f6
                         _ if fits_left || !fits_right => left,
                         _ => right,
                     };
-                    (x, ay + ah / 2 - h / 2)
+                    (x, ay.saturating_add(ah / 2).saturating_sub(h / 2))
                 }
             }
         }
@@ -594,6 +596,9 @@ impl Slots {
         }
         let saved: Vec<String> = super::cards::saved_instances(plugin, surface).into_iter().map(|(i, _, _)| i).collect();
         let open = self.card_instances(plugin, surface);
+        if open.len() >= 16 {
+            return Err("busy: at most 16 open copies of one card surface".into());
+        }
         // The first copy that is neither open nor remembered somewhere else.
         let instance = std::iter::once(String::new())
             .chain((2..).map(|n: u32| n.to_string()))
@@ -610,10 +615,16 @@ impl Slots {
             return Err(format!("{surface:?} is not \"multiple\": it has one copy"));
         }
         let host = self.canvas.borrow().clone().ok_or("cards are not available in this window")?;
+        if !instance.is_empty() && (instance.len() > 64 || !instance.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')) {
+            return Err(format!("invalid card instance id {instance:?}"));
+        }
         let key = Self::card_slot_key(plugin, surface, instance);
         if let Some(card) = self.open_cards.borrow().get(&key) {
             (host.raise)(card.container.upcast_ref());
             return Ok(());
+        }
+        if self.card_instances(plugin, surface).len() >= 16 {
+            return Err("busy: at most 16 open copies of one card surface".into());
         }
         let saved_key = super::cards::card_key(surface, instance);
         let saved = super::cards::saved(plugin, &saved_key).map(|(g, _)| g);
@@ -1080,7 +1091,7 @@ impl Slots {
                 for entry in std::fs::read_dir(&path).into_iter().flatten().flatten() {
                     let name = entry.file_name();
                     let hidden = name.to_str().is_none_or(|n| n.starts_with('.'));
-                    if !hidden && entry.path().is_dir() {
+                    if !hidden && entry.file_type().is_ok_and(|t| t.is_dir()) {
                         dirs.push((entry.path(), depth + 1));
                     }
                 }
@@ -1092,11 +1103,15 @@ impl Slots {
             };
             let weak = Rc::downgrade(self);
             let id = id.to_owned();
-            monitor.connect_changed(move |_, file, _, _| {
+            monitor.connect_changed(move |_, file, other_file, _| {
                 // Notes, editor swap files and the skill copy do not change
-                // what the plugin draws.
-                let name = file.basename().and_then(|n| n.to_str().map(str::to_owned)).unwrap_or_default();
-                if name.starts_with('.') || name.ends_with('~') || name.ends_with(".swp") || name.ends_with(".md") {
+                // what the plugin draws; still catch atomic renames whose
+                // source was a hidden temp file and destination is not.
+                let ignored = |f: &gio::File| {
+                    let name = f.basename().and_then(|n| n.to_str().map(str::to_owned)).unwrap_or_default();
+                    name.starts_with('.') || name.ends_with('~') || name.ends_with(".swp") || name.ends_with(".md")
+                };
+                if ignored(file) && other_file.is_none_or(ignored) {
                     return;
                 }
                 if let Some(slots) = weak.upgrade() {
@@ -1207,8 +1222,8 @@ impl Slots {
             self.unload(id);
             return;
         }
-        let monitors = self.watch_plugin(id, &dir);
         let manifest = manifest::load(&dir);
+        let monitors = self.watch_plugin(id, &dir);
         let waiting = !super_desktop::plugins::install::approved(&super_desktop::plugins::install::Places::current(), id);
         let surfaces = match &manifest {
             Err(problems) => {

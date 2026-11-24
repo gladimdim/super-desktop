@@ -419,8 +419,7 @@ pub fn merge_quota_responses(
 }
 
 pub fn cache_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    PathBuf::from(home).join(".local/state/super-desktop/agy-usage.json")
+    crate::state::home_dir().join(".local/state/super-desktop/agy-usage.json")
 }
 
 pub fn read_cache_file(path: &Path) -> Option<LiveSnapshot> {
@@ -430,21 +429,28 @@ pub fn read_cache_file(path: &Path) -> Option<LiveSnapshot> {
 
 pub fn write_cache_file(path: &Path, snap: &LiveSnapshot) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+        crate::control::ensure_private_dir(parent)?;
     }
     let json = serde_json::to_vec(snap)?;
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_extension(format!("json.{}.{seq}.tmp", std::process::id()));
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.write_all(&json)?;
+    let nonce = crate::control::random_hex(6)
+        .unwrap_or_else(|_| format!("{}", std::process::id()));
+    let tmp = path.with_extension(format!("json.{}.{seq}.{nonce}.tmp", std::process::id()));
+    let res = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(&json)?;
+            f.flush()?;
+            fs::rename(&tmp, path)
+        });
+    if res.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
-    fs::rename(tmp, path)
+    res
 }
 
 fn secret_tool_token(now: i64) -> Option<String> {
@@ -492,11 +498,29 @@ fn read_local_token() -> Option<String> {
     parse_oauth_token(&raw, now)
 }
 
+fn validate_cloud_code_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let url = reqwest::Url::parse(trimmed).ok()?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !matches!(url.port(), None | Some(443))
+    {
+        return None;
+    }
+    let host = url.host_str()?.to_ascii_lowercase();
+    if host != "cloudcode-pa.googleapis.com" && !host.ends_with(".googleapis.com") {
+        return None;
+    }
+    Some(url.as_str().trim_end_matches('/').to_string())
+}
+
 fn cloud_code_base_url() -> String {
     if let Some(raw) = std::env::var_os("CLOUD_CODE_URL").and_then(|v| v.into_string().ok()) {
-        let trimmed = raw.trim().trim_end_matches('/');
-        if trimmed.starts_with("https://") {
-            return trimmed.to_string();
+        if let Some(valid) = validate_cloud_code_url(&raw) {
+            return valid;
         }
     }
     DEFAULT_CLOUD_CODE_URL.to_string()
@@ -812,5 +836,22 @@ mod tests {
         write_cache_file(&path, &snap).unwrap();
         assert_eq!(read_cache_file(&path), Some(snap));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cloud_code_url_allowlist_blocks_untrusted_endpoints() {
+        assert_eq!(
+            validate_cloud_code_url("https://cloudcode-pa.googleapis.com/"),
+            Some("https://cloudcode-pa.googleapis.com".into())
+        );
+        for bad in [
+            "http://cloudcode-pa.googleapis.com",
+            "https://evil.example",
+            "https://user:pass@cloudcode-pa.googleapis.com",
+            "https://cloudcode-pa.googleapis.com?next=evil",
+            "https://cloudcode-pa.googleapis.com:8443",
+        ] {
+            assert_eq!(validate_cloud_code_url(bad), None, "{bad}");
+        }
     }
 }

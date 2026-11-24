@@ -232,6 +232,16 @@ fn pinned_tag(dir: &Path) -> Option<String> {
 
 /// Fetch what `dir` follows and compare its version with `current`: the newest
 /// release tag on `origin`, or the upstream branch of a clone set to follow one.
+pub(crate) fn is_safe_git_ref(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && !value.starts_with('-')
+        && !value.contains("..")
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-'))
+}
+
 pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
     let channel = run(dir, &["config", "--get", CHANNEL_KEY]).ok();
     let pinned = match channel.as_deref() {
@@ -244,8 +254,11 @@ pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
         let (remote, branch) = upstream
             .split_once('/')
             .ok_or_else(|| format!("{upstream} is not a remote branch."))?;
-        let url = run(dir, &["remote", "get-url", remote]).unwrap_or_else(|_| remote.to_string());
-        run_bounded(dir, &["fetch", "--quiet", "--no-tags", remote, branch], FETCH_TIMEOUT)
+        if !is_safe_git_ref(remote) || !is_safe_git_ref(branch) || !is_safe_git_ref(&upstream) {
+            return Err("Unsafe git remote or branch ref.".to_string());
+        }
+        let url = run(dir, &["remote", "get-url", "--", remote]).unwrap_or_else(|_| remote.to_string());
+        run_bounded(dir, &["fetch", "--quiet", "--no-tags", "--", remote, branch], FETCH_TIMEOUT)
             .map_err(|error| format!("Could not reach {url}: {error}"))?;
         (upstream, None, url)
     } else {
@@ -255,13 +268,17 @@ pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
             .map_err(|error| format!("Could not reach {url}: {error}"))?;
         let tag = newest_release(&run(dir, &["tag", "--list", "v*"])?)
             .ok_or_else(|| format!("{url} has no releases yet."))?;
-        (format!("refs/tags/{tag}"), Some(tag), url)
+        let full_ref = format!("refs/tags/{tag}");
+        if !is_safe_git_ref(&full_ref) {
+            return Err("Unsafe git release tag.".to_string());
+        }
+        (full_ref, Some(tag), url)
     };
     let manifest = run(dir, &["show", &format!("{upstream}:Cargo.toml")])?;
     let shown = release.as_deref().unwrap_or(&upstream);
     let latest = manifest_version(&manifest)
         .ok_or_else(|| format!("Cargo.toml on {shown} names no version."))?;
-    let subjects = run(dir, &["log", "--format=%s", &format!("HEAD..{upstream}")]).unwrap_or_default();
+    let subjects = run(dir, &["log", "--format=%s", &format!("HEAD..{upstream}"), "--"]).unwrap_or_default();
     let subjects: Vec<String> = subjects.lines().map(str::to_string).collect();
     let more = subjects.len().saturating_sub(MAX_CHANGES);
     Ok(Status {
@@ -280,6 +297,9 @@ pub fn check_clone(dir: &Path, current: Version) -> Result<Status, String> {
 
 /// Why `dir` cannot be moved forward to `upstream` (named `shown`) as it is.
 fn blocker(dir: &Path, upstream: &str, shown: &str) -> Option<String> {
+    if !is_safe_git_ref(upstream) {
+        return Some("Unsafe git ref.".to_string());
+    }
     match run(dir, &["status", "--porcelain", "--untracked-files=no"]) {
         Ok(changes) if !changes.trim().is_empty() => {
             return Some(format!("{} has uncommitted changes. Commit or stash them, then update.", dir.display()));
@@ -287,7 +307,7 @@ fn blocker(dir: &Path, upstream: &str, shown: &str) -> Option<String> {
         Err(error) => return Some(error),
         Ok(_) => {}
     }
-    run(dir, &["merge-base", "--is-ancestor", "HEAD", upstream]).err().map(|_| {
+    run(dir, &["merge-base", "--is-ancestor", "--", "HEAD", upstream]).err().map(|_| {
         format!("{} has commits that are not on {shown}. Merge or rebase them, then update.", dir.display())
     })
 }
@@ -302,8 +322,11 @@ impl Status {
 /// Move `dir` to `target`: check out a release (and follow the releases from
 /// then on, leaving any pin), or fast-forward the branch.
 fn move_to(status: &Status, target: &str) -> Result<(), String> {
+    if !is_safe_git_ref(target) {
+        return Err("Unsafe git target ref.".to_string());
+    }
     if status.release.is_some() {
-        run(&status.dir, &["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target])?;
+        run(&status.dir, &["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", target, "--"])?;
         run(&status.dir, &["config", CHANNEL_KEY, "releases"])?;
     } else {
         run(&status.dir, &["merge", "--ff-only", "--quiet", target])?;
@@ -359,12 +382,36 @@ pub fn start_cli_update(status:&Status,commit:&str,paths:&Paths)->Result<Child,S
 /// Start `<dir>/rebuild.sh` in a session of its own, so replacing this daemon
 /// does not take the rebuild down with it. Its output goes to `paths.log`.
 pub fn start_rebuild(dir: &Path, target: Version, paths: &Paths) -> Result<Child, String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     if let Some(parent) = paths.log.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("Cannot write {}: {error}", parent.display()))?;
+        crate::control::ensure_private_dir(parent)
+            .map_err(|error| format!("Cannot write {}: {error}", parent.display()))?;
     }
-    let log = std::fs::File::create(&paths.log).map_err(|error| format!("Cannot write {}: {error}", paths.log.display()))?;
+    if let Some(parent) = paths.pending.parent() {
+        crate::control::ensure_private_dir(parent)
+            .map_err(|error| format!("Cannot write {}: {error}", parent.display()))?;
+    }
+    let log = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&paths.log)
+        .map_err(|error| format!("Cannot write {}: {error}", paths.log.display()))?;
     let log_err = log.try_clone().map_err(|error| error.to_string())?;
-    std::fs::write(&paths.pending, format!("{target}\n"))
+    if std::fs::symlink_metadata(&paths.pending).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!("Cannot write {}: unsafe symlink", paths.pending.display()));
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&paths.pending)
+        .and_then(|mut f| f.write_all(format!("{target}\n").as_bytes()))
         .map_err(|error| format!("Cannot write {}: {error}", paths.pending.display()))?;
     let mut command = Command::new(dir.join("rebuild.sh"));
     command
@@ -433,10 +480,25 @@ pub fn announce_finished_update() {
     }
 }
 
+fn escape_pango(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 /// A desktop notification (Omarchy's shell shows it). Blocks until sent.
 pub fn notify(summary: &str, body: &str) {
+    let summary = escape_pango(summary);
+    let body = escape_pango(body);
     let _ = Command::new("notify-send")
-        .args(["--app-name=SUPER DESKTOP", "--icon=system-software-update", summary, body])
+        .args(["--app-name=SUPER DESKTOP", "--icon=system-software-update", "--", &summary, &body])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -813,5 +875,14 @@ mod tests {
         std::fs::write(repo.join("Cargo.lock"), lock("1.2.0")).unwrap();
         test_git(&repo, &["commit", "--quiet", "-am", "Release 1.2.0"]);
         assert_eq!(versions(), ("1.2.0".into(), "1.2.0".into()));
+    }
+
+    #[test]
+    fn git_ref_validation_blocks_flag_and_traversal_injection() {
+        assert!(is_safe_git_ref("origin/master"));
+        assert!(is_safe_git_ref("refs/tags/v2.1.0"));
+        for bad in ["", "--upload-pack=id", "-evil", "a..b", "a b", "bad\nref"] {
+            assert!(!is_safe_git_ref(bad), "{bad:?}");
+        }
     }
 }

@@ -473,10 +473,10 @@ fn test_session_state_reports_existence_and_pin_in_one_call() {
     if !has_tmux() {
         return;
     }
-    let sess = "test_sd_session_state_probe";
+    let sess = "sd_term_session_state_probe";
     let _session = new_session(sess, &["-c", "/tmp", "/bin/bash"]);
 
-    assert_eq!(session_state("test_sd_session_state_missing"), None);
+    assert_eq!(session_state("sd_term_session_state_missing"), None);
     // Inherits the server config until pinned.
     tmux(&["set-option", "-t", sess, "detach-on-destroy", "off"]);
     assert_eq!(session_state(sess), Some(false));
@@ -1649,4 +1649,13 @@ fn goose_exact_session_resume_and_aider_waiting_prompts() {
     assert!(aider_screen_waiting("Run shell command? (Y)es/(N)o [No]: ", 24));
     assert!(aider_screen_waiting("Apply edit? [y/n/a/d]: ", 24));
     assert!(!aider_screen_waiting("Waiting for prompt\n> ", 24));
+
+    // OpenCode resume validates `ses_...` IDs and quotes them safely.
+    let bad_oc = resolve_resume_command_with_session("opencode", Some("/usr/bin/opencode"), Some("--evil;id"));
+    assert!(!bad_oc.contains("--evil"));
+    assert!(!bad_oc.contains("--session"));
+    assert_eq!(
+        resolve_resume_command_with_session("opencode", Some("/usr/bin/opencode"), Some("ses_abc123")),
+        "/usr/bin/opencode --mini --auto --session ses_abc123"
+    );
 }

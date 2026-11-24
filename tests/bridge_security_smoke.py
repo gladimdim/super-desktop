@@ -19,9 +19,14 @@ def main():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
         probe.close()
+        child_env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+        child_env.update({
+            "SUPER_DESKTOP_BRIDGE_STATE_DIR": directory,
+            "XDG_RUNTIME_DIR": directory,
+            "TMUX_TMPDIR": directory,
+        })
         process = subprocess.Popen([binary, "harness-bridge", str(port)],
-            env={**os.environ, "SUPER_DESKTOP_BRIDGE_STATE_DIR": directory,
-                 "XDG_RUNTIME_DIR": directory},
+            env=child_env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             control = str(pathlib.Path(directory) / "control.sock")
@@ -106,7 +111,7 @@ def main():
             check_desktop_commands(request, token, bridge_id, directory)
             assert request("/api/v1/theme", token=token)[0] == 200
             status, harnesses = request("/api/v1/harnesses", token=token)
-            assert status == 200 and set(harnesses) == {"protocolVersion", "timestamp", "harnesses", "usage", "theme"}
+            assert status == 200 and set(harnesses) == {"protocolVersion", "timestamp", "harnesses", "usage", "theme", "wake"}
             assert request("/api/v1/harnesses/sd_term_probe/image-prompt", {}, token=token, headers={"Origin": "https://untrusted.example"})[0] == 403
             prompts = "/api/v1/harnesses/sd_term_probe/prompts"
             assert request(prompts, token=token) == (404, {"status": "error", "error": "no_such_session"})

@@ -1,11 +1,13 @@
 //! Forum Topics synchronization (1 card = 1 Telegram Forum Topic), live Dashboard,
 //! live screen streaming, and shared keyboards.
 use super::api::{ApiError, InlineButton, InlineKeyboardMarkup, TelegramApi};
-use super::config::{Config, LiveStream, Permissions, RuntimeState, TopicBinding, MAX_TOPICS};
+use super::config::{
+    mask_token_in_text, Config, LiveStream, Permissions, RuntimeState, TopicBinding, MAX_TOPICS,
+};
 use super::desktop::{CardSummary, DesktopBackend, ProviderUsageLimit, ProviderUsageSummary};
 use super::redact::{
-    escape_html, sanitize_terminal_text, status_emoji, strip_legacy_status_prefix,
-    tag_to_topic_color, topic_title, truncate_chars,
+    escape_html, redact_known_secrets, sanitize_terminal_text, status_emoji,
+    strip_legacy_status_prefix, tag_to_topic_color, topic_title, truncate_chars,
 };
 use std::collections::HashMap;
 
@@ -129,7 +131,11 @@ pub fn quick_keys_keyboard(card: &CardSummary, perms: Permissions) -> Option<Inl
     })
 }
 
-pub fn format_card_header_html(card: &CardSummary) -> String {
+pub fn format_card_header_html_redacted(
+    card: &CardSummary,
+    bot_token: &str,
+    redact_secrets: bool,
+) -> String {
     let dot = status_emoji(&card.status);
     let mut out = format!(
         "{dot} <b>{} {}</b> · <code>{}</code>\nStatus: <b>{}</b>",
@@ -145,15 +151,25 @@ pub fn format_card_header_html(card: &CardSummary) -> String {
         }
     }
     if let Some(title) = card.title.as_deref().filter(|t| !t.trim().is_empty()) {
-        out.push_str(&format!("\nPrompt: <i>{}</i>", escape_html(title)));
+        let masked = mask_token_in_text(title, bot_token);
+        let clean = if redact_secrets {
+            redact_known_secrets(&masked)
+        } else {
+            masked
+        };
+        out.push_str(&format!("\nPrompt: <i>{}</i>", escape_html(&clean)));
     }
     out
 }
 
-pub fn format_topic_header_html(card: &CardSummary) -> String {
+pub fn format_topic_header_html_redacted(
+    card: &CardSummary,
+    bot_token: &str,
+    redact_secrets: bool,
+) -> String {
     format!(
         "{}\n\n<i>Send messages here to talk directly to this card.</i>",
-        format_card_header_html(card)
+        format_card_header_html_redacted(card, bot_token, redact_secrets)
     )
 }
 
@@ -544,7 +560,12 @@ pub fn usage_keyboard() -> InlineKeyboardMarkup {
     }
 }
 
-pub fn format_dashboard_html(cards: &[CardSummary], usage: &[ProviderUsageSummary]) -> String {
+pub fn format_dashboard_html_redacted(
+    cards: &[CardSummary],
+    usage: &[ProviderUsageSummary],
+    bot_token: &str,
+    redact_secrets: bool,
+) -> String {
     let mut out = format!("⚡ <b>SUPER DESKTOP</b> · <b>{}</b> active card(s)", cards.len());
     if cards.is_empty() {
         out.push_str("\n\n<i>No running terminal cards. Use /new to launch one.</i>");
@@ -562,7 +583,15 @@ pub fn format_dashboard_html(cards: &[CardSummary], usage: &[ProviderUsageSummar
                 .title
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
-                .map(|t| format!("\n   <i>{}</i>", escape_html(&truncate_chars(t, 44))))
+                .map(|t| {
+                    let masked = mask_token_in_text(t, bot_token);
+                    let clean = if redact_secrets {
+                        redact_known_secrets(&masked)
+                    } else {
+                        masked
+                    };
+                    format!("\n   <i>{}</i>", escape_html(&truncate_chars(&clean, 44)))
+                })
                 .unwrap_or_default();
             out.push_str(&format!(
                 "\n{dot} {} <b>{}</b> · <code>{}</code> · <b>{}</b>{}{}",
@@ -650,7 +679,7 @@ pub fn sync_dashboard(
     let Some(forum) = cfg.forum.as_ref() else {
         return false;
     };
-    let html = format_dashboard_html(cards, usage);
+    let html = format_dashboard_html_redacted(cards, usage, &cfg.bot_token, cfg.permissions.redact_secrets);
     let app_url = cfg
         .mini_app
         .dashboard_deep_link(cfg.bot_username.as_deref());
@@ -917,11 +946,19 @@ pub fn sync_topics(
     let mut changed = false;
 
     for card in cards {
+        let redacted_title = card.title.as_deref().map(|t| {
+            let m = mask_token_in_text(t, &cfg.bot_token);
+            if cfg.permissions.redact_secrets {
+                redact_known_secrets(&m)
+            } else {
+                m
+            }
+        });
         let desired_name = topic_title(
             &card.icon,
             &card.agent_name,
             &card.directory_display,
-            card.title.as_deref(),
+            redacted_title.as_deref(),
         );
         let color = tag_to_topic_color(card.tag);
 
@@ -944,6 +981,7 @@ pub fn sync_topics(
                         color,
                         now_unix,
                         cfg.permissions,
+                        &cfg.bot_token,
                         app_url.as_deref(),
                     ) {
                         if let Some(msg_id) = binding.status_message_id {
@@ -1001,7 +1039,11 @@ pub fn sync_topics(
                 }
 
                 // B. Live silent status header card edit (no topic rename service line).
-                let desired_header = format_topic_header_html(card);
+                let desired_header = format_topic_header_html_redacted(
+                    card,
+                    &cfg.bot_token,
+                    cfg.permissions.redact_secrets,
+                );
                 let app_url = cfg
                     .mini_app
                     .card_deep_link(cfg.bot_username.as_deref(), &card.id);
@@ -1088,6 +1130,7 @@ pub fn sync_topics(
                     color,
                     now_unix,
                     cfg.permissions,
+                    &cfg.bot_token,
                     app_url.as_deref(),
                 ) {
                     if let Some(msg_id) = binding.status_message_id {
@@ -1223,10 +1266,11 @@ fn create_binding(
     color: u32,
     now_unix: u64,
     perms: Permissions,
+    bot_token: &str,
     mini_app_url: Option<&str>,
 ) -> Option<TopicBinding> {
     let topic = api.create_forum_topic(chat_id, desired_name, color).ok()?;
-    let header = format_topic_header_html(card);
+    let header = format_topic_header_html_redacted(card, bot_token, perms.redact_secrets);
     let kb = topic_header_keyboard_with_app(card, perms, mini_app_url);
     let status_message_id = api
         .send_message(

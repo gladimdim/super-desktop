@@ -307,7 +307,13 @@ pub fn pinned_stream(peer: &Peer) -> Result<PinnedStream> {
     let _ = socket.set_write_timeout(Some(Duration::from_secs(5)));
     let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
     let mut stream = rustls::StreamOwned::new(connection, socket);
+    let tls_deadline = std::time::Instant::now() + Duration::from_secs(5);
     while stream.conn.is_handshaking() {
+        let Some(left) = tls_deadline.checked_duration_since(std::time::Instant::now()) else {
+            return Err(PeerError("connection_failed_or_pin_mismatch"));
+        };
+        let _ = stream.sock.set_read_timeout(Some(left));
+        let _ = stream.sock.set_write_timeout(Some(left));
         stream
             .conn
             .complete_io(&mut stream.sock)

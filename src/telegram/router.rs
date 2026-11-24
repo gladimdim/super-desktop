@@ -3,24 +3,26 @@ use super::api::{
     CallbackQuery, InlineButton, InlineKeyboardMarkup, Message, PhotoSize, TelegramApi, Update,
 };
 use super::config::{
-    save_config_at, save_runtime_at, Config, LiveStream, RuntimeState, MAX_LIVE_STREAMS,
+    load_config_at, mask_token_in_text, save_config_at, save_runtime_at, Config, LiveStream,
+    RuntimeState, MAX_LIVE_STREAMS,
 };
 use super::desktop::{
     normalize_telegram_image, CardAsset, CardSummary, DesktopBackend, HarnessChoice, NamedKey,
 };
 use super::pairing;
 use super::redact::{
-    escape_html, sanitize_terminal_text, split_chunks, status_emoji, truncate_chars,
-    DEFAULT_CHUNK_CHARS,
+    escape_html, redact_known_secrets, redact_link_text, sanitize_terminal_text, split_chunks,
+    status_emoji, truncate_chars, DEFAULT_CHUNK_CHARS,
 };
 use super::topics::{
-    self, card_action_keyboard, dashboard_keyboard, format_card_header_html,
-    format_dashboard_html, format_live_message_html, format_usage_html, live_stream_keyboard,
+    self, card_action_keyboard, dashboard_keyboard, format_card_header_html_redacted,
+    format_dashboard_html_redacted, format_live_message_html, format_usage_html,
+    live_stream_keyboard,
     quick_keys_keyboard, quick_slash_commands, tail_output_snippet, usage_keyboard,
 };
 use crate::prompt_attachments::{safe_name, Attachment, Kind, MAX_TOTAL};
 use crate::prompt_image::MAX_IMAGE;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 const MAX_CACHED_FILE_PICKS: usize = 256;
@@ -64,6 +66,7 @@ pub struct Router {
     pub new_wizard_harnesses: Vec<HarnessChoice>,
     next_file_pick_id: u64,
     file_picks: VecDeque<(u64, CachedFilePick)>,
+    pairing_failures: HashMap<i64, (u64, u8)>,
 }
 
 impl Router {
@@ -76,6 +79,7 @@ impl Router {
             new_wizard_harnesses: Vec::new(),
             next_file_pick_id: 1,
             file_picks: VecDeque::new(),
+            pairing_failures: HashMap::new(),
         }
     }
 
@@ -193,6 +197,11 @@ impl Router {
                     && (cfg.allowed_user.is_none()
                         || pairing::has_active_invite(state_dir, now_unix))
                 {
+                    if let Some(&(window_start, count)) = self.pairing_failures.get(&from.id) {
+                        if now_unix.saturating_sub(window_start) < 60 && count >= 3 {
+                            return;
+                        }
+                    }
                     let reply = pairing::handle_pairing_start(
                         state_dir,
                         cfg,
@@ -202,6 +211,16 @@ impl Router {
                         arg,
                         now_unix,
                     );
+                    if !reply.pending_created {
+                        let entry = self.pairing_failures.entry(from.id).or_insert((now_unix, 0));
+                        if now_unix.saturating_sub(entry.0) >= 60 {
+                            *entry = (now_unix, 1);
+                        } else {
+                            entry.1 = entry.1.saturating_add(1);
+                        }
+                    } else {
+                        self.pairing_failures.remove(&from.id);
+                    }
                     if let Some(html) = reply.reply_html {
                         let _ = api.send_message(msg.chat.id, None, &html, None, None);
                     }
@@ -562,7 +581,12 @@ impl Router {
                 if is_linked_forum && thread_id.is_none() && cfg.forum.is_some() {
                     topics::sync_dashboard(api, cfg, runtime, &cards, &usage, now_unix, true);
                 } else {
-                    let html = format_dashboard_html(&cards, &usage);
+                    let html = format_dashboard_html_redacted(
+                        &cards,
+                        &usage,
+                        &cfg.bot_token,
+                        cfg.permissions.redact_secrets,
+                    );
                     let app_url = if is_linked_forum {
                         cfg.mini_app.dashboard_deep_link(cfg.bot_username.as_deref())
                     } else {
@@ -702,7 +726,15 @@ impl Router {
                     let title_suffix = card
                         .title
                         .as_deref()
-                        .map(|t| format!(" — <i>{}</i>", escape_html(&truncate_chars(t, 40))))
+                        .map(|t| {
+                            let m = mask_token_in_text(t, &cfg.bot_token);
+                            let clean = if cfg.permissions.redact_secrets {
+                                redact_known_secrets(&m)
+                            } else {
+                                m
+                            };
+                            format!(" — <i>{}</i>", escape_html(&truncate_chars(&clean, 40)))
+                        })
                         .unwrap_or_default();
                     lines.push(format!(
                         "{} <b>{}</b> · <code>{}</code> [{}]{}{}",
@@ -745,7 +777,11 @@ impl Router {
                         runtime,
                         chat_id,
                         thread_id,
-                        &format_card_header_html(card),
+                        &format_card_header_html_redacted(
+                            card,
+                            &cfg.bot_token,
+                            cfg.permissions.redact_secrets,
+                        ),
                         None,
                         kb.as_ref(),
                         Some(&card.id),
@@ -890,19 +926,37 @@ impl Router {
                 }
             }
             "/unlinkforum" => {
-                if let Ok(disk_cfg) = super::config::load_config_at(&state_dir.join("config.json")) {
-                    if disk_cfg.allowed_user.is_some() {
-                        *cfg = disk_cfg;
-                    }
+                let expected_owner_id = cfg.allowed_user.as_ref().map(|u| u.user_id);
+                let cfg_path = state_dir.join("config.json");
+                let Ok(mut disk_cfg) = load_config_at(&cfg_path) else {
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        chat_id,
+                        thread_id,
+                        "Could not read Telegram config on PC.",
+                        None,
+                        None,
+                        None,
+                    );
+                    return;
+                };
+                if expected_owner_id.is_none()
+                    || !disk_cfg.should_run()
+                    || disk_cfg.allowed_user.as_ref().map(|u| u.user_id) != expected_owner_id
+                {
+                    return;
                 }
-                cfg.forum = None;
+                disk_cfg.forum = None;
                 runtime.topics.clear();
                 runtime.dashboard_message_id = None;
                 runtime.dashboard_pinned = false;
                 runtime.last_dashboard_card = None;
                 runtime.last_dashboard_edit_at = 0;
                 runtime.live_streams.clear();
-                let _ = save_config_at(&state_dir.join("config.json"), cfg);
+                if save_config_at(&cfg_path, &disk_cfg).is_ok() {
+                    *cfg = disk_cfg;
+                }
                 self.reply_and_track(
                     api,
                     runtime,
@@ -1214,17 +1268,25 @@ impl Router {
             lines.push(String::new());
             lines.push(format!("<b>Links ({}/{}):</b>", current_page + 1, total_pages));
             for link in slice {
-                let shown = escape_html(&truncate_chars(link, 90));
-                if is_telegram_button_url(link) {
-                    lines.push(format!("• <a href=\"{}\">{}</a>", escape_html(link), shown));
+                let (redacted_link, redacted) =
+                    redact_link_text(link, &cfg.bot_token, cfg.permissions.redact_secrets);
+                let shown = escape_html(&truncate_chars(&redacted_link, 90));
+                if !redacted && is_telegram_button_url(&redacted_link) {
+                    lines.push(format!(
+                        "• <a href=\"{}\">{}</a>",
+                        escape_html(&redacted_link),
+                        shown
+                    ));
                     let btn_text = format!(
                         "🔗 {}",
                         truncate_chars(
-                            link.trim_start_matches("https://").trim_start_matches("http://"),
+                            redacted_link
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://"),
                             42
                         )
                     );
-                    rows.push(vec![InlineButton::url(btn_text, link.clone())]);
+                    rows.push(vec![InlineButton::url(btn_text, redacted_link)]);
                 } else {
                     lines.push(format!("• <code>{}</code>", shown));
                 }
@@ -1262,18 +1324,26 @@ impl Router {
                 lines.push("<b>Links:</b>".into());
                 let mut url_buttons = 0usize;
                 for link in &refs.links {
-                    let shown = escape_html(&truncate_chars(link, 90));
-                    if is_telegram_button_url(link) {
-                        lines.push(format!("• <a href=\"{}\">{}</a>", escape_html(link), shown));
+                    let (redacted_link, redacted) =
+                        redact_link_text(link, &cfg.bot_token, cfg.permissions.redact_secrets);
+                    let shown = escape_html(&truncate_chars(&redacted_link, 90));
+                    if !redacted && is_telegram_button_url(&redacted_link) {
+                        lines.push(format!(
+                            "• <a href=\"{}\">{}</a>",
+                            escape_html(&redacted_link),
+                            shown
+                        ));
                         if url_buttons < 4 {
                             let btn_text = format!(
                                 "🔗 {}",
                                 truncate_chars(
-                                    link.trim_start_matches("https://").trim_start_matches("http://"),
+                                    redacted_link
+                                        .trim_start_matches("https://")
+                                        .trim_start_matches("http://"),
                                     42
                                 )
                             );
-                            rows.push(vec![InlineButton::url(btn_text, link.clone())]);
+                            rows.push(vec![InlineButton::url(btn_text, redacted_link)]);
                             url_buttons += 1;
                         }
                     } else {
@@ -1929,7 +1999,11 @@ impl Router {
                     runtime,
                     msg.chat.id,
                     thread_id,
-                    &format_card_header_html(card),
+                    &format_card_header_html_redacted(
+                        card,
+                        &cfg.bot_token,
+                        cfg.permissions.redact_secrets,
+                    ),
                     None,
                     kb.as_ref(),
                     Some(&card.id),
@@ -1954,7 +2028,12 @@ impl Router {
         } else if data.starts_with("dsh:") {
             let _ = api.answer_callback_query(&cq.id, Some("Refreshed"));
             let usage = backend.usage_summary();
-            let html = format_dashboard_html(&cards, &usage);
+            let html = format_dashboard_html_redacted(
+                &cards,
+                &usage,
+                &cfg.bot_token,
+                cfg.permissions.redact_secrets,
+            );
             let app_url = if is_linked_forum {
                 cfg.mini_app.dashboard_deep_link(cfg.bot_username.as_deref())
             } else {
@@ -2123,6 +2202,14 @@ impl Router {
         } else if let Some(card_id) = data.strip_prefix("clc:") {
             if !cfg.permissions.close {
                 let _ = api.answer_callback_query(&cq.id, Some("Close disabled"));
+            } else if !cards.iter().any(|c| c.id == card_id) {
+                let _ = api.answer_callback_query(&cq.id, Some("Card not running"));
+                let _ = api.edit_message_text(
+                    msg.chat.id,
+                    msg.message_id,
+                    "Card is no longer running.",
+                    None,
+                );
             } else {
                 let _ = api.answer_callback_query(&cq.id, Some("Closing card"));
                 match backend.close_card(card_id) {

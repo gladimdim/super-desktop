@@ -246,10 +246,10 @@ impl Default for AppState {
     }
 }
 
-/// The user's home directory, as an absolute path. Fallback: `/tmp`, matching
-/// the state-file fallback below.
+/// The user's home directory, as an absolute path. Never falls back to `/tmp`:
+/// tries `$HOME`, then POSIX `getpwuid_r(geteuid())`, then the owner runtime dir.
 pub fn home_dir() -> PathBuf {
-    get_home_dir().unwrap_or_else(|| PathBuf::from("/tmp"))
+    get_home_dir().unwrap_or_else(crate::control::runtime_dir)
 }
 
 pub fn home_dir_string() -> String {
@@ -409,14 +409,42 @@ pub fn resolve_workspace_input(input: &str, current: &str) -> Option<String> {
 }
 
 fn get_home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(home));
+    }
+    #[cfg(unix)]
+    {
+        use std::ffi::CStr;
+        use std::os::unix::ffi::OsStrExt;
+        let uid = unsafe { libc::geteuid() };
+        let mut pwd = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut buf = vec![0u8; 4096];
+        let mut res: *mut libc::passwd = std::ptr::null_mut();
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                pwd.as_mut_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut res,
+            )
+        };
+        if rc == 0 && !res.is_null() {
+            let dir = unsafe { CStr::from_ptr((*res).pw_dir) };
+            let bytes = dir.to_bytes();
+            if !bytes.is_empty() {
+                return Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)));
+            }
+        }
+    }
+    None
 }
 
 pub fn get_state_path() -> PathBuf {
-    let mut path = get_home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let mut path = home_dir();
     path.push(".config");
     path.push("super-desktop");
-    let _ = fs::create_dir_all(&path);
+    let _ = crate::control::ensure_private_dir(&path);
     path.push("state.json");
     path
 }
@@ -541,17 +569,31 @@ impl StateWriter {
     fn new(path: PathBuf) -> Self {
         Self::with_writer(move |state| {
             use std::io::Write;
-            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Some(parent) = path.parent() {
+                let _ = crate::control::ensure_private_dir(parent);
+            }
+            let nonce = crate::control::random_hex(8)
+                .unwrap_or_else(|_| format!("{}", std::process::id()));
             // A different process loading state must not share our temp file.
-            let temp = path.with_extension(format!("{}.tmp", std::process::id()));
-            let file = fs::OpenOptions::new().write(true).create(true).truncate(true)
-                .mode(0o600).open(&temp)?;
-            // A stale temp file from an older build may have wider permissions.
-            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            let temp = path.with_extension(format!("{nonce}.tmp"));
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(&temp)?;
             let mut file = std::io::BufWriter::new(file);
-            serde_json::to_writer_pretty(&mut file, state)?;
-            file.flush()?;
-            fs::rename(temp, &path)
+            if let Err(e) = serde_json::to_writer_pretty(&mut file, state)
+                .map_err(std::io::Error::other)
+                .and_then(|()| file.flush())
+                .and_then(|()| file.get_ref().sync_all())
+                .and_then(|()| fs::rename(&temp, &path))
+            {
+                let _ = fs::remove_file(&temp);
+                return Err(e);
+            }
+            Ok(())
         })
     }
 

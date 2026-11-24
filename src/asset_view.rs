@@ -25,6 +25,19 @@ enum Preview {
 /// An image's frames (one, or an animated GIF's), at most 1600 pixels on a
 /// side. Runs off GTK's thread; SD Editor's previews use it too.
 pub(crate) fn frames(bytes: &[u8]) -> Result<Vec<Frame>, String> {
+    if bytes.len() <= 256 * 1024 {
+        let lower = bytes
+            .iter()
+            .take(8192)
+            .map(u8::to_ascii_lowercase)
+            .collect::<Vec<u8>>();
+        if lower.windows(4).any(|w| w == b"<svg")
+            && (lower.windows(9).any(|w| w == b"<!doctype")
+                || lower.windows(8).any(|w| w == b"<!entity"))
+        {
+            return Err("Unsafe SVG document declarations are not permitted".into());
+        }
+    }
     let count = if bytes.starts_with(b"GIF") {
         crate::assets::gif_frames(bytes)?
     } else {

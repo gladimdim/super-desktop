@@ -243,21 +243,33 @@ fn find_word<'a>(text: &'a str, word: &'a str) -> impl Iterator<Item = usize> + 
     })
 }
 
-/// Every .qml file of the plugin (hidden folders skipped).
+/// Every .qml file of the plugin (hidden folders and symlinks skipped).
 fn qml_files(dir: &Path) -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 8;
+    const MAX_FILES: usize = 256;
     let mut out = Vec::new();
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    while let Some((cur, depth)) = stack.pop() {
+        for entry in std::fs::read_dir(&cur).into_iter().flatten().flatten() {
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             let hidden = entry.file_name().to_string_lossy().starts_with('.');
             if hidden {
                 continue;
             }
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "qml") {
+            if ft.is_dir() {
+                if depth < MAX_DEPTH {
+                    stack.push((path, depth + 1));
+                }
+            } else if ft.is_file() && path.extension().is_some_and(|e| e == "qml") {
                 out.push(path);
+                if out.len() >= MAX_FILES {
+                    out.sort();
+                    return out;
+                }
             }
         }
     }

@@ -89,7 +89,22 @@ impl HostProcess {
         if options.scale > 0.0 {
             command.args(["--scale", &format!("{}", options.scale)]);
         }
-        match options.log.as_deref().and_then(|path| OpenOptions::new().create(true).append(true).open(path).ok()) {
+        match options.log.as_deref().and_then(|path| {
+            if let Some(dir) = path.parent() {
+                let _ = super::paths::ensure_private_dir(dir);
+            }
+            if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+                return None;
+            }
+            use std::os::unix::fs::OpenOptionsExt;
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .ok()
+        }) {
             Some(file) => command.stderr(Stdio::from(file)),
             None => command.stderr(Stdio::null()),
         };
@@ -97,8 +112,12 @@ impl HostProcess {
         // SAFETY: only async-signal-safe calls between fork and exec.
         unsafe {
             command.pre_exec(move || {
-                // dup2 clears close-on-exec on the copy.
-                if libc::dup2(child_fd, 3) < 0 {
+                // Ensure fd 3 stays open across exec even when child_fd already happens to be 3.
+                if child_fd == 3 {
+                    if libc::fcntl(3, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                } else if libc::dup2(child_fd, 3) < 0 {
                     return Err(io::Error::last_os_error());
                 }
                 // The host ends with the overlay, whatever way it ends.
@@ -188,20 +207,23 @@ pub fn send_packet(fd: RawFd, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+#[repr(C, align(8))]
+struct CmsgBuf([u8; 64]);
+
 /// One packet. `block` waits for it; otherwise `Ok(None)` when none is there.
 pub fn receive_packet(fd: RawFd, block: bool) -> io::Result<Option<(Vec<u8>, Option<OwnedFd>)>> {
     let flags = RECEIVE_CLOEXEC | if block { 0 } else { libc::MSG_DONTWAIT };
     let mut buffer = vec![0u8; MAX_PACKET];
-    let mut control = [0u8; 64];
+    let mut control = CmsgBuf([0u8; 64]);
     loop {
         let mut iov = libc::iovec { iov_base: buffer.as_mut_ptr().cast(), iov_len: buffer.len() };
         // SAFETY: zeroed msghdr is a valid empty header; fields set below.
         let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
-        msg.msg_control = control.as_mut_ptr().cast();
-        msg.msg_controllen = control.len() as _;
-        // SAFETY: msg points at live buffers for the duration of the call.
+        msg.msg_control = control.0.as_mut_ptr().cast();
+        msg.msg_controllen = control.0.len() as _;
+        // SAFETY: msg points at live aligned buffers for the duration of the call.
         let n = unsafe { libc::recvmsg(fd, &mut msg, flags) };
         if n < 0 {
             let error = io::Error::last_os_error();
@@ -215,70 +237,87 @@ pub fn receive_packet(fd: RawFd, block: bool) -> io::Result<Option<(Vec<u8>, Opt
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "host closed the connection"));
         }
         let mut passed = None;
-        // SAFETY: walking the control messages the kernel filled in.
-        unsafe {
-            let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
-            while !cmsg.is_null() {
-                if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
-                    let data = libc::CMSG_DATA(cmsg) as *const RawFd;
-                    let count = ((*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<RawFd>();
-                    for i in 0..count {
-                        let raw = std::ptr::read_unaligned(data.add(i));
-                        let owned = OwnedFd::from_raw_fd(raw);
-                        if passed.is_none() {
-                            passed = Some(owned);
+        if (msg.msg_flags & libc::MSG_CTRUNC) == 0 {
+            // SAFETY: walking the control messages the kernel filled in.
+            unsafe {
+                let mut cmsg = libc::CMSG_FIRSTHDR(&msg);
+                while !cmsg.is_null() {
+                    if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
+                        let base_len = libc::CMSG_LEN(0) as usize;
+                        let total_len = (*cmsg).cmsg_len as usize;
+                        if let Some(payload_len) = total_len.checked_sub(base_len) {
+                            let data = libc::CMSG_DATA(cmsg) as *const RawFd;
+                            let count = payload_len / std::mem::size_of::<RawFd>();
+                            for i in 0..count {
+                                let raw = std::ptr::read_unaligned(data.add(i));
+                                let owned = OwnedFd::from_raw_fd(raw);
+                                if passed.is_none() {
+                                    passed = Some(owned);
+                                }
+                            }
                         }
                     }
+                    cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
                 }
-                cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
             }
         }
-        buffer.truncate(n as usize);
-        return Ok(Some((buffer, passed)));
+        let out = buffer[..n as usize].to_vec();
+        return Ok(Some((out, passed)));
     }
 }
 
-/// A frame buffer the host shares with us (read only on this side).
+/// A frame buffer the host shares with us (verified sealed against shrinking and read safely via `pread`).
 pub struct SharedBuffer {
-    ptr: *mut libc::c_void,
     len: usize,
     pub width: i32,
     pub height: i32,
     pub stride: i32,
     pub scale: f64,
-    _file: File,
+    file: File,
 }
+
+const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 impl SharedBuffer {
     pub fn map(fd: OwnedFd, width: i32, height: i32, stride: i32, scale: f64) -> io::Result<Self> {
-        if width <= 0 || height <= 0 || stride < width.saturating_mul(4) || width > 16384 || height > 16384 {
+        let min_stride = width.saturating_mul(4);
+        let max_stride = min_stride.saturating_add(4096);
+        if width <= 0
+            || height <= 0
+            || width > 16384
+            || height > 16384
+            || stride < min_stride
+            || stride > max_stride
+            || !scale.is_finite()
+            || scale <= 0.0
+            || scale > 16.0
+        {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad frame buffer size"));
         }
-        let len = stride as usize * height as usize;
+        let len = (stride as usize)
+            .checked_mul(height as usize)
+            .filter(|&l| l > 0 && l <= MAX_FRAME_BYTES)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "frame buffer too large"))?;
         let file = File::from(fd);
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: F_GET_SEALS takes no extra pointer argument on Linux.
+            let seals = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GET_SEALS) };
+            if seals < 0 || (seals & libc::F_SEAL_SHRINK) == 0 {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "frame buffer must be shrink-sealed"));
+            }
+        }
         if file.metadata()?.len() < len as u64 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "frame buffer smaller than announced"));
         }
-        // SAFETY: mapping a file we hold, read only, for its announced size.
-        let ptr = unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, file.as_raw_fd(), 0) };
-        if ptr == libc::MAP_FAILED {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self { ptr, len, width, height, stride, scale, _file: file })
+        Ok(Self { len, width, height, stride, scale, file })
     }
 
-    pub fn bytes(&self) -> &[u8] {
-        // SAFETY: the mapping is `len` bytes and lives as long as `self`.
-        unsafe { std::slice::from_raw_parts(self.ptr as *const u8, self.len) }
-    }
-}
-
-impl Drop for SharedBuffer {
-    fn drop(&mut self) {
-        // SAFETY: unmapping exactly what `map` mapped.
-        unsafe {
-            libc::munmap(self.ptr, self.len);
-        }
+    pub fn copy_bytes(&self) -> io::Result<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
+        let mut out = vec![0u8; self.len];
+        self.file.read_exact_at(&mut out, 0)?;
+        Ok(out)
     }
 }
 
@@ -515,7 +554,7 @@ Rectangle {
         }), "no frame");
         let pixels = buffer.unwrap();
         // BGRA premultiplied: pure red, opaque.
-        assert_eq!(&pixels.bytes()[..4], &[0, 0, 255, 255]);
+        assert_eq!(&pixels.copy_bytes().unwrap()[..4], &[0, 0, 255, 255]);
         host.send(&protocol::ack(1)).unwrap();
         host.send(&protocol::pointer("enter", 10.0, 10.0, 0, 0)).unwrap();
         host.send(&protocol::pointer("move", 10.0, 10.0, 0, 0)).unwrap();
@@ -756,7 +795,7 @@ Rectangle {
                         }
                         FromHost::Frame { seq } => {
                             // The overlay's copy into a texture.
-                            let copy = buffer.as_ref().map(|b| b.bytes().to_vec());
+                            let copy = buffer.as_ref().and_then(|b| b.copy_bytes().ok());
                             std::hint::black_box(copy);
                             frames += 1;
                             host.send(&protocol::ack(seq)).unwrap();

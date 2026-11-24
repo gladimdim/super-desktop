@@ -113,6 +113,14 @@ pub(in crate::window) fn install_plugin_hooks(
         }) as Rc<dyn Fn(&str) -> Option<(String, String)>>
     };
     crate::plugin_ui::api::set_hooks(crate::plugin_ui::api::Hooks { hide, harnesses, launch, cards, open_card, focus_card, card_session });
+    crate::plugin_ui::api::set_open_custom_card({
+        let owner = Rc::downgrade(owner);
+        Rc::new(move |key: &str, folder: &str, cmd: Option<&str>| {
+            let owner = owner.upgrade().ok_or("the overlay is closing")?;
+            let session = owner.create_new_terminal_in(key, cmd, None, None, Some(folder));
+            if session.is_empty() { Err("the card could not be created".into()) } else { Ok(session) }
+        })
+    });
     crate::plugin_ui::api::set_workspace_folder({
         let owner = Rc::downgrade(owner);
         Rc::new(move || {

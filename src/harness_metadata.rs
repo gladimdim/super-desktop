@@ -39,9 +39,13 @@ pub struct Launch {
 }
 impl Launch {
     pub fn register(&self, session: &str) {
+        if !crate::tmux::is_owned_session(session) {
+            return;
+        }
         if let Some(path) = &self.path {
+            let target = format!("={session}:");
             let _ = Command::new(crate::tmux::tmux_bin())
-                .args(["set-option", "-t", session, OPTION, &path.to_string_lossy()])
+                .args(["set-option", "-t", &target, OPTION, &path.to_string_lossy()])
                 .output();
         }
     }
@@ -376,23 +380,50 @@ fn run_openclaw(cli: &str, args: &[&str], quiet: bool) -> Result<(), String> {
     if quiet {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
     }
-    let child = command.spawn().map_err(|e| format!(": {e}"))?;
-    let pid = child.id();
-    let (done, finished) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = done.send(child.wait_with_output());
+    let mut child = command.spawn().map_err(|e| format!(": {e}"))?;
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut s) = stdout {
+            let _ = s.take(256 * 1024).read_to_end(&mut buf);
+        }
+        buf
     });
-    let output = match finished.recv_timeout(OPENCLAW_STEP_TIMEOUT) {
-        Ok(output) => output.map_err(|e| format!(": {e}"))?,
-        Err(_) => {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-            return Err(": timed out".into());
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(ref mut s) = stderr {
+            let _ = s.take(256 * 1024).read_to_end(&mut buf);
+        }
+        buf
+    });
+    let deadline = std::time::Instant::now() + OPENCLAW_STEP_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(": timed out".into());
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(": {e}"));
+            }
         }
     };
-    if output.status.success() {
+    let out_bytes = out_reader.join().unwrap_or_default();
+    let err_bytes = err_reader.join().unwrap_or_default();
+    if status.success() {
         return Ok(());
     }
-    let text = String::from_utf8_lossy(if output.stderr.is_empty() { &output.stdout } else { &output.stderr })
+    let text = String::from_utf8_lossy(if err_bytes.is_empty() { &out_bytes } else { &err_bytes })
         .into_owned();
     let last = crate::terminal_text::strip_terminal_escapes(&text)
         .lines()

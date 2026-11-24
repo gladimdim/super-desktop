@@ -43,7 +43,27 @@ pub struct Doc {
 
 /// Why a file could not be opened.
 pub fn read(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let meta = file
+        .metadata()
+        .map_err(|e| format!("cannot inspect {}: {e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", path.display()));
+    }
+    if meta.len() > MAX_BYTES as u64 {
+        return Err(format!("{} is larger than 8 MiB", path.display()));
+    }
+    let mut bytes = Vec::with_capacity(meta.len().min(MAX_BYTES as u64) as usize);
+    file.take(MAX_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     if bytes.len() > MAX_BYTES {
         return Err(format!("{} is larger than 8 MiB", path.display()));
     }
