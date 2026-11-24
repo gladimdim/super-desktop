@@ -716,18 +716,24 @@ footer .legal { flex-basis: 100%; margin: 0; font-size: 12px; }
   details.more summary { display: list-item; padding: 10px 0; }
 }
 
-/* Native Studio screens from the Android app. */
-.studio-screens {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 360px));
-  justify-content: center;
-  gap: 16px;
-}
-.studio-screens figure { margin: 0; }
-.studio-screens a { display: block; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-.studio-screens img { display: block; width: 100%; height: auto; }
-.studio-screens figcaption { margin-top: 6px; color: var(--text); font-weight: 600; }
-.studio-caption { text-align: center; }
+/* Android screenshot carousel. */
+#phone .media { width: min(100%, 800px); margin-inline: auto; }
+.android-gallery .gallery-track { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; }
+.android-gallery .gallery-slide { flex: 0 0 100%; min-width: 0; margin: 0; scroll-snap-align: start; }
+.android-screen { display: flex; align-items: center; justify-content: center; gap: clamp(14px, 4vw, 40px); padding: 12px; background: var(--bg); border-radius: 10px; }
+.android-screen img { display: block; height: auto; border: 1px solid var(--border); border-radius: 8px; }
+.android-full { width: 17%; max-width: 136px; }
+.android-detail { width: 62%; max-width: 410px; }
+.android-gallery figcaption { margin: 12px 4px; color: var(--muted); }
+.android-gallery figcaption strong { color: var(--text); margin-right: .4em; }
+.android-gallery-nav, .android-gallery-nav nav, .android-gallery .gallery-controls { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.android-gallery-nav { justify-content: space-between; border-top: 1px solid var(--border); padding-top: 8px; }
+.android-gallery-nav a, .android-gallery-nav button { padding: 6px 9px; border-radius: 6px; color: var(--muted); font: inherit; font-size: 14px; }
+.android-gallery-nav a[aria-current], .android-gallery-nav button { color: var(--text); background: var(--panel2); }
+.android-gallery-nav button { border: 1px solid var(--border); cursor: pointer; }
+.android-gallery .gallery-controls[hidden] { display: none; }
+.android-gallery .gallery-count { font: 13px var(--mono); }
 @media (max-width: 560px) {
-  .studio-screens { grid-template-columns: minmax(0, 360px); }
+  .android-screen .android-full { display: none; }
+  .android-detail { width: 100%; }
 }

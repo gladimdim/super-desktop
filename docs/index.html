@@ -135,6 +135,7 @@
 <script src="assets/demo-stage.js" defer></script>
 <script src="assets/demo-plugins.js" defer></script>
 <script src="assets/demo-phone.js" defer></script>
+<script src="launcher/carousel.js" defer></script>
 <script src="assets/main.js" defer></script>
 </head>
 <body>
@@ -285,20 +286,6 @@
       <div class="copy">
         <p class="eyebrow">Android, iPhone and iPad</p>
         <h2>Your agents, in your pocket.</h2>
-        <p><strong>Now on the App Store.</strong> SUPER DESKTOP for iPhone and iPad is published as <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466">SUPER DESKTOP: AI Agents</a>. It pairs the same way as Android: a QR code on the PC, then your agents, live, on the phone. The App Store edition has a 10-day trial and an optional one-time Pro purchase.</p>
-        <p>Every session on your PC shows up on your phone. <strong>Type on the phone; it runs on the PC.</strong></p>
-        <p>Get an alert when an agent finishes. Send it pictures and files.</p>
-        <p><strong>New in 2.2.0 (20): Antigravity CLI shortcuts.</strong> Open an Antigravity terminal to find <code>@</code>, <code>/</code> and <code>/resume</code> above the keyboard. Tap <code>/resume</code> and Send to open the conversation picker. SUPER DESKTOP 2.0.8 brings inline history to new sessions on supported AGY versions.</p>
-        <p><strong>Voice prompts.</strong> Tap the microphone, speak, and send the clip with your prompt. Your PC transcribes it with a speech-to-text tool installed there, such as whisper.cpp. The recording stays in the app's memory and goes only to your PC.</p>
-        <p><strong>Also new in 2.0.3 (18).</strong> Sessions reconnect when your phone switches networks, including from Wi-Fi to mobile data with Tailscale. Retry checks each saved connectable IP and shows “Cannot connect” if they all fail. On a physical keyboard, Ctrl+Enter sends and Enter adds a new line.</p>
-        <p><strong>Meet Studio, the new look for the free APK.</strong> Clearer session cards, larger usage values and a roomier prompt composer, with all your Omarchy themes still supported.</p>
-        <p><strong>Show your agent what you see.</strong> Tap <strong>＋ → Camera</strong>, take and confirm a photo, then send it with your prompt. Review or remove the thumbnail before sending.</p>
-        <p><strong>No screen? No login? Still there.</strong> SUPER DESKTOP can run headless from boot, so your phone reaches your agents on a server or a PC nobody is logged in to.</p>
-        <p><strong>The Android APK is now free forever.</strong> Every feature is unlocked: no 10-day trial, no Pro purchase, no subscription. Google Play is not required.</p>
-        <p class="store"><a class="btn primary" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk">Download free APK · 2.2.0</a> <a href="https://github.com/gladimdim/super-desktop/releases/tag/v2.0.8">Release notes →</a></p>
-        <p class="caption"><a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk.sha256">SHA-256 checksum</a>. Android 10 or newer, including phones, foldables, tablets and TVs. Open the downloaded APK and allow installation from your browser when Android asks. Get future APK updates from GitHub Releases. It installs alongside the Google Play app; pair your PCs in the new app. Existing SUPER DESKTOP SELF installations update in place.</p>
-        <p>The Google Play edition remains available with its 10-day usage trial and optional one-time Pro purchase. The iPhone and iPad app is the same kind of release: a 10-day trial, then Pro if you want it.</p>
-        <p class="store"><a class="play-badge large" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="188" height="56"></a> <a class="play-badge large" href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466"><img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download on the App Store" width="135" height="45"></a> <a href="connect.html">Connect your phone →</a></p>
       </div>
       <div class="media">
         <div class="tabs" role="tablist" aria-label="Phone demo">
@@ -307,17 +294,61 @@
           <button role="tab" type="button" aria-selected="false" aria-controls="phone-watch" id="phone-watch-tab">▶ Watch it</button>
         </div>
         <div class="panel" id="phone-studio" role="tabpanel" aria-labelledby="phone-studio-tab">
-          <div class="studio-screens">
-            <figure>
-              <a href="screenshots/android-compact-sessions.webp"><img src="screenshots/android-session-cards-detail.webp" width="864" height="560" loading="lazy" alt="Open full Sessions screenshot showing Claude Code and Codex cards with their latest prompts"></a>
-              <figcaption>Session cards</figcaption>
-            </figure>
-            <figure>
-              <a href="screenshots/android-voice-prompt.webp"><img src="screenshots/android-voice-composer-detail.webp" width="864" height="560" loading="lazy" alt="Open full Codex terminal screenshot showing a voice recording attached to a draft"></a>
-              <figcaption>Voice prompt composer</figcaption>
-            </figure>
+          <div class="screenshot-carousel android-gallery" role="region" aria-label="Android app screenshots" aria-roledescription="carousel">
+            <div class="gallery-track" tabindex="0" aria-label="Android screens">
+              <figure class="gallery-slide" id="android-shot-1">
+                <a class="android-screen" href="screenshots/android-compact-sessions.webp" aria-label="Open full Sessions screenshot">
+                  <img class="android-full" src="screenshots/android-compact-sessions.webp" width="648" height="1440" alt="" loading="lazy">
+                  <img class="android-detail" src="screenshots/android-session-cards-detail.webp" width="864" height="560" alt="Sessions detail" loading="lazy">
+                </a>
+                <figcaption><strong>Sessions</strong> Check the latest prompt and status for each agent on your paired PCs.</figcaption>
+              </figure>
+              <figure class="gallery-slide" id="android-shot-2">
+                <a class="android-screen" href="screenshots/android-harness-picker.webp" aria-label="Open full New harness screenshot">
+                  <img class="android-full" src="screenshots/android-harness-picker.webp" width="648" height="1440" alt="" loading="lazy">
+                  <img class="android-detail" src="screenshots/android-harness-picker-detail.webp" width="864" height="560" alt="New harness detail" loading="lazy">
+                </a>
+                <figcaption><strong>New harness</strong> Choose a working directory and launch an installed harness on that PC.</figcaption>
+              </figure>
+              <figure class="gallery-slide" id="android-shot-3">
+                <a class="android-screen" href="screenshots/android-claude-terminal.webp" aria-label="Open full Claude Code screenshot">
+                  <img class="android-full" src="screenshots/android-claude-terminal.webp" width="648" height="1440" alt="" loading="lazy">
+                  <img class="android-detail" src="screenshots/android-claude-terminal-detail.webp" width="864" height="560" alt="Claude Code detail" loading="lazy">
+                </a>
+                <figcaption><strong>Claude Code</strong> Follow Claude as it reads the capture code, edits a file and runs a test.</figcaption>
+              </figure>
+              <figure class="gallery-slide" id="android-shot-4">
+                <a class="android-screen" href="screenshots/android-voice-prompt.webp" aria-label="Open full Codex screenshot">
+                  <img class="android-full" src="screenshots/android-voice-prompt.webp" width="648" height="1440" alt="" loading="lazy">
+                  <img class="android-detail" src="screenshots/android-voice-composer-detail.webp" width="864" height="560" alt="Codex detail" loading="lazy">
+                </a>
+                <figcaption><strong>Codex</strong> Review a recorded voice clip in the Codex composer before sending it.</figcaption>
+              </figure>
+              <figure class="gallery-slide" id="android-shot-5">
+                <a class="android-screen" href="screenshots/android-session-files.webp" aria-label="Open full Files &amp; links screenshot">
+                  <img class="android-full" src="screenshots/android-session-files.webp" width="648" height="1440" alt="" loading="lazy">
+                  <img class="android-detail" src="screenshots/android-session-files-detail.webp" width="864" height="560" alt="Files &amp; links detail" loading="lazy">
+                </a>
+                <figcaption><strong>Files &amp; links</strong> Browse the Markdown, images and logs mentioned in a terminal.</figcaption>
+              </figure>
+              <figure class="gallery-slide" id="android-shot-6">
+                <a class="android-screen" href="screenshots/android-markdown-preview.webp" aria-label="Open full Markdown preview screenshot">
+                  <img class="android-full" src="screenshots/android-markdown-preview.webp" width="648" height="1440" alt="" loading="lazy">
+                  <img class="android-detail" src="screenshots/android-markdown-preview-detail.webp" width="864" height="560" alt="Markdown preview detail" loading="lazy">
+                </a>
+                <figcaption><strong>Markdown preview</strong> Read the frame latency report and its timing table on your phone.</figcaption>
+              </figure>
+            </div>
+            <div class="android-gallery-nav">
+              <nav aria-label="Choose an Android screen"><a data-slide href="#android-shot-1">Sessions</a> <a data-slide href="#android-shot-2">New harness</a> <a data-slide href="#android-shot-3">Claude Code</a> <a data-slide href="#android-shot-4">Codex</a> <a data-slide href="#android-shot-5">Files &amp; links</a> <a data-slide href="#android-shot-6">Markdown preview</a></nav>
+              <div class="gallery-controls" hidden>
+                <button type="button" data-step="-1" aria-label="Previous screenshot">‹</button>
+                <span class="gallery-count" aria-live="polite">1 / 6</span>
+                <button type="button" data-step="1" aria-label="Next screenshot">›</button>
+              </div>
+            </div>
+            <p class="gallery-hint caption">Android demo mode. Select a screenshot to open it full size.</p>
           </div>
-          <p class="caption studio-caption">Android 2.2.0 in demo mode. Select a detail to see the full screen.</p>
         </div>
         <div class="panel" id="phone-try" role="tabpanel" aria-labelledby="phone-try-tab" hidden>
           <div class="phone-row">
@@ -333,6 +364,22 @@
           </div>
           <p class="caption">Earlier app interface, recorded on an unfolded Galaxy Z Fold.</p>
         </div>
+      </div>
+      <div class="copy">
+        <p><strong>Now on the App Store.</strong> SUPER DESKTOP for iPhone and iPad is published as <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466">SUPER DESKTOP: AI Agents</a>. It pairs the same way as Android: a QR code on the PC, then your agents, live, on the phone. The App Store edition has a 10-day trial and an optional one-time Pro purchase.</p>
+        <p>Every session on your PC shows up on your phone. <strong>Type on the phone; it runs on the PC.</strong></p>
+        <p>Get an alert when an agent finishes. Send it pictures and files.</p>
+        <p><strong>New in 2.2.0 (20): Antigravity CLI shortcuts.</strong> Open an Antigravity terminal to find <code>@</code>, <code>/</code> and <code>/resume</code> above the keyboard. Tap <code>/resume</code> and Send to open the conversation picker. SUPER DESKTOP 2.0.8 brings inline history to new sessions on supported AGY versions.</p>
+        <p><strong>Voice prompts.</strong> Tap the microphone, speak, and send the clip with your prompt. Your PC transcribes it with a speech-to-text tool installed there, such as whisper.cpp. The recording stays in the app's memory and goes only to your PC.</p>
+        <p><strong>Also new in 2.0.3 (18).</strong> Sessions reconnect when your phone switches networks, including from Wi-Fi to mobile data with Tailscale. Retry checks each saved connectable IP and shows “Cannot connect” if they all fail. On a physical keyboard, Ctrl+Enter sends and Enter adds a new line.</p>
+        <p><strong>Meet Studio, the new look for the free APK.</strong> Clearer session cards, larger usage values and a roomier prompt composer, with all your Omarchy themes still supported.</p>
+        <p><strong>Show your agent what you see.</strong> Tap <strong>＋ → Camera</strong>, take and confirm a photo, then send it with your prompt. Review or remove the thumbnail before sending.</p>
+        <p><strong>No screen? No login? Still there.</strong> SUPER DESKTOP can run headless from boot, so your phone reaches your agents on a server or a PC nobody is logged in to.</p>
+        <p><strong>The Android APK is now free forever.</strong> Every feature is unlocked: no 10-day trial, no Pro purchase, no subscription. Google Play is not required.</p>
+        <p class="store"><a class="btn primary" href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk">Download free APK · 2.2.0</a> <a href="https://github.com/gladimdim/super-desktop/releases/tag/v2.0.8">Release notes →</a></p>
+        <p class="caption"><a href="https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk.sha256">SHA-256 checksum</a>. Android 10 or newer, including phones, foldables, tablets and TVs. Open the downloaded APK and allow installation from your browser when Android asks. Get future APK updates from GitHub Releases. It installs alongside the Google Play app; pair your PCs in the new app. Existing SUPER DESKTOP SELF installations update in place.</p>
+        <p>The Google Play edition remains available with its 10-day usage trial and optional one-time Pro purchase. The iPhone and iPad app is the same kind of release: a 10-day trial, then Pro if you want it.</p>
+        <p class="store"><a class="play-badge large" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="188" height="56"></a> <a class="play-badge large" href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466"><img src="https://tools.applemediaservices.com/api/badges/download-on-the-app-store/black/en-us?size=250x83" alt="Download on the App Store" width="135" height="45"></a> <a href="connect.html">Connect your phone →</a></p>
       </div>
     </div>
   </section>
