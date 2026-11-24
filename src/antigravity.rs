@@ -1,7 +1,9 @@
-//! Launch options for the Antigravity CLI.
+//! Launch options, hook registration, and conversation inspection for the Antigravity CLI.
 
+use serde_json::{json, Value};
 use std::{
-    path::Path,
+    fs,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -82,6 +84,191 @@ fn supports_settings(executable: &str) -> bool {
     has_flag("--settings") && has_flag("--conversation")
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookStatus {
+    Connected,
+    Missing(&'static str),
+}
+
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gemini/antigravity-cli"))
+}
+
+pub fn gemini_config_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".gemini/config"))
+}
+
+pub fn transcript_for_conversation(id: &str) -> Option<PathBuf> {
+    let home = home_dir()?;
+    transcript_for_conversation_in(&home, id)
+}
+
+pub fn transcript_for_conversation_in(home: &Path, id: &str) -> Option<PathBuf> {
+    if !crate::tmux::is_resumable_id(id) {
+        return None;
+    }
+    let path = home
+        .join("brain")
+        .join(id)
+        .join(".system_generated/logs/transcript.jsonl");
+    path.is_file().then_some(path)
+}
+
+pub fn conversation_exists(id: &str) -> bool {
+    home_dir().is_some_and(|h| conversation_exists_in(&h, id))
+}
+
+pub fn conversation_exists_in(home: &Path, id: &str) -> bool {
+    if !crate::tmux::is_resumable_id(id) {
+        return false;
+    }
+    if transcript_for_conversation_in(home, id).is_some()
+        || home.join("conversations").join(format!("{id}.pb")).is_file()
+    {
+        return true;
+    }
+    let db = home.join("conversation_summaries.db");
+    if !db.is_file() {
+        return false;
+    }
+    let esc = crate::tmux::sql_escape(id);
+    let sql = format!(
+        "SELECT 1 FROM conversation_summaries WHERE conversation_id = '{esc}' LIMIT 1;"
+    );
+    crate::tmux::sqlite_query(&db, &sql).is_some_and(|out| out.trim() == "1")
+}
+
+pub fn summary_title(id: &str) -> Option<String> {
+    let db = home_dir()?.join("conversation_summaries.db");
+    summary_title_in(&db, id)
+}
+
+pub fn summary_title_in(db: &Path, id: &str) -> Option<String> {
+    if !crate::tmux::is_resumable_id(id) || !db.is_file() {
+        return None;
+    }
+    let esc = crate::tmux::sql_escape(id);
+    let sql = format!(
+        "SELECT COALESCE(title, '') FROM conversation_summaries WHERE conversation_id = '{esc}' LIMIT 1;"
+    );
+    let raw = crate::tmux::sqlite_query(db, &sql)?;
+    let title = raw.trim();
+    (!title.is_empty() && !crate::harness_record::is_placeholder_title("antigravity", title))
+        .then(|| title.to_string())
+}
+
+pub fn prompt_history(id: &str, limit: usize) -> Vec<(String, Option<u64>)> {
+    let Some(path) = transcript_for_conversation(id) else {
+        return Vec::new();
+    };
+    let Some((records, _)) = crate::harness_record::antigravity_prompts(&path, 256 * 1024) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Option<u64>)> = records
+        .into_iter()
+        .map(|rec| {
+            let ms = rec
+                .at
+                .as_deref()
+                .and_then(crate::prompt_log::parse_iso)
+                .and_then(|ms| u64::try_from(ms).ok());
+            (rec.text, ms)
+        })
+        .collect();
+    if limit > 0 && out.len() > limit {
+        out.drain(..out.len() - limit);
+    }
+    out
+}
+
+pub fn latest_prompt(id: &str) -> Option<String> {
+    prompt_history(id, 1).pop().map(|(p, _)| p)
+}
+
+pub fn hook_status() -> HookStatus {
+    let Some(dir) = gemini_config_dir() else {
+        return HookStatus::Missing("HOME directory is not set");
+    };
+    hook_status_in(&dir)
+}
+
+pub fn hook_status_in(config_dir: &Path) -> HookStatus {
+    let path = config_dir.join("hooks.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return HookStatus::Missing("Prompts & session tracking need the Antigravity hook");
+    };
+    let Ok(val) = serde_json::from_str::<Value>(&raw) else {
+        return HookStatus::Missing("Could not read ~/.gemini/config/hooks.json");
+    };
+    let installed = val
+        .get("super-desktop")
+        .and_then(|g| g.get("PreInvocation"))
+        .and_then(Value::as_array)
+        .is_some_and(|arr| {
+            arr.iter().any(|entry| {
+                entry
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cmd| cmd.contains("harness-event antigravity"))
+            })
+        });
+    if installed {
+        HookStatus::Connected
+    } else {
+        HookStatus::Missing("Prompts & session tracking need the Antigravity hook")
+    }
+}
+
+pub fn connect_hooks() -> Result<(), String> {
+    let config_dir = gemini_config_dir().ok_or_else(|| "HOME directory is not set".to_string())?;
+    let exe = std::env::current_exe()
+        .map(crate::harness_metadata::event_exe)
+        .map_err(|e| format!("locate binary: {e}"))?;
+    connect_hooks_in(&config_dir, &exe)
+}
+
+pub fn connect_hooks_in(config_dir: &Path, exe: &Path) -> Result<(), String> {
+    fs::create_dir_all(config_dir)
+        .map_err(|e| format!("create {}: {e}", config_dir.display()))?;
+    let hooks_path = config_dir.join("hooks.json");
+    let mut root = if hooks_path.exists() {
+        let raw = fs::read_to_string(&hooks_path)
+            .map_err(|e| format!("read {}: {e}", hooks_path.display()))?;
+        if raw.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str::<Value>(&raw)
+                .map_err(|e| format!("parse {}: {e}", hooks_path.display()))?
+        }
+    } else {
+        json!({})
+    };
+    let Some(obj) = root.as_object_mut() else {
+        return Err(format!("{} must contain a JSON object", hooks_path.display()));
+    };
+    let cmd = format!(
+        "{} harness-event antigravity",
+        crate::harness_metadata::shell_quote(&exe.to_string_lossy())
+    );
+    obj.insert(
+        "super-desktop".into(),
+        json!({
+            "PreInvocation": [
+                {
+                    "type": "command",
+                    "command": cmd,
+                    "timeout": 5
+                }
+            ]
+        }),
+    );
+    let mut formatted = serde_json::to_string_pretty(&root)
+        .map_err(|e| format!("serialize hooks.json: {e}"))?;
+    formatted.push('\n');
+    crate::harness_record::atomic_bytes(&hooks_path, formatted.as_bytes())
+        .map_err(|e| format!("write {}: {e}", hooks_path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +315,52 @@ mod tests {
                 command
             );
         }
+    }
+
+    #[test]
+    fn antigravity_hooks_connect_preserves_existing_keys_and_summary_title_reads_db() {
+        let root = std::env::temp_dir().join(format!(
+            "agy-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let cfg = root.join("config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(
+            cfg.join("hooks.json"),
+            r#"{"herdr":{"PreInvocation":[{"command":"echo hi","timeout":10,"type":"command"}]}}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(hook_status_in(&cfg), HookStatus::Missing(_)));
+        connect_hooks_in(&cfg, Path::new("/usr/bin/super-desktop-client")).unwrap();
+        assert_eq!(hook_status_in(&cfg), HookStatus::Connected);
+
+        let merged: Value =
+            serde_json::from_str(&fs::read_to_string(cfg.join("hooks.json")).unwrap()).unwrap();
+        assert!(merged.get("herdr").is_some(), "existing hooks must be kept");
+        assert!(merged["super-desktop"]["PreInvocation"][0]["command"]
+            .as_str()
+            .unwrap()
+            .contains("harness-event antigravity"));
+
+        let db = root.join("conversation_summaries.db");
+        let out = Command::new("sqlite3")
+            .arg(&db)
+            .arg("CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT); INSERT INTO conversation_summaries VALUES ('conv-42', 'Refactor terminal layout');")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        assert_eq!(
+            summary_title_in(&db, "conv-42").as_deref(),
+            Some("Refactor terminal layout")
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

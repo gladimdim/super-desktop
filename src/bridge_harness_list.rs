@@ -431,7 +431,33 @@ pub(super) fn collect(state: &crate::state::AppState, snapshot: Option<&PaneSnap
                 (status, metadata, title, prompt)
             }
         };
-        let model = metadata.map(|value| value.model).filter(|model| !model.is_empty()).or(footer_model);
+        let (grok_model, grok_effort) = if agent_type == "grok" {
+            status
+                .pid
+                .parse::<u32>()
+                .ok()
+                .and_then(|pid| crate::grok_session::summary_for_pid(pid, Some(&status.cwd)))
+                .map(|s| (s.model, s.effort))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+        let hermes_model = if agent_type == "hermes" {
+            metadata
+                .as_ref()
+                .filter(|m| m.adapter_reported() && !m.native_session.is_empty())
+                .and_then(|m| crate::hermes::session_info(&m.native_session))
+                .and_then(|info| info.model)
+        } else {
+            None
+        };
+        let model = metadata
+            .map(|value| value.model)
+            .filter(|model| !model.is_empty())
+            .or(grok_model)
+            .or(hermes_model)
+            .or(footer_model);
+        let effort = effort.or(grok_effort);
         let harness_home = resolve_workspace_dir(workspace_dir.as_deref());
         let (directory, directory_kind) = launcher_directory(&agent_type, &harness_home, &status.cwd);
         let directory_display = crate::state::display_dir(&directory);

@@ -54,7 +54,7 @@ pub(in crate::tmux) use status::{
     agent_screen_indicates_work, explicit_turn_status, foreground_job_from_stat,
     screen_indicates_work,
 };
-pub(in crate::tmux) use status::get_direct_children;
+pub(crate) use status::get_direct_children;
 
 #[allow(unused_imports)]
 pub use capture::{
@@ -81,6 +81,6 @@ pub use opencode::{
     resolve_own_opencode_id, should_adopt_heuristic_match,
 };
 #[allow(unused_imports)]
-pub(crate) use opencode::opencode_db_title;
+pub(crate) use opencode::{opencode_db_title, sql_escape, sqlite_query, sqlite_query_as};
 #[cfg(test)]
-pub(in crate::tmux) use opencode::{opencode_last_prompt_in, read_cmdline, sql_escape, sqlite_query, SQLITE_RUNS};
+pub(in crate::tmux) use opencode::{opencode_last_prompt_in, read_cmdline, SQLITE_RUNS};

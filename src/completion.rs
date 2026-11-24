@@ -446,7 +446,7 @@ pub fn collect_watched(ids: &[String]) -> (Vec<Completion>, Watched) {
             let Some(terminal) = state.terminals.iter().find(|t| &t.session_name == id) else {
                 return unknown(id);
             };
-            if terminal.agent_type != "codex" {
+            if !matches!(terminal.agent_type.as_str(), "codex" | "grok") {
                 watch.sessions.push(id.clone());
             }
             if let [(pid, option)] = session_panes(&panes, id)[..] {
@@ -460,6 +460,21 @@ pub fn collect_watched(ids: &[String]) -> (Vec<Completion>, Watched) {
                         watch.files.push(fd.clone());
                     }
                     api_state(inspect_rollout(id, found))
+                } else if terminal.agent_type == "grok" {
+                    if let Some(found) =
+                        crate::grok_session::inspect_completion(pid, terminal.workspace_dir.as_deref())
+                    {
+                        watch.files.push(found.dir);
+                        watch.files.push(found.events_path);
+                        api_state(Completion {
+                            id: id.clone(),
+                            supported: true,
+                            state: found.state.into(),
+                            completion_id: found.completion_id,
+                        })
+                    } else {
+                        unknown(id)
+                    }
                 } else {
                     if !option.is_empty() {
                         watch.files.push(PathBuf::from(option));

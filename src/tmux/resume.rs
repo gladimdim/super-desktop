@@ -24,8 +24,29 @@ pub(in crate::tmux) fn conversation_exists(agent: &str, id: &str, cwd: Option<&s
         }
         "codex" => dir("CODEX_HOME", ".codex")
             .is_some_and(|root| codex_rollout_exists(&root.join("sessions"), id)),
+        "pi" => dir("PI_CODING_AGENT_SESSION_DIR", ".pi/agent/sessions")
+            .is_some_and(|root| pi_session_exists(&root, id)),
+        "grok" => crate::grok_session::conversation_exists(id),
+        "antigravity" | "agy" => crate::antigravity::conversation_exists(id),
+        "hermes" => crate::hermes::conversation_exists(id),
         _ => false,
     }
+}
+
+fn pi_session_exists(sessions: &std::path::Path, id: &str) -> bool {
+    let exact_name = format!("{id}.jsonl");
+    let suffix = format!("_{id}.jsonl");
+    std::fs::read_dir(sessions)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .flat_map(|dir| std::fs::read_dir(dir.path()).into_iter().flatten().flatten())
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name == exact_name || name.ends_with(&suffix))
+        })
 }
 
 pub(in crate::tmux) fn claude_transcript(root: &std::path::Path, cwd: &str, id: &str) -> std::path::PathBuf {
@@ -139,6 +160,18 @@ pub(in crate::tmux) fn resume_command_with(
             // Global flags before the subcommand parse fine under clap.
             "codex" if exists(agent_type, id) => {
                 return append_resume_flag(&base, &format!("resume {id}"), &["resume"]);
+            }
+            "grok" if exists(agent_type, id) => {
+                return append_resume_flag(&base, &format!("--resume {id}"), &["--resume", "--continue", "-r", "-c"]);
+            }
+            "pi" if exists(agent_type, id) => {
+                return append_resume_flag(&base, &format!("--session {id}"), &["--session", "--session-id", "--continue", "--resume", "-c", "-r"]);
+            }
+            "antigravity" | "agy" if exists(agent_type, id) => {
+                return append_resume_flag(&base, &format!("--conversation {id}"), &["--conversation", "--continue", "--resume", "-c", "-r"]);
+            }
+            "hermes" if exists(agent_type, id) => {
+                return append_resume_flag(&base, &format!("--resume {id}"), &["--resume", "--continue", "-r", "-c"]);
             }
             _ => {}
         }

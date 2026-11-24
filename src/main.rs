@@ -58,6 +58,8 @@ mod bridge;
 mod card_resize;
 mod antigravity;
 mod codex_launch;
+mod grok_session;
+mod hermes;
 mod arrange;
 mod card_status;
 mod crashlog;

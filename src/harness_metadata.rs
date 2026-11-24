@@ -52,7 +52,16 @@ impl Launch {
 pub fn prepare(session: &str, agent: &str, command: &str) -> Launch {
     let command = crate::antigravity::launch_command(agent, command);
     let command = crate::codex_launch::launch_command(agent, &command);
+    let command = crate::grok_session::launch_command(agent, &command);
     prepare_with_root(session, agent, &command, root())
+}
+
+fn canonical_agent(agent: &str) -> &str {
+    if agent == "agy" {
+        "antigravity"
+    } else {
+        agent
+    }
 }
 
 fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<PathBuf>) -> Launch {
@@ -60,7 +69,8 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
         command: command.into(),
         path: None,
     };
-    if !has_native_metadata(agent) {
+    let launcher = canonical_agent(agent);
+    if !has_native_metadata(launcher) {
         return unchanged();
     }
     let Some(mut args) = shlex::split(command) else {
@@ -74,13 +84,14 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
         return unchanged();
     };
     let exe_name = exe_name.to_owned();
-    let launcher = agent;
-    let agent = if launcher.starts_with("custom-") && native_agent(&exe_name) {
-        exe_name.as_str()
+    let canonical_exe = canonical_agent(&exe_name);
+    let agent = if launcher.starts_with("custom-") && native_agent(canonical_exe) {
+        canonical_exe
     } else {
-        agent
+        launcher
     };
-    if !native_agent(agent) || exe_name != agent || !plain_interactive(command, &args) {
+    let exe_matches = canonical_exe == agent;
+    if !native_agent(agent) || !exe_matches || !plain_interactive(agent, command, &args) {
         return unchanged();
     }
     let Some(root) = root else {
@@ -142,6 +153,7 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
                 &json!({"path":path,"exe":exe}),
             );
         }
+        "antigravity" | "hermes" => {}
         _ => unreachable!(),
     }
     // Record the actual exec'd harness PID, not the short-lived hook child.
@@ -166,10 +178,14 @@ fn prepare_with_root(session: &str, agent: &str, command: &str, root: Option<Pat
 /// Whether `command` (split into `args`) starts the harness on its own,
 /// interactively: no shell syntax, no settings of the user's own, and no
 /// one-shot or server mode the adapters do not follow.
-fn plain_interactive(command: &str, args: &[String]) -> bool {
+fn plain_interactive(agent: &str, command: &str, args: &[String]) -> bool {
     !command.contains(['$', '`', '\n'])
         && !args.iter().any(|s| {
-            s.starts_with("--settings=")
+            let is_settings = s == "--settings" || s.starts_with("--settings=");
+            if is_settings && agent == "antigravity" {
+                return false;
+            }
+            is_settings
                 || matches!(
                     s.as_str(),
                     "&&" | "||"
@@ -180,7 +196,6 @@ fn plain_interactive(command: &str, args: &[String]) -> bool {
                         | ">>"
                         | "<"
                         | "--"
-                        | "--settings"
                         | "--pure"
                         | "--bare"
                         | "-p"
@@ -243,7 +258,7 @@ fn opencode_config(raw: Option<&str>, plugin: &Path) -> Option<String> {
 
 /// Hooks run `<exe> harness-event` once per agent tool call. Prefer the small
 /// GTK-free client installed beside this binary, which records natively.
-fn event_exe(exe: PathBuf) -> PathBuf {
+pub(crate) fn event_exe(exe: PathBuf) -> PathBuf {
     let client = exe.with_file_name("super-desktop-client");
     if client.is_file() {
         client
@@ -585,7 +600,10 @@ fn strip_trailing_commas(text: &str) -> String {
 }
 
 pub fn native_agent(agent: &str) -> bool {
-    matches!(agent, "claude" | "opencode" | "pi" | "openclaw")
+    matches!(
+        agent,
+        "claude" | "opencode" | "pi" | "openclaw" | "antigravity" | "agy" | "hermes"
+    )
 }
 
 /// Launchers whose cards may carry launch metadata: the native adapters, and
@@ -649,6 +667,7 @@ pub fn inspect_option(agent: &str, option: &str) -> Option<Metadata> {
     if path.parent()? != root()? {
         return None;
     }
+    let agent = canonical_agent(agent);
     let mut value = read(path)?;
     if value.version != 1
         || !native_agent(&value.agent)

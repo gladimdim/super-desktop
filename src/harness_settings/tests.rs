@@ -351,10 +351,12 @@ fn openclaw_row_shows_the_plugin_state_from_openclaws_config() {
     std::fs::write(&config, r#"{"gateway":{"mode":"local"}}"#).unwrap();
     let panel = inert_panel(Rc::new(RefCell::new(AppState::default())));
     let line = || {
+        let row = harness_row_named(&panel.widget, "OpenClaw");
+        let notice = row.next_sibling().expect("OpenClaw plugin notice");
+        assert!(notice.has_css_class("harness-plugin-notice"));
         let lines = find_all::<gtk4::Widget>(&panel.widget, "harness-plugin-notice");
-        assert_eq!(lines.len(), 1, "one plugin line, for OpenClaw only");
-        assert_eq!(lines[0].prev_sibling(), Some(harness_row_named(&panel.widget, "OpenClaw")));
-        lines[0].clone()
+        assert!(lines.iter().any(|w| w == &notice));
+        notice
     };
     let (text, chip, connect, _) = plugin_line(&line());
     assert_eq!(text, "Status & titles need the SUPER DESKTOP plugin");

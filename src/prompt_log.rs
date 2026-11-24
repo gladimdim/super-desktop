@@ -61,7 +61,7 @@ fn iso(ms: i64) -> Option<String> {
         .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
 }
 
-fn parse_iso(value: &str) -> Option<i64> {
+pub(crate) fn parse_iso(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value.trim())
         .ok()
         .map(|at| at.timestamp_millis())
@@ -241,6 +241,60 @@ fn native(session: &str, agent: &str, persisted: Option<&str>) -> Option<(Vec<(S
             let cut = rows.len() > MAX_PROMPTS;
             rows.reverse();
             Some((rows.into_iter().map(|(text, at)| (text, Some(at))).collect(), cut, "opencode"))
+        }
+        "pi" => {
+            let metadata = crate::harness_metadata::inspect(session, "pi")?;
+            let path = std::path::PathBuf::from(&metadata.transcript);
+            let (records, cut) = crate::harness_record::pi_prompts(&path, NATIVE_TAIL)?;
+            Some((native_records(records), cut, "pi"))
+        }
+        "antigravity" | "agy" => {
+            let metadata = crate::harness_metadata::inspect(session, "antigravity")
+                .or_else(|| crate::harness_metadata::inspect(session, agent))?;
+            let path = (!metadata.transcript.is_empty())
+                .then(|| std::path::PathBuf::from(&metadata.transcript))
+                .or_else(|| crate::antigravity::transcript_for_conversation(&metadata.native_session))?;
+            let (records, cut) = crate::harness_record::antigravity_prompts(&path, NATIVE_TAIL)?;
+            Some((native_records(records), cut, "antigravity"))
+        }
+        "grok" => {
+            let id = crate::grok_session::find_session_id_for_pid(crate::completion::pane_pid(session)?)?;
+            let rows = crate::grok_session::prompt_history_for_id(&id, MAX_PROMPTS + 1);
+            if rows.is_empty() {
+                return None;
+            }
+            let cut = rows.len() > MAX_PROMPTS;
+            let trimmed: Vec<_> = rows
+                .into_iter()
+                .rev()
+                .take(MAX_PROMPTS)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|(text, ms)| (text, ms.map(|m| m as i64)))
+                .collect();
+            Some((trimmed, cut, "grok"))
+        }
+        "hermes" => {
+            let metadata = crate::harness_metadata::inspect(session, "hermes")?;
+            if metadata.native_session.is_empty() {
+                return None;
+            }
+            let rows = crate::hermes::prompts_for_session(&metadata.native_session, MAX_PROMPTS + 1);
+            if rows.is_empty() {
+                return None;
+            }
+            let cut = rows.len() > MAX_PROMPTS;
+            let trimmed: Vec<_> = rows
+                .into_iter()
+                .rev()
+                .take(MAX_PROMPTS)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|(text, ms)| (text, ms.map(|m| m as i64)))
+                .collect();
+            Some((trimmed, cut, "hermes"))
         }
         _ => None,
     }

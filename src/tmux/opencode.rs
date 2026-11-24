@@ -1,6 +1,6 @@
 use super::*;
 
-pub(in crate::tmux) fn sql_escape(s: &str) -> String {
+pub(crate) fn sql_escape(s: &str) -> String {
     s.replace('\'', "''")
 }
 
@@ -41,12 +41,12 @@ pub(in crate::tmux) fn db_stamp(db: &std::path::Path) -> Option<DbStamp> {
 /// `sqlite3` over a large database costs a process and a query per call, and
 /// cards ask the same questions every second: an unchanged database (and
 /// WAL) answers from memory.
-pub(in crate::tmux) fn sqlite_query(db: &std::path::Path, sql: &str) -> Option<String> {
+pub(crate) fn sqlite_query(db: &std::path::Path, sql: &str) -> Option<String> {
     sqlite_query_as(db, sql, "-list")
 }
 
 /// `sqlite_query` with an explicit `sqlite3` output mode (`-list` or `-json`).
-pub(in crate::tmux) fn sqlite_query_as(db: &std::path::Path, sql: &str, mode: &'static str) -> Option<String> {
+pub(crate) fn sqlite_query_as(db: &std::path::Path, sql: &str, mode: &'static str) -> Option<String> {
     type Cache = std::collections::HashMap<(std::path::PathBuf, String, &'static str), (DbStamp, Option<String>)>;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<Cache>> = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);

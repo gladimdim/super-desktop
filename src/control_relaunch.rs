@@ -33,6 +33,24 @@ fn prepare(card:&crate::state::TerminalData,native:Option<&str>)->Result<Prepare
                 }
                 ("--conversation", &["--conversation", "--continue", "-c", "--resume", "-r"])
             }
+            "grok" => {
+                if !crate::grok_session::is_valid_session_id(native) {
+                    return Err(("invalid_arguments", "Grok resume requires a valid session ID."));
+                }
+                ("--resume", &["--resume", "--continue", "-r", "-c", "--session-id", "-s"])
+            }
+            "pi" => {
+                if !crate::tmux::is_resumable_id(native) {
+                    return Err(("invalid_arguments", "Pi resume requires a valid session ID."));
+                }
+                ("--session", &["--session", "--session-id", "--continue", "-c", "--resume", "-r"])
+            }
+            "hermes" => {
+                if !crate::tmux::is_resumable_id(native) {
+                    return Err(("invalid_arguments", "Hermes resume requires a valid session ID."));
+                }
+                ("--resume", &["--resume", "--continue", "-r", "-c"])
+            }
             _=>return Err(("unsupported_resume","Native resume is unsupported for this harness.")),
         };
         if words.iter().skip(1).any(|w|conflicts.contains(&w.split('=').next().unwrap())){return Err(("unsupported_resume","The saved command already selects a resume mode; launch explicitly instead."));}
@@ -107,5 +125,42 @@ pub fn execute(root:&std::path::Path,request:&Request,deadline:Instant,mut ui:im
         }
         card.command = "antigravity".into();
         assert!(prepare(&card, Some(id)).is_ok());
+    }
+
+    #[test]
+    fn grok_pi_and_hermes_relaunch_select_exact_sessions() {
+        let id = "12345678-1234-1234-1234-123456789abc";
+        let grok: crate::state::TerminalData = serde_json::from_value(json!({
+            "id": "g", "session_name": "g", "agent_type": "grok",
+            "command": "/usr/bin/grok --minimal",
+            "x": 0, "y": 0, "workspace_dir": "/", "created_at": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            shlex::split(&prepare(&grok, Some(id)).unwrap().command).unwrap(),
+            ["/usr/bin/grok", "--minimal", "--resume", id]
+        );
+
+        let pi: crate::state::TerminalData = serde_json::from_value(json!({
+            "id": "p", "session_name": "p", "agent_type": "pi",
+            "command": "/usr/bin/pi",
+            "x": 0, "y": 0, "workspace_dir": "/", "created_at": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            shlex::split(&prepare(&pi, Some("abc_123")).unwrap().command).unwrap(),
+            ["/usr/bin/pi", "--session", "abc_123"]
+        );
+
+        let hermes: crate::state::TerminalData = serde_json::from_value(json!({
+            "id": "h", "session_name": "h", "agent_type": "hermes",
+            "command": "/usr/bin/hermes --cli",
+            "x": 0, "y": 0, "workspace_dir": "/", "created_at": 1
+        }))
+        .unwrap();
+        assert_eq!(
+            shlex::split(&prepare(&hermes, Some("hermes-42")).unwrap().command).unwrap(),
+            ["/usr/bin/hermes", "--cli", "--resume", "hermes-42"]
+        );
     }
 }

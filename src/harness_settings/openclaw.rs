@@ -174,3 +174,117 @@ pub(in crate::harness_settings) fn openclaw_plugin_notice(actions: OpenClawActio
     line
 }
 
+pub(in crate::harness_settings) fn antigravity_hook_notice() -> Box {
+    simple_connect_notice(
+        "Prompts & session tracking come from the Antigravity hook",
+        "Connect Antigravity hook to report prompts and conversation IDs",
+        "Register the SUPER DESKTOP hook in ~/.gemini/config/hooks.json",
+        || matches!(crate::antigravity::hook_status(), crate::antigravity::HookStatus::Connected),
+        || match crate::antigravity::hook_status() {
+            crate::antigravity::HookStatus::Connected => None,
+            crate::antigravity::HookStatus::Missing(why) => Some(why),
+        },
+        crate::antigravity::connect_hooks,
+    )
+}
+
+pub(in crate::harness_settings) fn hermes_plugin_notice() -> Box {
+    simple_connect_notice(
+        "Status, prompts & titles come from the Hermes plugin",
+        "Connect Hermes plugin to report status, prompts and titles",
+        "Install the SUPER DESKTOP plugin into ~/.hermes/plugins/super-desktop",
+        || matches!(crate::hermes::plugin_status(), crate::hermes::PluginStatus::Connected),
+        || match crate::hermes::plugin_status() {
+            crate::hermes::PluginStatus::Connected => None,
+            crate::hermes::PluginStatus::Missing(why) => Some(why),
+        },
+        crate::hermes::connect_plugin,
+    )
+}
+
+fn simple_connect_notice(
+    connected_msg: &'static str,
+    connected_tip: &'static str,
+    connect_tip: &'static str,
+    is_connected: fn() -> bool,
+    missing_reason: fn() -> Option<&'static str>,
+    connect_fn: fn() -> Result<(), String>,
+) -> Box {
+    let busy = Rc::new(Cell::new(false));
+    let error = Rc::new(RefCell::new(None::<String>));
+    let line = Box::new(Orientation::Horizontal, 8);
+    line.add_css_class("harness-plugin-notice");
+    let text = Label::new(None);
+    text.add_css_class("harness-plugin-text");
+    text.set_xalign(0.0);
+    text.set_hexpand(true);
+    text.set_wrap(true);
+    text.set_valign(Align::Center);
+    line.append(&text);
+    let connected = Label::new(Some("Connected"));
+    connected.add_css_class("harness-plugin-connected");
+    connected.set_valign(Align::Center);
+    connected.set_tooltip_text(Some(connected_tip));
+    line.append(&connected);
+    let connect = Button::with_label("Connect");
+    connect.add_css_class("launcher-btn");
+    connect.add_css_class("launcher-btn-primary");
+    connect.set_valign(Align::Center);
+    connect.set_tooltip_text(Some(connect_tip));
+    line.append(&connect);
+
+    let paint: Rc<dyn Fn()> = {
+        let (text, connected, connect) = (text.clone(), connected.clone(), connect.clone());
+        let (busy, error) = (Rc::clone(&busy), Rc::clone(&error));
+        Rc::new(move || {
+            let ok = is_connected();
+            let is_busy = busy.get();
+            let err = error.borrow().clone();
+            let msg = if is_busy {
+                "Connecting…"
+            } else if ok {
+                connected_msg
+            } else {
+                missing_reason().unwrap_or("Connect SUPER DESKTOP integration")
+            };
+            text.set_text(err.as_deref().unwrap_or(msg));
+            if err.is_some() {
+                text.add_css_class("launcher-note-error");
+            } else {
+                text.remove_css_class("launcher-note-error");
+            }
+            connected.set_visible(ok && !is_busy);
+            connect.set_visible(!ok || is_busy);
+            connect.set_sensitive(!is_busy);
+        })
+    };
+
+    connect.connect_clicked({
+        let (busy, error, paint) = (Rc::clone(&busy), Rc::clone(&error), Rc::clone(&paint));
+        move |_| {
+            if busy.get() {
+                return;
+            }
+            busy.set(true);
+            error.replace(None);
+            paint();
+            let (busy, error, paint) = (Rc::clone(&busy), Rc::clone(&error), Rc::clone(&paint));
+            glib::MainContext::default().spawn_local(async move {
+                match gtk4::gio::spawn_blocking(connect_fn).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(msg)) => {
+                        error.replace(Some(msg));
+                    }
+                    Err(_) => {
+                        error.replace(Some("Integration step stopped unexpectedly".into()));
+                    }
+                }
+                busy.set(false);
+                paint();
+            });
+        }
+    });
+    paint();
+    line
+}
+

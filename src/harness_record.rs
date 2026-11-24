@@ -203,6 +203,9 @@ pub fn record(kind: &str) {
     if let Err(error) = record_inner(kind) {
         eprintln!("Harness metadata: {error}");
     }
+    if kind == "antigravity" {
+        println!("{{}}");
+    }
 }
 pub fn record_inner(kind: &str) -> Result<(), Box<dyn std::error::Error>> {
     let path = PathBuf::from(std::env::var("SD_HARNESS_FILE")?);
@@ -238,6 +241,16 @@ pub fn record_inner(kind: &str) -> Result<(), Box<dyn std::error::Error>> {
             return Err("wrong adapter".into());
         }
         apply_claude(&mut data, &input);
+    } else if kind == "antigravity" {
+        if data.agent != "antigravity" {
+            return Err("wrong adapter".into());
+        }
+        apply_antigravity(&mut data, &input);
+    } else if kind == "hermes" {
+        if data.agent != "hermes" {
+            return Err("wrong adapter".into());
+        }
+        apply_hermes(&mut data, &input);
     } else {
         if kind != data.agent {
             return Err("wrong adapter".into());
@@ -265,6 +278,14 @@ pub fn apply(data: &mut Metadata, event: &Value) {
             data.completion_id = None;
             data.completion_supported = false;
             data.claude_turn_active = false;
+        }
+    }
+    if data.agent == "pi" {
+        if let Some(path) = event["transcript"]
+            .as_str()
+            .filter(|p| is_pi_transcript(Path::new(p)))
+        {
+            data.transcript = path.into();
         }
     }
     if let Some(title) = event["title"].as_str() {
@@ -315,6 +336,106 @@ pub fn apply(data: &mut Metadata, event: &Value) {
 /// Native adapters that report explicit turn completions.
 pub fn reports_completion(agent: &str) -> bool {
     matches!(agent, "pi" | "opencode" | "claude")
+}
+
+pub fn apply_antigravity(data: &mut Metadata, input: &Value) {
+    let session = input["conversationId"]
+        .as_str()
+        .or_else(|| input["session_id"].as_str())
+        .unwrap_or("");
+    if !session.is_empty() && data.native_session != session {
+        data.native_session = session.into();
+        data.transcript.clear();
+        data.title.clear();
+        data.prompt.clear();
+        data.model.clear();
+        data.status = "unknown".into();
+        data.completion_id = None;
+        data.completion_supported = false;
+        data.claude_turn_active = false;
+    }
+    if let Some(tp) = input["transcriptPath"]
+        .as_str()
+        .or_else(|| input["transcript"].as_str())
+        .filter(|p| is_antigravity_transcript(Path::new(p)))
+    {
+        data.transcript = tp.into();
+    }
+    if !data.transcript.is_empty() {
+        if let Some((prompts, _)) = antigravity_prompts(Path::new(&data.transcript), 64 * 1024) {
+            if let Some(last) = prompts.into_iter().last() {
+                data.prompt = clean(&last.text);
+            }
+        }
+    }
+    if let Some(prompt) = input["prompt"].as_str().filter(|p| is_user_prompt(p)) {
+        data.prompt = clean(prompt);
+    }
+    if let Some(model) = input["model"].as_str().map(clean).filter(|s| !s.is_empty()) {
+        data.model = model;
+    }
+}
+
+pub fn apply_hermes(data: &mut Metadata, input: &Value) {
+    let hook = input["hook"].as_str().unwrap_or("");
+    if let Some(session) = input["session_id"]
+        .as_str()
+        .or_else(|| input["session"].as_str())
+        .filter(|s| !s.is_empty())
+    {
+        if data.native_session != session {
+            data.native_session = session.into();
+            data.transcript.clear();
+            data.title.clear();
+            data.prompt.clear();
+            data.model.clear();
+            data.status = "unknown".into();
+            data.completion_id = None;
+            data.completion_supported = false;
+            data.claude_turn_active = false;
+        }
+    }
+    if let Some(model) = input["model"].as_str().map(clean).filter(|s| !s.is_empty()) {
+        data.model = model;
+    }
+    if let Some(title) = input["title"].as_str() {
+        let cleaned = native_title("hermes", title);
+        if !cleaned.is_empty() {
+            data.title = cleaned;
+        }
+    }
+    match hook {
+        "session_start" => {
+            data.status = "idle".into();
+        }
+        "session_reset" => {
+            data.prompt.clear();
+            data.title.clear();
+            data.status = "idle".into();
+        }
+        "pre_llm" => {
+            data.status = "working".into();
+            if let Some(prompt) = input["prompt"].as_str().filter(|p| is_user_prompt(p)) {
+                data.prompt = clean(prompt);
+            }
+        }
+        "pre_tool" | "post_tool" | "approval_response" => {
+            data.status = "working".into();
+        }
+        "approval_request" => {
+            data.status = "waiting".into();
+        }
+        "post_llm" => {
+            data.status = "idle".into();
+        }
+        "api_error" => {
+            data.status = "error".into();
+        }
+        "session_end" => {
+            data.status = "unknown".into();
+        }
+        _ => {}
+    }
 }
 
 pub fn apply_claude(data: &mut Metadata, input: &Value) {
@@ -503,7 +624,11 @@ pub fn claude_transcript_scan(bytes: &[u8], session: &str) -> TranscriptScan {
 
 /// The text of a transcript record's message (its text parts, joined).
 fn claude_record_text(record: &Value) -> Option<String> {
-    let content = &record["message"]["content"];
+    message_content_text(&record["message"])
+}
+
+fn message_content_text(message: &Value) -> Option<String> {
+    let content = &message["content"];
     content.as_str().map(str::to_owned).or_else(|| {
         content.as_array().map(|parts| {
             parts
@@ -514,6 +639,36 @@ fn claude_record_text(record: &Value) -> Option<String> {
                 .join(" ")
         })
     })
+}
+
+fn is_pi_transcript(path: &Path) -> bool {
+    path.is_absolute() && path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
+fn is_antigravity_transcript(path: &Path) -> bool {
+    path.is_absolute() && path.extension().is_some_and(|ext| ext == "jsonl")
+}
+
+/// Extract plain user request text from an Antigravity `transcript.jsonl` content field,
+/// unwrapping `<USER_REQUEST>...</USER_REQUEST>` when present and dropping context wrappers.
+pub fn extract_antigravity_user_request(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(start) = trimmed.find("<USER_REQUEST>") {
+        let after = &trimmed[start + "<USER_REQUEST>".len()..];
+        let body = after
+            .find("</USER_REQUEST>")
+            .map(|end| &after[..end])
+            .unwrap_or(after);
+        let cleaned = body.trim();
+        return (!cleaned.is_empty()).then(|| cleaned.to_string());
+    }
+    if trimmed.contains("<CONTEXT_SUMMARY>") || trimmed.contains("<system-reminder>") {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 /// Newer transcripts label turns Claude Code produced itself; a compaction
@@ -576,6 +731,85 @@ pub fn claude_prompt_records(bytes: &[u8], session: &str) -> Vec<PromptRecord> {
             prompts.push(PromptRecord {
                 text: text.trim().to_owned(),
                 at: record["timestamp"].as_str().map(str::to_owned),
+            });
+        }
+    }
+    prompts
+}
+
+/// Every user prompt in the last `limit` bytes of a Pi session JSONL file,
+/// oldest first, vetted by `is_user_prompt`.
+pub fn pi_prompts(path: &Path, limit: u64) -> Option<(Vec<PromptRecord>, bool)> {
+    if !is_pi_transcript(path) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let (bytes, cut) = read_jsonl_tail(&mut file, &metadata, limit)?;
+    Some((pi_prompt_records(&bytes), cut))
+}
+
+pub fn pi_prompt_records(bytes: &[u8]) -> Vec<PromptRecord> {
+    let mut prompts = Vec::new();
+    for record in json_lines(bytes) {
+        if record["type"] != "message" || record["message"]["role"] != "user" {
+            continue;
+        }
+        let Some(text) = message_content_text(&record["message"]) else {
+            continue;
+        };
+        if is_user_prompt(&text) {
+            prompts.push(PromptRecord {
+                text: text.trim().to_owned(),
+                at: record["timestamp"].as_str().map(str::to_owned),
+            });
+        }
+    }
+    prompts
+}
+
+/// Every explicit user prompt in the last `limit` bytes of an Antigravity `transcript.jsonl`
+/// file, oldest first, vetted by `is_user_prompt`.
+pub fn antigravity_prompts(path: &Path, limit: u64) -> Option<(Vec<PromptRecord>, bool)> {
+    if !is_antigravity_transcript(path) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let (bytes, cut) = read_jsonl_tail(&mut file, &metadata, limit)?;
+    Some((antigravity_prompt_records(&bytes), cut))
+}
+
+pub fn antigravity_prompt_records(bytes: &[u8]) -> Vec<PromptRecord> {
+    let mut prompts = Vec::new();
+    for record in json_lines(bytes) {
+        if record["type"] != "USER_INPUT" || record["source"] != "USER_EXPLICIT" {
+            continue;
+        }
+        let raw = record["content"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| record["text"].as_str().map(str::to_owned))
+            .or_else(|| message_content_text(&record["message"]));
+        let Some(raw) = raw else {
+            continue;
+        };
+        let Some(text) = extract_antigravity_user_request(&raw) else {
+            continue;
+        };
+        if is_user_prompt(&text) {
+            prompts.push(PromptRecord {
+                text: text.trim().to_owned(),
+                at: record["created_at"]
+                    .as_str()
+                    .or_else(|| record["timestamp"].as_str())
+                    .map(str::to_owned),
             });
         }
     }
@@ -758,6 +992,68 @@ mod tests {
         apply_claude(&mut late, &json!({"hook_event_name":"Stop","session_id":"own","transcript_path":transcript}));
         assert_eq!(late.prompt, "Push the PR");
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn card_title_pi_and_antigravity_transcript_filtering() {
+        let pi_bytes = [
+            json!({"type":"session","id":"pi-1"}),
+            json!({"type":"message","timestamp":"2026-10-07T09:00:00Z","message":{"role":"user","content":"<task-notification>ignored</task-notification>"}}),
+            json!({"type":"message","timestamp":"2026-10-07T09:01:00Z","message":{"role":"user","content":[{"type":"text","text":"Fix Pi session parser"}]}}),
+        ]
+        .iter()
+        .map(|v| format!("{v}\n"))
+        .collect::<String>();
+        assert_eq!(
+            pi_prompt_records(pi_bytes.as_bytes()),
+            vec![PromptRecord {
+                text: "Fix Pi session parser".into(),
+                at: Some("2026-10-07T09:01:00Z".into()),
+            }]
+        );
+
+        let agy_bytes = [
+            json!({"type":"USER_INPUT","source":"SYSTEM","content":"<USER_REQUEST>ignore non-explicit</USER_REQUEST>","created_at":"2026-10-07T09:00:00Z"}),
+            json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"<CONTEXT_SUMMARY>summary</CONTEXT_SUMMARY>","created_at":"2026-10-07T09:01:00Z"}),
+            json!({"type":"USER_INPUT","source":"USER_EXPLICIT","content":"wrapper\n<USER_REQUEST>Refactor widget layout</USER_REQUEST>","created_at":"2026-10-07T09:02:00Z"}),
+        ]
+        .iter()
+        .map(|v| format!("{v}\n"))
+        .collect::<String>();
+        assert_eq!(
+            antigravity_prompt_records(agy_bytes.as_bytes()),
+            vec![PromptRecord {
+                text: "Refactor widget layout".into(),
+                at: Some("2026-10-07T09:02:00Z".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn apply_hermes_and_antigravity_set_expected_metadata() {
+        let mut hermes = Metadata {
+            agent: "hermes".into(),
+            ..Default::default()
+        };
+        apply_hermes(&mut hermes, &json!({"hook":"pre_llm","session_id":"h-1","model":"gpt-5","title":"Optimize SQL","prompt":"Tune indexes"}));
+        assert_eq!(hermes.native_session, "h-1");
+        assert_eq!(hermes.status, "working");
+        assert_eq!(hermes.model, "gpt-5");
+        assert_eq!(hermes.title, "Optimize SQL");
+        assert_eq!(hermes.prompt, "Tune indexes");
+        apply_hermes(&mut hermes, &json!({"hook":"approval_request","session_id":"h-1"}));
+        assert_eq!(hermes.status, "waiting");
+        apply_hermes(&mut hermes, &json!({"hook":"post_llm","session_id":"h-1"}));
+        assert_eq!(hermes.status, "idle");
+
+        let mut agy = Metadata {
+            agent: "antigravity".into(),
+            ..Default::default()
+        };
+        apply_antigravity(&mut agy, &json!({"conversationId":"conv-1","prompt":"Inspect hooks"}));
+        assert_eq!(agy.native_session, "conv-1");
+        assert_eq!(agy.status, "unknown");
+        assert_eq!(agy.prompt, "Inspect hooks");
     }
 
 }

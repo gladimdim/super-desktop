@@ -412,8 +412,11 @@ pub(in crate::harness_settings) fn wire_harness_list(page: &HarnessesPage, hooks
                 let key = info.key.to_string();
                 list.connect_toggle(&btn, key.clone());
                 rows.append(&row);
-                if info.key == "openclaw" {
-                    rows.append(&openclaw_plugin_notice(OpenClawActions::SYSTEM));
+                match info.key {
+                    "openclaw" => rows.append(&openclaw_plugin_notice(OpenClawActions::SYSTEM)),
+                    "antigravity" => rows.append(&super::openclaw::antigravity_hook_notice()),
+                    "hermes" => rows.append(&super::openclaw::hermes_plugin_notice()),
+                    _ => {}
                 }
                 list.row_buttons.borrow_mut().push((key, btn));
             }

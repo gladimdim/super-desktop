@@ -22,7 +22,7 @@ pub(in crate::tmux) fn get_proc_comm(pid: u32) -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub(in crate::tmux) fn get_direct_children(pid: u32) -> Vec<u32> {
+pub(crate) fn get_direct_children(pid: u32) -> Vec<u32> {
     let task_path = format!("/proc/{}/task/{}/children", pid, pid);
     if let Ok(content) = std::fs::read_to_string(&task_path) {
         return content
@@ -37,7 +37,7 @@ pub(in crate::tmux) fn get_direct_children(pid: u32) -> Vec<u32> {
 pub(in crate::tmux) fn get_proc_comm(pid: u32) -> String { crate::platform::process::name(pid).unwrap_or_default() }
 
 #[cfg(target_os = "macos")]
-pub(in crate::tmux) fn get_direct_children(pid: u32) -> Vec<u32> { crate::platform::process::children(pid) }
+pub(crate) fn get_direct_children(pid: u32) -> Vec<u32> { crate::platform::process::children(pid) }
 
 /// Compare the shell's process group with the terminal's foreground group.
 /// Background jobs and persistent helpers are not evidence of a busy prompt.
@@ -305,13 +305,23 @@ pub fn status_for_pane(
         }
     }
 
+    if agent_type == "grok" && p_num != 0 {
+        if let Some((raw, _)) = crate::grok_session::inspect_status(p_num, Some(&cwd)) {
+            if let Some((status, label)) = crate::harness_record::status(raw) {
+                return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+            }
+        }
+    }
+
     if crate::harness_metadata::has_native_metadata(agent_type) {
         // An adapter that never reported (an OpenClaw gateway without our
         // plugin, hooks that did not run) has no status to give: use the
         // screen like any other launcher rather than a permanent UNKNOWN.
         if let Some(metadata) = metadata().filter(|m| m.adapter_reported()) {
-            if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
-                return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+            if !(metadata.agent == "antigravity" && metadata.status == "unknown") {
+                if let Some((status, label)) = crate::harness_metadata::status(&metadata.status) {
+                    return SessionStatus { status, label, pid: display_pid, cmd: display_cmd, cwd };
+                }
             }
         }
     }

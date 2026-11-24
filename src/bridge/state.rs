@@ -12,14 +12,54 @@ pub(crate) fn last_user_text(
     }
     // A silent native adapter falls back to the typed prompt (same rule as
     // the card, see `reported_or_typed_prompt`).
+    let metadata = crate::harness_metadata::inspect(session, agent_type);
     if let Some(prompt) = crate::card_status::reported_or_typed_prompt(
-        crate::harness_metadata::inspect(session, agent_type).as_ref(),
+        metadata.as_ref(),
         || crate::prompt_history::last(session),
     ) {
-        return prompt;
+        if prompt.is_some() {
+            return prompt;
+        }
+        if let Some(m) = metadata.filter(|m| m.adapter_reported() && !m.native_session.is_empty()) {
+            match agent_type {
+                "antigravity" | "agy" => {
+                    if let Some(p) = crate::antigravity::latest_prompt(&m.native_session) {
+                        return Some(crate::tmux::truncate_prompt_title(&p));
+                    }
+                    return crate::prompt_history::last(session)
+                        .filter(|p| crate::harness_record::is_user_prompt(p));
+                }
+                "hermes" => {
+                    if let Some(p) = crate::hermes::latest_prompt(&m.native_session) {
+                        return Some(crate::tmux::truncate_prompt_title(&p));
+                    }
+                    return crate::prompt_history::last(session)
+                        .filter(|p| crate::harness_record::is_user_prompt(p));
+                }
+                "pi" if !m.transcript.is_empty() => {
+                    if let Some((recs, _)) = crate::harness_record::pi_prompts(
+                        std::path::Path::new(&m.transcript),
+                        64 * 1024,
+                    ) {
+                        if let Some(last) = recs.into_iter().last() {
+                            return Some(crate::tmux::truncate_prompt_title(&last.text));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
     }
     if agent_type == "codex" {
         return crate::completion::last_user_prompt(session);
+    }
+    if agent_type == "grok" {
+        if let Some(pid) = crate::completion::pane_pid(session) {
+            if let Some(p) = crate::grok_session::latest_prompt_for_pid(pid, None) {
+                return Some(crate::tmux::truncate_prompt_title(&p));
+            }
+        }
     }
     // Exact opencode DB text is resolved to the session OWNED by this pane
     // (own `--session` flag, else a claims-aware match), so a closed console's
@@ -39,8 +79,17 @@ pub(crate) fn session_title(session: &str, agent_type: &str, pane_pid: &str) -> 
     if let Some(title) = crate::harness_metadata::title(session, agent_type) {
         return Some(title);
     }
-    if agent_type != "codex" { return None; }
-    crate::completion::session_title(pane_pid.parse().ok()?)
+    match agent_type {
+        "codex" => crate::completion::session_title(pane_pid.parse().ok()?),
+        "grok" => crate::grok_session::title_for_pid(pane_pid.parse().ok()?, None),
+        "antigravity" | "agy" => crate::harness_metadata::inspect(session, agent_type)
+            .filter(|m| !m.native_session.is_empty())
+            .and_then(|m| crate::antigravity::summary_title(&m.native_session)),
+        "hermes" => crate::harness_metadata::inspect(session, agent_type)
+            .filter(|m| !m.native_session.is_empty())
+            .and_then(|m| crate::hermes::session_title(&m.native_session)),
+        _ => None,
+    }
 }
 
 /// Hex colour of a super-desktop group tag (0 = untagged).

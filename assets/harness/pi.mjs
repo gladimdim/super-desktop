@@ -9,6 +9,7 @@ export default function integration(pi) {
     session: ctx.sessionManager.getSessionId(),
     title: ctx.sessionManager.getSessionName() ?? "",
     model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "",
+    transcript: ctx.sessionManager.getSessionFile() ?? "",
   });
   const emit = (ctx, patch) => report("pi", { ...metadata(ctx), ...patch });
   pi.on("session_start", async (_event, ctx) => {

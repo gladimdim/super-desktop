@@ -171,10 +171,11 @@ fn resolve_oc_id(request: &CardRequest) -> Option<String> {
 /// its CLI holds open. Never the latest conversation in the folder.
 fn own_session(agent: &str, metadata: Option<&Metadata>, row: Option<&PaneRow>) -> Option<String> {
     let id = match agent {
-        "claude" => metadata
+        "claude" | "pi" | "antigravity" | "agy" | "hermes" => metadata
             .filter(|m| m.adapter_reported())
             .map(|m| m.native_session.clone()),
         "codex" => crate::completion::session_id(row?.pid.parse().ok()?),
+        "grok" => crate::grok_session::find_session_id_for_pid(row?.pid.parse().ok()?),
         _ => None,
     }?;
     crate::tmux::is_resumable_id(&id).then_some(id)
@@ -225,10 +226,43 @@ pub(crate) fn card_prompt(
         );
     }
     if let Some(prompt) = reported_or_typed_prompt(metadata, recorded) {
-        return prompt;
+        if prompt.is_some() {
+            return prompt;
+        }
+        if let Some(m) = metadata.filter(|m| m.adapter_reported() && !m.native_session.is_empty()) {
+            match agent {
+                "antigravity" | "agy" => {
+                    if let Some(p) = crate::antigravity::latest_prompt(&m.native_session) {
+                        return Some(crate::tmux::truncate_prompt_title(&p));
+                    }
+                    return recorded().filter(|p| crate::harness_record::is_user_prompt(p));
+                }
+                "hermes" => {
+                    if let Some(p) = crate::hermes::latest_prompt(&m.native_session) {
+                        return Some(crate::tmux::truncate_prompt_title(&p));
+                    }
+                    return recorded().filter(|p| crate::harness_record::is_user_prompt(p));
+                }
+                "pi" if !m.transcript.is_empty() => {
+                    if let Some((recs, _)) =
+                        crate::harness_record::pi_prompts(std::path::Path::new(&m.transcript), 64 * 1024)
+                    {
+                        if let Some(last) = recs.into_iter().last() {
+                            return Some(crate::tmux::truncate_prompt_title(&last.text));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        return None;
     }
     if agent == "codex" {
         return crate::completion::last_user_prompt_for_pid(row?.pid.parse().ok()?);
+    }
+    if agent == "grok" {
+        return crate::grok_session::latest_prompt_for_pid(row?.pid.parse().ok()?, None)
+            .map(|p| crate::tmux::truncate_prompt_title(&p));
     }
     if agent == "opencode" {
         return crate::tmux::get_opencode_user_text_by_id(oc_id?);
@@ -255,6 +289,13 @@ pub(crate) fn card_title(
     match agent {
         "opencode" => crate::tmux::get_opencode_title_by_id(oc_id?),
         "codex" => crate::completion::session_title(pid.parse().ok()?),
+        "grok" => crate::grok_session::title_for_pid(pid.parse().ok()?, None),
+        "antigravity" | "agy" => metadata
+            .filter(|m| m.adapter_reported() && !m.native_session.is_empty())
+            .and_then(|m| crate::antigravity::summary_title(&m.native_session)),
+        "hermes" => metadata
+            .filter(|m| m.adapter_reported() && !m.native_session.is_empty())
+            .and_then(|m| crate::hermes::session_title(&m.native_session)),
         _ => None,
     }
 }
