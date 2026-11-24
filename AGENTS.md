@@ -45,7 +45,7 @@ together.
 
 A release is an annotated git tag `vX.Y.Z` on the commit whose `Cargo.toml`
 version is X.Y.Z, plus a GitHub Release. People use it to install an exact
-version (`SUPER_DESKTOP_VERSION=vX.Y.Z` with `install.sh`, see the README's
+version (`SUPER_DESKTOP_VERSION=vX.Y.Z` with `install.sh`, see `guides/INSTALL.md`'s
 "Installing a specific version"), for example to match an older phone app.
 Make one only when the user says to release; never tag on your own. The
 version changes only for a release, so every version is a release.
@@ -76,7 +76,7 @@ When the user asks for a release:
    (`SUPER_DESKTOP_VERSION=vX.Y.Z` command), then the changelog. Leave the
    Android line out, and name no app version anywhere, until the user says the
    Android app is public.
-6. Add a row to the README's compatibility table (a normal commit; the release
+6. Add a row to the compatibility table in `guides/INSTALL.md` (a normal commit; the release
    tag stays on the release commit). Then check the command in a scratch
    clone (`git clone --branch vX.Y.Z`), never on the user's own install, and
    open the Release page.
@@ -104,7 +104,8 @@ mobile terminal output and Linux performance notes.
   describe unreleased plans. Describe shipped, user-facing behavior only.
 - This repository's Markdown is limited to README.md, CLI.md (the public command
   reference), SECURITY.md, these
-  instructions, `assets/logos/` attribution and licenses,
+  instructions, `guides/*.md` (public shipped user guides split out of README.md),
+  `assets/logos/` attribution and licenses,
   `docs/screenshots/README.md`, and the plugin skill under `skills/`.
 - If `../OmarchyAILauncher` is not checked out, ask for it instead of writing
   the notes here.
