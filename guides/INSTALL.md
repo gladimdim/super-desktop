@@ -91,6 +91,7 @@ follows the `master` branch instead, until you install a release again with
 
 | SUPER DESKTOP | Protocol |
 | --- | --- |
+| `v2.1.0` | 3 |
 | `v2.0.8` | 3 |
 | `v2.0.7` | 3 |
 | `v2.0.6` | 3 |
