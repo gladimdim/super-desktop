@@ -47,6 +47,8 @@ pub(crate) use interaction::{dragged_origin, placed_origin};
 pub(in crate::mini_terminal) use interaction::{
     CardActivity, MoveDrag, ACTIVE_FOR, RESIZE_HOVER_LOCK,
 };
+pub use refresh::observe_hidden_status;
+pub(in crate::mini_terminal) use refresh::forget_session_notifications;
 #[allow(unused_imports)]
 pub use interaction::{HoverRaiseLock, NEW_HARNESS_HOVER_LOCK};
 #[allow(unused_imports)]
@@ -76,6 +78,7 @@ pub struct MiniTerminalCard {
     /// forever and keeps showing that console's prompt in this card's title.
     pub(in crate::mini_terminal) oc_recheck_at: Rc<RefCell<std::time::Instant>>,
     pub(in crate::mini_terminal) status_badge: Label,
+    pub(in crate::mini_terminal) current_status: Rc<RefCell<String>>,
     pub(in crate::mini_terminal) refresh_in_flight: Rc<Cell<bool>>,
     pub(in crate::mini_terminal) meta_label: Label,
     /// A brief line about the last command this card sent to another PC
@@ -132,6 +135,11 @@ pub struct MiniTerminalCard {
     pub(in crate::mini_terminal) geometry_commit: GeometryAction,
     /// The header buttons running plugins add (a local card only).
     pub(in crate::mini_terminal) plugin_buttons: Option<crate::plugin_ui::card_buttons::ButtonRow>,
+    pub(in crate::mini_terminal) files_btn: Option<Button>,
+    pub(in crate::mini_terminal) attach_btn: Option<Button>,
+    pub(in crate::mini_terminal) history_btn: Option<Button>,
+    pub(in crate::mini_terminal) on_open_slash: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
+    pub(in crate::mini_terminal) on_restart: Rc<RefCell<Option<Rc<dyn Fn(bool)>>>>,
 }
 
 impl MiniTerminalCard {
@@ -329,30 +337,124 @@ impl MiniTerminalCard {
         // never gets that button. The panel buttons sit closer together than
         // the rest of the header: it sets the card's minimum width, and these
         // three must fit a default-size card without widening it.
-        if !source.is_remote() {
+        let (files_btn, attach_btn, history_btn) = if !source.is_remote() {
             let panels = gtk4::Box::new(Orientation::Horizontal, 0);
             panels.add_css_class("term-panel-btns");
-            panels.append(&crate::asset_view::button(
+            let f_btn = crate::asset_view::button(
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
-            ));
+            );
+            panels.append(&f_btn);
             // Attachments are files on this machine, typed into its own
             // terminal. A card from before folders were recorded started in
             // $HOME.
             let folder = data.borrow().workspace_dir.clone()
                 .unwrap_or_else(crate::state::home_dir_string);
-            panels.append(&crate::attachment_view::button(
+            let a_btn = crate::attachment_view::button(
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
                 folder,
-            ));
+            );
+            panels.append(&a_btn);
             // Prompt history reads this machine's journal and agent files too.
-            panels.append(&crate::prompt_history_view::button(
+            let h_btn = crate::prompt_history_view::button(
                 data.borrow().session_name.clone(),
                 display_name.to_string(),
                 &agent_type,
-            ));
+            );
+            panels.append(&h_btn);
             header.append(&panels);
+            (Some(f_btn), Some(a_btn), Some(h_btn))
+        } else {
+            (None, None, None)
+        };
+        let on_open_slash: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
+        let on_restart: Rc<RefCell<Option<Rc<dyn Fn(bool)>>>> = Rc::new(RefCell::new(None));
+        if !source.is_remote() {
+            let right_click = GestureClick::new();
+            right_click.set_button(gdk::BUTTON_SECONDARY);
+            let h_weak = header.downgrade();
+            let pop_agent = agent_type.clone();
+            let pop_data = Rc::clone(&data);
+            let pop_slash = Rc::clone(&on_open_slash);
+            let pop_restart = Rc::clone(&on_restart);
+            let pop_f = files_btn.clone();
+            let pop_a = attach_btn.clone();
+            let pop_h = history_btn.clone();
+            right_click.connect_pressed(move |_, _, _, _| {
+                let Some(hdr) = h_weak.upgrade() else { return };
+                let pop = gtk4::Popover::new();
+                pop.set_parent(&hdr);
+                pop.set_position(gtk4::PositionType::Bottom);
+                pop.set_has_arrow(true);
+                pop.set_autohide(true);
+                let col = gtk4::Box::new(Orientation::Vertical, 2);
+                col.set_margin_top(4);
+                col.set_margin_bottom(4);
+                col.set_margin_start(4);
+                col.set_margin_end(4);
+
+                let add_btn = |label: &str, sensitive: bool, act: Box<dyn FnOnce()>| {
+                    let b = Button::with_label(label);
+                    b.set_has_frame(false);
+                    b.set_sensitive(sensitive);
+                    if let Some(lbl) = b.child().and_downcast::<Label>() {
+                        lbl.set_xalign(0.0);
+                    }
+                    let pop_close = pop.clone();
+                    let act_cell = RefCell::new(Some(act));
+                    b.connect_clicked(move |_| {
+                        pop_close.popdown();
+                        if let Some(f) = act_cell.borrow_mut().take() {
+                            f();
+                        }
+                    });
+                    col.append(&b);
+                };
+
+                if !crate::slash_commands::commands_for(&pop_agent).is_empty() {
+                    let slash_ref = Rc::clone(&pop_slash);
+                    add_btn("Slash commands…", true, Box::new(move || {
+                        if let Some(cb) = slash_ref.borrow().clone() {
+                            cb();
+                        }
+                    }));
+                }
+                let r1 = Rc::clone(&pop_restart);
+                add_btn("Restart fresh", true, Box::new(move || {
+                    if let Some(cb) = r1.borrow().clone() {
+                        cb(false);
+                    }
+                }));
+                let can_resume = pop_data.borrow().agent_session_id.is_some()
+                    || matches!(pop_agent.as_str(), "claude" | "opencode" | "codex" | "aider" | "reasonix");
+                let r2 = Rc::clone(&pop_restart);
+                add_btn("Resume conversation", can_resume, Box::new(move || {
+                    if let Some(cb) = r2.borrow().clone() {
+                        cb(true);
+                    }
+                }));
+                if let Some(btn) = pop_h.clone() {
+                    let sensitive = btn.is_sensitive();
+                    add_btn("Prompt history", sensitive, Box::new(move || {
+                        btn.emit_clicked();
+                    }));
+                }
+                if let Some(btn) = pop_f.clone() {
+                    add_btn("Files & links", true, Box::new(move || {
+                        btn.emit_clicked();
+                    }));
+                }
+                if let Some(btn) = pop_a.clone() {
+                    add_btn("Attach files", true, Box::new(move || {
+                        btn.emit_clicked();
+                    }));
+                }
+                pop.set_child(Some(&col));
+                pop.connect_closed(|p| p.unparent());
+                pop.popup();
+            });
+            header.add_controller(right_click);
         }
 
         // Iconify button: iconifies the window into 128x128 size
@@ -637,6 +739,7 @@ impl MiniTerminalCard {
             // guess heals fast, then at most every 30s.
             oc_recheck_at: Rc::new(RefCell::new(std::time::Instant::now())),
             status_badge,
+            current_status: Rc::new(RefCell::new("IDLE".into())),
             refresh_in_flight: Rc::new(Cell::new(false)),
             meta_label,
             notice,
@@ -667,6 +770,11 @@ impl MiniTerminalCard {
             cli_tag_buttons: Rc::clone(&tag_sync),
             geometry_commit: Rc::new(RefCell::new(None)),
             plugin_buttons,
+            files_btn,
+            attach_btn,
+            history_btn,
+            on_open_slash: Rc::clone(&on_open_slash),
+            on_restart: Rc::clone(&on_restart),
         };
 
         // Hover-focus: entering the card raises it and focuses VTE,

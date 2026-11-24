@@ -89,9 +89,97 @@ impl Links {
     }
 }
 
+/// Find an HTTP(S) link at (`target_row`, `target_col`) across contiguous
+/// hard-wrapped lines of `cols` width, returning `clean_link` on the token.
+pub fn wrapped_link_at(rows: &[&str], target_row: usize, target_col: usize, cols: usize) -> Option<String> {
+    if target_row >= rows.len() || cols < 16 {
+        return None;
+    }
+    fn trim_cr(s: &str) -> &str {
+        s.trim_end_matches('\r')
+    }
+    let is_wrap_join = |idx: usize| -> bool {
+        let cur = trim_cr(rows[idx]);
+        let next = trim_cr(rows[idx + 1]);
+        let len = cur.chars().count();
+        let ends_non_ws = cur.chars().next_back().is_some_and(|c| !c.is_whitespace());
+        let next_starts_non_ws = next.chars().next().is_some_and(|c| !c.is_whitespace());
+        len >= cols.saturating_sub(1) && ends_non_ws && next_starts_non_ws
+    };
+
+    let mut start = target_row;
+    while start > 0 && is_wrap_join(start - 1) {
+        start -= 1;
+    }
+    let mut end = target_row;
+    while end + 1 < rows.len() && is_wrap_join(end) {
+        end += 1;
+    }
+
+    let mut combined = String::new();
+    let mut click_char_idx = 0usize;
+    for (offset_row, raw) in rows[start..=end].iter().enumerate() {
+        let line = trim_cr(raw);
+        let row_idx = start + offset_row;
+        let line_chars = line.chars().count();
+        if row_idx < target_row {
+            click_char_idx += line_chars;
+        } else if row_idx == target_row {
+            click_char_idx += target_col.min(line_chars);
+        }
+        combined.push_str(line);
+    }
+
+    let chars: Vec<char> = combined.chars().collect();
+    if chars.is_empty() || click_char_idx >= chars.len() {
+        return None;
+    }
+    let is_url_char = |c: char| !c.is_whitespace() && !matches!(c, '"' | '\'' | '<' | '>' | '`');
+    let mut left = click_char_idx;
+    if !is_url_char(chars[left]) {
+        return None;
+    }
+    while left > 0 && is_url_char(chars[left - 1]) {
+        left -= 1;
+    }
+    let mut right = click_char_idx + 1;
+    while right < chars.len() && is_url_char(chars[right]) {
+        right += 1;
+    }
+    let token: String = chars[left..right].iter().collect();
+    clean_link(&token)
+}
+
+fn wrapped_link_in_term(term: &vte4::Terminal, x: f64, y: f64) -> Option<String> {
+    let cw = term.char_width() as f64;
+    let ch = term.char_height() as f64;
+    if cw <= 0.0 || ch <= 0.0 || x < 0.0 || y < 0.0 {
+        return None;
+    }
+    let col = (x / cw).floor() as usize;
+    let view_row = (y / ch).floor() as usize;
+    let cols = term.column_count().max(1) as usize;
+    let visible_rows = term.row_count().max(1) as usize;
+    let text = term.text_format(vte4::Format::Text)?;
+    let rows: Vec<&str> = text.split('\n').collect();
+    let top_row = if rows.len() <= visible_rows {
+        0
+    } else {
+        term.vadjustment()
+            .map(|adj| adj.value().round().max(0.0) as usize)
+            .unwrap_or(0)
+            .min(rows.len().saturating_sub(visible_rows))
+    };
+    wrapped_link_at(&rows, top_row + view_row, col, cols)
+}
+
 /// The link under view position (`x`, `y`), if Ctrl highlighting is active.
 fn link_at(term: &vte4::Terminal, x: f64, y: f64) -> Option<String> {
-    clean_link(term.check_match_at(x, y).0?.as_str())
+    let single = clean_link(term.check_match_at(x, y).0?.as_str());
+    match (single, wrapped_link_in_term(term, x, y)) {
+        (Some(s), Some(w)) if w.len() > s.len() => Some(w),
+        (s, w) => s.or(w),
+    }
 }
 
 fn open(uri: String) {
@@ -169,7 +257,7 @@ pub fn install(term: &vte4::Terminal) {
             return;
         }
         l.set_active(&term, true);
-        if let Some(uri) = link_at(&term, x, y) {
+        if let Some(uri) = link_at(&term, x, y).or_else(|| wrapped_link_in_term(&term, x, y)) {
             gesture.set_state(gtk4::EventSequenceState::Claimed);
             open(uri);
         }
@@ -241,5 +329,40 @@ mod tests {
         let (x, y) = at(10.0);
         assert_eq!(link_at(&term, x, y), None, "releasing Ctrl ends highlighting");
         window.close();
+    }
+
+    #[test]
+    fn wrapped_link_joins_soft_wrapped_urls_across_rows_without_joining_short_lines() {
+        // 2-row wrapped URL clicked on row 1 or row 2:
+        let rows2 = ["open https://example.org/a/b", "cdef/ghij?k=1. done"];
+        let r0_len = rows2[0].chars().count();
+        assert_eq!(
+            wrapped_link_at(&rows2, 0, 10, r0_len).as_deref(),
+            Some("https://example.org/a/bcdef/ghij?k=1")
+        );
+        assert_eq!(
+            wrapped_link_at(&rows2, 1, 3, r0_len).as_deref(),
+            Some("https://example.org/a/bcdef/ghij?k=1")
+        );
+
+        // 3-row wrapped URL with trailing sentence period:
+        let rows3 = [
+            "https://example.org/",
+            "very/long/path/segmt",
+            "end/page?q=42).",
+        ];
+        let cols = rows3[0].chars().count();
+        assert_eq!(
+            wrapped_link_at(&rows3, 2, 2, cols).as_deref(),
+            Some("https://example.org/very/long/path/segmtend/page?q=42")
+        );
+
+        // Short line must not join with the line below it.
+        let short = ["see https://example.org/a", "more/text"];
+        assert_eq!(
+            wrapped_link_at(&short, 0, 10, 40).as_deref(),
+            Some("https://example.org/a")
+        );
+        assert_eq!(wrapped_link_at(&short, 1, 2, 40), None);
     }
 }

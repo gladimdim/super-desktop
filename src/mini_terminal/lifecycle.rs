@@ -287,6 +287,100 @@ impl MiniTerminalCard {
         self.status_badge.label().split_whitespace().last().unwrap_or("IDLE").to_lowercase()
     }
 
+    pub fn status_name(&self) -> String {
+        self.current_status.borrow().clone()
+    }
+
+    pub fn title_text(&self) -> String {
+        self.title_label.label().to_string()
+    }
+
+    pub fn open_files(&self) {
+        if let Some(btn) = &self.files_btn {
+            btn.emit_clicked();
+        }
+    }
+
+    pub fn open_attachments(&self) {
+        if let Some(btn) = &self.attach_btn {
+            btn.emit_clicked();
+        }
+    }
+
+    pub fn open_prompt_history(&self) {
+        if let Some(btn) = &self.history_btn {
+            if btn.is_sensitive() {
+                btn.emit_clicked();
+            }
+        }
+    }
+
+    pub fn set_on_open_slash(&self, cb: Rc<dyn Fn()>) {
+        *self.on_open_slash.borrow_mut() = Some(cb);
+    }
+
+    pub fn set_on_restart(&self, cb: Rc<dyn Fn(bool)>) {
+        *self.on_restart.borrow_mut() = Some(cb);
+    }
+
+    pub fn toggle_expand(&self) {
+        self.chrome.expand_btn.emit_clicked();
+    }
+
+    pub fn toggle_iconify(&self) {
+        self.set_iconified(!self.is_compact());
+    }
+
+    pub fn restart(self: &Rc<Self>, resume_saved: bool) {
+        if self.source.is_remote() || self.session_task.is_closed() {
+            return;
+        }
+        let (session, agent_type, cmd, workspace_dir) = {
+            let mut d = self.data.borrow_mut();
+            if !resume_saved {
+                d.agent_session_id = None;
+            }
+            (
+                d.session_name.clone(),
+                d.agent_type.clone(),
+                d.command.clone(),
+                d.workspace_dir.clone(),
+            )
+        };
+        if !resume_saved {
+            let snapshot = self.data.borrow().clone();
+            (self.on_session_persist)(&snapshot);
+        }
+        self.detach_vte();
+        let weak = Rc::downgrade(self);
+        let task = Arc::clone(&self.session_task);
+        glib::MainContext::default().spawn_local(async move {
+            let _ = gtk4::gio::spawn_blocking(move || {
+                if task.is_closed() {
+                    return;
+                }
+                if resume_saved {
+                    crate::tmux::kill_session(&session);
+                } else {
+                    crate::tmux::restart_fresh(
+                        &session,
+                        &agent_type,
+                        (!cmd.is_empty()).then_some(cmd.as_str()),
+                        workspace_dir.as_deref(),
+                    );
+                }
+            })
+            .await;
+            let Some(card) = weak.upgrade() else { return };
+            if card.session_task.is_closed() {
+                return;
+            }
+            card.attach_vte();
+            card.focus_terminal();
+            card.refresh_status();
+        });
+    }
+
     /// An explicit keyboard selection restores compact cards and protects the
     /// selected terminal from the pointer left over a different card.
     pub fn select_with_keyboard(&self) {
@@ -733,6 +827,7 @@ impl MiniTerminalCard {
         self.detach_vte();
         let task = Arc::clone(&self.session_task);
         let session = self.data.borrow().session_name.clone();
+        forget_session_notifications(&session);
         gtk4::gio::spawn_blocking(move || {
             task.finish_close(|| crate::tmux::kill_session(&session));
         });

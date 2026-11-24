@@ -326,6 +326,7 @@ impl SuperDesktopWindow {
         // First: paused tmux clients redraw within a few ms of this, before
         // the slide-in brings their cards on screen.
         self.hidden_pause.on_shown();
+        self.hidden_notify_gen.set(self.hidden_notify_gen.get().wrapping_add(1));
         self.show_token.set(self.show_token.get().wrapping_add(1));
         self.reclaim_input();
         // Before drawing is re-enabled, so a terminal whose image is stale
@@ -425,6 +426,80 @@ impl SuperDesktopWindow {
         // cards keep the last frame, so showing again reconnects immediately.
         self.machine_view.suspend_streams();
         self.arm_hidden_pause();
+        self.arm_hidden_notifications();
+    }
+
+    pub fn arm_hidden_notifications(&self) {
+        let gen = self.hidden_notify_gen.get().wrapping_add(1);
+        self.hidden_notify_gen.set(gen);
+        let working: Vec<(String, String, String)> = self
+            .terminal_cards
+            .borrow()
+            .iter()
+            .filter(|c| c.status_name() == "WORKING")
+            .map(|c| {
+                let d = c.data.borrow();
+                (d.session_name.clone(), d.agent_type.clone(), c.title_text())
+            })
+            .collect();
+        if working.is_empty() {
+            return;
+        }
+        let notify_gen = Rc::clone(&self.hidden_notify_gen);
+        let cards_w = Rc::downgrade(&self.terminal_cards);
+        let watched = Rc::new(RefCell::new(working));
+        glib::timeout_add_local(Duration::from_secs(3), move || {
+            if notify_gen.get() != gen {
+                return glib::ControlFlow::Break;
+            }
+            let current = watched.borrow().clone();
+            if current.is_empty() {
+                return glib::ControlFlow::Break;
+            }
+            let requests: Vec<crate::card_status::CardRequest> = current
+                .iter()
+                .map(|(session, agent, _)| crate::card_status::CardRequest {
+                    session: session.clone(),
+                    agent: agent.clone(),
+                    preview_lines: None,
+                    oc_id: None,
+                    need_resolve: false,
+                })
+                .collect();
+            let watched_c = Rc::clone(&watched);
+            let notify_gen_c = Rc::clone(&notify_gen);
+            let cards_c = std::rc::Weak::clone(&cards_w);
+            glib::MainContext::default().spawn_local(async move {
+                let Ok(updates) =
+                    gtk4::gio::spawn_blocking(move || crate::card_status::refresh(requests)).await
+                else {
+                    return;
+                };
+                if notify_gen_c.get() != gen {
+                    return;
+                }
+                let titles: HashMap<String, String> = cards_c
+                    .upgrade()
+                    .map(|rc| {
+                        rc.borrow()
+                            .iter()
+                            .map(|c| (c.data.borrow().session_name.clone(), c.title_text()))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut still_working = Vec::new();
+                for ((session, agent, old_title), update) in current.into_iter().zip(updates) {
+                    let title = titles.get(&session).cloned().unwrap_or(old_title);
+                    let st = update.status.status;
+                    crate::mini_terminal::observe_hidden_status(&session, &title, st);
+                    if st == "WORKING" {
+                        still_working.push((session, agent, title));
+                    }
+                }
+                *watched_c.borrow_mut() = still_working;
+            });
+            glib::ControlFlow::Continue
+        });
     }
 
     /// Render one small image with the window's renderer while the overlay is

@@ -150,6 +150,10 @@ pub struct SuperDesktopWindow {
     /// The welcome tour: opened once by the first show after a fresh install,
     /// and again from ⚙ Settings or `super-desktop tour`.
     pub(in crate::window) welcome_tour: Rc<crate::welcome_tour::WelcomeTour>,
+    pub(in crate::window) command_palette: Rc<crate::command_palette::CommandPalette>,
+    pub(in crate::window) hidden_notify_gen: Rc<Cell<u64>>,
+    pub(in crate::window) open_settings_action: RefCell<Option<Rc<dyn Fn()>>>,
+    pub(in crate::window) hide_overlay_action: RefCell<Option<Rc<dyn Fn()>>>,
     /// This window, for the slide's frame tick, which rebuilds the paths once
     /// the window has its real size.
     pub(in crate::window) this: std::cell::OnceCell<std::rc::Weak<Self>>,
@@ -492,6 +496,8 @@ impl SuperDesktopWindow {
             },
         );
 
+        let command_palette = crate::command_palette::CommandPalette::new();
+
         let win_rc = Rc::new(Self {
             window,
             canvas,
@@ -515,7 +521,11 @@ impl SuperDesktopWindow {
             brand_images: Rc::clone(&brand_images),
             settings_refresh: Rc::clone(&settings_panel.refresh),
             cli_harness_bar: Rc::clone(&harness_bar_for_settings),
-            overlay_panels: vec![settings_panel.widget.clone(), welcome_tour.widget.clone().upcast()],
+            overlay_panels: vec![
+                settings_panel.widget.clone(),
+                welcome_tour.widget.clone().upcast(),
+                command_palette.root.clone().upcast(),
+            ],
             ws_popover: workspace_bar.popover.clone(),
             ws_bar: workspace_bar.clone(),
             show_token: std::cell::Cell::new(0),
@@ -524,6 +534,10 @@ impl SuperDesktopWindow {
             terminal_picker: RefCell::new(None),
             settings_layout: RefCell::new(None),
             welcome_tour: Rc::clone(&welcome_tour),
+            command_palette: Rc::clone(&command_palette),
+            hidden_notify_gen: Rc::new(Cell::new(0)),
+            open_settings_action: RefCell::new(None),
+            hide_overlay_action: RefCell::new(None),
             this: std::cell::OnceCell::new(),
         });
         let _ = win_rc.this.set(Rc::downgrade(&win_rc));
@@ -823,6 +837,14 @@ impl SuperDesktopWindow {
             }
         });
         hud_right.append(&btn_settings);
+        {
+            let btn = btn_settings.clone();
+            *win_rc.open_settings_action.borrow_mut() = Some(Rc::new(move || {
+                btn.emit_clicked();
+            }));
+            let close_act: Rc<dyn Fn()> = Rc::clone(&on_close_rc) as Rc<dyn Fn()>;
+            *win_rc.hide_overlay_action.borrow_mut() = Some(close_act);
+        }
 
         // Close (its tooltip already names the current shortcut — see
         // `paint_shortcut_hints`).
@@ -970,6 +992,8 @@ impl SuperDesktopWindow {
         );
         // Last: a request is decided above whatever else is open.
         root_overlay.add_overlay(&pairing_requests.widget);
+        root_overlay.add_overlay(&win_rc.command_palette.root);
+        root_overlay.set_measure_overlay(&win_rc.command_palette.root, false);
 
         let picker_window = Rc::downgrade(&win_rc);
         let picker = crate::terminal_picker::Picker::install(&win_rc.window, &root_overlay, Rc::new(move || {
@@ -1009,6 +1033,85 @@ impl SuperDesktopWindow {
         });
         win_rc.window.add_controller(plugin_keys);
 
+        // Global Command Palette, card triage, and focused-card shortcuts (Capture phase).
+        let nav_keys = EventControllerKey::new();
+        nav_keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        let nav_w = Rc::downgrade(&win_rc);
+        nav_keys.connect_key_pressed(move |_, key, _, state| {
+            let Some(w) = nav_w.upgrade() else {
+                return glib::Propagation::Proceed;
+            };
+            if w.command_palette.is_open() {
+                return glib::Propagation::Proceed;
+            }
+            let alt = state.contains(gdk::ModifierType::ALT_MASK);
+            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+            let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+            let modal_open = w.overlay_panels.iter().any(|p| p.is_visible())
+                || w.pairing_requests.is_open()
+                || w.pairing_wizard.is_open();
+
+            if (alt && !ctrl && key == gdk::Key::space)
+                || (ctrl && shift && !alt && matches!(key, gdk::Key::k | gdk::Key::K))
+            {
+                if let Some(picker) = w.terminal_picker.borrow().as_ref() {
+                    picker.cancel();
+                }
+                w.open_command_palette();
+                return glib::Propagation::Stop;
+            }
+            if modal_open {
+                return glib::Propagation::Proceed;
+            }
+            if alt && !ctrl && matches!(key, gdk::Key::w | gdk::Key::W) {
+                if let Some(picker) = w.terminal_picker.borrow().as_ref() {
+                    picker.cancel();
+                }
+                w.jump_to_attention_card();
+                return glib::Propagation::Stop;
+            }
+            if alt && !ctrl && matches!(key, gdk::Key::bracketleft | gdk::Key::bracketright) {
+                if let Some(picker) = w.terminal_picker.borrow().as_ref() {
+                    picker.cancel();
+                }
+                w.cycle_local_cards(key == gdk::Key::bracketright);
+                return glib::Propagation::Stop;
+            }
+            if ctrl && shift && !alt {
+                if let Some(card) = w.focused_local_card() {
+                    match key {
+                        gdk::Key::f | gdk::Key::F => {
+                            card.toggle_expand();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::m | gdk::Key::M => {
+                            card.toggle_iconify();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::p | gdk::Key::P => {
+                            card.open_prompt_history();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::o | gdk::Key::O => {
+                            card.open_files();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::a | gdk::Key::A => {
+                            card.open_attachments();
+                            return glib::Propagation::Stop;
+                        }
+                        gdk::Key::slash | gdk::Key::question => {
+                            w.open_slash_palette_for(&card);
+                            return glib::Propagation::Stop;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        win_rc.window.add_controller(nav_keys);
+
         // Esc key
         let key_ctrl = EventControllerKey::new();
         let on_close_key = Rc::clone(&on_close_rc);
@@ -1017,6 +1120,10 @@ impl SuperDesktopWindow {
         key_ctrl.connect_key_pressed(move |_, key, _, state| {
             if key == gdk::Key::Escape {
                 if let Some(w) = win_w.upgrade() {
+                    if w.command_palette.is_open() {
+                        w.command_palette.close();
+                        return glib::Propagation::Stop;
+                    }
                     if w.pairing_requests.is_open() {
                         w.pairing_requests.close();
                         return glib::Propagation::Stop;
@@ -1052,6 +1159,17 @@ impl SuperDesktopWindow {
                     }
                 }
                 on_close_key();
+                return glib::Propagation::Stop;
+            } else if state.contains(gdk::ModifierType::CONTROL_MASK) && (key == gdk::Key::k || key == gdk::Key::K) {
+                if let Some(w) = win_w.upgrade() {
+                    if let Some(focused) = gtk4::prelude::RootExt::focus(&w.window) {
+                        let type_name = focused.type_().name();
+                        if type_name.contains("Terminal") || focused.has_css_class("term-vte") {
+                            return glib::Propagation::Proceed;
+                        }
+                    }
+                    w.open_command_palette();
+                }
                 return glib::Propagation::Stop;
             } else if state.contains(gdk::ModifierType::CONTROL_MASK) && (key == gdk::Key::n || key == gdk::Key::N) {
                 if let Some(w) = win_w.upgrade() {
@@ -1129,4 +1247,308 @@ impl SuperDesktopWindow {
         win_rc
     }
 
+    pub(in crate::window) fn focused_local_card(&self) -> Option<Rc<MiniTerminalCard>> {
+        let cards = self.terminal_cards.borrow().clone();
+        if let Some(focused) = gtk4::prelude::RootExt::focus(&self.window) {
+            if let Some(card) = cards
+                .iter()
+                .find(|card| {
+                    let root: &gtk4::Widget = card.container.upcast_ref();
+                    &focused == root || focused.is_ancestor(root)
+                })
+                .cloned()
+            {
+                return Some(card);
+            }
+        }
+        cards.into_iter().find(|card| card.is_expanded())
+    }
+
+    fn focused_card_index(&self, cards: &[Rc<MiniTerminalCard>]) -> Option<usize> {
+        let focused = self.focused_local_card()?;
+        cards.iter().position(|c| Rc::ptr_eq(c, &focused))
+    }
+
+    pub(in crate::window) fn jump_to_attention_card(&self) {
+        let cards = self.terminal_cards.borrow().clone();
+        let statuses: Vec<String> = cards.iter().map(|c| c.status_name()).collect();
+        let status_refs: Vec<&str> = statuses.iter().map(String::as_str).collect();
+        let cur = self.focused_card_index(&cards);
+        if let Some(idx) = crate::command_palette::next_attention_index(&status_refs, cur) {
+            cards[idx].select_with_keyboard();
+        }
+    }
+
+    pub(in crate::window) fn cycle_local_cards(&self, forward: bool) {
+        let cards = self.terminal_cards.borrow().clone();
+        let cur = self.focused_card_index(&cards);
+        if let Some(idx) = crate::command_palette::cycle_mru_index(cards.len(), cur, forward) {
+            cards[idx].select_with_keyboard();
+        }
+    }
+
+    pub(in crate::window) fn open_slash_palette_for(&self, card: &Rc<MiniTerminalCard>) {
+        let (session, agent, title) = {
+            let d = card.data.borrow();
+            (d.session_name.clone(), d.agent_type.clone(), card.title_text())
+        };
+        let cmds = crate::slash_commands::commands_for(&agent);
+        if cmds.is_empty() {
+            self.open_command_palette();
+            return;
+        }
+        let items = cmds
+            .iter()
+            .map(|cmd| {
+                let s = session.clone();
+                let a = agent.clone();
+                let c = *cmd;
+                let card_w = Rc::downgrade(card);
+                crate::command_palette::PaletteItem {
+                    title: c.command.trim_end().to_string(),
+                    subtitle: c.description.to_string(),
+                    badge: if c.submit { "RUN" } else { "DRAFT" }.into(),
+                    keywords: format!("{} {}", agent, c.description),
+                    action: Rc::new(move || {
+                        crate::slash_commands::send(&s, &a, &c);
+                        if let Some(card) = card_w.upgrade() {
+                            card.focus_terminal();
+                        }
+                    }),
+                }
+            })
+            .collect();
+        let card_focus = Rc::downgrade(card);
+        set_overlay_keyboard_mode(&self.window, KeyboardMode::Exclusive);
+        self.command_palette.open(
+            &format!("Slash Commands · {title}"),
+            items,
+            Some(Rc::new(move || {
+                if let Some(c) = card_focus.upgrade() {
+                    c.focus_terminal();
+                }
+            })),
+        );
+    }
+
+    pub(in crate::window) fn open_command_palette(&self) {
+        let mut items: Vec<crate::command_palette::PaletteItem> = Vec::new();
+        let focused = self.focused_local_card();
+
+        // 1. Focused card actions & slash commands first
+        if let Some(card) = &focused {
+            let (session, agent, title) = {
+                let d = card.data.borrow();
+                (d.session_name.clone(), d.agent_type.clone(), card.title_text())
+            };
+            let card_w = Rc::downgrade(card);
+            items.push(crate::command_palette::PaletteItem {
+                title: if card.is_expanded() { "Collapse card" } else { "Expand card" }.into(),
+                subtitle: title.clone(),
+                badge: "Ctrl+Shift+F".into(),
+                keywords: "toggle fullscreen".into(),
+                action: Rc::new({
+                    let c = card_w.clone();
+                    move || { if let Some(c) = c.upgrade() { c.toggle_expand(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: if card.is_compact() { "Restore card" } else { "Minimize card" }.into(),
+                subtitle: title.clone(),
+                badge: "Ctrl+Shift+M".into(),
+                keywords: "iconify compact".into(),
+                action: Rc::new({
+                    let c = card_w.clone();
+                    move || { if let Some(c) = c.upgrade() { c.toggle_iconify(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "Prompt history".into(),
+                subtitle: title.clone(),
+                badge: "Ctrl+Shift+P".into(),
+                keywords: "prompts log".into(),
+                action: Rc::new({
+                    let c = card_w.clone();
+                    move || { if let Some(c) = c.upgrade() { c.open_prompt_history(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "Files & links".into(),
+                subtitle: title.clone(),
+                badge: "Ctrl+Shift+O".into(),
+                keywords: "assets drawer".into(),
+                action: Rc::new({
+                    let c = card_w.clone();
+                    move || { if let Some(c) = c.upgrade() { c.open_files(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "Attach files".into(),
+                subtitle: title.clone(),
+                badge: "Ctrl+Shift+A".into(),
+                keywords: "upload insert".into(),
+                action: Rc::new({
+                    let c = card_w.clone();
+                    move || { if let Some(c) = c.upgrade() { c.open_attachments(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "Restart fresh".into(),
+                subtitle: title.clone(),
+                badge: "SESSION".into(),
+                keywords: "restart clean new".into(),
+                action: Rc::new({
+                    let c = card_w.clone();
+                    move || { if let Some(c) = c.upgrade() { c.restart(false); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "Resume conversation".into(),
+                subtitle: title.clone(),
+                badge: "SESSION".into(),
+                keywords: "restart continue resume".into(),
+                action: Rc::new({
+                    let c = card_w;
+                    move || { if let Some(c) = c.upgrade() { c.restart(true); } }
+                }),
+            });
+            for cmd in crate::slash_commands::commands_for(&agent) {
+                let s = session.clone();
+                let a = agent.clone();
+                let c = *cmd;
+                let cw = Rc::downgrade(card);
+                items.push(crate::command_palette::PaletteItem {
+                    title: format!("{} · {}", c.command.trim_end(), title),
+                    subtitle: c.description.to_string(),
+                    badge: if c.submit { "SLASH" } else { "DRAFT" }.into(),
+                    keywords: format!("{} {}", agent, c.description),
+                    action: Rc::new(move || {
+                        crate::slash_commands::send(&s, &a, &c);
+                        if let Some(c) = cw.upgrade() {
+                            c.focus_terminal();
+                        }
+                    }),
+                });
+            }
+        }
+
+        // 2. Switch to any open local or remote card
+        let active_cards = if self.machine_view.is_remote() {
+            self.machine_view.keyboard_cards()
+        } else {
+            self.terminal_cards.borrow().clone()
+        };
+        for card in active_cards {
+            let cw = Rc::downgrade(&card);
+            let status = card.status_name();
+            let title = card.title_text();
+            let agent = card.data.borrow().agent_type.clone();
+            items.push(crate::command_palette::PaletteItem {
+                title: format!("Focus: {title}"),
+                subtitle: agent.clone(),
+                badge: status,
+                keywords: format!("card switch {agent} {title}"),
+                action: Rc::new(move || {
+                    if let Some(c) = cw.upgrade() {
+                        c.select_with_keyboard();
+                    }
+                }),
+            });
+        }
+
+        // 3. Workspace & launcher actions
+        if let Some(w) = self.this.get().cloned() {
+            items.push(crate::command_palette::PaletteItem {
+                title: "Jump to waiting / error card".into(),
+                subtitle: "Focus next card needing attention".into(),
+                badge: "Alt+W".into(),
+                keywords: "triage waiting error".into(),
+                action: Rc::new({
+                    let w = w.clone();
+                    move || { if let Some(w) = w.upgrade() { w.jump_to_attention_card(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "Arrange cards".into(),
+                subtitle: "Tile terminals and organize notes".into(),
+                badge: "LAYOUT".into(),
+                keywords: "tile grid arrange".into(),
+                action: Rc::new({
+                    let w = w.clone();
+                    move || { if let Some(w) = w.upgrade() { w.auto_arrange(); } }
+                }),
+            });
+            items.push(crate::command_palette::PaletteItem {
+                title: "New sticky note".into(),
+                subtitle: "Create a desktop sticky note".into(),
+                badge: "Ctrl+N".into(),
+                keywords: "note sticky".into(),
+                action: Rc::new({
+                    let w = w.clone();
+                    move || {
+                        if let Some(w) = w.upgrade() {
+                            if !w.machine_view.is_remote() {
+                                w.create_new_note(None, None, "");
+                            }
+                        }
+                    }
+                }),
+            });
+            for info in crate::tmux::detect_harnesses() {
+                let key = info.key.to_string();
+                let (label, icon) = crate::harness_bar::harness_label(&key);
+                items.push(crate::command_palette::PaletteItem {
+                    title: format!("Launch {icon} {label}"),
+                    subtitle: format!("Start a new {label} terminal card"),
+                    badge: "NEW".into(),
+                    keywords: format!("launch spawn {key} {label}"),
+                    action: Rc::new({
+                        let w = w.clone();
+                        move || {
+                            if let Some(w) = w.upgrade() {
+                                if w.ws_bar.commit_typed() {
+                                    w.launch_new_terminal(&key);
+                                }
+                            }
+                        }
+                    }),
+                });
+            }
+        }
+        if let Some(act) = self.open_settings_action.borrow().clone() {
+            items.push(crate::command_palette::PaletteItem {
+                title: "Open Settings".into(),
+                subtitle: "Launchers, connections, and shortcuts".into(),
+                badge: "PREFS".into(),
+                keywords: "settings config preferences".into(),
+                action: act,
+            });
+        }
+        if let Some(act) = self.hide_overlay_action.borrow().clone() {
+            items.push(crate::command_palette::PaletteItem {
+                title: "Hide overlay".into(),
+                subtitle: "Slide SUPER DESKTOP off screen".into(),
+                badge: "Esc".into(),
+                keywords: "hide close dismiss".into(),
+                action: act,
+            });
+        }
+
+        let card_focus = focused.as_ref().map(Rc::downgrade);
+        let win_weak = self.window.downgrade();
+        set_overlay_keyboard_mode(&self.window, KeyboardMode::Exclusive);
+        self.command_palette.open(
+            "Command Palette",
+            items,
+            Some(Rc::new(move || {
+                if let Some(c) = card_focus.as_ref().and_then(|c| c.upgrade()) {
+                    c.focus_terminal();
+                    return;
+                }
+                if let Some(win) = win_weak.upgrade() {
+                    set_overlay_keyboard_mode(&win, KeyboardMode::OnDemand);
+                }
+            })),
+        );
+    }
 }

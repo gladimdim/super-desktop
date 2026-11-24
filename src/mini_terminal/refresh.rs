@@ -1,5 +1,28 @@
 use super::*;
 
+thread_local! {
+    static NOTIFIER: RefCell<crate::desktop_notify::Notifier> = RefCell::new(crate::desktop_notify::Notifier::default());
+}
+
+pub fn observe_hidden_status(session: &str, card_title: &str, status: &str) {
+    let notif = NOTIFIER.with(|n| {
+        n.borrow_mut().observe(
+            session,
+            card_title,
+            status,
+            true,
+            std::time::Instant::now(),
+        )
+    });
+    if let Some(notif) = notif {
+        crate::desktop_notify::dispatch(notif);
+    }
+}
+
+pub fn forget_session_notifications(session: &str) {
+    NOTIFIER.with(|n| n.borrow_mut().forget(session));
+}
+
 impl MiniTerminalCard {
     /// Refresh this card alone (one worker, one tmux inventory).
     pub fn refresh_status(&self) {
@@ -67,6 +90,10 @@ impl MiniTerminalCard {
         let on_persist = Rc::clone(&self.on_session_persist);
         let in_flight = Rc::downgrade(&self.refresh_in_flight);
         let jump = self.jump.clone();
+        let status_slot = Rc::clone(&self.current_status);
+        let vte_focus = Rc::clone(&self.vte);
+        let root_focus = self.container.downgrade();
+        let notify_sess = sess_name.clone();
         self.refresh_in_flight.set(true);
 
         let request = crate::card_status::CardRequest {
@@ -84,6 +111,7 @@ impl MiniTerminalCard {
                 return;
             };
 
+            *status_slot.borrow_mut() = status_info.status.to_string();
             if let (Some(badge), Some(compact)) = (status_badge.upgrade(), compact_status.upgrade()) {
                 apply_status_view(&badge, &compact, status_info.status);
             }
@@ -103,16 +131,29 @@ impl MiniTerminalCard {
                 }
             }
 
+            let notify_title = format_card_title(&title_prefix, prompt.as_deref());
             if let Some(title) = title_label.upgrade() {
-                let user_text = prompt;
-                let new_title = format_card_title(&title_prefix, user_text.as_deref());
-                if title.label().as_str() != new_title {
-                    title.set_label(&new_title);
-                    title.set_tooltip_text(Some(&new_title));
+                if title.label().as_str() != notify_title {
+                    title.set_label(&notify_title);
+                    title.set_tooltip_text(Some(&notify_title));
                     // This refresh runs for local cards only; their title is
                     // part of the published workspace.
                     crate::workspace_model::notify_changed();
                 }
+            }
+            let focused = vte_focus.borrow().as_ref().is_some_and(|v| v.has_focus())
+                || root_focus.upgrade().is_some_and(|r| r.is_focus());
+            let notif = NOTIFIER.with(|n| {
+                n.borrow_mut().observe(
+                    &notify_sess,
+                    &notify_title,
+                    status_info.status,
+                    !focused,
+                    std::time::Instant::now(),
+                )
+            });
+            if let Some(notif) = notif {
+                crate::desktop_notify::dispatch(notif);
             }
             // A setup hint shows once per session, and only on a card on screen.
             let (revealer, label, generation, header, compact) = &notice_parts;

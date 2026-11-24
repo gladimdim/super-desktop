@@ -1638,6 +1638,57 @@ separator.launcher-sep {{
     border: 1px solid {status_exited_border};
 }}
 
+.command-palette-backdrop {{
+    background-color: rgba(0, 0, 0, 0.35);
+}}
+
+.command-palette-card {{
+    background-color: {hud_bg};
+    border: 1px solid {btn_border};
+    border-radius: 12px;
+    padding: 12px;
+}}
+
+.command-palette-title {{
+    color: {light_foreground};
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+.command-palette-entry {{
+    background-color: {btn_bg};
+    color: {bright_foreground};
+    border: 1px solid {btn_border};
+    border-radius: 8px;
+    padding: 6px 10px;
+}}
+
+.command-palette-list {{
+    background-color: transparent;
+}}
+
+.command-palette-row {{
+    padding: 6px 8px;
+}}
+
+.command-palette-item-title {{
+    color: {bright_foreground};
+    font-weight: 600;
+}}
+
+.command-palette-item-sub {{
+    color: {light_foreground};
+    font-size: 11px;
+}}
+
+.command-palette-badge {{
+    color: {light_foreground};
+    border: 1px solid {btn_border};
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: 10px;
+}}
+
 "#,
         // The Mac overlay uses an opaque native window: a translucent root
         // can leave black/stale regions when terminal surfaces disappear.

@@ -621,6 +621,20 @@ impl SuperDesktopWindow {
             crate::card_source::CardSource::Local,
         );
         let card = Rc::new(card);
+        if let Some(win_w) = self.this.get().cloned() {
+            let card_slash = Rc::downgrade(&card);
+            card.set_on_open_slash(Rc::new(move || {
+                if let (Some(w), Some(c)) = (win_w.upgrade(), card_slash.upgrade()) {
+                    w.open_slash_palette_for(&c);
+                }
+            }));
+        }
+        let card_restart = Rc::downgrade(&card);
+        card.set_on_restart(Rc::new(move |resume_saved| {
+            if let Some(c) = card_restart.upgrade() {
+                c.restart(resume_saved);
+            }
+        }));
         card.set_first_icon_spot(self.first_icon_spot(sw, sh));
         card.keyboard_digit.set(crate::terminal_picker::next_digit(
             term_cards.borrow().iter().filter_map(|card| card.keyboard_digit.get())
