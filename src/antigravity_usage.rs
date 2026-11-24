@@ -1,9 +1,11 @@
 //! Live quota reader for Google Antigravity (`agy` CLI).
 //!
-//! Queries Google's Cloud Code endpoints (`v1internal:loadCodeAssist`,
-//! `v1internal:retrieveUserQuotaSummary`, and `v1internal:retrieveUserQuota`)
-//! read-only using the local OAuth access token managed by `agy`, and caches
-//! the merged snapshot in `~/.local/state/super-desktop/agy-usage.json`.
+//! Uses `agy --log-file /dev/null -p "/usage" --output-format json` as the
+//! primary live source (which picks up AICode quota groups including both
+//! 5-hour and weekly Gemini buckets), falling back to Google's Cloud Code REST
+//! endpoints (`v1internal:loadCodeAssist`, `v1internal:retrieveUserQuotaSummary`,
+//! and `v1internal:retrieveUserQuota`) using the local OAuth access token.
+//! The merged snapshot is cached in `~/.local/state/super-desktop/agy-usage.json`.
 use chrono::{DateTime, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -104,6 +106,9 @@ fn parse_iso_normalized(v: &Value) -> String {
         return String::new();
     };
     if let Some(secs) = parse_iso_epoch(s) {
+        if secs <= 0 {
+            return String::new();
+        }
         if let Some(dt) = DateTime::from_timestamp(secs, 0) {
             return dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         }
@@ -216,12 +221,16 @@ fn window_order_and_label(bucket: &Value) -> (u8, String) {
         .to_ascii_lowercase();
     let bucket_id = bucket
         .get("bucketId")
+        .or_else(|| bucket.get("bucket_id"))
+        .or_else(|| bucket.get("id"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim()
         .to_ascii_lowercase();
     let name = bucket
         .get("displayName")
+        .or_else(|| bucket.get("display_name"))
+        .or_else(|| bucket.get("name"))
         .and_then(Value::as_str)
         .unwrap_or("")
         .trim();
@@ -239,8 +248,33 @@ fn window_order_and_label(bucket: &Value) -> (u8, String) {
     }
 }
 
-/// Parse `v1internal:retrieveUserQuotaSummary`, keeping both touched and untouched
-/// (100% remaining) quota groups. Returns `(limits, has_gemini_group)`.
+/// True when an Antigravity limit label belongs to Gemini models rather than
+/// third-party models (Claude / GPT / 3P).
+pub fn is_gemini_limit_label(label: &str) -> bool {
+    let lower = label.to_ascii_lowercase();
+    !["claude", "gpt", "openai", "anthropic", "3p"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+fn normalize_gemini_group_label(display: &str) -> String {
+    let trimmed = display.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let base = if lower.ends_with(" models") {
+        trimmed[..trimmed.len() - " models".len()].trim()
+    } else {
+        trimmed
+    };
+    if base.is_empty() {
+        "Gemini".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
+/// Parse `v1internal:retrieveUserQuotaSummary` or CLI `/usage` data, keeping
+/// only Gemini groups and buckets (both touched and untouched 100% remaining).
+/// Third-party Claude/GPT groups are excluded. Returns `(limits, has_gemini_limits)`.
 pub fn parse_quota_summary(summary: &Value) -> (Vec<LiveLimit>, bool) {
     let Some(obj) = summary.as_object() else {
         return (Vec::new(), false);
@@ -248,38 +282,34 @@ pub fn parse_quota_summary(summary: &Value) -> (Vec<LiveLimit>, bool) {
     if obj.contains_key("error") {
         return (Vec::new(), false);
     }
-    let mut groups: Vec<(bool, String, &[Value])> = Vec::new();
+    let mut groups: Vec<(String, &[Value])> = Vec::new();
     if let Some(arr) = obj.get("groups").and_then(Value::as_array) {
         for g in arr {
             let Some(g_obj) = g.as_object() else {
                 continue;
             };
-            let display = g_obj.get("displayName").and_then(Value::as_str).unwrap_or("").trim();
-            let is_gemini = display.to_ascii_lowercase().contains("gemini");
-            let short = if is_gemini {
-                "Gemini".to_string()
-            } else if display.to_ascii_lowercase().contains("claude") {
-                "Claude & GPT".to_string()
-            } else if !display.is_empty() {
-                display.to_string()
-            } else {
-                "Models".to_string()
-            };
+            let display = g_obj
+                .get("displayName")
+                .or_else(|| g_obj.get("display_name"))
+                .or_else(|| g_obj.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim();
+            if !display.to_ascii_lowercase().contains("gemini") {
+                continue;
+            }
             if let Some(buckets) = g_obj.get("buckets").and_then(Value::as_array) {
-                groups.push((is_gemini, short, buckets));
+                groups.push((normalize_gemini_group_label(display), buckets));
             }
         }
     } else if let Some(buckets) = obj.get("buckets").and_then(Value::as_array) {
         if !buckets.is_empty() {
-            groups.push((true, "Gemini".to_string(), buckets));
+            groups.push(("Gemini".to_string(), buckets));
         }
     }
 
-    let has_gemini = groups.iter().any(|(is_gem, _, _)| *is_gem);
-    groups.sort_by_key(|(is_gem, _, _)| !*is_gem);
-
     let mut out = Vec::new();
-    for (_is_gem, group_label, buckets) in groups {
+    for (group_label, buckets) in groups {
         let mut items: Vec<(u8, LiveLimit)> = Vec::new();
         for bucket in buckets {
             let Some(used) = bucket_percent_used(bucket) else {
@@ -288,11 +318,12 @@ pub fn parse_quota_summary(summary: &Value) -> (Vec<LiveLimit>, bool) {
             let (order, win_label) = window_order_and_label(bucket);
             let label = if win_label.is_empty() {
                 group_label.clone()
-            } else if group_label.is_empty() {
-                win_label
             } else {
                 format!("{group_label} ({win_label})")
             };
+            if !is_gemini_limit_label(&label) {
+                continue;
+            }
             items.push((
                 order,
                 LiveLimit {
@@ -305,7 +336,45 @@ pub fn parse_quota_summary(summary: &Value) -> (Vec<LiveLimit>, bool) {
         items.sort_by_key(|(order, _)| *order);
         out.extend(items.into_iter().map(|(_, lim)| lim));
     }
+    let has_gemini = !out.is_empty();
     (out, has_gemini)
+}
+
+/// Parse `agy --log-file /dev/null -p "/usage" --output-format json` stdout
+/// into ordered Gemini-only `LiveLimit` items.
+pub fn parse_cli_usage_json(raw: &str) -> Vec<LiveLimit> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let val: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => {
+            let Some(start) = trimmed.find('{') else {
+                return Vec::new();
+            };
+            let Some(end) = trimmed.rfind('}') else {
+                return Vec::new();
+            };
+            if end < start {
+                return Vec::new();
+            }
+            match serde_json::from_str(&trimmed[start..=end]) {
+                Ok(v) => v,
+                Err(_) => return Vec::new(),
+            }
+        }
+    };
+    if let Some(status) = val.get("status").and_then(Value::as_str) {
+        if !status.eq_ignore_ascii_case("SUCCESS") {
+            return Vec::new();
+        }
+    }
+    let data = val
+        .get("command")
+        .and_then(|c| c.get("data"))
+        .unwrap_or(&val);
+    parse_quota_summary(data).0
 }
 
 fn min_reset(a: &str, b: &str) -> String {
@@ -320,9 +389,15 @@ fn min_reset(a: &str, b: &str) -> String {
     }
 }
 
-/// Aggregate per-model rolling buckets from `v1internal:retrieveUserQuota`
-/// (or `fetchAvailableModels`), ignoring internal `tab_*` completion previews.
-pub fn parse_model_quota_buckets(quota: &Value, include_3p: bool) -> Vec<LiveLimit> {
+fn is_gemini_pro_model(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    !lower.contains("flash")
+        && (lower.contains("-pro") || lower.starts_with("gemini-4-"))
+}
+
+/// Aggregate per-model Gemini rolling buckets from `v1internal:retrieveUserQuota`
+/// (or `fetchAvailableModels`), ignoring internal `tab_*` and third-party models.
+pub fn parse_model_quota_buckets(quota: &Value) -> Vec<LiveLimit> {
     let mut entries: Vec<(&str, f64, String)> = Vec::new();
     if let Some(buckets) = quota.get("buckets").and_then(Value::as_array) {
         for b in buckets {
@@ -372,19 +447,14 @@ pub fn parse_model_quota_buckets(quota: &Value, include_3p: bool) -> Vec<LiveLim
         })
     };
 
-    let mut out = Vec::new();
-    if let Some(gem) = fold_group(&|id| id.starts_with("gemini-"), "Gemini") {
-        out.push(gem);
-    }
-    if include_3p {
-        if let Some(tp) = fold_group(
-            &|id| id.starts_with("claude-") || id.starts_with("gpt-"),
-            "Claude & GPT",
-        ) {
-            out.push(tp);
+    let pro = fold_group(&|id| id.starts_with("gemini-") && is_gemini_pro_model(id), "Gemini Pro");
+    let flash = fold_group(&|id| id.starts_with("gemini-") && !is_gemini_pro_model(id), "Gemini Flash");
+    match (pro, flash) {
+        (Some(p), Some(f)) if (p.percent_used - f.percent_used).abs() > 1e-6 || p.resets_at != f.resets_at => {
+            vec![p, f]
         }
+        _ => fold_group(&|id| id.starts_with("gemini-"), "Gemini").into_iter().collect(),
     }
-    out
 }
 
 pub fn merge_quota_responses(
@@ -402,7 +472,7 @@ pub fn merge_quota_responses(
     let mut limits = Vec::new();
     if !has_gemini {
         if let Some(mq) = model_quota {
-            limits.extend(parse_model_quota_buckets(mq, summary_limits.is_empty()));
+            limits.extend(parse_model_quota_buckets(mq));
         }
     }
     limits.append(&mut summary_limits);
@@ -424,7 +494,9 @@ pub fn cache_path() -> PathBuf {
 
 pub fn read_cache_file(path: &Path) -> Option<LiveSnapshot> {
     let raw = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
+    let mut snap: LiveSnapshot = serde_json::from_str(&raw).ok()?;
+    snap.limits.retain(|l| is_gemini_limit_label(&l.label));
+    Some(snap)
 }
 
 pub fn write_cache_file(path: &Path, snap: &LiveSnapshot) -> std::io::Result<()> {
@@ -546,12 +618,102 @@ fn post_cloud_code(
     resp.json::<Value>().ok()
 }
 
-/// Perform a live, read-only Antigravity quota fetch against Cloud Code.
-/// Returns `None` if OAuth credentials are missing/expired or network calls fail.
-pub fn fetch_live() -> Option<LiveSnapshot> {
+fn run_agy_cli_usage() -> Option<Vec<LiveLimit>> {
     if cfg!(test) {
         return None;
     }
+    use std::io::Read;
+
+    let bin = crate::tmux::which("agy").or_else(|| crate::tmux::which("antigravity"))?;
+    let mut child = Command::new(&bin)
+        .args(["--log-file", "/dev/null", "-p", "/usage", "--output-format", "json"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .spawn()
+        .ok()?;
+
+    let stdout = child.stdout.take()?;
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout.take(256 * 1024).read_to_end(&mut buf);
+        buf
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) if started.elapsed() >= Duration::from_secs(10) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return None;
+            }
+        }
+    };
+    let buf = reader.join().ok()?;
+    if !status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(buf).ok()?;
+    let limits = parse_cli_usage_json(&raw);
+    (!limits.is_empty()).then_some(limits)
+}
+
+fn fetch_cloud_code_tier() -> String {
+    let Some(token) = read_local_token() else {
+        return String::new();
+    };
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let Ok(http) = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return String::new();
+    };
+    let base = cloud_code_base_url();
+    let Some(load_assist) = post_cloud_code(
+        &http,
+        &base,
+        "loadCodeAssist",
+        &token,
+        &json!({"metadata": {"ideType": "ANTIGRAVITY"}}),
+    ) else {
+        return String::new();
+    };
+    extract_tier(&load_assist)
+}
+
+fn fetch_live_with_tier_hint(existing_tier: Option<&str>) -> Option<LiveSnapshot> {
+    if cfg!(test) {
+        return None;
+    }
+    if let Some(limits) = run_agy_cli_usage() {
+        let tier = match existing_tier {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => fetch_cloud_code_tier(),
+        };
+        let stamp = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        return Some(LiveSnapshot {
+            tier,
+            limits,
+            updated_at: stamp,
+            fetched_at_ms: now_ms(),
+        });
+    }
+
     let token = read_local_token()?;
     let _ = rustls::crypto::ring::default_provider().install_default();
     let http = reqwest::blocking::Client::builder()
@@ -597,6 +759,14 @@ pub fn fetch_live() -> Option<LiveSnapshot> {
     )
 }
 
+/// Perform a live, read-only Antigravity quota fetch via `agy -p "/usage"`
+/// with Cloud Code REST fallback. Returns `None` in tests or when no quota
+/// source is available.
+#[allow(dead_code)]
+pub fn fetch_live() -> Option<LiveSnapshot> {
+    fetch_live_with_tier_hint(None)
+}
+
 /// Pure memory/disk lookup safe on the GTK thread. Returns `None` in tests.
 pub fn cached_snapshot() -> Option<LiveSnapshot> {
     if cfg!(test) {
@@ -629,7 +799,7 @@ pub fn refresh_if_stale() -> bool {
         return false;
     }
     let now = now_ms();
-    {
+    let existing_tier = {
         let Ok(mut state) = cache_mutex().lock() else {
             return false;
         };
@@ -645,9 +815,14 @@ pub fn refresh_if_stale() -> bool {
             return false;
         }
         state.in_flight = true;
-    }
+        state
+            .snapshot
+            .as_ref()
+            .map(|s| s.tier.clone())
+            .filter(|t| !t.is_empty())
+    };
 
-    let fetched = fetch_live();
+    let fetched = fetch_live_with_tier_hint(existing_tier.as_deref());
     let finish_ms = now_ms();
     let updated = if let Some(ref snap) = fetched {
         let _ = write_cache_file(&cache_path(), snap);
@@ -674,7 +849,7 @@ pub fn refresh_async() {
         return;
     }
     let now = now_ms();
-    let should_spawn = {
+    let existing_tier = {
         let Ok(mut state) = cache_mutex().lock() else {
             return;
         };
@@ -690,11 +865,17 @@ pub fn refresh_async() {
             return;
         }
         state.in_flight = true;
-        true
+        Some(
+            state
+                .snapshot
+                .as_ref()
+                .map(|s| s.tier.clone())
+                .filter(|t| !t.is_empty()),
+        )
     };
-    if should_spawn {
-        std::thread::spawn(|| {
-            let fetched = fetch_live();
+    if let Some(tier_hint) = existing_tier {
+        std::thread::spawn(move || {
+            let fetched = fetch_live_with_tier_hint(tier_hint.as_deref());
             let finish_ms = now_ms();
             if let Some(ref snap) = fetched {
                 let _ = write_cache_file(&cache_path(), snap);
@@ -776,15 +957,11 @@ mod tests {
         .unwrap();
 
         assert_eq!(snap.tier, "Ultra");
-        assert_eq!(snap.limits.len(), 3);
+        assert_eq!(snap.limits.len(), 1);
         assert_eq!(snap.limits[0].label, "Gemini");
         assert!((snap.limits[0].percent_used - 0.45).abs() < 1e-6);
         assert_eq!(snap.limits[0].resets_at, "2026-11-24T14:16:10Z");
-        // Untouched 100%-left 3P buckets preserved in 5h -> Weekly order.
-        assert_eq!(snap.limits[1].label, "Claude & GPT (5-hour)");
-        assert_eq!(snap.limits[1].percent_used, 0.0);
-        assert_eq!(snap.limits[2].label, "Claude & GPT (Weekly)");
-        assert_eq!(snap.limits[2].percent_used, 0.0);
+        assert!(snap.limits.iter().all(|l| is_gemini_limit_label(&l.label)));
     }
 
     #[test]
@@ -813,10 +990,26 @@ mod tests {
         let snap = merge_quota_responses(&load_assist, Some(&summary), None, "2026-11-24T11:20:00Z".into(), 1).unwrap();
         assert_eq!(snap.tier, "Pro");
         let labels: Vec<_> = snap.limits.iter().map(|l| l.label.as_str()).collect();
-        assert_eq!(labels, vec!["Gemini (5-hour)", "Gemini (Weekly)", "Claude & GPT (Weekly)"]);
+        assert_eq!(labels, vec!["Gemini (5-hour)", "Gemini (Weekly)"]);
         assert!((snap.limits[0].percent_used - 0.3).abs() < 1e-6);
         assert!((snap.limits[1].percent_used - 0.2).abs() < 1e-6);
-        assert_eq!(snap.limits[2].percent_used, 1.0);
+    }
+
+    #[test]
+    fn separate_gemini_pro_and_flash_pools_are_split_without_3p_models() {
+        let model_quota = json!({
+            "buckets": [
+                {"modelId": "claude-opus-5-5-high", "remainingFraction": 0.2, "resetTime": "2026-11-24T16:00:00Z"},
+                {"modelId": "gpt-oss-120b-medium", "remainingFraction": 0.1, "resetTime": "2026-11-24T16:00:00Z"},
+                {"modelId": "gemini-2.5-pro", "remainingFraction": 0.4, "resetTime": "2026-11-24T15:00:00Z"},
+                {"modelId": "gemini-3-flash", "remainingFraction": 0.9, "resetTime": "2026-11-24T14:00:00Z"}
+            ]
+        });
+        let limits = parse_model_quota_buckets(&model_quota);
+        let labels: Vec<_> = limits.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, vec!["Gemini Pro", "Gemini Flash"]);
+        assert!((limits[0].percent_used - 0.6).abs() < 1e-6);
+        assert!((limits[1].percent_used - 0.1).abs() < 1e-6);
     }
 
     #[test]
@@ -853,5 +1046,81 @@ mod tests {
         ] {
             assert_eq!(validate_cloud_code_url(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn cli_usage_json_extracts_gemini_5h_and_weekly_and_drops_claude_gpt() {
+        let raw = r#"{
+            "conversation_id": "",
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.654930591583252,
+                                    "reset_time": "2026-12-01T09:16:10Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.9291462302207947,
+                                    "reset_time": "2026-11-25T00:16:10Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "2026-11-30T14:29:48Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 1,
+                                    "reset_time": "1970-01-01T00:00:00Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }"#;
+
+        let limits = parse_cli_usage_json(raw);
+        let labels: Vec<_> = limits.iter().map(|l| l.label.as_str()).collect();
+        assert_eq!(labels, vec!["Gemini (5-hour)", "Gemini (Weekly)"]);
+        assert!((limits[0].percent_used - 0.0709).abs() < 1e-6);
+        assert_eq!(limits[0].resets_at, "2026-11-25T00:16:10Z");
+        assert!((limits[1].percent_used - 0.3451).abs() < 1e-6);
+        assert_eq!(limits[1].resets_at, "2026-12-01T09:16:10Z");
+        assert!(limits.iter().all(|l| is_gemini_limit_label(&l.label)));
+    }
+
+    #[test]
+    fn cli_usage_json_handles_epoch_zero_named_groups_and_errors() {
+        let wrapped = r#"warning: ignore me
+{"status":"SUCCESS","command":{"name":"usage","data":{"groups":[{"name":"Gemini Pro Models","buckets":[{"id":"gem-pro-5h","name":"Five Hour Limit Remaining","window":"5h","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}]}]}}}"#;
+        let limits = parse_cli_usage_json(wrapped);
+        assert_eq!(limits.len(), 1);
+        assert_eq!(limits[0].label, "Gemini Pro (5-hour)");
+        assert!((limits[0].percent_used - 0.0).abs() < 1e-6);
+        assert_eq!(limits[0].resets_at, "");
+
+        let err = r#"{"status":"ERROR","command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.5}]}]}}}"#;
+        assert!(parse_cli_usage_json(err).is_empty());
     }
 }

@@ -277,8 +277,17 @@ fn launcher_usage_snapshot(id: &str, value: &Value) -> Option<Value> {
     if !value.is_object() {
         return None;
     }
+    let is_agy = matches!(id, "agy" | "antigravity");
     let limits: Vec<Value> = value.get("limits").and_then(Value::as_array)
-        .into_iter().flatten().take(4).map(|limit| {
+        .into_iter().flatten()
+        .filter(|limit| {
+            if !is_agy {
+                return true;
+            }
+            let lbl = limit.get("label").or_else(|| limit.get("title")).and_then(Value::as_str).unwrap_or("");
+            crate::antigravity_usage::is_gemini_limit_label(lbl)
+        })
+        .take(4).map(|limit| {
             serde_json::json!({
                 "label": limit.get("label").or_else(|| limit.get("title"))
                     .and_then(Value::as_str).unwrap_or("Limit"),
@@ -358,6 +367,7 @@ fn load_usage_direct(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
 fn live_limits_to_usage(limits: &[crate::antigravity_usage::LiveLimit]) -> Vec<UsageLimit> {
     limits
         .iter()
+        .filter(|lim| crate::antigravity_usage::is_gemini_limit_label(&lim.label))
         .map(|lim| UsageLimit {
             label: lim.label.clone(),
             percent_used: lim.percent_used.clamp(0.0, 1.0),
@@ -426,6 +436,7 @@ fn apply_agy_live_to_snapshots(
     let limits_json: Vec<Value> = live
         .limits
         .iter()
+        .filter(|lim| crate::antigravity_usage::is_gemini_limit_label(&lim.label))
         .take(4)
         .map(|lim| {
             serde_json::json!({
@@ -480,6 +491,7 @@ fn load_usage_in(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
 }
 
 fn parse_provider_usage(id: &str, v: &Value) -> ProviderUsage {
+    let is_agy = matches!(id, "agy" | "antigravity");
     let mut limits = Vec::new();
     if let Some(arr) = v.get("limits").and_then(|l| l.as_array()) {
         for item in arr.iter().take(6) {
@@ -502,6 +514,9 @@ fn parse_provider_usage(id: &str, v: &Value) -> ProviderUsage {
                 .and_then(|x| x.as_str())
                 .unwrap_or("Limit")
                 .to_string();
+            if is_agy && !crate::antigravity_usage::is_gemini_limit_label(&label) {
+                continue;
+            }
             limits.push(UsageLimit {
                 label,
                 percent_used: percent,
@@ -998,38 +1013,46 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("agy.json"),
-            r#"{"name":"Gemini","tierLabel":"Ultra","ready":true,"limits":[],"todayPrompts":34,"todaySessions":3,"todayTotalTokens":160000,"totalPrompts":496,"totalSessions":74,"updatedAt":"2026-11-24T10:00:00Z"}"#,
+            r#"{"name":"Gemini","tierLabel":"Ultra","ready":true,"limits":[{"label":"Claude/GPT Weekly","percent":0.5}],"todayPrompts":34,"todaySessions":3,"todayTotalTokens":160000,"totalPrompts":496,"totalSessions":74,"updatedAt":"2026-11-24T10:00:00Z"}"#,
         )
         .unwrap();
 
-        let disk = load_usage_direct(&dir, "agy");
+        let disk = load_usage_direct(&dir, "agy").unwrap();
+        assert!(disk.limits.is_empty(), "disk agy.json must drop third-party Claude/GPT limits");
         let live = crate::antigravity_usage::LiveSnapshot {
             tier: "Ultra".into(),
             limits: vec![
                 crate::antigravity_usage::LiveLimit {
-                    label: "Gemini".into(),
+                    label: "Gemini (5-hour)".into(),
                     percent_used: 0.45,
                     resets_at: "2099-01-01T00:00:00Z".into(),
                 },
                 crate::antigravity_usage::LiveLimit {
-                    label: "Claude & GPT (5-hour)".into(),
+                    label: "Gemini (Weekly)".into(),
                     percent_used: 0.0,
                     resets_at: "2020-01-01T00:00:00Z".into(),
+                },
+                crate::antigravity_usage::LiveLimit {
+                    label: "Claude & GPT (5-hour)".into(),
+                    percent_used: 0.0,
+                    resets_at: "2099-01-01T00:00:00Z".into(),
                 },
             ],
             updated_at: "2026-11-24T11:20:00Z".into(),
             fetched_at_ms: 1,
         };
 
-        let merged = apply_agy_live(disk, Some(&live)).unwrap();
+        let merged = apply_agy_live(Some(disk), Some(&live)).unwrap();
         assert_eq!(merged.name, "Antigravity");
         assert_eq!(merged.tier, "Ultra");
         assert_eq!(merged.today_prompts, 34);
         assert_eq!(merged.today_tokens, 160_000);
         assert_eq!(merged.updated_at, "2026-11-24T11:20:00Z");
         assert_eq!(merged.limits.len(), 2);
+        assert_eq!(merged.limits[0].label, "Gemini (5-hour)");
         assert_eq!(merged.limits[0].left_percent_int(), 55);
         assert!(!format_limit_subtitle(&merged.limits[0]).is_empty());
+        assert_eq!(merged.limits[1].label, "Gemini (Weekly)");
         assert_eq!(format_limit_subtitle(&merged.limits[1]), "");
 
         // Works even when no agy.json exists on disk.
