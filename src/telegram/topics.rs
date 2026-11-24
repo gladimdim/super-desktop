@@ -4,14 +4,11 @@ use super::api::{ApiError, InlineButton, InlineKeyboardMarkup, TelegramApi};
 use super::config::{Config, LiveStream, Permissions, RuntimeState, TopicBinding, MAX_TOPICS};
 use super::desktop::{CardSummary, DesktopBackend, ProviderUsageLimit, ProviderUsageSummary};
 use super::redact::{
-    escape_html, sanitize_terminal_text, status_emoji, tag_to_topic_color, topic_title,
-    truncate_chars,
+    escape_html, sanitize_terminal_text, status_emoji, strip_legacy_status_prefix,
+    tag_to_topic_color, topic_title, truncate_chars,
 };
 use std::collections::HashMap;
 
-pub const TOPIC_RENAME_MIN_INTERVAL_SECS: u64 = 60;
-pub const TOPIC_STATUS_DEBOUNCE_SECS: u64 = 4;
-pub const TOPIC_STATUS_RENAME_COOLDOWN_SECS: u64 = 10;
 pub const DASHBOARD_MIN_INTERVAL_SECS: u64 = 6;
 pub const LIVE_EDIT_INTERVAL_SECS: u64 = 4;
 pub const LIVE_IDLE_STOP_SECS: u64 = 20;
@@ -27,6 +24,14 @@ pub fn quick_slash_commands(agent_type: &str) -> &'static [&'static str] {
 }
 
 pub fn card_action_keyboard(card: &CardSummary, perms: Permissions) -> Option<InlineKeyboardMarkup> {
+    card_action_keyboard_with_app(card, perms, None)
+}
+
+pub fn card_action_keyboard_with_app(
+    card: &CardSummary,
+    perms: Permissions,
+    mini_app_url: Option<&str>,
+) -> Option<InlineKeyboardMarkup> {
     let mut row1 = Vec::new();
     if perms.read_output {
         row1.push(InlineButton::callback("📷 Screen", format!("scr:{}", card.id)));
@@ -50,6 +55,9 @@ pub fn card_action_keyboard(card: &CardSummary, perms: Permissions) -> Option<In
     }
     if !row2.is_empty() {
         rows.push(row2);
+    }
+    if let Some(url) = mini_app_url {
+        rows.push(vec![InlineButton::url("📱 Open App", url)]);
     }
     (!rows.is_empty()).then_some(InlineKeyboardMarkup {
         inline_keyboard: rows,
@@ -149,11 +157,26 @@ pub fn format_topic_header_html(card: &CardSummary) -> String {
     )
 }
 
-pub fn topic_header_keyboard(card: &CardSummary, perms: Permissions) -> Option<InlineKeyboardMarkup> {
+pub fn topic_header_keyboard_with_app(
+    card: &CardSummary,
+    perms: Permissions,
+    mini_app_url: Option<&str>,
+) -> Option<InlineKeyboardMarkup> {
     if card.status == "WAITING" {
-        waiting_keyboard(card, perms)
+        let mut kb = waiting_keyboard(card, perms);
+        if let Some(url) = mini_app_url {
+            match &mut kb {
+                Some(m) => m.inline_keyboard.push(vec![InlineButton::url("📱 Open App", url)]),
+                None => {
+                    kb = Some(InlineKeyboardMarkup {
+                        inline_keyboard: vec![vec![InlineButton::url("📱 Open App", url)]],
+                    });
+                }
+            }
+        }
+        kb
     } else {
-        card_action_keyboard(card, perms)
+        card_action_keyboard_with_app(card, perms, mini_app_url)
     }
 }
 
@@ -166,6 +189,21 @@ fn format_closed_topic_header_html(topic_name: &str) -> String {
         "🛑 <b>{}</b>\nStatus: <b>Closed on PC</b>",
         escape_html(topic_name)
     )
+}
+
+fn clamp_tail_chars(joined: String, max_chars: usize) -> String {
+    let limit = max_chars.max(1);
+    if joined.chars().count() <= limit {
+        return joined;
+    }
+    let keep = limit.saturating_sub(1).max(1);
+    let byte_start = joined
+        .char_indices()
+        .rev()
+        .nth(keep.saturating_sub(1))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    format!("…{}", &joined[byte_start..])
 }
 
 /// Sanitize raw terminal text and keep its trailing lines bounded cleanly.
@@ -185,19 +223,202 @@ pub fn tail_output_snippet(
         return None;
     }
     let start = lines.len().saturating_sub(max_lines.max(1));
-    let joined = lines[start..].join("\n");
-    let count = joined.chars().count();
-    if count <= max_chars {
-        return Some(joined);
+    Some(clamp_tail_chars(lines[start..].join("\n"), max_chars))
+}
+
+fn collapse_blank_lines<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut prev_blank = true;
+    for raw in lines {
+        let trimmed = raw.trim_end();
+        if trimmed.trim().is_empty() {
+            if !prev_blank {
+                out.push(String::new());
+                prev_blank = true;
+            }
+        } else {
+            out.push(trimmed.to_string());
+            prev_blank = false;
+        }
     }
-    let keep = max_chars.saturating_sub(1).max(1);
-    let byte_start = joined
-        .char_indices()
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out
+}
+
+/// Detect active working/streaming TUI banners in the bottom of the screen so
+/// heuristic IDLE fallback notifications wait until work truly settles.
+pub fn screen_shows_active_work(raw: &str) -> bool {
+    let clean = sanitize_terminal_text(raw, "", false);
+    clean
+        .lines()
         .rev()
-        .nth(keep.saturating_sub(1))
-        .map(|(idx, _)| idx)
-        .unwrap_or(0);
-    Some(format!("…{}", &joined[byte_start..]))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .take(8)
+        .any(|line| {
+            if line.chars().next().is_some_and(|ch| {
+                matches!(
+                    ch,
+                    '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'
+                )
+            }) {
+                return true;
+            }
+            let lower = line.to_ascii_lowercase();
+            [
+                "esc to interrupt",
+                "ctrl+c to cancel",
+                "ctrl+c to interrupt",
+                "ctrl-c to cancel",
+                "working…",
+                "working...",
+                "thinking…",
+                "thinking...",
+                "responding…",
+                "responding...",
+                "generating…",
+                "generating...",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
+        })
+}
+
+/// Sanitize and format a structured final assistant reply from the top, keeping
+/// a concise readable summary bounded by lines and characters.
+pub fn format_assistant_done_summary(
+    raw: &str,
+    bot_token: &str,
+    redact_secrets: bool,
+    max_lines: usize,
+    max_chars: usize,
+) -> Option<String> {
+    let clean = sanitize_terminal_text(raw, bot_token, redact_secrets);
+    let mut normalized = collapse_blank_lines(clean.lines());
+    if normalized.is_empty() {
+        return None;
+    }
+    let line_limit = max_lines.max(1);
+    let cut_by_lines = normalized.len() > line_limit;
+    if cut_by_lines {
+        normalized.truncate(line_limit);
+        while normalized.last().is_some_and(|l| l.is_empty()) {
+            normalized.pop();
+        }
+    }
+    let mut joined = normalized.join("\n");
+    let char_limit = max_chars.max(1);
+    if cut_by_lines && joined.chars().count() < char_limit {
+        joined.push('…');
+    }
+    let trimmed = if joined.chars().count() > char_limit {
+        truncate_chars(&joined, char_limit)
+    } else {
+        joined
+    };
+    (!trimmed.trim().is_empty()).then_some(trimmed)
+}
+
+fn is_tui_border_line(trimmed: &str) -> bool {
+    trimmed.is_empty()
+        || trimmed.chars().all(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '─' | '━'
+                        | '═'
+                        | '┄'
+                        | '┈'
+                        | '┌'
+                        | '┐'
+                        | '└'
+                        | '┘'
+                        | '╭'
+                        | '╮'
+                        | '╰'
+                        | '╯'
+                        | '│'
+                        | '┃'
+                        | '├'
+                        | '┤'
+                        | '┬'
+                        | '┴'
+                        | '┼'
+                        | '-'
+                        | '='
+                        | '_'
+                        | '*'
+                )
+        })
+}
+
+fn is_tui_prompt_prefix(trimmed: &str) -> bool {
+    trimmed.starts_with('›') || trimmed.starts_with('❯')
+}
+
+fn is_tui_footer_chrome(trimmed: &str) -> bool {
+    if is_tui_border_line(trimmed) || is_tui_prompt_prefix(trimmed) || trimmed == ">" {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if [
+        "for shortcuts",
+        "for agents",
+        "bypass permissions",
+        "shift+tab to cycle",
+        "update available",
+        "turn off recaps",
+        "context left",
+        "auto-accept",
+        "ctrl+c to",
+        "? for help",
+        "esc to interrupt",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return true;
+    }
+    if lower.contains("% left") && lower.contains("resets ") {
+        return true;
+    }
+    (trimmed.contains(" · ~/") || trimmed.contains(" · /home/"))
+        && !trimmed.starts_with('•')
+        && !trimmed.starts_with('-')
+}
+
+/// Extract the current turn's output from raw terminal capture, stripping bottom
+/// TUI prompt boxes, keybinding footers, and model status bars.
+pub fn extract_done_summary(
+    raw: &str,
+    bot_token: &str,
+    redact_secrets: bool,
+    max_lines: usize,
+    max_chars: usize,
+) -> Option<String> {
+    let clean = sanitize_terminal_text(raw, bot_token, redact_secrets);
+    let mut lines: Vec<&str> = clean.lines().map(str::trim_end).collect();
+    while lines.last().is_some_and(|l| is_tui_footer_chrome(l.trim())) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    if let Some(prompt_idx) = lines.iter().rposition(|l| is_tui_prompt_prefix(l.trim())) {
+        let after = &lines[prompt_idx + 1..];
+        if after.iter().any(|l| !l.trim().is_empty()) {
+            lines = after.to_vec();
+        }
+    }
+    let normalized = collapse_blank_lines(lines);
+    if normalized.is_empty() {
+        return None;
+    }
+    let start = normalized.len().saturating_sub(max_lines.max(1));
+    let out = clamp_tail_chars(normalized[start..].join("\n"), max_chars);
+    (!out.trim().is_empty()).then_some(out)
 }
 
 pub fn render_progress_bar(percent_used: f64, width: usize) -> String {
@@ -395,7 +616,11 @@ pub fn format_dashboard_html(cards: &[CardSummary], usage: &[ProviderUsageSummar
     out
 }
 
-pub fn dashboard_keyboard(perms: Permissions, has_forum: bool) -> InlineKeyboardMarkup {
+pub fn dashboard_keyboard(
+    perms: Permissions,
+    has_forum: bool,
+    mini_app_url: Option<&str>,
+) -> InlineKeyboardMarkup {
     let mut row = Vec::new();
     if perms.launch {
         row.push(InlineButton::callback("➕ New", "nwo:0"));
@@ -404,8 +629,12 @@ pub fn dashboard_keyboard(perms: Permissions, has_forum: bool) -> InlineKeyboard
         row.push(InlineButton::callback("🔄 Sync", "syn:0"));
     }
     row.push(InlineButton::callback("🔄 Refresh", "dsh:0"));
+    let mut rows = vec![row];
+    if let Some(url) = mini_app_url {
+        rows.push(vec![InlineButton::url("📱 Open App", url)]);
+    }
     InlineKeyboardMarkup {
-        inline_keyboard: vec![row],
+        inline_keyboard: rows,
     }
 }
 
@@ -422,7 +651,10 @@ pub fn sync_dashboard(
         return false;
     };
     let html = format_dashboard_html(cards, usage);
-    let kb = dashboard_keyboard(cfg.permissions, true);
+    let app_url = cfg
+        .mini_app
+        .dashboard_deep_link(cfg.bot_username.as_deref());
+    let kb = dashboard_keyboard(cfg.permissions, true, app_url.as_deref());
     let fp = status_card_fingerprint(&html, Some(&kb));
     let mut changed = false;
 
@@ -686,7 +918,6 @@ pub fn sync_topics(
 
     for card in cards {
         let desired_name = topic_title(
-            &card.status,
             &card.icon,
             &card.agent_name,
             &card.directory_display,
@@ -702,6 +933,9 @@ pub fn sync_topics(
                     continue;
                 }
                 if deleted && force_recreate_deleted {
+                    let app_url = cfg
+                        .mini_app
+                        .card_deep_link(cfg.bot_username.as_deref(), &card.id);
                     if let Some(binding) = create_binding(
                         api,
                         forum.chat_id,
@@ -710,6 +944,7 @@ pub fn sync_topics(
                         color,
                         now_unix,
                         cfg.permissions,
+                        app_url.as_deref(),
                     ) {
                         if let Some(msg_id) = binding.status_message_id {
                             runtime.record_message_card(forum.chat_id, msg_id, &card.id);
@@ -767,7 +1002,11 @@ pub fn sync_topics(
 
                 // B. Live silent status header card edit (no topic rename service line).
                 let desired_header = format_topic_header_html(card);
-                let desired_kb = topic_header_keyboard(card, cfg.permissions);
+                let app_url = cfg
+                    .mini_app
+                    .card_deep_link(cfg.bot_username.as_deref(), &card.id);
+                let desired_kb =
+                    topic_header_keyboard_with_app(card, cfg.permissions, app_url.as_deref());
                 let desired_fp = status_card_fingerprint(&desired_header, desired_kb.as_ref());
                 if let Some(msg_id) = runtime.topics[idx].status_message_id {
                     if runtime.topics[idx].last_status_card.as_deref() != Some(desired_fp.as_str()) {
@@ -796,77 +1035,41 @@ pub fn sync_topics(
                     }
                 }
 
-                // C. Topic title update (debounced on status changes, 60s-throttled on prompt-only changes).
-                let status_changed = runtime.topics[idx].last_status != card.status;
-                if status_changed {
-                    if runtime.topics[idx].pending_status.as_deref() != Some(card.status.as_str()) {
-                        runtime.topics[idx].pending_status = Some(card.status.clone());
-                        runtime.topics[idx].pending_status_since = now_unix;
-                        changed = true;
-                    }
-                    let stable = force_recreate_deleted
-                        || now_unix.saturating_sub(runtime.topics[idx].pending_status_since)
-                            >= TOPIC_STATUS_DEBOUNCE_SECS;
-                    let allowed = force_recreate_deleted
-                        || now_unix >= runtime.topics[idx].next_rename_allowed_at;
-                    if stable && allowed {
-                        if runtime.topics[idx].topic_name == desired_name {
-                            runtime.topics[idx].last_status = card.status.clone();
-                            runtime.topics[idx].pending_status = None;
+                // C. Track status silently (the pinned header shows live dots) and never rename
+                // topics on status flickers, which inject noisy Telegram service lines into chat.
+                if runtime.topics[idx].last_status != card.status {
+                    runtime.topics[idx].last_status = card.status.clone();
+                    changed = true;
+                }
+                if runtime.topics[idx].pending_status.is_some() {
+                    runtime.topics[idx].pending_status = None;
+                    changed = true;
+                }
+                let initial_title_fill = !strip_legacy_status_prefix(&runtime.topics[idx].topic_name)
+                    .contains(" — ")
+                    && desired_name.contains(" — ")
+                    && now_unix >= runtime.topics[idx].next_rename_allowed_at;
+                let should_rename = (force_recreate_deleted || initial_title_fill)
+                    && runtime.topics[idx].topic_name != desired_name;
+                if should_rename {
+                    match api.edit_forum_topic(forum.chat_id, thread_id, &desired_name) {
+                        Ok(()) => {
+                            runtime.topics[idx].topic_name = desired_name;
+                            runtime.topics[idx].last_renamed_at = now_unix;
+                            runtime.topics[idx].next_rename_allowed_at =
+                                now_unix.saturating_add(60);
                             changed = true;
-                        } else {
-                            match api.edit_forum_topic(forum.chat_id, thread_id, &desired_name) {
-                                Ok(()) => {
-                                    runtime.topics[idx].topic_name = desired_name;
-                                    runtime.topics[idx].last_status = card.status.clone();
-                                    runtime.topics[idx].pending_status = None;
-                                    runtime.topics[idx].last_renamed_at = now_unix;
-                                    runtime.topics[idx].next_rename_allowed_at =
-                                        now_unix.saturating_add(TOPIC_STATUS_RENAME_COOLDOWN_SECS);
-                                    changed = true;
-                                }
-                                Err(ApiError::TopicNotFound) => {
-                                    runtime.topics[idx].deleted_in_telegram = true;
-                                    changed = true;
-                                }
-                                Err(ApiError::RateLimited { retry_after }) => {
-                                    runtime.topics[idx].next_rename_allowed_at =
-                                        now_unix.saturating_add(retry_after.max(5));
-                                    changed = true;
-                                }
-                                Err(_) => {}
-                            }
                         }
-                    }
-                } else {
-                    if runtime.topics[idx].pending_status.is_some() {
-                        runtime.topics[idx].pending_status = None;
-                        changed = true;
-                    }
-                    let prompt_rename_ready = force_recreate_deleted
-                        || (now_unix.saturating_sub(runtime.topics[idx].last_renamed_at)
-                            >= TOPIC_RENAME_MIN_INTERVAL_SECS
-                            && now_unix >= runtime.topics[idx].next_rename_allowed_at);
-                    if runtime.topics[idx].topic_name != desired_name && prompt_rename_ready {
-                        match api.edit_forum_topic(forum.chat_id, thread_id, &desired_name) {
-                            Ok(()) => {
-                                runtime.topics[idx].topic_name = desired_name;
-                                runtime.topics[idx].last_renamed_at = now_unix;
-                                runtime.topics[idx].next_rename_allowed_at =
-                                    now_unix.saturating_add(TOPIC_STATUS_RENAME_COOLDOWN_SECS);
-                                changed = true;
-                            }
-                            Err(ApiError::TopicNotFound) => {
-                                runtime.topics[idx].deleted_in_telegram = true;
-                                changed = true;
-                            }
-                            Err(ApiError::RateLimited { retry_after }) => {
-                                runtime.topics[idx].next_rename_allowed_at =
-                                    now_unix.saturating_add(retry_after.max(5));
-                                changed = true;
-                            }
-                            Err(_) => {}
+                        Err(ApiError::TopicNotFound) => {
+                            runtime.topics[idx].deleted_in_telegram = true;
+                            changed = true;
                         }
+                        Err(ApiError::RateLimited { retry_after }) => {
+                            runtime.topics[idx].next_rename_allowed_at =
+                                now_unix.saturating_add(retry_after.max(5));
+                            changed = true;
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -874,6 +1077,9 @@ pub fn sync_topics(
                 if !cfg.auto_sync_topics && !force_recreate_deleted {
                     continue;
                 }
+                let app_url = cfg
+                    .mini_app
+                    .card_deep_link(cfg.bot_username.as_deref(), &card.id);
                 if let Some(binding) = create_binding(
                     api,
                     forum.chat_id,
@@ -882,6 +1088,7 @@ pub fn sync_topics(
                     color,
                     now_unix,
                     cfg.permissions,
+                    app_url.as_deref(),
                 ) {
                     if let Some(msg_id) = binding.status_message_id {
                         runtime.record_message_card(forum.chat_id, msg_id, &card.id);
@@ -1016,10 +1223,11 @@ fn create_binding(
     color: u32,
     now_unix: u64,
     perms: Permissions,
+    mini_app_url: Option<&str>,
 ) -> Option<TopicBinding> {
     let topic = api.create_forum_topic(chat_id, desired_name, color).ok()?;
     let header = format_topic_header_html(card);
-    let kb = topic_header_keyboard(card, perms);
+    let kb = topic_header_keyboard_with_app(card, perms, mini_app_url);
     let status_message_id = api
         .send_message(
             chat_id,

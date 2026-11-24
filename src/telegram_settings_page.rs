@@ -4,6 +4,7 @@ use crate::telegram::config::{
     self, unix_now, Config, RuntimeState,
 };
 use crate::telegram::pairing;
+use crate::telegram::webapp;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{Align, Box, Button, DrawingArea, Entry, Label, Orientation, Switch};
@@ -32,6 +33,8 @@ struct Hooks {
     revoke_user: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     clear_rejected: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
     unlink_forum: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    detect_tailscale: Arc<dyn Fn(u16) -> webapp::TailscaleInfo + Send + Sync>,
+    setup_tailscale: Arc<dyn Fn(u16, u16) -> Result<String, String> + Send + Sync>,
 }
 
 impl Hooks {
@@ -68,6 +71,8 @@ impl Hooks {
                 let dir = pairing::default_state_dir()?;
                 pairing::unlink_forum(&dir)
             }),
+            detect_tailscale: Arc::new(webapp::detect_tailscale_info),
+            setup_tailscale: Arc::new(webapp::configure_tailscale_serve),
         }
     }
 }
@@ -334,6 +339,61 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
         "Delete the card's Forum Topic automatically once the terminal is closed (falls back to archiving if Telegram denies deletion).",
     );
 
+    // --- Section 3b: Mini Web App (Tailscale) ---
+    let (_, miniapp_body) = crate::launcher_settings::section_card(root, "", "Mini Web App (Tailscale)");
+    text(
+        &miniapp_body,
+        "Open an Android-like live terminal, weekly usage bars, Quick Keys, and Files inside Telegram using your own Tailscale Serve HTTPS URL (stays inside your private tailnet).",
+    );
+    let miniapp_status = text(&miniapp_body, "Tailscale status: checking…");
+    miniapp_status.add_css_class("launcher-note");
+    let miniapp_toggle = switch_row(
+        &miniapp_body,
+        "telegram-miniapp-enabled",
+        "Enable Telegram Mini Web App",
+        "Serve the embedded Android-like web UI on 127.0.0.1 for private Tailscale Serve HTTPS access.",
+    );
+
+    let url_row = Box::new(Orientation::Horizontal, 8);
+    let miniapp_url_entry = Entry::new();
+    miniapp_url_entry.set_widget_name("telegram-miniapp-url");
+    miniapp_url_entry.add_css_class("ws-entry");
+    miniapp_url_entry.set_hexpand(true);
+    miniapp_url_entry.set_placeholder_text(Some("https://<pc>.<tailnet>.ts.net:8443"));
+    url_row.append(&miniapp_url_entry);
+    miniapp_body.append(&url_row);
+
+    let short_row = Box::new(Orientation::Horizontal, 8);
+    let miniapp_short_entry = Entry::new();
+    miniapp_short_entry.set_widget_name("telegram-miniapp-shortname");
+    miniapp_short_entry.add_css_class("ws-entry");
+    miniapp_short_entry.set_hexpand(true);
+    miniapp_short_entry.set_placeholder_text(Some("Optional @BotFather /newapp short name (for Forum Topic buttons)"));
+    short_row.append(&miniapp_short_entry);
+    miniapp_body.append(&short_row);
+
+    let miniapp_actions = Box::new(Orientation::Horizontal, 8);
+    let btn_miniapp_save = Button::with_label("Save Mini App");
+    btn_miniapp_save.set_widget_name("telegram-miniapp-save");
+    btn_miniapp_save.add_css_class("launcher-btn");
+    btn_miniapp_save.add_css_class("launcher-btn-primary");
+    miniapp_actions.append(&btn_miniapp_save);
+
+    let btn_miniapp_ts = Button::with_label("Auto-setup Tailscale Serve");
+    btn_miniapp_ts.set_widget_name("telegram-miniapp-tailscale");
+    btn_miniapp_ts.add_css_class("launcher-btn");
+    miniapp_actions.append(&btn_miniapp_ts);
+
+    let btn_miniapp_prompt = Button::with_label("Copy AI setup prompt");
+    btn_miniapp_prompt.set_widget_name("telegram-miniapp-copy-prompt");
+    btn_miniapp_prompt.add_css_class("launcher-btn");
+    miniapp_actions.append(&btn_miniapp_prompt);
+    miniapp_body.append(&miniapp_actions);
+
+    let miniapp_feedback = text(&miniapp_body, "");
+    miniapp_feedback.add_css_class("launcher-note");
+    miniapp_feedback.set_visible(false);
+
     // --- Section 4: Permissions ---
     let (_, perm_body) = crate::launcher_settings::section_card(root, "", "Permissions");
     text(
@@ -358,7 +418,9 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
 
     let pending_req_id: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
     let token_loaded = Rc::new(Cell::new(false));
+    let miniapp_loaded = Rc::new(Cell::new(false));
     let verifying = Rc::new(Cell::new(false));
+    let cached_ts: Rc<RefCell<Option<webapp::TailscaleInfo>>> = Rc::new(RefCell::new(None));
 
     let paint: Rc<
         dyn Fn(
@@ -371,7 +433,10 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
     > = Rc::new({
         let painting = Rc::clone(&painting);
         let token_loaded = Rc::clone(&token_loaded);
+        let miniapp_loaded = Rc::clone(&miniapp_loaded);
         let verifying = Rc::clone(&verifying);
+        let cached_ts = Rc::clone(&cached_ts);
+        let hooks = hooks.clone();
         let bot_chip = bot_chip.clone();
         let bot_status_label = bot_status_label.clone();
         let token_entry = token_entry.clone();
@@ -393,6 +458,10 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
         let btn_unlink_forum = btn_unlink_forum.clone();
         let auto_topics_toggle = auto_topics_toggle.clone();
         let archive_topics_toggle = archive_topics_toggle.clone();
+        let miniapp_status = miniapp_status.clone();
+        let miniapp_toggle = miniapp_toggle.clone();
+        let miniapp_url_entry = miniapp_url_entry.clone();
+        let miniapp_short_entry = miniapp_short_entry.clone();
         let perm_switches = perm_switches.clone();
         move |cfg: &Config,
               rt: &RuntimeState,
@@ -512,6 +581,40 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
             }
             auto_topics_toggle.set_active(cfg.auto_sync_topics);
             archive_topics_toggle.set_active(cfg.archive_closed_topics);
+
+            let port = cfg.mini_app.effective_port();
+            if cached_ts.borrow().is_none() {
+                *cached_ts.borrow_mut() = Some((hooks.detect_tailscale)(port));
+            }
+            if !miniapp_loaded.get() {
+                let ts_url = cached_ts
+                    .borrow()
+                    .as_ref()
+                    .and_then(|ts| ts.serve_url.clone().or_else(|| ts.suggested_url.clone()));
+                let initial_url = if cfg.mini_app.public_url.trim().is_empty() {
+                    ts_url.unwrap_or_default()
+                } else {
+                    cfg.mini_app.public_url.clone()
+                };
+                miniapp_url_entry.set_text(&initial_url);
+                miniapp_short_entry.set_text(&cfg.mini_app.short_name);
+                miniapp_loaded.set(true);
+            }
+            miniapp_toggle.set_active(cfg.mini_app.enabled);
+            if let Some(ts) = cached_ts.borrow().as_ref() {
+                let status_line = if !ts.installed {
+                    format!("Tailscale CLI not found. Loopback port 127.0.0.1:{port}. Or paste your own HTTPS URL.")
+                } else if !ts.running {
+                    format!("Tailscale installed (stopped). Run `tailscale up`, then Auto-setup Tailscale Serve (port 127.0.0.1:{port}).")
+                } else if let Some(serve) = ts.serve_url.as_deref() {
+                    format!("Tailscale Serve active: {serve} -> http://127.0.0.1:{port}")
+                } else if let Some(suggested) = ts.suggested_url.as_deref() {
+                    format!("Tailscale running ({suggested}). Click Auto-setup Tailscale Serve to proxy port {port}.")
+                } else {
+                    format!("Tailscale running. Loopback port 127.0.0.1:{port}.")
+                };
+                miniapp_status.set_text(&status_line);
+            }
 
             let p = cfg.permissions;
             for (idx, val) in [
@@ -805,6 +908,134 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
         }
     });
 
+    miniapp_toggle.connect_active_notify({
+        let hooks = hooks.clone();
+        let painting = Rc::clone(&painting);
+        let miniapp_url_entry = miniapp_url_entry.clone();
+        let miniapp_short_entry = miniapp_short_entry.clone();
+        let miniapp_feedback = miniapp_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |toggle| {
+            if painting.get() {
+                return;
+            }
+            let mut cfg = (hooks.load_config)().unwrap_or_default();
+            cfg.mini_app.enabled = toggle.is_active();
+            cfg.mini_app.listen_port = cfg.mini_app.effective_port();
+            let typed_url = miniapp_url_entry.text().trim().to_string();
+            if !typed_url.is_empty() {
+                cfg.mini_app.public_url = typed_url;
+            }
+            cfg.mini_app.short_name = miniapp_short_entry.text().trim().to_string();
+            if (hooks.save_config)(&cfg).is_err() {
+                miniapp_feedback.set_text("Could not save Mini Web App settings.");
+                miniapp_feedback.set_visible(true);
+            } else {
+                miniapp_feedback.set_visible(false);
+            }
+            refresh();
+        }
+    });
+
+    btn_miniapp_save.connect_clicked({
+        let hooks = hooks.clone();
+        let miniapp_url_entry = miniapp_url_entry.clone();
+        let miniapp_short_entry = miniapp_short_entry.clone();
+        let miniapp_feedback = miniapp_feedback.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let url = miniapp_url_entry.text().trim().to_string();
+            if !url.is_empty() && !url.starts_with("https://") {
+                miniapp_feedback.set_text("Mini App URL must start with https:// (for example https://my-pc.tailnet.ts.net:8443).");
+                miniapp_feedback.set_visible(true);
+                return;
+            }
+            let short = miniapp_short_entry.text().trim().to_string();
+            if !short.is_empty()
+                && !short.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            {
+                miniapp_feedback.set_text("BotFather /newapp short name can only contain letters, digits, _ and -.");
+                miniapp_feedback.set_visible(true);
+                return;
+            }
+            let mut cfg = (hooks.load_config)().unwrap_or_default();
+            cfg.mini_app.listen_port = cfg.mini_app.effective_port();
+            cfg.mini_app.public_url = url;
+            cfg.mini_app.short_name = short;
+            if !cfg.mini_app.public_url.is_empty() {
+                cfg.mini_app.enabled = true;
+            }
+            match (hooks.save_config)(&cfg) {
+                Ok(()) => miniapp_feedback.set_text("Saved Mini Web App settings."),
+                Err(e) => miniapp_feedback.set_text(&format!("Save failed: {e}")),
+            }
+            miniapp_feedback.set_visible(true);
+            refresh();
+        }
+    });
+
+    btn_miniapp_ts.connect_clicked({
+        let hooks = hooks.clone();
+        let cached_ts = Rc::clone(&cached_ts);
+        let miniapp_loaded = Rc::clone(&miniapp_loaded);
+        let miniapp_feedback = miniapp_feedback.clone();
+        let btn_miniapp_ts = btn_miniapp_ts.clone();
+        let refresh = Rc::clone(&refresh);
+        move |_| {
+            let port = (hooks.load_config)()
+                .map(|c| c.mini_app.effective_port())
+                .unwrap_or(config::DEFAULT_MINI_APP_PORT);
+            btn_miniapp_ts.set_sensitive(false);
+            miniapp_feedback.set_text("Configuring `tailscale serve --bg --https=8443`…");
+            miniapp_feedback.set_visible(true);
+            let hooks = hooks.clone();
+            let cached_ts = Rc::clone(&cached_ts);
+            let miniapp_loaded = Rc::clone(&miniapp_loaded);
+            let miniapp_feedback = miniapp_feedback.clone();
+            let btn_miniapp_ts = btn_miniapp_ts.clone();
+            let refresh = Rc::clone(&refresh);
+            glib::MainContext::default().spawn_local(async move {
+                let res = gtk4::gio::spawn_blocking(move || {
+                    let url = (hooks.setup_tailscale)(port, config::DEFAULT_MINI_APP_HTTPS_PORT)?;
+                    let info = (hooks.detect_tailscale)(port);
+                    let mut cfg = (hooks.load_config)().map_err(|e| e.to_string())?;
+                    cfg.mini_app.enabled = true;
+                    cfg.mini_app.listen_port = port;
+                    cfg.mini_app.public_url = url.clone();
+                    (hooks.save_config)(&cfg).map_err(|e| e.to_string())?;
+                    Ok::<_, String>((url, info))
+                })
+                .await;
+                btn_miniapp_ts.set_sensitive(true);
+                match res {
+                    Ok(Ok((url, info))) => {
+                        *cached_ts.borrow_mut() = Some(info);
+                        miniapp_loaded.set(false);
+                        miniapp_feedback.set_text(&format!("Tailscale Serve active at {url} and Mini App enabled."));
+                    }
+                    Ok(Err(err)) => miniapp_feedback.set_text(&err),
+                    Err(_) => miniapp_feedback.set_text("Tailscale Serve setup failed."),
+                }
+                miniapp_feedback.set_visible(true);
+                refresh();
+            });
+        }
+    });
+
+    btn_miniapp_prompt.connect_clicked({
+        let hooks = hooks.clone();
+        let miniapp_feedback = miniapp_feedback.clone();
+        move |btn| {
+            let port = (hooks.load_config)()
+                .map(|c| c.mini_app.effective_port())
+                .unwrap_or(config::DEFAULT_MINI_APP_PORT);
+            let prompt = webapp::ai_agent_setup_prompt(port, config::DEFAULT_MINI_APP_HTTPS_PORT);
+            btn.clipboard().set_text(&prompt);
+            miniapp_feedback.set_text("Copied AI agent setup prompt to clipboard — paste it into any AI agent.");
+            miniapp_feedback.set_visible(true);
+        }
+    });
+
     for (index, toggle) in perm_switches.iter().enumerate() {
         let hooks = hooks.clone();
         let painting = Rc::clone(&painting);
@@ -968,6 +1199,17 @@ mod tests {
             },
             clear_rejected: Arc::new(|| Ok(())),
             unlink_forum: Arc::new(|| Ok(())),
+            detect_tailscale: Arc::new(|port| webapp::TailscaleInfo {
+                installed: true,
+                running: true,
+                dns_name: Some("my-pc.tailnet.ts.net".into()),
+                serve_url: None,
+                suggested_url: Some("https://my-pc.tailnet.ts.net:8443".into()),
+                serve_command: format!("tailscale serve --bg --https=8443 http://127.0.0.1:{port}"),
+            }),
+            setup_tailscale: Arc::new(|_, https_port| {
+                Ok(format!("https://my-pc.tailnet.ts.net:{https_port}"))
+            }),
         };
 
         let root = Box::new(Orientation::Vertical, 10);
@@ -1026,5 +1268,30 @@ mod tests {
         find_btn("telegram-revoke-btn").emit_clicked();
         assert!(cfg_store.lock().unwrap().allowed_user.is_none());
         refresh();
+
+        // Mini App settings persist URL, short name, and enabled toggle.
+        let miniapp_url: Entry = crate::gtk_test::find_where(root.upcast_ref(), |w| {
+            w.widget_name() == "telegram-miniapp-url"
+        })
+        .and_then(|w| w.downcast().ok())
+        .unwrap();
+        let miniapp_short: Entry = crate::gtk_test::find_where(root.upcast_ref(), |w| {
+            w.widget_name() == "telegram-miniapp-shortname"
+        })
+        .and_then(|w| w.downcast().ok())
+        .unwrap();
+        miniapp_url.set_text("https://devbox.tailnet.ts.net:8443/");
+        miniapp_short.set_text("superdesktop");
+        find_btn("telegram-miniapp-save").emit_clicked();
+        {
+            let guard = cfg_store.lock().unwrap();
+            assert!(guard.mini_app.enabled);
+            assert_eq!(
+                guard.mini_app.normalized_url().as_deref(),
+                Some("https://devbox.tailnet.ts.net:8443")
+            );
+            assert_eq!(guard.mini_app.valid_short_name(), Some("superdesktop"));
+        }
+        let _copy_prompt = find_btn("telegram-miniapp-copy-prompt");
     }
 }

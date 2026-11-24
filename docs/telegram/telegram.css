@@ -177,6 +177,27 @@ section[id] { scroll-margin-top: 82px; }
 
 .no-js .screen-panel[hidden] { display: block; }
 
+.prompt-box {
+  margin-top: 16px; background: #0c111b; border: 1px solid var(--border);
+  border-radius: 14px; overflow: hidden;
+}
+.prompt-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 14px; background: #151c2b; border-bottom: 1px solid var(--border);
+  font-size: 13px; color: var(--muted);
+}
+.prompt-bar strong { color: var(--text); }
+.prompt-code {
+  margin: 0; padding: 16px; overflow-x: auto; font-family: var(--mono);
+  font-size: 12.5px; line-height: 1.5; color: #dbeafe; white-space: pre-wrap;
+}
+.prompt-copy {
+  background: rgba(34, 211, 238, .15); color: var(--accent);
+  border: 1px solid rgba(34, 211, 238, .4); border-radius: 8px;
+  padding: 6px 12px; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.prompt-copy:hover { background: rgba(34, 211, 238, .25); }
+
 @media (max-width: 900px) {
   .tg-mock { grid-template-columns: 1fr; }
   .tg-sidebar { border-right: 0; border-bottom: 1px solid var(--border); }

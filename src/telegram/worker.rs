@@ -9,6 +9,7 @@ use super::desktop::{DesktopBackend, LiveDesktopBackend, ProviderUsageSummary};
 use super::notifier::NotifierState;
 use super::router::{Router, BOT_COMMANDS};
 use super::topics;
+use super::webapp::MiniAppServer;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -72,6 +73,43 @@ struct SharedState {
     config_mtime: Option<SystemTime>,
 }
 
+fn sync_menu_button(client: &TelegramClient, cfg: &Config) {
+    let Some(owner) = cfg.allowed_user.as_ref() else {
+        return;
+    };
+    let web_app_url = if cfg.mini_app.enabled {
+        cfg.mini_app.normalized_url()
+    } else {
+        None
+    };
+    let arg = web_app_url.as_deref().map(|u| ("⚡ Open App", u));
+    let _ = client.set_chat_menu_button(Some(owner.chat_id), arg);
+}
+
+fn reconcile_mini_app_server(
+    server: &mut Option<MiniAppServer>,
+    cfg: &Config,
+    shared: &Arc<Mutex<SharedState>>,
+) {
+    let want_port = (cfg.should_run() && cfg.mini_app.enabled).then(|| cfg.mini_app.effective_port());
+    if server.as_ref().map(|s| s.listen_port) == want_port {
+        return;
+    }
+    if let Some(mut old) = server.take() {
+        old.stop();
+    }
+    if let Some(port) = want_port {
+        let shared_cfg = Arc::clone(shared);
+        let cfg_reader: Arc<dyn Fn() -> Config + Send + Sync> =
+            Arc::new(move || shared_cfg.lock().unwrap().cfg.clone());
+        let backend: Arc<dyn DesktopBackend + Send + Sync> = Arc::new(LiveDesktopBackend);
+        match MiniAppServer::spawn(port, cfg_reader, backend) {
+            Ok(srv) => *server = Some(srv),
+            Err(err) => eprintln!("SUPER DESKTOP telegram mini-app: {err}"),
+        }
+    }
+}
+
 /// Reload `config.json` immediately whenever Settings changed it on disk.
 /// Returns `true` if `runtime` changed (e.g. cleared topics/active card on revocation).
 fn reload_config_if_changed(
@@ -125,6 +163,9 @@ fn reload_config_if_changed(
         guard.runtime.last_dashboard_edit_at = 0;
         guard.runtime.live_streams.clear();
         runtime_dirty = true;
+    }
+    if guard.cfg.allowed_user != new_cfg.allowed_user || guard.cfg.mini_app != new_cfg.mini_app {
+        sync_menu_button(client, &new_cfg);
     }
     guard.cfg = new_cfg;
     runtime_dirty
@@ -209,6 +250,7 @@ pub fn serve() {
         let _ = save_config_at(&cfg_path, &cfg);
     }
     let _ = client.set_my_commands(BOT_COMMANDS);
+    sync_menu_button(&client, &cfg);
 
     let now = unix_now();
     let mut router = Router::new(me.id, me.username.clone(), now);
@@ -235,12 +277,14 @@ pub fn serve() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Mutex::new(SharedState {
-        cfg,
+        cfg: cfg.clone(),
         runtime,
         router,
         notifier,
         config_mtime: config_mtime(),
     }));
+    let mut mini_app_server: Option<MiniAppServer> = None;
+    reconcile_mini_app_server(&mut mini_app_server, &cfg, &shared);
 
     let poller_client = match TelegramClient::new(&token) {
         Ok(c) => c,
@@ -362,9 +406,11 @@ pub fn serve() {
 
         let mut guard = shared.lock().unwrap();
         let mut runtime_dirty = reload_config_if_changed(&mut guard, &cfg_path, &token, &client, &stop);
+        let latest_cfg = guard.cfg.clone();
         if stop.load(Ordering::SeqCst) {
             break;
         }
+        reconcile_mini_app_server(&mut mini_app_server, &latest_cfg, &shared);
 
         if guard.cfg.forum.is_some() {
             let cfg_copy = guard.cfg.clone();
@@ -423,6 +469,9 @@ pub fn serve() {
         }
     }
 
+    if let Some(mut srv) = mini_app_server.take() {
+        srv.stop();
+    }
     stop.store(true, Ordering::SeqCst);
     if let Ok(handle) = poller_handle {
         let _ = handle.join();

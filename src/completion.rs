@@ -132,6 +132,70 @@ fn parse_tail_detail(bytes: &[u8], identity: &str) -> ParsedTail {
     }
 }
 
+fn agent_message_item_text(event: &Value) -> Option<String> {
+    if event["type"] != "item_completed" || event["item"]["type"] != "AgentMessage" {
+        return None;
+    }
+    let text = event["item"]["content"]
+        .as_array()?
+        .iter()
+        .filter(|part| part["type"] == "text")
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+pub(crate) fn last_agent_message_for_pid(pid: u32) -> Option<String> {
+    let (fd, _) = rollout(pid)?;
+    let (mut file, meta) = open_owned(&fd)?;
+    let (tail, _) = read_jsonl_tail(&mut file, &meta, 512 * 1024)?;
+    last_agent_message_from_tail(&tail)
+}
+
+fn last_agent_message_from_tail(bytes: &[u8]) -> Option<String> {
+    if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return None;
+    }
+    let mut last_message: Option<String> = None;
+    let mut fallback_agent_msg: Option<String> = None;
+    for record in json_lines(bytes) {
+        if record["type"] != "event_msg" {
+            continue;
+        }
+        let event = &record["payload"];
+        match event["type"].as_str() {
+            Some(
+                "task_started" | "turn_started" | "user_message" | "turn_aborted" | "task_failed"
+                | "error",
+            ) => {
+                last_message = None;
+                fallback_agent_msg = None;
+            }
+            Some("item_completed") => {
+                if let Some(msg) = agent_message_item_text(event) {
+                    fallback_agent_msg = Some(msg);
+                }
+            }
+            Some("task_complete") if event["error"].is_object() => {
+                last_message = None;
+                fallback_agent_msg = None;
+            }
+            Some("task_complete") => {
+                let explicit = event["last_agent_message"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
+                last_message = explicit.or_else(|| fallback_agent_msg.take());
+            }
+            _ => {}
+        }
+    }
+    last_message
+}
+
 #[cfg(test)]
 fn parse_tail(bytes: &[u8], identity: &str) -> (String, Option<String>) {
     let parsed = parse_tail_detail(bytes, identity);
@@ -898,5 +962,40 @@ mod prompt_tests {
         assert_eq!(super::prompt_from_records(records.as_bytes()).as_deref(), Some("older shape"));
         let current = records.rsplit_once("{\"timestamp\":\"2026-10-07T06:14").unwrap().0;
         assert_eq!(super::prompt_from_records(current.as_bytes()).as_deref(), Some("what about quest step"));
+    }
+
+    #[test]
+    fn last_agent_message_reads_completed_turn_and_clears_on_new_or_failed_turn() {
+        let started = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n";
+        let item = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"item\":{\"type\":\"AgentMessage\",\"content\":[{\"type\":\"text\",\"text\":\"Drafted release notes.\"}]}}}\n";
+        let done_explicit = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-1\",\"last_agent_message\":\"  Committed and pushed both repos.  \"}}\n";
+        let done_no_msg = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-2\",\"last_agent_message\":\"\"}}\n";
+        let failed = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"turn-3\",\"last_agent_message\":null,\"error\":{\"message\":\"limit\"}}}\n";
+
+        assert_eq!(
+            super::last_agent_message_from_tail(format!("{started}{item}{done_explicit}").as_bytes())
+                .as_deref(),
+            Some("Committed and pushed both repos.")
+        );
+        assert_eq!(
+            super::last_agent_message_from_tail(format!("{started}{item}{done_no_msg}").as_bytes())
+                .as_deref(),
+            Some("Drafted release notes.")
+        );
+        assert_eq!(
+            super::last_agent_message_from_tail(
+                format!("{started}{item}{done_explicit}{started}").as_bytes()
+            ),
+            None
+        );
+        assert_eq!(
+            super::last_agent_message_from_tail(format!("{started}{failed}").as_bytes()),
+            None
+        );
+        // Mid-turn AgentMessage without task_complete must not report early.
+        assert_eq!(
+            super::last_agent_message_from_tail(format!("{started}{item}").as_bytes()),
+            None
+        );
     }
 }

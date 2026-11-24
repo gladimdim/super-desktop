@@ -27,6 +27,7 @@ const MAX_CACHED_FILE_PICKS: usize = 256;
 const FILES_PAGE_SIZE: usize = 8;
 
 pub const BOT_COMMANDS: &[(&str, &str)] = &[
+    ("app", "Open the Android-like Telegram Mini App"),
     ("cards", "List active terminal cards"),
     ("dashboard", "Show or refresh live dashboard + usage"),
     ("usage", "Show weekly allowance & provider progress"),
@@ -527,6 +528,7 @@ impl Router {
                 let html = format!(
                     "<b>SUPER DESKTOP Bot</b>\n{forum_line}\n\n\
                      <b>Commands:</b>\n\
+                     /app — open Mini Web App (live ANSI terminal)\n\
                      /cards — list active cards\n\
                      /dashboard — live workspace &amp; usage\n\
                      /usage — weekly allowance &amp; provider progress\n\
@@ -561,7 +563,12 @@ impl Router {
                     topics::sync_dashboard(api, cfg, runtime, &cards, &usage, now_unix, true);
                 } else {
                     let html = format_dashboard_html(&cards, &usage);
-                    let kb = dashboard_keyboard(cfg.permissions, cfg.forum.is_some());
+                    let app_url = if is_linked_forum {
+                        cfg.mini_app.dashboard_deep_link(cfg.bot_username.as_deref())
+                    } else {
+                        None
+                    };
+                    let kb = dashboard_keyboard(cfg.permissions, cfg.forum.is_some(), app_url.as_deref());
                     self.reply_and_track(
                         api,
                         runtime,
@@ -571,6 +578,86 @@ impl Router {
                         None,
                         Some(&kb),
                         None,
+                    );
+                }
+            }
+            "/app" => {
+                if !cfg.mini_app.enabled {
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        chat_id,
+                        thread_id,
+                        "Mini Web App is disabled. Turn on <b>Enable Telegram Mini Web App</b> in <b>Settings → Telegram</b>.",
+                        None,
+                        None,
+                        None,
+                    );
+                    return;
+                }
+                let Some(base_url) = cfg.mini_app.normalized_url() else {
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        chat_id,
+                        thread_id,
+                        "Mini Web App HTTPS URL is not set yet. Configure Tailscale Serve and paste the <code>https://…ts.net:8443</code> URL in <b>Settings → Telegram</b>.",
+                        None,
+                        None,
+                        None,
+                    );
+                    return;
+                };
+                if is_linked_forum {
+                    let dl = resolved_card_id
+                        .and_then(|cid| cfg.mini_app.card_deep_link(cfg.bot_username.as_deref(), cid))
+                        .or_else(|| cfg.mini_app.dashboard_deep_link(cfg.bot_username.as_deref()));
+                    if let Some(link) = dl {
+                        let kb = InlineKeyboardMarkup {
+                            inline_keyboard: vec![vec![InlineButton::url("📱 Open SUPER DESKTOP", link)]],
+                        };
+                        self.reply_and_track(
+                            api,
+                            runtime,
+                            chat_id,
+                            thread_id,
+                            "📱 Launch live ANSI terminal &amp; Files:",
+                            None,
+                            Some(&kb),
+                            resolved_card_id,
+                        );
+                    } else {
+                        self.reply_and_track(
+                            api,
+                            runtime,
+                            chat_id,
+                            thread_id,
+                            "Open the Mini App from the <b>⚡ Open App</b> menu button in our private 1:1 chat, or add a <code>@BotFather</code> <code>/newapp</code> short name in <b>Settings → Telegram</b> for one-tap buttons inside Forum Topics.",
+                            None,
+                            None,
+                            None,
+                        );
+                    }
+                } else {
+                    let launch_url = match resolved_card_id {
+                        Some(cid) => format!("{base_url}#card={cid}"),
+                        None => base_url,
+                    };
+                    let kb = InlineKeyboardMarkup {
+                        inline_keyboard: vec![vec![InlineButton::web_app(
+                            "📱 Open SUPER DESKTOP",
+                            launch_url,
+                        )]],
+                    };
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        chat_id,
+                        thread_id,
+                        "⚡ <b>SUPER DESKTOP Mini App</b>\nLive ANSI terminal, Weekly Usage &amp; Files over your private Tailscale connection:",
+                        None,
+                        Some(&kb),
+                        resolved_card_id,
                     );
                 }
             }
@@ -1868,7 +1955,12 @@ impl Router {
             let _ = api.answer_callback_query(&cq.id, Some("Refreshed"));
             let usage = backend.usage_summary();
             let html = format_dashboard_html(&cards, &usage);
-            let kb = dashboard_keyboard(cfg.permissions, cfg.forum.is_some());
+            let app_url = if is_linked_forum {
+                cfg.mini_app.dashboard_deep_link(cfg.bot_username.as_deref())
+            } else {
+                None
+            };
+            let kb = dashboard_keyboard(cfg.permissions, cfg.forum.is_some(), app_url.as_deref());
             let _ = api.edit_message_text(msg.chat.id, msg.message_id, &html, Some(&kb));
         } else if data.starts_with("usg:") {
             let _ = api.answer_callback_query(&cq.id, Some("Refreshed"));

@@ -6,11 +6,12 @@ use super::desktop::{
     extract_terminal_links, CardAsset, CardReferences, CardSummary, DesktopBackend, HarnessChoice,
     NamedKey, ProviderUsageLimit, ProviderUsageSummary, WorkspaceInfo,
 };
-use super::notifier::NotifierState;
+use super::notifier::{NotifierState, IDLE_FINISH_SETTLE_TICKS};
 use super::pairing;
 use super::redact::*;
 use super::router::Router;
 use super::topics;
+use super::webapp::{sign_init_data_for_test, verify_init_data, MiniAppServer};
 use crate::prompt_attachments::Attachment;
 use serde_json::json;
 use std::collections::{HashMap, VecDeque};
@@ -70,6 +71,8 @@ struct MockApiState {
     reopened_topics: Vec<(i64, i64)>,
     deleted_threads: std::collections::HashSet<i64>,
     deleted_messages: std::collections::HashSet<i64>,
+    msg_threads: HashMap<i64, i64>,
+    menu_buttons: Vec<(Option<i64>, Option<(String, String)>)>,
     chat_info: Option<ChatInfo>,
     chat_member: Option<ChatMember>,
     chat_member_count: u64,
@@ -123,6 +126,9 @@ impl TelegramApi for MockApi {
         }
         st.next_msg_id += 1;
         let id = st.next_msg_id;
+        if let Some(tid) = thread_id {
+            st.msg_threads.insert(id, tid);
+        }
         st.sent.push(SentMsg {
             chat_id,
             thread_id,
@@ -243,6 +249,13 @@ impl TelegramApi for MockApi {
         keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<(), ApiError> {
         let mut st = self.state.lock().unwrap();
+        if st
+            .msg_threads
+            .get(&message_id)
+            .is_some_and(|tid| st.deleted_threads.contains(tid))
+        {
+            return Err(ApiError::TopicNotFound);
+        }
         if st.deleted_messages.contains(&message_id) {
             return Err(ApiError::MessageNotFound);
         }
@@ -276,6 +289,18 @@ impl TelegramApi for MockApi {
     }
 
     fn set_my_commands(&self, _commands: &[(&str, &str)]) -> Result<(), ApiError> {
+        Ok(())
+    }
+
+    fn set_chat_menu_button(
+        &self,
+        chat_id: Option<i64>,
+        web_app: Option<(&str, &str)>,
+    ) -> Result<(), ApiError> {
+        self.state.lock().unwrap().menu_buttons.push((
+            chat_id,
+            web_app.map(|(t, u)| (t.to_string(), u.to_string())),
+        ));
         Ok(())
     }
 
@@ -386,6 +411,7 @@ struct MockBackend {
     cards: Mutex<Vec<CardSummary>>,
     usage: Mutex<Vec<ProviderUsageSummary>>,
     screens: Mutex<HashMap<String, String>>,
+    final_messages: Mutex<HashMap<String, String>>,
     references: Mutex<HashMap<String, CardReferences>>,
     assets: Mutex<HashMap<(String, String), (CardAsset, Vec<u8>)>>,
     pdf_pages: Mutex<HashMap<(String, String, u32), Vec<u8>>>,
@@ -404,6 +430,7 @@ impl MockBackend {
             cards: Mutex::new(cards),
             usage: Mutex::new(Vec::new()),
             screens: Mutex::new(HashMap::new()),
+            final_messages: Mutex::new(HashMap::new()),
             references: Mutex::new(HashMap::new()),
             assets: Mutex::new(HashMap::new()),
             pdf_pages: Mutex::new(HashMap::new()),
@@ -441,6 +468,10 @@ impl DesktopBackend for MockBackend {
         self.usage.lock().unwrap().clone()
     }
 
+    fn final_assistant_message(&self, card_id: &str) -> Option<String> {
+        self.final_messages.lock().unwrap().get(card_id).cloned()
+    }
+
     fn capture_screen(&self, card_id: &str, _history_lines: u32) -> Result<String, String> {
         Ok(self
             .screens
@@ -449,6 +480,10 @@ impl DesktopBackend for MockBackend {
             .get(card_id)
             .cloned()
             .unwrap_or_default())
+    }
+
+    fn capture_ansi_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String> {
+        self.capture_screen(card_id, history_lines)
     }
 
     fn list_references(&self, card_id: &str) -> Result<CardReferences, String> {
@@ -680,15 +715,60 @@ fn telegram_redaction_chunking_and_topic_formatting() {
     assert!(chunks.iter().all(|c| c.chars().count() <= 300));
 
     let long_title = "Very long prompt ".repeat(20);
-    let topic = topic_title("WORKING", "⚡", "Claude Code", "~/GitHub/super-desktop", Some(&long_title));
+    let topic = topic_title("⚡", "Claude Code", "~/GitHub/super-desktop", Some(&long_title));
     assert!(topic.chars().count() <= MAX_TOPIC_NAME_CHARS);
     assert!(!topic.contains('\n'));
-    assert!(topic.starts_with("🟢 ⚡ Claude Code · super-desktop"));
-    assert!(topic_title("WAITING", "⚡", "Claude Code", "~/p", None).starts_with("🟡 "));
-    assert!(topic_title("FINISHED", "⚡", "Claude Code", "~/p", None).starts_with("✅ "));
-    assert!(topic_title("ERROR", "⚡", "Claude Code", "~/p", None).starts_with("🔴 "));
-    assert!(topic_title("EXITED", "⚡", "Claude Code", "~/p", None).starts_with("⚫ "));
-    assert!(topic_title("IDLE", "⚡", "Claude Code", "~/p", None).starts_with("⚪ "));
+    assert!(topic.starts_with("⚡ Claude Code · super-desktop — Very long prompt"));
+    assert_eq!(
+        topic_title("🤖", "OpenAI Codex", "~/GitHub/SichWorld", None),
+        "🤖 OpenAI Codex · SichWorld"
+    );
+    assert_eq!(
+        strip_legacy_status_prefix("🟢 🤖 OpenAI Codex · SichWorld"),
+        "🤖 OpenAI Codex · SichWorld"
+    );
+    assert_eq!(
+        strip_legacy_status_prefix("🤖 OpenAI Codex · SichWorld"),
+        "🤖 OpenAI Codex · SichWorld"
+    );
+
+    let codex_screen = "\
+› commit and push your changes\n\
+\n\
+• Committed and pushed both repositories to main.\n\
+  OPENAI_API_KEY=sk-ant-api03-1234567890abcdefghijklmnop\n\
+  Worked for 25s • 1:31 PM\n\
+\n\
+  ↳ Recap: Both repositories are clean and synced to `main`.\n\
+\n\
+› Ask Codex to do anything\n\
+\n\
+  GPT-6.2-Astra medium · ~/GitHub/SichWorld · Створи текстури\n\
+  ← for agents · ? for shortcuts\n";
+    assert!(!topics::screen_shows_active_work(codex_screen));
+    assert!(topics::screen_shows_active_work(
+        "• Working (12s • esc to interrupt)\n› Ask Codex to do anything\n"
+    ));
+    assert!(topics::screen_shows_active_work("⠋ Running tests...\n"));
+    let extracted = topics::extract_done_summary(codex_screen, "123:tok", true, 16, 1200)
+        .expect("summary extracted");
+    assert!(extracted.contains("Committed and pushed both repositories to main."));
+    assert!(extracted.contains("Recap: Both repositories are clean"));
+    assert!(extracted.contains("[REDACTED]"));
+    assert!(!extracted.contains("sk-ant-"));
+    assert!(!extracted.contains("Ask Codex to do anything"));
+    assert!(!extracted.contains("for shortcuts"));
+    assert!(!extracted.contains("GPT-6.2-Astra medium"));
+
+    let native_summary = topics::format_assistant_done_summary(
+        "\n\nLine 1 ok\n\n\nBot 123:tok\nAPI_TOKEN=secret_val\nLine 3\n",
+        "123:tok",
+        true,
+        18,
+        1400,
+    )
+    .unwrap();
+    assert!(native_summary.starts_with("Line 1 ok\n\nBot [REDACTED_TOKEN]\nAPI_TOKEN=[REDACTED]"));
 
     for tag in 0..=8 {
         assert!(TELEGRAM_TOPIC_COLORS.contains(&tag_to_topic_color(tag)));
@@ -1041,7 +1121,8 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         [("sd_term_2".to_string(), "run cargo check".to_string())]
     );
 
-    // Rename throttled (<60s skipped for topic name, >=60s applied; silent header card updates immediately).
+    // Prompt edits update the silent header card immediately with zero topic-rename spam;
+    // explicit /sync (force_recreate_deleted = true) renames the topic on demand.
     {
         let mut cards = backend.cards.lock().unwrap();
         cards[0].title = Some("Refactored router".into());
@@ -1050,7 +1131,9 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 10, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 0);
     assert_eq!(api.state.lock().unwrap().edited_msgs.len(), 1);
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 65, false));
+    assert!(!topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 65, false));
+    assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 0);
+    assert!(topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 66, true));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
 
     // Closing card deletes topic via deleteForumTopic and drops its binding; returning card creates a fresh topic.
@@ -1431,7 +1514,7 @@ fn telegram_notifier_seeds_quietly_and_alerts_into_forum_topics() {
         assert!(st.sent[0].keyboard.is_some());
     }
 
-    // New completion_id emits Finished alert with snippet when read_output=true, and omits output when read_output=false.
+    // New completion_id emits Done report with snippet when read_output=true, and omits output when read_output=false.
     card.status = "FINISHED".into();
     card.completion_state = "completed".into();
     card.completion_id = Some("cid_2".into());
@@ -1439,7 +1522,7 @@ fn telegram_notifier_seeds_quietly_and_alerts_into_forum_topics() {
     {
         let st = api.state.lock().unwrap();
         assert_eq!(st.sent.len(), 2);
-        assert!(st.sent[1].html.contains("Finished"));
+        assert!(st.sent[1].html.contains("✅ <b>Done</b>"));
         assert!(st.sent[1].html.contains("Allow running tests?"));
         assert_eq!(st.sent[1].thread_id, Some(77));
     }
@@ -1449,8 +1532,191 @@ fn telegram_notifier_seeds_quietly_and_alerts_into_forum_topics() {
     assert!(notifier.tick(&api, &backend, &cfg, &mut rt, &[card]));
     let st = api.state.lock().unwrap();
     assert_eq!(st.sent.len(), 3);
-    assert!(st.sent[2].html.contains("Finished"));
+    assert!(st.sent[2].html.contains("✅ <b>Done</b>"));
     assert!(!st.sent[2].html.contains("Allow running tests?"));
+}
+
+#[test]
+fn telegram_notifier_done_report_native_summary_and_idle_fallback() {
+    let api = MockApi::new();
+    let cfg = Config {
+        enabled: true,
+        bot_token: "123:tok".into(),
+        bot_username: Some("sd_bot".into()),
+        allowed_user: Some(AllowedUser {
+            user_id: 777,
+            chat_id: 777,
+            username: None,
+            first_name: "Owner".into(),
+            paired_at: 100,
+        }),
+        forum: Some(ForumConfig {
+            chat_id: -100555,
+            title: "Forum".into(),
+            linked_at: 100,
+        }),
+        permissions: Permissions {
+            notifications: true,
+            controls: true,
+            read_output: true,
+            redact_secrets: true,
+            ..Permissions::default()
+        },
+        ..Config::default()
+    };
+    let mut rt = RuntimeState {
+        topics: vec![
+            TopicBinding {
+                card_id: "sd_native".into(),
+                thread_id: 101,
+                topic_name: "⚡ Claude Code · proj".into(),
+                icon_color: 7_322_096,
+                ..TopicBinding::default()
+            },
+            TopicBinding {
+                card_id: "sd_codex".into(),
+                thread_id: 102,
+                topic_name: "🤖 OpenAI Codex · SichWorld".into(),
+                icon_color: 7_322_096,
+                ..TopicBinding::default()
+            },
+            TopicBinding {
+                card_id: "sd_shell".into(),
+                thread_id: 103,
+                topic_name: "💻 Shell · proj".into(),
+                icon_color: 7_322_096,
+                ..TopicBinding::default()
+            },
+        ],
+        ..RuntimeState::default()
+    };
+
+    let mut claude = sample_card("sd_native", "claude", false);
+    claude.completion_supported = true;
+    claude.completion_state = "working".into();
+    claude.status = "WORKING".into();
+
+    let mut codex = sample_card("sd_codex", "codex", false);
+    codex.agent_name = "OpenAI Codex".into();
+    codex.icon = "🤖".into();
+    codex.directory_display = "~/GitHub/SichWorld".into();
+    codex.completion_supported = false;
+    codex.status = "IDLE".into();
+
+    let mut shell = sample_card("sd_shell", "shell", true);
+    shell.status = "IDLE".into();
+
+    let backend = MockBackend::new(vec![claude.clone(), codex.clone(), shell.clone()]);
+    backend.final_messages.lock().unwrap().insert(
+        "sd_native".into(),
+        "Built installer.\nOPENAI_API_KEY=sk-ant-api03-1234567890abcdefghijklmnop\nVerified checksums."
+            .into(),
+    );
+    backend.screens.lock().unwrap().insert(
+        "sd_codex".into(),
+        "• Working (esc to interrupt)\n› Ask Codex to do anything\n".into(),
+    );
+
+    let mut notifier = NotifierState::default();
+    assert!(!notifier.tick(
+        &api,
+        &backend,
+        &cfg,
+        &mut rt,
+        &[claude.clone(), codex.clone(), shell.clone()]
+    ));
+    assert!(api.state.lock().unwrap().sent.is_empty());
+
+    // 1. Native structured summary renders cleanly inside <blockquote> with secrets redacted.
+    claude.status = "FINISHED".into();
+    claude.completion_state = "completed".into();
+    claude.completion_id = Some("turn-42".into());
+    assert!(notifier.tick(
+        &api,
+        &backend,
+        &cfg,
+        &mut rt,
+        &[claude.clone(), codex.clone(), shell.clone()]
+    ));
+    {
+        let st = api.state.lock().unwrap();
+        assert_eq!(st.sent.len(), 1);
+        assert_eq!(st.sent[0].thread_id, Some(101));
+        assert!(st.sent[0].html.contains("✅ <b>Done</b>"));
+        assert!(st.sent[0].html.contains("<blockquote>"));
+        assert!(st.sent[0].html.contains("Built installer."));
+        assert!(st.sent[0].html.contains("[REDACTED]"));
+        assert!(!st.sent[0].html.contains("sk-ant-"));
+    }
+
+    // 2. Non-completion_supported Codex card flickers WORKING -> IDLE -> WORKING without false alerts.
+    codex.status = "WORKING".into();
+    shell.status = "WORKING".into();
+    assert!(!notifier.tick(
+        &api,
+        &backend,
+        &cfg,
+        &mut rt,
+        &[claude.clone(), codex.clone(), shell.clone()]
+    ));
+
+    codex.status = "IDLE".into();
+    shell.status = "IDLE".into();
+    // Still showing "esc to interrupt": even after settle ticks, active-screen guard holds off.
+    for _ in 0..=IDLE_FINISH_SETTLE_TICKS {
+        assert!(!notifier.tick(
+            &api,
+            &backend,
+            &cfg,
+            &mut rt,
+            &[claude.clone(), codex.clone(), shell.clone()]
+        ));
+    }
+    assert_eq!(api.state.lock().unwrap().sent.len(), 1);
+
+    // Codex actually finishes and screen settles: emits ONE Done report with Recap summary (and never shell).
+    backend.screens.lock().unwrap().insert(
+        "sd_codex".into(),
+        "• Committed and pushed both repositories.\n  ↳ Recap: Clean sync to main.\n› Ask Codex to do anything\n  ← for agents · ? for shortcuts\n".into(),
+    );
+    assert!(notifier.tick(
+        &api,
+        &backend,
+        &cfg,
+        &mut rt,
+        &[claude.clone(), codex.clone(), shell.clone()]
+    ));
+    {
+        let st = api.state.lock().unwrap();
+        assert_eq!(st.sent.len(), 2);
+        assert_eq!(st.sent[1].thread_id, Some(102));
+        assert!(st.sent[1].html.contains("✅ <b>Done</b>"));
+        assert!(st.sent[1].html.contains("<pre><code>"));
+        assert!(st.sent[1].html.contains("Committed and pushed both repositories."));
+        assert!(st.sent[1].html.contains("Recap: Clean sync to main."));
+        assert!(!st.sent[1].html.contains("for shortcuts"));
+    }
+
+    // Subsequent spurious WORKING -> IDLE flicker with identical screen output is deduped.
+    codex.status = "WORKING".into();
+    assert!(!notifier.tick(
+        &api,
+        &backend,
+        &cfg,
+        &mut rt,
+        &[claude.clone(), codex.clone(), shell.clone()]
+    ));
+    codex.status = "IDLE".into();
+    for _ in 0..IDLE_FINISH_SETTLE_TICKS {
+        assert!(!notifier.tick(
+            &api,
+            &backend,
+            &cfg,
+            &mut rt,
+            &[claude.clone(), codex.clone(), shell.clone()]
+        ));
+    }
+    assert_eq!(api.state.lock().unwrap().sent.len(), 2);
 }
 
 #[test]
@@ -1483,45 +1749,38 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     let mut rt = RuntimeState::default();
     let t0 = 1_700_000_000;
     let mut card = sample_card("sd_term_live", "claude", false);
+    card.title = None;
+    card.last_prompt = None;
 
-    // 1. Creation silently pins status_message_id and prefixes topic title with ⚪ for IDLE.
+    // 1. Creation silently pins status_message_id and uses clean topic title (no volatile status prefix).
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0, false));
     let binding = rt.topic_for_card("sd_term_live").unwrap().clone();
     let status_msg_id = binding.status_message_id.expect("status header created");
     assert!(binding.status_pinned);
-    assert!(binding.topic_name.starts_with("⚪ ⚡ Claude Code"));
+    assert_eq!(binding.topic_name, "⚡ Claude Code · super-desktop");
     assert_eq!(
         api.state.lock().unwrap().pinned_msgs,
         vec![(-100555, status_msg_id, true)]
     );
 
-    // 2. Brief 1-tick flicker (IDLE -> WORKING at t+2, back to IDLE at t+4) updates the silent
-    // header card immediately, without renaming the Forum topic.
-    card.status = "WORKING".into();
-    card.label = "● WORKING".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 2, false));
-    assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 0);
-    assert_eq!(api.state.lock().unwrap().edited_msgs.len(), 1);
-    assert!(api.state.lock().unwrap().edited_msgs[0].2.contains("🟢"));
-
-    card.status = "IDLE".into();
-    card.label = "● IDLE".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 4, false));
-    assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 0);
-    assert_eq!(api.state.lock().unwrap().edited_msgs.len(), 2);
-    assert!(rt.topic_for_card("sd_term_live").unwrap().pending_status.is_none());
-
-    // 3. Sustained transition (IDLE -> WAITING at t+10..t+14): header updates at t+10 with
-    // waiting_keyboard (Yes/No/1/2), topic title renames at t+14 (>= 4s debounce).
-    card.status = "WAITING".into();
-    card.label = "◌ WAITING".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 10, false));
-    {
+    // 2. Status transitions (IDLE -> WORKING -> IDLE -> WAITING -> FINISHED -> ERROR)
+    // update the silent header card immediately with live status dots & keyboards,
+    // and NEVER call editForumTopic (zero chat-spam service lines).
+    for (offset, status, label, expected_dot) in [
+        (2, "WORKING", "● WORKING", "🟢"),
+        (4, "IDLE", "● IDLE", "⚪"),
+        (10, "WAITING", "◌ WAITING", "🟡"),
+        (16, "FINISHED", "✓ FINISHED", "✅"),
+        (25, "ERROR", "⚠ ERROR", "🔴"),
+    ] {
+        card.status = status.into();
+        card.label = label.into();
+        assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + offset, false));
         let st = api.state.lock().unwrap();
         assert_eq!(st.renamed_topics.len(), 0);
         let (_, mid, ref html, ref kb) = st.edited_msgs.last().unwrap();
         assert_eq!(*mid, status_msg_id);
-        assert!(html.contains("🟡"));
+        assert!(html.contains(expected_dot));
         let labels: Vec<&str> = kb
             .as_ref()
             .unwrap()
@@ -1530,51 +1789,36 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
             .flatten()
             .map(|b| b.text.as_str())
             .collect();
-        assert!(labels.contains(&"Yes") && labels.contains(&"No"));
-    }
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 14, false));
-    {
-        let st = api.state.lock().unwrap();
-        assert_eq!(st.renamed_topics.len(), 1);
-        assert!(st.renamed_topics[0].2.starts_with("🟡 "));
+        if status == "WAITING" {
+            assert!(labels.contains(&"Yes") && labels.contains(&"No"));
+        } else {
+            assert!(!labels.contains(&"Yes") && labels.contains(&"📷 Screen"));
+        }
     }
 
-    // 4. Cooldown (10s) holds next topic rename until t+24 while header edits immediately at t+16.
-    card.status = "FINISHED".into();
-    card.label = "✓ FINISHED".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 16, false));
-    {
-        let st = api.state.lock().unwrap();
-        assert_eq!(st.renamed_topics.len(), 1);
-        let (_, _, ref html, ref kb) = st.edited_msgs.last().unwrap();
-        assert!(html.contains("✅"));
-        let labels: Vec<&str> = kb
-            .as_ref()
-            .unwrap()
-            .inline_keyboard
-            .iter()
-            .flatten()
-            .map(|b| b.text.as_str())
-            .collect();
-        assert!(!labels.contains(&"Yes") && labels.contains(&"📷 Screen"));
-    }
-    assert!(!topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 20, false));
+    // 3. One-time initial prompt fill renames an untitled topic once; subsequent prompt edits
+    // update only the pinned header unless explicit /sync (force_recreate_deleted = true) runs.
+    card.title = Some("Fix tests".into());
+    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 30, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 24, false));
-    {
-        let st = api.state.lock().unwrap();
-        assert_eq!(st.renamed_topics.len(), 2);
-        assert!(st.renamed_topics[1].2.starts_with("✅ "));
-    }
+    assert_eq!(
+        api.state.lock().unwrap().renamed_topics[0].2,
+        "⚡ Claude Code · super-desktop — Fix tests"
+    );
 
-    // 5. Explicit /sync (force_recreate_deleted = true) bypasses debounce and cooldown immediately.
-    card.status = "ERROR".into();
-    card.label = "⚠ ERROR".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 25, true));
-    assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 3);
-    assert!(api.state.lock().unwrap().renamed_topics[2].2.starts_with("🔴 "));
+    card.title = Some("Second prompt".into());
+    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 120, false));
+    assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
+    assert!(api.state.lock().unwrap().edited_msgs.last().unwrap().2.contains("Second prompt"));
 
-    // 6. If deleteForumTopic is denied, fallback edits status header to Closed on PC before archiving;
+    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 125, true));
+    assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 2);
+    assert_eq!(
+        api.state.lock().unwrap().renamed_topics[1].2,
+        "⚡ Claude Code · super-desktop — Second prompt"
+    );
+
+    // 4. If deleteForumTopic is denied, fallback edits status header to Closed on PC before archiving;
     //    default deletion deletes the topic cleanly when the card closes.
     api.state.lock().unwrap().fail_delete_topic_bad_request = true;
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[], t0 + 30, false));
@@ -1601,7 +1845,7 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     card.label = "● IDLE".into();
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 42, false));
     assert!(rt.topic_for_card("sd_term_live").unwrap().status_message_id.is_none());
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card], t0 + 60, false));
+    assert!(!topics::sync_topics(&api, &cfg, &mut rt, &[card], t0 + 60, false));
 
     // Default deletion removes topic and binding completely.
     api.state.lock().unwrap().fail_delete_topic_bad_request = false;
@@ -2296,6 +2540,8 @@ fn telegram_http_client_against_loopback_mock_server() {
         (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
         (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
         (400u16, "application/json", json!({"ok":false,"error_code":400,"description":"Bad Request: TOPIC_ID_INVALID"}).to_string().into_bytes()),
+        (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
+        (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
         (429u16, "application/json", json!({"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":7}}).to_string().into_bytes()),
         (200u16, "application/octet-stream", b"hello-bytes".to_vec()),
         (200u16, "application/octet-stream", vec![b'x'; 200]),
@@ -2306,7 +2552,7 @@ fn telegram_http_client_against_loopback_mock_server() {
     let reqs_clone = Arc::clone(&recorded_reqs);
 
     let handle = std::thread::spawn(move || {
-        for stream in listener.incoming().take(13) {
+        for stream in listener.incoming().take(15) {
             let mut stream = stream.unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
@@ -2382,6 +2628,12 @@ fn telegram_http_client_against_loopback_mock_server() {
         ApiError::TopicNotFound
     );
 
+    // setChatMenuButton supports web_app and commands reset
+    client
+        .set_chat_menu_button(Some(777), Some(("Open App", "https://pc.tailnet.ts.net:8443")))
+        .unwrap();
+    client.set_chat_menu_button(Some(777), None).unwrap();
+
     // 429 classified cleanly as RateLimited
     let err = client.get_updates(0, 1).unwrap_err();
     assert_eq!(err, ApiError::RateLimited { retry_after: 7 });
@@ -2407,5 +2659,388 @@ fn telegram_http_client_against_loopback_mock_server() {
     assert!(seen[7].0.contains("/bot123456:TESTTOKEN/setMessageReaction"));
     assert!(seen[8].0.contains("/bot123456:TESTTOKEN/deleteForumTopic"));
     assert!(seen[8].1.contains("\"message_thread_id\":301"));
-    assert!(seen[11].0.contains("/file/bot123456:TESTTOKEN/photos/a.png"));
+    assert!(seen[10].0.contains("/bot123456:TESTTOKEN/setChatMenuButton"));
+    assert!(seen[10].1.contains("\"type\":\"web_app\""));
+    assert!(seen[11].1.contains("\"type\":\"commands\""));
+    assert!(seen[13].0.contains("/file/bot123456:TESTTOKEN/photos/a.png"));
+}
+
+#[test]
+fn telegram_mini_app_init_data_hmac_and_http_ws_end_to_end() {
+    use std::net::TcpStream;
+
+    let dir = scratch_dir("webapp");
+    let bot_token = "123456:MINIAPP_SECRET_TOKEN";
+    let now = unix_now();
+    let user_json = r#"{"id":777,"first_name":"Dmytro","username":"dmytro"}"#;
+    let init_data = sign_init_data_for_test(
+        &[
+            ("auth_date", &now.to_string()),
+            ("start_param", "card_sd_term_app"),
+            ("user", user_json),
+        ],
+        bot_token,
+    );
+
+    // 1. initData verification rejects wrong user, tampered hash, and expired auth_date.
+    let ok = verify_init_data(&init_data, bot_token, 777, now, 300).unwrap();
+    assert_eq!(ok.user_id, 777);
+    assert_eq!(ok.start_param.as_deref(), Some("card_sd_term_app"));
+    assert!(verify_init_data(&init_data, bot_token, 999, now, 300).is_err());
+    assert!(verify_init_data(&format!("{init_data}0"), bot_token, 777, now, 300).is_err());
+    assert!(verify_init_data(&init_data, bot_token, 777, now + 600, 300).is_err());
+
+    // 2. Start MiniAppServer on 127.0.0.1:0 with MockBackend.
+    let card = sample_card("sd_term_app", "claude", false);
+    let backend = Arc::new(MockBackend::new(vec![card.clone()]));
+    backend.screens.lock().unwrap().insert(
+        "sd_term_app".into(),
+        "\x1b[32mbuild ok\x1b[0m\n\x1b[31msk-ant-api03-1234567890abcdefghijklmnop\x1b[0m".into(),
+    );
+    *backend.usage.lock().unwrap() = vec![ProviderUsageSummary {
+        id: "codex".into(),
+        name: "Codex".into(),
+        tier: "Pro".into(),
+        ready: true,
+        limits: vec![ProviderUsageLimit {
+            label: "Weekly (7-day)".into(),
+            percent_used: 0.25,
+            resets_at: String::new(),
+            used: None,
+            allowance: None,
+        }],
+        ..ProviderUsageSummary::default()
+    }];
+    let img_id = "a".repeat(64);
+    let pdf_id = "b".repeat(64);
+    backend.references.lock().unwrap().insert(
+        "sd_term_app".into(),
+        CardReferences {
+            assets: vec![
+                CardAsset {
+                    id: img_id.clone(),
+                    name: "ui.png".into(),
+                    relative_path: "ui.png".into(),
+                    mime_type: "image/png".into(),
+                    kind: "image".into(),
+                    size: 12,
+                },
+                CardAsset {
+                    id: pdf_id.clone(),
+                    name: "doc.pdf".into(),
+                    relative_path: "doc.pdf".into(),
+                    mime_type: "application/pdf".into(),
+                    kind: "pdf".into(),
+                    size: 20,
+                },
+            ],
+            links: vec!["https://example.org/docs".into()],
+        },
+    );
+    backend.assets.lock().unwrap().insert(
+        ("sd_term_app".into(), img_id.clone()),
+        (
+            CardAsset {
+                id: img_id.clone(),
+                name: "ui.png".into(),
+                relative_path: "ui.png".into(),
+                mime_type: "image/png".into(),
+                    kind: "image".into(),
+                size: 12,
+            },
+            b"PNGDATA".to_vec(),
+        ),
+    );
+    backend.assets.lock().unwrap().insert(
+        ("sd_term_app".into(), pdf_id.clone()),
+        (
+            CardAsset {
+                id: pdf_id.clone(),
+                name: "doc.pdf".into(),
+                relative_path: "doc.pdf".into(),
+                mime_type: "application/pdf".into(),
+                kind: "pdf".into(),
+                size: 20,
+            },
+            b"%PDF".to_vec(),
+        ),
+    );
+    backend
+        .pdf_pages
+        .lock()
+        .unwrap()
+        .insert(("sd_term_app".into(), pdf_id.clone(), 1), b"PDFPAGE1".to_vec());
+
+    let shared_cfg = Arc::new(Mutex::new(Config {
+        enabled: true,
+        bot_token: bot_token.into(),
+        bot_id: Some(999),
+        bot_username: Some("sd_test_bot".into()),
+        allowed_user: Some(AllowedUser {
+            user_id: 777,
+            chat_id: 777,
+            username: Some("dmytro".into()),
+            first_name: "Dmytro".into(),
+            paired_at: now,
+        }),
+        forum: Some(ForumConfig {
+            chat_id: -100555,
+            title: "Forum".into(),
+            linked_at: now,
+        }),
+        mini_app: MiniAppConfig {
+            enabled: true,
+            listen_port: 0,
+            public_url: "https://pc.tailnet.ts.net:8443".into(),
+            short_name: "superdesktop".into(),
+        },
+        permissions: Permissions {
+            read_output: false,
+            prompts: true,
+            controls: true,
+            close: true,
+            ..Permissions::default()
+        },
+        ..Config::default()
+    }));
+
+    let cfg_reader: Arc<dyn Fn() -> Config + Send + Sync> = {
+        let sc = Arc::clone(&shared_cfg);
+        Arc::new(move || sc.lock().unwrap().clone())
+    };
+    let mut server =
+        MiniAppServer::spawn(0, cfg_reader, Arc::clone(&backend) as Arc<dyn DesktopBackend + Send + Sync>)
+            .unwrap();
+    ensure_rustls_provider();
+    let http = reqwest::blocking::Client::new();
+    let base = format!("http://127.0.0.1:{}", server.listen_port);
+
+    // Health + HTML + 401 when unauthenticated
+    let health = http.get(format!("{base}/health")).send().unwrap();
+    assert_eq!(health.status(), 200);
+    let ui = http.get(format!("{base}/")).send().unwrap();
+    assert_eq!(ui.status(), 200);
+    assert!(ui.text().unwrap().contains("SUPER DESKTOP"));
+    assert_eq!(http.get(format!("{base}/api/bootstrap")).send().unwrap().status(), 401);
+
+    // Authenticate with signed initData
+    let auth_res: serde_json::Value = http
+        .post(format!("{base}/api/auth"))
+        .json(&json!({ "initData": init_data }))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let tok = auth_res["token"].as_str().unwrap().to_string();
+    assert_eq!(auth_res["startParam"], "card_sd_term_app");
+
+    // Bootstrap includes cards and weekly usage
+    let boot: serde_json::Value = http
+        .get(format!("{base}/api/bootstrap"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(boot["cards"][0]["id"], "sd_term_app");
+    assert_eq!(boot["usage"][0]["limits"][0]["usedPercent"], 25);
+    assert!(boot["theme"]["mode"].as_str().is_some());
+    assert!(boot["theme"]["darkerBackground"].as_str().is_some());
+    assert!(boot["theme"]["accent"].as_str().is_some());
+    assert_eq!(boot["theme"]["ansi16"].as_array().map(|a| a.len()), Some(16));
+
+    // Read output permission gated cleanly
+    assert_eq!(
+        http.get(format!("{base}/api/cards/sd_term_app/screen"))
+            .bearer_auth(&tok)
+            .send()
+            .unwrap()
+            .status(),
+        403
+    );
+    shared_cfg.lock().unwrap().permissions.read_output = true;
+    let screen: serde_json::Value = http
+        .get(format!("{base}/api/cards/sd_term_app/screen"))
+        .bearer_auth(&tok)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let ansi = screen["ansi"].as_str().unwrap();
+    assert!(ansi.contains("\u{1b}[32mbuild ok\u{1b}[0m"));
+    assert!(ansi.contains("[REDACTED]"));
+    assert!(!ansi.contains("sk-ant-"));
+
+    // Assets & PDF preview endpoints
+    let pdf_png = http
+        .get(format!("{base}/api/cards/sd_term_app/pdf/{pdf_id}/1?token={tok}"))
+        .send()
+        .unwrap();
+    assert_eq!(pdf_png.status(), 200);
+    assert_eq!(pdf_png.bytes().unwrap().as_ref(), b"PDFPAGE1");
+
+    // Prompt & Key POST endpoints
+    assert_eq!(
+        http.post(format!("{base}/api/cards/sd_term_app/prompt"))
+            .bearer_auth(&tok)
+            .json(&json!({ "text": "hello mini app" }))
+            .send()
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(backend
+        .prompts_sent
+        .lock()
+        .unwrap()
+        .contains(&("sd_term_app".into(), "hello mini app".into())));
+
+    // Live WebSocket upgrade, receives ANSI frame, sends key, receives ping/close cleanly
+    {
+        let mut ws = TcpStream::connect(("127.0.0.1", server.listen_port)).unwrap();
+        ws.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        let upgrade = format!(
+            "GET /ws/terminal/sd_term_app?token={tok} HTTP/1.1\r\n\
+             Host: 127.0.0.1:{}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n",
+            server.listen_port
+        );
+        ws.write_all(upgrade.as_bytes()).unwrap();
+        let mut resp_buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        let hdr_end = loop {
+            let n = ws.read(&mut tmp).unwrap();
+            assert!(n > 0);
+            resp_buf.extend_from_slice(&tmp[..n]);
+            if let Some(p) = resp_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break p + 4;
+            }
+        };
+        let hdr_str = String::from_utf8_lossy(&resp_buf[..hdr_end]);
+        assert!(hdr_str.contains("101 Switching Protocols"));
+
+        // Read unmasked server->client WS text frame
+        let mut frame_buf = resp_buf[hdr_end..].to_vec();
+        while frame_buf.len() < 2 {
+            let n = ws.read(&mut tmp).unwrap();
+            frame_buf.extend_from_slice(&tmp[..n]);
+        }
+        assert_eq!(frame_buf[0], 0x81);
+        let (pay_off, pay_len) = match frame_buf[1] & 0x7F {
+            126 => {
+                while frame_buf.len() < 4 {
+                    let n = ws.read(&mut tmp).unwrap();
+                    frame_buf.extend_from_slice(&tmp[..n]);
+                }
+                (4usize, u16::from_be_bytes([frame_buf[2], frame_buf[3]]) as usize)
+            }
+            n => (2usize, n as usize),
+        };
+        while frame_buf.len() < pay_off + pay_len {
+            let n = ws.read(&mut tmp).unwrap();
+            frame_buf.extend_from_slice(&tmp[..n]);
+        }
+        let ws_msg = String::from_utf8_lossy(&frame_buf[pay_off..pay_off + pay_len]);
+        assert!(ws_msg.contains("build ok"));
+
+        // Send masked client->server key frame ("t" -> Tab)
+        let key_payload = br#"{"type":"key","code":"t"}"#;
+        let mask = [0x11, 0x22, 0x33, 0x44];
+        let mut client_frame = vec![0x81, 0x80 | (key_payload.len() as u8)];
+        client_frame.extend_from_slice(&mask);
+        for (idx, b) in key_payload.iter().enumerate() {
+            client_frame.push(b ^ mask[idx % 4]);
+        }
+        ws.write_all(&client_frame).unwrap();
+        // Close frame
+        ws.write_all(&[0x88, 0x82, 0, 0, 0, 0, 0x03, 0xE8]).unwrap();
+        for _ in 0..20 {
+            if backend
+                .keys_sent
+                .lock()
+                .unwrap()
+                .contains(&("sd_term_app".into(), NamedKey::Tab))
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(backend
+            .keys_sent
+            .lock()
+            .unwrap()
+            .contains(&("sd_term_app".into(), NamedKey::Tab)));
+    }
+
+    // Revoking owner invalidates Bearer token immediately
+    shared_cfg.lock().unwrap().allowed_user = None;
+    assert_eq!(
+        http.get(format!("{base}/api/bootstrap"))
+            .bearer_auth(&tok)
+            .send()
+            .unwrap()
+            .status(),
+        403
+    );
+
+    // /app command in 1:1 DM emits WebAppInfo button, and in Forum Topic emits Direct Link url button.
+    shared_cfg.lock().unwrap().allowed_user = Some(AllowedUser {
+        user_id: 777,
+        chat_id: 777,
+        username: Some("dmytro".into()),
+        first_name: "Dmytro".into(),
+        paired_at: now,
+    });
+    let mut cfg_copy = shared_cfg.lock().unwrap().clone();
+    let api = MockApi::new();
+    let mut rt = RuntimeState::default();
+    let mut router = Router::new(999, Some("sd_test_bot".into()), now);
+    router.handle_update(
+        &api,
+        backend.as_ref(),
+        &dir,
+        &mut cfg_copy,
+        &mut rt,
+        &Update {
+            update_id: 1,
+            message: Some(text_msg(777, "private", 777, 1, "/app", now)),
+            callback_query: None,
+        },
+        now,
+    );
+    let dm_kb = api.state.lock().unwrap().sent.last().unwrap().keyboard.clone().unwrap();
+    assert_eq!(
+        dm_kb.inline_keyboard[0][0].web_app.as_ref().map(|w| w.url.as_str()),
+        Some("https://pc.tailnet.ts.net:8443")
+    );
+
+    topics::sync_topics(&api, &cfg_copy, &mut rt, &[card.clone()], now, false);
+    let tid = rt.topic_for_card("sd_term_app").unwrap().thread_id;
+    let mut topic_app = text_msg(-100555, "supergroup", 777, 2, "/app", now);
+    topic_app.is_topic_message = Some(true);
+    topic_app.message_thread_id = Some(tid);
+    router.handle_update(
+        &api,
+        backend.as_ref(),
+        &dir,
+        &mut cfg_copy,
+        &mut rt,
+        &Update {
+            update_id: 2,
+            message: Some(topic_app),
+            callback_query: None,
+        },
+        now,
+    );
+    let topic_kb = api.state.lock().unwrap().sent.last().unwrap().keyboard.clone().unwrap();
+    assert_eq!(
+        topic_kb.inline_keyboard[0][0].url.as_deref(),
+        Some("https://t.me/sd_test_bot/superdesktop?startapp=card_sd_term_app")
+    );
+
+    server.stop();
+    let _ = std::fs::remove_dir_all(&dir);
 }

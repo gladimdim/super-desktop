@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>SUPER DESKTOP</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root {
+  --bg: #10100f;
+  --surface: #181715;
+  --surface2: #22201d;
+  --border: #2f2d2a;
+  --term-bg: #0c0c0b;
+  --fg: #ece8e5;
+  --muted: #8f8a84;
+  --accent: #5ca3ad;
+  --accent-fg: #091216;
+  --green: #88ad7c;
+  --yellow: #dbb471;
+  --red: #d95750;
+  --orange: #d47844;
+  --blue: #6b93b8;
+  --magenta: #a688b5;
+  --cyan: #5ca3ad;
+  --ansi-0: #1c1b1a; --ansi-1: #d95750; --ansi-2: #88ad7c; --ansi-3: #dbb471;
+  --ansi-4: #6b93b8; --ansi-5: #a688b5; --ansi-6: #5ca3ad; --ansi-7: #d1cdc9;
+  --ansi-8: #736f6b; --ansi-9: #ea6861; --ansi-10: #9ec292; --ansi-11: #e8c484;
+  --ansi-12: #84acd2; --ansi-13: #ba9dca; --ansi-14: #72bac5; --ansi-15: #ece8e5;
+  --mono: "JetBrains Mono", "Adwaita Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --term-size: 12px;
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; padding: 0; height: 100%; width: 100%; overflow: hidden;
+  background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px;
+}
+button, input, textarea, select { font: inherit; color: inherit; }
+.app { display: flex; flex-direction: column; height: 100dvh; width: 100%; }
+.topbar {
+  display: flex; align-items: center; gap: 8px; padding: 10px 12px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.brand { font-weight: 700; font-size: 14px; letter-spacing: .02em; display: flex; align-items: center; gap: 6px; }
+.pill {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface2); color: var(--muted);
+  white-space: nowrap;
+}
+.pill.ok { color: var(--green); border-color: color-mix(in srgb, var(--green) 45%, transparent); }
+.pill.warn { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 45%, transparent); }
+.pill.err { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.spacer { flex: 1; }
+.btn {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--fg);
+  border-radius: 8px; padding: 6px 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.btn.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.btn:disabled { opacity: .45; cursor: default; }
+.tabs {
+  display: flex; gap: 6px; padding: 8px 12px; background: var(--surface);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.tab {
+  flex: 1; padding: 7px 10px; border-radius: 8px; border: 1px solid transparent;
+  background: transparent; color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer;
+}
+.tab.active { background: var(--surface2); border-color: var(--border); color: var(--fg); }
+.view { flex: 1; overflow-y: auto; padding: 12px; }
+.hidden { display: none !important; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px; margin-bottom: 10px; cursor: pointer;
+}
+.card:active { transform: scale(.99); }
+.card-head { display: flex; align-items: center; gap: 8px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; background: var(--muted); }
+.dot.WORKING { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.dot.WAITING { background: var(--yellow); box-shadow: 0 0 8px var(--yellow); }
+.dot.FINISHED { background: var(--cyan); }
+.dot.ERROR { background: var(--red); }
+.card-title { font-weight: 700; font-size: 14px; }
+.card-sub { color: var(--muted); font-size: 12px; margin-top: 3px; font-family: var(--mono); word-break: break-word; }
+.card-prompt { margin-top: 6px; font-size: 12.5px; color: var(--fg); opacity: .9; line-height: 1.35; }
+.empty { text-align: center; padding: 40px 16px; color: var(--muted); }
+.usage-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+.usage-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; }
+.usage-name { font-weight: 700; font-size: 15px; }
+.usage-tier { color: var(--muted); font-size: 12px; }
+.limit-row { margin-top: 8px; }
+.limit-label { display: flex; justify-content: space-between; font-size: 12.5px; margin-bottom: 4px; gap: 8px; }
+.bar-bg { height: 7px; border-radius: 999px; background: var(--surface2); overflow: hidden; border: 1px solid var(--border); }
+.bar-fill { height: 100%; border-radius: 999px; background: var(--green); transition: width .2s ease; }
+.bar-fill.warn { background: var(--yellow); }
+.bar-fill.crit { background: var(--red); }
+.limit-meta { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.term-shell { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.term-bar {
+  display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.term-meta { min-width: 0; flex: 1; }
+.term-name { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term-dir { font-size: 11px; color: var(--muted); font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.term-wrap { position: relative; flex: 1; min-height: 0; background: var(--term-bg); }
+#term-pre {
+  margin: 0; padding: 10px; height: 100%; width: 100%; overflow: auto;
+  font-family: var(--mono); font-size: var(--term-size); line-height: 1.38;
+  white-space: pre-wrap; word-break: break-word; tab-size: 4; user-select: text;
+}
+#jump-live {
+  position: absolute; right: 12px; bottom: 12px; padding: 6px 12px;
+  border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-weight: 700;
+  font-size: 12px; border: 0; box-shadow: 0 4px 12px rgba(0,0,0,.45); cursor: pointer;
+}
+.quick-keys {
+  display: flex; gap: 6px; overflow-x: auto; padding: 7px 10px;
+  background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0;
+  scrollbar-width: none;
+}
+.quick-keys::-webkit-scrollbar { display: none; }
+.qkey {
+  flex-shrink: 0; padding: 5px 10px; border-radius: 8px; font-size: 12px; font-weight: 600;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--fg); cursor: pointer;
+}
+.qkey.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+.qkey.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.composer {
+  display: flex; align-items: flex-end; gap: 6px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+  background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0;
+}
+#prompt-input {
+  flex: 1; min-height: 36px; max-height: 110px; resize: none;
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 10px; outline: none; font-size: 14px;
+}
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.72);
+  display: flex; align-items: flex-end; justify-content: center; z-index: 40;
+}
+.drawer {
+  width: 100%; max-width: 720px; max-height: 86dvh; background: var(--surface);
+  border-top: 1px solid var(--border); border-radius: 16px 16px 0 0;
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.drawer-head {
+  display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+  border-bottom: 1px solid var(--border); font-weight: 700;
+}
+.drawer-body { overflow-y: auto; padding: 12px 14px calc(16px + env(safe-area-inset-bottom)); flex: 1; }
+.filter-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.fbtn {
+  padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface2); color: var(--muted); font-size: 12px; cursor: pointer;
+}
+.fbtn.active { background: var(--accent); color: #091216; border-color: transparent; font-weight: 700; }
+.ref-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 10px; border: 1px solid var(--border); background: var(--surface2);
+  border-radius: 10px; margin-bottom: 8px; cursor: pointer;
+}
+.preview-box { margin-top: 10px; background: #0c0c0b; border: 1px solid var(--border); border-radius: 10px; padding: 10px; }
+.preview-box img { width: 100%; height: auto; border-radius: 6px; display: block; }
+.preview-box pre { margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-word; max-height: 50dvh; overflow: auto; }
+.toast {
+  position: fixed; left: 50%; bottom: 72px; transform: translateX(-50%);
+  background: var(--surface2); color: var(--fg); border: 1px solid var(--border);
+  padding: 8px 14px; border-radius: 999px; font-size: 12.5px; z-index: 60;
+  box-shadow: 0 6px 20px rgba(0,0,0,.5);
+}
+label.field { display: block; margin-bottom: 10px; font-size: 12.5px; color: var(--muted); }
+label.field select { width: 100%; margin-top: 4px; padding: 9px 10px; border-radius: 8px; background: var(--surface2); border: 1px solid var(--border); color: var(--fg); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">⚡ <span>SUPER DESKTOP</span></div>
+    <span class="pill" id="conn-pill">Connecting…</span>
+    <span class="spacer"></span>
+    <button class="btn primary hidden" id="btn-new-top">＋ New</button>
+    <button class="btn" id="btn-refresh-top">↻</button>
+  </div>
+
+  <div class="tabs" id="main-tabs">
+    <button class="tab active" data-tab="sessions">Sessions (<span id="card-count">0</span>)</button>
+    <button class="tab" data-tab="usage">Usage</button>
+  </div>
+
+  <div class="view" id="view-auth">
+    <div class="empty">
+      <h3 id="auth-title">Connecting to your PC…</h3>
+      <p id="auth-msg">Verifying Telegram WebApp session over Tailscale.</p>
+    </div>
+  </div>
+
+  <div class="view hidden" id="view-sessions"></div>
+  <div class="view hidden" id="view-usage"></div>
+
+  <div class="term-shell hidden" id="view-terminal">
+    <div class="term-bar">
+      <button class="btn" id="btn-back">←</button>
+      <div class="term-meta">
+        <div class="term-name" id="term-title">Terminal</div>
+        <div class="term-dir" id="term-sub"></div>
+      </div>
+      <span class="pill" id="term-status">IDLE</span>
+      <button class="btn" id="btn-font-dec" aria-label="Smaller font">A−</button>
+      <button class="btn" id="btn-font-inc" aria-label="Larger font">A+</button>
+      <button class="btn" id="btn-files">📎 Files</button>
+      <button class="btn danger hidden" id="btn-close-card">🗑</button>
+    </div>
+    <div class="term-wrap">
+      <pre id="term-pre"></pre>
+      <button id="jump-live" class="hidden">↓ Live</button>
+    </div>
+    <div class="quick-keys hidden" id="quick-keys"></div>
+    <div class="composer">
+      <input type="file" id="attach-input" class="hidden" accept="image/*,.pdf,.txt,.md,.json,.log,.csv">
+      <button class="btn hidden" id="btn-attach" title="Send photo or file">📎</button>
+      <textarea id="prompt-input" rows="1" placeholder="Send prompt to agent…"></textarea>
+      <button class="btn primary" id="btn-send">Send</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="files-modal">
+  <div class="drawer">
+    <div class="drawer-head">
+      <span>📎 Files &amp; Previews</span>
+      <span class="spacer"></span>
+      <button class="btn" id="files-refresh">↻</button>
+      <button class="btn" id="files-close">✕</button>
+    </div>
+    <div class="drawer-body" id="files-body"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="new-modal">
+  <div class="drawer">
+    <div class="drawer-head">
+      <span>🚀 Launch harness card</span>
+      <span class="spacer"></span>
+      <button class="btn" id="new-close">✕</button>
+    </div>
+    <div class="drawer-body">
+      <label class="field">Workspace folder<select id="new-folder"></select></label>
+      <label class="field">Harness<select id="new-harness"></select></label>
+      <button class="btn primary" id="new-submit" style="width:100%;padding:10px;">Launch card</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast"></div>
+
+<script>
+(() => {
+  const tg = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  const state = {
+    token: null,
+    activeTab: 'sessions',
+    selectedCardId: null,
+    bootstrap: null,
+    ws: null,
+    wsRetry: 0,
+    wsTimer: null,
+    followBottom: true,
+    filesFilter: 'all',
+    references: null,
+    previewHtml: '',
+    pdfState: null,
+    fontSize: Number(localStorage.getItem('sd_tg_font') || 12),
+  };
+  document.documentElement.style.setProperty('--term-size', state.fontSize + 'px');
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  function haptic(type) { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(type || 'light'); } catch (_) {} }
+  let toastTimer = null;
+  function showToast(msg) {
+    const el = $('toast'); el.textContent = msg; el.classList.remove('hidden');
+    clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.add('hidden'), 2400);
+  }
+  function setConn(txt, cls) {
+    const p = $('conn-pill'); p.textContent = txt; p.className = 'pill ' + (cls || '');
+  }
+
+  function accentFgFor(hex) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || '').trim());
+    if (!m) return '#091216';
+    const n = parseInt(m[1], 16);
+    const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 145 ? '#091216' : '#ffffff';
+  }
+  function applyTheme(t) {
+    if (!t) return;
+    const r = document.documentElement.style;
+    const set = (k, v) => { if (v) r.setProperty(k, v); };
+    const bg = t.background || '#10100f';
+    const surface = t.lighterBackground || bg;
+    const accent = t.accent || t.cyan;
+    set('--bg', bg); set('--surface', surface);
+    set('--surface2', t.selection || `color-mix(in srgb, ${t.foreground || '#ece8e5'} 10%, ${bg})`);
+    set('--border', t.foreground ? `color-mix(in srgb, ${t.foreground} 16%, ${bg})` : '');
+    set('--term-bg', t.darkerBackground || t.darkBackground || bg);
+    set('--fg', t.foreground); set('--muted', t.muted); set('--accent', accent);
+    set('--accent-fg', accentFgFor(accent));
+    set('--orange', t.orange); set('--green', t.green); set('--yellow', t.yellow);
+    set('--red', t.red); set('--cyan', t.cyan); set('--blue', t.blue); set('--magenta', t.magenta);
+    if (Array.isArray(t.ansi16)) t.ansi16.forEach((c, i) => set('--ansi-' + i, c));
+    r.colorScheme = t.mode === 'light' ? 'light' : 'dark';
+    try {
+      if (tg) {
+        if (/^#[0-9a-f]{6}$/i.test(surface) && tg.setHeaderColor) tg.setHeaderColor(surface);
+        if (/^#[0-9a-f]{6}$/i.test(bg) && tg.setBackgroundColor) tg.setBackgroundColor(bg);
+      }
+    } catch (_) {}
+  }
+
+  const ANSI16_NAMES = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15];
+  function color256(n) {
+    if (n < 16) return `var(--ansi-${n})`;
+    if (n >= 232) { const g = 8 + (n - 232) * 10; return `rgb(${g},${g},${g})`; }
+    const idx = n - 16, b = idx % 6, g = ((idx / 6) | 0) % 6, r = (idx / 36) | 0;
+    const v = (c) => c ? 55 + c * 40 : 0;
+    return `rgb(${v(r)},${v(g)},${v(b)})`;
+  }
+
+  function ansiToHtml(input) {
+    let fg = null, bg = null, bold = false, dim = false, italic = false, ul = false, inv = false, strike = false;
+    let out = '', i = 0;
+    const spanOpen = () => {
+      let f = inv ? (bg || 'var(--term-bg)') : fg;
+      let b = inv ? (fg || 'var(--fg)') : bg;
+      const styles = [];
+      if (f) styles.push('color:' + f);
+      if (b) styles.push('background:' + b);
+      if (bold) styles.push('font-weight:700');
+      if (dim) styles.push('opacity:.65');
+      if (italic) styles.push('font-style:italic');
+      if (ul || strike) styles.push(`text-decoration:${[ul?'underline':'', strike?'line-through':''].filter(Boolean).join(' ')}`);
+      return styles.length ? `<span style="${styles.join(';')}">` : '';
+    };
+    let open = false;
+    const pushText = (txt) => {
+      if (!txt) return;
+      if (!open) { const tag = spanOpen(); if (tag) { out += tag; open = true; } }
+      out += esc(txt);
+    };
+    const closeSpan = () => { if (open) { out += '</span>'; open = false; } };
+    while (i < input.length) {
+      const idx = input.indexOf('\x1b[', i);
+      if (idx === -1) { pushText(input.slice(i)); break; }
+      if (idx > i) pushText(input.slice(i, idx));
+      const mIdx = input.indexOf('m', idx + 2);
+      if (mIdx === -1 || mIdx - idx > 48) { i = idx + 2; continue; }
+      closeSpan();
+      const codes = input.slice(idx + 2, mIdx).split(';').map((x) => x === '' ? 0 : Number(x));
+      for (let k = 0; k < codes.length; k++) {
+        const c = codes[k];
+        if (c === 0) { fg = bg = null; bold = dim = italic = ul = inv = strike = false; }
+        else if (c === 1) bold = true; else if (c === 2) dim = true; else if (c === 3) italic = true;
+        else if (c === 4) ul = true; else if (c === 7) inv = true; else if (c === 9) strike = true;
+        else if (c === 22) { bold = false; dim = false; } else if (c === 23) italic = false;
+        else if (c === 24) ul = false; else if (c === 27) inv = false; else if (c === 29) strike = false;
+        else if (c >= 30 && c <= 37) fg = `var(--ansi-${c - 30})`;
+        else if (c === 39) fg = null;
+        else if (c >= 40 && c <= 47) bg = `var(--ansi-${c - 40})`;
+        else if (c === 49) bg = null;
+        else if (c >= 90 && c <= 97) fg = `var(--ansi-${c - 90 + 8})`;
+        else if (c >= 100 && c <= 107) bg = `var(--ansi-${c - 100 + 8})`;
+        else if ((c === 38 || c === 48) && k + 2 < codes.length && codes[k + 1] === 5) {
+          const col = color256(codes[k + 2]); if (c === 38) fg = col; else bg = col; k += 2;
+        } else if ((c === 38 || c === 48) && k + 4 < codes.length && codes[k + 1] === 2) {
+          const col = `rgb(${codes[k+2]},${codes[k+3]},${codes[k+4]})`; if (c === 38) fg = col; else bg = col; k += 4;
+        }
+      }
+      i = mIdx + 1;
+    }
+    closeSpan();
+    return out;
+  }
+
+  async function apiFetch(path, opts = {}) {
+    const headers = Object.assign({}, opts.headers || {});
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
+    if (opts.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    const res = await fetch(path, Object.assign({}, opts, { headers }));
+    if (res.status === 401 && path !== '/api/auth') {
+      state.token = null;
+      await authenticate();
+      if (state.token) return apiFetch(path, opts);
+    }
+    const text = await res.text();
+    let json = null;
+    try { json = JSON.parse(text); } catch (_) {}
+    if (!res.ok) throw new Error((json && json.error) || text || ('HTTP ' + res.status));
+    return json;
+  }
+
+  function showErrorScreen(title, msg) {
+    $('view-auth').classList.remove('hidden');
+    $('view-sessions').classList.add('hidden');
+    $('view-usage').classList.add('hidden');
+    $('view-terminal').classList.add('hidden');
+    $('auth-title').textContent = title;
+    $('auth-msg').textContent = msg;
+    setConn('Offline', 'err');
+  }
+
+  async function authenticate() {
+    const initData = tg && tg.initData ? tg.initData : '';
+    if (!initData) {
+      showErrorScreen('Open inside Telegram', 'Launch this page from your SUPER DESKTOP bot inside Telegram so Telegram can sign your session.');
+      return false;
+    }
+    try {
+      const auth = await apiFetch('/api/auth', { method: 'POST', body: JSON.stringify({ initData }) });
+      state.token = auth.token;
+      setConn('Connected', 'ok');
+      const hashMatch = (location.hash || '').match(/card=([A-Za-z0-9_-]+)/);
+      const startParam = auth.startParam || (hashMatch ? 'card_' + hashMatch[1] : null);
+      await loadBootstrap();
+      if (startParam && startParam.startsWith('card_')) {
+        const cid = startParam.slice(5);
+        if (state.bootstrap && state.bootstrap.cards.some((c) => c.id === cid)) {
+          openCard(cid);
+        }
+      }
+      return true;
+    } catch (err) {
+      showErrorScreen('Authentication failed', err.message);
+      return false;
+    }
+  }
+
+  async function loadBootstrap() {
+    const data = await apiFetch('/api/bootstrap');
+    state.bootstrap = data;
+    applyTheme(data.theme);
+    $('card-count').textContent = String((data.cards || []).length);
+    $('btn-new-top').classList.toggle('hidden', !data.permissions?.launch);
+    renderSessions();
+    renderUsage();
+    if (!state.selectedCardId) renderMainTabs();
+    else {
+      const current = (data.cards || []).find((c) => c.id === state.selectedCardId);
+      if (current) updateTerminalMeta(current);
+    }
+  }
+
+  function renderMainTabs() {
+    $('view-auth').classList.add('hidden');
+    $('view-terminal').classList.add('hidden');
+    $('main-tabs').classList.remove('hidden');
+    $('view-sessions').classList.toggle('hidden', state.activeTab !== 'sessions');
+    $('view-usage').classList.toggle('hidden', state.activeTab !== 'usage');
+    document.querySelectorAll('#main-tabs .tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === state.activeTab));
+    if (tg && tg.BackButton) tg.BackButton.hide();
+  }
+
+  function renderSessions() {
+    const el = $('view-sessions');
+    const cards = state.bootstrap?.cards || [];
+    if (!cards.length) {
+      el.innerHTML = '<div class="empty">No running terminal cards on this PC.<br><br>Use <b>+ New</b> above or open one on your PC.</div>';
+      return;
+    }
+    el.innerHTML = cards.map((c) => {
+      const model = c.model ? ` · ${esc(c.model)}${c.effort ? ` (${esc(c.effort)})` : ''}` : '';
+      const title = c.title ? `<div class="card-prompt">${esc(c.title)}</div>` : '';
+      return `<div class="card" data-cid="${esc(c.id)}">
+        <div class="card-head">
+          <span class="dot ${esc(c.status)}"></span>
+          <span class="card-title">${esc(c.icon)} ${esc(c.agentName)}</span>
+          <span class="spacer"></span>
+          <span class="pill">${esc(c.label)}${model}</span>
+        </div>
+        <div class="card-sub">${esc(c.directoryDisplay)}</div>
+        ${title}
+      </div>`;
+    }).join('');
+    el.querySelectorAll('.card').forEach((node) => {
+      node.addEventListener('click', () => { haptic('light'); openCard(node.dataset.cid); });
+    });
+  }
+
+  function renderUsage() {
+    const el = $('view-usage');
+    const providers = state.bootstrap?.usage || [];
+    if (!providers.length) {
+      el.innerHTML = '<div class="empty">No cached provider usage data yet.</div>';
+      return;
+    }
+    el.innerHTML = providers.map((p) => {
+      const limits = (p.limits || []).map((l) => {
+        const cls = l.leftPercent < 5 ? 'crit' : (l.leftPercent < 20 ? 'warn' : '');
+        const counts = l.allowance > 0 ? ` (${l.used}/${l.allowance})` : '';
+        const reset = l.resetsIn ? ` · ${esc(l.resetsIn)}` : '';
+        return `<div class="limit-row">
+          <div class="limit-label"><span><b>${esc(l.label)}</b></span><span><b>${l.usedPercent}%</b> used${esc(counts)}</span></div>
+          <div class="bar-bg"><div class="bar-fill ${cls}" style="width:${Math.max(0, Math.min(100, l.usedPercent))}%"></div></div>
+          <div class="limit-meta">${l.leftPercent}% left${reset}</div>
+        </div>`;
+      }).join('') || `<div class="limit-meta">${esc(p.statusText || 'No weekly allowance reported')}</div>`;
+      const act = p.activity ? `<div class="limit-meta" style="margin-top:8px;">${esc(p.activity)}</div>` : '';
+      return `<div class="usage-card">
+        <div class="usage-head"><span class="usage-name">${esc(p.name)}</span><span class="usage-tier">${esc(p.tier || '')}</span></div>
+        ${limits}${act}
+      </div>`;
+    }).join('');
+  }
+
+  function updateTerminalMeta(card) {
+    $('term-title').textContent = `${card.icon} ${card.agentName}`;
+    $('term-sub').textContent = card.title ? `${card.directoryDisplay} — ${card.title}` : card.directoryDisplay;
+    const st = $('term-status');
+    st.textContent = card.label || card.status;
+    st.className = 'pill ' + (card.status === 'WORKING' ? 'ok' : card.status === 'WAITING' ? 'warn' : card.status === 'ERROR' ? 'err' : '');
+    const perms = state.bootstrap?.permissions || {};
+    const canInput = !card.isShell || perms.shellInput;
+    const canPrompt = perms.prompts && canInput;
+    const canControl = perms.controls && canInput;
+    const canAttach = perms.attachments && canInput;
+    $('btn-close-card').classList.toggle('hidden', !perms.close);
+    $('btn-files').classList.toggle('hidden', !perms.readOutput);
+    $('btn-attach').classList.toggle('hidden', !canAttach);
+    $('prompt-input').disabled = !canPrompt;
+    $('btn-send').disabled = !canPrompt;
+    $('prompt-input').placeholder = canPrompt ? 'Send prompt to agent…' : 'Submit prompts disabled in Settings → Telegram';
+
+    const qk = $('quick-keys');
+    const keys = [
+      ['Yes','y','accent'], ['No','n',''], ['1','1',''], ['2','2',''], ['3','3',''],
+      ['↑','u',''], ['↓','d',''], ['Tab','t',''], ['⇧Tab','b',''],
+      ['Enter','e',''], ['Esc','x',''], ['Ctrl-C','c','danger'],
+    ];
+    let html = canControl ? keys.map(([lbl, code, cls]) => `<button class="qkey ${cls}" data-k="${code}">${lbl}</button>`).join('') : '';
+    if (canPrompt && Array.isArray(card.quickSlashCommands)) {
+      html += card.quickSlashCommands.map((cmd) => `<button class="qkey accent" data-cmd="${esc(cmd)}">${esc(cmd)}</button>`).join('');
+    }
+    qk.innerHTML = html;
+    qk.classList.toggle('hidden', !html);
+    qk.querySelectorAll('[data-k]').forEach((b) => b.addEventListener('click', () => sendKey(b.dataset.k)));
+    qk.querySelectorAll('[data-cmd]').forEach((b) => b.addEventListener('click', () => sendPromptText(b.dataset.cmd)));
+  }
+
+  function closeWs() {
+    clearTimeout(state.wsTimer); state.wsTimer = null;
+    if (state.ws) { try { state.ws.close(); } catch (_) {} state.ws = null; }
+  }
+
+  async function openCard(cardId) {
+    const card = (state.bootstrap?.cards || []).find((c) => c.id === cardId);
+    if (!card) return;
+    state.selectedCardId = cardId;
+    state.followBottom = true;
+    $('jump-live').classList.add('hidden');
+    $('view-auth').classList.add('hidden');
+    $('view-sessions').classList.add('hidden');
+    $('view-usage').classList.add('hidden');
+    $('main-tabs').classList.add('hidden');
+    $('view-terminal').classList.remove('hidden');
+    updateTerminalMeta(card);
+    if (tg && tg.BackButton) { tg.BackButton.show(); tg.BackButton.onClick(backToList); }
+    await fetchScreenOnce(cardId);
+    connectWs(cardId);
+  }
+
+  function backToList() {
+    closeWs();
+    state.selectedCardId = null;
+    renderMainTabs();
+  }
+
+  function renderTerminalAnsi(ansi) {
+    const pre = $('term-pre');
+    if (!state.bootstrap?.permissions?.readOutput) {
+      pre.textContent = 'Read terminal output is disabled in Settings → Telegram.';
+      return;
+    }
+    const prevTop = pre.scrollTop;
+    pre.innerHTML = ansiToHtml(ansi || '');
+    if (state.followBottom) pre.scrollTop = pre.scrollHeight;
+    else pre.scrollTop = prevTop;
+  }
+
+  async function fetchScreenOnce(cardId) {
+    if (!state.bootstrap?.permissions?.readOutput) { renderTerminalAnsi(''); return; }
+    try {
+      const data = await apiFetch(`/api/cards/${encodeURIComponent(cardId)}/screen`);
+      if (state.selectedCardId !== cardId) return;
+      renderTerminalAnsi(data.ansi);
+      if (data.card) updateTerminalMeta(data.card);
+    } catch (err) {
+      $('term-pre').textContent = 'Unable to load screen: ' + err.message;
+    }
+  }
+
+  function connectWs(cardId) {
+    closeWs();
+    if (!state.bootstrap?.permissions?.readOutput || !state.token) return;
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws/terminal/${encodeURIComponent(cardId)}?token=${encodeURIComponent(state.token)}`;
+    const ws = new WebSocket(url);
+    state.ws = ws;
+    ws.onopen = () => { state.wsRetry = 0; setConn('Live WS', 'ok'); };
+    ws.onmessage = (ev) => {
+      if (state.selectedCardId !== cardId) return;
+      try {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'frame') {
+          renderTerminalAnsi(msg.ansi || '');
+          if (msg.card) updateTerminalMeta(msg.card);
+        }
+      } catch (_) {}
+    };
+    ws.onclose = (ev) => {
+      if (state.selectedCardId !== cardId) return;
+      if (ev && ev.code === 1000 && ev.reason === 'card_closed') {
+        showToast('Card closed on PC');
+        backToList();
+        loadBootstrap().catch(() => {});
+        return;
+      }
+      setConn('Reconnecting…', 'warn');
+      const delay = Math.min(8000, 600 * Math.pow(1.6, state.wsRetry++));
+      state.wsTimer = setTimeout(() => { if (state.selectedCardId === cardId) connectWs(cardId); }, delay);
+    };
+  }
+
+  async function sendKey(code) {
+    const cid = state.selectedCardId; if (!cid) return;
+    haptic('light');
+    if (state.ws && state.ws.readyState === 1) {
+      state.ws.send(JSON.stringify({ type: 'key', code }));
+      return;
+    }
+    try { await apiFetch(`/api/cards/${encodeURIComponent(cid)}/key`, { method: 'POST', body: JSON.stringify({ code }) }); }
+    catch (err) { showToast(err.message); }
+  }
+
+  async function sendPromptText(text) {
+    const cid = state.selectedCardId; const trimmed = String(text || '').trim();
+    if (!cid || !trimmed) return;
+    haptic('medium');
+    try {
+      await apiFetch(`/api/cards/${encodeURIComponent(cid)}/prompt`, { method: 'POST', body: JSON.stringify({ text: trimmed }) });
+      $('prompt-input').value = '';
+      state.followBottom = true;
+      fetchScreenOnce(cid);
+    } catch (err) { showToast(err.message); }
+  }
+
+  async function openFilesDrawer() {
+    const cid = state.selectedCardId; if (!cid) return;
+    $('files-modal').classList.remove('hidden');
+    state.previewHtml = '';
+    $('files-body').innerHTML = '<div class="empty">Loading references…</div>';
+    try {
+      state.references = await apiFetch(`/api/cards/${encodeURIComponent(cid)}/references`);
+      renderFilesBody();
+    } catch (err) {
+      $('files-body').innerHTML = `<div class="empty">${esc(err.message)}</div>`;
+    }
+  }
+
+  function renderFilesBody() {
+    const refs = state.references || { assets: [], links: [] };
+    const tabs = [['all','All'], ['images','🖼 Images'], ['docs','📄 Docs'], ['links','🔗 Links']];
+    const assets = (refs.assets || []).filter((a) => {
+      if (state.filesFilter === 'images') return a.kind === 'image';
+      if (state.filesFilter === 'docs') return a.kind !== 'image';
+      return state.filesFilter === 'all';
+    });
+    const links = (state.filesFilter === 'all' || state.filesFilter === 'links') ? (refs.links || []) : [];
+    const cid = encodeURIComponent(state.selectedCardId);
+    let html = '<div class="filter-row">' + tabs.map(([k, lbl]) => `<button class="fbtn ${state.filesFilter===k?'active':''}" data-f="${k}">${lbl}</button>`).join('') + '</div>';
+    if (state.previewHtml) html += `<div class="preview-box">${state.previewHtml}</div><br>`;
+    assets.forEach((a) => {
+      const ico = a.kind === 'image' ? '🖼' : a.kind === 'pdf' ? '📕' : '📝';
+      html += `<div class="ref-item" data-aid="${esc(a.id)}" data-kind="${esc(a.kind)}" data-name="${esc(a.name)}">
+        <span>${ico} <b>${esc(a.name)}</b></span><span class="pill">${Math.max(1, Math.round(a.size/1024))} KB</span>
+      </div>`;
+    });
+    links.forEach((u) => {
+      html += `<div class="ref-item" data-url="${esc(u)}"><span>🔗 ${esc(u)}</span><span class="pill">Open ↗</span></div>`;
+    });
+    if (!assets.length && !links.length) html += '<div class="empty">No matching references.</div>';
+    const body = $('files-body'); body.innerHTML = html;
+    body.querySelectorAll('[data-f]').forEach((b) => b.addEventListener('click', () => { state.filesFilter = b.dataset.f; renderFilesBody(); }));
+    body.querySelectorAll('[data-url]').forEach((n) => n.addEventListener('click', () => {
+      if (tg && tg.openLink) tg.openLink(n.dataset.url); else window.open(n.dataset.url, '_blank');
+    }));
+    body.querySelectorAll('[data-aid]').forEach((n) => n.addEventListener('click', () => previewAsset(n.dataset.aid, n.dataset.kind, n.dataset.name)));
+  }
+
+  async function previewAsset(aid, kind, name) {
+    const cid = encodeURIComponent(state.selectedCardId);
+    const tok = encodeURIComponent(state.token || '');
+    if (kind === 'image') {
+      state.previewHtml = `<div style="margin-bottom:6px;font-weight:700;">🖼 ${esc(name)}</div><img src="/api/cards/${cid}/asset/${encodeURIComponent(aid)}?token=${tok}" alt="${esc(name)}">`;
+      renderFilesBody();
+    } else if (kind === 'pdf') {
+      state.pdfState = { aid, name, page: 1 };
+      await renderPdfPreview();
+    } else {
+      try {
+        const res = await fetch(`/api/cards/${cid}/asset/${encodeURIComponent(aid)}?token=${tok}`);
+        const txt = await res.text();
+        state.previewHtml = `<div style="margin-bottom:6px;font-weight:700;">📝 ${esc(name)}</div><pre>${esc(txt)}</pre>`;
+        renderFilesBody();
+      } catch (err) { showToast(err.message); }
+    }
+  }
+
+  async function renderPdfPreview() {
+    const p = state.pdfState; if (!p) return;
+    const cid = encodeURIComponent(state.selectedCardId);
+    const tok = encodeURIComponent(state.token || '');
+    const src = `/api/cards/${cid}/pdf/${encodeURIComponent(p.aid)}/${p.page}?token=${tok}`;
+    state.previewHtml = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <b>📕 ${esc(p.name)} · Page ${p.page}</b><span class="spacer"></span>
+      <button class="btn" id="pdf-prev" ${p.page<=1?'disabled':''}>◀</button>
+      <button class="btn" id="pdf-next">▶</button>
+    </div><img src="${src}" onerror="this.alt='No further page';">`;
+    renderFilesBody();
+    const prev = $('pdf-prev'), next = $('pdf-next');
+    if (prev) prev.onclick = () => { if (p.page > 1) { p.page--; renderPdfPreview(); } };
+    if (next) next.onclick = () => { p.page++; renderPdfPreview(); };
+  }
+
+  $('term-pre').addEventListener('scroll', () => {
+    const p = $('term-pre');
+    const atBottom = p.scrollHeight - p.scrollTop - p.clientHeight < 36;
+    state.followBottom = atBottom;
+    $('jump-live').classList.toggle('hidden', atBottom);
+  });
+  $('jump-live').addEventListener('click', () => {
+    const p = $('term-pre'); state.followBottom = true; p.scrollTop = p.scrollHeight; $('jump-live').classList.add('hidden');
+  });
+  document.querySelectorAll('#main-tabs .tab').forEach((b) => b.addEventListener('click', () => {
+    state.activeTab = b.dataset.tab; renderMainTabs();
+  }));
+  $('btn-back').addEventListener('click', backToList);
+  $('btn-refresh-top').addEventListener('click', () => { loadBootstrap().catch((e) => showToast(e.message)); });
+  $('btn-font-dec').addEventListener('click', () => {
+    state.fontSize = Math.max(9, state.fontSize - 1); localStorage.setItem('sd_tg_font', state.fontSize);
+    document.documentElement.style.setProperty('--term-size', state.fontSize + 'px');
+  });
+  $('btn-font-inc').addEventListener('click', () => {
+    state.fontSize = Math.min(20, state.fontSize + 1); localStorage.setItem('sd_tg_font', state.fontSize);
+    document.documentElement.style.setProperty('--term-size', state.fontSize + 'px');
+  });
+  $('btn-send').addEventListener('click', () => sendPromptText($('prompt-input').value));
+  $('prompt-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendPromptText($('prompt-input').value); }
+  });
+  $('btn-files').addEventListener('click', openFilesDrawer);
+  $('files-close').addEventListener('click', () => $('files-modal').classList.add('hidden'));
+  $('files-refresh').addEventListener('click', openFilesDrawer);
+  $('btn-attach').addEventListener('click', () => $('attach-input').click());
+  $('attach-input').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0]; const cid = state.selectedCardId;
+    if (!file || !cid) return;
+    if (file.size > 10 * 1024 * 1024) { showToast('File exceeds 10 MB limit'); return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const b64 = String(reader.result || '').split(',')[1] || '';
+      try {
+        await apiFetch(`/api/cards/${encodeURIComponent(cid)}/attachment`, {
+          method: 'POST',
+          body: JSON.stringify({
+            name: file.name, mimeType: file.type || 'application/octet-stream',
+            caption: $('prompt-input').value.trim(), dataBase64: b64,
+            isImage: (file.type || '').startsWith('image/')
+          })
+        });
+        $('prompt-input').value = ''; showToast('Attachment sent');
+      } catch (err) { showToast(err.message); }
+      e.target.value = '';
+    };
+    reader.readAsDataURL(file);
+  });
+  $('btn-close-card').addEventListener('click', async () => {
+    const cid = state.selectedCardId; if (!cid) return;
+    if (!confirm('Close this terminal card on your PC?')) return;
+    try {
+      await apiFetch(`/api/cards/${encodeURIComponent(cid)}/close`, { method: 'POST', body: '{}' });
+      showToast('Card closed');
+      backToList();
+      await loadBootstrap();
+    } catch (err) { showToast(err.message); }
+  });
+  $('btn-new-top').addEventListener('click', () => {
+    const ws = state.bootstrap?.workspaces || {};
+    const folders = [ws.current, ...(ws.recent || [])].filter((v, i, a) => v && a.indexOf(v) === i);
+    $('new-folder').innerHTML = folders.map((f) => `<option value="${esc(f)}">${esc(f)}</option>`).join('');
+    $('new-harness').innerHTML = (state.bootstrap?.harnesses || []).map((h) => `<option value="${esc(h.id)}">${esc(h.icon)} ${esc(h.name)}</option>`).join('');
+    $('new-modal').classList.remove('hidden');
+  });
+  $('new-close').addEventListener('click', () => $('new-modal').classList.add('hidden'));
+  $('new-submit').addEventListener('click', async () => {
+    try {
+      const res = await apiFetch('/api/cards/launch', {
+        method: 'POST',
+        body: JSON.stringify({ workspace: $('new-folder').value, agentType: $('new-harness').value })
+      });
+      $('new-modal').classList.add('hidden');
+      await loadBootstrap();
+      if (res.id) openCard(res.id);
+    } catch (err) { showToast(err.message); }
+  });
+
+  setInterval(() => { if (state.token && !document.hidden) loadBootstrap().catch(() => {}); }, 4000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && state.token) loadBootstrap().catch(() => {}); });
+  authenticate();
+})();
+</script>
+</body>
+</html>

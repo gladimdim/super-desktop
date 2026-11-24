@@ -12,6 +12,78 @@ pub const MAX_MESSAGE_CARD_MAP: usize = 256;
 pub const MAX_REJECTED_USERS: usize = 256;
 pub const MAX_TOPICS: usize = 256;
 pub const MAX_LIVE_STREAMS: usize = 3;
+pub const DEFAULT_MINI_APP_PORT: u16 = 7789;
+pub const DEFAULT_MINI_APP_HTTPS_PORT: u16 = 8443;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MiniAppConfig {
+    pub enabled: bool,
+    pub listen_port: u16,
+    pub public_url: String,
+    pub short_name: String,
+}
+
+impl Default for MiniAppConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen_port: DEFAULT_MINI_APP_PORT,
+            public_url: String::new(),
+            short_name: String::new(),
+        }
+    }
+}
+
+impl MiniAppConfig {
+    pub fn effective_port(&self) -> u16 {
+        if self.listen_port >= 1024 {
+            self.listen_port
+        } else {
+            DEFAULT_MINI_APP_PORT
+        }
+    }
+
+    pub fn normalized_url(&self) -> Option<String> {
+        let trimmed = self.public_url.trim().trim_end_matches('/');
+        if !trimmed.starts_with("https://")
+            || trimmed.len() <= "https://".len()
+            || trimmed.chars().any(|c| c.is_whitespace() || c.is_control())
+        {
+            return None;
+        }
+        Some(trimmed.to_string())
+    }
+
+    pub fn valid_short_name(&self) -> Option<&str> {
+        let s = self.short_name.trim();
+        if s.is_empty()
+            || s.len() > 64
+            || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return None;
+        }
+        Some(s)
+    }
+
+    pub fn card_deep_link(&self, bot_username: Option<&str>, card_id: &str) -> Option<String> {
+        if !self.enabled || self.normalized_url().is_none() {
+            return None;
+        }
+        let bot = bot_username.map(str::trim).filter(|b| !b.is_empty())?;
+        let short = self.valid_short_name()?;
+        Some(format!("https://t.me/{bot}/{short}?startapp=card_{card_id}"))
+    }
+
+    pub fn dashboard_deep_link(&self, bot_username: Option<&str>) -> Option<String> {
+        if !self.enabled || self.normalized_url().is_none() {
+            return None;
+        }
+        let bot = bot_username.map(str::trim).filter(|b| !b.is_empty())?;
+        let short = self.valid_short_name()?;
+        Some(format!("https://t.me/{bot}/{short}"))
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -76,6 +148,8 @@ pub struct Config {
     pub archive_closed_topics: bool,
     pub mirror_alerts_to_private: bool,
     pub permissions: Permissions,
+    #[serde(default)]
+    pub mini_app: MiniAppConfig,
 }
 
 impl Default for Config {
@@ -92,6 +166,7 @@ impl Default for Config {
             archive_closed_topics: true,
             mirror_alerts_to_private: false,
             permissions: Permissions::default(),
+            mini_app: MiniAppConfig::default(),
         }
     }
 }

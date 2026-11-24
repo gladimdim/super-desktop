@@ -13,6 +13,7 @@ pub mod process;
 pub mod redact;
 pub mod router;
 pub mod topics;
+pub mod webapp;
 pub mod worker;
 
 #[cfg(test)]

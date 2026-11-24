@@ -195,12 +195,19 @@ pub struct FileInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebAppInfo {
+    pub url: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InlineButton {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub callback_data: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_app: Option<WebAppInfo>,
 }
 
 impl InlineButton {
@@ -209,6 +216,7 @@ impl InlineButton {
             text: text.into(),
             callback_data: Some(callback_data.into()),
             url: None,
+            web_app: None,
         }
     }
 
@@ -217,6 +225,16 @@ impl InlineButton {
             text: text.into(),
             callback_data: None,
             url: Some(url.into()),
+            web_app: None,
+        }
+    }
+
+    pub fn web_app(text: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            callback_data: None,
+            url: None,
+            web_app: Some(WebAppInfo { url: url.into() }),
         }
     }
 }
@@ -294,6 +312,11 @@ pub trait TelegramApi {
     ) -> Result<(), ApiError>;
     fn answer_callback_query(&self, callback_id: &str, text: Option<&str>) -> Result<(), ApiError>;
     fn set_my_commands(&self, commands: &[(&str, &str)]) -> Result<(), ApiError>;
+    fn set_chat_menu_button(
+        &self,
+        chat_id: Option<i64>,
+        web_app: Option<(&str, &str)>,
+    ) -> Result<(), ApiError>;
     fn get_chat(&self, chat_id: i64) -> Result<ChatInfo, ApiError>;
     fn get_chat_member(&self, chat_id: i64, user_id: i64) -> Result<ChatMember, ApiError>;
     fn get_chat_member_count(&self, chat_id: i64) -> Result<u64, ApiError>;
@@ -330,7 +353,7 @@ struct ApiParameters {
     retry_after: Option<u64>,
 }
 
-fn ensure_rustls_provider() {
+pub(super) fn ensure_rustls_provider() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -762,6 +785,27 @@ impl TelegramApi for TelegramClient {
             .map(|(cmd, desc)| json!({ "command": cmd, "description": desc }))
             .collect();
         let _: Value = self.call("setMyCommands", &json!({ "commands": items }))?;
+        Ok(())
+    }
+
+    fn set_chat_menu_button(
+        &self,
+        chat_id: Option<i64>,
+        web_app: Option<(&str, &str)>,
+    ) -> Result<(), ApiError> {
+        let menu_button = match web_app {
+            Some((text, url)) => json!({
+                "type": "web_app",
+                "text": text,
+                "web_app": { "url": url }
+            }),
+            None => json!({ "type": "commands" }),
+        };
+        let mut body = json!({ "menu_button": menu_button });
+        if let Some(cid) = chat_id {
+            body["chat_id"] = json!(cid);
+        }
+        let _: Value = self.call("setChatMenuButton", &body)?;
         Ok(())
     }
 

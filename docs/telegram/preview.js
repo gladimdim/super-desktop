@@ -33,4 +33,17 @@
   topicButtons.forEach((btn) => {
     btn.addEventListener('click', () => selectTopic(btn));
   });
+
+  const copyPromptBtn = document.getElementById('copy-agent-prompt');
+  const promptTextEl = document.getElementById('agent-setup-prompt');
+  if (copyPromptBtn && promptTextEl) {
+    copyPromptBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(promptTextEl.textContent.trim());
+        const prev = copyPromptBtn.textContent;
+        copyPromptBtn.textContent = '✓ Copied!';
+        setTimeout(() => { copyPromptBtn.textContent = prev; }, 2000);
+      } catch (_) {}
+    });
+  }
 })();

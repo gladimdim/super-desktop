@@ -193,7 +193,11 @@ pub struct ProviderUsageSummary {
 pub trait DesktopBackend {
     fn list_cards(&self) -> Vec<CardSummary>;
     fn usage_summary(&self) -> Vec<ProviderUsageSummary>;
+    fn final_assistant_message(&self, _card_id: &str) -> Option<String> {
+        None
+    }
     fn capture_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String>;
+    fn capture_ansi_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String>;
     fn list_references(&self, card_id: &str) -> Result<CardReferences, String>;
     fn read_asset(&self, card_id: &str, asset_id: &str) -> Result<(CardAsset, Vec<u8>), String>;
     fn render_pdf_page(
@@ -234,6 +238,39 @@ impl LiveDesktopBackend {
             .find(|t| t.session_name == card_id)
             .map(|t| t.agent_type)
             .unwrap_or_else(|| "shell".to_string())
+    }
+
+    fn capture_pane(
+        card_id: &str,
+        history_lines: u32,
+        ansi: bool,
+        max_bytes: usize,
+    ) -> Result<String, String> {
+        Self::verify_owned_session(card_id)?;
+        let target = format!("={card_id}:");
+        let mut cmd = Command::new(crate::tmux::tmux_bin());
+        cmd.args(["capture-pane", "-p"]);
+        if ansi {
+            cmd.arg("-e");
+        }
+        cmd.args(["-t", &target]);
+        if history_lines > 0 {
+            let clamped = history_lines.min(300);
+            cmd.args(["-S", &format!("-{clamped}")]);
+        }
+        let out = cmd.output().map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err("Could not capture terminal screen.".into());
+        }
+        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
+        if text.len() > max_bytes {
+            let mut cut = max_bytes;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            text.truncate(cut);
+        }
+        Ok(text)
     }
 }
 
@@ -309,28 +346,45 @@ impl DesktopBackend for LiveDesktopBackend {
             .collect()
     }
 
-    fn capture_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String> {
-        Self::verify_owned_session(card_id)?;
-        let target = format!("={card_id}:");
-        let mut cmd = Command::new(crate::tmux::tmux_bin());
-        cmd.args(["capture-pane", "-p", "-t", &target]);
-        if history_lines > 0 {
-            let clamped = history_lines.min(300);
-            cmd.args(["-S", &format!("-{clamped}")]);
+    fn final_assistant_message(&self, card_id: &str) -> Option<String> {
+        if Self::verify_owned_session(card_id).is_err() {
+            return None;
         }
-        let out = cmd.output().map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err("Could not capture terminal screen.".into());
-        }
-        let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-        if text.len() > 65536 {
-            let mut cut = 65536;
-            while !text.is_char_boundary(cut) {
-                cut -= 1;
+        let agent = Self::session_agent(card_id);
+        match agent.as_str() {
+            "codex" => crate::completion::pane_pid(card_id)
+                .and_then(crate::completion::last_agent_message_for_pid),
+            "claude" => {
+                let meta = crate::harness_metadata::inspect(card_id, "claude")?;
+                if meta.transcript.is_empty() || meta.native_session.is_empty() {
+                    return None;
+                }
+                crate::harness_record::claude_last_assistant_message(
+                    std::path::Path::new(&meta.transcript),
+                    &meta.native_session,
+                    256 * 1024,
+                )
             }
-            text.truncate(cut);
+            "pi" => {
+                let meta = crate::harness_metadata::inspect(card_id, "pi")?;
+                if meta.transcript.is_empty() {
+                    return None;
+                }
+                crate::harness_record::pi_last_assistant_message(
+                    std::path::Path::new(&meta.transcript),
+                    256 * 1024,
+                )
+            }
+            _ => None,
         }
-        Ok(text)
+    }
+
+    fn capture_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String> {
+        Self::capture_pane(card_id, history_lines, false, 65_536)
+    }
+
+    fn capture_ansi_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String> {
+        Self::capture_pane(card_id, history_lines, true, 131_072)
     }
 
     fn list_references(&self, card_id: &str) -> Result<CardReferences, String> {

@@ -35,6 +35,7 @@
       <a href="#screens">Screens</a>
       <a href="#features">What it can do</a>
       <a href="#setup">Setup</a>
+      <a href="#mini-app">Mini Web App</a>
       <a href="#commands">Commands</a>
       <a href="#permissions">Permissions</a>
       <a href="#security">Security</a>
@@ -64,6 +65,7 @@
         <a href="#screens">Usage &amp; setup screens</a>
         <a href="#features">What is possible</a>
         <a href="#setup">Step-by-step setup</a>
+        <a href="#mini-app">Mini Web App + AI setup prompt</a>
         <a href="#commands">Commands</a>
         <a href="#permissions">Permissions</a>
         <a href="#security">Privacy &amp; security</a>
@@ -279,18 +281,18 @@ test burst_window_recovers_after_tick ... ok</pre>
             </div>
 
             <div class="setup-card">
-              <h3>3. Forum Topics</h3>
+              <h3>3. Forum Topics &amp; Mini Web App</h3>
               <p class="setup-note">1-card-1-topic mode inside a private 2-member supergroup. Linked: <strong>My PC Agents</strong>.</p>
               <div class="sd-row">
                 <span class="sd-btn">Sync topics now</span>
-                <span class="sd-btn">Unlink forum</span>
+                <span class="sd-btn">Auto-setup Tailscale Serve</span>
               </div>
               <div class="sd-switch-row">
-                <div><strong>Auto-create a topic for each card</strong><span>Open a color-tagged Forum Topic automatically.</span></div>
+                <div><strong>Auto-create &amp; Delete on close</strong><span>Open a topic per card and delete it when closed.</span></div>
                 <span class="sd-pill on" aria-label="On"></span>
               </div>
               <div class="sd-switch-row">
-                <div><strong>Delete topic when a card closes</strong><span>Delete the topic automatically once the card closes (falls back to archiving).</span></div>
+                <div><strong>Telegram Mini Web App (Tailscale)</strong><span>Private <code>https://*.ts.net:8443</code> live ANSI UI.</span></div>
                 <span class="sd-pill on" aria-label="On"></span>
               </div>
             </div>
@@ -335,12 +337,12 @@ test burst_window_recovers_after_tick ... ok</pre>
       <div class="cap-card">
         <b>🚦</b>
         <h3>Live statuses &amp; quiet 👍 acks</h3>
-        <p>Pinned headers edit silently in place and topic names show debounced status dots (<code>🟢</code> <code>🟡</code> <code>✅</code> <code>🔴</code> <code>⚪</code> <code>⚫</code>), while prompts in Forum Topics acknowledge with a clean <code>👍</code> reaction.</p>
+        <p>Pinned headers and the General dashboard update live status dots (<code>🟢</code> <code>🟡</code> <code>✅</code> <code>🔴</code> <code>⚪</code> <code>⚫</code>) silently in place with zero topic-rename service spam, while prompts in Forum Topics acknowledge with a clean <code>👍</code> reaction.</p>
       </div>
       <div class="cap-card">
         <b>📺</b>
-        <h3>Live output &amp; smart alerts</h3>
-        <p>Tap <strong>📺 Live</strong> (<code>/live</code>) to watch an auto-updating <code>&lt;pre&gt;</code> block while an agent runs. Finished and Waiting alerts include trailing output snippets above one-tap buttons.</p>
+        <h3>Instant Done reports &amp; live output</h3>
+        <p>When a harness finishes, a concise <strong>✅ Done</strong> output summary arrives right in chat (final assistant reply or cleaned terminal result without TUI chrome). Tap <strong>📺 Live</strong> (<code>/live</code>) while running for an auto-updating stream.</p>
       </div>
       <div class="cap-card">
         <b>📎</b>
@@ -366,6 +368,11 @@ test burst_window_recovers_after_tick ... ok</pre>
         <b>🖼</b>
         <h3>Send photos, files &amp; voice</h3>
         <p>Drop a screenshot, document, or voice clip directly into a card's topic — staged privately outside workspaces, never saved to random repos.</p>
+      </div>
+      <div class="cap-card">
+        <b>📱</b>
+        <h3>Telegram Mini Web App (Tailscale)</h3>
+        <p>Tap <code>⚡ Open App</code> (or <code>/app</code>) for an Android-like WebSocket ANSI terminal, Weekly Usage bars, Quick Keys, and interactive Files &amp; Previews over private <code>tailscale serve</code>.</p>
       </div>
       <div class="cap-card">
         <b>🌐</b>
@@ -431,6 +438,58 @@ test burst_window_recovers_after_tick ... ok</pre>
     </div>
   </section>
 
+  <section class="guide" id="mini-app">
+    <p class="eyebrow">OPTIONAL · PRIVATE TAILNET UI</p>
+    <h2>Telegram Mini Web App via Tailscale.</h2>
+    <p class="sub">Want a full Android-like experience right inside Telegram — live colored ANSI terminal over WebSocket, weekly allowance meters, swipeable Quick Keys, and interactive image/PDF/code previews? Serve the embedded UI on <code>127.0.0.1:7789</code> and wrap it privately inside your own Tailscale tailnet using <code>tailscale serve</code> (never public Funnel).</p>
+
+    <h3 id="use-this-prompt-to-setup" style="margin-top:26px;">Use this prompt to setup</h3>
+    <p class="sub">Paste this prompt into <strong>Claude Code, Codex, OpenCode, Antigravity, Grok</strong>, or any AI coding agent on your Linux PC to configure Tailscale Serve and enable the Mini Web App safely without exposing any tokens.</p>
+
+    <div class="prompt-box">
+      <div class="prompt-bar">
+        <span><strong>AI Agent Setup Prompt</strong> · tailscale serve + config.json</span>
+        <button type="button" class="prompt-copy" id="copy-agent-prompt">Copy prompt</button>
+      </div>
+      <pre class="prompt-code" id="agent-setup-prompt">Configure the SUPER DESKTOP Telegram Mini Web App on this Linux PC using Tailscale Serve (never Tailscale Funnel).
+
+Rules:
+- Never print, echo, or commit my bot token (`botToken`) or any secrets from config.json.
+- Use `tailscale serve` (private to my tailnet only), never `tailscale funnel`.
+- Keep all existing Telegram settings (`enabled`, `botToken`, `allowedUser`, `forum`, `permissions`) intact.
+
+Steps:
+1. Check Tailscale status with `tailscale status --json` and ensure it is Running with a `Self.DNSName`.
+   - If MagicDNS or HTTPS Certificates are disabled, stop and tell me what toggle to enable in https://login.tailscale.com/admin/dns.
+2. Expose only SUPER DESKTOP's local loopback Mini App server privately via Tailscale Serve:
+   `tailscale serve --bg --https=8443 http://127.0.0.1:7789`
+   and record `URL="https://&lt;DNSName_without_trailing_dot&gt;:8443"`.
+3. Inspect `${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop/telegram/config.json`:
+   - If the Telegram bot is not yet configured (`enabled: false` or empty `botToken` or no `allowedUser`), stop and guide me through Settings → Telegram (`@BotFather` token + account pairing) first.
+   - Otherwise update `config.json` atomically (`chmod 600`) to set:
+     `miniApp.enabled = true`, `miniApp.listenPort = 7789`, `miniApp.publicUrl = "$URL"` (preserving `miniApp.shortName` and all other fields).
+4. Signal/verify the worker cleanly:
+   - Check `curl -fsS http://127.0.0.1:7789/health` and `curl -fsS "$URL/health"`.
+   - If the `super-desktop telegram-bot` process isn't listening on `127.0.0.1:7789` yet, wait a couple seconds after updating `config.json` (the daemon hot-reloads it) or restart SUPER DESKTOP with `super-desktop status`.
+5. Report back concisely:
+   - The private Mini App `$URL`
+   - Whether `/health` succeeded locally and via Tailscale HTTPS
+   - Next steps on my phone (keep Tailscale ON, tap ⚡ Open App in 1:1 chat with the bot or run `/app`; optionally register `/newapp` in `@BotFather` and paste the short name into Settings → Telegram → Mini Web App for Forum Topic deep links).</pre>
+    </div>
+
+    <div class="step">
+      <div class="num" aria-hidden="true">M</div>
+      <div>
+        <h3>Manual setup &amp; optional <code>@BotFather</code> Forum Topic deep links</h3>
+        <ol>
+          <li>Ensure <strong>MagicDNS</strong> and <strong>HTTPS Certificates</strong> are enabled in Tailscale Admin → DNS and Tailscale is running on your PC and phone.</li>
+          <li>Click <strong>Auto-setup Tailscale Serve</strong> in <strong>⚙ Settings → Telegram → Mini Web App</strong>, or run <code>tailscale serve --bg --https=8443 http://127.0.0.1:7789</code> and save your <code>https://&lt;pc&gt;.&lt;tailnet&gt;.ts.net:8443</code> URL.</li>
+          <li><em>Optional for Forum Topic buttons:</em> Message <code>@BotFather</code> → <code>/newapp</code>, register a short name (e.g. <code>superdesktop</code>) pointing to that URL, and paste it in <strong>Settings → Telegram</strong>. Every card topic immediately gets a <strong>📱 Open App</strong> deep link button.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
   <section class="guide" id="commands">
     <p class="eyebrow">REFERENCE</p>
     <h2>Bot commands.</h2>
@@ -439,6 +498,7 @@ test burst_window_recovers_after_tick ... ok</pre>
       <table>
         <thead><tr><th>Command</th><th>Action</th></tr></thead>
         <tbody>
+          <tr><td><code>/app</code></td><td>Open the Android-like Telegram Mini Web App (live ANSI terminal, Usage &amp; Files)</td></tr>
           <tr><td><code>/cards</code></td><td>List active terminal cards with quick select, <code>📷</code> screen, and <code>📎</code> files buttons</td></tr>
           <tr><td><code>/dashboard</code> · <code>/usage</code></td><td>Show or refresh the live workspace dashboard, or view weekly allowance &amp; progress bars for each provider</td></tr>
           <tr><td><code>/status</code></td><td>Show selected card status, model, prompt, and inline action keyboard</td></tr>

@@ -51,6 +51,41 @@ pub fn sanitize_terminal_text(raw: &str, bot_token: &str, redact_secrets: bool) 
     redact_known_secrets(&token_masked)
 }
 
+/// Mask secrets and bot tokens while preserving ANSI SGR color sequences (`\x1b[...m`).
+pub fn redact_ansi_preserving(text: &str, bot_token: &str, redact_secrets: bool) -> String {
+    // Strip unsafe non-SGR control characters (keeping \n, \t, and \x1b[<params>m).
+    let mut safe = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == 0x1B && bytes.get(i + 1) == Some(&b'[') {
+            let mut j = i + 2;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b';' || bytes[j] == b':') {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'm' && j - (i + 2) <= 48 {
+                safe.push_str(&text[i..=j]);
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        let ch = text[i..].chars().next().unwrap();
+        if !ch.is_control() || ch == '\n' || ch == '\t' {
+            safe.push(ch);
+        }
+        i += ch.len_utf8();
+    }
+    let token_masked = mask_token_in_text(&safe, bot_token);
+    if !redact_secrets {
+        return token_masked;
+    }
+    // Redact known secrets while ensuring ANSI SGR suffixes (`...m`) don't block inline prefix matching.
+    redact_known_secrets(&token_masked.replace('m', "m\0"))
+        .replace("m\0", "m")
+}
+
 fn redact_known_secrets(text: &str) -> String {
     let mut lines_out = Vec::new();
     let mut in_pem = false;
@@ -251,8 +286,16 @@ pub fn status_emoji(status: &str) -> &'static str {
     }
 }
 
+pub fn strip_legacy_status_prefix(name: &str) -> &str {
+    for prefix in ["🟢 ", "🟡 ", "✅ ", "🔴 ", "⚪ ", "⚫ "] {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            return rest;
+        }
+    }
+    name
+}
+
 pub fn topic_title(
-    status: &str,
     icon: &str,
     agent_name: &str,
     dir_display: &str,
@@ -266,7 +309,6 @@ pub fn topic_title(
             .collect::<Vec<_>>()
             .join(" ")
     };
-    let dot = status_emoji(status);
     let icon = clean_one_line(icon);
     let agent = clean_one_line(agent_name);
     let folder_leaf = dir_display
@@ -277,9 +319,9 @@ pub fn topic_title(
         .unwrap_or(dir_display);
     let folder = clean_one_line(folder_leaf);
     let mut base = if icon.is_empty() {
-        format!("{dot} {agent} · {folder}")
+        format!("{agent} · {folder}")
     } else {
-        format!("{dot} {icon} {agent} · {folder}")
+        format!("{icon} {agent} · {folder}")
     };
     if let Some(title) = card_title.map(clean_one_line).filter(|s| !s.is_empty()) {
         base.push_str(" — ");

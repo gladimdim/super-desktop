@@ -774,6 +774,105 @@ pub fn claude_prompt_records(bytes: &[u8], session: &str) -> Vec<PromptRecord> {
     prompts
 }
 
+fn assistant_message_text(message: &Value) -> Option<String> {
+    let content = &message["content"];
+    let raw = if let Some(s) = content.as_str() {
+        s.to_owned()
+    } else if let Some(parts) = content.as_array() {
+        parts
+            .iter()
+            .filter(|p| p["type"] == "text")
+            .filter_map(|p| p["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    } else {
+        return None;
+    };
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// Latest non-empty assistant text reply for `session` from the last `limit`
+/// bytes of its Claude Code transcript, ignoring sidechains, other sessions,
+/// thinking/tool_use blocks, and resetting on a new user turn.
+pub fn claude_last_assistant_message(
+    path: &Path,
+    session: &str,
+    limit: u64,
+) -> Option<String> {
+    if !is_claude_transcript(path, session) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let (bytes, _) = read_jsonl_tail(&mut file, &metadata, limit)?;
+    claude_last_assistant_message_from_bytes(&bytes, session)
+}
+
+pub fn claude_last_assistant_message_from_bytes(bytes: &[u8], session: &str) -> Option<String> {
+    let mut last_reply = None;
+    for record in claude_session_records(bytes, session) {
+        if claude_injected(&record) {
+            continue;
+        }
+        match record["type"].as_str() {
+            Some("user") => {
+                if claude_record_text(&record).is_some_and(|t| is_user_prompt(&t)) {
+                    last_reply = None;
+                }
+            }
+            Some("assistant") => {
+                if let Some(reply) = assistant_message_text(&record["message"]) {
+                    last_reply = Some(reply);
+                }
+            }
+            _ => {}
+        }
+    }
+    last_reply
+}
+
+/// Latest non-empty assistant text reply from the last `limit` bytes of a Pi
+/// session transcript JSONL file.
+pub fn pi_last_assistant_message(path: &Path, limit: u64) -> Option<String> {
+    if !is_pi_transcript(path) {
+        return None;
+    }
+    let mut file = fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let (bytes, _) = read_jsonl_tail(&mut file, &metadata, limit)?;
+    pi_last_assistant_message_from_bytes(&bytes)
+}
+
+pub fn pi_last_assistant_message_from_bytes(bytes: &[u8]) -> Option<String> {
+    let mut last_reply = None;
+    for record in json_lines(bytes) {
+        if record["type"] != "message" {
+            continue;
+        }
+        match record["message"]["role"].as_str() {
+            Some("user") => {
+                if message_content_text(&record["message"]).is_some_and(|t| is_user_prompt(&t)) {
+                    last_reply = None;
+                }
+            }
+            Some("assistant") => {
+                if let Some(reply) = assistant_message_text(&record["message"]) {
+                    last_reply = Some(reply);
+                }
+            }
+            _ => {}
+        }
+    }
+    last_reply
+}
+
 /// Every user prompt in the last `limit` bytes of a Pi session JSONL file,
 /// oldest first, vetted by `is_user_prompt`.
 pub fn pi_prompts(path: &Path, limit: u64) -> Option<(Vec<PromptRecord>, bool)> {
@@ -1103,6 +1202,47 @@ mod tests {
         assert_eq!(agy.native_session, "conv-1");
         assert_eq!(agy.status, "unknown");
         assert_eq!(agy.prompt, "Inspect hooks");
+    }
+
+    #[test]
+    fn claude_and_pi_last_assistant_message_extract_final_text_and_skip_noise() {
+        let claude_bytes = [
+            json!({"type":"user","sessionId":"own","message":{"content":"First prompt"}}),
+            json!({"type":"assistant","sessionId":"own","message":{"content":[{"type":"thinking","thinking":"secret"},{"type":"tool_use","name":"Read"},{"type":"text","text":"First answer"}]}}),
+            json!({"type":"user","sessionId":"own","message":{"content":"Second prompt"}}),
+            json!({"type":"assistant","sessionId":"other","message":{"content":[{"type":"text","text":"Wrong session"}]}}),
+            json!({"type":"assistant","sessionId":"own","isSidechain":true,"message":{"content":[{"type":"text","text":"Sidechain subagent"}]}}),
+            json!({"type":"assistant","sessionId":"own","message":{"content":[{"type":"thinking","thinking":"hmm"}]}}),
+            json!({"type":"assistant","sessionId":"own","message":{"content":[{"type":"text","text":"Step 1 done."},{"type":"text","text":"All checks pass."}]}}),
+        ]
+        .iter()
+        .map(|v| format!("{v}\n"))
+        .collect::<String>();
+        assert_eq!(
+            claude_last_assistant_message_from_bytes(claude_bytes.as_bytes(), "own").as_deref(),
+            Some("Step 1 done.\n\nAll checks pass.")
+        );
+
+        let reset = format!(
+            "{claude_bytes}{}\n",
+            json!({"type":"user","sessionId":"own","message":{"content":"Third prompt"}})
+        );
+        assert_eq!(
+            claude_last_assistant_message_from_bytes(reset.as_bytes(), "own"),
+            None
+        );
+
+        let pi_bytes = [
+            json!({"type":"message","message":{"role":"user","content":"Check Pi"}}),
+            json!({"type":"message","message":{"role":"assistant","content":[{"type":"thinking","thinking":"x"},{"type":"text","text":"Pi reply ready."}]}}),
+        ]
+        .iter()
+        .map(|v| format!("{v}\n"))
+        .collect::<String>();
+        assert_eq!(
+            pi_last_assistant_message_from_bytes(pi_bytes.as_bytes()).as_deref(),
+            Some("Pi reply ready.")
+        );
     }
 
 }
