@@ -231,3 +231,9 @@ lead image of the walkthrough; earlier terminal, usage and menu captures remain.
 Captured on an isolated Android 14 emulator on 2026-11-14. Demo PCs contain
 synthetic sessions; the camera image is the emulator camera's scene. Both
 captures are 540 × 1200 WebP, resized from 1080 × 2400 at quality 86.
+
+## Android phone gallery
+
+The homepage shows the public Android APK 2.2.0 (20) in demo mode on an
+isolated Android 14 phone emulator. The Sessions view and Codex voice draft
+were captured at 1080 × 2400 and resized to 648 × 1440 WebP.
