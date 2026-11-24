@@ -8,7 +8,7 @@ For the [SUPER DESKTOP Android app on Google Play](https://play.google.com/store
 
 ## Free Android APK
 
-[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.0.8/SUPER-DESKTOP-2.2.0.apk): every feature is free forever,
+[Download SUPER DESKTOP for Android](https://github.com/gladimdim/super-desktop/releases/download/v2.1.0/SUPER-DESKTOP-2.3.0.apk): every feature is free forever,
 with no 10-day trial, Pro purchase or subscription. Google Play is not required.
 Android 10 or newer; phones, foldables, tablets and TVs are supported.
 Open the downloaded APK and allow installation from your browser when Android
@@ -20,11 +20,12 @@ Play edition keeps its usage-day trial and one-time Pro purchase.
 [Connect your phone](https://superdesktop.dmytrogladkyi.com/connect.html).
 
 The free APK uses protocol 3 with no new PC minimum. Individual features retain
-their requirements: TV code pairing needs PC 1.8.0+, web previews need 1.9.0+.
-**2.2.0 (20)** adds Antigravity CLI shortcuts above the keyboard. Tap
-**/resume** and **Send** for Antigravity’s conversation picker. New direct
-Antigravity sessions on PC **2.0.8** use inline scrollback when the CLI supports
-per-session rendering settings.
+their requirements: TV code pairing needs PC 1.8.0+, web previews need 1.9.0+,
+and terminal relaunch and speech transcription need PC 2.1.0+.
+**2.3.0 (21)** adds one-tap approval buttons above active prompts, scrollable
+slash/draft shortcuts across all supported harnesses, clear error-state cues,
+terminal **Relaunch** (fresh or resume) on PC 2.1.0+, and voice dictation on
+unsupported devices via the PC transcription endpoint on PC 2.1.0+.
 
 **2.1.0 (19)** adds voice prompts: in an AI harness terminal, tap the microphone,
 speak, and send the clip with your prompt. The agent transcribes it on your PC
