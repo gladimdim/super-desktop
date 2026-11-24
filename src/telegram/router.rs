@@ -3,28 +3,38 @@ use super::api::{
     CallbackQuery, InlineButton, InlineKeyboardMarkup, Message, PhotoSize, TelegramApi, Update,
 };
 use super::config::{
-    save_config_at, save_runtime_at, Config, RuntimeState,
+    save_config_at, save_runtime_at, Config, LiveStream, RuntimeState, MAX_LIVE_STREAMS,
 };
 use super::desktop::{
     normalize_telegram_image, CardAsset, CardSummary, DesktopBackend, HarnessChoice, NamedKey,
 };
 use super::pairing;
 use super::redact::{
-    escape_html, sanitize_terminal_text, split_chunks, truncate_chars, DEFAULT_CHUNK_CHARS,
+    escape_html, sanitize_terminal_text, split_chunks, status_emoji, truncate_chars,
+    DEFAULT_CHUNK_CHARS,
 };
-use super::topics::{self, card_action_keyboard, format_card_header_html};
+use super::topics::{
+    self, card_action_keyboard, dashboard_keyboard, format_card_header_html,
+    format_dashboard_html, format_live_message_html, format_usage_html, live_stream_keyboard,
+    quick_keys_keyboard, quick_slash_commands, tail_output_snippet, usage_keyboard,
+};
 use crate::prompt_attachments::{safe_name, Attachment, Kind, MAX_TOTAL};
 use crate::prompt_image::MAX_IMAGE;
 use std::collections::VecDeque;
 use std::path::Path;
 
 const MAX_CACHED_FILE_PICKS: usize = 256;
+const FILES_PAGE_SIZE: usize = 8;
 
 pub const BOT_COMMANDS: &[(&str, &str)] = &[
     ("cards", "List active terminal cards"),
+    ("dashboard", "Show or refresh live dashboard + usage"),
+    ("usage", "Show weekly allowance & provider progress"),
     ("status", "Show selected card status"),
     ("screen", "Capture current screen"),
     ("history", "Capture recent scrollback"),
+    ("live", "Stream live screen output for a card"),
+    ("keys", "Show quick keys & agent slash shortcuts"),
     ("files", "List referenced images, files, and links"),
     ("new", "Launch a new harness card"),
     ("close", "Close selected card"),
@@ -284,6 +294,7 @@ impl Router {
                 runtime,
                 msg,
                 reply_thread,
+                is_linked_forum,
                 card,
                 text,
                 owner.user_id,
@@ -299,23 +310,29 @@ impl Router {
         match backend.send_prompt(&card.id, text) {
             Ok(()) => {
                 runtime.active_card_id = Some(card.id.clone());
-                let kb = card_action_keyboard(card, cfg.permissions);
-                let reply = format!(
-                    "✓ Sent to {} <b>{}</b> · <code>{}</code>",
-                    escape_html(&card.icon),
-                    escape_html(&card.agent_name),
-                    escape_html(&card.directory_display)
-                );
-                self.reply_and_track(
-                    api,
-                    runtime,
-                    msg.chat.id,
-                    reply_thread,
-                    &reply,
-                    Some(msg.message_id),
-                    kb.as_ref(),
-                    Some(&card.id),
-                );
+                let acked_with_reaction = is_linked_forum
+                    && api
+                        .set_message_reaction(msg.chat.id, msg.message_id, "👍")
+                        .is_ok();
+                if !acked_with_reaction {
+                    let kb = card_action_keyboard(card, cfg.permissions);
+                    let reply = format!(
+                        "✓ Sent to {} <b>{}</b> · <code>{}</code>",
+                        escape_html(&card.icon),
+                        escape_html(&card.agent_name),
+                        escape_html(&card.directory_display)
+                    );
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        msg.chat.id,
+                        reply_thread,
+                        &reply,
+                        Some(msg.message_id),
+                        kb.as_ref(),
+                        Some(&card.id),
+                    );
+                }
             }
             Err(err) => {
                 let err_html = format!("Could not send prompt: <code>{}</code>", escape_html(&err));
@@ -381,6 +398,7 @@ impl Router {
         runtime: &mut RuntimeState,
         msg: &Message,
         thread_id: Option<i64>,
+        is_linked_forum: bool,
         card: &CardSummary,
         caption: &str,
         owner_user_id: i64,
@@ -442,23 +460,29 @@ impl Router {
         match prepared.and_then(|(text, att)| backend.send_attachment(&card.id, &owner_key, &text, att)) {
             Ok(()) => {
                 runtime.active_card_id = Some(card.id.clone());
-                let kb = card_action_keyboard(card, cfg.permissions);
-                let reply = format!(
-                    "📎 Sent attachment to {} <b>{}</b> · <code>{}</code>",
-                    escape_html(&card.icon),
-                    escape_html(&card.agent_name),
-                    escape_html(&card.directory_display)
-                );
-                self.reply_and_track(
-                    api,
-                    runtime,
-                    msg.chat.id,
-                    thread_id,
-                    &reply,
-                    Some(msg.message_id),
-                    kb.as_ref(),
-                    Some(&card.id),
-                );
+                let acked_with_reaction = is_linked_forum
+                    && api
+                        .set_message_reaction(msg.chat.id, msg.message_id, "👍")
+                        .is_ok();
+                if !acked_with_reaction {
+                    let kb = card_action_keyboard(card, cfg.permissions);
+                    let reply = format!(
+                        "📎 Sent attachment to {} <b>{}</b> · <code>{}</code>",
+                        escape_html(&card.icon),
+                        escape_html(&card.agent_name),
+                        escape_html(&card.directory_display)
+                    );
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        msg.chat.id,
+                        thread_id,
+                        &reply,
+                        Some(msg.message_id),
+                        kb.as_ref(),
+                        Some(&card.id),
+                    );
+                }
             }
             Err(err) => {
                 let err_html = format!("Attachment failed: <code>{}</code>", escape_html(&err));
@@ -504,10 +528,14 @@ impl Router {
                     "<b>SUPER DESKTOP Bot</b>\n{forum_line}\n\n\
                      <b>Commands:</b>\n\
                      /cards — list active cards\n\
+                     /dashboard — live workspace &amp; usage\n\
+                     /usage — weekly allowance &amp; provider progress\n\
                      /status — selected card status\n\
                      /screen — current screen\n\
                      /history [N] — scrollback (20–300)\n\
-                     /files — referenced images, files & links\n\
+                     /live — stream live screen output\n\
+                     /keys — quick keys &amp; slash shortcuts\n\
+                     /files — referenced images, files &amp; links\n\
                      /new — launch harness card\n\
                      /close — close selected card\n\
                      /ctrlc /enter /esc — send control key\n\
@@ -525,6 +553,41 @@ impl Router {
                     on_off(p.redact_secrets),
                 );
                 self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, None);
+            }
+            "/dashboard" | "/dash" => {
+                let cards = backend.list_cards();
+                let usage = backend.usage_summary();
+                if is_linked_forum && thread_id.is_none() && cfg.forum.is_some() {
+                    topics::sync_dashboard(api, cfg, runtime, &cards, &usage, now_unix, true);
+                } else {
+                    let html = format_dashboard_html(&cards, &usage);
+                    let kb = dashboard_keyboard(cfg.permissions, cfg.forum.is_some());
+                    self.reply_and_track(
+                        api,
+                        runtime,
+                        chat_id,
+                        thread_id,
+                        &html,
+                        None,
+                        Some(&kb),
+                        None,
+                    );
+                }
+            }
+            "/usage" => {
+                let usage = backend.usage_summary();
+                let html = format_usage_html(&usage);
+                let kb = usage_keyboard();
+                self.reply_and_track(
+                    api,
+                    runtime,
+                    chat_id,
+                    thread_id,
+                    &html,
+                    None,
+                    Some(&kb),
+                    None,
+                );
             }
             "/cards" | "/list" => {
                 let cards = backend.list_cards();
@@ -630,13 +693,29 @@ impl Router {
                 let lines = arg.parse::<u32>().unwrap_or(80).clamp(20, 300);
                 self.send_capture(api, backend, cfg, runtime, chat_id, thread_id, card, lines, 3);
             }
+            "/live" => {
+                let cards = backend.list_cards();
+                let Some(card) = resolved_card_id.and_then(|id| cards.iter().find(|c| c.id == id)) else {
+                    self.reply_and_track(api, runtime, chat_id, thread_id, "No card selected. Send /cards first.", None, None, None);
+                    return;
+                };
+                self.start_live_stream(api, backend, cfg, runtime, chat_id, thread_id, card, now_unix);
+            }
+            "/keys" => {
+                let cards = backend.list_cards();
+                let Some(card) = resolved_card_id.and_then(|id| cards.iter().find(|c| c.id == id)) else {
+                    self.reply_and_track(api, runtime, chat_id, thread_id, "No card selected. Send /cards first.", None, None, None);
+                    return;
+                };
+                self.send_keys_panel(api, cfg, runtime, chat_id, thread_id, card);
+            }
             "/files" => {
                 let cards = backend.list_cards();
                 let Some(card) = resolved_card_id.and_then(|id| cards.iter().find(|c| c.id == id)) else {
                     self.reply_and_track(api, runtime, chat_id, thread_id, "No card selected. Send /cards first.", None, None, None);
                     return;
                 };
-                self.send_files_list(api, backend, cfg, runtime, chat_id, thread_id, card);
+                self.send_files_list(api, backend, cfg, runtime, chat_id, thread_id, card, 'a', 0, None);
             }
             "/ctrlc" | "/esc" | "/enter" => {
                 let cards = backend.list_cards();
@@ -652,57 +731,7 @@ impl Router {
                 self.send_key_for_card(api, backend, cfg, runtime, chat_id, thread_id, card, key);
             }
             "/new" => {
-                if !cfg.permissions.launch {
-                    self.reply_and_track(
-                        api,
-                        runtime,
-                        chat_id,
-                        thread_id,
-                        "Launching new cards from Telegram is disabled. Turn on <b>Launch new cards</b> in <b>Settings → Telegram</b>.",
-                        None,
-                        None,
-                        None,
-                    );
-                    return;
-                }
-                match backend.workspace_choices() {
-                    Ok(ws) => {
-                        let mut folders = Vec::new();
-                        folders.push(ws.current);
-                        for dir in ws.recent {
-                            if !folders.contains(&dir) && folders.len() < 12 {
-                                folders.push(dir);
-                            }
-                        }
-                        self.new_wizard_folders = folders;
-                        let rows: Vec<Vec<InlineButton>> = self
-                            .new_wizard_folders
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, dir)| {
-                                vec![InlineButton::callback(
-                                    truncate_chars(&crate::state::display_dir(dir), 48),
-                                    format!("nwd:{idx}"),
-                                )]
-                            })
-                            .collect();
-                        let kb = InlineKeyboardMarkup { inline_keyboard: rows };
-                        self.reply_and_track(
-                            api,
-                            runtime,
-                            chat_id,
-                            thread_id,
-                            "Choose a project folder for the new card:",
-                            None,
-                            Some(&kb),
-                            None,
-                        );
-                    }
-                    Err(err) => {
-                        let html = format!("Cannot list folders: <code>{}</code>", escape_html(&err));
-                        self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, None);
-                    }
-                }
+                self.send_new_wizard_folders(api, backend, cfg, runtime, chat_id, thread_id);
             }
             "/close" => {
                 if !cfg.permissions.close {
@@ -781,6 +810,11 @@ impl Router {
                 }
                 cfg.forum = None;
                 runtime.topics.clear();
+                runtime.dashboard_message_id = None;
+                runtime.dashboard_pinned = false;
+                runtime.last_dashboard_card = None;
+                runtime.last_dashboard_edit_at = 0;
+                runtime.live_streams.clear();
                 let _ = save_config_at(&state_dir.join("config.json"), cfg);
                 self.reply_and_track(
                     api,
@@ -809,6 +843,15 @@ impl Router {
                 }
                 let cards = backend.list_cards();
                 topics::sync_topics(api, cfg, runtime, &cards, now_unix, true);
+                topics::sync_dashboard(
+                    api,
+                    cfg,
+                    runtime,
+                    &cards,
+                    &backend.usage_summary(),
+                    now_unix,
+                    true,
+                );
                 let active = runtime
                     .topics
                     .iter()
@@ -978,6 +1021,9 @@ impl Router {
         chat_id: i64,
         thread_id: Option<i64>,
         card: &CardSummary,
+        filter: char,
+        page: usize,
+        edit_message_id: Option<i64>,
     ) {
         if !cfg.permissions.read_output {
             self.reply_and_track(
@@ -1009,9 +1055,13 @@ impl Router {
                 escape_html(&card.directory_display)
             );
             let kb = InlineKeyboardMarkup {
-                inline_keyboard: vec![vec![InlineButton::callback("🔄 Refresh", format!("fil:{}", card.id))]],
+                inline_keyboard: vec![vec![InlineButton::callback("🔄 Refresh", format!("flr:a:0:{}", card.id))]],
             };
-            self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, Some(&kb), Some(&card.id));
+            if let Some(mid) = edit_message_id {
+                let _ = api.edit_message_text(chat_id, mid, &html, Some(&kb));
+            } else {
+                self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, Some(&kb), Some(&card.id));
+            }
             return;
         }
 
@@ -1023,72 +1073,170 @@ impl Router {
             _ => 3,
         });
 
+        let img_count = refs.assets.iter().filter(|a| a.kind == "image").count();
+        let file_count = refs.assets.iter().filter(|a| a.kind != "image").count();
+        let link_count = refs.links.len();
+        let filter = match filter {
+            'i' | 'f' | 'l' => filter,
+            _ => 'a',
+        };
+
+        let mut rows: Vec<Vec<InlineButton>> = Vec::new();
+        let non_empty_categories = usize::from(img_count > 0)
+            + usize::from(file_count > 0)
+            + usize::from(link_count > 0);
+        if non_empty_categories > 1 {
+            let tab = |code: char, label: String| {
+                let text = if filter == code {
+                    format!("• {label} •")
+                } else {
+                    label
+                };
+                InlineButton::callback(text, format!("flr:{code}:0:{}", card.id))
+            };
+            let mut tabs = vec![tab('a', "All".into())];
+            if img_count > 0 {
+                tabs.push(tab('i', format!("🖼 {img_count}")));
+            }
+            if file_count > 0 {
+                tabs.push(tab('f', format!("📄 {file_count}")));
+            }
+            if link_count > 0 {
+                tabs.push(tab('l', format!("🔗 {link_count}")));
+            }
+            rows.push(tabs);
+        }
+
         let mut lines = vec![format!(
-            "📎 <b>Files &amp; links</b> · {} {} · <code>{}</code>\n{} file(s) · {} link(s)",
+            "📎 <b>Files &amp; links</b> · {} {} · <code>{}</code>\n{} image(s) · {} doc(s) · {} link(s)",
             escape_html(&card.icon),
             escape_html(&card.agent_name),
             escape_html(&card.directory_display),
-            refs.assets.len(),
-            refs.links.len(),
+            img_count,
+            file_count,
+            link_count,
         )];
 
-        let mut rows: Vec<Vec<InlineButton>> = Vec::new();
-        for asset in refs.assets.iter().take(16) {
-            let pick_id = self.cache_file_pick(CachedFilePick {
-                card_id: card.id.clone(),
-                asset_id: asset.id.clone(),
-                relative_path: asset.relative_path.clone(),
-            });
-            let label = format!(
-                "{} {} · {}",
-                asset_icon(asset),
-                truncate_chars(&asset.name, 34),
-                human_bytes(asset.size)
-            );
-            rows.push(vec![InlineButton::callback(label, format!("fop:{pick_id}"))]);
-        }
-
-        if !refs.links.is_empty() {
+        let total_pages: usize;
+        let current_page: usize;
+        if filter == 'l' {
+            total_pages = link_count.max(1).div_ceil(FILES_PAGE_SIZE);
+            current_page = page.min(total_pages - 1);
+            let start = current_page * FILES_PAGE_SIZE;
+            let slice = &refs.links[start..(start + FILES_PAGE_SIZE).min(link_count)];
             lines.push(String::new());
-            lines.push("<b>Links:</b>".into());
-            let mut url_buttons = 0usize;
-            for link in &refs.links {
+            lines.push(format!("<b>Links ({}/{}):</b>", current_page + 1, total_pages));
+            for link in slice {
                 let shown = escape_html(&truncate_chars(link, 90));
                 if is_telegram_button_url(link) {
                     lines.push(format!("• <a href=\"{}\">{}</a>", escape_html(link), shown));
-                    if url_buttons < 8 {
-                        let btn_text = format!(
-                            "🔗 {}",
-                            truncate_chars(
-                                link.trim_start_matches("https://").trim_start_matches("http://"),
-                                42
-                            )
-                        );
-                        rows.push(vec![InlineButton::url(btn_text, link.clone())]);
-                        url_buttons += 1;
-                    }
+                    let btn_text = format!(
+                        "🔗 {}",
+                        truncate_chars(
+                            link.trim_start_matches("https://").trim_start_matches("http://"),
+                            42
+                        )
+                    );
+                    rows.push(vec![InlineButton::url(btn_text, link.clone())]);
                 } else {
                     lines.push(format!("• <code>{}</code>", shown));
                 }
             }
+        } else {
+            let filtered_assets: Vec<&CardAsset> = refs
+                .assets
+                .iter()
+                .filter(|a| match filter {
+                    'i' => a.kind == "image",
+                    'f' => a.kind != "image",
+                    _ => true,
+                })
+                .collect();
+            total_pages = filtered_assets.len().max(1).div_ceil(FILES_PAGE_SIZE);
+            current_page = page.min(total_pages - 1);
+            let start = current_page * FILES_PAGE_SIZE;
+            let slice = &filtered_assets[start..(start + FILES_PAGE_SIZE).min(filtered_assets.len())];
+            for asset in slice {
+                let pick_id = self.cache_file_pick(CachedFilePick {
+                    card_id: card.id.clone(),
+                    asset_id: asset.id.clone(),
+                    relative_path: asset.relative_path.clone(),
+                });
+                let label = format!(
+                    "{} {} · {}",
+                    asset_icon(asset),
+                    truncate_chars(&asset.name, 34),
+                    human_bytes(asset.size)
+                );
+                rows.push(vec![InlineButton::callback(label, format!("fop:{pick_id}"))]);
+            }
+            if filter == 'a' && current_page == 0 && !refs.links.is_empty() {
+                lines.push(String::new());
+                lines.push("<b>Links:</b>".into());
+                let mut url_buttons = 0usize;
+                for link in &refs.links {
+                    let shown = escape_html(&truncate_chars(link, 90));
+                    if is_telegram_button_url(link) {
+                        lines.push(format!("• <a href=\"{}\">{}</a>", escape_html(link), shown));
+                        if url_buttons < 4 {
+                            let btn_text = format!(
+                                "🔗 {}",
+                                truncate_chars(
+                                    link.trim_start_matches("https://").trim_start_matches("http://"),
+                                    42
+                                )
+                            );
+                            rows.push(vec![InlineButton::url(btn_text, link.clone())]);
+                            url_buttons += 1;
+                        }
+                    } else {
+                        lines.push(format!("• <code>{}</code>", shown));
+                    }
+                }
+            }
         }
 
-        if refs.assets.len() > 16 {
-            lines.push(format!("\n<i>Showing first 16 of {} files.</i>", refs.assets.len()));
+        if total_pages > 1 {
+            let mut nav = Vec::new();
+            if current_page > 0 {
+                nav.push(InlineButton::callback(
+                    "◀ Prev",
+                    format!("flr:{filter}:{}:{}", current_page - 1, card.id),
+                ));
+            }
+            nav.push(InlineButton::callback(
+                format!("{}/{}", current_page + 1, total_pages),
+                format!("flr:{filter}:{current_page}:{}", card.id),
+            ));
+            if current_page + 1 < total_pages {
+                nav.push(InlineButton::callback(
+                    "Next ▶",
+                    format!("flr:{filter}:{}:{}", current_page + 1, card.id),
+                ));
+            }
+            rows.push(nav);
         }
 
-        rows.push(vec![InlineButton::callback("🔄 Refresh", format!("fil:{}", card.id))]);
+        rows.push(vec![InlineButton::callback(
+            "🔄 Refresh",
+            format!("flr:{filter}:{current_page}:{}", card.id),
+        )]);
         let kb = InlineKeyboardMarkup { inline_keyboard: rows };
-        self.reply_and_track(
-            api,
-            runtime,
-            chat_id,
-            thread_id,
-            &lines.join("\n"),
-            None,
-            Some(&kb),
-            Some(&card.id),
-        );
+        let html = lines.join("\n");
+        if let Some(mid) = edit_message_id {
+            let _ = api.edit_message_text(chat_id, mid, &html, Some(&kb));
+        } else {
+            self.reply_and_track(
+                api,
+                runtime,
+                chat_id,
+                thread_id,
+                &html,
+                None,
+                Some(&kb),
+                Some(&card.id),
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1100,6 +1248,7 @@ impl Router {
         runtime: &mut RuntimeState,
         chat_id: i64,
         thread_id: Option<i64>,
+        pick_id: u64,
         pick: &CachedFilePick,
     ) {
         if !cfg.permissions.read_output {
@@ -1164,9 +1313,16 @@ impl Router {
                     &asset.mime_type,
                     &bytes,
                     Some(&caption),
+                    None,
                 )
             }
         } else if asset.kind == "pdf" {
+            let kb = InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![InlineButton::callback(
+                    "🖼 Preview page 1",
+                    format!("ppg:{pick_id}:1"),
+                )]],
+            };
             api.send_document(
                 chat_id,
                 thread_id,
@@ -1174,6 +1330,7 @@ impl Router {
                 &asset.mime_type,
                 &bytes,
                 Some(&caption),
+                Some(&kb),
             )
         } else if asset.kind == "markdown" || asset.kind == "text" {
             let clean = sanitize_terminal_text(
@@ -1189,14 +1346,19 @@ impl Router {
                 );
                 api.send_message(chat_id, thread_id, &html, None, None)
             } else {
-                api.send_document(
+                self.send_text_chunks_page(
+                    api,
+                    runtime,
                     chat_id,
                     thread_id,
-                    &asset.name,
-                    "text/plain",
-                    clean.as_bytes(),
-                    Some(&caption),
-                )
+                    pick_id,
+                    &pick.card_id,
+                    &asset.relative_path,
+                    &clean,
+                    0,
+                    None,
+                );
+                return;
             }
         } else {
             api.send_document(
@@ -1206,6 +1368,7 @@ impl Router {
                 &asset.mime_type,
                 &bytes,
                 Some(&caption),
+                None,
             )
         };
 
@@ -1218,6 +1381,378 @@ impl Router {
                     escape_html(&err.to_string())
                 );
                 self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, Some(&pick.card_id));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_text_chunks_page(
+        &self,
+        api: &dyn TelegramApi,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        pick_id: u64,
+        card_id: &str,
+        relative_path: &str,
+        clean_text: &str,
+        page: usize,
+        edit_message_id: Option<i64>,
+    ) {
+        let chunks = split_chunks(clean_text, 3200);
+        let total = chunks.len().max(1);
+        let page = page.min(total - 1);
+        let html = format!(
+            "📄 <code>{}</code> (Page {}/{})\n<pre>{}</pre>",
+            escape_html(relative_path),
+            page + 1,
+            total,
+            escape_html(&chunks[page])
+        );
+        let mut nav = Vec::new();
+        if page > 0 {
+            nav.push(InlineButton::callback("◀ Prev", format!("tpg:{pick_id}:{}", page - 1)));
+        }
+        if page + 1 < total {
+            nav.push(InlineButton::callback("Next ▶", format!("tpg:{pick_id}:{}", page + 1)));
+        }
+        let mut rows = Vec::new();
+        if !nav.is_empty() {
+            rows.push(nav);
+        }
+        rows.push(vec![InlineButton::callback(
+            "📥 Download file",
+            format!("tdl:{pick_id}"),
+        )]);
+        let kb = InlineKeyboardMarkup { inline_keyboard: rows };
+        if let Some(mid) = edit_message_id {
+            let _ = api.edit_message_text(chat_id, mid, &html, Some(&kb));
+        } else {
+            self.reply_and_track(
+                api,
+                runtime,
+                chat_id,
+                thread_id,
+                &html,
+                None,
+                Some(&kb),
+                Some(card_id),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_text_page(
+        &self,
+        api: &dyn TelegramApi,
+        backend: &dyn DesktopBackend,
+        cfg: &Config,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        pick_id: u64,
+        pick: &CachedFilePick,
+        page: usize,
+        edit_message_id: Option<i64>,
+    ) {
+        if !cfg.permissions.read_output {
+            return;
+        }
+        match backend.read_asset(&pick.card_id, &pick.asset_id) {
+            Ok((asset, bytes)) => {
+                let clean = sanitize_terminal_text(
+                    &String::from_utf8_lossy(&bytes),
+                    &cfg.bot_token,
+                    cfg.permissions.redact_secrets,
+                );
+                self.send_text_chunks_page(
+                    api,
+                    runtime,
+                    chat_id,
+                    thread_id,
+                    pick_id,
+                    &pick.card_id,
+                    &asset.relative_path,
+                    &clean,
+                    page,
+                    edit_message_id,
+                );
+            }
+            Err(err) => {
+                let html = format!(
+                    "Could not open <code>{}</code>: <code>{}</code>",
+                    escape_html(&pick.relative_path),
+                    escape_html(&err)
+                );
+                self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, Some(&pick.card_id));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn download_text_pick(
+        &self,
+        api: &dyn TelegramApi,
+        backend: &dyn DesktopBackend,
+        cfg: &Config,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        pick: &CachedFilePick,
+    ) {
+        if !cfg.permissions.read_output {
+            return;
+        }
+        match backend.read_asset(&pick.card_id, &pick.asset_id) {
+            Ok((asset, bytes)) => {
+                let clean = sanitize_terminal_text(
+                    &String::from_utf8_lossy(&bytes),
+                    &cfg.bot_token,
+                    cfg.permissions.redact_secrets,
+                );
+                let caption = format!(
+                    "📎 <code>{}</code> ({})",
+                    escape_html(&truncate_chars(&asset.relative_path, 200)),
+                    human_bytes(asset.size)
+                );
+                if let Ok(mid) = api.send_document(
+                    chat_id,
+                    thread_id,
+                    &asset.name,
+                    "text/plain",
+                    clean.as_bytes(),
+                    Some(&caption),
+                    None,
+                ) {
+                    runtime.record_message_card(chat_id, mid, &pick.card_id);
+                }
+            }
+            Err(err) => {
+                let html = format!("Download failed: <code>{}</code>", escape_html(&err));
+                self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, Some(&pick.card_id));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open_pdf_page(
+        &self,
+        api: &dyn TelegramApi,
+        backend: &dyn DesktopBackend,
+        cfg: &Config,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        pick_id: u64,
+        pick: &CachedFilePick,
+        page: u32,
+    ) {
+        if !cfg.permissions.read_output || page == 0 {
+            return;
+        }
+        match backend.render_pdf_page(&pick.card_id, &pick.asset_id, page) {
+            Ok((asset, png_bytes)) => {
+                let mut nav = Vec::new();
+                if page > 1 {
+                    nav.push(InlineButton::callback(
+                        format!("◀ Page {}", page - 1),
+                        format!("ppg:{pick_id}:{}", page - 1),
+                    ));
+                }
+                nav.push(InlineButton::callback(
+                    format!("Page {} ▶", page + 1),
+                    format!("ppg:{pick_id}:{}", page + 1),
+                ));
+                let kb = InlineKeyboardMarkup {
+                    inline_keyboard: vec![nav],
+                };
+                let caption = format!(
+                    "📕 <code>{}</code> · Page {page}",
+                    escape_html(&truncate_chars(&asset.relative_path, 180))
+                );
+                let fname = format!("{}-page-{page}.png", asset.name);
+                match api.send_photo(
+                    chat_id,
+                    thread_id,
+                    &fname,
+                    "image/png",
+                    &png_bytes,
+                    Some(&caption),
+                    Some(&kb),
+                ) {
+                    Ok(mid) => runtime.record_message_card(chat_id, mid, &pick.card_id),
+                    Err(err) => {
+                        let html = format!("PDF preview failed: <code>{}</code>", escape_html(&err.to_string()));
+                        self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, Some(&pick.card_id));
+                    }
+                }
+            }
+            Err(err) => {
+                let html = format!(
+                    "Could not render page {page} of <code>{}</code>: <code>{}</code>",
+                    escape_html(&pick.relative_path),
+                    escape_html(&err)
+                );
+                self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, Some(&pick.card_id));
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_live_stream(
+        &self,
+        api: &dyn TelegramApi,
+        backend: &dyn DesktopBackend,
+        cfg: &Config,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        card: &CardSummary,
+        now_unix: u64,
+    ) {
+        if !cfg.permissions.read_output {
+            self.reply_and_track(
+                api,
+                runtime,
+                chat_id,
+                thread_id,
+                "Reading terminal output is disabled. Turn on <b>Read terminal output</b> in <b>Settings → Telegram</b>.",
+                None,
+                None,
+                Some(&card.id),
+            );
+            return;
+        }
+        let raw = match backend.capture_screen(&card.id, 0) {
+            Ok(raw) => raw,
+            Err(err) => {
+                let html = format!("Capture failed: <code>{}</code>", escape_html(&err));
+                self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, Some(&card.id));
+                return;
+            }
+        };
+        let snippet = tail_output_snippet(&raw, &cfg.bot_token, cfg.permissions.redact_secrets, 30, 3200)
+            .unwrap_or_else(|| "(empty screen)".to_string());
+        let html = format_live_message_html(card, &snippet);
+        let kb = live_stream_keyboard(card, cfg.permissions);
+        runtime.live_streams.retain(|s| s.card_id != card.id);
+        while runtime.live_streams.len() >= MAX_LIVE_STREAMS {
+            runtime.live_streams.remove(0);
+        }
+        if let Ok(msg_id) = api.send_message(chat_id, thread_id, &html, None, Some(&kb)) {
+            runtime.record_message_card(chat_id, msg_id, &card.id);
+            runtime.live_streams.push(LiveStream {
+                card_id: card.id.clone(),
+                chat_id,
+                thread_id,
+                message_id: msg_id,
+                last_text: html,
+                started_at: now_unix,
+                last_edited_at: now_unix,
+                idle_since: None,
+            });
+        }
+    }
+
+    fn send_keys_panel(
+        &self,
+        api: &dyn TelegramApi,
+        cfg: &Config,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        card: &CardSummary,
+    ) {
+        let Some(kb) = quick_keys_keyboard(card, cfg.permissions) else {
+            self.reply_and_track(
+                api,
+                runtime,
+                chat_id,
+                thread_id,
+                "Quick keys require <b>Control keys</b> or <b>Submit prompts</b> in <b>Settings → Telegram</b>.",
+                None,
+                None,
+                Some(&card.id),
+            );
+            return;
+        };
+        let dot = status_emoji(&card.status);
+        let html = format!(
+            "⌨ <b>Quick keys</b> · {dot} {} <b>{}</b> · <code>{}</code>",
+            escape_html(&card.icon),
+            escape_html(&card.agent_name),
+            escape_html(&card.directory_display)
+        );
+        self.reply_and_track(
+            api,
+            runtime,
+            chat_id,
+            thread_id,
+            &html,
+            None,
+            Some(&kb),
+            Some(&card.id),
+        );
+    }
+
+    fn send_new_wizard_folders(
+        &mut self,
+        api: &dyn TelegramApi,
+        backend: &dyn DesktopBackend,
+        cfg: &Config,
+        runtime: &mut RuntimeState,
+        chat_id: i64,
+        thread_id: Option<i64>,
+    ) {
+        if !cfg.permissions.launch {
+            self.reply_and_track(
+                api,
+                runtime,
+                chat_id,
+                thread_id,
+                "Launching cards from Telegram is disabled. Turn on <b>Launch new cards</b> in <b>Settings → Telegram</b>.",
+                None,
+                None,
+                None,
+            );
+            return;
+        }
+        match backend.workspace_choices() {
+            Ok(ws) => {
+                let mut folders = Vec::new();
+                folders.push(ws.current);
+                for dir in ws.recent {
+                    if !folders.contains(&dir) && folders.len() < 12 {
+                        folders.push(dir);
+                    }
+                }
+                self.new_wizard_folders = folders;
+                let rows: Vec<Vec<InlineButton>> = self
+                    .new_wizard_folders
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, dir)| {
+                        vec![InlineButton::callback(
+                            truncate_chars(&crate::state::display_dir(dir), 48),
+                            format!("nwd:{idx}"),
+                        )]
+                    })
+                    .collect();
+                let kb = InlineKeyboardMarkup { inline_keyboard: rows };
+                self.reply_and_track(
+                    api,
+                    runtime,
+                    chat_id,
+                    thread_id,
+                    "Choose a project folder for the new card:",
+                    None,
+                    Some(&kb),
+                    None,
+                );
+            }
+            Err(err) => {
+                let html = format!("Cannot list folders: <code>{}</code>", escape_html(&err));
+                self.reply_and_track(api, runtime, chat_id, thread_id, &html, None, None, None);
             }
         }
     }
@@ -1329,21 +1864,134 @@ impl Router {
             } else {
                 self.reply_and_track(api, runtime, msg.chat.id, thread_id, "Card is no longer running.", None, None, None);
             }
-        } else if let Some(card_id) = data.strip_prefix("fil:") {
+        } else if data.starts_with("dsh:") {
+            let _ = api.answer_callback_query(&cq.id, Some("Refreshed"));
+            let usage = backend.usage_summary();
+            let html = format_dashboard_html(&cards, &usage);
+            let kb = dashboard_keyboard(cfg.permissions, cfg.forum.is_some());
+            let _ = api.edit_message_text(msg.chat.id, msg.message_id, &html, Some(&kb));
+        } else if data.starts_with("usg:") {
+            let _ = api.answer_callback_query(&cq.id, Some("Refreshed"));
+            let usage = backend.usage_summary();
+            let html = format_usage_html(&usage);
+            let kb = usage_keyboard();
+            let _ = api.edit_message_text(msg.chat.id, msg.message_id, &html, Some(&kb));
+        } else if data.starts_with("nwo:") {
+            let _ = api.answer_callback_query(&cq.id, None);
+            self.send_new_wizard_folders(api, backend, cfg, runtime, msg.chat.id, thread_id);
+        } else if data.starts_with("syn:") {
+            let _ = api.answer_callback_query(&cq.id, Some("Synced"));
+            if cfg.forum.is_some() {
+                topics::sync_topics(api, cfg, runtime, &cards, now_unix, true);
+                topics::sync_dashboard(
+                    api,
+                    cfg,
+                    runtime,
+                    &cards,
+                    &backend.usage_summary(),
+                    now_unix,
+                    true,
+                );
+            }
+        } else if let Some(card_id) = data.strip_prefix("liv:") {
             let _ = api.answer_callback_query(&cq.id, None);
             if let Some(card) = cards.iter().find(|c| c.id == card_id) {
-                self.send_files_list(api, backend, cfg, runtime, msg.chat.id, thread_id, card);
+                self.start_live_stream(api, backend, cfg, runtime, msg.chat.id, thread_id, card, now_unix);
+            } else {
+                self.reply_and_track(api, runtime, msg.chat.id, thread_id, "Card is no longer running.", None, None, None);
+            }
+        } else if let Some(card_id) = data.strip_prefix("lst:") {
+            let _ = api.answer_callback_query(&cq.id, Some("Live stopped"));
+            runtime.live_streams.retain(|s| s.card_id != card_id);
+            let kb = InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![
+                    InlineButton::callback("📺 Resume live", format!("liv:{card_id}")),
+                    InlineButton::callback("📷 Screen", format!("scr:{card_id}")),
+                ]],
+            };
+            let _ = api.edit_message_text(
+                msg.chat.id,
+                msg.message_id,
+                "📺 <b>Live paused</b>.",
+                Some(&kb),
+            );
+        } else if let Some(card_id) = data.strip_prefix("kyp:") {
+            let _ = api.answer_callback_query(&cq.id, None);
+            if let Some(card) = cards.iter().find(|c| c.id == card_id) {
+                self.send_keys_panel(api, cfg, runtime, msg.chat.id, thread_id, card);
+            } else {
+                self.reply_and_track(api, runtime, msg.chat.id, thread_id, "Card is no longer running.", None, None, None);
+            }
+        } else if let Some(rest) = data.strip_prefix("qc:") {
+            if let Some((idx_str, card_id)) = rest.split_once(':') {
+                if let (Ok(idx), Some(card)) = (
+                    idx_str.parse::<usize>(),
+                    cards.iter().find(|c| c.id == card_id),
+                ) {
+                    if !cfg.permissions.prompts || card.is_shell {
+                        let _ = api.answer_callback_query(&cq.id, Some("Submit prompts disabled"));
+                    } else if let Some(&cmd) = quick_slash_commands(&card.agent_type).get(idx) {
+                        match backend.send_prompt(&card.id, cmd) {
+                            Ok(()) => {
+                                let _ = api.answer_callback_query(&cq.id, Some(&format!("Sent {cmd}")));
+                            }
+                            Err(err) => {
+                                let _ = api.answer_callback_query(&cq.id, Some("Send failed"));
+                                let html = format!("Could not send <code>{cmd}</code>: <code>{}</code>", escape_html(&err));
+                                self.reply_and_track(api, runtime, msg.chat.id, thread_id, &html, None, None, Some(&card.id));
+                            }
+                        }
+                    } else {
+                        let _ = api.answer_callback_query(&cq.id, None);
+                    }
+                } else {
+                    let _ = api.answer_callback_query(&cq.id, Some("Card unavailable"));
+                }
+            }
+        } else if let Some(rest) = data.strip_prefix("fil:").or_else(|| data.strip_prefix("flr:")) {
+            let edit_mid = data.starts_with("flr:").then_some(msg.message_id);
+            let _ = api.answer_callback_query(&cq.id, None);
+            let (filter, page, card_id) = parse_files_callback(rest);
+            if let Some(card) = cards.iter().find(|c| c.id == card_id) {
+                self.send_files_list(api, backend, cfg, runtime, msg.chat.id, thread_id, card, filter, page, edit_mid);
             } else {
                 self.reply_and_track(api, runtime, msg.chat.id, thread_id, "Card is no longer running.", None, None, None);
             }
         } else if let Some(pick_str) = data.strip_prefix("fop:") {
-            let pick = pick_str
-                .parse::<u64>()
-                .ok()
-                .and_then(|id| self.lookup_file_pick(id));
-            if let Some(pick) = pick {
+            let parsed = pick_str.parse::<u64>().ok();
+            let pick = parsed.and_then(|id| self.lookup_file_pick(id));
+            if let (Some(pick_id), Some(pick)) = (parsed, pick) {
                 let _ = api.answer_callback_query(&cq.id, Some("Sending…"));
-                self.open_file_pick(api, backend, cfg, runtime, msg.chat.id, thread_id, &pick);
+                self.open_file_pick(api, backend, cfg, runtime, msg.chat.id, thread_id, pick_id, &pick);
+            } else {
+                let _ = api.answer_callback_query(&cq.id, Some("List expired — tap 📎 Files again"));
+            }
+        } else if let Some(rest) = data.strip_prefix("ppg:") {
+            if let Some((pick_str, page_str)) = rest.split_once(':') {
+                if let (Ok(pick_id), Ok(page)) = (pick_str.parse::<u64>(), page_str.parse::<u32>()) {
+                    if let Some(pick) = self.lookup_file_pick(pick_id) {
+                        let _ = api.answer_callback_query(&cq.id, Some(&format!("Rendering page {page}…")));
+                        self.open_pdf_page(api, backend, cfg, runtime, msg.chat.id, thread_id, pick_id, &pick, page);
+                    } else {
+                        let _ = api.answer_callback_query(&cq.id, Some("List expired — tap 📎 Files again"));
+                    }
+                }
+            }
+        } else if let Some(rest) = data.strip_prefix("tpg:") {
+            if let Some((pick_str, page_str)) = rest.split_once(':') {
+                if let (Ok(pick_id), Ok(page)) = (pick_str.parse::<u64>(), page_str.parse::<usize>()) {
+                    if let Some(pick) = self.lookup_file_pick(pick_id) {
+                        let _ = api.answer_callback_query(&cq.id, None);
+                        self.open_text_page(api, backend, cfg, runtime, msg.chat.id, thread_id, pick_id, &pick, page, Some(msg.message_id));
+                    } else {
+                        let _ = api.answer_callback_query(&cq.id, Some("List expired — tap 📎 Files again"));
+                    }
+                }
+            }
+        } else if let Some(pick_str) = data.strip_prefix("tdl:") {
+            if let Some(pick) = pick_str.parse::<u64>().ok().and_then(|id| self.lookup_file_pick(id)) {
+                let _ = api.answer_callback_query(&cq.id, Some("Uploading file…"));
+                self.download_text_pick(api, backend, cfg, runtime, msg.chat.id, thread_id, &pick);
             } else {
                 let _ = api.answer_callback_query(&cq.id, Some("List expired — tap 📎 Files again"));
             }
@@ -1393,6 +2041,19 @@ impl Router {
                             "🛑 Card closed.",
                             None,
                         );
+                        if cfg.forum.is_some() {
+                            let updated_cards = backend.list_cards();
+                            topics::sync_topics(api, cfg, runtime, &updated_cards, now_unix, false);
+                            topics::sync_dashboard(
+                                api,
+                                cfg,
+                                runtime,
+                                &updated_cards,
+                                &backend.usage_summary(),
+                                now_unix,
+                                true,
+                            );
+                        }
                     }
                     Err(err) => {
                         let _ = api.edit_message_text(
@@ -1552,6 +2213,19 @@ fn asset_icon(asset: &CardAsset) -> &'static str {
     }
 }
 
+fn parse_files_callback(rest: &str) -> (char, usize, &str) {
+    let mut parts = rest.splitn(3, ':');
+    let first = parts.next().unwrap_or("");
+    let second = parts.next();
+    let third = parts.next();
+    if let (Some(page_s), Some(card_id)) = (second, third) {
+        let filter = first.chars().next().unwrap_or('a');
+        let page = page_s.parse::<usize>().unwrap_or(0);
+        return (filter, page, card_id);
+    }
+    ('a', 0, rest)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_media_with_doc_fallback(
     api: &dyn TelegramApi,
@@ -1564,13 +2238,13 @@ fn send_media_with_doc_fallback(
     animation: bool,
 ) -> Result<i64, super::api::ApiError> {
     let first = if animation {
-        api.send_animation(chat_id, thread_id, filename, mime_type, bytes, Some(caption))
+        api.send_animation(chat_id, thread_id, filename, mime_type, bytes, Some(caption), None)
     } else {
-        api.send_photo(chat_id, thread_id, filename, mime_type, bytes, Some(caption))
+        api.send_photo(chat_id, thread_id, filename, mime_type, bytes, Some(caption), None)
     };
     match first {
         Err(super::api::ApiError::BadRequest(_)) => {
-            api.send_document(chat_id, thread_id, filename, mime_type, bytes, Some(caption))
+            api.send_document(chat_id, thread_id, filename, mime_type, bytes, Some(caption), None)
         }
         other => other,
     }

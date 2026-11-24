@@ -245,6 +245,7 @@ pub trait TelegramApi {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError>;
     fn send_animation(
         &self,
@@ -254,6 +255,7 @@ pub trait TelegramApi {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError>;
     fn send_document(
         &self,
@@ -263,7 +265,20 @@ pub trait TelegramApi {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError>;
+    fn send_chat_action(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        action: &str,
+    ) -> Result<(), ApiError>;
+    fn set_message_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: &str,
+    ) -> Result<(), ApiError>;
     fn edit_message_text(
         &self,
         chat_id: i64,
@@ -290,6 +305,7 @@ pub trait TelegramApi {
     ) -> Result<ForumTopic, ApiError>;
     fn edit_forum_topic(&self, chat_id: i64, thread_id: i64, name: &str) -> Result<(), ApiError>;
     fn close_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError>;
+    fn delete_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError>;
     fn reopen_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError>;
     fn get_file(&self, file_id: &str) -> Result<FileInfo, ApiError>;
     fn download_file_bounded(&self, file_path: &str, max_bytes: usize) -> Result<Vec<u8>, ApiError>;
@@ -495,6 +511,7 @@ impl TelegramClient {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         let mut fields = vec![("chat_id", chat_id.to_string())];
         if let Some(tid) = thread_id.filter(|&id| id > 1) {
@@ -503,6 +520,11 @@ impl TelegramClient {
         if let Some(cap) = caption_html.filter(|c| !c.is_empty()) {
             fields.push(("caption", cap.to_string()));
             fields.push(("parse_mode", "HTML".to_string()));
+        }
+        if let Some(kb) = keyboard {
+            if let Ok(markup) = serde_json::to_string(kb) {
+                fields.push(("reply_markup", markup));
+            }
         }
         let sent: Message =
             self.call_multipart(method, &fields, file_field, filename, mime_type, bytes)?;
@@ -520,7 +542,10 @@ fn classify_error(code: u16, desc: &str, retry_after: Option<u64>) -> ApiError {
         ApiError::RateLimited {
             retry_after: retry_after.unwrap_or(5).max(1),
         }
-    } else if lower.contains("message thread not found") || lower.contains("topic_deleted") {
+    } else if lower.contains("message thread not found")
+        || lower.contains("topic_deleted")
+        || lower.contains("topic_id_invalid")
+    {
         ApiError::TopicNotFound
     } else if lower.contains("topic_not_modified") || lower.contains("topic_closed") {
         ApiError::TopicNotModified
@@ -587,6 +612,7 @@ impl TelegramApi for TelegramClient {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         self.send_media(
             "sendPhoto",
@@ -597,6 +623,7 @@ impl TelegramApi for TelegramClient {
             mime_type,
             bytes,
             caption_html,
+            keyboard,
         )
     }
 
@@ -608,6 +635,7 @@ impl TelegramApi for TelegramClient {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         self.send_media(
             "sendAnimation",
@@ -618,6 +646,7 @@ impl TelegramApi for TelegramClient {
             mime_type,
             bytes,
             caption_html,
+            keyboard,
         )
     }
 
@@ -629,6 +658,7 @@ impl TelegramApi for TelegramClient {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         self.send_media(
             "sendDocument",
@@ -639,7 +669,42 @@ impl TelegramApi for TelegramClient {
             mime_type,
             bytes,
             caption_html,
+            keyboard,
         )
+    }
+
+    fn send_chat_action(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        action: &str,
+    ) -> Result<(), ApiError> {
+        let mut body = json!({
+            "chat_id": chat_id,
+            "action": action
+        });
+        if let Some(tid) = thread_id.filter(|&id| id > 1) {
+            body["message_thread_id"] = json!(tid);
+        }
+        let _: Value = self.call("sendChatAction", &body)?;
+        Ok(())
+    }
+
+    fn set_message_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: &str,
+    ) -> Result<(), ApiError> {
+        let _: Value = self.call(
+            "setMessageReaction",
+            &json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reaction": [{ "type": "emoji", "emoji": emoji }]
+            }),
+        )?;
+        Ok(())
     }
 
     fn edit_message_text(
@@ -756,6 +821,17 @@ impl TelegramApi for TelegramClient {
             Ok(_) | Err(ApiError::TopicNotModified) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    fn delete_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError> {
+        let _: Value = self.call(
+            "deleteForumTopic",
+            &json!({
+                "chat_id": chat_id,
+                "message_thread_id": thread_id
+            }),
+        )?;
+        Ok(())
     }
 
     fn reopen_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError> {

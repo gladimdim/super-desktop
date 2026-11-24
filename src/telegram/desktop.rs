@@ -46,6 +46,10 @@ pub enum NamedKey {
     Digit1,
     Digit2,
     Digit3,
+    Up,
+    Down,
+    Tab,
+    ShiftTab,
     Enter,
     Escape,
     CtrlC,
@@ -59,6 +63,10 @@ impl NamedKey {
             "1" => Some(Self::Digit1),
             "2" => Some(Self::Digit2),
             "3" => Some(Self::Digit3),
+            "u" => Some(Self::Up),
+            "d" => Some(Self::Down),
+            "t" => Some(Self::Tab),
+            "b" => Some(Self::ShiftTab),
             "e" => Some(Self::Enter),
             "x" => Some(Self::Escape),
             "c" => Some(Self::CtrlC),
@@ -73,6 +81,10 @@ impl NamedKey {
             Self::Digit1 => "1",
             Self::Digit2 => "2",
             Self::Digit3 => "3",
+            Self::Up => "↑",
+            Self::Down => "↓",
+            Self::Tab => "Tab",
+            Self::ShiftTab => "Shift+Tab",
             Self::Enter => "Enter",
             Self::Escape => "Escape",
             Self::CtrlC => "Ctrl-C",
@@ -133,11 +145,63 @@ pub fn extract_terminal_links(text: &str) -> Vec<String> {
     result
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProviderUsageLimit {
+    pub label: String,
+    /// Fraction consumed, `0.0..=1.0` (`0.0` = fresh, `1.0` = exhausted).
+    pub percent_used: f64,
+    pub resets_at: String,
+    pub used: Option<u64>,
+    pub allowance: Option<u64>,
+}
+
+impl ProviderUsageLimit {
+    pub fn is_weekly(&self) -> bool {
+        let lower = self.label.to_ascii_lowercase();
+        lower.contains("week")
+            || lower.contains("7-day")
+            || lower.contains("seven")
+            || lower.contains("month")
+            || lower.contains("30-day")
+    }
+
+    pub fn used_percent_int(&self) -> i64 {
+        (self.percent_used.clamp(0.0, 1.0) * 100.0).round() as i64
+    }
+
+    pub fn left_percent_int(&self) -> i64 {
+        ((1.0 - self.percent_used.clamp(0.0, 1.0)) * 100.0).round() as i64
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProviderUsageSummary {
+    pub id: String,
+    pub name: String,
+    pub tier: String,
+    pub ready: bool,
+    pub limits: Vec<ProviderUsageLimit>,
+    pub today_tokens: u64,
+    pub today_prompts: u64,
+    pub today_sessions: u64,
+    pub total_prompts: u64,
+    pub total_sessions: u64,
+    pub status_text: String,
+    pub updated_at: String,
+}
+
 pub trait DesktopBackend {
     fn list_cards(&self) -> Vec<CardSummary>;
+    fn usage_summary(&self) -> Vec<ProviderUsageSummary>;
     fn capture_screen(&self, card_id: &str, history_lines: u32) -> Result<String, String>;
     fn list_references(&self, card_id: &str) -> Result<CardReferences, String>;
     fn read_asset(&self, card_id: &str, asset_id: &str) -> Result<(CardAsset, Vec<u8>), String>;
+    fn render_pdf_page(
+        &self,
+        card_id: &str,
+        asset_id: &str,
+        page: u32,
+    ) -> Result<(CardAsset, Vec<u8>), String>;
     fn send_prompt(&self, card_id: &str, text: &str) -> Result<(), String>;
     fn send_key(&self, card_id: &str, key: NamedKey) -> Result<(), String>;
     fn send_attachment(
@@ -292,6 +356,54 @@ impl DesktopBackend for LiveDesktopBackend {
         Ok((CardAsset::from_asset(asset), bytes))
     }
 
+    fn render_pdf_page(
+        &self,
+        card_id: &str,
+        asset_id: &str,
+        page: u32,
+    ) -> Result<(CardAsset, Vec<u8>), String> {
+        Self::verify_owned_session(card_id)?;
+        let _permit = crate::assets::Transfer::acquire()
+            .ok_or_else(|| "Too many concurrent file transfers; try again in a moment.".to_string())?;
+        let (asset, bytes) =
+            crate::assets::read(card_id, asset_id).map_err(|e| e.replace('_', " "))?;
+        if asset.kind != "pdf" {
+            return Err("Selected file is not a PDF.".into());
+        }
+        let png = crate::asset_pdf::page(bytes, page).map_err(|e| e.replace('_', " "))?;
+        Ok((CardAsset::from_asset(asset), png))
+    }
+
+    fn usage_summary(&self) -> Vec<ProviderUsageSummary> {
+        crate::usage::all_provider_usage()
+            .into_iter()
+            .map(|u| ProviderUsageSummary {
+                id: u.id,
+                name: u.name,
+                tier: u.tier,
+                ready: u.ready,
+                limits: u
+                    .limits
+                    .into_iter()
+                    .map(|l| ProviderUsageLimit {
+                        label: l.label,
+                        percent_used: l.percent_used,
+                        resets_at: l.resets_at,
+                        used: l.used,
+                        allowance: l.allowance,
+                    })
+                    .collect(),
+                today_tokens: u.today_tokens,
+                today_prompts: u.today_prompts,
+                today_sessions: u.today_sessions,
+                total_prompts: u.total_prompts,
+                total_sessions: u.total_sessions,
+                status_text: u.status_text,
+                updated_at: u.updated_at,
+            })
+            .collect()
+    }
+
     fn send_prompt(&self, card_id: &str, text: &str) -> Result<(), String> {
         Self::verify_owned_session(card_id)?;
         if text.is_empty() || text.len() > 4096 {
@@ -316,10 +428,14 @@ impl DesktopBackend for LiveDesktopBackend {
             NamedKey::Digit2 => crate::tmux::send_keys(card_id, &agent, "2", true),
             NamedKey::Digit3 => crate::tmux::send_keys(card_id, &agent, "3", true),
             NamedKey::Enter => crate::tmux::send_keys(card_id, &agent, "", true),
-            NamedKey::Escape | NamedKey::CtrlC => {
+            NamedKey::Escape | NamedKey::CtrlC | NamedKey::Up | NamedKey::Down | NamedKey::Tab | NamedKey::ShiftTab => {
                 let tmux_key = match key {
                     NamedKey::Escape => "Escape",
                     NamedKey::CtrlC => "C-c",
+                    NamedKey::Up => "Up",
+                    NamedKey::Down => "Down",
+                    NamedKey::Tab => "Tab",
+                    NamedKey::ShiftTab => "BTab",
                     _ => unreachable!(),
                 };
                 let target = format!("={card_id}:");

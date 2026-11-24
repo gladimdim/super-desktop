@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en" class="no-js">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telegram Bot &amp; Forum Topics — SUPER DESKTOP</title>
+<meta name="description" content="Create your own @BotFather Telegram bot, connect it to SUPER DESKTOP on Linux, and control AI agents from a private 2-member Forum Topics supergroup with live statuses, approvals, and Files &amp; Previews.">
+<link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/telegram/">
+<meta name="theme-color" content="#090c12">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SUPER DESKTOP">
+<meta property="og:locale" content="en_US">
+<meta property="og:url" content="https://superdesktop.dmytrogladkyi.com/telegram/">
+<meta property="og:title" content="Telegram Bot &amp; Forum Topics — SUPER DESKTOP">
+<meta property="og:description" content="Bring your own @BotFather bot: 1-card-1-topic Forum groups, live status badges, inline approvals, and Files &amp; Previews straight from your Linux PC.">
+<meta property="og:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. Control harnesses from Telegram Forum Topics.">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.ico">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/telegram/telegram.css">
+<script>document.documentElement.className = "js";</script>
+<script src="/telegram/preview.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="nav">
+  <div class="wrap">
+    <a class="brand" href="/"><b aria-hidden="true">⚡</b>SUPER DESKTOP</a>
+    <nav class="nav-links" aria-label="Telegram sections">
+      <a href="#screens">Screens</a>
+      <a href="#features">What it can do</a>
+      <a href="#setup">Setup</a>
+      <a href="#commands">Commands</a>
+      <a href="#permissions">Permissions</a>
+      <a href="#security">Security</a>
+    </nav>
+    <a class="btn primary" href="/#install">Install PC app</a>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">TELEGRAM BOT · BRING YOUR OWN BOT</p>
+      <h1>Control your agents.<br><span class="grad">Right from Telegram.</span></h1>
+      <p class="product-equation">
+        <a href="#setup">Your @BotFather bot</a><span aria-hidden="true">+</span>
+        <a href="#screens">Local PC worker</a><span aria-hidden="true">+</span>
+        <a href="#features">Forum Topics (1 card = 1 topic)</a>
+      </p>
+      <p class="lede">Run a private local Telegram worker on your Omarchy PC using your own bot token. Zero third-party relay servers, zero open ports — works behind NAT and on headless machines.</p>
+      <div class="cta">
+        <a class="btn primary" href="#setup">Setup in 4 steps ↓</a>
+        <a class="btn" href="#features">What you can do</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/blob/master/guides/TELEGRAM.md">Markdown guide on GitHub</a>
+      </div>
+      <p class="platforms">Included in SUPER DESKTOP · Outbound HTTPS long-polling · No public IP or port forwarding</p>
+      <nav class="page-links" aria-label="On this page">
+        <a href="#screens">Usage &amp; setup screens</a>
+        <a href="#features">What is possible</a>
+        <a href="#setup">Step-by-step setup</a>
+        <a href="#commands">Commands</a>
+        <a href="#permissions">Permissions</a>
+        <a href="#security">Privacy &amp; security</a>
+        <a href="#trouble">Troubleshooting</a>
+      </nav>
+    </div>
+  </section>
+
+  <section class="guide" id="screens">
+    <p class="eyebrow">USAGE &amp; SETUP SCREENS</p>
+    <h2>What it looks like on Telegram and on your PC.</h2>
+    <p class="sub">Switch between a live 2-member <strong>Forum Topics</strong> group in Telegram and the desktop <strong>Settings → Telegram</strong> screen where you pair your account and control permissions.</p>
+
+    <div class="screen-showcase">
+      <div class="screen-tabs" role="tablist" aria-label="Telegram screens">
+        <button type="button" role="tab" aria-selected="true" aria-controls="panel-usage" id="tab-usage">💬 Usage screen (Forum Topics)</button>
+        <button type="button" role="tab" aria-selected="false" aria-controls="panel-setup" id="tab-setup">⚙ Setup screen (Settings → Telegram)</button>
+        <span class="tab-hint">Tip: click topics inside the Usage screen to preview each card state</span>
+      </div>
+
+      <div class="screen-panel" id="panel-usage" role="tabpanel" aria-labelledby="tab-usage">
+        <div class="tg-mock">
+          <div class="tg-sidebar">
+            <div class="tg-group-bar">
+              <div>
+                <strong>My PC Agents</strong>
+                <span>2 members · you + @my_sd_bot</span>
+              </div>
+              <span class="tg-badge">Forum</span>
+            </div>
+            <div class="tg-topic-list" role="tablist" aria-label="Sample Forum Topics">
+              <button type="button" class="tg-topic-btn" role="tab" aria-selected="true" data-topic-target="topic-claude">
+                <span class="tg-topic-title">🟡 ⚡ Claude Code · super-desktop</span>
+                <span class="tg-topic-sub">Waiting · Fix auth flow + 📎 Files</span>
+              </button>
+              <button type="button" class="tg-topic-btn" role="tab" aria-selected="false" data-topic-target="topic-codex">
+                <span class="tg-topic-title">🟢 🤖 Codex · api-server</span>
+                <span class="tg-topic-sub">Working · Add rate limiter (/screen)</span>
+              </button>
+              <button type="button" class="tg-topic-btn" role="tab" aria-selected="false" data-topic-target="topic-opencode">
+                <span class="tg-topic-title">✅ 🔮 OpenCode · web-app</span>
+                <span class="tg-topic-sub">Finished · Build release notes</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="tg-chat">
+            <!-- Topic 1: Claude Waiting + Files -->
+            <div class="tg-chat-pane" id="topic-claude">
+              <div class="tg-chat-head">
+                <div>
+                  <strong>🟡 ⚡ Claude Code · super-desktop — Fix auth flow</strong><br>
+                  <span>Linked to card sd_term_1</span>
+                </div>
+                <span class="tg-badge">Waiting</span>
+              </div>
+              <div class="tg-pinned">
+                <div><b>Pinned</b> 🟡 <strong>Claude Code</strong> · <code>~/super-desktop</code> · Status: <code>◌ WAITING</code></div>
+                <span>Live header</span>
+              </div>
+              <div class="tg-messages">
+                <div class="tg-bubble">
+                  <div class="tg-bubble-head">🟡 Waiting for input · ⚡ Claude Code · <code>~/super-desktop</code></div>
+                  <p>Prompt: <em>Fix auth flow and render updated screenshot</em></p>
+                  <div class="tg-kb" aria-label="Approval actions">
+                    <div class="tg-kb-row">
+                      <span class="tg-kbtn hl">Yes</span>
+                      <span class="tg-kbtn">No</span>
+                      <span class="tg-kbtn">1</span>
+                      <span class="tg-kbtn">2</span>
+                    </div>
+                    <div class="tg-kb-row">
+                      <span class="tg-kbtn">⏎ Enter</span>
+                      <span class="tg-kbtn">Esc</span>
+                      <span class="tg-kbtn">⛔ Ctrl-C</span>
+                    </div>
+                    <div class="tg-kb-row">
+                      <span class="tg-kbtn">📷 Screen</span>
+                      <span class="tg-kbtn hl">📎 Files</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="tg-bubble">
+                  <div class="tg-bubble-head">📎 Files &amp; links · ⚡ Claude Code · <code>~/super-desktop</code></div>
+                  <p>3 file(s) · 2 link(s)</p>
+                  <p><strong>Links:</strong><br>• <a href="#screens">https://example.org/docs/oauth</a><br>• <code>http://localhost:3000/callback</code></p>
+                  <div class="tg-kb" aria-label="Referenced files">
+                    <div class="tg-kb-row"><span class="tg-kbtn hl">🖼 overlay-preview.png · 203 KB</span></div>
+                    <div class="tg-kb-row"><span class="tg-kbtn">📕 auth-trace.pdf · 1.2 MB</span></div>
+                    <div class="tg-kb-row"><span class="tg-kbtn">📝 NOTES.md · 4 KB</span></div>
+                    <div class="tg-kb-row"><span class="tg-kbtn">🔗 example.org/docs/oauth</span></div>
+                  </div>
+                  <div class="tg-photo-preview">
+                    <img src="/screenshots/readme-overlay.webp" width="1920" height="1080" loading="lazy" alt="Example image sent directly to the Telegram topic after tapping an image file">
+                    <div class="tg-photo-cap">Sent straight to the topic via <code>sendPhoto</code> when you tap <code>🖼 overlay-preview.png</code></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Topic 2: Codex Working -->
+            <div class="tg-chat-pane" id="topic-codex" hidden>
+              <div class="tg-chat-head">
+                <div>
+                  <strong>🟢 🤖 Codex · api-server — Add rate limiter</strong><br>
+                  <span>Linked to card sd_term_2</span>
+                </div>
+                <span class="tg-badge">Working</span>
+              </div>
+              <div class="tg-pinned">
+                <div><b>Pinned</b> 🟢 <strong>Codex</strong> · <code>~/GitHub/api-server</code> · Status: <code>● WORKING</code></div>
+                <span>Live header</span>
+              </div>
+              <div class="tg-messages">
+                <div class="tg-bubble user">
+                  <p>Write unit tests for burst limit 10 req/s and run cargo test</p>
+                </div>
+                <div class="tg-bubble">
+                  <div class="tg-bubble-head">🤖 Codex · <code>~/GitHub/api-server</code></div>
+                  <pre>✓ Sent prompt to Codex
+• Running: cargo test rate_limit
+test burst_window_blocks_11th_request ... ok
+test burst_window_recovers_after_tick ... ok</pre>
+                  <div class="tg-kb">
+                    <div class="tg-kb-row">
+                      <span class="tg-kbtn">📷 Screen</span>
+                      <span class="tg-kbtn">📜 History</span>
+                      <span class="tg-kbtn">📎 Files</span>
+                    </div>
+                    <div class="tg-kb-row">
+                      <span class="tg-kbtn">⏎ Enter</span>
+                      <span class="tg-kbtn">⛔ Ctrl-C</span>
+                      <span class="tg-kbtn">🗑 Close</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Topic 3: OpenCode Finished -->
+            <div class="tg-chat-pane" id="topic-opencode" hidden>
+              <div class="tg-chat-head">
+                <div>
+                  <strong>✅ 🔮 OpenCode · web-app — Build release notes</strong><br>
+                  <span>Linked to card sd_term_3</span>
+                </div>
+                <span class="tg-badge">Finished</span>
+              </div>
+              <div class="tg-pinned">
+                <div><b>Pinned</b> ✅ <strong>OpenCode</strong> · <code>~/GitHub/web-app</code> · Status: <code>✓ FINISHED</code></div>
+                <span>Live header</span>
+              </div>
+              <div class="tg-messages">
+                <div class="tg-bubble">
+                  <div class="tg-bubble-head">✅ Finished · 🔮 OpenCode · <code>~/GitHub/web-app</code></div>
+                  <p>Prompt: <em>Summarize commits since last release into CHANGELOG.md</em></p>
+                  <div class="tg-kb">
+                    <div class="tg-kb-row">
+                      <span class="tg-kbtn">📷 Screen</span>
+                      <span class="tg-kbtn">📜 History</span>
+                      <span class="tg-kbtn">📎 Files</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="screen-panel" id="panel-setup" role="tabpanel" aria-labelledby="tab-setup" hidden>
+        <div class="setup-mock">
+          <div class="setup-titlebar">
+            <strong>⚙ Settings → Telegram</strong>
+            <span>SUPER DESKTOP · Local worker control</span>
+          </div>
+          <div class="setup-grid">
+            <div class="setup-card">
+              <h3>1. Telegram bot</h3>
+              <p class="setup-note">Create a bot with <code>@BotFather</code>, paste its token below, and verify directly against Telegram's API.</p>
+              <div class="setup-status">
+                <span class="sd-chip">Running</span>
+                <span>Polling <code>api.telegram.org</code> as <code>@my_superdesktop_bot</code>.</span>
+              </div>
+              <div class="sd-entry">••••••••••••••••••••••••••••••••••••••••••••</div>
+              <div class="sd-row">
+                <span class="sd-btn primary">Save &amp; verify</span>
+                <span class="sd-btn">Clear</span>
+              </div>
+              <div class="sd-switch-row">
+                <div><strong>Enable Telegram bot</strong><span>Run the background worker while SUPER DESKTOP runs.</span></div>
+                <span class="sd-pill on" aria-label="On"></span>
+              </div>
+            </div>
+
+            <div class="setup-card">
+              <h3>2. Account pairing</h3>
+              <p class="setup-note">Only one Telegram user ID can control this PC. Every link is single-use and needs desktop approval.</p>
+              <p class="setup-note"><strong>Paired with Owner (@you) · ID 123456789</strong></p>
+              <div class="sd-row">
+                <span class="sd-btn primary">Pair Telegram account</span>
+                <span class="sd-btn danger">Revoke access</span>
+                <span class="sd-btn">Clear rejected</span>
+              </div>
+              <div class="sd-pending">
+                <div><strong>Pending request</strong> from @you · Code <code>482 915</code></div>
+                <div class="sd-row">
+                  <span class="sd-btn primary">Approve</span>
+                  <span class="sd-btn danger">Reject</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="setup-card">
+              <h3>3. Forum Topics</h3>
+              <p class="setup-note">1-card-1-topic mode inside a private 2-member supergroup. Linked: <strong>My PC Agents</strong>.</p>
+              <div class="sd-row">
+                <span class="sd-btn">Sync topics now</span>
+                <span class="sd-btn">Unlink forum</span>
+              </div>
+              <div class="sd-switch-row">
+                <div><strong>Auto-create a topic for each card</strong><span>Open a color-tagged Forum Topic automatically.</span></div>
+                <span class="sd-pill on" aria-label="On"></span>
+              </div>
+              <div class="sd-switch-row">
+                <div><strong>Delete topic when a card closes</strong><span>Delete the topic automatically once the card closes (falls back to archiving).</span></div>
+                <span class="sd-pill on" aria-label="On"></span>
+              </div>
+            </div>
+
+            <div class="setup-card">
+              <h3>4. Permissions (safe defaults)</h3>
+              <div class="sd-switch-row">
+                <div><strong>Notifications</strong><span>Finished, Waiting, Error push alerts.</span></div>
+                <span class="sd-pill on" aria-label="On"></span>
+              </div>
+              <div class="sd-switch-row">
+                <div><strong>Redact common secrets</strong><span>Mask keys, tokens, and PEM blocks.</span></div>
+                <span class="sd-pill on" aria-label="On"></span>
+              </div>
+              <div class="sd-switch-row">
+                <div><strong>Read terminal output</strong><span><code>/screen</code>, <code>/history</code>, and <code>📎 Files</code>.</span></div>
+                <span class="sd-pill" aria-label="Off"></span>
+              </div>
+              <div class="sd-switch-row">
+                <div><strong>Submit prompts &amp; Control keys</strong><span>Typed text + Yes/No/Enter/Esc/Ctrl-C.</span></div>
+                <span class="sd-pill" aria-label="Off"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <p class="screen-caption">Illustrative previews of the live Forum Topics workspace and the PC <strong>Settings → Telegram</strong> screen (sample session data).</p>
+    </div>
+  </section>
+
+  <section class="guide" id="features">
+    <p class="eyebrow">CAPABILITIES</p>
+    <h2>What you can do from Telegram.</h2>
+    <p class="sub">Everything runs locally inside a dedicated <code>super-desktop telegram-bot</code> child process supervised by the daemon — whether the overlay is hidden, open, or running headless.</p>
+    <div class="cap-grid">
+      <div class="cap-card">
+        <b>🗂</b>
+        <h3>Live Dashboard + 1 card = 1 Topic</h3>
+        <p>A pinned <strong>General</strong> dashboard shows every card plus provider Usage limits. Each running card gets its own color-tagged topic with a live status header and <code>typing…</code> indicator while working.</p>
+      </div>
+      <div class="cap-card">
+        <b>🚦</b>
+        <h3>Live statuses &amp; quiet 👍 acks</h3>
+        <p>Pinned headers edit silently in place and topic names show debounced status dots (<code>🟢</code> <code>🟡</code> <code>✅</code> <code>🔴</code> <code>⚪</code> <code>⚫</code>), while prompts in Forum Topics acknowledge with a clean <code>👍</code> reaction.</p>
+      </div>
+      <div class="cap-card">
+        <b>📺</b>
+        <h3>Live output &amp; smart alerts</h3>
+        <p>Tap <strong>📺 Live</strong> (<code>/live</code>) to watch an auto-updating <code>&lt;pre&gt;</code> block while an agent runs. Finished and Waiting alerts include trailing output snippets above one-tap buttons.</p>
+      </div>
+      <div class="cap-card">
+        <b>📎</b>
+        <h3>Files, PDF pages &amp; text pager</h3>
+        <p><strong>📎 Files</strong> (<code>/files</code>) filters Images, Docs, and Links with pagination, sends photos directly, previews PDF pages as images, pages long redacted text files inline, and opens public URL buttons.</p>
+      </div>
+      <div class="cap-card">
+        <b>⌨</b>
+        <h3>Quick Keys &amp; slash shortcuts</h3>
+        <p>Tap <strong>⌨ Keys</strong> (<code>/keys</code>) for <code>Yes</code>, <code>No</code>, <code>1</code>–<code>3</code>, arrows, <code>Tab</code>, <code>⇧Tab</code>, <code>Esc</code>, <code>Ctrl-C</code>, and agent shortcuts like <code>/resume</code>, <code>/compact</code>, and <code>/clear</code>.</p>
+      </div>
+      <div class="cap-card">
+        <b>📷</b>
+        <h3>Bounded screen &amp; history</h3>
+        <p>Inspect live screen state with <code>/screen</code> or scrollback with <code>/history</code>. ANSI escapes are stripped and secrets masked before leaving your PC.</p>
+      </div>
+      <div class="cap-card">
+        <b>🚀</b>
+        <h3>Launch &amp; close sessions</h3>
+        <p>Start new agents in remembered project folders using <code>/new</code>'s 2-step inline keyboard wizard, or close finished cards cleanly with <code>/close</code> + confirmation.</p>
+      </div>
+      <div class="cap-card">
+        <b>🖼</b>
+        <h3>Send photos, files &amp; voice</h3>
+        <p>Drop a screenshot, document, or voice clip directly into a card's topic — staged privately outside workspaces, never saved to random repos.</p>
+      </div>
+      <div class="cap-card">
+        <b>🌐</b>
+        <h3>Zero ports, headless-ready</h3>
+        <p>Uses outbound HTTPS long-polling to <code>api.telegram.org</code>. Combine with <strong>Settings → System launch</strong> to control a PC with no display logged in.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="guide" id="setup">
+    <p class="eyebrow">STEP BY STEP</p>
+    <h2>Setup in four steps.</h2>
+    <p class="sub">Takes about two minutes. You stay the owner of your bot token, your Telegram pairing, and every permission switch.</p>
+
+    <div class="step">
+      <div class="num" aria-hidden="true">1</div>
+      <div>
+        <h3><span class="pill">Telegram</span> Create your own bot via <code>@BotFather</code></h3>
+        <ol>
+          <li>Open Telegram and message the official verified <strong><code>@BotFather</code></strong> bot with <code>/newbot</code>.</li>
+          <li>Pick a display name (for example <code>My Super Desktop</code>) and a unique username ending in <code>bot</code> (for example <code>my_superdesktop_bot</code>).</li>
+          <li>Copy the bot token (looks like <code>123456789:ABC...</code>) and keep it private.</li>
+        </ol>
+        <p>No extra <code>@BotFather</code> settings are needed: group invites work out of the box, and making the bot Admin in your Forum group lets it read topic messages while keeping Group Privacy Mode on.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num" aria-hidden="true">2</div>
+      <div>
+        <h3><span class="pill pc">PC</span> Save the token &amp; enable the worker</h3>
+        <ol>
+          <li>Press <span class="kbd">Super</span> + <span class="kbd">Shift</span> + <span class="kbd">Q</span> → open <strong>⚙ Settings → Telegram</strong>.</li>
+          <li>Paste your <code>@BotFather</code> token and click <strong>Save &amp; verify</strong> (verifies directly with <code>api.telegram.org</code> and shows your bot's <code>@username</code>).</li>
+          <li>Turn on <strong>Enable Telegram bot</strong>. Nothing runs until you switch it on.</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num" aria-hidden="true">3</div>
+      <div>
+        <h3><span class="pill pc">PC</span> + <span class="pill">Telegram</span> Pair your Telegram account</h3>
+        <ol>
+          <li>Click <strong>Pair Telegram account</strong> on your PC to generate a single-use <code>t.me/&lt;bot&gt;?start=…</code> invite link and QR code.</li>
+          <li>Open the link in Telegram and tap <strong>Start</strong>.</li>
+          <li>Check that the <strong>6-digit code</strong> matches on both screens, then click <strong>Approve</strong> on your PC. Access locks to your numeric Telegram <code>user_id</code>.</li>
+        </ol>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="num" aria-hidden="true">4</div>
+      <div>
+        <h3><span class="pill">Telegram</span> Link a 2-member Forum group (optional, recommended)</h3>
+        <ol>
+          <li>Create a new <strong>private group</strong> with <strong>only you and your bot</strong> (2 members max — any extra member is refused automatically for privacy).</li>
+          <li>In Group Settings, enable <strong>Topics</strong>.</li>
+          <li>In <strong>Administrators</strong>, promote your bot to Admin with <strong>Manage Topics</strong> (and optionally <strong>Pin Messages</strong> so each topic pins its live status header silently).</li>
+          <li>Open the group's <strong>General</strong> topic and send <code>/linkforum</code>. Every open card immediately gets its own live topic.</li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <section class="guide" id="commands">
+    <p class="eyebrow">REFERENCE</p>
+    <h2>Bot commands.</h2>
+    <p class="sub">In a linked Forum group, messages and commands sent inside a topic apply automatically to that topic's card. In a private 1:1 chat with your bot, use <code>/cards</code> or reply to any card alert.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Telegram bot commands">
+      <table>
+        <thead><tr><th>Command</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr><td><code>/cards</code></td><td>List active terminal cards with quick select, <code>📷</code> screen, and <code>📎</code> files buttons</td></tr>
+          <tr><td><code>/dashboard</code> · <code>/usage</code></td><td>Show or refresh the live workspace dashboard, or view weekly allowance &amp; progress bars for each provider</td></tr>
+          <tr><td><code>/status</code></td><td>Show selected card status, model, prompt, and inline action keyboard</td></tr>
+          <tr><td><code>/screen</code></td><td>Capture current terminal screen (bounded, ANSI-stripped)</td></tr>
+          <tr><td><code>/history [N]</code></td><td>Capture recent terminal scrollback (20–300 lines)</td></tr>
+          <tr><td><code>/live</code></td><td>Stream a live auto-updating terminal tail message while the card runs</td></tr>
+          <tr><td><code>/keys</code></td><td>Open Quick Keys (<code>↑</code>/<code>↓</code>/<code>Tab</code>/<code>⇧Tab</code>/<code>Yes</code>/<code>No</code>/<code>Ctrl-C</code> + slash shortcuts)</td></tr>
+          <tr><td><code>/files</code></td><td>Browse referenced images, PDF page previews, redacted text pages, and links</td></tr>
+          <tr><td><code>/new</code></td><td>Launch a new harness card via 2-step folder → harness picker</td></tr>
+          <tr><td><code>/close</code></td><td>Close the selected card on your PC after confirmation</td></tr>
+          <tr><td><code>/ctrlc</code> · <code>/enter</code> · <code>/esc</code></td><td>Send interrupt, Enter, or Escape to the selected card</td></tr>
+          <tr><td><code>/sync</code></td><td>Force-sync Forum Topics with live cards (and recreate unlinked/deleted topics)</td></tr>
+          <tr><td><code>/linkforum</code></td><td>Bind the current 2-member Forum supergroup</td></tr>
+          <tr><td><code>/unlinkforum</code></td><td>Unlink the Forum group</td></tr>
+          <tr><td><code>/unlink</code></td><td>Unlink the current Forum Topic without closing its card</td></tr>
+          <tr><td><code>/help</code></td><td>Show available commands and currently enabled permissions</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="guide" id="permissions">
+    <p class="eyebrow">CONTROL</p>
+    <h2>Permissions &amp; safe defaults.</h2>
+    <p class="sub">All inspection, input, launch, close, and attachment capabilities default to <strong>Off</strong> until you explicitly turn them on in <strong>⚙ Settings → Telegram</strong>.</p>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Telegram permissions">
+      <table>
+        <thead><tr><th>Switch</th><th>Default</th><th>What it allows</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Notifications</strong></td><td><strong>On</strong></td><td>Push Finished, Waiting, and Error alerts with inline buttons</td></tr>
+          <tr><td><strong>Redact common secrets</strong></td><td><strong>On</strong></td><td>Best-effort masking of API keys, Bearer/bot tokens, <code>.env</code> secrets, and PEM private keys</td></tr>
+          <tr><td><strong>Read terminal output</strong></td><td>Off</td><td><code>/screen</code>, <code>/history</code>, and <code>📎 Files</code> / <code>/files</code></td></tr>
+          <tr><td><strong>Submit prompts</strong></td><td>Off</td><td>Sending text prompts to AI harness cards</td></tr>
+          <tr><td><strong>Control keys</strong></td><td>Off</td><td>Inline/command <code>Yes</code>, <code>No</code>, <code>1</code>, <code>2</code>, <code>Enter</code>, <code>Esc</code>, <code>Ctrl-C</code></td></tr>
+          <tr><td><strong>Allow shell input</strong></td><td>Off</td><td>Typing text or keys into plain Shell cards (higher risk)</td></tr>
+          <tr><td><strong>Launch new cards</strong></td><td>Off</td><td><code>/new</code> harness launching in remembered project folders</td></tr>
+          <tr><td><strong>Close cards</strong></td><td>Off</td><td>Closing cards from Telegram after explicit confirmation</td></tr>
+          <tr><td><strong>Receive attachments</strong></td><td>Off</td><td>Staging photos, documents, and voice clips privately for harnesses</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="guide" id="security">
+    <p class="eyebrow">TRUST MODEL</p>
+    <h2>Private control, honest limits.</h2>
+    <div class="note">
+      <strong>Your bot, your PC, zero developer server:</strong> Bot credentials and state stay owner-only (<code>0700</code>/<code>0600</code>) on your Linux machine. Nobody else can pair without physical approval of a single-use invite + matching 6-digit code on your desktop, and any Forum group with more than 2 members is refused automatically.
+    </div>
+    <div class="note warn">
+      <strong>Telegram Bot API is not end-to-end encrypted:</strong> Messages, images, and terminal output sent through a Telegram bot pass through Telegram's servers (and Telegram clients). Keep <strong>Redact common secrets</strong> enabled, leave unneeded switches off, and never send secrets to the chat. When you want direct device-to-device TLS with no third party at all, use the <a href="/connect.html">Android / iPhone / iPad app</a> over LAN or Tailscale. Read the full <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security model</a>.
+    </div>
+  </section>
+
+  <section class="guide" id="trouble">
+    <p class="eyebrow">HELP</p>
+    <h2>Troubleshooting.</h2>
+    <div class="table-wrap" tabindex="0" role="region" aria-label="Troubleshooting">
+      <table>
+        <thead><tr><th>Symptom</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td>Status chip shows <code>Stopped</code> or <code>Error</code></td><td>In <strong>⚙ Settings → Telegram</strong>, verify the token with <strong>Save &amp; verify</strong>, turn on <strong>Enable Telegram bot</strong>, and ensure outbound HTTPS access to <code>api.telegram.org</code>.</td></tr>
+          <tr><td><code>Refused: this group has N members…</code></td><td>Remove everyone except you and your bot so the group has at most 2 members, then run <code>/linkforum</code> again.</td></tr>
+          <tr><td><code>Promote this bot to Administrator…</code></td><td>In Group Settings → Administrators, make the bot Admin with <strong>Manage Topics</strong> (and optionally <strong>Pin Messages</strong>).</td></tr>
+          <tr><td>Bot replies that an action is disabled</td><td>Enable the corresponding switch under <strong>⚙ Settings → Telegram → Permissions</strong> (for example <strong>Read terminal output</strong> for <code>📎 Files</code> and <code>/screen</code>).</td></tr>
+          <tr><td>Old messages sent offline don't run</td><td>Messages older than ~2 minutes or queued before worker startup are ignored by design so stale commands never replay unexpectedly on wake.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span><b style="color:var(--bolt)">⚡</b> SUPER DESKTOP</span>
+    <nav aria-label="More">
+      <a href="/">Home</a>
+      <a href="/connect.html">Connect your phone</a>
+      <a href="/launcher/">SD Launcher</a>
+      <a href="/cli.html">CLI reference</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="https://github.com/gladimdim/super-desktop/blob/master/guides/TELEGRAM.md">Telegram guide (Markdown)</a>
+      <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security</a>
+      <a href="https://github.com/gladimdim/super-desktop">GitHub</a>
+    </nav>
+    <p class="legal">Telegram and @BotFather are trademarks of Telegram FZ-LLC. SUPER DESKTOP is independent open-source software (GPL-3.0).</p>
+  </div>
+</footer>
+</body>
+</html>

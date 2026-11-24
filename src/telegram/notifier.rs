@@ -1,9 +1,9 @@
 //! Push notifications for FINISHED, WAITING, and ERROR card transitions.
 use super::api::{ApiError, InlineKeyboardMarkup, TelegramApi};
 use super::config::{Config, RuntimeState};
-use super::desktop::CardSummary;
+use super::desktop::{CardSummary, DesktopBackend};
 use super::redact::escape_html;
-use super::topics::{card_action_keyboard, waiting_keyboard};
+use super::topics::{card_action_keyboard, tail_output_snippet, waiting_keyboard};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Default)]
@@ -19,6 +19,7 @@ impl NotifierState {
     pub fn tick(
         &mut self,
         api: &dyn TelegramApi,
+        backend: &dyn DesktopBackend,
         cfg: &Config,
         runtime: &mut RuntimeState,
         cards: &[CardSummary],
@@ -80,6 +81,19 @@ impl NotifierState {
                 if let Some(prompt) = card.last_prompt.as_deref().filter(|p| !p.trim().is_empty()) {
                     html.push_str(&format!("\nPrompt: <i>{}</i>", escape_html(prompt)));
                 }
+                if cfg.permissions.read_output {
+                    if let Ok(raw) = backend.capture_screen(&card.id, 0) {
+                        if let Some(snip) = tail_output_snippet(
+                            &raw,
+                            &cfg.bot_token,
+                            cfg.permissions.redact_secrets,
+                            24,
+                            1800,
+                        ) {
+                            html.push_str(&format!("\n<pre><code>{}</code></pre>", escape_html(&snip)));
+                        }
+                    }
+                }
                 let kb = card_action_keyboard(card, cfg.permissions);
                 if send_card_alert(api, cfg, runtime, owner.chat_id, &card.id, &html, kb.as_ref()) {
                     runtime_changed = true;
@@ -105,6 +119,22 @@ impl NotifierState {
                             card.last_prompt.as_deref().filter(|p| !p.trim().is_empty())
                         {
                             html.push_str(&format!("\nPrompt: <i>{}</i>", escape_html(prompt)));
+                        }
+                        if cfg.permissions.read_output {
+                            if let Ok(raw) = backend.capture_screen(&card.id, 0) {
+                                if let Some(snip) = tail_output_snippet(
+                                    &raw,
+                                    &cfg.bot_token,
+                                    cfg.permissions.redact_secrets,
+                                    22,
+                                    1500,
+                                ) {
+                                    html.push_str(&format!(
+                                        "\n<pre><code>{}</code></pre>",
+                                        escape_html(&snip)
+                                    ));
+                                }
+                            }
                         }
                         let kb = waiting_keyboard(card, cfg.permissions);
                         if send_card_alert(

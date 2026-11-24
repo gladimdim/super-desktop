@@ -4,7 +4,7 @@ use super::api::*;
 use super::config::*;
 use super::desktop::{
     extract_terminal_links, CardAsset, CardReferences, CardSummary, DesktopBackend, HarnessChoice,
-    NamedKey, WorkspaceInfo,
+    NamedKey, ProviderUsageLimit, ProviderUsageSummary, WorkspaceInfo,
 };
 use super::notifier::NotifierState;
 use super::pairing;
@@ -56,12 +56,17 @@ struct MockApiState {
     sent_animations: Vec<SentMedia>,
     sent_documents: Vec<SentMedia>,
     fail_photo_bad_request: bool,
+    fail_reactions: bool,
+    fail_delete_topic_bad_request: bool,
+    chat_actions: Vec<(i64, Option<i64>, String)>,
+    reactions: Vec<(i64, i64, String)>,
     edited_msgs: Vec<(i64, i64, String, Option<InlineKeyboardMarkup>)>,
     pinned_msgs: Vec<(i64, i64, bool)>,
     answered_callbacks: Vec<(String, Option<String>)>,
     created_topics: Vec<(i64, String, u32, i64)>,
     renamed_topics: Vec<(i64, i64, String)>,
     closed_topics: Vec<(i64, i64)>,
+    deleted_topics: Vec<(i64, i64)>,
     reopened_topics: Vec<(i64, i64)>,
     deleted_threads: std::collections::HashSet<i64>,
     deleted_messages: std::collections::HashSet<i64>,
@@ -135,6 +140,7 @@ impl TelegramApi for MockApi {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        _keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         let mut st = self.state.lock().unwrap();
         if st.fail_photo_bad_request {
@@ -161,6 +167,7 @@ impl TelegramApi for MockApi {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        _keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         let mut st = self.state.lock().unwrap();
         st.next_msg_id += 1;
@@ -184,6 +191,7 @@ impl TelegramApi for MockApi {
         mime_type: &str,
         bytes: &[u8],
         caption_html: Option<&str>,
+        _keyboard: Option<&InlineKeyboardMarkup>,
     ) -> Result<i64, ApiError> {
         let mut st = self.state.lock().unwrap();
         st.next_msg_id += 1;
@@ -197,6 +205,34 @@ impl TelegramApi for MockApi {
             caption: caption_html.map(str::to_string),
         });
         Ok(id)
+    }
+
+    fn send_chat_action(
+        &self,
+        chat_id: i64,
+        thread_id: Option<i64>,
+        action: &str,
+    ) -> Result<(), ApiError> {
+        self.state
+            .lock()
+            .unwrap()
+            .chat_actions
+            .push((chat_id, thread_id, action.to_string()));
+        Ok(())
+    }
+
+    fn set_message_reaction(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        emoji: &str,
+    ) -> Result<(), ApiError> {
+        let mut st = self.state.lock().unwrap();
+        if st.fail_reactions {
+            return Err(ApiError::BadRequest("REACTION_INVALID".into()));
+        }
+        st.reactions.push((chat_id, message_id, emoji.to_string()));
+        Ok(())
     }
 
     fn edit_message_text(
@@ -302,6 +338,19 @@ impl TelegramApi for MockApi {
         Ok(())
     }
 
+    fn delete_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError> {
+        let mut st = self.state.lock().unwrap();
+        if st.deleted_threads.contains(&thread_id) {
+            return Err(ApiError::TopicNotFound);
+        }
+        if st.fail_delete_topic_bad_request {
+            return Err(ApiError::BadRequest("not enough rights".into()));
+        }
+        st.deleted_topics.push((chat_id, thread_id));
+        st.deleted_threads.insert(thread_id);
+        Ok(())
+    }
+
     fn reopen_forum_topic(&self, chat_id: i64, thread_id: i64) -> Result<(), ApiError> {
         let mut st = self.state.lock().unwrap();
         if st.deleted_threads.contains(&thread_id) {
@@ -335,9 +384,11 @@ impl TelegramApi for MockApi {
 
 struct MockBackend {
     cards: Mutex<Vec<CardSummary>>,
+    usage: Mutex<Vec<ProviderUsageSummary>>,
     screens: Mutex<HashMap<String, String>>,
     references: Mutex<HashMap<String, CardReferences>>,
     assets: Mutex<HashMap<(String, String), (CardAsset, Vec<u8>)>>,
+    pdf_pages: Mutex<HashMap<(String, String, u32), Vec<u8>>>,
     prompts_sent: Mutex<Vec<(String, String)>>,
     keys_sent: Mutex<Vec<(String, NamedKey)>>,
     attachments_sent: Mutex<Vec<(String, String, String, Vec<u8>)>>,
@@ -351,9 +402,11 @@ impl MockBackend {
     fn new(cards: Vec<CardSummary>) -> Self {
         Self {
             cards: Mutex::new(cards),
+            usage: Mutex::new(Vec::new()),
             screens: Mutex::new(HashMap::new()),
             references: Mutex::new(HashMap::new()),
             assets: Mutex::new(HashMap::new()),
+            pdf_pages: Mutex::new(HashMap::new()),
             prompts_sent: Mutex::new(Vec::new()),
             keys_sent: Mutex::new(Vec::new()),
             attachments_sent: Mutex::new(Vec::new()),
@@ -384,6 +437,10 @@ impl DesktopBackend for MockBackend {
         self.cards.lock().unwrap().clone()
     }
 
+    fn usage_summary(&self) -> Vec<ProviderUsageSummary> {
+        self.usage.lock().unwrap().clone()
+    }
+
     fn capture_screen(&self, card_id: &str, _history_lines: u32) -> Result<String, String> {
         Ok(self
             .screens
@@ -411,6 +468,23 @@ impl DesktopBackend for MockBackend {
             .get(&(card_id.to_string(), asset_id.to_string()))
             .cloned()
             .ok_or_else(|| "asset_expired_refresh_list".to_string())
+    }
+
+    fn render_pdf_page(
+        &self,
+        card_id: &str,
+        asset_id: &str,
+        page: u32,
+    ) -> Result<(CardAsset, Vec<u8>), String> {
+        let (asset, _) = self.read_asset(card_id, asset_id)?;
+        let bytes = self
+            .pdf_pages
+            .lock()
+            .unwrap()
+            .get(&(card_id.to_string(), asset_id.to_string(), page))
+            .cloned()
+            .ok_or_else(|| "page out of range".to_string())?;
+        Ok((asset, bytes))
     }
 
     fn send_prompt(&self, card_id: &str, text: &str) -> Result<(), String> {
@@ -979,7 +1053,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 65, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
 
-    // Closing card archives topic; card returning reopens it.
+    // Closing card deletes topic via deleteForumTopic and drops its binding; returning card creates a fresh topic.
     backend.cards.lock().unwrap().retain(|c| c.id != "sd_term_2");
     assert!(topics::sync_topics(
         &api,
@@ -989,10 +1063,10 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         now + 70,
         false
     ));
-    assert!(rt.topic_for_card("sd_term_2").unwrap().closed);
-    assert_eq!(api.state.lock().unwrap().closed_topics, vec![(-100999, tid2)]);
+    assert!(rt.topic_for_card("sd_term_2").is_none());
+    assert_eq!(api.state.lock().unwrap().deleted_topics, vec![(-100999, tid2)]);
 
-    backend.cards.lock().unwrap().push(card2);
+    backend.cards.lock().unwrap().push(card2.clone());
     assert!(topics::sync_topics(
         &api,
         &cfg,
@@ -1001,8 +1075,81 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         now + 75,
         false
     ));
-    assert!(!rt.topic_for_card("sd_term_2").unwrap().closed);
-    assert_eq!(api.state.lock().unwrap().reopened_topics, vec![(-100999, tid2)]);
+    let tid2_new = rt.topic_for_card("sd_term_2").unwrap().thread_id;
+    assert_ne!(tid2_new, tid2);
+
+    // Closing via clc: callback immediately deletes the bound topic.
+    cfg.permissions.close = true;
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 5,
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "cq_close".into(),
+                from: user(777),
+                message: Some(text_msg(-100999, "supergroup", 999, 250, "Close?", now + 80)),
+                data: Some("clc:sd_term_2".into()),
+            }),
+        },
+        now + 80,
+    );
+    assert!(rt.topic_for_card("sd_term_2").is_none());
+    assert!(api.state.lock().unwrap().deleted_topics.contains(&(-100999, tid2_new)));
+
+    // Fallback when deleteForumTopic is denied: archives topic once and reopens if card returns.
+    backend.cards.lock().unwrap().push(card2.clone());
+    assert!(topics::sync_topics(
+        &api,
+        &cfg,
+        &mut rt,
+        &backend.list_cards(),
+        now + 85,
+        false
+    ));
+    let tid2_fb = rt.topic_for_card("sd_term_2").unwrap().thread_id;
+    api.state.lock().unwrap().fail_delete_topic_bad_request = true;
+    backend.cards.lock().unwrap().retain(|c| c.id != "sd_term_2");
+    assert!(topics::sync_topics(
+        &api,
+        &cfg,
+        &mut rt,
+        &backend.list_cards(),
+        now + 90,
+        false
+    ));
+    let fb_binding = rt.topic_for_card("sd_term_2").unwrap();
+    assert!(fb_binding.closed);
+    assert!(fb_binding.delete_failed);
+    assert_eq!(api.state.lock().unwrap().closed_topics, vec![(-100999, tid2_fb)]);
+    // Subsequent sync tick does not retry delete_forum_topic while closed & delete_failed.
+    assert!(!topics::sync_topics(
+        &api,
+        &cfg,
+        &mut rt,
+        &backend.list_cards(),
+        now + 95,
+        false
+    ));
+
+    backend.cards.lock().unwrap().push(card2);
+    assert!(topics::sync_topics(
+        &api,
+        &cfg,
+        &mut rt,
+        &backend.list_cards(),
+        now + 100,
+        false
+    ));
+    let reopened = rt.topic_for_card("sd_term_2").unwrap();
+    assert!(!reopened.closed);
+    assert!(!reopened.delete_failed);
+    assert_eq!(api.state.lock().unwrap().reopened_topics, vec![(-100999, tid2_fb)]);
+    api.state.lock().unwrap().fail_delete_topic_bad_request = false;
 
     // Deleted topic in Telegram marks deleted_in_telegram and does not spam recreate until force_recreate.
     api.state.lock().unwrap().deleted_threads.insert(tid1);
@@ -1250,40 +1397,60 @@ fn telegram_notifier_seeds_quietly_and_alerts_into_forum_topics() {
     card.completion_id = Some("cid_1".into());
     card.status = "WAITING".into();
 
+    let backend = MockBackend::new(vec![card.clone()]);
+    backend.screens.lock().unwrap().insert(
+        "sd_term_1".into(),
+        "Allow running tests?\nOPENAI_API_KEY=sk-ant-api03-1234567890abcdefghijklmnop\n1) Yes  2) No"
+            .into(),
+    );
+
     let mut notifier = NotifierState::default();
     // Initial seed emits zero notifications even for already-completed / waiting cards.
-    assert!(!notifier.tick(&api, &cfg, &mut rt, &[card.clone()]));
+    assert!(!notifier.tick(&api, &backend, &cfg, &mut rt, &[card.clone()]));
     assert!(api.state.lock().unwrap().sent.is_empty());
 
     // Single tick of WAITING on another state doesn't spam; wait for 2nd tick.
     card.status = "WORKING".into();
-    assert!(!notifier.tick(&api, &cfg, &mut rt, &[card.clone()]));
+    assert!(!notifier.tick(&api, &backend, &cfg, &mut rt, &[card.clone()]));
 
     card.status = "WAITING".into();
-    assert!(!notifier.tick(&api, &cfg, &mut rt, &[card.clone()]));
+    assert!(!notifier.tick(&api, &backend, &cfg, &mut rt, &[card.clone()]));
     assert!(api.state.lock().unwrap().sent.is_empty());
 
-    // Second consecutive WAITING tick sends approval buttons into the card's topic!
-    assert!(notifier.tick(&api, &cfg, &mut rt, &[card.clone()]));
+    // Second consecutive WAITING tick sends approval buttons + redacted screen snippet into topic!
+    assert!(notifier.tick(&api, &backend, &cfg, &mut rt, &[card.clone()]));
     {
         let st = api.state.lock().unwrap();
         assert_eq!(st.sent.len(), 1);
         assert_eq!(st.sent[0].chat_id, -100555);
         assert_eq!(st.sent[0].thread_id, Some(77));
         assert!(st.sent[0].html.contains("Waiting for input"));
+        assert!(st.sent[0].html.contains("Allow running tests?"));
+        assert!(st.sent[0].html.contains("[REDACTED]"));
+        assert!(!st.sent[0].html.contains("sk-ant-"));
         assert!(st.sent[0].keyboard.is_some());
     }
 
-    // New completion_id emits Finished alert without raw terminal text.
+    // New completion_id emits Finished alert with snippet when read_output=true, and omits output when read_output=false.
     card.status = "FINISHED".into();
     card.completion_state = "completed".into();
     card.completion_id = Some("cid_2".into());
-    assert!(notifier.tick(&api, &cfg, &mut rt, &[card]));
+    assert!(notifier.tick(&api, &backend, &cfg, &mut rt, &[card.clone()]));
+    {
+        let st = api.state.lock().unwrap();
+        assert_eq!(st.sent.len(), 2);
+        assert!(st.sent[1].html.contains("Finished"));
+        assert!(st.sent[1].html.contains("Allow running tests?"));
+        assert_eq!(st.sent[1].thread_id, Some(77));
+    }
+
+    cfg.permissions.read_output = false;
+    card.completion_id = Some("cid_3".into());
+    assert!(notifier.tick(&api, &backend, &cfg, &mut rt, &[card]));
     let st = api.state.lock().unwrap();
-    assert_eq!(st.sent.len(), 2);
-    assert!(st.sent[1].html.contains("Finished"));
-    assert_eq!(st.sent[1].thread_id, Some(77));
-    let _ = &mut cfg;
+    assert_eq!(st.sent.len(), 3);
+    assert!(st.sent[2].html.contains("Finished"));
+    assert!(!st.sent[2].html.contains("Allow running tests?"));
 }
 
 #[test]
@@ -1407,7 +1574,9 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 3);
     assert!(api.state.lock().unwrap().renamed_topics[2].2.starts_with("🔴 "));
 
-    // 6. Closing edits the status header to Closed on PC before closing, and reopening restores it.
+    // 6. If deleteForumTopic is denied, fallback edits status header to Closed on PC before archiving;
+    //    default deletion deletes the topic cleanly when the card closes.
+    api.state.lock().unwrap().fail_delete_topic_bad_request = true;
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[], t0 + 30, false));
     {
         let st = api.state.lock().unwrap();
@@ -1417,20 +1586,28 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
         assert!(kb.is_none());
     }
     assert!(rt.topic_for_card("sd_term_live").unwrap().closed);
+    assert!(rt.topic_for_card("sd_term_live").unwrap().delete_failed);
 
     card.status = "WORKING".into();
     card.label = "● WORKING".into();
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 40, false));
     assert!(!rt.topic_for_card("sd_term_live").unwrap().closed);
+    assert!(!rt.topic_for_card("sd_term_live").unwrap().delete_failed);
     assert!(api.state.lock().unwrap().edited_msgs.last().unwrap().2.contains("🟢"));
 
-    // 7. Manually deleted status header message clears status_message_id cleanly without failing later syncs.
+    // Manually deleted status header message clears status_message_id cleanly without failing later syncs.
     api.state.lock().unwrap().deleted_messages.insert(status_msg_id);
     card.status = "IDLE".into();
     card.label = "● IDLE".into();
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 42, false));
     assert!(rt.topic_for_card("sd_term_live").unwrap().status_message_id.is_none());
     assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card], t0 + 60, false));
+
+    // Default deletion removes topic and binding completely.
+    api.state.lock().unwrap().fail_delete_topic_bad_request = false;
+    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[], t0 + 70, false));
+    assert!(rt.topic_for_card("sd_term_live").is_none());
+    assert!(!api.state.lock().unwrap().deleted_topics.is_empty());
 }
 
 #[test]
@@ -1524,6 +1701,12 @@ fn telegram_files_and_links_discovery_photo_send_fallback_and_redaction() {
             "log line\n".repeat(500)
         );
         map.insert((card.id.clone(), txt_large_id.clone()), (assets[4].clone(), large_body.into_bytes()));
+    }
+
+    {
+        let mut pages = backend.pdf_pages.lock().unwrap();
+        pages.insert((card.id.clone(), pdf_id.clone(), 1), b"\x89PNGpage1".to_vec());
+        pages.insert((card.id.clone(), pdf_id.clone(), 2), b"\x89PNGpage2".to_vec());
     }
 
     let mut cfg = Config {
@@ -1655,8 +1838,13 @@ fn telegram_files_and_links_discovery_photo_send_fallback_and_redaction() {
     trigger_fop(&mut router, &mut cfg, &mut rt, 6, fop_buttons[2].1);
     assert_eq!(api.state.lock().unwrap().sent_documents.len(), 2);
     assert_eq!(api.state.lock().unwrap().sent_documents[1].filename, "report.pdf");
+    // Preview page 1 of PDF as photo via ppg:
+    let pdf_pick_num = fop_buttons[2].1.strip_prefix("fop:").unwrap();
+    trigger_fop(&mut router, &mut cfg, &mut rt, 60, &format!("ppg:{pdf_pick_num}:1"));
+    assert_eq!(api.state.lock().unwrap().sent_photos.len(), 2);
+    assert!(api.state.lock().unwrap().sent_photos[1].filename.contains("page-1"));
 
-    // 6. Small Markdown/text sends inline redacted; large text uploads redacted document.
+    // 6. Small Markdown/text sends inline redacted; large text starts inline multi-page preview with Next/Download buttons.
     trigger_fop(&mut router, &mut cfg, &mut rt, 7, fop_buttons[3].1);
     let inline_md = api.state.lock().unwrap().sent.last().unwrap().clone();
     assert!(inline_md.html.contains("NOTES.md"));
@@ -1664,11 +1852,430 @@ fn telegram_files_and_links_discovery_photo_send_fallback_and_redaction() {
     assert!(!inline_md.html.contains("sk-ant-"));
 
     trigger_fop(&mut router, &mut cfg, &mut rt, 8, fop_buttons[4].1);
+    {
+        let st = api.state.lock().unwrap();
+        let paged = st.sent.last().unwrap();
+        assert!(paged.html.contains("Page 1/2"));
+        assert!(paged.html.contains("[REDACTED]"));
+        assert!(!paged.html.contains("super_secret_value"));
+    }
+    let text_pick_num = fop_buttons[4].1.strip_prefix("fop:").unwrap();
+    trigger_fop(&mut router, &mut cfg, &mut rt, 80, &format!("tpg:{text_pick_num}:1"));
+    assert!(api.state.lock().unwrap().edited_msgs.last().unwrap().2.contains("Page 2/2"));
+
+    trigger_fop(&mut router, &mut cfg, &mut rt, 81, &format!("tdl:{text_pick_num}"));
     let st = api.state.lock().unwrap();
     assert_eq!(st.sent_documents.len(), 3);
     let doc_text = String::from_utf8_lossy(&st.sent_documents[2].bytes);
     assert!(!doc_text.contains("super_secret_value"));
     assert!(doc_text.contains("[REDACTED]"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn telegram_dashboard_typing_reactions_live_stream_and_quick_keys() {
+    let dir = scratch_dir("ui");
+    let api = MockApi::new();
+    let mut card = sample_card("sd_term_ui", "claude", false);
+    card.status = "WORKING".into();
+    card.label = "● WORKING".into();
+    let backend = MockBackend::new(vec![card.clone()]);
+    *backend.usage.lock().unwrap() = vec![ProviderUsageSummary {
+        id: "claude".into(),
+        name: "Claude".into(),
+        tier: "Max 5x".into(),
+        ready: true,
+        limits: vec![ProviderUsageLimit {
+            label: "Weekly (7-day)".into(),
+            percent_used: 0.18,
+            resets_at: String::new(),
+            used: None,
+            allowance: None,
+        }],
+        ..ProviderUsageSummary::default()
+    }];
+    backend
+        .screens
+        .lock()
+        .unwrap()
+        .insert(card.id.clone(), "step 1: building...".into());
+
+    let now = 1_700_000_000;
+    let mut cfg = Config {
+        enabled: true,
+        bot_token: "123:tok".into(),
+        bot_id: Some(999),
+        allowed_user: Some(AllowedUser {
+            user_id: 777,
+            chat_id: 777,
+            username: Some("owner".into()),
+            first_name: "Owner".into(),
+            paired_at: now,
+        }),
+        forum: Some(ForumConfig {
+            chat_id: -100555,
+            title: "Forum".into(),
+            linked_at: now,
+        }),
+        permissions: Permissions {
+            notifications: true,
+            read_output: true,
+            prompts: true,
+            controls: true,
+            ..Permissions::default()
+        },
+        ..Config::default()
+    };
+    let mut rt = RuntimeState::default();
+    topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], now, false);
+    let tid = rt.topic_for_card(&card.id).unwrap().thread_id;
+
+    // 1. General Dashboard creates & pins with card status + usage, and throttles edits (<6s skipped, >=6s applied).
+    let usage = backend.usage_summary();
+    assert!(topics::sync_dashboard(&api, &cfg, &mut rt, &[card.clone()], &usage, now, false));
+    let dash_id = rt.dashboard_message_id.expect("dashboard created");
+    assert!(rt.dashboard_pinned);
+    {
+        let st = api.state.lock().unwrap();
+        let dash = st.sent.iter().find(|m| m.thread_id.is_none() && m.html.contains("SUPER DESKTOP")).unwrap();
+        assert!(dash.html.contains("Claude"));
+        assert!(dash.html.contains("18%"));
+        assert!(dash.html.contains("82% left"));
+        assert!(dash.html.contains("█"));
+        assert!(dash.html.contains("░"));
+        assert!(st.pinned_msgs.contains(&(-100555, dash_id, true)));
+    }
+    card.status = "FINISHED".into();
+    card.label = "✓ FINISHED".into();
+    *backend.cards.lock().unwrap() = vec![card.clone()];
+    assert!(!topics::sync_dashboard(&api, &cfg, &mut rt, &[card.clone()], &usage, now + 2, false));
+    assert!(topics::sync_dashboard(&api, &cfg, &mut rt, &[card.clone()], &usage, now + 8, false));
+    assert!(api
+        .state
+        .lock()
+        .unwrap()
+        .edited_msgs
+        .iter()
+        .any(|(_, mid, html, _)| *mid == dash_id && html.contains("✅")));
+
+    // 2. Typing indicator fires for WORKING cards with >=4s cadence.
+    card.status = "WORKING".into();
+    card.label = "● WORKING".into();
+    *backend.cards.lock().unwrap() = vec![card.clone()];
+    let mut last_typing = HashMap::new();
+    topics::tick_typing_actions(&api, &cfg, &rt, &[card.clone()], now, &mut last_typing);
+    topics::tick_typing_actions(&api, &cfg, &rt, &[card.clone()], now + 2, &mut last_typing);
+    topics::tick_typing_actions(&api, &cfg, &rt, &[card.clone()], now + 5, &mut last_typing);
+    assert_eq!(api.state.lock().unwrap().chat_actions.len(), 2);
+    assert_eq!(api.state.lock().unwrap().chat_actions[0], (-100555, Some(tid), "typing".into()));
+
+    // 3. Forum topic prompts acknowledge silently with 👍 reaction without redundant text reply; falls back on error.
+    let mut router = Router::new(999, Some("sd_test_bot".into()), now);
+    let mut prompt_msg = text_msg(-100555, "supergroup", 777, 300, "check status", now);
+    prompt_msg.is_topic_message = Some(true);
+    prompt_msg.message_thread_id = Some(tid);
+    let sent_before = api.state.lock().unwrap().sent.len();
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 10,
+            message: Some(prompt_msg.clone()),
+            callback_query: None,
+        },
+        now,
+    );
+    assert_eq!(api.state.lock().unwrap().reactions, vec![(-100555, 300, "👍".into())]);
+    assert_eq!(api.state.lock().unwrap().sent.len(), sent_before);
+
+    api.state.lock().unwrap().fail_reactions = true;
+    prompt_msg.message_id = 301;
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 11,
+            message: Some(prompt_msg),
+            callback_query: None,
+        },
+        now,
+    );
+    assert_eq!(api.state.lock().unwrap().sent.len(), sent_before + 1);
+
+    // 4. Quick keys panel sends Tab/arrows + quick slash commands gated cleanly.
+    let mut keys_cmd = text_msg(-100555, "supergroup", 777, 302, "/keys", now);
+    keys_cmd.is_topic_message = Some(true);
+    keys_cmd.message_thread_id = Some(tid);
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 12,
+            message: Some(keys_cmd),
+            callback_query: None,
+        },
+        now,
+    );
+    let keys_kb = api.state.lock().unwrap().sent.last().unwrap().keyboard.clone().unwrap();
+    let key_labels: Vec<&str> = keys_kb
+        .inline_keyboard
+        .iter()
+        .flatten()
+        .map(|b| b.text.as_str())
+        .collect();
+    assert!(key_labels.contains(&"Tab") && key_labels.contains(&"/compact"));
+
+    let mut cq_msg = text_msg(-100555, "supergroup", 999, 303, "keys", now);
+    cq_msg.is_topic_message = Some(true);
+    cq_msg.message_thread_id = Some(tid);
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 13,
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "cq_tab".into(),
+                from: user(777),
+                message: Some(cq_msg.clone()),
+                data: Some(format!("key:t:{}", card.id)),
+            }),
+        },
+        now,
+    );
+    assert_eq!(backend.keys_sent.lock().unwrap().as_slice(), [(card.id.clone(), NamedKey::Tab)]);
+
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 14,
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "cq_slash".into(),
+                from: user(777),
+                message: Some(cq_msg),
+                data: Some(format!("qc:0:{}", card.id)),
+            }),
+        },
+        now,
+    );
+    assert!(backend.prompts_sent.lock().unwrap().iter().any(|(_, p)| p == "/compact"));
+
+    // 5. Live stream starts, edits on output change every >=4s, and auto-stops after idle threshold.
+    let mut live_cmd = text_msg(-100555, "supergroup", 777, 304, "/live", now);
+    live_cmd.is_topic_message = Some(true);
+    live_cmd.message_thread_id = Some(tid);
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 15,
+            message: Some(live_cmd),
+            callback_query: None,
+        },
+        now,
+    );
+    assert_eq!(rt.live_streams.len(), 1);
+    backend.screens.lock().unwrap().insert(card.id.clone(), "step 2: all tests passing".into());
+    assert!(!topics::tick_live_streams(&api, &backend, &cfg, &mut rt, &[card.clone()], now + 2));
+    assert!(topics::tick_live_streams(&api, &backend, &cfg, &mut rt, &[card.clone()], now + 5));
+    assert!(api.state.lock().unwrap().edited_msgs.last().unwrap().2.contains("step 2: all tests passing"));
+
+    card.status = "FINISHED".into();
+    card.label = "✓ FINISHED".into();
+    assert!(topics::tick_live_streams(&api, &backend, &cfg, &mut rt, &[card.clone()], now + 7));
+    assert_eq!(rt.live_streams.len(), 1);
+    assert!(topics::tick_live_streams(&api, &backend, &cfg, &mut rt, &[card], now + 30));
+    assert!(rt.live_streams.is_empty());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn telegram_usage_command_shows_weekly_allowance_progress_and_refreshes() {
+    let dir = scratch_dir("usage_cmd");
+    let api = MockApi::new();
+    let backend = MockBackend::new(vec![]);
+    let now = 1_700_000_000;
+    let mut cfg = Config {
+        enabled: true,
+        bot_token: "123:tok".into(),
+        bot_id: Some(999),
+        allowed_user: Some(AllowedUser {
+            user_id: 777,
+            chat_id: 777,
+            username: Some("owner".into()),
+            first_name: "Owner".into(),
+            paired_at: now,
+        }),
+        ..Config::default()
+    };
+    let mut rt = RuntimeState::default();
+
+    *backend.usage.lock().unwrap() = vec![
+        ProviderUsageSummary {
+            id: "codex".into(),
+            name: "Codex".into(),
+            tier: "Pro 100".into(),
+            ready: true,
+            limits: vec![ProviderUsageLimit {
+                label: "Weekly (7-day)".into(),
+                percent_used: 0.07,
+                resets_at: "2099-01-01T00:00:00Z".into(),
+                used: None,
+                allowance: None,
+            }],
+            today_tokens: 37_762_105,
+            ..ProviderUsageSummary::default()
+        },
+        ProviderUsageSummary {
+            id: "claude".into(),
+            name: "Claude".into(),
+            tier: "Max <5x>".into(),
+            ready: true,
+            limits: vec![
+                ProviderUsageLimit {
+                    label: "Session (5-hour)".into(),
+                    percent_used: 0.0,
+                    resets_at: String::new(),
+                    used: None,
+                    allowance: None,
+                },
+                ProviderUsageLimit {
+                    label: "Weekly (7-day)".into(),
+                    percent_used: 1.0,
+                    resets_at: String::new(),
+                    used: None,
+                    allowance: None,
+                },
+                ProviderUsageLimit {
+                    label: "Fable Weekly".into(),
+                    percent_used: 0.96,
+                    resets_at: String::new(),
+                    used: None,
+                    allowance: None,
+                },
+            ],
+            total_prompts: 2362,
+            total_sessions: 190,
+            ..ProviderUsageSummary::default()
+        },
+        ProviderUsageSummary {
+            id: "antigravity".into(),
+            name: "Antigravity".into(),
+            tier: "Google".into(),
+            ready: true,
+            limits: vec![ProviderUsageLimit {
+                label: "Thinking Models Quota".into(),
+                percent_used: 0.77,
+                resets_at: String::new(),
+                used: Some(77),
+                allowance: Some(100),
+            }],
+            ..ProviderUsageSummary::default()
+        },
+        ProviderUsageSummary {
+            id: "agy".into(),
+            name: "Gemini".into(),
+            tier: "Ultra".into(),
+            ready: true,
+            limits: vec![],
+            today_tokens: 138_468_542,
+            today_prompts: 26,
+            today_sessions: 3,
+            ..ProviderUsageSummary::default()
+        },
+        ProviderUsageSummary {
+            id: "opencode".into(),
+            name: "OpenCode".into(),
+            ready: true,
+            total_prompts: 133,
+            total_sessions: 40,
+            ..ProviderUsageSummary::default()
+        },
+    ];
+
+    let mut router = Router::new(999, Some("sd_test_bot".into()), now);
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 1,
+            message: Some(text_msg(777, "private", 777, 10, "/usage", now)),
+            callback_query: None,
+        },
+        now,
+    );
+
+    let sent = api.state.lock().unwrap().sent.last().unwrap().clone();
+    assert!(sent.html.contains("Codex"));
+    assert!(sent.html.contains("Claude"));
+    assert!(sent.html.contains("Max &lt;5x&gt;"));
+    assert!(sent.html.contains("Antigravity"));
+    assert!(sent.html.contains("Gemini"));
+    assert!(sent.html.contains("OpenCode"));
+    // Weekly limits are ordered ahead of Session (5-hour) for Claude.
+    let claude_weekly_pos = sent.html.find("Weekly (7-day)</b>\n<code>██████████</code>").unwrap();
+    let fable_weekly_pos = sent.html.find("Fable Weekly</b>\n<code>█████████░</code>").unwrap();
+    let claude_session_pos = sent.html.find("Session (5-hour)").unwrap();
+    assert!(claude_weekly_pos < claude_session_pos);
+    assert!(fable_weekly_pos < claude_session_pos);
+    assert!(sent.html.contains("77%</b> used (77/100) · 23% left"));
+    assert!(sent.html.contains("No weekly allowance reported"));
+    assert!(sent.html.contains("138.5M tokens"));
+    assert!(sent.html.contains("133 prompts · 40 sessions"));
+
+    let kb = sent.keyboard.unwrap();
+    assert_eq!(kb.inline_keyboard[0][0].callback_data.as_deref(), Some("usg:0"));
+
+    // Update provider usage and trigger usg:0 callback to refresh in place.
+    backend.usage.lock().unwrap()[0].limits[0].percent_used = 0.50;
+    router.handle_update(
+        &api,
+        &backend,
+        &dir,
+        &mut cfg,
+        &mut rt,
+        &Update {
+            update_id: 2,
+            message: None,
+            callback_query: Some(CallbackQuery {
+                id: "cq_usg".into(),
+                from: user(777),
+                message: Some(text_msg(777, "private", 999, 100, "usage", now)),
+                data: Some("usg:0".into()),
+            }),
+        },
+        now + 5,
+    );
+
+    let st = api.state.lock().unwrap();
+    let edited = st.edited_msgs.last().unwrap();
+    assert_eq!(edited.1, 100);
+    assert!(edited.2.contains("<code>█████░░░░░</code> <b>50%</b> used · 50% left"));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1685,6 +2292,10 @@ fn telegram_http_client_against_loopback_mock_server() {
         (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
         (400u16, "application/json", json!({"ok":false,"error_code":400,"description":"Bad Request: message to edit not found"}).to_string().into_bytes()),
         (200u16, "application/json", json!({"ok":true,"result":{"message_id":777,"chat":{"id":-1001,"type":"supergroup"},"date":1700000000}}).to_string().into_bytes()),
+        (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
+        (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
+        (200u16, "application/json", json!({"ok":true,"result":true}).to_string().into_bytes()),
+        (400u16, "application/json", json!({"ok":false,"error_code":400,"description":"Bad Request: TOPIC_ID_INVALID"}).to_string().into_bytes()),
         (429u16, "application/json", json!({"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":7}}).to_string().into_bytes()),
         (200u16, "application/octet-stream", b"hello-bytes".to_vec()),
         (200u16, "application/octet-stream", vec![b'x'; 200]),
@@ -1695,7 +2306,7 @@ fn telegram_http_client_against_loopback_mock_server() {
     let reqs_clone = Arc::clone(&recorded_reqs);
 
     let handle = std::thread::spawn(move || {
-        for stream in listener.incoming().take(9) {
+        for stream in listener.incoming().take(13) {
             let mut stream = stream.unwrap();
             let mut buf = Vec::new();
             let mut tmp = [0u8; 4096];
@@ -1756,9 +2367,20 @@ fn telegram_http_client_against_loopback_mock_server() {
 
     // sendPhoto multipart upload succeeds and delivers filename + raw bytes
     let sent_photo_id = client
-        .send_photo(-1001, Some(301), "shot.png", "image/png", b"PNGRAWDATA", Some("cap"))
+        .send_photo(-1001, Some(301), "shot.png", "image/png", b"PNGRAWDATA", Some("cap"), None)
         .unwrap();
     assert_eq!(sent_photo_id, 777);
+
+    // sendChatAction & setMessageReaction succeed
+    client.send_chat_action(-1001, Some(301), "typing").unwrap();
+    client.set_message_reaction(-1001, 777, "👍").unwrap();
+
+    // deleteForumTopic succeeds and maps TOPIC_ID_INVALID to TopicNotFound
+    client.delete_forum_topic(-1001, 301).unwrap();
+    assert_eq!(
+        client.delete_forum_topic(-1001, 999).unwrap_err(),
+        ApiError::TopicNotFound
+    );
 
     // 429 classified cleanly as RateLimited
     let err = client.get_updates(0, 1).unwrap_err();
@@ -1781,5 +2403,9 @@ fn telegram_http_client_against_loopback_mock_server() {
         .contains("content-type: multipart/form-data; boundary="));
     assert!(seen[5].1.contains("filename=\"shot.png\""));
     assert!(seen[5].1.contains("PNGRAWDATA"));
-    assert!(seen[7].0.contains("/file/bot123456:TESTTOKEN/photos/a.png"));
+    assert!(seen[6].0.contains("/bot123456:TESTTOKEN/sendChatAction"));
+    assert!(seen[7].0.contains("/bot123456:TESTTOKEN/setMessageReaction"));
+    assert!(seen[8].0.contains("/bot123456:TESTTOKEN/deleteForumTopic"));
+    assert!(seen[8].1.contains("\"message_thread_id\":301"));
+    assert!(seen[11].0.contains("/file/bot123456:TESTTOKEN/photos/a.png"));
 }

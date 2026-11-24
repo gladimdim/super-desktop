@@ -330,8 +330,8 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
     let archive_topics_toggle = switch_row(
         &forum_body,
         "telegram-archive-topics",
-        "Close topic when a card closes",
-        "Archive the card's Forum Topic automatically once the terminal is closed.",
+        "Delete topic when a card closes",
+        "Delete the card's Forum Topic automatically once the terminal is closed (falls back to archiving if Telegram denies deletion).",
     );
 
     // --- Section 4: Permissions ---

@@ -5,10 +5,11 @@ use super::config::{
     mask_token_in_text, save_config_at, save_runtime_at, state_dir, take_topic_sync_request_at,
     unix_now, Config, RuntimeState,
 };
-use super::desktop::{DesktopBackend, LiveDesktopBackend};
+use super::desktop::{DesktopBackend, LiveDesktopBackend, ProviderUsageSummary};
 use super::notifier::NotifierState;
 use super::router::{Router, BOT_COMMANDS};
 use super::topics;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::fd::AsRawFd;
@@ -107,12 +108,22 @@ fn reload_config_if_changed(
     }
     if guard.cfg.forum.is_some() && new_cfg.forum.is_none() {
         guard.runtime.topics.clear();
+        guard.runtime.dashboard_message_id = None;
+        guard.runtime.dashboard_pinned = false;
+        guard.runtime.last_dashboard_card = None;
+        guard.runtime.last_dashboard_edit_at = 0;
+        guard.runtime.live_streams.clear();
         runtime_dirty = true;
     }
     if new_cfg.allowed_user.is_none() {
         guard.runtime.active_card_id = None;
         guard.runtime.topics.clear();
         guard.runtime.message_card_map.clear();
+        guard.runtime.dashboard_message_id = None;
+        guard.runtime.dashboard_pinned = false;
+        guard.runtime.last_dashboard_card = None;
+        guard.runtime.last_dashboard_edit_at = 0;
+        guard.runtime.live_streams.clear();
         runtime_dirty = true;
     }
     guard.cfg = new_cfg;
@@ -204,9 +215,20 @@ pub fn serve() {
     let mut notifier = NotifierState::default();
     let backend = LiveDesktopBackend;
     let initial_cards = backend.list_cards();
-    let _ = notifier.tick(&client, &cfg, &mut runtime, &initial_cards);
+    let mut cached_usage: Vec<ProviderUsageSummary> = backend.usage_summary();
+    let mut last_usage_at = now;
+    let _ = notifier.tick(&client, &backend, &cfg, &mut runtime, &initial_cards);
     if cfg.forum.is_some() {
         let _ = topics::sync_topics(&client, &cfg, &mut runtime, &initial_cards, now, false);
+        let _ = topics::sync_dashboard(
+            &client,
+            &cfg,
+            &mut runtime,
+            &initial_cards,
+            &cached_usage,
+            now,
+            false,
+        );
     }
     router.bot_id = me.id;
     persist_status(&rt_path, &mut runtime, "running", cfg.bot_username.clone(), None);
@@ -323,6 +345,7 @@ pub fn serve() {
         });
 
     let sync_backend = LiveDesktopBackend;
+    let mut last_typing: HashMap<String, u64> = HashMap::new();
     while !stop.load(Ordering::SeqCst) && !SIGNAL_STOP.load(Ordering::SeqCst) {
         sleep_interruptible(2, &stop);
         if stop.load(Ordering::SeqCst) || SIGNAL_STOP.load(Ordering::SeqCst) {
@@ -332,6 +355,10 @@ pub fn serve() {
         let sync_requested = take_topic_sync_request_at(&dir);
         let cards = sync_backend.list_cards();
         let now = unix_now();
+        if sync_requested || now.saturating_sub(last_usage_at) >= 10 {
+            cached_usage = sync_backend.usage_summary();
+            last_usage_at = now;
+        }
 
         let mut guard = shared.lock().unwrap();
         let mut runtime_dirty = reload_config_if_changed(&mut guard, &cfg_path, &token, &client, &stop);
@@ -346,13 +373,44 @@ pub fn serve() {
                 guard.runtime = rt_copy;
                 runtime_dirty = true;
             }
+            let mut rt_copy = guard.runtime.clone();
+            if topics::sync_dashboard(
+                &client,
+                &cfg_copy,
+                &mut rt_copy,
+                &cards,
+                &cached_usage,
+                now,
+                sync_requested,
+            ) {
+                guard.runtime = rt_copy;
+                runtime_dirty = true;
+            }
+            topics::tick_typing_actions(
+                &client,
+                &cfg_copy,
+                &guard.runtime,
+                &cards,
+                now,
+                &mut last_typing,
+            );
+        }
+
+        if !guard.runtime.live_streams.is_empty() {
+            let cfg_copy = guard.cfg.clone();
+            let mut rt_copy = guard.runtime.clone();
+            if topics::tick_live_streams(&client, &sync_backend, &cfg_copy, &mut rt_copy, &cards, now)
+            {
+                guard.runtime = rt_copy;
+                runtime_dirty = true;
+            }
         }
 
         {
             let cfg_copy = guard.cfg.clone();
             let mut rt_copy = guard.runtime.clone();
             let mut notifier_copy = std::mem::take(&mut guard.notifier);
-            let notified = notifier_copy.tick(&client, &cfg_copy, &mut rt_copy, &cards);
+            let notified = notifier_copy.tick(&client, &sync_backend, &cfg_copy, &mut rt_copy, &cards);
             guard.notifier = notifier_copy;
             if notified {
                 guard.runtime = rt_copy;

@@ -11,6 +11,7 @@ pub const MAX_RUNTIME_BYTES: usize = 512 * 1024;
 pub const MAX_MESSAGE_CARD_MAP: usize = 256;
 pub const MAX_REJECTED_USERS: usize = 256;
 pub const MAX_TOPICS: usize = 256;
+pub const MAX_LIVE_STREAMS: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -115,6 +116,8 @@ pub struct TopicBinding {
     #[serde(default)]
     pub closed: bool,
     #[serde(default)]
+    pub delete_failed: bool,
+    #[serde(default)]
     pub deleted_in_telegram: bool,
     #[serde(default)]
     pub last_renamed_at: u64,
@@ -188,12 +191,40 @@ pub struct MessageCardRef {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+pub struct LiveStream {
+    pub card_id: String,
+    pub chat_id: i64,
+    #[serde(default)]
+    pub thread_id: Option<i64>,
+    pub message_id: i64,
+    #[serde(default)]
+    pub last_text: String,
+    #[serde(default)]
+    pub started_at: u64,
+    #[serde(default)]
+    pub last_edited_at: u64,
+    #[serde(default)]
+    pub idle_since: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct RuntimeState {
     pub update_offset: i64,
     pub active_card_id: Option<String>,
     pub topics: Vec<TopicBinding>,
     pub message_card_map: Vec<MessageCardRef>,
     pub worker_status: WorkerStatus,
+    #[serde(default)]
+    pub dashboard_message_id: Option<i64>,
+    #[serde(default)]
+    pub dashboard_pinned: bool,
+    #[serde(default)]
+    pub last_dashboard_card: Option<String>,
+    #[serde(default)]
+    pub last_dashboard_edit_at: u64,
+    #[serde(default)]
+    pub live_streams: Vec<LiveStream>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

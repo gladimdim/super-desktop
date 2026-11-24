@@ -91,6 +91,7 @@ impl UsageLimit {
 }
 
 pub struct ProviderUsage {
+    pub id: String,
     pub name: String,
     pub tier: String,
     pub ready: bool,
@@ -161,6 +162,25 @@ fn has_active_usage(value: &Value) -> bool {
         || opt_u64(value, "totalSessions").is_some_and(|n| n > 0)
 }
 
+const PRIMARY_USAGE_IDS: &[&str] = &["codex", "claude", "agy", "grok", "opencode"];
+const EXTRA_USAGE_IDS: &[&str] = &[
+    "fireworks",
+    "hermes",
+    "copilot",
+    "cursor",
+    "deepseek",
+    "kimi",
+    "qwen",
+    "ollama",
+    "openrouter",
+    "vibe",
+    "zai",
+    "devin",
+    "minimax",
+    "synthetic",
+    "local",
+];
+
 /// Public, allowlisted usage snapshots for the launcher header. Reads the
 /// collector cache only; credentials and arbitrary collector fields stay local.
 pub fn launcher_usage() -> Vec<Value> {
@@ -168,28 +188,10 @@ pub fn launcher_usage() -> Vec<Value> {
 }
 
 fn launcher_usage_in(dir: &std::path::Path) -> Vec<Value> {
-    const PRIMARY: &[&str] = &["codex", "claude", "agy", "grok", "opencode"];
-    const EXTRA: &[&str] = &[
-        "fireworks",
-        "hermes",
-        "copilot",
-        "cursor",
-        "deepseek",
-        "kimi",
-        "qwen",
-        "ollama",
-        "openrouter",
-        "vibe",
-        "zai",
-        "devin",
-        "minimax",
-        "synthetic",
-        "local",
-    ];
     let dir = dir.to_path_buf();
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for &id in PRIMARY {
+    for &id in PRIMARY_USAGE_IDS {
         if let Some((resolved, value)) = read_usage_value(&dir, id) {
             seen.insert(resolved);
             if let Some(snapshot) = launcher_usage_snapshot(resolved, &value) {
@@ -197,7 +199,7 @@ fn launcher_usage_in(dir: &std::path::Path) -> Vec<Value> {
             }
         }
     }
-    for &id in EXTRA {
+    for &id in EXTRA_USAGE_IDS {
         if seen.contains(id) {
             continue;
         }
@@ -210,6 +212,40 @@ fn launcher_usage_in(dir: &std::path::Path) -> Vec<Value> {
         seen.insert(resolved);
         if let Some(snapshot) = launcher_usage_snapshot(resolved, &value) {
             out.push(snapshot);
+        }
+    }
+    out
+}
+
+/// Read all active local provider usage records (never filtered to the phone bridge subset).
+pub fn all_provider_usage() -> Vec<ProviderUsage> {
+    all_provider_usage_in(&usage_dir())
+}
+
+fn all_provider_usage_in(dir: &std::path::Path) -> Vec<ProviderUsage> {
+    let dir = dir.to_path_buf();
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for &id in PRIMARY_USAGE_IDS.iter().chain(EXTRA_USAGE_IDS.iter()) {
+        if seen.contains(id) {
+            continue;
+        }
+        let Some((resolved, value)) = read_usage_value(&dir, id) else {
+            continue;
+        };
+        if !seen.insert(resolved) || !has_active_usage(&value) {
+            continue;
+        }
+        let parsed = parse_provider_usage(resolved, &value);
+        let has_content = !parsed.limits.is_empty()
+            || parsed.today_tokens > 0
+            || parsed.today_prompts > 0
+            || parsed.today_sessions > 0
+            || parsed.total_prompts > 0
+            || parsed.total_sessions > 0
+            || !parsed.status_text.is_empty();
+        if has_content {
+            out.push(parsed);
         }
     }
     out
@@ -288,21 +324,32 @@ fn load_usage_in(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
         v.is_object().then_some(v)
     };
     let v = parse(id).or_else(|| usage_fallback_id(id).and_then(parse))?;
+    Some(parse_provider_usage(id, &v))
+}
 
+fn parse_provider_usage(id: &str, v: &Value) -> ProviderUsage {
     let mut limits = Vec::new();
     if let Some(arr) = v.get("limits").and_then(|l| l.as_array()) {
-        for item in arr.iter().take(4) {
+        for item in arr.iter().take(6) {
+            let used = opt_u64(item, "used");
+            let allowance = opt_u64(item, "allowance");
+            let percent = match item
+                .get("percent")
+                .and_then(|x| x.as_f64())
+                .filter(|p| p.is_finite())
+            {
+                Some(p) => p.clamp(0.0, 1.0),
+                None => match (used, allowance) {
+                    (Some(u), Some(a)) if a > 0 => (u as f64 / a as f64).clamp(0.0, 1.0),
+                    _ => continue,
+                },
+            };
             let label = item
                 .get("label")
                 .or_else(|| item.get("title"))
                 .and_then(|x| x.as_str())
                 .unwrap_or("Limit")
                 .to_string();
-            let percent = item
-                .get("percent")
-                .and_then(|x| x.as_f64())
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0);
             limits.push(UsageLimit {
                 label,
                 percent_used: percent,
@@ -311,34 +358,35 @@ fn load_usage_in(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
                     .and_then(|x| x.as_str())
                     .unwrap_or("")
                     .to_string(),
-                used: opt_u64(item, "used"),
-                allowance: opt_u64(item, "allowance"),
+                used,
+                allowance,
             });
         }
     }
 
-    Some(ProviderUsage {
+    ProviderUsage {
+        id: id.to_string(),
         name: {
-            let n = get_str(&v, "name");
+            let n = get_str(v, "name");
             if n.is_empty() {
                 id.to_string()
             } else {
                 n
             }
         },
-        tier: get_str(&v, "tierLabel"),
+        tier: get_str(v, "tierLabel"),
         ready: v.get("ready").and_then(|x| x.as_bool()).unwrap_or(false),
         limits,
-        today_prompts: get_u64(&v, "todayPrompts"),
-        today_sessions: get_u64(&v, "todaySessions"),
-        today_tokens: get_u64(&v, "todayTotalTokens"),
-        total_prompts: get_u64(&v, "totalPrompts"),
-        total_sessions: get_u64(&v, "totalSessions"),
-        model_tokens: sum_model_tokens(&v),
-        status_text: get_str(&v, "usageStatusText"),
-        auth_help: get_str(&v, "authHelpText"),
-        updated_at: get_str(&v, "updatedAt"),
-    })
+        today_prompts: get_u64(v, "todayPrompts"),
+        today_sessions: get_u64(v, "todaySessions"),
+        today_tokens: get_u64(v, "todayTotalTokens"),
+        total_prompts: get_u64(v, "totalPrompts"),
+        total_sessions: get_u64(v, "totalSessions"),
+        model_tokens: sum_model_tokens(v),
+        status_text: get_str(v, "usageStatusText"),
+        auth_help: get_str(v, "authHelpText"),
+        updated_at: get_str(v, "updatedAt"),
+    }
 }
 
 /// 1250 -> "1.2K", 2_400_000 -> "2.4M", 3_100_000_000 -> "3.1B".
@@ -735,5 +783,50 @@ mod tests {
         for value in ["2026-09-19", "2026-13-19T08:10:41Z", "2026-09-19T25:10:41Z", "08:10:41"] {
             assert_eq!(parse_iso_to_epoch(value), None, "{value:?}");
         }
+    }
+
+    #[test]
+    fn all_provider_usage_reads_tiers_limits_and_skips_inactive() {
+        let dir = std::env::temp_dir().join(format!(
+            "sd-all-usage-test-{}",
+            crate::tmux::unique_session_name()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(
+            dir.join("codex.json"),
+            r#"{"name":"Codex","tierLabel":"Pro 100","ready":true,"todayTotalTokens":500,"limits":[{"label":"Weekly (7-day)","percent":0.07,"resetsAt":"2026-11-29T17:09:42Z"}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("claude.json"),
+            r#"{"name":"Claude","tierLabel":"Max 5x","ready":true,"limits":[{"label":"Session (5-hour)","percent":0.1},{"label":"Weekly (7-day)","percent":0.96},{"label":"MissingPercent"},{"title":"Derived","used":77,"allowance":100}]}"#,
+        )
+        .unwrap();
+        // Ready=false and zero activity -> skipped even if primary id.
+        fs::write(
+            dir.join("grok.json"),
+            r#"{"name":"Grok","ready":false,"todayPrompts":0,"totalPrompts":0,"limits":[]}"#,
+        )
+        .unwrap();
+        // Extra active provider included.
+        fs::write(
+            dir.join("local.json"),
+            r#"{"name":"Local models","ready":true,"totalPrompts":3,"limits":[]}"#,
+        )
+        .unwrap();
+
+        let items = all_provider_usage_in(&dir);
+        let ids: Vec<_> = items.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["codex", "claude", "local"]);
+        assert_eq!(items[0].tier, "Pro 100");
+        assert_eq!(items[0].today_tokens, 500);
+        assert_eq!(items[1].limits.len(), 3);
+        assert_eq!(items[1].limits[2].label, "Derived");
+        assert!((items[1].limits[2].percent_used - 0.77).abs() < 1e-6);
+        assert_eq!(items[1].limits[2].used, Some(77));
+        assert_eq!(items[1].limits[2].allowance, Some(100));
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

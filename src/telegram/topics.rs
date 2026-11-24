@@ -1,23 +1,43 @@
-//! Forum Topics synchronization (1 card = 1 Telegram Forum Topic) and shared keyboards.
+//! Forum Topics synchronization (1 card = 1 Telegram Forum Topic), live Dashboard,
+//! live screen streaming, and shared keyboards.
 use super::api::{ApiError, InlineButton, InlineKeyboardMarkup, TelegramApi};
-use super::config::{Config, Permissions, RuntimeState, TopicBinding, MAX_TOPICS};
-use super::desktop::CardSummary;
-use super::redact::{escape_html, status_emoji, tag_to_topic_color, topic_title};
+use super::config::{Config, LiveStream, Permissions, RuntimeState, TopicBinding, MAX_TOPICS};
+use super::desktop::{CardSummary, DesktopBackend, ProviderUsageLimit, ProviderUsageSummary};
+use super::redact::{
+    escape_html, sanitize_terminal_text, status_emoji, tag_to_topic_color, topic_title,
+    truncate_chars,
+};
+use std::collections::HashMap;
 
 pub const TOPIC_RENAME_MIN_INTERVAL_SECS: u64 = 60;
 pub const TOPIC_STATUS_DEBOUNCE_SECS: u64 = 4;
 pub const TOPIC_STATUS_RENAME_COOLDOWN_SECS: u64 = 10;
+pub const DASHBOARD_MIN_INTERVAL_SECS: u64 = 6;
+pub const LIVE_EDIT_INTERVAL_SECS: u64 = 4;
+pub const LIVE_IDLE_STOP_SECS: u64 = 20;
+pub const LIVE_MAX_DURATION_SECS: u64 = 600;
+pub const TYPING_ACTION_INTERVAL_SECS: u64 = 4;
+
+pub fn quick_slash_commands(agent_type: &str) -> &'static [&'static str] {
+    match agent_type {
+        "agy" | "antigravity" => &["/resume", "/compact", "/clear"],
+        "grok" => &["/minimal", "/clear"],
+        _ => &["/compact", "/clear", "/status"],
+    }
+}
 
 pub fn card_action_keyboard(card: &CardSummary, perms: Permissions) -> Option<InlineKeyboardMarkup> {
     let mut row1 = Vec::new();
     if perms.read_output {
         row1.push(InlineButton::callback("📷 Screen", format!("scr:{}", card.id)));
         row1.push(InlineButton::callback("📜 History", format!("his:{}", card.id)));
+        row1.push(InlineButton::callback("📺 Live", format!("liv:{}", card.id)));
         row1.push(InlineButton::callback("📎 Files", format!("fil:{}", card.id)));
     }
     let can_control = perms.controls && (!card.is_shell || perms.shell_input);
     let mut row2 = Vec::new();
     if can_control {
+        row2.push(InlineButton::callback("⌨ Keys", format!("kyp:{}", card.id)));
         row2.push(InlineButton::callback("⏎ Enter", format!("key:e:{}", card.id)));
         row2.push(InlineButton::callback("⛔ Ctrl-C", format!("key:c:{}", card.id)));
     }
@@ -57,6 +77,44 @@ pub fn waiting_keyboard(card: &CardSummary, perms: Permissions) -> Option<Inline
             InlineButton::callback("📷 Screen", format!("scr:{}", card.id)),
             InlineButton::callback("📎 Files", format!("fil:{}", card.id)),
         ]);
+    }
+    (!rows.is_empty()).then_some(InlineKeyboardMarkup {
+        inline_keyboard: rows,
+    })
+}
+
+pub fn quick_keys_keyboard(card: &CardSummary, perms: Permissions) -> Option<InlineKeyboardMarkup> {
+    let mut rows = Vec::new();
+    let can_control = perms.controls && (!card.is_shell || perms.shell_input);
+    if can_control {
+        rows.push(vec![
+            InlineButton::callback("Yes", format!("key:y:{}", card.id)),
+            InlineButton::callback("No", format!("key:n:{}", card.id)),
+            InlineButton::callback("1", format!("key:1:{}", card.id)),
+            InlineButton::callback("2", format!("key:2:{}", card.id)),
+            InlineButton::callback("3", format!("key:3:{}", card.id)),
+        ]);
+        rows.push(vec![
+            InlineButton::callback("↑", format!("key:u:{}", card.id)),
+            InlineButton::callback("↓", format!("key:d:{}", card.id)),
+            InlineButton::callback("Tab", format!("key:t:{}", card.id)),
+            InlineButton::callback("⇧Tab", format!("key:b:{}", card.id)),
+        ]);
+        rows.push(vec![
+            InlineButton::callback("⏎ Enter", format!("key:e:{}", card.id)),
+            InlineButton::callback("Esc", format!("key:x:{}", card.id)),
+            InlineButton::callback("⛔ Ctrl-C", format!("key:c:{}", card.id)),
+        ]);
+    }
+    if !card.is_shell && perms.prompts {
+        let slash_row: Vec<InlineButton> = quick_slash_commands(&card.agent_type)
+            .iter()
+            .enumerate()
+            .map(|(idx, cmd)| InlineButton::callback(*cmd, format!("qc:{idx}:{}", card.id)))
+            .collect();
+        if !slash_row.is_empty() {
+            rows.push(slash_row);
+        }
     }
     (!rows.is_empty()).then_some(InlineKeyboardMarkup {
         inline_keyboard: rows,
@@ -108,6 +166,509 @@ fn format_closed_topic_header_html(topic_name: &str) -> String {
         "🛑 <b>{}</b>\nStatus: <b>Closed on PC</b>",
         escape_html(topic_name)
     )
+}
+
+/// Sanitize raw terminal text and keep its trailing lines bounded cleanly.
+pub fn tail_output_snippet(
+    raw: &str,
+    bot_token: &str,
+    redact_secrets: bool,
+    max_lines: usize,
+    max_chars: usize,
+) -> Option<String> {
+    let clean = sanitize_terminal_text(raw, bot_token, redact_secrets);
+    let mut lines: Vec<&str> = clean.lines().collect();
+    while lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines.len().saturating_sub(max_lines.max(1));
+    let joined = lines[start..].join("\n");
+    let count = joined.chars().count();
+    if count <= max_chars {
+        return Some(joined);
+    }
+    let keep = max_chars.saturating_sub(1).max(1);
+    let byte_start = joined
+        .char_indices()
+        .rev()
+        .nth(keep.saturating_sub(1))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    Some(format!("…{}", &joined[byte_start..]))
+}
+
+pub fn render_progress_bar(percent_used: f64, width: usize) -> String {
+    let width = width.max(1);
+    let clamped = percent_used.clamp(0.0, 1.0);
+    let mut filled = (clamped * width as f64).round() as usize;
+    if clamped >= 0.995 {
+        filled = width;
+    } else if filled >= width && width > 1 {
+        filled = width - 1;
+    }
+    format!("{}{}", "█".repeat(filled), "░".repeat(width - filled))
+}
+
+pub fn usage_level_emoji(percent_used: f64) -> &'static str {
+    let left = 1.0 - percent_used.clamp(0.0, 1.0);
+    if left < 0.05 {
+        "🔴"
+    } else if left < 0.20 {
+        "🟡"
+    } else {
+        "🟢"
+    }
+}
+
+fn ordered_limits(limits: &[ProviderUsageLimit]) -> Vec<&ProviderUsageLimit> {
+    let mut out: Vec<&ProviderUsageLimit> = limits.iter().filter(|l| l.is_weekly()).collect();
+    out.extend(limits.iter().filter(|l| !l.is_weekly()));
+    out
+}
+
+fn format_limit_progress_line(lim: &ProviderUsageLimit) -> String {
+    let bar = render_progress_bar(lim.percent_used, 10);
+    let used_pct = lim.used_percent_int();
+    let left_pct = lim.left_percent_int();
+    let counts = match (lim.used, lim.allowance) {
+        (Some(used), Some(allow)) if allow > 0 => format!(" ({used}/{allow})"),
+        _ => String::new(),
+    };
+    let reset_txt = crate::usage::format_reset_in(&lim.resets_at);
+    let reset_part = if reset_txt.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", escape_html(&reset_txt))
+    };
+    format!("<code>{bar}</code> <b>{used_pct}%</b> used{counts} · {left_pct}% left{reset_part}")
+}
+
+fn plural_suffix(n: u64) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+fn format_activity_line(p: &ProviderUsageSummary) -> Option<String> {
+    if p.today_tokens > 0 || p.today_prompts > 0 || p.today_sessions > 0 {
+        let mut parts = Vec::new();
+        if p.today_tokens > 0 {
+            parts.push(format!("{} tokens", crate::usage::format_tokens(p.today_tokens)));
+        }
+        if p.today_prompts > 0 {
+            parts.push(format!("{} prompt{}", p.today_prompts, plural_suffix(p.today_prompts)));
+        }
+        if p.today_sessions > 0 {
+            parts.push(format!("{} session{}", p.today_sessions, plural_suffix(p.today_sessions)));
+        }
+        Some(format!("Today: {}", parts.join(" · ")))
+    } else if p.total_prompts > 0 || p.total_sessions > 0 {
+        let mut parts = Vec::new();
+        if p.total_prompts > 0 {
+            parts.push(format!("{} prompt{}", p.total_prompts, plural_suffix(p.total_prompts)));
+        }
+        if p.total_sessions > 0 {
+            parts.push(format!("{} session{}", p.total_sessions, plural_suffix(p.total_sessions)));
+        }
+        Some(format!("Lifetime: {}", parts.join(" · ")))
+    } else {
+        None
+    }
+}
+
+pub fn format_usage_html(usage: &[ProviderUsageSummary]) -> String {
+    if usage.is_empty() {
+        return "📊 <b>Provider Usage</b>\n\n<i>No provider usage data cached yet.</i>".to_string();
+    }
+    let mut out = String::from("📊 <b>Provider Usage &amp; Weekly Allowance</b>");
+    for p in usage.iter().take(12) {
+        out.push_str(&format!("\n\n<b>{}</b>", escape_html(&p.name)));
+        if !p.tier.is_empty() {
+            out.push_str(&format!(" <i>({})</i>", escape_html(&p.tier)));
+        }
+        if !p.limits.is_empty() {
+            for lim in ordered_limits(&p.limits) {
+                let dot = usage_level_emoji(lim.percent_used);
+                out.push_str(&format!(
+                    "\n{dot} <b>{}</b>\n{}",
+                    escape_html(&lim.label),
+                    format_limit_progress_line(lim)
+                ));
+            }
+        } else {
+            let status = if p.status_text.is_empty() {
+                "No weekly allowance reported"
+            } else {
+                p.status_text.as_str()
+            };
+            out.push_str(&format!("\n⚪ <i>{}</i>", escape_html(status)));
+        }
+        if let Some(act) = format_activity_line(p) {
+            out.push_str(&format!("\n<i>{}</i>", escape_html(&act)));
+        }
+    }
+    if usage.len() > 12 {
+        out.push_str(&format!(
+            "\n\n<i>…and {} more provider(s).</i>",
+            usage.len() - 12
+        ));
+    }
+    out
+}
+
+pub fn usage_keyboard() -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup {
+        inline_keyboard: vec![vec![InlineButton::callback("🔄 Refresh", "usg:0")]],
+    }
+}
+
+pub fn format_dashboard_html(cards: &[CardSummary], usage: &[ProviderUsageSummary]) -> String {
+    let mut out = format!("⚡ <b>SUPER DESKTOP</b> · <b>{}</b> active card(s)", cards.len());
+    if cards.is_empty() {
+        out.push_str("\n\n<i>No running terminal cards. Use /new to launch one.</i>");
+    } else {
+        out.push('\n');
+        for card in cards.iter().take(20) {
+            let dot = status_emoji(&card.status);
+            let model_part = card
+                .model
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .map(|m| format!(" · {}", escape_html(&truncate_chars(m, 24))))
+                .unwrap_or_default();
+            let prompt_part = card
+                .title
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| format!("\n   <i>{}</i>", escape_html(&truncate_chars(t, 44))))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "\n{dot} {} <b>{}</b> · <code>{}</code> · <b>{}</b>{}{}",
+                escape_html(&card.icon),
+                escape_html(&card.agent_name),
+                escape_html(&card.directory_display),
+                escape_html(&card.label),
+                model_part,
+                prompt_part
+            ));
+        }
+        if cards.len() > 20 {
+            out.push_str(&format!("\n<i>…and {} more card(s).</i>", cards.len() - 20));
+        }
+    }
+
+    let dash_usage: Vec<&ProviderUsageSummary> = usage
+        .iter()
+        .filter(|p| !p.limits.is_empty() || p.today_tokens > 0)
+        .take(6)
+        .collect();
+    if !dash_usage.is_empty() {
+        out.push_str("\n\n<b>Usage:</b>");
+        for provider in dash_usage {
+            let ordered = ordered_limits(&provider.limits);
+            if let Some(lim) = ordered.first() {
+                let dot = usage_level_emoji(lim.percent_used);
+                let bar = render_progress_bar(lim.percent_used, 8);
+                let used_pct = lim.used_percent_int();
+                let left_pct = lim.left_percent_int();
+                let reset_txt = crate::usage::format_reset_in(&lim.resets_at);
+                let reset_part = if reset_txt.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", escape_html(&reset_txt))
+                };
+                out.push_str(&format!(
+                    "\n• <b>{}</b>: {dot} <code>{bar}</code> <b>{used_pct}%</b> used ({left_pct}% left{reset_part}) · {}",
+                    escape_html(&provider.name),
+                    escape_html(&lim.label)
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n• <b>{}</b>: {} tokens today",
+                    escape_html(&provider.name),
+                    escape_html(&crate::usage::format_tokens(provider.today_tokens))
+                ));
+            }
+        }
+    }
+    out
+}
+
+pub fn dashboard_keyboard(perms: Permissions, has_forum: bool) -> InlineKeyboardMarkup {
+    let mut row = Vec::new();
+    if perms.launch {
+        row.push(InlineButton::callback("➕ New", "nwo:0"));
+    }
+    if has_forum {
+        row.push(InlineButton::callback("🔄 Sync", "syn:0"));
+    }
+    row.push(InlineButton::callback("🔄 Refresh", "dsh:0"));
+    InlineKeyboardMarkup {
+        inline_keyboard: vec![row],
+    }
+}
+
+pub fn sync_dashboard(
+    api: &dyn TelegramApi,
+    cfg: &Config,
+    runtime: &mut RuntimeState,
+    cards: &[CardSummary],
+    usage: &[ProviderUsageSummary],
+    now_unix: u64,
+    force: bool,
+) -> bool {
+    let Some(forum) = cfg.forum.as_ref() else {
+        return false;
+    };
+    let html = format_dashboard_html(cards, usage);
+    let kb = dashboard_keyboard(cfg.permissions, true);
+    let fp = status_card_fingerprint(&html, Some(&kb));
+    let mut changed = false;
+
+    match runtime.dashboard_message_id {
+        Some(msg_id) => {
+            if !runtime.dashboard_pinned {
+                match api.pin_chat_message(forum.chat_id, msg_id, true) {
+                    Ok(()) | Err(ApiError::BadRequest(_)) => {
+                        runtime.dashboard_pinned = true;
+                        changed = true;
+                    }
+                    Err(ApiError::MessageNotFound) => {
+                        runtime.dashboard_message_id = None;
+                        runtime.dashboard_pinned = false;
+                        runtime.last_dashboard_card = Some(String::new());
+                        changed = true;
+                    }
+                    Err(_) => {}
+                }
+            }
+            if let Some(msg_id) = runtime.dashboard_message_id {
+                let due = force
+                    || now_unix.saturating_sub(runtime.last_dashboard_edit_at)
+                        >= DASHBOARD_MIN_INTERVAL_SECS;
+                if due && runtime.last_dashboard_card.as_deref() != Some(fp.as_str()) {
+                    match api.edit_message_text(forum.chat_id, msg_id, &html, Some(&kb)) {
+                        Ok(()) => {
+                            runtime.last_dashboard_card = Some(fp);
+                            runtime.last_dashboard_edit_at = now_unix;
+                            changed = true;
+                        }
+                        Err(ApiError::MessageNotFound) => {
+                            runtime.dashboard_message_id = None;
+                            runtime.dashboard_pinned = false;
+                            runtime.last_dashboard_card = Some(String::new());
+                            changed = true;
+                        }
+                        Err(ApiError::RateLimited { retry_after }) => {
+                            runtime.last_dashboard_edit_at =
+                                now_unix.saturating_add(retry_after.max(5));
+                            changed = true;
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        None => {
+            let should_create = runtime.last_dashboard_card.is_none() || force;
+            if should_create {
+                if let Ok(msg_id) = api.send_message(forum.chat_id, None, &html, None, Some(&kb)) {
+                    let _ = api.pin_chat_message(forum.chat_id, msg_id, true);
+                    runtime.dashboard_message_id = Some(msg_id);
+                    runtime.dashboard_pinned = true;
+                    runtime.last_dashboard_card = Some(fp);
+                    runtime.last_dashboard_edit_at = now_unix;
+                    changed = true;
+                }
+            }
+        }
+    }
+
+    changed
+}
+
+pub fn format_live_message_html(card: &CardSummary, snippet: &str) -> String {
+    let dot = status_emoji(&card.status);
+    format!(
+        "📺 <b>Live</b> · {dot} {} <b>{}</b> · <b>{}</b>\n<pre><code>{}</code></pre>",
+        escape_html(&card.icon),
+        escape_html(&card.agent_name),
+        escape_html(&card.label),
+        escape_html(snippet)
+    )
+}
+
+pub fn live_stream_keyboard(card: &CardSummary, perms: Permissions) -> InlineKeyboardMarkup {
+    let mut row = vec![InlineButton::callback("⏸ Stop live", format!("lst:{}", card.id))];
+    let can_control = perms.controls && (!card.is_shell || perms.shell_input);
+    if can_control {
+        row.push(InlineButton::callback("⛔ Ctrl-C", format!("key:c:{}", card.id)));
+    }
+    InlineKeyboardMarkup {
+        inline_keyboard: vec![row],
+    }
+}
+
+pub fn tick_live_streams(
+    api: &dyn TelegramApi,
+    backend: &dyn DesktopBackend,
+    cfg: &Config,
+    runtime: &mut RuntimeState,
+    cards: &[CardSummary],
+    now_unix: u64,
+) -> bool {
+    if runtime.live_streams.is_empty() {
+        return false;
+    }
+    let mut changed = false;
+
+    if !cfg.permissions.read_output {
+        for stream in runtime.live_streams.drain(..) {
+            let kb = InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![InlineButton::callback(
+                    "📷 Screen",
+                    format!("scr:{}", stream.card_id),
+                )]],
+            };
+            let _ = api.edit_message_text(
+                stream.chat_id,
+                stream.message_id,
+                "📺 <b>Live stopped</b> (<i>Read terminal output</i> disabled in Settings).",
+                Some(&kb),
+            );
+        }
+        return true;
+    }
+
+    let mut idx = 0usize;
+    while idx < runtime.live_streams.len() {
+        let stream: LiveStream = runtime.live_streams[idx].clone();
+        let card_opt = cards.iter().find(|c| c.id == stream.card_id);
+        let Some(card) = card_opt else {
+            let _ = api.edit_message_text(
+                stream.chat_id,
+                stream.message_id,
+                "📺 <b>Live ended</b> · Card closed on PC.",
+                None,
+            );
+            runtime.live_streams.remove(idx);
+            changed = true;
+            continue;
+        };
+
+        let active = card.status == "WORKING" || card.status == "WAITING";
+        if active {
+            if runtime.live_streams[idx].idle_since.is_some() {
+                runtime.live_streams[idx].idle_since = None;
+                changed = true;
+            }
+        } else if runtime.live_streams[idx].idle_since.is_none() {
+            runtime.live_streams[idx].idle_since = Some(now_unix);
+            changed = true;
+        }
+
+        let idle_elapsed = runtime.live_streams[idx]
+            .idle_since
+            .is_some_and(|since| now_unix.saturating_sub(since) >= LIVE_IDLE_STOP_SECS);
+        let expired = now_unix.saturating_sub(stream.started_at) >= LIVE_MAX_DURATION_SECS;
+
+        if idle_elapsed || expired {
+            let reason = if expired {
+                "10-minute live window ended"
+            } else {
+                "card idle"
+            };
+            let html = format!(
+                "📺 <b>Live ended</b> ({reason}) · {} {} · <b>{}</b>",
+                escape_html(&card.icon),
+                escape_html(&card.agent_name),
+                escape_html(&card.label)
+            );
+            let kb = InlineKeyboardMarkup {
+                inline_keyboard: vec![vec![
+                    InlineButton::callback("📺 Resume live", format!("liv:{}", card.id)),
+                    InlineButton::callback("📷 Screen", format!("scr:{}", card.id)),
+                ]],
+            };
+            let _ = api.edit_message_text(stream.chat_id, stream.message_id, &html, Some(&kb));
+            runtime.live_streams.remove(idx);
+            changed = true;
+            continue;
+        }
+
+        if now_unix.saturating_sub(stream.last_edited_at) < LIVE_EDIT_INTERVAL_SECS {
+            idx += 1;
+            continue;
+        }
+
+        let Ok(raw) = backend.capture_screen(&card.id, 0) else {
+            idx += 1;
+            continue;
+        };
+        let snippet = tail_output_snippet(&raw, &cfg.bot_token, cfg.permissions.redact_secrets, 30, 3200)
+            .unwrap_or_else(|| "(empty screen)".to_string());
+        let html = format_live_message_html(card, &snippet);
+        if html == stream.last_text {
+            idx += 1;
+            continue;
+        }
+        let kb = live_stream_keyboard(card, cfg.permissions);
+        match api.edit_message_text(stream.chat_id, stream.message_id, &html, Some(&kb)) {
+            Ok(()) => {
+                runtime.live_streams[idx].last_text = html;
+                runtime.live_streams[idx].last_edited_at = now_unix;
+                changed = true;
+                idx += 1;
+            }
+            Err(ApiError::TopicNotFound) | Err(ApiError::MessageNotFound) => {
+                runtime.live_streams.remove(idx);
+                changed = true;
+            }
+            Err(ApiError::RateLimited { retry_after }) => {
+                runtime.live_streams[idx].last_edited_at =
+                    now_unix.saturating_add(retry_after.max(5));
+                changed = true;
+                idx += 1;
+            }
+            Err(_) => {
+                idx += 1;
+            }
+        }
+    }
+
+    changed
+}
+
+pub fn tick_typing_actions(
+    api: &dyn TelegramApi,
+    cfg: &Config,
+    runtime: &RuntimeState,
+    cards: &[CardSummary],
+    now_unix: u64,
+    last_typing: &mut HashMap<String, u64>,
+) {
+    last_typing.retain(|id, _| cards.iter().any(|c| c.id == *id));
+    let Some(forum) = cfg.forum.as_ref() else {
+        return;
+    };
+    for card in cards {
+        if card.status != "WORKING" {
+            continue;
+        }
+        let Some(binding) = runtime
+            .topics
+            .iter()
+            .find(|t| t.card_id == card.id && !t.closed && !t.deleted_in_telegram)
+        else {
+            continue;
+        };
+        let last = last_typing.get(&card.id).copied().unwrap_or(0);
+        if now_unix.saturating_sub(last) >= TYPING_ACTION_INTERVAL_SECS {
+            let _ = api.send_chat_action(forum.chat_id, Some(binding.thread_id), "typing");
+            last_typing.insert(card.id.clone(), now_unix);
+        }
+    }
 }
 
 pub fn sync_topics(
@@ -164,6 +725,7 @@ pub fn sync_topics(
                     match api.reopen_forum_topic(forum.chat_id, thread_id) {
                         Ok(()) => {
                             runtime.topics[idx].closed = false;
+                            runtime.topics[idx].delete_failed = false;
                             changed = true;
                         }
                         Err(ApiError::TopicNotFound) => {
@@ -195,7 +757,6 @@ pub fn sync_topics(
                                 changed = true;
                             }
                             Err(ApiError::BadRequest(_)) => {
-                                // Missing pin permission etc. — don't retry every 2s.
                                 runtime.topics[idx].status_pinned = true;
                                 changed = true;
                             }
@@ -332,12 +893,40 @@ pub fn sync_topics(
         }
     }
 
-    for idx in 0..runtime.topics.len() {
+    let mut idx = 0usize;
+    while idx < runtime.topics.len() {
         let card_alive = cards.iter().any(|c| c.id == runtime.topics[idx].card_id);
-        if card_alive || runtime.topics[idx].closed || runtime.topics[idx].deleted_in_telegram {
+        if card_alive || runtime.topics[idx].deleted_in_telegram {
+            idx += 1;
             continue;
         }
+        let card_id = runtime.topics[idx].card_id.clone();
         let thread_id = runtime.topics[idx].thread_id;
+
+        if cfg.archive_closed_topics && !runtime.topics[idx].delete_failed {
+            match api.delete_forum_topic(forum.chat_id, thread_id) {
+                Ok(()) | Err(ApiError::TopicNotFound) => {
+                    runtime.topics.remove(idx);
+                    runtime.live_streams.retain(|s| s.card_id != card_id);
+                    runtime.message_card_map.retain(|m| m.card_id != card_id);
+                    changed = true;
+                    continue;
+                }
+                Err(ApiError::RateLimited { .. }) | Err(ApiError::Network(_)) => {
+                    idx += 1;
+                    continue;
+                }
+                Err(_) => {
+                    runtime.topics[idx].delete_failed = true;
+                    changed = true;
+                }
+            }
+        }
+
+        if runtime.topics[idx].closed {
+            idx += 1;
+            continue;
+        }
         if let Some(msg_id) = runtime.topics[idx].status_message_id {
             let closed_html = format_closed_topic_header_html(&runtime.topics[idx].topic_name);
             let closed_fp = status_card_fingerprint(&closed_html, None);
@@ -352,6 +941,7 @@ pub fn sync_topics(
                     Err(ApiError::TopicNotFound) => {
                         runtime.topics[idx].deleted_in_telegram = true;
                         changed = true;
+                        idx += 1;
                         continue;
                     }
                     Err(ApiError::MessageNotFound) => {
@@ -372,12 +962,12 @@ pub fn sync_topics(
                 None,
             ) {
                 Ok(msg_id) => {
-                    let card_id = runtime.topics[idx].card_id.clone();
                     runtime.record_message_card(forum.chat_id, msg_id, &card_id);
                 }
                 Err(ApiError::TopicNotFound) => {
                     runtime.topics[idx].deleted_in_telegram = true;
                     changed = true;
+                    idx += 1;
                     continue;
                 }
                 Err(_) => {}
@@ -395,7 +985,11 @@ pub fn sync_topics(
                 }
                 Err(_) => {}
             }
+        } else if !runtime.topics[idx].deleted_in_telegram {
+            runtime.topics[idx].closed = true;
+            changed = true;
         }
+        idx += 1;
     }
 
     if runtime.topics.len() > MAX_TOPICS {
@@ -446,6 +1040,7 @@ fn create_binding(
         topic_name: desired_name.to_string(),
         icon_color: color,
         closed: false,
+        delete_failed: false,
         deleted_in_telegram: false,
         last_renamed_at: now_unix,
         status_message_id,

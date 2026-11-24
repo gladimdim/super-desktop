@@ -61,11 +61,14 @@ Forum Topics turn a private 2-member Telegram supergroup into a live workspace w
 5. Your bot verifies that the chat is a Forum supergroup with `Manage Topics` enabled and at most 2 members, links the group, and syncs a color-tagged topic for each open card.
 
 **How Forum Topics behave:**
-- Messages you send inside a card's topic go straight to that terminal card.
-- Each topic's **pinned status header card** updates live in place (silently, with no chat spam) whenever the card's status, model, or prompt changes, and swaps its inline action buttons (for example `Yes`/`No`/`1`/`2` while `Waiting`, or `📷 Screen` / `📜 History` / `📎 Files` / `⏎ Enter` / `⛔ Ctrl-C` otherwise).
-- Tapping **📎 Files** (or sending `/files`) lists referenced images, animated GIFs, PDFs, Markdown/text files, and web links discovered from that card's terminal output (requires **Read terminal output**). Tapping a file sends it straight to the topic or chat (images as photos, GIFs as animations, PDFs as documents, short text/Markdown inline with secret redaction), and public links open directly from inline URL buttons.
+- Messages you send inside a card's topic go straight to that terminal card (acknowledged silently with a 👍 reaction inside Forum Topics, while showing a live `"typing…"` indicator whenever the card is working).
+- A **pinned live dashboard** in **General** summarizes every running card and your cached provider usage limits, with `[➕ New]`, `[🔄 Sync]`, and `[🔄 Refresh]` buttons (and `/dashboard` / `/usage` commands).
+- Each topic's **pinned status header card** updates live in place (silently, with no chat spam) whenever the card's status, model, or prompt changes, and swaps its inline action buttons (for example `Yes`/`No`/`1`/`2` while `Waiting`, or `📷 Screen` / `📜 History` / `📺 Live` / `📎 Files` / `⌨ Keys` / `⏎ Enter` / `⛔ Ctrl-C` otherwise).
+- When **Read terminal output** is enabled, `Waiting` and `Finished` alerts include sanitized trailing output lines right inside the alert, and tapping **📺 Live** (or `/live`) streams a single auto-updating `<pre>` output block every ~4 seconds while the agent is active.
+- Tapping **⌨ Keys** (or `/keys`) opens a quick keypad (`Yes`/`No`/`1`–`3`/`↑`/`↓`/`Tab`/`⇧Tab`/`Enter`/`Esc`/`Ctrl-C` plus harness slash shortcuts like `/resume`, `/compact`, `/clear`).
+- Tapping **📎 Files** (or sending `/files`) opens a filterable, paginated list (`All` / `🖼 Images` / `📄 Docs` / `🔗 Links`) of referenced files and links (requires **Read terminal output**): images send as photos, GIFs as animations, PDFs as documents with inline **`🖼 Preview page`** buttons, long text/Markdown pages inline with **`◀ Prev` / `Next ▶` / `📥 Download file`**, and public links open from inline URL buttons.
 - Each topic's title is prefixed with a live status indicator (`🟢` Working, `🟡` Waiting, `✅` Finished, `🔴` Error, `⚪` Idle, `⚫` Exited), debounced briefly so transient flickers do not clutter the topic with rename notices.
-- By default, **Auto-create a topic for each card** and **Close topic when a card closes** are enabled in **⚙ Settings → Telegram** (so new cards open topics and closed cards mark the header closed and archive their topics automatically).
+- By default, **Auto-create a topic for each card** and **Delete topic when a card closes** are enabled in **⚙ Settings → Telegram** (so new cards open topics and closed cards automatically delete their topics — falling back to archiving if Telegram denies deletion).
 - Use **Sync topics now** (or `/sync` in General) to force an immediate resync of topics with open cards.
 - Use **Unlink forum** in Settings (or `/unlinkforum`) to disconnect the group, or send `/unlink` inside a topic to unbind just that topic.
 
@@ -96,10 +99,14 @@ In **⚙ Settings → Telegram → Permissions**, dangerous actions default to *
 | Command | Action |
 | --- | --- |
 | `/cards` | List active terminal cards |
+| `/dashboard` | Show or refresh the live workspace & usage dashboard |
+| `/usage` | Show each provider's weekly allowance, progress bar, reset countdown &amp; activity |
 | `/status` | Show selected card status |
 | `/screen` | Capture current screen |
 | `/history` | Capture recent scrollback |
-| `/files` | List referenced images, files, and links |
+| `/live` | Stream live terminal output (4 s edits while active) |
+| `/keys` | Open Quick Keys & agent slash shortcuts (`↑`/`↓`/`Tab`/`⇧Tab`, `/resume`, `/compact`) |
+| `/files` | Filter & browse referenced images, PDFs, text files, and links |
 | `/new` | Launch a new harness card |
 | `/close` | Close selected card |
 | `/ctrlc` | Send Ctrl-C to selected card |
