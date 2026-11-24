@@ -707,6 +707,19 @@ impl SuperDesktopWindow {
                     let content = crate::usage::build_usage_content(&card);
                     pop_enter.set_child(Some(&content));
                     pop_enter.popup();
+                    if card.usage_id == "agy" {
+                        let pop_refresh = pop_enter.clone();
+                        let card_refresh = card.clone();
+                        glib::MainContext::default().spawn_local(async move {
+                            let updated =
+                                gtk4::gio::spawn_blocking(crate::antigravity_usage::refresh_if_stale)
+                                    .await;
+                            if updated.ok() == Some(true) && pop_refresh.is_visible() {
+                                let fresh = crate::usage::build_usage_content(&card_refresh);
+                                pop_refresh.set_child(Some(&fresh));
+                            }
+                        });
+                    }
                 });
                 let pop_leave = pop.clone();
                 motion.connect_leave(move |_| {

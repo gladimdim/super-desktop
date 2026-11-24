@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Everything the hover card needs to render itself as an expansion of the
 /// HUD button it hangs from.
+#[derive(Clone)]
 pub struct UsageCardInfo<'a> {
     pub usage_id: &'a str,
     pub agent_key: &'a str,
@@ -184,7 +185,15 @@ const EXTRA_USAGE_IDS: &[&str] = &[
 /// Public, allowlisted usage snapshots for the launcher header. Reads the
 /// collector cache only; credentials and arbitrary collector fields stay local.
 pub fn launcher_usage() -> Vec<Value> {
-    launcher_usage_in(&usage_dir())
+    if cfg!(not(test)) {
+        crate::antigravity_usage::refresh_async();
+    }
+    let dir = usage_dir();
+    let mut out = launcher_usage_in(&dir);
+    if let Some(live) = crate::antigravity_usage::cached_snapshot() {
+        apply_agy_live_to_snapshots(&mut out, &live);
+    }
+    out
 }
 
 fn launcher_usage_in(dir: &std::path::Path) -> Vec<Value> {
@@ -219,7 +228,21 @@ fn launcher_usage_in(dir: &std::path::Path) -> Vec<Value> {
 
 /// Read all active local provider usage records (never filtered to the phone bridge subset).
 pub fn all_provider_usage() -> Vec<ProviderUsage> {
-    all_provider_usage_in(&usage_dir())
+    if cfg!(not(test)) {
+        crate::antigravity_usage::refresh_async();
+    }
+    let mut out = all_provider_usage_in(&usage_dir());
+    if let Some(live) = crate::antigravity_usage::cached_snapshot() {
+        if let Some(pos) = out.iter().position(|p| p.id == "agy") {
+            let existing = out.remove(pos);
+            if let Some(updated) = apply_agy_live(Some(existing), Some(&live)) {
+                out.insert(pos, updated);
+            }
+        } else if let Some(added) = apply_agy_live(None, Some(&live)) {
+            out.push(added);
+        }
+    }
+    out
 }
 
 fn all_provider_usage_in(dir: &std::path::Path) -> Vec<ProviderUsage> {
@@ -314,7 +337,137 @@ fn sum_model_tokens(v: &Value) -> u64 {
 /// Load cached Omarchy usage data for a provider id. Pure file read, no
 /// network — safe to call on hover on the UI thread.
 pub fn load_usage(id: &str) -> Option<ProviderUsage> {
-    load_usage_in(&usage_dir(), id)
+    let dir = usage_dir();
+    if id == "agy" {
+        let direct = load_usage_direct(&dir, "agy");
+        if let Some(live) = crate::antigravity_usage::cached_snapshot() {
+            return apply_agy_live(direct, Some(&live));
+        }
+        if let Some(usage) = direct {
+            return Some(usage);
+        }
+    }
+    load_usage_in(&dir, id)
+}
+
+fn load_usage_direct(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
+    let content = fs::read_to_string(dir.join(format!("{id}.json"))).ok()?;
+    let v: Value = serde_json::from_str(&content).ok()?;
+    v.is_object().then(|| parse_provider_usage(id, &v))
+}
+
+fn live_limits_to_usage(limits: &[crate::antigravity_usage::LiveLimit]) -> Vec<UsageLimit> {
+    limits
+        .iter()
+        .map(|lim| UsageLimit {
+            label: lim.label.clone(),
+            percent_used: lim.percent_used.clamp(0.0, 1.0),
+            resets_at: lim.resets_at.clone(),
+            used: None,
+            allowance: None,
+        })
+        .collect()
+}
+
+fn is_newer_stamp(candidate: &str, current: &str) -> bool {
+    match (parse_iso_to_epoch(candidate), parse_iso_to_epoch(current)) {
+        (Some(a), Some(b)) => a >= b,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn apply_agy_live(
+    usage: Option<ProviderUsage>,
+    live: Option<&crate::antigravity_usage::LiveSnapshot>,
+) -> Option<ProviderUsage> {
+    let Some(snap) = live else {
+        return usage;
+    };
+    let live_limits = live_limits_to_usage(&snap.limits);
+    match usage {
+        Some(mut u) => {
+            u.name = "Antigravity".to_string();
+            if !live_limits.is_empty() {
+                u.limits = live_limits;
+                u.ready = true;
+                u.auth_help.clear();
+            }
+            if !snap.tier.is_empty() {
+                u.tier = snap.tier.clone();
+            }
+            if !snap.updated_at.is_empty() && is_newer_stamp(&snap.updated_at, &u.updated_at) {
+                u.updated_at = snap.updated_at.clone();
+            }
+            Some(u)
+        }
+        None => Some(ProviderUsage {
+            id: "agy".to_string(),
+            name: "Antigravity".to_string(),
+            tier: snap.tier.clone(),
+            ready: true,
+            limits: live_limits,
+            today_prompts: 0,
+            today_sessions: 0,
+            today_tokens: 0,
+            total_prompts: 0,
+            total_sessions: 0,
+            model_tokens: 0,
+            status_text: String::new(),
+            auth_help: String::new(),
+            updated_at: snap.updated_at.clone(),
+        }),
+    }
+}
+
+fn apply_agy_live_to_snapshots(
+    out: &mut Vec<Value>,
+    live: &crate::antigravity_usage::LiveSnapshot,
+) {
+    let limits_json: Vec<Value> = live
+        .limits
+        .iter()
+        .take(4)
+        .map(|lim| {
+            serde_json::json!({
+                "label": lim.label,
+                "percentUsed": lim.percent_used.clamp(0.0, 1.0),
+                "resetsAt": (!lim.resets_at.is_empty()).then_some(lim.resets_at.as_str()),
+                "used": Value::Null,
+                "allowance": Value::Null,
+            })
+        })
+        .collect();
+    if let Some(entry) = out
+        .iter_mut()
+        .find(|v| matches!(v.get("id").and_then(Value::as_str), Some("agy" | "antigravity")))
+    {
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("id".into(), Value::String("agy".into()));
+            obj.insert("name".into(), Value::String("Antigravity".into()));
+            if !limits_json.is_empty() {
+                obj.insert("ready".into(), Value::Bool(true));
+                obj.insert("limits".into(), Value::Array(limits_json));
+            }
+            let cur_updated = obj.get("updatedAt").and_then(Value::as_str).unwrap_or("");
+            if !live.updated_at.is_empty() && is_newer_stamp(&live.updated_at, cur_updated) {
+                obj.insert("updatedAt".into(), Value::String(live.updated_at.clone()));
+            }
+        }
+    } else if !limits_json.is_empty() {
+        out.push(serde_json::json!({
+            "id": "agy",
+            "name": "Antigravity",
+            "ready": true,
+            "updatedAt": live.updated_at,
+            "limits": limits_json,
+            "todayTokens": Value::Null,
+            "todaySessions": Value::Null,
+            "todayPrompts": Value::Null,
+            "totalSessions": Value::Null,
+            "totalPrompts": Value::Null,
+        }));
+    }
 }
 
 fn load_usage_in(dir: &std::path::Path, id: &str) -> Option<ProviderUsage> {
@@ -479,6 +632,25 @@ pub fn format_updated_ago(updated_at: &str) -> String {
     }
 }
 
+fn format_limit_subtitle(lim: &UsageLimit) -> String {
+    let mut sub = String::new();
+    if let (Some(used), Some(allow)) = (lim.used, lim.allowance) {
+        if allow > 0 {
+            sub = format!("{used} / {allow} used");
+        }
+    }
+    let reset = format_reset_in(&lim.resets_at);
+    // Untouched 100%-left buckets can carry a past window timestamp; omit misleading "resets soon".
+    let show_reset = !reset.is_empty() && !(reset == "resets soon" && lim.left_percent_int() >= 100);
+    if show_reset {
+        if !sub.is_empty() {
+            sub.push_str(" • ");
+        }
+        sub.push_str(&reset);
+    }
+    sub
+}
+
 fn small_label(text: &str, class: &str) -> Label {
     let l = Label::new(Some(text));
     l.add_css_class(class);
@@ -574,19 +746,7 @@ pub fn build_usage_content(info: &UsageCardInfo) -> gtk4::Box {
         bar.add_css_class(lim.level_class());
         row.append(&bar);
 
-        let mut sub = String::new();
-        if let (Some(used), Some(allow)) = (lim.used, lim.allowance) {
-            if allow > 0 {
-                sub = format!("{used} / {allow} used");
-            }
-        }
-        let reset = format_reset_in(&lim.resets_at);
-        if !reset.is_empty() {
-            if !sub.is_empty() {
-                sub.push_str(" • ");
-            }
-            sub.push_str(&reset);
-        }
+        let sub = format_limit_subtitle(lim);
         if !sub.is_empty() {
             row.append(&small_label(&sub, "usage-meta"));
         }
@@ -826,6 +986,57 @@ mod tests {
         assert!((items[1].limits[2].percent_used - 0.77).abs() < 1e-6);
         assert_eq!(items[1].limits[2].used, Some(77));
         assert_eq!(items[1].limits[2].allowance, Some(100));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn agy_live_merge_replaces_empty_limits_and_suppresses_stale_resets_soon() {
+        let dir = std::env::temp_dir().join(format!(
+            "sd-agy-merge-test-{}",
+            crate::tmux::unique_session_name()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("agy.json"),
+            r#"{"name":"Gemini","tierLabel":"Ultra","ready":true,"limits":[],"todayPrompts":34,"todaySessions":3,"todayTotalTokens":160000,"totalPrompts":496,"totalSessions":74,"updatedAt":"2026-11-24T10:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let disk = load_usage_direct(&dir, "agy");
+        let live = crate::antigravity_usage::LiveSnapshot {
+            tier: "Ultra".into(),
+            limits: vec![
+                crate::antigravity_usage::LiveLimit {
+                    label: "Gemini".into(),
+                    percent_used: 0.45,
+                    resets_at: "2099-01-01T00:00:00Z".into(),
+                },
+                crate::antigravity_usage::LiveLimit {
+                    label: "Claude & GPT (5-hour)".into(),
+                    percent_used: 0.0,
+                    resets_at: "2020-01-01T00:00:00Z".into(),
+                },
+            ],
+            updated_at: "2026-11-24T11:20:00Z".into(),
+            fetched_at_ms: 1,
+        };
+
+        let merged = apply_agy_live(disk, Some(&live)).unwrap();
+        assert_eq!(merged.name, "Antigravity");
+        assert_eq!(merged.tier, "Ultra");
+        assert_eq!(merged.today_prompts, 34);
+        assert_eq!(merged.today_tokens, 160_000);
+        assert_eq!(merged.updated_at, "2026-11-24T11:20:00Z");
+        assert_eq!(merged.limits.len(), 2);
+        assert_eq!(merged.limits[0].left_percent_int(), 55);
+        assert!(!format_limit_subtitle(&merged.limits[0]).is_empty());
+        assert_eq!(format_limit_subtitle(&merged.limits[1]), "");
+
+        // Works even when no agy.json exists on disk.
+        let live_only = apply_agy_live(None, Some(&live)).unwrap();
+        assert_eq!(live_only.id, "agy");
+        assert_eq!(live_only.limits.len(), 2);
 
         let _ = fs::remove_dir_all(&dir);
     }
