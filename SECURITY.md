@@ -7,10 +7,12 @@ sandbox. Do not approve unknown devices or publish pairing invitations.
 ## Local MCP access
 
 `super-desktop mcp serve` exposes selected owner CLI operations through stdio,
-with no network listener. Settings → MCP gates all tools and separately permits
-output capture, harness launch, prompt submission, terminal controls and card
-closing; the five optional
-permissions default off. Disabled tools are hidden and calls are refused on
+with no network listener. Settings → MCP gates all tools and separately controls terminal output, launches, prompt submission, input, closing,
+notes, layout, files, prompt history, editors, plugins and desktop administration.
+Optional permissions default off. Administration includes Telegram pairing,
+application lifecycle, peer commands and update installation. Editor access can
+read unsaved text and write files as the desktop owner. Only the local CLI or
+Settings can change the MCP policy. Disabled tools are hidden and calls are refused on
 existing connections, but calls already in progress may finish. Invalid or
 unreadable preferences block access. Launches and prompts retain local socket
 checks, capability detection, request receipts and input guards.

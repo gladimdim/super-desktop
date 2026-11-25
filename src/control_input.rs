@@ -171,6 +171,11 @@ fn input_command(
 ) -> Result<(String, &'static str, usize), Failure> {
     let id = &pane.pane_id;
     Ok(match input {
+        InputData::Slash {text} => {
+            let command=crate::slash_commands::commands_for(agent).iter().find(|c|c.command==text)
+                .ok_or(("invalid_arguments","Unknown slash command for this card’s harness."))?;
+            return input_command(&InputData::Send {text:text.clone(),enter:command.submit},agent,pane,deadline);
+        }
         InputData::Send { text, enter } => (
             format!(
                 "send-keys -t {id} -H {}{}",

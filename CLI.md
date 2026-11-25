@@ -59,14 +59,14 @@ Configure your MCP client to launch `super-desktop mcp serve` as a stdio child
 process. Clients do not automatically discover a server running in a separate
 terminal. The server supports MCP 2025-11-25 and 2025-03-26; the
 [README configuration example](README.md#local-mcp-access) uses `mcpServers`.
-Discovery is offline. Calls use the existing owner-only local API and check
-operation support before dispatch; unavailable or older daemons return tool
-errors without starting another daemon or falling back to terminal commands.
+Discovery works offline. Desktop operations check the owner daemon's advertised
+capabilities. Plugin tools also support offline workflows. Starting the
+application requires an explicit lifecycle action.
 
-Open **Settings → MCP** to control access. **Enable MCP** gates every tool;
-**Read terminal output**, **Launch harnesses**, **Submit prompts**, **Control terminals**,
-**Close terminals**, **Read sticky notes**, and **Edit sticky notes** gate their corresponding tools.
-Metadata tools start enabled; these optional permissions start disabled. Disabled
+Open **Settings → MCP** to control access. Fresh preferences expose 14 metadata
+tools. All 13 optional permissions together expose 88 tools. Inspect the policy
+with `super-desktop mcp policy show`. Edit the complete JSON document and pass
+it to `super-desktop mcp policy replace --stdin` from the local CLI. Disabled
 tools are omitted from discovery and calls return `mcp_disabled`. The controls
 apply to the next request on an existing connection; in-flight calls may finish.
 Refresh/reconnect the client
@@ -92,7 +92,7 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 | `terminal_geometry` | `id` | Read geometry and workspace epoch/revision guards |
 | `terminal_composer` | `id` | Inspect composer readiness without input |
 | `inspect_request` | `id` (mutation request ID) | Read a historical receipt |
-| `launch_harness` | `harness`, `cwd`, `requestId`; optional `allowUnsafeHarness`, `allowDownload` | Launch a configured harness or `shell`; opt-ins default to false |
+| `launch_harness` | `harness`, `cwd`, `requestId`; optional `allowUnsafeHarness`, `allowDownload`, `arguments`, `width`, `height`, `center`, `show` | Launch a configured harness or `shell`; opt-ins default to false |
 | `submit_prompt` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision`, `expectPaneIdentity` | Submit a guarded text prompt; no attachments |
 | `send_terminal_text` | Input guards and `requestId`, `text`, optional `enter` | Send literal text (1–4096 UTF-8 bytes); Enter defaults false |
 | `send_terminal_keys` | Input guards and `requestId`, `keys` | Send 1–32 named keys from the schema's allowlist |
@@ -105,6 +105,31 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 | `create_note` | `text`, `requestId`, `expectEpoch`, `expectRevision`; optional `x`, `y`, `width`, `height`, `tag` | Create a note, by default at x=80, y=140, size 260×200, tag 0; the rectangle must fit the canvas; empty text is allowed |
 | `update_note` | `id`, `text`, `requestId`, `expectEpoch`, `expectRevision` | Replace note text; empty text is allowed |
 | `delete_note` | `id`, `confirm=true`, `requestId`, `expectEpoch`, `expectRevision` | Delete one exact note after explicit confirmation |
+
+| Area | Additional tools |
+| --- | --- |
+| Terminal and prompts | `submit_prompt_with_files`, `wait_for_status`, `prompt_history`, `list_slash_commands`, `run_slash_command`, `follow_terminal`, `attach_terminal`, `forget_terminal`, `relaunch_terminal`, `list_viewports`, `change_viewport` |
+| Cards and workspace | `inspect_workspace`, `list_workspace_folders`, `set_workspace_folder`, `forget_recent_folder`, `navigate_cards`, `arrange_workspace`, `arrange_desktop`, `export_layout`, `export_desktop_layout`, `validate_layout`, `apply_layout`, `workspace_events`, `move_terminal`, `resize_terminal`, `set_terminal_mode`, `change_terminal_card`, `move_note`, `resize_note`, `tag_note` |
+| SD Editor and files | `list_editors`, `open_editor`, `read_editor_buffer`, `edit_editor_buffer`, `terminal_files`, `edit_terminal_files` |
+| Plugins | `plugin_command`, `open_plugin_surface` |
+| Desktop administration | `app_action`, `desktop_doctor`, `read_preferences`, `edit_preferences`, `shortcut_preview`, `shortcut_apply`, `inspect_access`, `list_audit_records`, `audit_export`, `check_updates`, `inspect_update`, `install_update` |
+| Connections | `list_connections`, `invite_connection`, `decide_connection`, `revoke_connection`, `add_peer`, `inspect_peer_pairing`, `read_peers`, `send_peer_command`, `forget_peer`, `peer_events`, `peer_attach`, `inspect_telegram`, `manage_telegram` |
+
+Use `tools/list` for each tool's exact input schema and allowed actions. Workflow
+tools such as `plugin_command` take a command and an optional array of arguments.
+For example, pass `{"command":"plugin list","requestId":"inventory-1"}`.
+Each captured stream is bounded to 128 KiB. Remote terminal attachment returns
+base64 bytes. Send guarded terminal input separately. Prompt attachments require
+both file and prompt permissions. Forgetting or relaunching a terminal requires
+administration, launch, close and explicit confirmation.
+
+Use `workspace layout export-desktop` for a version 2 layout with terminals,
+notes, plugins and editors. Use `workspace arrange-desktop` for the toolbar's
+Arrange behavior. The original export and arrange commands cover terminals and
+notes. Get open document IDs from `workspace editors` and the current buffer
+revision from `workspace read-buffer`. For example, a buffer edit action is
+`{"kind":"splice","document":"DOC","revision":"REV","start":0,"end":0,"text":"Hello"}`.
+Offsets count UTF-8 bytes. The edit command also requires current workspace guards.
 
 Input guards are `expectEpoch`, `expectRevision`, and `expectPaneIdentity`, obtained
 from `terminal_geometry` and `terminal_runtime`. Each mutation requires a unique
@@ -178,6 +203,7 @@ No global request ID option or remote target is accepted here.
 | `terminal send ID` | Literal UTF-8 text from stdin/file; optional Enter | `terminal.input` |
 | `terminal keys ID` | One to 32 named keys | `terminal.input` |
 | `terminal interrupt ID` | Ctrl-C without killing the session | `terminal.input` |
+| `terminal slash ID COMMAND --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID` | Structured local | Apply the harness catalog’s insert or submit behavior |
 | `terminal prompt ID` | Paste and submit through a verified empty composer | `terminal.input` |
 | `terminal geometry ID` | Current logical geometry, bounds, epoch and revision | `terminal.geometry` |
 | `terminal move ID --x X --y Y --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--clamp]` | Move and raise a normal card or minimized icon | `terminal.move` |
@@ -697,10 +723,9 @@ super-desktop harness launch claude --cwd "$PWD" --request-id agent-task-001 --a
   `terminal create` does not accept it. It does not restrict a launched program's
   own network access; custom programs and startup files can run arbitrary code.
 
-Launches use saved Settings configuration. They accept no initial prompt, shell
-command, model selection, argument override or safe permission profile. They do
-not present the overlay or explicitly request focus; ordinary hover behavior
-still applies when the overlay is visible. The desktop permits at most 256
+Launches default to the arguments saved in Settings. Use `--args-file` for a
+one-shot override, `--show` to present the overlay and `harness launch --prompt`
+for an initial prompt on a supported harness. The desktop permits at most 256
 terminal cards.
 
 A successful launch's `data` contains `id`, `sessionName`, `harnessId`,
@@ -947,6 +972,8 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 
 | Syntax after `super-desktop` | Interface | Purpose |
 | --- | --- | --- |
+| `mcp policy show` | Offline | Print the local MCP permission document as JSON |
+| `mcp policy replace (--stdin \| --file PATH)` | Offline | Replace the complete local policy atomically |
 | `mcp serve` | Local MCP stdio | Serve desktop inspection, harness launch and guarded prompt tools |
 | `plugin list [--json]` | Offline | List QML plugins and whether they run |
 | `plugin new ID [--slot dock.left\|dock.right\|toolbar.item\|panel\|settings.page\|card\|fullscreen\|popup] [--name NAME] [--request TEXT] [--json]` | Offline | Create a working plugin folder to start from |
@@ -959,6 +986,8 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `plugin search [TEXT] [--category C] [--json]` | Network (offline: the last list) | Search the public plugin list |
 | `plugin install ID\|GIT_URL\|DIR [--json]` | Network for IDs and URLs | Install a shared plugin from the list, git or a folder |
 | `plugin fork ID\|GIT_URL\|DIR [--json]` | Network for IDs and URLs | Make a plugin your own copy to change |
+| `plugin enable ID [--json]` | Offline | Enable a plugin and preserve its approval state |
+| `plugin disable ID [--json]` | Offline | Disable a plugin and preserve its approval state |
 | `plugin approve ID [--json]` | Offline | Let an installed plugin run |
 | `plugin update ID [--json]` | Offline | Update an installed plugin from git |
 | `plugin remove ID [--json]` | Offline | Move a plugin to the trash |
@@ -997,6 +1026,28 @@ command and for the `app`, `terminal`, `harness` and `request` groups. Aliases:
 | `workspace layout validate (--stdin \| --file PATH) [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
 | `workspace layout apply (--stdin \| --file PATH) --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
 | `workspace arrange --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Inspect or apply bounded local card layouts |
+| `terminal history ID [--offset N]` | Structured local | Read a page of per-card dated prompts |
+| `harness slash ID` | Structured local | List harness slash commands and Enter behavior |
+| `workspace editors` | Structured local | List open editor cards and tabs |
+| `workspace open-editor FOLDER [FILE] --expect-epoch EPOCH --expect-revision REVISION --request-id ID` | Structured local | Open or focus an editor card |
+| `workspace open-plugin PLUGIN SURFACE ACTION --expect-epoch EPOCH --expect-revision REVISION --request-id ID` | Structured local | Open an approved panel, card or fullscreen surface |
+| `workspace arrange-desktop --expect-epoch EPOCH --expect-revision REVISION --request-id ID` | Structured local | Arrange all desktop card types |
+| `workspace navigate next\|previous\|attention --expect-epoch EPOCH --expect-revision REVISION --request-id ID` | Structured local | Focus another terminal using desktop navigation |
+| `workspace forget-folder PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID` | Structured local | Remove a recent folder from the dropdown |
+| `telegram setup-mini-app --allow-serve --request-id ID` | Structured local | Configure Tailscale Serve and save the Mini App URL |
+| `telegram status` | Structured local | Read Telegram settings and pending requests |
+| `telegram invitation` | Structured local | Read the current private pairing invitation |
+| `telegram invite --request-id ID` | Structured local | Start Telegram account pairing |
+| `telegram approve ID CODE --request-id ID` | Structured local | Approve a pending Telegram request |
+| `telegram reject ID CODE --request-id ID` | Structured local | Reject a pending Telegram request |
+| `telegram revoke --request-id ID` | Structured local | Revoke Telegram access |
+| `telegram clear-rejected --request-id ID` | Structured local | Clear rejected Telegram users |
+| `telegram unlink-forum --request-id ID` | Structured local | Unlink the Telegram forum |
+| `telegram sync-topics --request-id ID` | Structured local | Request forum topic synchronization |
+| `telegram set KEY (--stdin \| --file PATH) --request-id ID` | Structured local | Set one Telegram preference from a JSON value |
+| `workspace layout export-desktop` | Structured local | Export all card types as a version 2 layout for validate and apply |
+| `workspace read-buffer EDITOR DOCUMENT [--offset BYTES]` | Structured local | Read a UTF-8 page and buffer revision |
+| `workspace edit-buffer EDITOR (--file PATH \| --stdin) --expect-epoch EPOCH --expect-revision REVISION --request-id ID` | Structured local | Apply a new, closeCard, splice, save, saveNew or close editor action |
 | `workspace inspect [--format text\|json] [--target local]` | Structured local | Inspect local workspace and revision |
 | `workspace folders [--format text\|json] [--target local]` | Structured local | List selected and remembered folders |
 | `workspace set PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]` | Structured local | Select a folder for future launches |

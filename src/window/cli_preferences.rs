@@ -3,8 +3,11 @@ use super::*;
 use crate::control::{Command, PreferencesEdit as Edit, PreferencesQuery as Query, Reply, Request};
 use serde_json::{json, Value};
 
-fn settings(state: &AppState) -> Value {
+fn settings(state: &AppState, launchers: Option<Vec<String>>, toolbar: Option<Vec<String>>) -> Value {
     json!([
+        {"key":"launcherOrder","value":state.launcher_order,"effective":launchers,"default":[],"type":"id-list","writable":true,"restartRequired":false},
+        {"key":"toolbarItemOrder","value":state.toolbar_item_order,"effective":toolbar,"default":[],"type":"id-list","writable":true,"restartRequired":false},
+        {"key":"editorButtonVisible","value":!state.editor_button_hidden,"default":true,"type":"boolean","writable":true,"restartRequired":false},
         {"key":"toolbarSize","value":state.top_bar_size,"default":"large","type":"enum","choices":["small","medium","large"],"writable":true,"restartRequired":false},
         {"key":"sleepLockOnAc","value":state.sleep_lock_on_ac,"default":false,"type":"boolean","writable":cfg!(target_os="linux"),"restartRequired":false},
         {"key":"bootAutostart","value":state.boot_autostart,"default":false,"type":"boolean","writable":cfg!(target_os="linux"),"restartRequired":false},
@@ -63,7 +66,9 @@ impl SuperDesktopWindow {
             let mut data = envelope(&state);
             match query {
                 Query::Settings { key } => {
-                    let all = settings(&state);
+                    let launchers = self.cli_harness_bar.borrow().as_ref().map(|bar| bar.order());
+                    let toolbar = crate::plugin_ui::slots::get().map(|slots| slots.toolbar_item_keys());
+                    let all = settings(&state, launchers, toolbar);
                     if let Some(key) = key {
                         let Some(setting) =
                             all.as_array().unwrap().iter().find(|s| s["key"] == *key)
@@ -126,6 +131,25 @@ impl SuperDesktopWindow {
                 let null = Value::Null;
                 let v = value.as_ref().unwrap_or(&null);
                 match key.as_str() {
+                    "launcherOrder" | "toolbarItemOrder" => {
+                        let order: Vec<String> = if v.is_null() {Vec::new()} else {
+                            match serde_json::from_value(v.clone()) {
+                                Ok(order) => order, Err(_) => return fail("invalid_arguments","Use an array of item keys."),
+                            }
+                        };
+                        let mut seen = std::collections::BTreeSet::new();
+                        if order.len() > 256 || order.iter().any(|k| k.is_empty() || k.len()>256 || k.chars().any(char::is_control) || !seen.insert(k)) {
+                            return fail("invalid_arguments","Use at most 256 distinct nonempty item keys.");
+                        }
+                        if key == "launcherOrder" { next.launcher_order = order; } else { next.toolbar_item_order = order; }
+                    }
+                    "editorButtonVisible" => {
+                        next.editor_button_hidden = match v {
+                            Value::Null => false,
+                            Value::Bool(shown) => !shown,
+                            _ => return fail("invalid_arguments","editorButtonVisible requires a boolean."),
+                        };
+                    }
                     "toolbarSize" => {
                         next.top_bar_size = if v.is_null() {
                             TopBarSize::Large
@@ -335,6 +359,13 @@ impl SuperDesktopWindow {
                     paint_top_bar_size(&self.hud, next.top_bar_size);
                     self.machine_view.paint_top_bar_size(next.top_bar_size);
                 }
+                "launcherOrder" => {
+                    if let Some(bar) = self.cli_harness_bar.borrow().as_ref() { bar.set_order(&next.launcher_order); }
+                }
+                "toolbarItemOrder" => {
+                    if let Some(slots) = crate::plugin_ui::slots::get() { slots.apply_toolbar_order(next.toolbar_item_order.clone()); }
+                }
+                "editorButtonVisible" => crate::editor::set_button_shown(!next.editor_button_hidden),
                 "sleepLockOnAc" => crate::sleep_lock::set_enabled(next.sleep_lock_on_ac),
                 "bootAutostart" => crate::boot_autostart::apply(next.boot_autostart),
                 "workspaceDefault" => {

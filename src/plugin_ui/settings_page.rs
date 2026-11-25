@@ -29,35 +29,7 @@ fn button(text: &str, tooltip: &str) -> gtk4::Button {
     button
 }
 
-/// Sets `"enabled"` in a plugin.json, keeping everything else as written.
-pub fn set_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
-    let file = dir.join(super_desktop::plugins::manifest::MANIFEST_FILE);
-    let meta = std::fs::symlink_metadata(&file).map_err(|e| e.to_string())?;
-    if meta.file_type().is_symlink() || !meta.is_file() {
-        return Err("plugin.json must be a regular file inside the plugin folder".into());
-    }
-    let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
-    let mut value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let object = value.as_object_mut().ok_or("plugin.json is not an object")?;
-    object.insert("enabled".into(), Value::Bool(enabled));
-    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? + "\n";
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
-    let nonce = super_desktop::control::random_hex(8).map_err(|e| e.to_string())?;
-    let tmp = dir.join(format!(".plugin.{nonce}.tmp"));
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(&tmp)
-        .map_err(|e| e.to_string())?;
-    if let Err(e) = f.write_all(text.as_bytes()).and_then(|()| std::fs::rename(&tmp, &file)) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.to_string());
-    }
-    Ok(())
-}
+pub use super_desktop::plugins::manifest::set_enabled;
 
 fn last_lines(id: &str, count: usize) -> String {
     let text = std::fs::read_to_string(paths::log_path(id)).unwrap_or_default();

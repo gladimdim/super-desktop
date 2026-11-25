@@ -5,12 +5,33 @@ use crate::state::{AppState, NoteData};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+pub(crate) fn extra_cards() -> std::collections::BTreeMap<(String,String), std::rc::Rc<crate::plugin_ui::cards::PluginCard>> {
+    let plugin_cards = crate::plugin_ui::slots::get().map(|s| s.cards()).unwrap_or_default();
+    plugin_cards.into_iter().map(|card| (("plugin".into(),format!("{}/{}",card.plugin,card.key)),card))
+        .chain(crate::editor::cards().into_iter().map(|card| (("editor".into(),card.key.clone()),card))).collect()
+}
+
+fn extra_layout() -> Vec<crate::control::LayoutItem> {
+    extra_cards().into_iter().map(|((kind,id),card)| {
+        let g=card.geometry();
+        crate::control::LayoutItem {kind,id,mode:"normal".into(),x:g.x,y:g.y,width:g.width,height:g.height}
+    }).collect()
+}
+
+pub fn desktop_layout(state:&AppState,snapshot:&LocalWorkspaceSnapshot)->crate::control::Layout {
+    let mut layout=export(state,snapshot);
+    layout.version=2;
+    layout.items.extend(extra_layout());
+    layout
+}
+
 pub fn revision(state: &AppState, snapshot: &LocalWorkspaceSnapshot) -> String {
     format!(
         "{:x}",
         Sha256::digest(
             serde_json::to_vec(&(
                 state,
+                extra_layout(),
                 &snapshot.canvas,
                 snapshot
                     .cards
@@ -130,9 +151,10 @@ pub fn validate_layout(
     state: &AppState,
     snapshot: &LocalWorkspaceSnapshot,
 ) -> Result<(), &'static str> {
-    if layout.version != 1 || layout.items.len() > 64 {
-        return Err("Use layout version 1 with at most 64 items per operation.");
+    if !matches!(layout.version, 1 | 2) || layout.items.len() > 64 {
+        return Err("Use layout version 1 or 2 with at most 64 items per operation.");
     }
+    let extra = extra_cards();
     let mut seen = std::collections::HashSet::new();
     for item in &layout.items {
         if !seen.insert((&item.kind, &item.id)) {
@@ -187,6 +209,15 @@ pub fn validate_layout(
                 || item.height as i64 > d["limits"]["maxHeight"].as_i64().unwrap()
             {
                 return Err("Terminal dimensions exceed current normal-card limits.");
+            }
+        } else if layout.version == 2 && matches!(item.kind.as_str(),"editor"|"plugin") {
+            if !extra.contains_key(&(item.kind.clone(),item.id.clone())) || item.mode!="normal" {
+                return Err("Unknown editor or plugin card or invalid mode.");
+            }
+            let Some(host) = crate::plugin_ui::slots::get().and_then(|s|s.canvas_host()) else {return Err("Canvas unavailable.");};
+            let g=crate::plugin_ui::cards::Geometry {x:item.x,y:item.y,width:item.width,height:item.height};
+            if crate::plugin_ui::cards::initial_geometry(&host,Some(g),(g.width,g.height)) != g {
+                return Err("Editor or plugin rectangle exceeds the available canvas.");
             }
         } else {
             return Err(

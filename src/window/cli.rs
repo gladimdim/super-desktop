@@ -147,6 +147,12 @@ impl SuperDesktopWindow {
             if item.kind=="note" {
                 let cards:Vec<_>=self.note_cards.borrow().iter().filter(|n|n.data.borrow().id==item.id).cloned().collect();
                 if cards.len()!=1 || cards[0].text_view.has_focus() || cards[0].container.has_css_class("dragging") || cards[0].container.has_css_class("resizing") {return Err("A note is missing, ambiguous or being edited.");}
+            } else if matches!(item.kind.as_str(),"editor"|"plugin") {
+                let extra=crate::control_workspace::extra_cards();
+                let card=extra.get(&(item.kind.clone(),item.id.clone())).ok_or("Editor or plugin card unavailable.")?;
+                if card.container.has_css_class("resizing") || card.container.has_css_class("dragging") {
+                    return Err("An editor or plugin card is being moved.");
+                }
             } else {
                 let cards:Vec<_>=self.terminal_cards.borrow().iter().filter(|n|n.data.borrow().id==item.id).cloned().collect();
                 if cards.len()!=1 || cards[0].is_being_dragged() || cards[0].container.has_css_class("term-resizing") {return Err("A terminal is missing, ambiguous or being moved.");}
@@ -174,6 +180,11 @@ impl SuperDesktopWindow {
             match query {
                 Query::Inspect => { data["workspace"] = json!(crate::state::effective_workspace_dir(&state));
                     data["notesCount"] = json!(state.notes.len()); data["terminalsCount"] = json!(state.terminals.len()); },
+                Query::Buffer {editor,document,offset} => match crate::editor::control::read(editor,document,*offset) {
+                    Ok(buffer) => data["buffer"]=buffer, Err(e)=>return fail("invalid_arguments",e),
+                },
+                Query::DesktopLayout => data["layout"] = json!(workspace::desktop_layout(&state,&snapshot)),
+                Query::Editors => data["editors"] = crate::editor::inventory(),
                 Query::Folders => data["folders"] = self.workspace_choices(),
                 Query::Layout => data["layout"] = json!(crate::control_workspace::export(&state,&snapshot)),
                 Query::ValidateLayout {layout} => {
@@ -194,13 +205,45 @@ impl SuperDesktopWindow {
         if self.slide.running.get() { return fail("conflict","A workspace animation is in progress."); }
         let Command::WorkspaceEdit {edit,..} = &request.command else { unreachable!() };
         let mut result = json!({});
-        if matches!(edit,Edit::Layout {..}|Edit::Arrange) {
+        if let Edit::Editor {editor,action} = edit {
+            match crate::editor::control::edit(editor,action) {
+                Ok(info)=>result=info,Err(e)=>return fail("conflict",&e),
+            }
+        } else if let Edit::OpenEditor {folder,file} = edit {
+            let folder = std::path::Path::new(folder);
+            if !folder.is_absolute() || file.as_ref().is_some_and(|f| !folder.join(f).is_file()) {
+                return fail("invalid_arguments","Use an absolute folder and an existing file.");
+            }
+            if let Err(message) = crate::editor::open(folder,file.as_deref().map(std::path::Path::new)) {
+                return fail("unavailable",&message);
+            }
+        } else if let Edit::PluginSurface {plugin,surface,action} = edit {
+            if !matches!(action.as_str(), "panel.open" | "card.open" | "card.new" | "fullscreen.open") {
+                return fail("invalid_arguments","Use panel.open, card.open, card.new or fullscreen.open.");
+            }
+            let Some(slots) = crate::plugin_ui::slots::get() else { return fail("unavailable","Plugin host unavailable."); };
+            if let Err(message) = slots.act(plugin,action,surface,"") {return fail("unavailable",&message);}
+        } else if matches!(edit, Edit::ArrangeDesktop) {
+            if let Err(message) = self.cli_layout_ready(&workspace::desktop_layout(&state,&snapshot)) {return fail("conflict",message);}
+            self.auto_arrange();
+        } else if let Edit::Navigate {direction} = edit {
+            match direction.as_str() {
+                "next" => self.cycle_local_cards(true),
+                "previous" => self.cycle_local_cards(false),
+                "attention" => self.jump_to_attention_card(),
+                _ => return fail("invalid_arguments","Use next, previous or attention."),
+            }
+        } else if let Edit::ForgetFolder {path} = edit {
+            self.state.borrow_mut().recent_dirs.retain(|dir| dir != path);
+        } else if matches!(edit,Edit::Layout {..}|Edit::Arrange) {
             let layout=match edit {
                 Edit::Layout {layout} => layout.clone(),
                 _ => match workspace::arrange(&state,&snapshot) {Ok(v)=>v,Err(message)=>return fail("out_of_bounds",message)},
             };
             if let Err(message)=workspace::validate_layout(&layout,&state,&snapshot) { return fail("invalid_arguments",message); }
             if let Err(message)=self.cli_layout_ready(&layout) { return fail("conflict",message); }
+            let extra=workspace::extra_cards();
+            let host=crate::plugin_ui::slots::get().and_then(|s|s.canvas_host());
             for item in &layout.items {
                 if item.kind=="note" {
                     let note=self.note_cards.borrow().iter().find(|n| n.data.borrow().id==item.id).cloned().unwrap();
@@ -208,6 +251,9 @@ impl SuperDesktopWindow {
                     note.container.set_size_request(item.width,item.height);
                     self.canvas.move_(&note.container,item.x as f64,item.y as f64);
                     if let Some(data)=self.state.borrow_mut().notes.iter_mut().find(|n|n.id==item.id) {*data=note.live_data();}
+                } else if let Some(card)=extra.get(&(item.kind.clone(),item.id.clone())) {
+                    let Some(host)=&host else { return Reply::unknown(&request.request_id); };
+                    card.set_geometry(host,crate::plugin_ui::cards::Geometry {x:item.x,y:item.y,width:item.width,height:item.height});
                 } else {
                     let card=self.any_terminal_card(&item.id).unwrap();
                     let applied=if item.mode=="minimized" {self.move_terminal_card(&item.id,item.x,item.y).is_ok()} else {

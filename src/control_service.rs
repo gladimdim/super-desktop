@@ -35,6 +35,27 @@ pub fn answer(request: Request, snapshot: Snapshot) -> Reply {
             "visible":snapshot.visible,"ready":snapshot.ready,
             "notesCount":snapshot.state.notes.len(),"terminalsCount":snapshot.state.terminals.len()})
         }
+        Command::PromptHistory { id: ref card_id, offset } => {
+            let mut matches = snapshot.state.terminals.iter().filter(|t| t.id == *card_id);
+            let Some(card) = matches.next() else {return Reply::failure(id,"not_found","Unknown terminal ID.");};
+            if matches.next().is_some() {return Reply::failure(id,"conflict","Ambiguous terminal ID.");}
+            if card.agent_type == "codex" {return Reply::failure(id,"unsupported","This harness does not support per-card prompt history.");}
+            let mut history = crate::prompt_log::history(&card.session_name,&card.agent_type,card.agent_session_id.as_deref());
+            let offset = usize::from(offset);
+            let total = history.prompts.len();
+            history.prompts = history.prompts.into_iter().skip(offset).take(10).collect();
+            let next = offset + history.prompts.len();
+            let mut page = history.to_json();
+            page["nextOffset"] = json!((next < total).then_some(next));
+            page
+        }
+        Command::SlashCommands {id: ref key} => {
+            if !crate::tmux::HARNESS_KEYS.contains(&key.as_str()) && !snapshot.state.custom_harnesses.iter().any(|h| h.id == *key) {
+                return Reply::failure(id,"not_found","Unknown harness ID.");
+            }
+            json!({"harness":key,"commands":crate::slash_commands::commands_for(key).iter().map(|c|
+                json!({"text":c.command,"description":c.description,"enter":c.submit})).collect::<Vec<_>>()})
+        }
         Command::Terminals {} => {
             json!({"terminals":snapshot.state.terminals.iter().map(terminal).collect::<Vec<_>>(),
             "inventory":"saved-cards","runtimeObserved":false})

@@ -16,6 +16,12 @@ pub struct Config {
     pub close: bool,
     pub read_notes: bool,
     pub edit_notes: bool,
+    pub layout: bool,
+    pub files: bool,
+    pub administration: bool,
+    pub history: bool,
+    pub plugins: bool,
+    pub editor: bool,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -29,6 +35,12 @@ impl Default for Config {
             close: false,
             read_notes: false,
             edit_notes: false,
+            layout: false,
+            files: false,
+            administration: false,
+            history: false,
+            plugins: false,
+            editor: false,
         }
     }
 }
@@ -45,14 +57,47 @@ impl Config {
                 "capture_terminal" => self.read_output,
                 "launch_harness" => self.launch,
                 "submit_prompt" => self.prompts,
+                "submit_prompt_with_files" => self.files && self.prompts,
+                "wait_for_status" => true,
                 "launch_with_prompt" => self.launch && self.prompts,
                 "send_terminal_text" | "send_terminal_keys" | "interrupt_terminal" => self.controls,
                 "close_terminal" => self.close,
                 "list_notes" | "inspect_note" => self.read_notes,
                 "create_note" | "update_note" | "delete_note" => self.edit_notes,
-                _ => true,
+                "app_status" | "capabilities" | "list_terminals" | "inspect_terminal"
+                | "list_harnesses" | "inspect_harness" | "terminal_runtime" | "terminal_status"
+                | "terminal_geometry" | "terminal_composer" | "inspect_request" | "wait_for_completion" => true,
+                other => crate::mcp_operations::lookup(other).is_some_and(|op| op.allowed(self)) || crate::mcp_client_tools::allowed(other,self),
             }
     }
+}
+
+pub(crate) fn policy_command(args: &[String]) -> Option<crate::cli::Output> {
+    use crate::cli_extended::{Options,respond};
+    respond(args, || {
+        let options = Options::parse(args, &["--file"], &["--stdin"])?;
+        if options.values.contains_key("--request-id") || options.values.get("--target").is_some_and(|t| t != "local") {
+            return Err("MCP policy is an offline local operation.");
+        }
+        let words: Vec<_> = options.words.iter().map(String::as_str).collect();
+        let config = match words.as_slice() {
+            ["mcp","policy","show"] if !options.flags.contains("--stdin") && !options.values.contains_key("--file") =>
+                load().map_err(|_| "Unable to read the private MCP policy.")?,
+            ["mcp","policy","replace"] => {
+                let value: serde_json::Value = serde_json::from_str(&options.text(4096)?).map_err(|_| "Expected a JSON object.")?;
+                let expected = serde_json::to_value(Config::default()).unwrap();
+                let object = value.as_object().ok_or("Expected a complete policy object.")?;
+                if object.len() != expected.as_object().unwrap().len() || !expected.as_object().unwrap().keys().all(|k| object.get(k).is_some_and(serde_json::Value::is_boolean)) {
+                    return Err("Supply all permission fields from mcp policy show as booleans.");
+                }
+                let config = serde_json::from_value(value).map_err(|_| "Invalid policy.")?;
+                save(config).map_err(|_| "Could not save the private MCP policy.")?;
+                config
+            }
+            _ => return Err("Use mcp policy show or mcp policy replace (--stdin | --file PATH)."),
+        };
+        Ok(crate::cli::Output {code:0,stdout:format!("{}\n",serde_json::to_string_pretty(&config).unwrap()),stderr:String::new()})
+    })
 }
 
 pub fn config_root() -> io::Result<PathBuf> {
@@ -222,6 +267,7 @@ mod tests {
             close: true,
             read_notes: true,
             edit_notes: true,
+            layout: true, files: true, administration: true, history: true, plugins: true, editor: true,
         };
         save_at(&path, config).unwrap();
         assert_eq!(load_at(&path).unwrap(), config);
@@ -286,6 +332,7 @@ mod tests {
             close: true,
             read_notes: true,
             edit_notes: true,
+            layout: true, files: true, administration: true, history: true, plugins: true, editor: true,
         };
         for tool in [
             "app_status",

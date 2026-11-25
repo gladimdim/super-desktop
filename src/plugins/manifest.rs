@@ -6,6 +6,39 @@ use std::path::{Component, Path, PathBuf};
 
 pub const API_VERSION: u64 = 1;
 pub const MANIFEST_FILE: &str = "plugin.json";
+/// Sets `"enabled"` in a plugin.json, keeping everything else as written.
+pub fn set_enabled(dir: &Path, enabled: bool) -> Result<(), String> {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
+        return Err("Use an installed plugin directory.".into());
+    }
+    let file = dir.join(MANIFEST_FILE);
+    let meta = std::fs::symlink_metadata(&file).map_err(|e| e.to_string())?;
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return Err("plugin.json must be a regular file inside the plugin folder".into());
+    }
+    let text = std::fs::read_to_string(&file).map_err(|e| e.to_string())?;
+    let mut value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let object = value.as_object_mut().ok_or("plugin.json is not an object")?;
+    object.insert("enabled".into(), Value::Bool(enabled));
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())? + "\n";
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let nonce = crate::control::random_hex(8).map_err(|e| e.to_string())?;
+    let tmp = dir.join(format!(".plugin.{nonce}.tmp"));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&tmp)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = f.write_all(text.as_bytes()).and_then(|()| std::fs::rename(&tmp, &file)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.to_string());
+    }
+    Ok(())
+}
+
 pub const MAX_SURFACES: usize = 8;
 pub const DOCK_SIZE_DEFAULT: i32 = 64;
 pub const MAX_TITLE: usize = 60;
@@ -845,6 +878,20 @@ mod tests {
         let fields: Vec<&str> = problems.iter().map(|p| p.field.as_str()).collect();
         assert_eq!(fields, ["version", "minHost", "categories"]);
         assert!(version_older("1.5.0", "1.6") && !version_older("1.6", "1.6.0") && version_older("1.9.9", "1.10.0"));
+    }
+
+    #[test]
+    fn plugins_enable_disable_preserves_manifest_fields() {
+        let dir=plugin_dir("switch-test",&["A.qml"]);
+        let file=dir.join(MANIFEST_FILE);
+        let manifest=json!({"id":"switch-test","futureField":{"keep":1}});
+        std::fs::write(&file,manifest.to_string()).unwrap();
+        for enabled in [false,true] {
+            set_enabled(&dir,enabled).unwrap();
+            let saved:Value=serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+            assert_eq!(saved["enabled"],enabled);
+            assert_eq!(saved["futureField"],manifest["futureField"]);
+        }
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //! Which editors are open, where, and with which files is kept in
 //! `editors.json` next to state.json, never in the workspace sent to phones
 //! or other PCs.
+pub(crate) mod control;
 mod doc;
 mod find;
 mod highlight;
@@ -102,6 +103,10 @@ fn editors() -> Vec<Rc<Editor>> {
     EDITORS.with(|cell| cell.borrow().clone())
 }
 
+pub(crate) fn inventory() -> serde_json::Value {
+    control::inventory()
+}
+
 /// The open editors' cards, for Arrange, the slide and display changes.
 pub fn cards() -> Vec<Rc<PluginCard>> {
     editors().iter().map(|e| Rc::clone(&e.card)).collect()
@@ -139,7 +144,7 @@ pub fn open(folder: &Path, file: Option<&Path>) -> Result<(), String> {
     };
     (host.raise)(editor.card.container.upcast_ref());
     match file {
-        Some(file) => editor.open_file(&editor.resolve(&file.to_string_lossy())),
+        Some(file) => editor.try_open_file(&editor.resolve(&file.to_string_lossy()))?,
         None => editor.focus(),
     }
     Ok(())
@@ -727,35 +732,41 @@ impl Editor {
     /// Opens `path` in a tab (an image, a sound or a video in a preview),
     /// or shows its tab when it is open already.
     pub fn open_file(self: &Rc<Self>, path: &Path) {
+        if let Err(message)=self.try_open_file(path) { self.say(&message); }
+    }
+
+    fn try_open_file(self: &Rc<Self>,path:&Path)->Result<(),String> {
         let open = self.docs.borrow().iter().find(|d| d.path.borrow().as_deref() == Some(path)).cloned();
         if let Some(doc) = open {
             if let Some(index) = self.notebook.page_num(&doc.page) {
                 self.notebook.set_current_page(Some(index));
             }
             doc.view.grab_focus();
-            return;
+            return Ok(());
         }
         let shown = self.previews.borrow().iter().find(|p| p.path.borrow().as_path() == path).cloned();
         if let Some(preview) = shown {
             if let Some(index) = self.notebook.page_num(&preview.page) {
                 self.notebook.set_current_page(Some(index));
             }
-            return;
+            return Ok(());
         }
         let kind = media::kind(path);
         if kind != media::Kind::Text {
             if !path.is_file() {
-                return self.say(&format!("{} is not a file", pretty(path)));
+                return Err(format!("{} is not a file", pretty(path)));
             }
-            return self.add_preview(media::Preview::new(path, kind));
+            self.add_preview(media::Preview::new(path, kind));
+            return Ok(());
         }
         let doc = Doc::new(0, &scheme::Palette::current());
         match doc.load(path) {
             Ok(()) => {
                 self.add_doc(doc);
                 self.say(&format!("Opened {}", pretty(path)));
+                Ok(())
             }
-            Err(e) => self.say(&e),
+            Err(e) => Err(e),
         }
     }
 

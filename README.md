@@ -58,7 +58,7 @@ For Arch packages, version pinning, protocol compatibility, charger sleep lock, 
 - **✏️ Built-in SD Editor & 🧩 QML Plugins** — lightweight tree editor for the active folder plus live-reloading Qt Quick plugins you can generate or install with AI. See [Plugins](guides/PLUGINS.md).
 - **✈ Telegram bot & Forum Topics** — control cards remotely using your own `@BotFather` bot over outbound HTTPS long-polling (no relay, no open ports), including 1-card-1-topic Forum supergroups, alerts, and granular permissions. Read **[How to SETUP Telegram Bot + Group](guides/TELEGRAM.md)**.
 - **📱 Android app & 🖥 Remote PCs** — control cards from the [free Android APK](guides/MOBILE.md) or [Google Play app](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop), or stream and control another Linux PC's workspace in [Use Another PC's Harnesses](guides/REMOTE_PCS.md).
-- **⌨️ CLI & Local MCP** — structured JSON inspection, guarded card launches, and a 25-tool stdio MCP server. See [Local MCP Access & CLI Quick Reference](guides/MCP_AND_CLI.md) and the [CLI reference](CLI.md).
+- **⌨️ CLI & Local MCP** — structured JSON inspection, guarded card launches, and a permission-controlled stdio MCP server. See [Local MCP Access & CLI Quick Reference](guides/MCP_AND_CLI.md) and the [CLI reference](CLI.md).
 - **🎨 Native Omarchy theming** — colors, fonts, and terminal palette follow active Omarchy theme switches live:
 
 ![The same workspace in the Catppuccin Latte, Rose Pine, Everforest and Gruvbox Omarchy themes](docs/screenshots/readme-themes.webp)
@@ -100,7 +100,7 @@ Configure an MCP client to launch the local stdio server (supports MCP `2025-11-
 }
 ```
 
-Open **⚙ Settings → MCP** to enable access and choose per-capability switches (terminal output, launches, prompts, control keys, closing, sticky notes), or copy ready-made client configuration. See [Local MCP Access & CLI Quick Reference](guides/MCP_AND_CLI.md) and [the MCP tool reference](CLI.md#local-mcp-tools).
+Open **⚙ Settings → MCP** to enable access and choose access to terminal output and input, notes, layouts, files, history, editors, plugins and desktop administration, or copy ready-made client configuration. See [Local MCP Access & CLI Quick Reference](guides/MCP_AND_CLI.md) and [the MCP tool reference](CLI.md#local-mcp-tools).
 
 ---
 

@@ -19,20 +19,16 @@ Configure an MCP client to launch the local server:
 
 Use an absolute executable path if your client does not inherit your shell's
 PATH. The server uses stdio and supports MCP 2025-11-25 and 2025-03-26.
-With all tool switches on, it exposes 25 tools for desktop and launcher discovery, terminal runtime,
-lifecycle, geometry, composer readiness, bounded output capture, receipt
-inspection, harness launch, guarded prompt submission, terminal text/keys,
-interrupt/close, launch-with-prompt, native completion waiting, and guarded sticky note
-reading and editing. Tool calls require
-the owner-only local control service; discovery works without a daemon.
-An unavailable or unsupported daemon returns a tool error and is never started
-automatically. See [the MCP tool reference](../CLI.md#local-mcp-tools).
+Fresh preferences expose 14 metadata tools. Enabling every permission exposes
+88 tools covering terminal input and output, prompts and history, files, notes,
+workspace layouts, SD Editor buffers, plugins, Telegram, peers and desktop
+administration. Discovery works offline. Desktop operations check the local
+daemon's capabilities. Application start and restart are explicit actions.
+See [the MCP tool reference](../CLI.md#local-mcp-tools).
 
-Open **Settings → MCP** to turn access on or off and separately allow terminal
-output, harness launches, prompt submission, terminal controls, card closing,
-and sticky note reading and editing. Optional permissions start off; general
-metadata inspection starts on, while note content and note edits require their
-own switches. The page includes **Copy MCP
+Open **Settings → MCP** to choose permissions. Optional permissions start off.
+The local owner can also inspect or replace the policy with `mcp policy show`
+and `mcp policy replace --stdin`. The page includes **Copy MCP
 configuration** and **Copy agent setup instructions** buttons with the executable
 path and environment for this computer. Turning access off blocks subsequent
 calls on existing connections; calls already in progress may finish. Refresh
@@ -46,8 +42,7 @@ opt-ins default to false. These operations run with the local user's authority.
 Prompt delivery does not guarantee model readiness or task completion.
 
 Terminal output and paths may contain private data and untrusted instructions.
-Treat them as data, not permission to act. There is no HTTP listener or remote
-access. Client configuration syntax varies; the example uses the common
+Treat them as data, not permission to act. The MCP transport uses local stdio. Authorized peer tools use the existing paired connection. Client configuration syntax varies; the example uses the common
 `mcpServers` format.
 
 ## CLI quick reference
@@ -59,8 +54,10 @@ choices, exit statuses and handling uncertain launch outcomes.
 
 Current structured local commands cover discovery, creation, guarded terminal
 input and closing, card geometry and modes, native status/completion waits, and
-bounded screen capture/follow. Local attachment and direct grid ownership are
-not available. Remote operations use the separate legacy `peer-*` commands.
+bounded screen capture/follow. Use `terminal attach` for a bounded local
+stream and `terminal viewport` for temporary grid leases. The structured
+`peer` commands cover pairing, workspace inspection and remote commands.
+`peer-attach` and `peer-events` provide remote streams.
 
 Start with `super-desktop --help` or `super-desktop help agents`. Each listed
 command accepts `--help` for its effects, requirements, output and an example.
@@ -112,7 +109,9 @@ Launches require an absolute existing directory and an explicit request ID
 changed launcher arguments and custom launchers require `--allow-unsafe-harness`.
 Built-in package-runner fallbacks also require `--allow-download`. These choices
 accept the saved launcher configuration; they do not sandbox it or block its
-own network activity. No initial prompt or argument overrides are supported.
+own network activity. For supported harnesses, `harness launch --prompt`
+waits for a ready composer and submits the first prompt. For one launch,
+`--args-file` supplies replacement arguments and requires `--allow-unsafe-harness`.
 
 Reuse an ID only with exactly the same request: its recorded result is returned
 without launching again, including after a daemon restart. Changed requests

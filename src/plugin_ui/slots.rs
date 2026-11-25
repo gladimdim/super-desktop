@@ -325,8 +325,12 @@ impl Slots {
     /// Show the toolbar items in `order` (see `toolbar_order`); `on_reordered`
     /// saves the order the user drags them to.
     pub fn set_toolbar_order(&self, order: Vec<String>, on_reordered: Rc<dyn Fn(Vec<String>)>) {
-        *self.toolbar_order.borrow_mut() = order;
         *self.on_toolbar_reordered.borrow_mut() = Some(on_reordered);
+        self.apply_toolbar_order(order);
+    }
+
+    pub(crate) fn apply_toolbar_order(&self, order: Vec<String>) {
+        *self.toolbar_order.borrow_mut() = order;
         self.sort_toolbar_items();
     }
 

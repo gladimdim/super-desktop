@@ -263,13 +263,36 @@ pub(crate) fn send_request(request: &Request) -> Reply {
             "This daemon does not support this operation.",
         );
     }
+    let capabilities = support.data.as_ref().expect("checked method list");
+    if matches!(&request.command, Command::Input { input: InputData::Slash { .. }, .. })
+        && capabilities["terminalInput"]["slashCommand"] != true
+    {
+        return Reply::failure(&request.request_id, "unsupported_command", "This daemon does not support catalog slash commands.");
+    }
+    let variant = match &request.command {
+        Command::Workspace {query} => Some(("reads",serde_json::json!(query))),
+        Command::WorkspaceEdit {edit,..} => Some(("edits",serde_json::json!(edit))),
+        _ => None,
+    };
+    if let Some((family,variant))=variant {
+        if variant["layout"]["version"] == 2 && !capabilities["workspace"]["layoutVersions"]
+            .as_array().is_some_and(|versions| versions.contains(&serde_json::json!(2)))
+        {
+            return Reply::failure(&request.request_id, "unsupported_command", "This daemon does not support mixed-card layouts.");
+        }
+        let kind=variant["kind"].as_str().unwrap_or_default();
+        if matches!(kind,"buffer"|"desktopLayout"|"editors"|"editor"|"arrangeDesktop"|"navigate"|"forgetFolder"|"openEditor"|"pluginSurface")
+            && !support.data.as_ref().and_then(|d|d["workspace"][family].as_array()).is_some_and(|kinds|kinds.contains(&variant["kind"])) {
+            return Reply::failure(&request.request_id,"unsupported_command","This daemon does not support this workspace action.");
+        }
+    }
     control::request_at(&control::runtime_dir(), request)
 }
 
 pub(crate) fn run(args: &[String]) -> Option<Output> {
     let action = args.get(1)?.as_str();
     if args.first()?.as_str() != "terminal"
-        || !matches!(action, "send" | "keys" | "interrupt" | "prompt")
+        || !matches!(action, "send" | "keys" | "interrupt" | "prompt" | "slash")
     {
         return None;
     }
@@ -303,7 +326,10 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
         {
             return Err("Input requires a unique --request-id.");
         }
-        let input = if action == "keys" {
+        let input = if action == "slash" {
+            if options.words.len()!=4 {return Err("Supply the exact slash command from harness slash.");}
+            InputData::Slash {text:options.words[3].clone()}
+        } else if action == "keys" {
             InputData::Keys {
                 keys: options.words[3..].to_vec(),
             }

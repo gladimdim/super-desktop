@@ -40,6 +40,12 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
         ("mcp-close", "Close terminals", "Allow agents to stop one exact session and remove its card with explicit confirmation."),
         ("mcp-read-notes", "Read sticky notes", "Allow agents to list note metadata and read note text."),
         ("mcp-edit-notes", "Edit sticky notes", "Allow agents to create, replace and delete note text with workspace guards."),
+        ("mcp-layout", "Manage workspace layout", "Allow agents to move and arrange cards, manage grid leases, and select workspace folders."),
+        ("mcp-files", "Read and edit terminal files", "Allow agents to read and change checked workspace files."),
+        ("mcp-history", "Read prompt history", "Allow agents to read earlier prompts for a supported terminal."),
+        ("mcp-editor", "Control SD Editor", "Open local files, read and modify unsaved buffers, and save files as your user account."),
+        ("mcp-plugins", "Run plugin commands", "Allow authoring, executing, installing, approving and removing plugins as your user account."),
+        ("mcp-admin", "Administer this desktop", "Allow application start and stop, settings changes, Telegram administration, peer commands, device authorization and update installation. These actions have owner authority."),
     ] {
         let row = Box::new(Orientation::Horizontal, 12);
         let words = Box::new(Orientation::Vertical, 4);
@@ -70,6 +76,7 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
                 config.close,
                 config.read_notes,
                 config.edit_notes,
+                config.layout, config.files, config.history, config.editor, config.plugins, config.administration,
             ]
             .into_iter()
             .enumerate()
@@ -117,7 +124,14 @@ fn build_with_store(root: &Box, load: Load, save: Save) -> Rc<dyn Fn()> {
                 4 => config.controls = toggle.is_active(),
                 5 => config.close = toggle.is_active(),
                 6 => config.read_notes = toggle.is_active(),
-                _ => config.edit_notes = toggle.is_active(),
+                7 => config.edit_notes = toggle.is_active(),
+                8 => config.layout = toggle.is_active(),
+                9 => config.files = toggle.is_active(),
+                10 => config.history = toggle.is_active(),
+                11 => config.editor = toggle.is_active(),
+                12 => config.plugins = toggle.is_active(),
+                13 => config.administration = toggle.is_active(),
+                _ => unreachable!(),
             }
             match save(config) {
                 Ok(()) => refresh(),

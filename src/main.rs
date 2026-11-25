@@ -12,6 +12,7 @@ mod control_launch;
 #[cfg(unix)]
 mod headless;
 mod control_terminal;
+mod control_telegram;
 mod control_geometry;
 mod control_close;
 mod control_input;
@@ -1098,6 +1099,7 @@ fn control_handler(
             .map_err(|_| ())?
     };
     match &request.command {
+        C::TelegramRead {..} | C::TelegramEdit {..} => control_telegram::execute(&request),
         C::Capabilities {} => control::Reply::success(&request.request_id, control::capabilities()),
         C::ConnectionRead { .. } | C::ConnectionInvite { .. } | C::ConnectionDecide { .. } | C::ConnectionRevoke { .. } => {
             control_connection::execute(&root(), &request, deadline)

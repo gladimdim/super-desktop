@@ -4,6 +4,21 @@ use crate::cli_extended::{opaque, respond, send, valid_id, Options};
 use crate::control::{Command, WorkspaceEdit as Edit, WorkspaceQuery as Query};
 
 pub(crate) fn run(args: &[String]) -> Option<Output> {
+    if matches!(args.first().map(String::as_str), Some("terminal" | "harness")) {
+        let family: Vec<_> = args.iter().take(2).map(String::as_str).collect();
+        if !matches!(family.as_slice(), ["terminal","history"] | ["harness","slash"]) {return None;}
+        return respond(args, || {
+            let history = family[0] == "terminal";
+            let options = Options::parse(args, if history { &["--offset"] } else { &[] }, &[])?;
+            let [_, _, id] = options.words.as_slice() else {return Err("Supply one exact ID.");};
+            if !valid_id(id,128) {return Err("Invalid ID.");}
+            let command = if history {
+                let offset = options.values.get("--offset").map(|v| v.parse::<u16>()).transpose().map_err(|_| "Invalid history offset.")?.unwrap_or(0);
+                Command::PromptHistory {id:id.clone(),offset}
+            } else {Command::SlashCommands {id:id.clone()}};
+            Ok(render_reply(send(command,&options),options.json))
+        });
+    }
     if !matches!(args.first().map(String::as_str), Some("note" | "workspace")) {
         return None;
     }
@@ -23,6 +38,8 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
                     | &"resize"
                     | &"tag"
                     | &"set"
+                    | &"arrange-desktop" | &"navigate" | &"forget-folder" | &"open-editor" | &"open-plugin"
+                    | &"edit-buffer"
                     | &"arrange"
                     | &"layout"
             )
@@ -36,6 +53,8 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             values.extend(["--expect-epoch", "--expect-revision"]);
         }
         match words.as_slice() {
+            ["workspace","read-buffer",..] => values.push("--offset"),
+            ["workspace","edit-buffer",..] => {values.push("--file"); flags.push("--stdin");}
             ["note", "create", ..] => {
                 values.extend(["--file", "--x", "--y", "--width", "--height", "--tag"]);
                 flags.push("--stdin");
@@ -63,6 +82,9 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
             }
         };
         let query = match words.as_slice() {
+            ["workspace","read-buffer",editor,document] => Some(Query::Buffer {editor:(*editor).into(),document:(*document).into(),offset:options.values.get("--offset").map(|v|v.parse::<u32>()).transpose().map_err(|_|"Use an unsigned byte offset.")?.unwrap_or(0)}),
+            ["workspace","layout","export-desktop"] => Some(Query::DesktopLayout),
+            ["workspace", "editors"] => Some(Query::Editors),
             ["workspace", "inspect"] => Some(Query::Inspect),
             ["workspace", "folders"] => Some(Query::Folders),
             ["workspace", "layout", "export"] => Some(Query::Layout),
@@ -109,6 +131,12 @@ pub(crate) fn run(args: &[String]) -> Option<Output> {
                     .filter(|t| *t <= 8)
                     .ok_or("Tag must be 0..8.")?,
             },
+            ["workspace","edit-buffer",editor] => Edit::Editor {editor:(*editor).into(),action:serde_json::from_str(&options.text(12000)?).map_err(|_|"Invalid EditorAction. See workspace edit-buffer --help.")?},
+            ["workspace","arrange-desktop"] => Edit::ArrangeDesktop,
+            ["workspace","forget-folder",path] => Edit::ForgetFolder {path:(*path).into()},
+            ["workspace","navigate",direction @ ("next" | "previous" | "attention")] => Edit::Navigate {direction:(*direction).into()},
+            ["workspace","open-editor",folder,tail @ ..] if tail.len() <= 1 => Edit::OpenEditor {folder:(*folder).into(),file:tail.first().map(|s| (*s).into())},
+            ["workspace","open-plugin",plugin,surface,action] => Edit::PluginSurface {plugin:(*plugin).into(),surface:(*surface).into(),action:(*action).into()},
             ["workspace", "arrange"] => Edit::Arrange,
             ["workspace", "layout", "apply"] => Edit::Layout {layout:serde_json::from_str(&options.text(12000)?).map_err(|_|"Invalid layout JSON; use the data.layout object from export, with no unknown fields.")?},
             ["workspace", "set", path] => Edit::Folder {

@@ -28,6 +28,8 @@ const USAGE: &str = "usage: super-desktop plugin <command>
                                       install a plugin (an id from search); it runs once approved
   fork <id|git-url|folder> [--json]   make a plugin your own copy to change with an agent
                                       (installs and approves it when needed; no more updates)
+  enable <id> [--json]                enable an installed plugin (preserves approval)
+  disable <id> [--json]               disable an installed plugin
   approve <id> [--json]               let an installed plugin run
   update <id> [--json]                fast-forward an installed plugin from its git source
   remove <id> [--json]                move a plugin's folder to the trash
@@ -122,6 +124,14 @@ pub fn run(args: &[String]) -> i32 {
         "search" => Flags::parse(rest, &["category"]).and_then(|f| search(&f)),
         "install" => Flags::parse(rest, &[]).and_then(|f| install_command(&f)),
         "fork" => Flags::parse(rest, &[]).and_then(|f| fork_command(&f)),
+        "enable" | "disable" => Flags::parse(rest, &[]).and_then(|f| {
+            let id = one_id(&f)?;
+            if !manifest::valid_plugin_id(&id) { return Err("Invalid plugin ID.".into()); }
+            let enabled = command == "enable";
+            manifest::set_enabled(&paths::plugins_dir().join(&id), enabled)?;
+            report(f.json,json!({"ok":true,"id":id,"enabled":enabled}),&format!("{id}: enabled={enabled}"));
+            Ok(0)
+        }),
         "approve" => Flags::parse(rest, &[]).and_then(|f| one_id(&f).and_then(|id| {
             install::approve(&install::Places::current(), &id)?;
             report(f.json, json!({"ok": true, "id": id}), &format!("Approved {id}: it runs in SUPER DESKTOP now."));

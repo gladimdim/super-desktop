@@ -537,6 +537,10 @@ a pull request adding that entry to `registry.json`, in id order (its
 
 ## Other commands
 
+To pause the example clock, run `super-desktop plugin disable clock-dock`.
+Run `super-desktop plugin enable clock-dock` to enable it again. Both commands
+accept an installed ID and `--json`. Installed plugins still require approval.
+
 - `super-desktop plugin new <id> [--slot dock.left|dock.right|toolbar.item|panel|settings.page|card|fullscreen|popup] [--name "…"]`:
   a working plugin to start from (`panel`, `card`, `fullscreen` and `popup` also make
   the top-bar item that opens it).

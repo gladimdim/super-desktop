@@ -150,13 +150,13 @@ without a display or daemon. Structured reads never start a missing daemon. Use 
 process. Clients do not automatically discover a server running in a separate
 terminal. The server supports MCP 2025-11-25 and 2025-03-26; the
 <a href="https://github.com/gladimdim/super-desktop/blob/master/README.md#local-mcp-access">README configuration example</a> uses <code>mcpServers</code>.
-Discovery is offline. Calls use the existing owner-only local API and check
-operation support before dispatch; unavailable or older daemons return tool
-errors without starting another daemon or falling back to terminal commands.</p>
-<p>Open <strong>Settings → MCP</strong> to control access. <strong>Enable MCP</strong> gates every tool;
-<strong>Read terminal output</strong>, <strong>Launch harnesses</strong>, <strong>Submit prompts</strong>, <strong>Control terminals</strong>,
-<strong>Close terminals</strong>, <strong>Read sticky notes</strong>, and <strong>Edit sticky notes</strong> gate their corresponding tools.
-Metadata tools start enabled; these optional permissions start disabled. Disabled
+Discovery works offline. Desktop operations check the owner daemon's advertised
+capabilities. Plugin tools also support offline workflows. Starting the
+application requires an explicit lifecycle action.</p>
+<p>Open <strong>Settings → MCP</strong> to control access. Fresh preferences expose 14 metadata
+tools. All 13 optional permissions together expose 88 tools. Inspect the policy
+with <code>super-desktop mcp policy show</code>. Edit the complete JSON document and pass
+it to <code>super-desktop mcp policy replace --stdin</code> from the local CLI. Disabled
 tools are omitted from discovery and calls return <code>mcp_disabled</code>. The controls
 apply to the next request on an existing connection; in-flight calls may finish.
 Refresh/reconnect the client
@@ -237,7 +237,7 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 </tr>
 <tr>
 <td><code>launch_harness</code></td>
-<td><code>harness</code>, <code>cwd</code>, <code>requestId</code>; optional <code>allowUnsafeHarness</code>, <code>allowDownload</code></td>
+<td><code>harness</code>, <code>cwd</code>, <code>requestId</code>; optional <code>allowUnsafeHarness</code>, <code>allowDownload</code>, <code>arguments</code>, <code>width</code>, <code>height</code>, <code>center</code>, <code>show</code></td>
 <td>Launch a configured harness or <code>shell</code>; opt-ins default to false</td>
 </tr>
 <tr>
@@ -302,6 +302,54 @@ These controls govern MCP exposure, not the separate owner CLI or an OS sandbox.
 </tr>
 </tbody>
 </table></div>
+<div class="table-scroll" tabindex="0" role="region" aria-label="Reference table"><table>
+<thead>
+<tr>
+<th>Area</th>
+<th>Additional tools</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Terminal and prompts</td>
+<td><code>submit_prompt_with_files</code>, <code>wait_for_status</code>, <code>prompt_history</code>, <code>list_slash_commands</code>, <code>run_slash_command</code>, <code>follow_terminal</code>, <code>attach_terminal</code>, <code>forget_terminal</code>, <code>relaunch_terminal</code>, <code>list_viewports</code>, <code>change_viewport</code></td>
+</tr>
+<tr>
+<td>Cards and workspace</td>
+<td><code>inspect_workspace</code>, <code>list_workspace_folders</code>, <code>set_workspace_folder</code>, <code>forget_recent_folder</code>, <code>navigate_cards</code>, <code>arrange_workspace</code>, <code>arrange_desktop</code>, <code>export_layout</code>, <code>export_desktop_layout</code>, <code>validate_layout</code>, <code>apply_layout</code>, <code>workspace_events</code>, <code>move_terminal</code>, <code>resize_terminal</code>, <code>set_terminal_mode</code>, <code>change_terminal_card</code>, <code>move_note</code>, <code>resize_note</code>, <code>tag_note</code></td>
+</tr>
+<tr>
+<td>SD Editor and files</td>
+<td><code>list_editors</code>, <code>open_editor</code>, <code>read_editor_buffer</code>, <code>edit_editor_buffer</code>, <code>terminal_files</code>, <code>edit_terminal_files</code></td>
+</tr>
+<tr>
+<td>Plugins</td>
+<td><code>plugin_command</code>, <code>open_plugin_surface</code></td>
+</tr>
+<tr>
+<td>Desktop administration</td>
+<td><code>app_action</code>, <code>desktop_doctor</code>, <code>read_preferences</code>, <code>edit_preferences</code>, <code>shortcut_preview</code>, <code>shortcut_apply</code>, <code>inspect_access</code>, <code>list_audit_records</code>, <code>audit_export</code>, <code>check_updates</code>, <code>inspect_update</code>, <code>install_update</code></td>
+</tr>
+<tr>
+<td>Connections</td>
+<td><code>list_connections</code>, <code>invite_connection</code>, <code>decide_connection</code>, <code>revoke_connection</code>, <code>add_peer</code>, <code>inspect_peer_pairing</code>, <code>read_peers</code>, <code>send_peer_command</code>, <code>forget_peer</code>, <code>peer_events</code>, <code>peer_attach</code>, <code>inspect_telegram</code>, <code>manage_telegram</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>Use <code>tools/list</code> for each tool's exact input schema and allowed actions. Workflow
+tools such as <code>plugin_command</code> take a command and an optional array of arguments.
+For example, pass <code>{"command":"plugin list","requestId":"inventory-1"}</code>.
+Each captured stream is bounded to 128 KiB. Remote terminal attachment returns
+base64 bytes. Send guarded terminal input separately. Prompt attachments require
+both file and prompt permissions. Forgetting or relaunching a terminal requires
+administration, launch, close and explicit confirmation.</p>
+<p>Use <code>workspace layout export-desktop</code> for a version 2 layout with terminals,
+notes, plugins and editors. Use <code>workspace arrange-desktop</code> for the toolbar's
+Arrange behavior. The original export and arrange commands cover terminals and
+notes. Get open document IDs from <code>workspace editors</code> and the current buffer
+revision from <code>workspace read-buffer</code>. For example, a buffer edit action is
+<code>{"kind":"splice","document":"DOC","revision":"REV","start":0,"end":0,"text":"Hello"}</code>.
+Offsets count UTF-8 bytes. The edit command also requires current workspace guards.</p>
 <p>Input guards are <code>expectEpoch</code>, <code>expectRevision</code>, and <code>expectPaneIdentity</code>, obtained
 from <code>terminal_geometry</code> and <code>terminal_runtime</code>. Each mutation requires a unique
 request ID. Closing requires explicit confirmation as well as the Settings switch.
@@ -418,6 +466,11 @@ No global request ID option or remote target is accepted here.</p>
 <td><code>terminal interrupt ID</code></td>
 <td>Ctrl-C without killing the session</td>
 <td><code>terminal.input</code></td>
+</tr>
+<tr>
+<td><code>terminal slash ID COMMAND --expect-epoch EPOCH --expect-revision REVISION --expect-pane-identity IDENTITY --request-id ID</code></td>
+<td>Structured local</td>
+<td>Apply the harness catalog’s insert or submit behavior</td>
 </tr>
 <tr>
 <td><code>terminal prompt ID</code></td>
@@ -913,10 +966,9 @@ super-desktop harness launch claude --cwd &quot;$PWD&quot; --request-id agent-ta
   <code>terminal create</code> does not accept it. It does not restrict a launched program's
   own network access; custom programs and startup files can run arbitrary code.</li>
 </ul>
-<p>Launches use saved Settings configuration. They accept no initial prompt, shell
-command, model selection, argument override or safe permission profile. They do
-not present the overlay or explicitly request focus; ordinary hover behavior
-still applies when the overlay is visible. The desktop permits at most 256
+<p>Launches default to the arguments saved in Settings. Use <code>--args-file</code> for a
+one-shot override, <code>--show</code> to present the overlay and <code>harness launch --prompt</code>
+for an initial prompt on a supported harness. The desktop permits at most 256
 terminal cards.</p>
 <p>A successful launch's <code>data</code> contains <code>id</code>, <code>sessionName</code>, <code>harnessId</code>,
 <code>launchDirectory</code>, <code>state: "created"</code> and <code>readiness: "not_observed"</code>. It means
@@ -1165,6 +1217,16 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 </thead>
 <tbody>
 <tr>
+<td><code>mcp policy show</code></td>
+<td>Offline</td>
+<td>Print the local MCP permission document as JSON</td>
+</tr>
+<tr>
+<td><code>mcp policy replace (--stdin \| --file PATH)</code></td>
+<td>Offline</td>
+<td>Replace the complete local policy atomically</td>
+</tr>
+<tr>
 <td><code>mcp serve</code></td>
 <td>Local MCP stdio</td>
 <td>Serve desktop inspection, harness launch and guarded prompt tools</td>
@@ -1223,6 +1285,16 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td><code>plugin fork ID\|GIT_URL\|DIR [--json]</code></td>
 <td>Network for IDs and URLs</td>
 <td>Make a plugin your own copy to change</td>
+</tr>
+<tr>
+<td><code>plugin enable ID [--json]</code></td>
+<td>Offline</td>
+<td>Enable a plugin and preserve its approval state</td>
+</tr>
+<tr>
+<td><code>plugin disable ID [--json]</code></td>
+<td>Offline</td>
+<td>Disable a plugin and preserve its approval state</td>
 </tr>
 <tr>
 <td><code>plugin approve ID [--json]</code></td>
@@ -1413,6 +1485,116 @@ command and for the <code>app</code>, <code>terminal</code>, <code>harness</code
 <td><code>workspace arrange --expect-epoch EPOCH --expect-revision REVISION --request-id ID [--format text\|json] [--target local]</code></td>
 <td>Structured local</td>
 <td>Inspect or apply bounded local card layouts</td>
+</tr>
+<tr>
+<td><code>terminal history ID [--offset N]</code></td>
+<td>Structured local</td>
+<td>Read a page of per-card dated prompts</td>
+</tr>
+<tr>
+<td><code>harness slash ID</code></td>
+<td>Structured local</td>
+<td>List harness slash commands and Enter behavior</td>
+</tr>
+<tr>
+<td><code>workspace editors</code></td>
+<td>Structured local</td>
+<td>List open editor cards and tabs</td>
+</tr>
+<tr>
+<td><code>workspace open-editor FOLDER [FILE] --expect-epoch EPOCH --expect-revision REVISION --request-id ID</code></td>
+<td>Structured local</td>
+<td>Open or focus an editor card</td>
+</tr>
+<tr>
+<td><code>workspace open-plugin PLUGIN SURFACE ACTION --expect-epoch EPOCH --expect-revision REVISION --request-id ID</code></td>
+<td>Structured local</td>
+<td>Open an approved panel, card or fullscreen surface</td>
+</tr>
+<tr>
+<td><code>workspace arrange-desktop --expect-epoch EPOCH --expect-revision REVISION --request-id ID</code></td>
+<td>Structured local</td>
+<td>Arrange all desktop card types</td>
+</tr>
+<tr>
+<td><code>workspace navigate next\|previous\|attention --expect-epoch EPOCH --expect-revision REVISION --request-id ID</code></td>
+<td>Structured local</td>
+<td>Focus another terminal using desktop navigation</td>
+</tr>
+<tr>
+<td><code>workspace forget-folder PATH --expect-epoch EPOCH --expect-revision REVISION --request-id ID</code></td>
+<td>Structured local</td>
+<td>Remove a recent folder from the dropdown</td>
+</tr>
+<tr>
+<td><code>telegram setup-mini-app --allow-serve --request-id ID</code></td>
+<td>Structured local</td>
+<td>Configure Tailscale Serve and save the Mini App URL</td>
+</tr>
+<tr>
+<td><code>telegram status</code></td>
+<td>Structured local</td>
+<td>Read Telegram settings and pending requests</td>
+</tr>
+<tr>
+<td><code>telegram invitation</code></td>
+<td>Structured local</td>
+<td>Read the current private pairing invitation</td>
+</tr>
+<tr>
+<td><code>telegram invite --request-id ID</code></td>
+<td>Structured local</td>
+<td>Start Telegram account pairing</td>
+</tr>
+<tr>
+<td><code>telegram approve ID CODE --request-id ID</code></td>
+<td>Structured local</td>
+<td>Approve a pending Telegram request</td>
+</tr>
+<tr>
+<td><code>telegram reject ID CODE --request-id ID</code></td>
+<td>Structured local</td>
+<td>Reject a pending Telegram request</td>
+</tr>
+<tr>
+<td><code>telegram revoke --request-id ID</code></td>
+<td>Structured local</td>
+<td>Revoke Telegram access</td>
+</tr>
+<tr>
+<td><code>telegram clear-rejected --request-id ID</code></td>
+<td>Structured local</td>
+<td>Clear rejected Telegram users</td>
+</tr>
+<tr>
+<td><code>telegram unlink-forum --request-id ID</code></td>
+<td>Structured local</td>
+<td>Unlink the Telegram forum</td>
+</tr>
+<tr>
+<td><code>telegram sync-topics --request-id ID</code></td>
+<td>Structured local</td>
+<td>Request forum topic synchronization</td>
+</tr>
+<tr>
+<td><code>telegram set KEY (--stdin \| --file PATH) --request-id ID</code></td>
+<td>Structured local</td>
+<td>Set one Telegram preference from a JSON value</td>
+</tr>
+<tr>
+<td><code>workspace layout export-desktop</code></td>
+<td>Structured local</td>
+<td>Export all card types as a version 2 layout for validate and apply</td>
+</tr>
+<tr>
+<td><code>workspace read-buffer EDITOR DOCUMENT [--offset BYTES]</code></td>
+<td>Structured local</td>
+<td>Read a UTF-8 page and buffer revision</td>
+</tr>
+<tr>
+<td><code>workspace edit-buffer EDITOR (--file PATH \| --stdin) --expect-epoch EPOCH --expect-revision REVISION --request-id ID</code></td>
+<td>Structured local</td>
+<td>Apply a new, closeCard, splice, save, saveNew or close editor action</td>
 </tr>
 <tr>
 <td><code>workspace inspect [--format text\|json] [--target local]</code></td>
@@ -2026,9 +2208,10 @@ new-card placement. It requires geometry/pane guards and
 <code>--allow-unsafe-harness</code>: the saved command may execute code or download software.
 It does not promise a fresh conversation or recovery of interrupted work.</p>
 <p><code>terminal resume ID --native-session NATIVE_ID</code> performs the same replacement
-with an explicit native selector. Direct Claude and Codex executables accept an
-exact UUID; OpenCode accepts an exact <code>ses_</code> ID. Shell wrappers, other harnesses,
-and saved commands already selecting resume modes are refused. The receipt
+with an explicit native selector. Direct Claude, Codex and Antigravity CLI
+executables accept an exact UUID. OpenCode accepts an exact <code>ses_</code> ID. Shell
+wrappers, other harnesses, and saved commands already selecting resume modes
+are refused. The receipt
 reports the requested conversation, not verified native resumption. Neither
 replacement command submits a new prompt. The old pane must still exist;
 missing-session cards can be forgotten and a launcher started explicitly.</p>

@@ -17,6 +17,7 @@ type DiskChange = Rc<dyn Fn(&Rc<Doc>)>;
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 pub struct Doc {
+    pub(super) id:String,
     pub path: RefCell<Option<PathBuf>>,
     pub buffer: gtk4::TextBuffer,
     pub view: gtk4::TextView,
@@ -98,6 +99,7 @@ impl Doc {
         tab.append(&close);
 
         let doc = Rc::new(Self {
+            id: glib::uuid_string_random().to_string(),
             path: RefCell::new(None),
             buffer,
             view,
@@ -210,6 +212,26 @@ impl Doc {
     pub fn save_as(self: &Rc<Self>, path: &Path) -> Result<(), String> {
         self.write(path)?;
         self.set_path(path);
+        Ok(())
+    }
+
+    pub(super) fn save_new(self:&Rc<Self>,path:&Path)->Result<(),String>{
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let parent = path.parent().ok_or("Missing parent directory.")?;
+        let temporary = parent.join(format!(".sd-editor-{}", glib::uuid_string_random()));
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .open(&temporary).map_err(|e| e.to_string())?;
+        // Publish the complete file only if the destination still does not exist.
+        let result = file.write_all(self.text().as_bytes())
+            .and_then(|_| file.sync_all())
+            .and_then(|_| std::fs::hard_link(&temporary, path));
+        drop(file);
+        let _ = std::fs::remove_file(&temporary);
+        result.map_err(|e| e.to_string())?;
+        self.set_path(path);
+        self.buffer.set_modified(false);
+        self.stale.set(false);
         Ok(())
     }
 

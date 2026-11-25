@@ -110,7 +110,7 @@ impl Flow {
     pub(crate) fn run_with_permission(
         self,
         options: &Options,
-        mut permitted: impl FnMut() -> bool,
+        permitted: impl Fn() -> bool,
     ) -> Reply {
         if options.values.get("--target").is_some_and(|s| s != "local") {
             return Reply::failure(
@@ -146,6 +146,9 @@ impl Flow {
                 }
             },
             |id| {
+                if !permitted() {
+                    return Reply::failure(id, "mcp_disabled", "Launch access was disabled during this workflow.");
+                }
                 let exe = match std::env::current_exe() {
                     Ok(p) => p.with_file_name("super-desktop"),
                     Err(_) => {

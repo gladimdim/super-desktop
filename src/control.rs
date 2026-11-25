@@ -21,6 +21,8 @@ pub const MAX_CONNECTIONS: usize = 8;
 pub const DEADLINE: Duration = Duration::from_secs(3);
 pub const METHODS: &[&str] = &[
     "app.status",
+    "telegram.read",
+    "telegram.edit",
     "audit.list",
     "access.list",
     "connection.read",
@@ -40,6 +42,8 @@ pub const METHODS: &[&str] = &[
     "terminal.inspect",
     "terminal.runtime",
     "terminal.composer",
+    "terminal.history",
+    "harness.slash",
     "terminal.status",
     "terminal.capture",
     "terminal.geometry",
@@ -93,6 +97,7 @@ pub const MAX_INPUT: usize = 4096;
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum InputData {
+    Slash { text: String },
     Send {
         text: String,
         #[serde(default)]
@@ -140,7 +145,7 @@ impl InputData {
             }
         }
         match self {
-            Self::Send { text, .. } | Self::Prompt { text, .. } => {
+            Self::Slash { text } | Self::Send { text, .. } | Self::Prompt { text, .. } => {
                 if text.is_empty()
                     || text.len() > MAX_INPUT
                     || text
@@ -183,7 +188,17 @@ pub struct LayoutItem {
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum EditorAction {
+    New, CloseCard, Splice {document:String,revision:String,start:u32,end:u32,text:String},
+    Save {document:String,revision:String}, SaveNew {document:String,revision:String,path:String}, Close {document:String,revision:String},
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkspaceQuery {
+    Buffer {editor:String,document:String, #[serde(default)] offset:u32},
+    DesktopLayout,
+    Editors,
     Inspect,
     Layout,
     ValidateLayout { layout: Layout },
@@ -195,6 +210,13 @@ pub enum WorkspaceQuery {
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum WorkspaceEdit {
+    Editor {editor:String,action:EditorAction},
+    ArrangeDesktop,
+    Navigate { direction: String },
+    ForgetFolder { path: String },
+    OpenEditor { folder: String, file: Option<String> },
+    PluginSurface { plugin: String, surface: String, action: String },
+
     NoteCreate { text: String, x: i32, y: i32, width: i32, height: i32, tag: u8 },
     NoteUpdate { id: String, text: String },
     NoteDelete { id: String },
@@ -251,10 +273,25 @@ pub enum FilesEdit {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag="kind",rename_all="camelCase",deny_unknown_fields)]
+pub enum TelegramAction {
+    Invite, Approve {id:String,code:String}, Reject {id:String,code:String}, Revoke, ClearRejected, UnlinkForum, SyncTopics,
+    Settings {key:String,value:Value}, SetupMiniApp {confirm:bool},
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "method", deny_unknown_fields)]
 pub enum Command {
+    #[serde(rename="telegram.read")]
+    TelegramRead { #[serde(default)] invitation: bool },
+    #[serde(rename="telegram.edit")]
+    TelegramEdit { action:TelegramAction },
     #[serde(rename="terminal.composer")]
     Composer { id:String },
+    #[serde(rename="terminal.history")]
+    PromptHistory { id: String, #[serde(default)] offset: u16 },
+    #[serde(rename="harness.slash")]
+    SlashCommands { id: String },
     #[serde(rename="connection.read")]
     ConnectionRead { pending: bool },
     #[serde(rename="connection.invite")]
@@ -458,7 +495,7 @@ impl Command {
     pub fn is_mutation(&self) -> bool {
         matches!(
             self,
-            Self::ConnectionInvite {..} | Self::ConnectionDecide {..} | Self::ConnectionRevoke {..} | Self::PeerAdd {..} | Self::PeerCommand {..} | Self::PeerForget {..} | Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
+            Self::TelegramEdit {..} | Self::ConnectionInvite {..} | Self::ConnectionDecide {..} | Self::ConnectionRevoke {..} | Self::PeerAdd {..} | Self::PeerCommand {..} | Self::PeerForget {..} | Self::UpdatesCheck {} | Self::UpdatesInstall {..} | Self::Forget {..} | Self::Relaunch {..} | Self::Shortcut {preview:Some(_),..}
                 | Self::Attach { .. }
                 | Self::Viewport { .. }
                 | Self::CardAction { .. }
@@ -565,7 +602,7 @@ pub fn capabilities() -> Value {
         "terminalViewport":{"columns":[20,500],"rows":[5,300],"ttlSeconds":[1,300],"maxLeases":4,"sizingPolicy":"latest","exclusive":false,"persistentOptionsChanged":false,"requiresPaneIdentity":true},
         "terminalFiles":{"methods":["list","add","read","save","remove"],"chunkBytes":65536,"maxSaveBytes":8192,"fileLimitBytes":16777216,"textLimitBytes":524288,"referenceRemovalDeletesFile":false,"saveFormat":"markdown","catalog":"local-cli"},
         "settings":{"reads":["settings","harnessArgs","custom","theme","usage"],"edits":["setting","harnessArgs","customPut","customRemove","visibility","rescan","themeReload"],"revisionScope":"workspace","requiresRequestId":true,"runningSessionsChanged":false,"arbitraryKeys":false},
-        "workspace":{"reads":["inspect","folders","notes","note","layout","validateLayout"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
+        "workspace":{"layoutVersions":[1,2],"reads":["inspect","folders","notes","note","layout","validateLayout","editors","desktopLayout","buffer"],"edits":["folder","noteCreate","noteUpdate","noteDelete","noteMove","noteResize","noteTag","layout","arrange","arrangeDesktop","navigate","forgetFolder","openEditor","pluginSurface","editor"],"revisionScope":"workspace","maxNoteBytes":4096,"maxLayoutItems":64,"requiresEpochAndRevision":true},
         "terminalInventory": "saved-cards", "terminalRuntimeObserved": false,
         "connections":{"reads":["list","pending"],"mutations":["invite","approve","reject","revoke"],"wireVersion":3,"bridgeAutoStart":false,"invitationOutput":"new-private-file","approvalRequiresCode":true},
         "delegatedAccess": false, "remoteTargets": false, "peerWrappers":{"reads":["list","inspect","workspace"],"mutations":["add","command","forget"],"pairingJobs":{"statusMethod":"peer.pairing","durable":false,"maxJobs":32,"maxActive":1,"approval":"host-code-comparison"},"wire":"existing-pinned-peer-protocol","localFallback":false},
@@ -573,7 +610,7 @@ pub fn capabilities() -> Value {
         "terminalClose":{"requiresRequestId":true,"requiresEpochAndRevision":true,"requiresPaneIdentity":true,"missingPaneRemoval":false,"singleUnlinkedPaneOnly":true},
         "promptAttachments":{"maxFiles":4,"maxBytes":16777216,"delivery":"path-references","nativeImageConfirmation":false,"source":"checked-cli-assets","privateCopies":true},
         "terminalComposer":{"supportedHarnesses":["claude","codex","grok"],"readOnly":true,"readiness":"recognized-empty-composer","submissionObserved":false},
-        "terminalInput":{"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
+        "terminalInput":{"slashCommand":true,"maxBytes":MAX_INPUT,"maxKeys":32,"requiresPaneIdentity":true,"requiresEpochAndRevision":true,"requiresRequestId":true,"raw":false,"completionObserved":false},
         "terminalMode":{"actions":["minimize","restore","expand","collapse"],"requiresRequestId":true,"requiresEpochAndRevision":true,"startsSessions":false,"collapsesOtherCards":false},
         "terminalGeometry":{"units":"logical-pixels","requiresRequestId":true,"requiresEpochAndRevision":true,"clamp":"explicit","gridControl":false},
         "launch": {"requiresRequestId":true,"initialPrompt":false,"argumentOverrides":true,"focus":false,"journalEntries":4096}})
