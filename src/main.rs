@@ -821,16 +821,32 @@ fn run_daemon(start_visible: bool) {
     let (shortcut, shortcut_rx) = futures_channel::mpsc::channel::<control_shortcut::Query>(8);
     let (close, close_rx) = futures_channel::mpsc::channel::<control_close::Query>(8);
     let channels = ControlChannels { snapshot, adopt, geometry, files, shortcut, close };
-    match control::Server::bind(&runtime_dir()) {
-        Ok(server) => {
-            let _ = thread::Builder::new()
-                .name("sd-control".into())
-                .spawn(move || {
-                    server.run(move |request, deadline| control_handler(&channels, request, deadline));
-                });
-        }
-        Err(error) => eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}"),
-    }
+    let control_runtime = runtime_dir();
+    let _ = thread::Builder::new()
+        .name("sd-control".into())
+        .spawn(move || {
+            let mut bound = None;
+            for attempt in 0..30 {
+                match control::Server::bind(&control_runtime) {
+                    Ok(server) => {
+                        bound = Some(server);
+                        break;
+                    }
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::AddrInUse && attempt < 29 =>
+                    {
+                        thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(error) => {
+                        eprintln!("SUPER DESKTOP: local CLI control unavailable: {error}");
+                        break;
+                    }
+                }
+            }
+            if let Some(server) = bound {
+                server.run(move |request, deadline| control_handler(&channels, request, deadline));
+            }
+        });
     serve_window(&context, close_rx, "Close expired before card removal.", "Local desktop is not ready.", Err, |window, model, query| {
         window.cli_close(model, &query.request, query.action)
     });
