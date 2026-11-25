@@ -310,7 +310,7 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
     let (_, forum_body) = crate::launcher_settings::section_card(root, "", "Forum Topics");
     text(
         &forum_body,
-        "Optional 1-card-1-topic mode: create a private group with just you and your bot, enable Topics in Group Settings, promote the bot to Admin (Manage Topics), and send /linkforum inside General.",
+        "Optional 1-card-1-topic mode: create a private group with just you and your bot, enable Topics in Group Settings, promote the bot to Admin (Manage Topics and Delete Messages), and send /linkforum inside General.",
     );
     let forum_status = text(&forum_body, "Not linked to a Forum group.");
     forum_status.add_css_class("launcher-note");
@@ -336,7 +336,7 @@ fn build_with_hooks(root: &Box, hooks: Hooks) -> Rc<dyn Fn()> {
         &forum_body,
         "telegram-archive-topics",
         "Delete topic when a card closes",
-        "Delete the card's Forum Topic automatically once the terminal is closed (falls back to archiving if Telegram denies deletion).",
+        "Requires Delete Messages in the group. If Telegram denies deletion, the bot archives the topic and retries.",
     );
 
     // --- Section 3b: Mini Web App (Tailscale) ---

@@ -53,7 +53,7 @@ Forum Topics turn a private 2-member Telegram supergroup into a live workspace w
 
 1. In Telegram, create a new **private group** and add **only your bot** (there must be **2 members total**: you and your bot — SUPER DESKTOP refuses to link groups with more than 2 members for privacy).
 2. Open the group's **Settings / Edit** menu and enable **Topics**.
-3. Open **Administrators**, add your bot as an Administrator, and grant the **Manage Topics** permission (and optionally **Pin Messages** so the bot can silently pin the live status card at the top of each topic).
+3. Open **Administrators**, add your bot as an Administrator, and grant **Manage Topics** and **Delete Messages** so it can remove closed cards’ topics (and optionally **Pin Messages** so the bot can silently pin the live status card at the top of each topic).
 4. Open the group's **General** topic and send:
    ```text
    /linkforum
@@ -68,7 +68,7 @@ Forum Topics turn a private 2-member Telegram supergroup into a live workspace w
 - Tapping **⌨ Keys** (or `/keys`) opens a quick keypad (`Yes`/`No`/`1`–`3`/`↑`/`↓`/`Tab`/`⇧Tab`/`Enter`/`Esc`/`Ctrl-C` plus harness slash shortcuts like `/resume`, `/compact`, `/clear`).
 - Tapping **📎 Files** (or sending `/files`) opens a filterable, paginated list (`All` / `🖼 Images` / `📄 Docs` / `🔗 Links`) of referenced files and links (requires **Read terminal output**): images send as photos, GIFs as animations, PDFs as documents with inline **`🖼 Preview page`** buttons, long text/Markdown pages inline with **`◀ Prev` / `Next ▶` / `📥 Download file`**, and public links open from inline URL buttons.
 - Topic titles stay clean (`🤖 OpenAI Codex · project — prompt`) without constant status-dot rename notices cluttering the chat; live status dots (`🟢` Working, `🟡` Waiting, `✅` Finished, `🔴` Error, `⚪` Idle, `⚫` Exited) update silently in place on each topic's pinned header card and in the **General** dashboard.
-- By default, **Auto-create a topic for each card** and **Delete topic when a card closes** are enabled in **⚙ Settings → Telegram** (so new cards open topics and closed cards automatically delete their topics — falling back to archiving if Telegram denies deletion).
+- By default, **Auto-create a topic for each card** and **Delete topic when a card closes** are enabled in **⚙ Settings → Telegram** (so new cards open topics and closed cards automatically delete their topics — falling back to archiving if Telegram denies deletion). After a restart the bot checks its saved topic bindings against both live sessions and saved desktop cards. It retries a denied deletion every five minutes, or when you run `/sync` after granting **Delete Messages**.
 - Use **Sync topics now** (or `/sync` in General) to force an immediate resync of topics with open cards.
 - Use **Unlink forum** in Settings (or `/unlinkforum`) to disconnect the group, or send `/unlink` inside a topic to unbind just that topic.
 

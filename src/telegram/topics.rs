@@ -933,6 +933,7 @@ pub fn tick_typing_actions(
 }
 
 pub fn sync_topics(
+    backend: &dyn DesktopBackend,
     api: &dyn TelegramApi,
     cfg: &Config,
     runtime: &mut RuntimeState,
@@ -999,6 +1000,7 @@ pub fn sync_topics(
                         Ok(()) => {
                             runtime.topics[idx].closed = false;
                             runtime.topics[idx].delete_failed = false;
+                            runtime.topics[idx].next_delete_at = 0;
                             changed = true;
                         }
                         Err(ApiError::TopicNotFound) => {
@@ -1143,17 +1145,27 @@ pub fn sync_topics(
         }
     }
 
+    let saved_cards = std::cell::OnceCell::new();
     let mut idx = 0usize;
     while idx < runtime.topics.len() {
         let card_alive = cards.iter().any(|c| c.id == runtime.topics[idx].card_id);
-        if card_alive || runtime.topics[idx].deleted_in_telegram {
+        // A saved card can be waiting for its tmux session to be restored after boot.
+        if card_alive || runtime.topics[idx].deleted_in_telegram
+            || saved_cards.get_or_init(|| backend.saved_card_ids()).as_ref()
+                .is_none_or(|ids| ids.contains(&runtime.topics[idx].card_id))
+        {
             idx += 1;
             continue;
         }
         let card_id = runtime.topics[idx].card_id.clone();
         let thread_id = runtime.topics[idx].thread_id;
 
-        if cfg.archive_closed_topics && !runtime.topics[idx].delete_failed {
+        if cfg.archive_closed_topics {
+            let retry_denied = force_recreate_deleted && runtime.topics[idx].delete_failed;
+            if now_unix < runtime.topics[idx].next_delete_at && !retry_denied {
+                idx += 1;
+                continue;
+            }
             match api.delete_forum_topic(forum.chat_id, thread_id) {
                 Ok(()) | Err(ApiError::TopicNotFound) => {
                     runtime.topics.remove(idx);
@@ -1162,12 +1174,20 @@ pub fn sync_topics(
                     changed = true;
                     continue;
                 }
-                Err(ApiError::RateLimited { .. }) | Err(ApiError::Network(_)) => {
+                Err(err @ (ApiError::RateLimited { .. } | ApiError::Network(_))) => {
+                    let delay = match err {
+                        ApiError::RateLimited { retry_after } => retry_after.max(5),
+                        _ => 15,
+                    };
+                    runtime.topics[idx].delete_failed = false;
+                    runtime.topics[idx].next_delete_at = now_unix.saturating_add(delay);
+                    changed = true;
                     idx += 1;
                     continue;
                 }
                 Err(_) => {
                     runtime.topics[idx].delete_failed = true;
+                    runtime.topics[idx].next_delete_at = now_unix.saturating_add(300);
                     changed = true;
                 }
             }
@@ -1246,7 +1266,7 @@ pub fn sync_topics(
         let mut idx = 0;
         while runtime.topics.len() > MAX_TOPICS && idx < runtime.topics.len() {
             let live = cards.iter().any(|c| c.id == runtime.topics[idx].card_id);
-            if !live && (runtime.topics[idx].closed || runtime.topics[idx].deleted_in_telegram) {
+            if !live && (runtime.topics[idx].deleted_in_telegram || (!cfg.archive_closed_topics && runtime.topics[idx].closed)) {
                 runtime.topics.remove(idx);
                 changed = true;
             } else {
@@ -1293,6 +1313,7 @@ fn create_binding(
         icon_color: color,
         closed: false,
         delete_failed: false,
+        next_delete_at: 0,
         deleted_in_telegram: false,
         last_renamed_at: now_unix,
         status_message_id,

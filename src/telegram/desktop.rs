@@ -192,6 +192,7 @@ pub struct ProviderUsageSummary {
 
 pub trait DesktopBackend {
     fn list_cards(&self) -> Vec<CardSummary>;
+    fn saved_card_ids(&self) -> Option<Vec<String>>;
     fn usage_summary(&self) -> Vec<ProviderUsageSummary>;
     fn final_assistant_message(&self, _card_id: &str) -> Option<String> {
         None
@@ -275,6 +276,12 @@ impl LiveDesktopBackend {
 }
 
 impl DesktopBackend for LiveDesktopBackend {
+    fn saved_card_ids(&self) -> Option<Vec<String>> {
+        let file = std::fs::File::open(crate::state::get_state_path()).ok()?;
+        let state: crate::state::AppState = serde_json::from_reader(file).ok()?;
+        Some(state.terminals.into_iter().map(|card| card.session_name).collect())
+    }
+
     fn list_cards(&self) -> Vec<CardSummary> {
         let items = crate::bridge::collect_harnesses();
         let ids: Vec<String> = items

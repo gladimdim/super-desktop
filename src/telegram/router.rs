@@ -907,7 +907,7 @@ impl Router {
                 match pairing::link_forum(api, state_dir, cfg, runtime, chat_id, self.bot_id, now_unix) {
                     Ok(title) => {
                         let cards = backend.list_cards();
-                        topics::sync_topics(api, cfg, runtime, &cards, now_unix, true);
+                        topics::sync_topics(backend, api, cfg, runtime, &cards, now_unix, true);
                         let active = runtime
                             .topics
                             .iter()
@@ -983,7 +983,7 @@ impl Router {
                     return;
                 }
                 let cards = backend.list_cards();
-                topics::sync_topics(api, cfg, runtime, &cards, now_unix, true);
+                topics::sync_topics(backend, api, cfg, runtime, &cards, now_unix, true);
                 topics::sync_dashboard(
                     api,
                     cfg,
@@ -2053,7 +2053,7 @@ impl Router {
         } else if data.starts_with("syn:") {
             let _ = api.answer_callback_query(&cq.id, Some("Synced"));
             if cfg.forum.is_some() {
-                topics::sync_topics(api, cfg, runtime, &cards, now_unix, true);
+                topics::sync_topics(backend, api, cfg, runtime, &cards, now_unix, true);
                 topics::sync_dashboard(
                     api,
                     cfg,
@@ -2222,7 +2222,7 @@ impl Router {
                         );
                         if cfg.forum.is_some() {
                             let updated_cards = backend.list_cards();
-                            topics::sync_topics(api, cfg, runtime, &updated_cards, now_unix, false);
+                            topics::sync_topics(backend, api, cfg, runtime, &updated_cards, now_unix, false);
                             topics::sync_dashboard(
                                 api,
                                 cfg,
@@ -2307,7 +2307,7 @@ impl Router {
                                 runtime.active_card_id = Some(new_id.clone());
                                 if cfg.forum.is_some() {
                                     let updated_cards = backend.list_cards();
-                                    topics::sync_topics(api, cfg, runtime, &updated_cards, now_unix, false);
+                                    topics::sync_topics(backend, api, cfg, runtime, &updated_cards, now_unix, false);
                                 }
                                 let dir_display = crate::state::display_dir(&dir);
                                 let html = format!(

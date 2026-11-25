@@ -327,13 +327,16 @@ pub fn link_forum(
     if !fresh.should_run() || fresh.allowed_user.as_ref().map(|u| u.user_id) != Some(owner_id) {
         return Err("Telegram owner changed or was revoked; /linkforum aborted.".into());
     }
+    let same_forum = fresh.forum.as_ref().is_some_and(|forum| forum.chat_id == chat_id);
     fresh.forum = Some(ForumConfig {
         chat_id,
         title: title.clone(),
         linked_at: now,
     });
-    runtime.topics.clear();
     save_config_at(&cfg_path, &fresh).map_err(|e| e.to_string())?;
+    if !same_forum {
+        runtime.topics.clear();
+    }
     *cfg = fresh;
     save_runtime_at(&state_dir.join("runtime.json"), runtime).map_err(|e| e.to_string())?;
     Ok(title)

@@ -409,6 +409,7 @@ impl TelegramApi for MockApi {
 }
 
 struct MockBackend {
+    saved_cards: Mutex<Option<Vec<String>>>,
     cards: Mutex<Vec<CardSummary>>,
     usage: Mutex<Vec<ProviderUsageSummary>>,
     screens: Mutex<HashMap<String, String>>,
@@ -428,6 +429,7 @@ struct MockBackend {
 impl MockBackend {
     fn new(cards: Vec<CardSummary>) -> Self {
         Self {
+            saved_cards: Mutex::new(Some(Vec::new())),
             cards: Mutex::new(cards),
             usage: Mutex::new(Vec::new()),
             screens: Mutex::new(HashMap::new()),
@@ -461,6 +463,7 @@ impl MockBackend {
 }
 
 impl DesktopBackend for MockBackend {
+    fn saved_card_ids(&self) -> Option<Vec<String>> { self.saved_cards.lock().unwrap().clone() }
     fn list_cards(&self) -> Vec<CardSummary> {
         self.cards.lock().unwrap().clone()
     }
@@ -1102,6 +1105,8 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     let tid1 = rt.topic_for_card("sd_term_1").unwrap().thread_id;
     let tid2 = rt.topic_for_card("sd_term_2").unwrap().thread_id;
     assert_ne!(tid1, tid2);
+    pairing::link_forum(&api, &dir, &mut cfg, &mut rt, -100999, 999, now).unwrap();
+    assert_eq!(rt.topic_for_card("sd_term_2").unwrap().thread_id, tid2);
 
     // Message written inside Topic 2 routes directly to sd_term_2 without /select.
     let mut topic_msg = text_msg(-100999, "supergroup", 777, 10, "run cargo check", now);
@@ -1132,18 +1137,18 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         cards[0].title = Some("Refactored router".into());
     }
     let updated = backend.list_cards();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 10, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &updated, now + 10, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 0);
     assert_eq!(api.state.lock().unwrap().edited_msgs.len(), 1);
-    assert!(!topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 65, false));
+    assert!(!topics::sync_topics(&backend, &api, &cfg, &mut rt, &updated, now + 65, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 0);
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &updated, now + 66, true));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &updated, now + 66, true));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
 
     // Closing card deletes topic via deleteForumTopic and drops its binding; returning card creates a fresh topic.
     backend.cards.lock().unwrap().retain(|c| c.id != "sd_term_2");
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1155,7 +1160,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
 
     backend.cards.lock().unwrap().push(card2.clone());
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1191,7 +1196,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     // Fallback when deleteForumTopic is denied: archives topic once and reopens if card returns.
     backend.cards.lock().unwrap().push(card2.clone());
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1202,7 +1207,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     api.state.lock().unwrap().fail_delete_topic_bad_request = true;
     backend.cards.lock().unwrap().retain(|c| c.id != "sd_term_2");
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1215,7 +1220,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     assert_eq!(api.state.lock().unwrap().closed_topics, vec![(-100999, tid2_fb)]);
     // Subsequent sync tick does not retry delete_forum_topic while closed & delete_failed.
     assert!(!topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1225,7 +1230,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
 
     backend.cards.lock().unwrap().push(card2);
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1245,7 +1250,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
         cards[0].title = Some("Another title".into());
     }
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1255,7 +1260,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
     assert!(rt.topic_for_card("sd_term_1").unwrap().deleted_in_telegram);
     let created_before = api.state.lock().unwrap().created_topics.len();
     assert!(!topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1266,7 +1271,7 @@ fn telegram_forum_topics_linking_sync_routing_and_lifecycle() {
 
     // /sync (force_recreate_deleted = true) recreates deleted topic.
     assert!(topics::sync_topics(
-        &api,
+        &backend, &api,
         &cfg,
         &mut rt,
         &backend.list_cards(),
@@ -1724,7 +1729,42 @@ fn telegram_notifier_done_report_native_summary_and_idle_fallback() {
 }
 
 #[test]
+fn telegram_retries_archived_topics_after_restart_and_protects_restoring_cards() {
+    let dir = scratch_dir("restart-topics");
+    let path = dir.join("runtime.json");
+    let api = MockApi::new();
+    let backend = MockBackend::new(vec![]);
+    let cfg = Config {
+        forum: Some(ForumConfig { chat_id: -100555, title: "Forum".into(), linked_at: 10 }),
+        ..Config::default()
+    };
+    // Existing installations may already have an archived topic with no retry deadline.
+    let mut rt: RuntimeState = serde_json::from_value(json!({"topics":[{
+        "cardId":"sd_term_old", "threadId":77, "topicName":"Old", "iconColor":0,
+        "closed":true, "deleteFailed":true
+    }]})).unwrap();
+    api.state.lock().unwrap().fail_delete_topic_bad_request = true;
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[], 10, false));
+    save_runtime_at(&path, &rt).unwrap();
+    let mut restarted = load_runtime_at(&path).unwrap();
+    api.state.lock().unwrap().fail_delete_topic_bad_request = false;
+    assert!(!topics::sync_topics(&backend, &api, &cfg, &mut restarted, &[], 309, false));
+
+    for saved in [None, Some(vec!["sd_term_old".into()])] {
+        *backend.saved_cards.lock().unwrap() = saved;
+        assert!(!topics::sync_topics(&backend, &api, &cfg, &mut restarted, &[], 310, false));
+    }
+    assert!(api.state.lock().unwrap().deleted_topics.is_empty());
+    *backend.saved_cards.lock().unwrap() = Some(vec![]);
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut restarted, &[], 310, false));
+    assert!(restarted.topics.is_empty());
+    assert_eq!(api.state.lock().unwrap().deleted_topics, vec![(-100555, 77)]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
+    let backend = MockBackend::new(vec![]);
     let api = MockApi::new();
     let cfg = Config {
         enabled: true,
@@ -1757,7 +1797,7 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     card.last_prompt = None;
 
     // 1. Creation silently pins status_message_id and uses clean topic title (no volatile status prefix).
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0, false));
     let binding = rt.topic_for_card("sd_term_live").unwrap().clone();
     let status_msg_id = binding.status_message_id.expect("status header created");
     assert!(binding.status_pinned);
@@ -1779,7 +1819,7 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     ] {
         card.status = status.into();
         card.label = label.into();
-        assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + offset, false));
+        assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0 + offset, false));
         let st = api.state.lock().unwrap();
         assert_eq!(st.renamed_topics.len(), 0);
         let (_, mid, ref html, ref kb) = st.edited_msgs.last().unwrap();
@@ -1803,7 +1843,7 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     // 3. One-time initial prompt fill renames an untitled topic once; subsequent prompt edits
     // update only the pinned header unless explicit /sync (force_recreate_deleted = true) runs.
     card.title = Some("Fix tests".into());
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 30, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0 + 30, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
     assert_eq!(
         api.state.lock().unwrap().renamed_topics[0].2,
@@ -1811,11 +1851,11 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     );
 
     card.title = Some("Second prompt".into());
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 120, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0 + 120, false));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 1);
     assert!(api.state.lock().unwrap().edited_msgs.last().unwrap().2.contains("Second prompt"));
 
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 125, true));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0 + 125, true));
     assert_eq!(api.state.lock().unwrap().renamed_topics.len(), 2);
     assert_eq!(
         api.state.lock().unwrap().renamed_topics[1].2,
@@ -1825,7 +1865,7 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     // 4. If deleteForumTopic is denied, fallback edits status header to Closed on PC before archiving;
     //    default deletion deletes the topic cleanly when the card closes.
     api.state.lock().unwrap().fail_delete_topic_bad_request = true;
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[], t0 + 30, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[], t0 + 30, false));
     {
         let st = api.state.lock().unwrap();
         let (_, mid, ref html, ref kb) = st.edited_msgs.last().unwrap();
@@ -1838,7 +1878,7 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
 
     card.status = "WORKING".into();
     card.label = "● WORKING".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 40, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0 + 40, false));
     assert!(!rt.topic_for_card("sd_term_live").unwrap().closed);
     assert!(!rt.topic_for_card("sd_term_live").unwrap().delete_failed);
     assert!(api.state.lock().unwrap().edited_msgs.last().unwrap().2.contains("🟢"));
@@ -1847,13 +1887,13 @@ fn telegram_forum_topics_live_status_header_pin_and_debounced_title_updates() {
     api.state.lock().unwrap().deleted_messages.insert(status_msg_id);
     card.status = "IDLE".into();
     card.label = "● IDLE".into();
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], t0 + 42, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], t0 + 42, false));
     assert!(rt.topic_for_card("sd_term_live").unwrap().status_message_id.is_none());
-    assert!(!topics::sync_topics(&api, &cfg, &mut rt, &[card], t0 + 60, false));
+    assert!(!topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card], t0 + 60, false));
 
     // Default deletion removes topic and binding completely.
     api.state.lock().unwrap().fail_delete_topic_bad_request = false;
-    assert!(topics::sync_topics(&api, &cfg, &mut rt, &[], t0 + 70, false));
+    assert!(topics::sync_topics(&backend, &api, &cfg, &mut rt, &[], t0 + 70, false));
     assert!(rt.topic_for_card("sd_term_live").is_none());
     assert!(!api.state.lock().unwrap().deleted_topics.is_empty());
 }
@@ -1977,7 +2017,7 @@ fn telegram_files_and_links_discovery_photo_send_fallback_and_redaction() {
         ..Config::default()
     };
     let mut rt = RuntimeState::default();
-    topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], now, false);
+    topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], now, false);
     let tid = rt.topic_for_card(&card.id).unwrap().thread_id;
     let mut router = Router::new(999, Some("sd_test_bot".into()), now);
 
@@ -2176,7 +2216,7 @@ fn telegram_dashboard_typing_reactions_live_stream_and_quick_keys() {
         ..Config::default()
     };
     let mut rt = RuntimeState::default();
-    topics::sync_topics(&api, &cfg, &mut rt, &[card.clone()], now, false);
+    topics::sync_topics(&backend, &api, &cfg, &mut rt, &[card.clone()], now, false);
     let tid = rt.topic_for_card(&card.id).unwrap().thread_id;
 
     // 1. General Dashboard creates & pins with card status + usage, and throttles edits (<6s skipped, >=6s applied).
@@ -3089,7 +3129,7 @@ fn telegram_mini_app_init_data_hmac_and_http_ws_end_to_end() {
         Some("https://pc.tailnet.ts.net:8443")
     );
 
-    topics::sync_topics(&api, &cfg_copy, &mut rt, &[card.clone()], now, false);
+    topics::sync_topics(backend.as_ref(), &api, &cfg_copy, &mut rt, &[card.clone()], now, false);
     let tid = rt.topic_for_card("sd_term_app").unwrap().thread_id;
     let mut topic_app = text_msg(-100555, "supergroup", 777, 2, "/app", now);
     topic_app.is_topic_message = Some(true);

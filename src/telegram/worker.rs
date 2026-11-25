@@ -233,7 +233,13 @@ pub fn serve() {
             return;
         }
     };
-    let mut runtime = load_runtime_at(&rt_path).unwrap_or_default();
+    let mut runtime = match load_runtime_at(&rt_path) {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("SUPER DESKTOP telegram-bot: runtime state unreadable ({e})");
+            return;
+        }
+    };
 
     if !cfg.should_run() {
         persist_status(&rt_path, &mut runtime, "stopped", cfg.bot_username.clone(), None);
@@ -278,7 +284,7 @@ pub fn serve() {
     let mut last_usage_at = now;
     let _ = notifier.tick(&client, &backend, &cfg, &mut runtime, &initial_cards);
     if cfg.forum.is_some() {
-        let _ = topics::sync_topics(&client, &cfg, &mut runtime, &initial_cards, now, false);
+        let _ = topics::sync_topics(&backend, &client, &cfg, &mut runtime, &initial_cards, now, false);
         let _ = topics::sync_dashboard(
             &client,
             &cfg,
@@ -500,7 +506,7 @@ pub fn serve() {
         if guard.cfg.forum.is_some() {
             let cfg_copy = guard.cfg.clone();
             let mut rt_copy = guard.runtime.clone();
-            if topics::sync_topics(&client, &cfg_copy, &mut rt_copy, &cards, now, sync_requested) {
+            if topics::sync_topics(&sync_backend, &client, &cfg_copy, &mut rt_copy, &cards, now, sync_requested) {
                 guard.runtime = rt_copy;
                 runtime_dirty = true;
             }

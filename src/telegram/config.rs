@@ -193,6 +193,8 @@ pub struct TopicBinding {
     #[serde(default)]
     pub delete_failed: bool,
     #[serde(default)]
+    pub next_delete_at: u64,
+    #[serde(default)]
     pub deleted_in_telegram: bool,
     #[serde(default)]
     pub last_renamed_at: u64,
