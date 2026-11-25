@@ -125,8 +125,7 @@ pub struct SuperDesktopWindow {
     /// light/dark mode) after a theme switch.
     pub(in crate::window) settings_refresh: Rc<dyn Fn()>,
     pub(in crate::window) cli_harness_bar: Rc<RefCell<Option<Rc<crate::harness_bar::HarnessBar>>>>,
-    /// Floating panels (the ⚙ settings card) inside `root_overlay`; hidden with
-    /// the window so they cannot reappear on the next show.
+    /// Panels inside `root_overlay` that take input over the workspace.
     pub(in crate::window) overlay_panels: Vec<gtk4::Widget>,
     /// The workspace field's ▾ list. A popover is its own Wayland surface, so
     /// hiding the window does not dismiss it: it must be popped down

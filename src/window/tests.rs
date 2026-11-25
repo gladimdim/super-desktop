@@ -420,6 +420,48 @@ fn hide_slides_cards_from_where_they_are_now_inner() {
 }
 
 #[test]
+fn settings_survives_overlay_toggle_until_closed() {
+    crate::gtk_test::run_in_child_process("window::tests::settings_survives_overlay_toggle_inner");
+}
+
+#[test]
+fn settings_survives_overlay_toggle_inner() {
+    if !crate::gtk_test::is_child() { return; }
+    let root = std::env::temp_dir().join(format!("sd-settings-toggle-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    for name in ["HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"] {
+        std::env::set_var(name, &root);
+    }
+    gtk4::init().unwrap();
+    let app = gtk4::Application::new(Some("com.superdesktop.SettingsToggleTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+    app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+    let state = AppState { welcome_tour_seen: true, ..AppState::default() };
+    let model = crate::workspace_model::LocalWorkspace::new(state);
+    let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+    let tree = window.window.upcast_ref::<gtk4::Widget>();
+    window.show_again();
+    crate::gtk_test::find_first::<Button>(tree, "hud-gear").unwrap().emit_clicked();
+    crate::gtk_test::find_first::<Button>(tree, "settings-top-bar-entry").unwrap().emit_clicked();
+    let size = crate::gtk_test::find_first::<Button>(tree, "top-bar-size").unwrap();
+    assert!(size.is_mapped());
+
+    window.start_slide_out(|| {});
+    window.hide_now();
+    window.show_again();
+    assert!(size.is_mapped(), "the selected Settings page must return with the overlay");
+
+    let panel = crate::gtk_test::find_first::<gtk4::Box>(tree, "harness-panel").unwrap();
+    let close = crate::gtk_test::find_where(panel.upcast_ref(), |w| w.tooltip_text().as_deref() == Some("Close panel"))
+        .unwrap().downcast::<Button>().unwrap();
+    close.emit_clicked();
+    window.hide_now();
+    window.show_again();
+    assert!(!size.is_mapped(), "explicitly closed Settings must stay closed");
+    window.window.close();
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn renderer_warm_up_leaves_the_overlay_unmapped() {
     crate::gtk_test::run_in_child_process("window::tests::renderer_warm_up_leaves_the_overlay_unmapped_inner");
 }

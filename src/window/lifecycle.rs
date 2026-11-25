@@ -425,10 +425,9 @@ impl SuperDesktopWindow {
         // (`MiniTerminalCard::keep_slide_frame_for_show`).
         self.set_terminal_gpu_mapped(false);
         self.slide.freeze_pending.set(false);
-        // Floating panels must not come back with the window.
-        for panel in &self.overlay_panels {
-            panel.set_visible(false);
-        }
+        // Settings keeps its current page when its parent window is unmapped.
+        self.welcome_tour.close();
+        self.command_palette.root.set_visible(false);
         self.pairing_wizard.close();
         self.pairing_requests.close();
         // …and neither may the workspace list, which is not part of the
