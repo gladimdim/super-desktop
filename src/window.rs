@@ -1049,7 +1049,7 @@ impl SuperDesktopWindow {
         let nav_keys = EventControllerKey::new();
         nav_keys.set_propagation_phase(gtk4::PropagationPhase::Capture);
         let nav_w = Rc::downgrade(&win_rc);
-        nav_keys.connect_key_pressed(move |_, key, _, state| {
+        nav_keys.connect_key_pressed(move |_, key, keycode, state| {
             let Some(w) = nav_w.upgrade() else {
                 return glib::Propagation::Proceed;
             };
@@ -1091,7 +1091,8 @@ impl SuperDesktopWindow {
             }
             if ctrl && shift && !alt {
                 if let Some(card) = w.focused_local_card() {
-                    match key {
+                    let display = gtk4::prelude::WidgetExt::display(&w.window);
+                    match crate::terminal_clipboard::layout_shortcut_key(&display, key, keycode) {
                         gdk::Key::f | gdk::Key::F => {
                             card.toggle_expand();
                             return glib::Propagation::Stop;

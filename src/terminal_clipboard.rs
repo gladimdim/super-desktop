@@ -94,6 +94,15 @@ fn shortcut_key(key: gdk::Key, same_key: impl FnOnce() -> Vec<gdk::Key>) -> gdk:
         .unwrap_or(key)
 }
 
+pub(crate) fn layout_shortcut_key(display: &gdk::Display, key: gdk::Key, keycode: u32) -> gdk::Key {
+    shortcut_key(key, || {
+        display.map_keycode(keycode).unwrap_or_default().into_iter()
+            .filter(|(position, _)| position.level() == 0)
+            .map(|(_, keyval)| keyval)
+            .collect()
+    })
+}
+
 /// Which physical modifier keys the terminal saw go down. Omarchy's Super+C
 /// and Super+V send Ctrl+C and Ctrl+V with Super still physically held and no
 /// Control key pressed, which tells them apart from a Ctrl+C or Ctrl+V typed
@@ -148,16 +157,7 @@ pub fn install(terminal: &vte4::Terminal, paste_on_control_v: bool) -> gtk4::Eve
         };
         let held = &pressed;
         held.update(key, true);
-        let key = shortcut_key(key, || {
-            terminal
-                .display()
-                .map_keycode(keycode)
-                .unwrap_or_default()
-                .into_iter()
-                .filter(|(position, _)| position.level() == 0)
-                .map(|(_, keyval)| keyval)
-                .collect()
-        });
+        let key = layout_shortcut_key(&terminal.display(), key, keycode);
         // Paste text when Chrome (or another app) offers text, including rich
         // selections. Check formats only: never read or replace the clipboard
         // on key routing.
@@ -318,6 +318,7 @@ mod tests {
     /// as М. It still pastes, like GTK's own shortcuts.
     #[test]
     fn clipboard_shortcuts_work_in_non_latin_layouts() {
+        assert_eq!(shortcut_key(gdk::Key::Cyrillic_ZE, || vec![gdk::Key::p, gdk::Key::Cyrillic_ze]), gdk::Key::p);
         let v_key = || vec![gdk::Key::v, gdk::Key::Cyrillic_em];
         let c_key = || vec![gdk::Key::c, gdk::Key::Cyrillic_es];
         assert_eq!(shortcut_key(gdk::Key::Cyrillic_em, v_key), gdk::Key::v);

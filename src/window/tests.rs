@@ -60,6 +60,54 @@ fn icon_slots_follow_the_icon_side_of_a_scaled_view() {
 }
 
 #[test]
+fn antigravity_prompt_history_shortcut_opens_the_focused_cards_panel() {
+    if !crate::gtk_test::is_child() {
+        crate::gtk_test::run_in_child_process("window::tests::antigravity_prompt_history_shortcut_opens_the_focused_cards_panel");
+        return;
+    }
+    let root = std::path::PathBuf::from(std::env::var_os("SD_TEST_ISOLATION_ROOT").unwrap());
+    std::env::set_var("HOME", &root);
+    std::env::set_var("XDG_CONFIG_HOME", &root);
+    std::env::set_var("XDG_STATE_HOME", &root);
+    gtk4::init().unwrap();
+    let app = gtk4::Application::new(Some("com.superdesktop.HistoryTest"), gtk4::gio::ApplicationFlags::NON_UNIQUE);
+    app.register(None::<&gtk4::gio::Cancellable>).unwrap();
+    let mut state = AppState { welcome_tour_seen: true, ..AppState::default() };
+    let session = "sd_term_agy_history";
+    state.terminals.push(serde_json::from_value(serde_json::json!({
+        "id":session, "session_name":session, "agent_type":"antigravity", "command":"/bin/false",
+        "x":20, "y":120, "width":400, "height":300, "created_at":0.0
+    })).unwrap());
+    let model = crate::workspace_model::LocalWorkspace::new(state);
+    let window = SuperDesktopWindow::new(&app, || {}, Rc::new(crate::hotcorner::Zone::default()), model.state());
+    window.show_again();
+    let card = window.any_terminal_card(session).unwrap();
+    card.focus_terminal();
+    assert!(window.focused_local_card().is_some_and(|c| Rc::ptr_eq(&c, &card)));
+    let controllers = window.window.observe_controllers();
+    let modifiers = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+    let send = |key: gdk::Key, keycode: u32| {
+        (0..controllers.n_items())
+            .filter_map(|i| controllers.item(i)?.downcast::<EventControllerKey>().ok())
+            .filter(|keys| keys.propagation_phase() == gtk4::PropagationPhase::Capture)
+            .any(|keys| keys.emit_by_name::<bool>("key-pressed", &[&key, &keycode, &modifiers]))
+    };
+    assert!(send(gdk::Key::P, 0));
+    // Where the test display supplies a keymap, exercise a non-Latin keysym
+    // through the same window controller with the physical P keycode.
+    let display = gtk4::prelude::WidgetExt::display(&window.window);
+    if let Some(position) = display.map_keyval(gdk::Key::p).and_then(|keys| keys.into_iter().next()) {
+        assert!(send(gdk::Key::Cyrillic_ZE, position.keycode()));
+    }
+    let tree = window.window.upcast_ref::<gtk4::Widget>();
+    let drawer = crate::gtk_test::find_first::<gtk4::Box>(tree, "asset-drawer").unwrap();
+    assert!(drawer.is_mapped());
+    assert!(crate::gtk_test::find_where(drawer.upcast_ref(), |w|
+        w.downcast_ref::<Label>().is_some_and(|label| label.text() == "Prompt history")).is_some());
+    window.window.close();
+}
+
+#[test]
 fn cli_notes_preserve_live_text_and_guard_edits() {
     crate::gtk_test::run_in_child_process("window::tests::cli_notes_inner");
 }
