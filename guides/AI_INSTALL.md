@@ -12,7 +12,7 @@
 - OS is Omarchy/Arch, Wayland Hyprland session with a display (`echo $WAYLAND_DISPLAY` must be non-empty for the overlay; build works headless, showing does not).
 - You run commands as the **user** (never root for build/install steps).
 - Nothing else needs to be installed first: the installer adds the missing Arch packages (build tools, `gtk4`, `gtk4-layer-shell`, `vte4`, `qt6-base`, `qt6-declarative`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`, `gst-plugins-good`, `gst-libav`) and, when there is no Rust 1.92 or newer, installs Rust with the official rustup into `~/.cargo`/`~/.rustup` (shell profiles untouched; `rebuild.sh` finds it there).
-- Installing packages runs `sudo pacman`, which reads the user's password from the terminal. Run the installer in a terminal the user can type into. Without one, install the missing packages first (the installer prints the `pacman` command).
+- Run the installer in a terminal the user can type into. Both `sudo` and the Omarchy updater can prompt there while the install script is piped to Bash.
 
 ### 1. Install (the only supported way)
 
@@ -24,7 +24,7 @@ From an existing clone, `./install.sh` installs that clone instead and does not 
 
 `install.sh` does, in order:
 1. Refuses to run as root; checks for Omarchy and `pacman`.
-2. Installs missing Arch packages with one `sudo pacman -S --needed` call.
+2. Checks whether pacman can install the missing packages. If a newer library would break an installed package's version requirement, the installer opens the Omarchy system updater in the same terminal. Confirm the update and defer any reboot until setup finishes. The installer checks the package list again and installs what is still missing.
 3. Uses a working Rust 1.92+; otherwise selects or updates rustup's stable toolchain, or downloads the official `rustup-init`, checks its SHA-256 and installs stable with `--no-modify-path`.
 4. Picks the source: the clone holding the script; else `$SUPER_DESKTOP_DIR`; else the clone `~/.local/bin/super-desktop` already links into; else clones `~/.local/share/super-desktop/source`. It checks out the newest release tag (`vX.Y.Z`), or the release in `SUPER_DESKTOP_VERSION`, and records the choice in the clone's git config (`superdesktop.channel`); a pinned clone stays on its release, and a clone with local changes or commits of its own is installed as it is.
 5. `cargo build --release --locked`.
@@ -66,7 +66,8 @@ Then ask the user (or use the GUI) to press `SUPER + SHIFT + Q` — the overlay 
 | The toggle shortcut does nothing | `grep -A4 'super-desktop shortcut' ~/.config/hypr/bindings.lua` — the managed block must hold the combination you expect; re-run the installer; `hyprctl reload`; `hyprctl configerrors` |
 | A shortcut recorded in ⚙ Settings does nothing | Opening ⚙ Settings → *Record* parks Hyprland in a throwaway submap, so any combination is captured even if a bind already owns it; the new bind then needs a reload. Check `hyprctl configerrors`, then re-record. |
 | Global shortcuts stopped working after using ⚙ Settings → *Record* | The recorder releases the submap on Esc, on Cancel and after 10s. If it was killed mid-recording: `hyprctl dispatch 'hl.dsp.submap("reset")'` |
-| Installer stops at the package step | `sudo pacman -Syu` if the package database is out of date, then `sudo pacman -S --needed` with the packages it printed, then run the installer again |
+| Installer opens the Omarchy updater while checking dependencies | Confirm the full system update in the same terminal. If offered a reboot, choose Later. SUPER DESKTOP setup continues automatically. |
+| Installer stops at the package step | Read the pacman or Omarchy update error above the installer's message. Once the underlying issue is resolved, the same install command can be run again. |
 | Build fails: `vte-2.91-gtk4` / GTK headers missing | `omarchy pkg add vte4 gtk4 gtk4-layer-shell pkgconf`, then `./rebuild.sh` |
 | Installer says rustup's default is too old or not working | `rustup default stable`, then run the installer again |
 | Theme changes don't restyle the overlay | Check `~/.config/omarchy/hooks/theme-set.d/super-desktop` is executable; run `super-desktop reload-theme` manually |

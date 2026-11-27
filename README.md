@@ -22,9 +22,11 @@ curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/inst
 ```
 
 The installer sets everything up automatically:
-- installs missing Arch packages with `pacman` (GTK 4, gtk4-layer-shell, VTE, Qt Quick, tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap, poppler) and Rust 1.92+ via rustup if needed;
+- installs missing Arch packages with `pacman` (GTK 4, gtk4-layer-shell, VTE, Qt Quick, tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap, poppler, GStreamer codecs) and Rust 1.92+ via rustup if needed;
 - downloads and builds the newest [release](https://github.com/gladimdim/super-desktop/releases) under `~/.local/share/super-desktop/source` (keep this folder — the installed command runs binaries from it);
 - configures the launcher, shortcut, autostart, and Omarchy theme integration.
+
+If a required library conflicts with an installed package's version requirement, confirm the Omarchy system update in the same terminal. Defer any reboot until the installer finishes.
 
 Press **SUPER + SHIFT + Q** (or run `super-desktop toggle`) to open the overlay, pick a project folder, and click a harness launcher. Replay the intro anytime from **⚙ Settings → Getting started guide** or `super-desktop tour`. Update later via **⚙ Settings → Updates** or by re-running the install command.
 

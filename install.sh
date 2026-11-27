@@ -9,7 +9,8 @@
 # state alone.
 #
 # In order, it:
-#   1. installs the Arch packages it needs that are missing (one sudo prompt);
+#   1. installs missing Arch packages, opening Omarchy's updater if an
+#      installed dependency needs a matching system update;
 #   2. installs Rust with rustup when there is no Rust 1.92 or newer, into
 #      ~/.cargo and ~/.rustup, without editing your shell profile;
 #   3. clones the source into ~/.local/share/super-desktop/source (or uses
@@ -140,21 +141,44 @@ keep_packages() {
 }
 
 install_packages() {
-    local missing=()
-    mapfile -t missing < <(pacman -T "${PACKAGES[@]}")
-    if ((${#missing[@]} == 0)); then
-        say "✓ System packages present"
-        keep_packages
-        return
-    fi
-    say "Installing system packages: ${missing[*]}"
-    command -v sudo >/dev/null 2>&1 ||
-        die "sudo not found. Install the packages as root, then run the installer again: pacman -S --needed ${missing[*]}"
-    # sudo reads the password from the terminal, not from the piped script.
-    if ! sudo pacman -S --needed --noconfirm "${missing[@]}" </dev/null; then
-        die "Could not install ${missing[*]}. Install them with 'sudo pacman -S --needed ${missing[*]}' (after 'sudo pacman -Syu' if the package database is out of date), then run the installer again."
-    fi
-    say "✓ Installed ${missing[*]}"
+    local missing=() update=(omarchy update)
+    local needed plan attempted_update=0
+    while true; do
+        if needed="$(pacman -T "${PACKAGES[@]}")"; then
+            say "✓ System packages present"
+            break
+        elif [[ $? != 127 || -z "$needed" ]]; then
+            die "Could not check installed packages with pacman."
+        fi
+        mapfile -t missing <<<"$needed"
+        command -v sudo >/dev/null 2>&1 ||
+            die "sudo not found. Install the packages as root, then run the installer again: pacman -S --needed ${missing[*]}"
+
+        # Resolve against this machine's package database before starting sudo.
+        # Pacman writes parts of a dependency diagnostic to both output streams.
+        if plan="$(LC_ALL=C pacman -Sp --needed --noconfirm "${missing[@]}" </dev/null 2>&1)"; then
+            say "Installing system packages: ${missing[*]}"
+            sudo pacman -S --needed --noconfirm "${missing[@]}" </dev/null ||
+                die "Could not install ${missing[*]}. See the pacman error above."
+            say "✓ Installed ${missing[*]}"
+            break
+        fi
+        if ((attempted_update)) || [[ "$plan" != *" breaks dependency "* ]]; then
+            printf '%s\n' "$plan" >&2
+            die "Pacman could not resolve ${missing[*]}."
+        fi
+
+        # A full Omarchy update keeps version-locked packages together. Let the
+        # updater ask for confirmation on the terminal when the script is piped.
+        if ! command -v omarchy >/dev/null 2>&1; then
+            update=(omarchy-update)
+        fi
+        say "These packages need newer system libraries. Confirm the Omarchy system update to continue installing SUPER DESKTOP."
+        say "If offered a reboot, choose Later so the installation can finish."
+        "${update[@]}" </dev/tty ||
+            die "The Omarchy update did not complete. Check the updater's output above."
+        attempted_update=1
+    done
     keep_packages
 }
 
