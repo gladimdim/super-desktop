@@ -50,7 +50,8 @@ run_case() {
     shift
     (
         set -euo pipefail
-        HOME="$WORK_DIR/home-$name"
+        export CASE_NAME="$name"
+        export HOME="$WORK_DIR/home-$name"
         mkdir -p "$HOME"
         PACMAN_CONF="$WORK_DIR/pacman-$name.conf"
         PACMAN_REPO_CONF="$WORK_DIR/pacman.d-$name/super-desktop.conf"
@@ -64,7 +65,7 @@ run_case() {
 
         # Mocks
         sudo() {
-            printf 'sudo %s\n' "$*" >>"$WORK_DIR/calls-$name.log"
+            printf 'sudo %s\n' "$*" >>"$WORK_DIR/calls-$CASE_NAME.log"
             case "$1" in
             mkdir) mkdir -p "${@:3}" ;;
             install)
@@ -77,15 +78,15 @@ run_case() {
             esac
         }
         pacman-key() {
-            printf 'pacman-key %s\n' "$*" >>"$WORK_DIR/calls-$name.log"
+            printf 'pacman-key %s\n' "$*" >>"$WORK_DIR/calls-$CASE_NAME.log"
             case "$1" in
             --list-keys) return 1 ;;
             --add | --lsign-key) return 0 ;;
             esac
         }
         omarchy() {
-            printf 'omarchy %s\n' "$*" >>"$WORK_DIR/calls-$name.log"
-            touch "$WORK_DIR/updated-$name"
+            printf 'omarchy %s\n' "$*" >>"$WORK_DIR/calls-$CASE_NAME.log"
+            touch "$WORK_DIR/updated-$CASE_NAME"
             return 0
         }
         export -f sudo pacman-key omarchy
@@ -172,7 +173,14 @@ case_partial_upgrade_guard() {
         esac
     }
     SHELL=/bin/bash
-    resolve_and_install_pacman_target -S super-desktop-bin </dev/null
+    if (: </dev/tty) 2>/dev/null; then
+        resolve_and_install_pacman_target -S super-desktop-bin </dev/null
+    else
+        # Headless CI runners have no /dev/tty; allocate a PTY like install_packages.sh.
+        export -f pacman
+        export PACMAN_CONF PACMAN_REPO_CONF WORK_DIR
+        script -qefc 'bash -euo pipefail -c '\''source "$WORK_DIR/install_lib.sh"; resolve_and_install_pacman_target -S super-desktop-bin </dev/null'\''' /dev/null >/dev/null
+    fi
     grep -q '^omarchy update$' "$WORK_DIR/calls-partial.log"
     grep -q '^sudo pacman -S --needed --noconfirm super-desktop-bin$' "$WORK_DIR/calls-partial.log"
 }
