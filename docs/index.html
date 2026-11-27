@@ -1015,49 +1015,174 @@
   </section>
 
   <section class="pane" id="install">
-    <div class="pane-bar"><span class="path">[07] ~/install</span><span class="badge">PREBUILT x86_64 &amp; aarch64 · ZERO COMPILE · SIGNED PACMAN REPO</span></div>
+    <div class="pane-bar"><span class="path">[07] ~/install</span><span class="badge">PREBUILT x86_64 &amp; aarch64 · ZERO COMPILE · SOURCE OPTION</span></div>
     <div class="pane-body">
-      <div class="grid-3" style="margin-bottom:14px">
-        <div class="box">
-          <h3>// ZERO COMPILATION</h3>
-          <p>Prebuilt native binaries for <code>x86_64</code> and <code>aarch64</code> (ARM64). No Rust, <code>rustup</code>, <code>cargo</code>, or <code>base-devel</code> required.</p>
-        </div>
-        <div class="box">
-          <h3>// SIGNED PACMAN REPO</h3>
-          <p>Served from <code>superdesktop.dmytrogladkyi.com/repo/$arch</code> with Ed25519 GPG signing (<code>SigLevel = Required DatabaseRequired</code>, key fingerprint <code>EBCB860628250D70F3C4D033304840D354676353</code>).</p>
-        </div>
-        <div class="box">
-          <h3>// AUTO-UPDATES IN OMARCHY</h3>
-          <p>Registers <code>[super-desktop]</code> and an Omarchy <code>pre-refresh-pacman</code> hook so <code>omarchy update</code> (<code>pacman -Syu</code>) upgrades <code>super-desktop-bin</code> automatically.</p>
-        </div>
+      <div class="mcp-head">
+        <h2>INSTALL IN 10 SECONDS — <span>PREBUILT PACKAGES OR BUILD FROM SOURCE.</span></h2>
+        <p>Every Linux package ships native binaries (<code>super-desktop</code>, <code>super-desktop-client</code>, and <code>sd-qml-host</code>) for both <code>x86_64</code> and <code>aarch64</code> (ARM64) — signed with Ed25519 GPG key <code>EBCB860628250D70F3C4D033304840D354676353</code> (<a href="repo/super-desktop.gpg">super-desktop.gpg</a>). Pick the install variant that fits your workflow:</p>
       </div>
-      <div class="cmd"><code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code><button type="button" data-copy="cmd-install">COPY</button></div>
-      <p style="margin:10px 0 0;color:var(--muted);font-size:13px">Verifies the GPG signing key, registers the repo and Omarchy refresh hook, installs <code>super-desktop-bin</code>, migrates any older source install, and sets up the shortcut and theme hook.</p>
-      <details class="more">
-        <summary>Manual Pacman repository setup (without install.sh)</summary>
-        <div class="mcp-box" style="margin-top:10px">
-          <div class="mcp-bar">
-            <span>ARCH / OMARCHY PACMAN REPO SETUP</span>
-            <button type="button" data-copy="cmd-pacman-repo">COPY</button>
+
+      <div style="overflow-x:auto;margin-bottom:16px">
+        <table>
+          <thead>
+            <tr>
+              <th>Install Method</th>
+              <th>CPU Platforms</th>
+              <th>Rust / Compiler</th>
+              <th>Updates</th>
+              <th>Best For</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>1. <code>install.sh</code> (Default)</strong></td>
+              <td><code>x86_64</code>, <code>aarch64</code></td>
+              <td>None (~10s)</td>
+              <td>Automatic (<code>omarchy update</code>)</td>
+              <td>Fastest 1-command Omarchy setup</td>
+            </tr>
+            <tr>
+              <td><strong>2. Manual Pacman Repo (<code>super-desktop-bin</code>)</strong></td>
+              <td><code>x86_64</code>, <code>aarch64</code></td>
+              <td>None (~10s)</td>
+              <td>Automatic (<code>omarchy update</code> / <code>pacman -Syu</code>)</td>
+              <td>Users who skip <code>curl | bash</code></td>
+            </tr>
+            <tr>
+              <td><strong>3. Direct <code>.pkg.tar.zst</code> / Pinned Tag</strong></td>
+              <td><code>x86_64</code>, <code>aarch64</code></td>
+              <td>None (binary releases)</td>
+              <td>Manual (<code>pacman -U</code>, or add repo later)</td>
+              <td>Version pinning / offline install</td>
+            </tr>
+            <tr>
+              <td><strong>4. Build from Source (Rust / Git)</strong></td>
+              <td>Any Arch / Omarchy</td>
+              <td>Rust 1.92+ &amp; <code>base-devel</code></td>
+              <td>In-app <strong>Settings → Updates</strong> or <code>./rebuild.sh</code></td>
+              <td>Developers, <code>master</code> branch, custom patches</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="tabs" role="tablist" aria-label="Install methods">
+        <button role="tab" type="button" aria-selected="true" aria-controls="inst-auto" id="tab-inst-auto">1. Quick Install (install.sh)</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="inst-pacman" id="tab-inst-pacman">2. Manual Pacman Repo</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="inst-pin" id="tab-inst-pin">3. Direct .pkg.tar.zst / Pin Release</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="inst-source" id="tab-inst-source">4. Build from Source (Rust / Dev)</button>
+      </div>
+
+      <div class="panel" id="inst-auto" role="tabpanel" aria-labelledby="tab-inst-auto">
+        <div class="cmd"><code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code><button type="button" data-copy="cmd-install">COPY</button></div>
+        <div class="grid-3" style="margin-top:14px">
+          <div class="box">
+            <h3>// 1. VERIFIES &amp; REGISTERS</h3>
+            <p>Detects <code>x86_64</code> or <code>aarch64</code>, verifies key <code>EBCB860628250D70F3C4D033304840D354676353</code>, writes <code>/etc/pacman.d/super-desktop.conf</code>, and installs an Omarchy <code>pre-refresh-pacman</code> hook.</p>
           </div>
-          <pre><code id="cmd-pacman-repo">curl -fsSL https://superdesktop.dmytrogladkyi.com/repo/super-desktop.gpg -o /tmp/super-desktop.gpg
-gpg --show-keys --with-fingerprint /tmp/super-desktop.gpg   # expect EBCB 8606 2825 0D70 F3C4  D033 3048 40D3 5467 6353
-sudo pacman-key --add /tmp/super-desktop.gpg && sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
-printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
-echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
-sudo pacman -Syu super-desktop-bin && super-desktop-setup</code></pre>
-          <div class="mcp-foot">
-            <span>Migrating from an earlier <code>install.sh</code> source install? Run <code>/usr/bin/super-desktop-setup --migrate</code> instead, then restart with <code>/usr/bin/super-desktop kill &amp;&amp; /usr/bin/super-desktop toggle</code>.</span>
+          <div class="box">
+            <h3>// 2. SAFE PACMAN INSTALL</h3>
+            <p>Guards against Arch partial library upgrades (runs <code>omarchy update</code> first if needed) and installs <code>super-desktop-bin</code> + runtime deps with zero Rust compilation.</p>
+          </div>
+          <div class="box">
+            <h3>// 3. SETUP &amp; MIGRATION</h3>
+            <p>Runs <code>super-desktop-setup</code> (or <code>--migrate</code> on earlier source installs), preserves notes/shortcuts/settings, reloads Hyprland, and restarts the daemon cleanly.</p>
           </div>
         </div>
-      </details>
-      <details class="more">
-        <summary>Update, pin a release, or build from source</summary>
-        <p>Run <code>omarchy update</code> (or the install command again) to upgrade while keeping your settings, notes, and running agents. To install a specific release asset:</p>
-        <div class="cmd"><code id="cmd-version">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v2.1.2 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
-        <p style="margin-top:10px">Prefer to compile from source instead of installing prebuilt binaries?</p>
-        <div class="cmd"><code id="cmd-source-build">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_BUILD_FROM_SOURCE=1 bash</code><button type="button" data-copy="cmd-source-build">COPY</button></div>
-      </details>
+        <p style="margin:12px 0 0;color:var(--muted);font-size:13px">Want to inspect before running? Read <a href="https://github.com/gladimdim/super-desktop/blob/master/install.sh">install.sh on GitHub</a>. If the binary repo is not yet active for your architecture or release tag, <code>install.sh</code> automatically falls back to building from source.</p>
+      </div>
+
+      <div class="panel" id="inst-pacman" role="tabpanel" aria-labelledby="tab-inst-pacman" hidden>
+        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">Prefer a minimal script just for the signed Pacman repo (without the full <code>install.sh</code> wrapper)? Paste this one-liner to verify key <code>EBCB860628250D70F3C4D033304840D354676353</code>, configure <code>/etc/pacman.d/super-desktop.conf</code> + Omarchy refresh hook, install <code>super-desktop-bin</code>, and run <code>super-desktop-setup</code>:</p>
+        <div class="cmd"><code id="cmd-pacman-repo-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-repo.sh | bash</code><button type="button" data-copy="cmd-pacman-repo-sh">COPY</button></div>
+        <p style="margin:8px 0 14px;color:var(--muted);font-size:12.5px"><a href="install/pacman-repo.sh" target="_blank" rel="noopener">[VIEW pacman-repo.sh ↗]</a> · Works on both <code>x86_64</code> and <code>aarch64</code>, zero Rust/compilers required.</p>
+        <div class="cmd"><code id="cmd-pacman-hook-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-hook.sh | bash</code><button type="button" data-copy="cmd-pacman-hook-sh">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px"><a href="install/pacman-hook.sh" target="_blank" rel="noopener">[VIEW pacman-hook.sh ↗]</a> · Optional standalone Omarchy <code>pre-refresh-pacman</code> hook (keeps <code>[super-desktop]</code> enabled when switching channels).</p>
+        <details class="more">
+          <summary>Or copy the raw manual commands (no curl | bash)</summary>
+          <div class="mcp-box" style="margin-top:10px">
+            <div class="mcp-bar">
+              <span>MANUAL SIGNED PACMAN REPOSITORY SETUP (IDEMPOTENT)</span>
+              <button type="button" data-copy="cmd-pacman-repo">COPY</button>
+            </div>
+            <pre><code id="cmd-pacman-repo">curl -fsSL https://superdesktop.dmytrogladkyi.com/repo/super-desktop.gpg -o /tmp/super-desktop.gpg
+gpg --show-keys --with-fingerprint /tmp/super-desktop.gpg   # expect EBCB 8606 2825 0D70 F3C4  D033 3048 40D3 5467 6353
+sudo pacman-key --add /tmp/super-desktop.gpg &amp;&amp; sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
+printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
+grep -qxF 'Include = /etc/pacman.d/super-desktop.conf' /etc/pacman.conf || echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
+sudo pacman -Syu super-desktop-bin &amp;&amp; super-desktop-setup</code></pre>
+            <div class="mcp-foot">
+              <span>Migrating from an earlier source install? Run <code>/usr/bin/super-desktop-setup --migrate</code> instead, then restart: <code>/usr/bin/super-desktop kill &amp;&amp; /usr/bin/super-desktop toggle</code>.</span>
+            </div>
+          </div>
+          <div class="mcp-box" style="margin-top:12px">
+            <div class="mcp-bar">
+              <span>OPTIONAL: OMARCHY REFRESH HOOK (KEEPS REPO ACROSS CHANNEL SWITCHES)</span>
+              <button type="button" data-copy="cmd-pacman-hook">COPY</button>
+            </div>
+            <pre><code id="cmd-pacman-hook">mkdir -p ~/.config/omarchy/hooks/pre-refresh-pacman.d
+cat &lt;&lt;'EOF' &gt; ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop
+#!/bin/bash
+CONF=/etc/pacman.conf
+SNIPPET=/etc/pacman.d/super-desktop.conf
+MARKER="Include = $SNIPPET"
+[[ -r $SNIPPET ]] || exit 0
+grep -qxF "$MARKER" "$CONF" &amp;&amp; exit 0
+if grep -q '^\[omarchy\]' "$CONF"; then
+  sudo sed -i "0,/^\[omarchy\]/s||$MARKER\n\n[omarchy]|" "$CONF"
+else
+  printf '\n%s\n' "$MARKER" | sudo tee -a "$CONF" &gt;/dev/null
+fi
+EOF
+chmod 755 ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop</code></pre>
+          </div>
+        </details>
+      </div>
+
+      <div class="panel" id="inst-pin" role="tabpanel" aria-labelledby="tab-inst-pin" hidden>
+        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">Install a prebuilt <code>.pkg.tar.zst</code> directly from <a href="https://github.com/gladimdim/super-desktop/releases">GitHub Releases</a> (verified against <code>SHA256SUMS</code>, no repo added to <code>/etc/pacman.conf</code>). Adding the <code>[super-desktop]</code> repo later still upgrades it cleanly in place.</p>
+        <div class="cmd"><code id="cmd-direct-pkg-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | bash</code><button type="button" data-copy="cmd-direct-pkg-sh">COPY</button></div>
+        <p style="margin:8px 0 14px;color:var(--muted);font-size:12.5px"><a href="install/direct-pkg.sh" target="_blank" rel="noopener">[VIEW direct-pkg.sh ↗]</a> · Fetches the newest binary release for your CPU (<code>x86_64</code> or <code>aarch64</code>) and verifies <code>SHA256SUMS</code>.</p>
+        <div class="cmd"><code id="cmd-version">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | VER=2.2.0 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">Pin any exact binary release via <code>VER=X.Y.Z</code> (for older pre-binary tags like <code>v2.1.2</code>, run <code>install.sh</code> with <code>SUPER_DESKTOP_VERSION=v2.1.2</code>).</p>
+        <details class="more">
+          <summary>Or copy the raw pacman -U commands</summary>
+          <div class="mcp-box" style="margin-top:10px">
+            <div class="mcp-bar">
+              <span>DIRECT pacman -U FROM GITHUB RELEASES</span>
+              <button type="button" data-copy="cmd-pacman-u">COPY</button>
+            </div>
+            <pre><code id="cmd-pacman-u">ARCH=$(uname -m)
+VER=2.2.0   # pick any binary release on GitHub Releases
+sudo pacman -U "https://github.com/gladimdim/super-desktop/releases/download/v${VER}/super-desktop-bin-${VER}-1-${ARCH}.pkg.tar.zst"
+super-desktop-setup</code></pre>
+            <div class="mcp-foot"><span>See <a href="https://github.com/gladimdim/super-desktop/releases">GitHub Releases</a> for available versions and <code>SHA256SUMS</code>.</span></div>
+          </div>
+        </details>
+      </div>
+
+      <div class="panel" id="inst-source" role="tabpanel" aria-labelledby="tab-inst-source" hidden>
+        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">Want to compile locally, track unreleased commits on <code>master</code>, or use in-app <strong>⚙ Settings → Updates</strong> rebuilds? These scripts install Rust 1.92+ via <code>rustup</code> (<code>--no-modify-path</code>) and build release binaries + <code>sd-qml-host</code> under <code>~/.local/share/super-desktop/source</code>:</p>
+        <div class="cmd"><code id="cmd-source-build">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/source.sh | bash</code><button type="button" data-copy="cmd-source-build">COPY</button></div>
+        <p style="margin:8px 0 14px;color:var(--muted);font-size:12.5px"><a href="install/source.sh" target="_blank" rel="noopener">[VIEW source.sh ↗]</a> · Compiles the latest tagged release from source instead of fetching <code>super-desktop-bin</code>.</p>
+        <div class="cmd"><code id="cmd-source-master">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/master.sh | bash</code><button type="button" data-copy="cmd-source-master">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px"><a href="install/master.sh" target="_blank" rel="noopener">[VIEW master.sh ↗]</a> · Compiles and tracks unreleased commits on <code>master</code>.</p>
+        <details class="more">
+          <summary>Or clone and build manually for local development</summary>
+          <div class="mcp-box" style="margin-top:10px">
+            <div class="mcp-bar">
+              <span>LOCAL DEVELOPER CHECKOUT</span>
+              <button type="button" data-copy="cmd-dev-clone">COPY</button>
+            </div>
+            <pre><code id="cmd-dev-clone">git clone https://github.com/gladimdim/super-desktop.git
+cd super-desktop &amp;&amp; ./install.sh
+# after local edits:
+./rebuild.sh</code></pre>
+            <div class="mcp-foot"><span>Keeps your git state untouched and links <code>~/.local/bin/super-desktop</code> to your clone.</span></div>
+          </div>
+        </details>
+      </div>
+
       <div class="vid-box">
         <video controls preload="none" playsinline width="1920" height="1080" poster="video/super-desktop-trailer-poster.webp">
           <source src="video/super-desktop-trailer.mp4" type="video/mp4">

@@ -54,18 +54,20 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/sd-release
           docker run --rm \
+            -e "RELEASE_TAG=$RELEASE_TAG" \
             -v "$GITHUB_WORKSPACE:/src:ro" \
             -v "/tmp/sd-release:/out" \
             "sd-arch-builder:${{ matrix.arch }}" \
             bash -euo pipefail -c '
               cp -a /src /work
               chown -R builder:builder /work /out
-              runuser -u builder -- bash -c "cd /work && bash scripts/build-arch-release.sh \"\$1\" /out" _ "'"$RELEASE_TAG"'"
+              runuser -u builder -- bash -c "cd /work && bash scripts/build-arch-release.sh \"\$1\" /out" _ "$RELEASE_TAG"
               pacman -U --noconfirm /out/*.pkg.tar.zst
               touch /super-desktop-package-test-root
               install -d -m 700 -o builder -g builder /tmp/sd-package-runtime
               runuser -u builder -- env -u SD_GTK_TESTS_ON_DESKTOP XDG_RUNTIME_DIR=/tmp/sd-package-runtime \
                 bash -c "cd /work && cargo test --locked package_tests::packaged_desktop_lifecycle -- --ignored --nocapture"
+              chmod -R a+rX /out
             '
 
       - uses: actions/upload-artifact@v4
@@ -107,7 +109,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          VER="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")"
+          VER="${RELEASE_TAG#v}"
+          grep -qxF "version = \"$VER\"" Cargo.toml || {
+            echo "Error: Cargo.toml version does not match $VER" >&2
+            exit 1
+          }
           mkdir -p release-assets repo
 
           cp "artifacts/x86_64/super-desktop-${VER}-source.tar.gz" release-assets/

@@ -29,7 +29,13 @@ the newest release, unless it has local changes or commits of its own.
 
 SUPER DESKTOP provides prebuilt, GPG-signed Arch/Omarchy binary packages (`super-desktop-bin`) for both **`x86_64`** and **`aarch64`** — no Rust toolchain, `cargo`, or C/C++ compilation required. Running `install.sh` sets up the repository and installs `super-desktop-bin` automatically (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead).
 
-To register the signed repository manually without `install.sh`:
+One-line signed repository setup (without the full `install.sh` wrapper):
+
+```bash
+curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-repo.sh | bash
+```
+
+Or register the signed repository manually step by step:
 
 1. Download and verify the signing key (`EBCB860628250D70F3C4D033304840D354676353`):
 
@@ -44,7 +50,7 @@ sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
 
 ```bash
 printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
-echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
+grep -qxF 'Include = /etc/pacman.d/super-desktop.conf' /etc/pacman.conf || echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
 ```
 
 3. Optional Omarchy refresh hook (keeps the `Include` line intact if you switch Omarchy channels with `omarchy refresh pacman`):
