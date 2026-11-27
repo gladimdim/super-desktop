@@ -1075,7 +1075,12 @@ impl SuperDesktopWindow {
             if modal_open {
                 return glib::Propagation::Proceed;
             }
-            if alt && !ctrl && matches!(key, gdk::Key::w | gdk::Key::W) {
+            if alt && !ctrl && matches!(
+                crate::terminal_clipboard::layout_shortcut_key(
+                    &gtk4::prelude::WidgetExt::display(&w.window), key, keycode,
+                ),
+                gdk::Key::w | gdk::Key::W
+            ) {
                 if let Some(picker) = w.terminal_picker.borrow().as_ref() {
                     picker.cancel();
                 }
@@ -1289,6 +1294,17 @@ impl SuperDesktopWindow {
         let cur = self.focused_card_index(&cards);
         if let Some(idx) = crate::command_palette::next_attention_index(&status_refs, cur) {
             cards[idx].select_with_keyboard();
+        } else {
+            let notice = crate::command_feedback::Notice {
+                text: "No other terminal is waiting or in error",
+                tone: crate::command_feedback::Tone::Info,
+                duration: std::time::Duration::from_secs(3),
+            };
+            if let Some(idx) = cur {
+                cards[idx].show_notice(notice);
+            } else if let Some(bar) = self.cli_harness_bar.borrow().as_ref() {
+                bar.flash(notice);
+            }
         }
     }
 

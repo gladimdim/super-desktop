@@ -1088,6 +1088,13 @@ fn mcp_stdio_uses_owner_socket_in_both_entry_points() {
             std::fs::write(&policy_path,b"invalid").unwrap();
             assert_eq!(send(call(4,"app_status",serde_json::json!({})),true)["result"]["isError"],true);
             super_desktop::mcp_settings::save_at(&policy_path,super_desktop::mcp_settings::Config {enabled:true,read_output:true,launch:true,prompts:true,controls:true,close:true,read_notes:true,edit_notes:true,..Default::default()}).unwrap();
+            // Valid policy contents cannot grant authority if another user can write the file.
+            std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o620)).unwrap();
+            let denied = send(call(22, "app_status", serde_json::json!({})), true);
+            assert_eq!(denied["result"]["structuredContent"]["error"]["code"], "mcp_disabled");
+            let list = send(serde_json::json!({"jsonrpc":"2.0","id":23,"method":"tools/list"}), true);
+            assert_eq!(list["result"]["tools"], serde_json::json!([]));
+            std::fs::set_permissions(&policy_path, std::fs::Permissions::from_mode(0o600)).unwrap();
             assert_eq!(send(call(5,"app_status",serde_json::json!({})),true)["result"]["structuredContent"]["data"]["ready"],true);
         }
         drop(input);

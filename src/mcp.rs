@@ -957,6 +957,64 @@ mod tests {
             .iter()
             .any(|t| t["name"] == "launch_harness"));
     }
+    // Exercise discovery and invocation on the same session as permissions change.
+    // The callback stands in for the local daemon and records every dispatch.
+    fn check_tool_access(session: &mut Session, config: Config, tool: &str, args: &Value, allowed: bool) {
+        let list = json!({"jsonrpc":"2.0","id":1,"method":"tools/list"});
+        let reply = session.handle(list, &mut |_| panic!("list dispatched a command"), config).unwrap();
+        let advertised = reply["result"]["tools"].as_array().unwrap()
+            .iter().any(|entry| entry["name"] == tool);
+        assert_eq!(advertised, allowed, "discovery for {tool} with {config:?}");
+
+        let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":tool,"arguments":args}});
+        let mut dispatched = Vec::new();
+        let reply = session.handle(request, &mut |call| {
+            dispatched.push(call.name);
+            json!({"ok":true})
+        }, config).unwrap();
+        let expected = if allowed { vec![tool] } else { vec![] };
+        assert_eq!(dispatched, expected, "dispatch for {tool} with {config:?}");
+        assert_eq!(reply["result"]["isError"], !allowed);
+        if !allowed {
+            assert_eq!(reply["result"]["structuredContent"]["error"]["code"], "mcp_disabled");
+        }
+    }
+
+    #[test]
+    fn mcp_launch_with_prompt_requires_both_grants_on_each_call() {
+        let mut session = Session { initialized: true, ready: true };
+        let args = json!({"harness":"claude","cwd":"/tmp","text":"hello","requestId":"fixture"});
+        for (launch, prompts, allowed) in [
+            (true, true, true), (false, true, false), (true, false, false), (false, false, false),
+        ] {
+            check_tool_access(&mut session, Config { launch, prompts, ..all_enabled() },
+                "launch_with_prompt", &args, allowed);
+        }
+        check_tool_access(&mut session, Config { enabled: false, ..all_enabled() },
+            "launch_with_prompt", &args, false);
+    }
+
+    #[test]
+    fn mcp_terminal_input_and_close_require_separate_grants() {
+        let mut session = Session { initialized: true, ready: true };
+        let guards = json!({"id":"fixture","requestId":"test","expectEpoch":"epoch",
+            "expectRevision":"a".repeat(64),"expectPaneIdentity":"b".repeat(64)});
+        for (tool, extra) in [
+            ("send_terminal_text", json!({"text":"hello"})),
+            ("send_terminal_keys", json!({"keys":["Enter"]})),
+            ("interrupt_terminal", json!({})),
+            ("close_terminal", json!({"confirm":true})),
+        ] {
+            let mut args = guards.clone();
+            args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            for (controls, close) in [(true, false), (false, true), (false, false)] {
+                let allowed = if tool == "close_terminal" { close } else { controls };
+                check_tool_access(&mut session, Config { controls, close, ..all_enabled() },
+                    tool, &args, allowed);
+            }
+        }
+    }
+
     #[test]
     fn mcp_parse_errors_limits_and_unavailable() {
         let mut output = Vec::new();

@@ -44,7 +44,7 @@ pub fn next_attention_index(statuses: &[&str], current: Option<usize>) -> Option
     let start = current.map(|i| (i + 1) % statuses.len()).unwrap_or(0);
     (0..statuses.len())
         .map(|offset| (start + offset) % statuses.len())
-        .find(|&idx| matches!(statuses[idx], "WAITING" | "ERROR"))
+        .find(|&idx| Some(idx) != current && matches!(statuses[idx], "WAITING" | "ERROR"))
 }
 
 /// Cycle `0..len` forward or backward with wrap-around.
@@ -325,6 +325,8 @@ mod tests {
         assert!(rank_items("zzz", &items).is_empty());
 
         let statuses = ["IDLE", "WORKING", "WAITING", "IDLE", "ERROR"];
+        assert_eq!(next_attention_index(&["WORKING", "WAITING"], Some(1)), None);
+        assert_eq!(next_attention_index(&["ERROR"], None), Some(0));
         assert_eq!(next_attention_index(&statuses, None), Some(2));
         assert_eq!(next_attention_index(&statuses, Some(2)), Some(4));
         assert_eq!(next_attention_index(&statuses, Some(4)), Some(2));
@@ -334,6 +336,19 @@ mod tests {
         assert_eq!(cycle_mru_index(3, Some(2), true), Some(0));
         assert_eq!(cycle_mru_index(3, Some(0), false), Some(2));
         assert_eq!(cycle_mru_index(0, None, true), None);
+    }
+
+    #[test]
+    fn attention_shortcut_uses_the_latest_status_after_focus_changes() {
+        let mut cards = ["WORKING", "WAITING", "ERROR"];
+        let focus = next_attention_index(&cards, Some(0));
+        assert_eq!(focus, Some(1));
+        cards[1] = "WORKING";
+        let focus = next_attention_index(&cards, focus);
+        assert_eq!(focus, Some(2));
+        assert_eq!(next_attention_index(&cards, focus), None);
+        cards[0] = "WAITING";
+        assert_eq!(next_attention_index(&cards, focus), Some(0));
     }
 
     #[test]
