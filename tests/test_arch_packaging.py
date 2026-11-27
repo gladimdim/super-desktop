@@ -40,6 +40,7 @@ class DesktopSetupTests(unittest.TestCase):
         self.configure()
         self.assertEqual(first, self.snapshot())
         self.assertIn("super-desktop toggle", (self.hypr / "bindings.lua").read_text())
+        self.assertIn('hl.dsp.no_op()', (self.hypr / "bindings.lua").read_text())
         self.assertEqual((self.hypr / "hyprland.lua.before-package").read_text(), '-- user configuration\n')
         hook = self.home / ".config/omarchy/hooks/theme-set.d/super-desktop"
         self.assertTrue(os.access(hook, os.X_OK))
@@ -179,6 +180,66 @@ class PackageTests(unittest.TestCase):
             package["license"] = "LicenseRef-Unreviewed"
             with self.assertRaisesRegex(ValueError, "Unreviewed license"):
                 SOURCES["dependency_notices"](root, metadata)
+
+    def test_cargo_graph_licenses_are_reviewed_for_x86_64_and_aarch64(self):
+        if shutil.which("cargo") is None:
+            self.skipTest("cargo is not available")
+        fallbacks = json.loads((ROOT / "packaging/arch/licenses/sources.json").read_text())
+        for plat in ("x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"):
+            metadata = json.loads(subprocess.check_output(
+                ["cargo", "metadata", "--locked", "--format-version", "1", "--filter-platform", plat],
+                cwd=ROOT, text=True,
+            ))
+            active = {node["id"] for node in metadata["resolve"]["nodes"]}
+            for package in metadata["packages"]:
+                if package["id"] not in active or package["source"] is None:
+                    continue
+                self.assertIn(
+                    package["license"],
+                    SOURCES["REVIEWED_LICENSES"],
+                    f"Unreviewed license on {plat} for {package['name']} {package['version']}: {package['license']}",
+                )
+                directory = Path(package["manifest_path"]).parent
+                files = SOURCES["license_files"](directory)
+                key = f"{package['name']}@{package['version']}"
+                self.assertTrue(files or key in fallbacks, f"Missing license text on {plat} for {key}")
+
+    def test_arch_sources_preserves_full_logos_by_default_and_replaces_when_neutral(self):
+        if shutil.which("cargo") is None:
+            self.skipTest("cargo is not available")
+        with tempfile.TemporaryDirectory() as temp:
+            full_dir = Path(temp) / "full"
+            SOURCES["prepare_sources"](ROOT, full_dir, arch="x86_64", neutral_assets=False)
+            self.assertEqual(
+                (full_dir / "assets/logos/claude.svg").read_bytes(),
+                (ROOT / "assets/logos/claude.svg").read_bytes(),
+            )
+            self.assertIn("retain their original notices", (full_dir / "BUILDING").read_text())
+
+            neutral_dir = Path(temp) / "neutral"
+            SOURCES["prepare_sources"](ROOT, neutral_dir, arch="aarch64", neutral_assets=True)
+            self.assertNotEqual(
+                (neutral_dir / "assets/logos/claude.svg").read_bytes(),
+                (ROOT / "assets/logos/claude.svg").read_bytes(),
+            )
+            self.assertIn("Arch aarch64", (neutral_dir / "BUILDING").read_text())
+
+    def test_recipe_supports_x86_64_and_aarch64_and_requires_qml_host(self):
+        for arch in ("x86_64", "aarch64"):
+            text = PACKAGE["recipe"]("2.1.2", "GPL-3.0-only", "b" * 64, ["gtk4>=4.18", "gst-plugins-good", "gst-libav"], arch=arch)
+            self.assertIn(f"arch=('{arch}')", text)
+            self.assertIn(f"super-desktop-$pkgver-linux-{arch}.tar.gz", text)
+            self.assertIn("gst-plugins-good", text)
+            self.assertIn("gst-libav", text)
+            subprocess.run(["bash", "-n"], input=text, text=True, check=True)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "source"
+            for relative in ("LICENSE", "super-desktop.desktop", "packaging/arch/super-desktop-setup", "assets/logos/LICENSES.md", "assets/logos/ATTRIBUTION.md", "assets/editor/SYNTAX-LICENSES.txt", "assets/icons/hicolor/test.svg", "bin/super-desktop", "bin/super-desktop-client"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("fixture\n")
+            with self.assertRaisesRegex(ValueError, "sd-qml-host"):
+                PACKAGE["stage"](root, root / "bin", Path(temp) / "staged", require_qml_host=True)
 
     def test_missing_crate_license_requires_exact_version_and_verified_fallback(self):
         with tempfile.TemporaryDirectory() as temp:

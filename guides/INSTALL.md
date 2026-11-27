@@ -27,22 +27,63 @@ the newest release, unless it has local changes or commits of its own.
 
 ## Package installations
 
-An Arch package installation uses `/usr/bin/super-desktop` and keeps the
-application files under `/usr/lib/super-desktop` and `/usr/share/super-desktop`.
-Configure your Omarchy shortcut, autostart and theme hook as your normal user:
+SUPER DESKTOP provides prebuilt, GPG-signed Arch/Omarchy binary packages (`super-desktop-bin`) for both **`x86_64`** and **`aarch64`** — no Rust toolchain, `cargo`, or C/C++ compilation required. Running `install.sh` sets up the repository and installs `super-desktop-bin` automatically (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead).
+
+To register the signed repository manually without `install.sh`:
+
+1. Download and verify the signing key (`EBCB860628250D70F3C4D033304840D354676353`):
 
 ```bash
+curl -fsSL https://superdesktop.dmytrogladkyi.com/repo/super-desktop.gpg -o /tmp/super-desktop.gpg
+gpg --show-keys --with-fingerprint /tmp/super-desktop.gpg
+sudo pacman-key --add /tmp/super-desktop.gpg
+sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
+```
+
+2. Add `/etc/pacman.d/super-desktop.conf` and include it from `/etc/pacman.conf`:
+
+```bash
+printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
+echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
+```
+
+3. Optional Omarchy refresh hook (keeps the `Include` line intact if you switch Omarchy channels with `omarchy refresh pacman`):
+
+```bash
+mkdir -p ~/.config/omarchy/hooks/pre-refresh-pacman.d
+cat <<'EOF' > ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop
+#!/bin/bash
+CONF=/etc/pacman.conf
+SNIPPET=/etc/pacman.d/super-desktop.conf
+MARKER="Include = $SNIPPET"
+[[ -r $SNIPPET ]] || exit 0
+grep -qxF "$MARKER" "$CONF" && exit 0
+if grep -q '^\[omarchy\]' "$CONF"; then
+  sudo sed -i "0,/^\[omarchy\]/s||$MARKER\n\n[omarchy]|" "$CONF"
+else
+  printf '\n%s\n' "$MARKER" | sudo tee -a "$CONF" >/dev/null
+fi
+EOF
+chmod 755 ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop
+```
+
+4. Install `super-desktop-bin` and run the user setup:
+
+```bash
+sudo pacman -Syu super-desktop-bin
 super-desktop-setup
 ```
 
-For an existing `install.sh` installation, use
+An Arch package installation uses `/usr/bin/super-desktop` and keeps the
+application files under `/usr/lib/super-desktop` and `/usr/share/super-desktop`.
+For an existing `install.sh` source installation, use
 `/usr/bin/super-desktop-setup --migrate`. It backs up the old per-user launcher
 and desktop entry, routes the launcher to the package, and preserves existing
 shortcuts, notes, settings and source checkouts. Custom launcher scripts require
 manual migration. Setup requires Omarchy's Lua Hyprland configuration.
 
 Update package installations through **Omarchy's system update** (`omarchy
-update`). Restart the overlay afterwards, or log out and back in:
+update`) or `sudo pacman -Syu super-desktop-bin`. Restart the overlay afterwards, or log out and back in:
 
 ```bash
 /usr/bin/super-desktop kill && /usr/bin/super-desktop toggle

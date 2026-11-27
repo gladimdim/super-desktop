@@ -22,13 +22,13 @@ curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/inst
 ```
 
 The installer sets everything up automatically:
-- installs missing Arch packages with `pacman` (GTK 4, gtk4-layer-shell, VTE, Qt Quick, tmux, wl-clipboard, libnotify, sqlite, avahi, bubblewrap, poppler, GStreamer codecs) and Rust 1.92+ via rustup if needed;
-- downloads and builds the newest [release](https://github.com/gladimdim/super-desktop/releases) under `~/.local/share/super-desktop/source` (keep this folder — the installed command runs binaries from it);
-- configures the launcher, shortcut, autostart, and Omarchy theme integration.
+- installs the prebuilt GPG-signed `super-desktop-bin` package for `x86_64` or `aarch64` from `https://superdesktop.dmytrogladkyi.com/repo/$arch` (no Rust, `cargo`, or compilation needed) along with its Arch runtime packages (`GTK 4`, `gtk4-layer-shell`, `VTE`, `Qt Quick`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`, and GStreamer codecs);
+- registers the `[super-desktop]` Pacman repository and Omarchy refresh hook so future releases update automatically via `omarchy update` (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead);
+- configures the launcher, shortcut, autostart, and Omarchy theme integration (and migrates existing source installs cleanly).
 
 If a required library conflicts with an installed package's version requirement, confirm the Omarchy system update in the same terminal. Defer any reboot until the installer finishes.
 
-Press **SUPER + SHIFT + Q** (or run `super-desktop toggle`) to open the overlay, pick a project folder, and click a harness launcher. Replay the intro anytime from **⚙ Settings → Getting started guide** or `super-desktop tour`. Update later via **⚙ Settings → Updates** or by re-running the install command.
+Press **SUPER + SHIFT + Q** (or run `super-desktop toggle`) to open the overlay, pick a project folder, and click a harness launcher. Replay the intro anytime from **⚙ Settings → Getting started guide** or `super-desktop tour`. Package installs update via `omarchy update` (`sudo pacman -Syu super-desktop-bin`); source installs update via **⚙ Settings → Updates** or by re-running the install command.
 
 For Arch packages, version pinning, protocol compatibility, charger sleep lock, and headless boot, see [Installation, Packages, Versions & Power](guides/INSTALL.md). Installing via an AI agent? Follow [For AI Assistants & Project Layout](guides/AI_INSTALL.md).
 

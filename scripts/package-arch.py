@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 from pathlib import Path
+import platform
 import re
 import shlex
 import shutil
@@ -13,7 +14,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 LIBRARIES = ("glibc", "gcc-libs", "glib2", "gtk4", "gtk4-layer-shell", "vte4", "cairo", "pango", "gdk-pixbuf2", "graphene", "qt6-base", "qt6-declarative")
-RUNTIME = ("bash", "coreutils", "python", "tmux", "wl-clipboard", "libnotify", "sqlite", "avahi", "bubblewrap", "poppler")
+RUNTIME = ("bash", "coreutils", "python", "tmux", "wl-clipboard", "libnotify", "sqlite", "avahi", "bubblewrap", "poppler", "gst-plugins-good", "gst-libav")
 
 
 def release_metadata(root):
@@ -42,7 +43,7 @@ def check_release(root, tag, version):
         raise ValueError("Release packaging requires a clean checkout")
 
 
-def stage(root, binaries, destination, sources=None):
+def stage(root, binaries, destination, sources=None, *, require_qml_host=False):
     def install(source, relative, mode=0o644):
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -51,8 +52,11 @@ def stage(root, binaries, destination, sources=None):
     for name in ("super-desktop", "super-desktop-client"):
         install(binaries / name, f"usr/lib/super-desktop/{name}", 0o755)
     # Draws QML plugins; the overlay finds it next to its own binary.
-    if (binaries / "sd-qml-host").is_file():
-        install(binaries / "sd-qml-host", "usr/lib/super-desktop/sd-qml-host", 0o755)
+    qml_host = binaries / "sd-qml-host"
+    if qml_host.is_file():
+        install(qml_host, "usr/lib/super-desktop/sd-qml-host", 0o755)
+    elif require_qml_host:
+        raise ValueError("sd-qml-host binary is missing from binary-dir")
     install(root / "packaging/arch/super-desktop-setup", "usr/bin/super-desktop-setup", 0o755)
     (destination / "usr/bin/super-desktop").symlink_to("../lib/super-desktop/super-desktop-client")
     install(root / "super-desktop.desktop", "usr/share/applications/super-desktop.desktop")
@@ -72,27 +76,27 @@ def stage(root, binaries, destination, sources=None):
         notice.write_text(f"Corresponding source, vendored Rust dependencies and build instructions:\n{source_url}\n")
 
 
-def recipe(version, license_id, checksum, dependencies, *, omarchy=False):
+def recipe(version, license_id, checksum, dependencies, *, arch="x86_64", omarchy=False):
+    if arch not in ("x86_64", "aarch64"):
+        raise ValueError(f"Unsupported architecture: {arch}")
     quote = shlex.quote
     deps = " ".join(quote(value) for value in dependencies)
-    suffix = "_x86_64" if omarchy else ""
+    suffix = f"_{arch}" if omarchy else ""
     return f'''# Maintained from the SUPER DESKTOP release artifacts.
 pkgname=super-desktop-bin
 pkgver={version}
 pkgrel=1
 pkgdesc='Your overlay with AI agents for Omarchy / Hyprland'
-arch=('x86_64')
+arch=('{arch}')
 url='https://github.com/gladimdim/super-desktop'
 license=({quote(license_id)})
 depends=({deps})
-optdepends=('hyprland: Wayland compositor for the overlay'
-            'gst-plugins-good: play WAV, MP3, FLAC, WebM and MP4 in SD Editor and Files previews'
-            'gst-libav: play H.264 and AAC (most MP4 videos) in previews')
+optdepends=('hyprland: Wayland compositor for the overlay')
 provides=("super-desktop=$pkgver")
 conflicts=('super-desktop' 'super-desktop-git')
 options=('!strip' '!debug')
 install=super-desktop-bin.install
-source{suffix}=("super-desktop-$pkgver-linux-x86_64.tar.gz::$url/releases/download/v$pkgver/super-desktop-$pkgver-linux-x86_64.tar.gz")
+source{suffix}=("super-desktop-$pkgver-linux-{arch}.tar.gz::$url/releases/download/v$pkgver/super-desktop-$pkgver-linux-{arch}.tar.gz")
 sha256sums{suffix}=('{checksum}')
 
 package() {{
@@ -101,14 +105,14 @@ package() {{
 '''
 
 
-def write_recipes(root, output, version, license_id, checksum, dependencies):
+def write_recipes(root, output, version, license_id, checksum, dependencies, *, arch="x86_64"):
     for omarchy, directory in (
         (False, output / "aur"),
         (True, output / "omarchy/pkgbuilds/super-desktop-bin"),
     ):
         directory.mkdir(parents=True)
         (directory / "PKGBUILD").write_text(
-            recipe(version, license_id, checksum, dependencies, omarchy=omarchy)
+            recipe(version, license_id, checksum, dependencies, arch=arch, omarchy=omarchy)
         )
         shutil.copyfile(root / "packaging/arch/super-desktop-bin.install", directory / "super-desktop-bin.install")
         srcinfo = subprocess.check_output(["makepkg", "--printsrcinfo"], cwd=directory, text=True)
@@ -124,7 +128,11 @@ def main():
     parser.add_argument("--source-dir", type=Path, required=True, help="Exported source used to build both binaries")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--release-tag", required=True)
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"), default=platform.machine())
+    parser.add_argument("--require-qml-host", action="store_true")
     args = parser.parse_args()
+    if args.arch not in ("x86_64", "aarch64"):
+        parser.error(f"Unsupported architecture: {args.arch}")
     version, license_id = release_metadata(ROOT)
     check_release(ROOT, args.release_tag, version)
     if release_metadata(args.source_dir) != (version, license_id):
@@ -132,8 +140,6 @@ def main():
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
     if f"Commit: {commit}\n" not in (args.source_dir / "BUILDING").read_text():
         parser.error("Exported source must come from this release commit")
-    if subprocess.check_output(["uname", "-m"], text=True).strip() != "x86_64":
-        parser.error("This package is built for x86_64 only")
     # Use the build machine's library versions as conservative ABI floors.
     dependencies = list(RUNTIME)
     for name in LIBRARIES:
@@ -145,7 +151,7 @@ def main():
             parser.error(f"{name} version does not match {version}: {actual}")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    archive = output / f"super-desktop-{version}-linux-x86_64.tar.gz"
+    archive = output / f"super-desktop-{version}-linux-{args.arch}.tar.gz"
     source_archive = output / f"super-desktop-{version}-source.tar.gz"
     if archive.exists() or source_archive.exists() or (output / "aur").exists() or (output / "omarchy").exists():
         parser.error("Output already contains a package; use a fresh output directory")
@@ -156,13 +162,13 @@ def main():
         with tarfile.open(source_archive, "w:gz") as tar:
             tar.add(sources, arcname=f"super-desktop-{version}-source", filter=normalize_owner)
         staged = Path(temp) / "staged"
-        stage(sources, args.binary_dir, staged, sources)
+        stage(sources, args.binary_dir, staged, sources, require_qml_host=args.require_qml_host)
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(staged / "usr", arcname="usr", filter=normalize_owner)
     checksum = hashlib.sha256(archive.read_bytes()).hexdigest()
     source_checksum = hashlib.sha256(source_archive.read_bytes()).hexdigest()
     (output / "SHA256SUMS").write_text(f"{checksum}  {archive.name}\n{source_checksum}  {source_archive.name}\n")
-    write_recipes(ROOT, output, version, license_id, checksum, dependencies)
+    write_recipes(ROOT, output, version, license_id, checksum, dependencies, arch=args.arch)
     print(f"Prepared {archive}, {output / 'aur'} and {output / 'omarchy'}; nothing uploaded.")
 
 

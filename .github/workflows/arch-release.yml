@@ -1,0 +1,189 @@
+name: Arch release package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated release tag (vX.Y.Z)
+        required: true
+        type: string
+      publish:
+        description: Attach artifacts to the existing release and update Pages repo
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: arch-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  build:
+    if: github.event_name == 'workflow_dispatch' || !github.event.release.prerelease
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build clean Omarchy stable container
+        shell: bash
+        run: |
+          docker build -t "sd-arch-builder:${{ matrix.arch }}" packaging/arch/builder
+
+      - name: Build, test and package inside container
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/sd-release
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/src:ro" \
+            -v "/tmp/sd-release:/out" \
+            "sd-arch-builder:${{ matrix.arch }}" \
+            bash -euo pipefail -c '
+              cp -a /src /work
+              chown -R builder:builder /work /out
+              runuser -u builder -- bash -c "cd /work && bash scripts/build-arch-release.sh \"\$1\" /out" _ "'"$RELEASE_TAG"'"
+              pacman -U --noconfirm /out/*.pkg.tar.zst
+              touch /super-desktop-package-test-root
+              install -d -m 700 -o builder -g builder /tmp/sd-package-runtime
+              runuser -u builder -- env -u SD_GTK_TESTS_ON_DESKTOP XDG_RUNTIME_DIR=/tmp/sd-package-runtime \
+                bash -c "cd /work && cargo test --locked package_tests::packaged_desktop_lifecycle -- --ignored --nocapture"
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch-release-${{ matrix.arch }}
+          include-hidden-files: true
+          path: |
+            /tmp/sd-release/*.tar.gz
+            /tmp/sd-release/*.pkg.tar.zst
+            /tmp/sd-release/SHA256SUMS
+            /tmp/sd-release/aur/PKGBUILD
+            /tmp/sd-release/aur/.SRCINFO
+            /tmp/sd-release/aur/super-desktop-bin.install
+            /tmp/sd-release/omarchy/
+
+  build-repo:
+    needs: build
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-release-x86_64
+          path: artifacts/x86_64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: arch-release-aarch64
+          path: artifacts/aarch64
+
+      - name: Stage release assets and build signed Pacman repositories
+        env:
+          PACMAN_GPG_PRIVATE_KEY: ${{ secrets.PACMAN_GPG_PRIVATE_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['package']['version'])")"
+          mkdir -p release-assets repo
+
+          cp "artifacts/x86_64/super-desktop-${VER}-source.tar.gz" release-assets/
+          for arch in x86_64 aarch64; do
+            cp "artifacts/${arch}/super-desktop-${VER}-linux-${arch}.tar.gz" release-assets/
+            cp "artifacts/${arch}/super-desktop-bin-${VER}-1-${arch}.pkg.tar.zst" release-assets/
+          done
+
+          if [[ -n "${PACMAN_GPG_PRIVATE_KEY}" ]]; then
+            GNUPG_WORK="$(mktemp -d)"
+            chmod 700 "$GNUPG_WORK"
+            trap 'rm -rf "$GNUPG_WORK"' EXIT
+            export GNUPGHOME="$GNUPG_WORK"
+            printf '%s\n' "$PACMAN_GPG_PRIVATE_KEY" | gpg --batch --import
+            FPR="$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')"
+            [[ "$FPR" =~ ^[0-9A-F]{40}$ ]] || {
+              echo "Error: Imported GPG key has invalid fingerprint" >&2
+              exit 1
+            }
+            if [[ -f packaging/arch/super-desktop.gpg.fingerprint ]]; then
+              expected="$(tr -d '[:space:]' < packaging/arch/super-desktop.gpg.fingerprint)"
+              if [[ "$FPR" != "$expected" ]]; then
+                echo "Error: Imported key fingerprint $FPR does not match $expected" >&2
+                exit 1
+              fi
+            fi
+            for arch in x86_64 aarch64; do
+              pkg="release-assets/super-desktop-bin-${VER}-1-${arch}.pkg.tar.zst"
+              bash scripts/build-pacman-repo.sh \
+                --repo-name super-desktop \
+                --key-fingerprint "$FPR" \
+                --output "repo/${arch}" \
+                "$pkg"
+              cp "repo/${arch}/super-desktop-bin-${VER}-1-${arch}.pkg.tar.zst.sig" release-assets/
+              tar -C "repo/${arch}" --owner=0 --group=0 -czf "release-assets/pacman-repo-${arch}.tar.gz" .
+            done
+          else
+            echo "PACMAN_GPG_PRIVATE_KEY is unset; skipping signed Pacman repository creation."
+          fi
+
+          (cd release-assets && sha256sum *.tar.gz *.pkg.tar.zst > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets/
+
+  publish-release:
+    needs: build-repo
+    if: github.event_name == 'release' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Attach binaries and repo archives to the existing stable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$(gh release view "$RELEASE_TAG" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
+          # No --clobber: published binary assets are immutable.
+          gh release upload "$RELEASE_TAG" release-assets/*
+
+  deploy-pages:
+    needs: publish-release
+    if: github.event_name == 'release' || inputs.publish
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml

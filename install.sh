@@ -57,6 +57,13 @@ CHANNEL_KEY="superdesktop.channel"
 RELEASES_URL="https://github.com/gladimdim/super-desktop/releases"
 DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-desktop/source"
 
+PACMAN_REPO_URL="${SUPER_DESKTOP_PACMAN_REPO_URL:-https://superdesktop.dmytrogladkyi.com/repo}"
+REPO_KEY_FINGERPRINT="EBCB860628250D70F3C4D033304840D354676353"
+PACMAN_REPO_NAME="super-desktop"
+PACMAN_REPO_CONF="${SUPER_DESKTOP_PACMAN_REPO_CONF:-/etc/pacman.d/super-desktop.conf}"
+PACMAN_CONF="${SUPER_DESKTOP_PACMAN_CONF:-/etc/pacman.conf}"
+BUILD_FROM_SOURCE="${SUPER_DESKTOP_BUILD_FROM_SOURCE:-0}"
+
 # The oldest Rust that builds the locked dependencies (gtk4 0.11).
 MIN_RUST="1.92"
 
@@ -105,6 +112,8 @@ Environment:
                         v1.1.17: that release, pinned
                         master: the branch, with unreleased changes
                         (releases: $RELEASES_URL)
+  SUPER_DESKTOP_BUILD_FROM_SOURCE
+                        1: build from source instead of installing packages
 
 A specific release, for example the one that matches an older phone app:
 
@@ -639,9 +648,311 @@ reload_hyprland() {
 # pattern rebuild.sh stops it with). A looser one also matches any process
 # whose command text mentions both words.
 DAEMON_PROCESS='^([^ ]*/)?super-desktop daemon( |$)'
+BRIDGE_PROCESS='^([^ ]*/)?super-desktop harness-bridge( |$)'
+TELEGRAM_PROCESS='^([^ ]*/)?super-desktop telegram-bot( |$)'
 
 daemon_running() {
     pgrep -u "$(id -u)" -f "$DAEMON_PROCESS" >/dev/null 2>&1
+}
+
+supported_binary_arch() {
+    local arch
+    arch="$(uname -m)"
+    case "$arch" in
+    x86_64 | aarch64) printf '%s\n' "$arch" ;;
+    *) return 1 ;;
+    esac
+}
+
+pacman_repo_available() {
+    local arch="$1"
+    [[ "$REPO_KEY_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]] || return 1
+    curl --proto '=https' --tlsv1.2 -fsSI "$PACMAN_REPO_URL/$arch/$PACMAN_REPO_NAME.db" >/dev/null 2>&1
+}
+
+import_repo_key() {
+    [[ "$REPO_KEY_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]] ||
+        die "Package signing key fingerprint is not configured."
+    if pacman-key --list-keys "$REPO_KEY_FINGERPRINT" >/dev/null 2>&1; then
+        say "✓ Package signing key already trusted ($REPO_KEY_FINGERPRINT)"
+        return 0
+    fi
+    command -v gpg >/dev/null 2>&1 ||
+        die "gpg is required to verify the package signing key."
+    command -v sudo >/dev/null 2>&1 ||
+        die "sudo is required to trust the package signing key."
+    local work keyfile gpghome match
+    work="$(mktemp -d)"
+    keyfile="$work/super-desktop.gpg"
+    gpghome="$work/gnupg"
+    mkdir -p "$gpghome"
+    chmod 700 "$gpghome"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$keyfile" "$PACMAN_REPO_URL/super-desktop.gpg"; then
+        rm -rf "$work"
+        die "Could not download the package signing key from $PACMAN_REPO_URL/super-desktop.gpg."
+    fi
+    match="$(
+        GNUPGHOME="$gpghome" gpg --batch --show-keys --with-colons "$keyfile" 2>/dev/null |
+            awk -F: '$1 == "pub" { in_pub = 1; next } $1 == "sub" { in_pub = 0 } in_pub && $1 == "fpr" { print $10; in_pub = 0 }' |
+            grep -Fx "$REPO_KEY_FINGERPRINT" || true
+    )"
+    if [[ -z "$match" ]]; then
+        rm -rf "$work"
+        die "Downloaded signing key does not match expected fingerprint $REPO_KEY_FINGERPRINT."
+    fi
+    if ! sudo pacman-key --add "$keyfile" </dev/null ||
+        ! sudo pacman-key --lsign-key "$REPO_KEY_FINGERPRINT" </dev/null; then
+        rm -rf "$work"
+        die "Could not add or trust the SUPER DESKTOP package signing key."
+    fi
+    rm -rf "$work"
+    say "✓ Trusted SUPER DESKTOP package signing key ($REPO_KEY_FINGERPRINT)"
+}
+
+configure_pacman_repo() {
+    command -v sudo >/dev/null 2>&1 ||
+        die "sudo is required to register the SUPER DESKTOP pacman repository."
+    local work repo_tmp conf_tmp
+    work="$(mktemp -d)"
+    repo_tmp="$work/super-desktop.conf"
+    cat >"$repo_tmp" <<EOF
+[$PACMAN_REPO_NAME]
+SigLevel = Required DatabaseRequired
+Server = $PACMAN_REPO_URL/\$arch
+EOF
+    sudo mkdir -p "$(dirname "$PACMAN_REPO_CONF")" </dev/null
+    sudo install -m 644 "$repo_tmp" "$PACMAN_REPO_CONF" </dev/null || {
+        rm -rf "$work"
+        die "Could not write $PACMAN_REPO_CONF."
+    }
+
+    if ! grep -qxF "Include = $PACMAN_REPO_CONF" "$PACMAN_CONF" 2>/dev/null; then
+        conf_tmp="$work/pacman.conf"
+        if grep -q '^\[omarchy\]' "$PACMAN_CONF" 2>/dev/null; then
+            awk -v inc="Include = $PACMAN_REPO_CONF" '
+                !done && /^\[omarchy\]/ { print inc; print ""; done = 1 }
+                { print }
+            ' "$PACMAN_CONF" >"$conf_tmp"
+        else
+            {
+                [[ ! -f "$PACMAN_CONF" ]] || cat "$PACMAN_CONF"
+                printf '\nInclude = %s\n' "$PACMAN_REPO_CONF"
+            } >"$conf_tmp"
+        fi
+        sudo install -m 644 "$conf_tmp" "$PACMAN_CONF" </dev/null || {
+            rm -rf "$work"
+            die "Could not add Include = $PACMAN_REPO_CONF to $PACMAN_CONF."
+        }
+    fi
+    rm -rf "$work"
+
+    local hook_dir="$HOME/.config/omarchy/hooks/pre-refresh-pacman.d"
+    local hook_file="$hook_dir/super-desktop"
+    mkdir -p "$hook_dir"
+    cat >"$hook_file" <<EOF
+#!/bin/bash
+CONF=$PACMAN_CONF
+SNIPPET=$PACMAN_REPO_CONF
+MARKER="Include = \$SNIPPET"
+[[ -r \$SNIPPET ]] || exit 0
+grep -qxF "\$MARKER" "\$CONF" && exit 0
+if grep -q '^\[omarchy\]' "\$CONF"; then
+    sudo sed -i "0,/^\[omarchy\]/s||\$MARKER\n\n[omarchy]|" "\$CONF"
+else
+    printf '\n%s\n' "\$MARKER" | sudo tee -a "\$CONF" >/dev/null
+fi
+EOF
+    chmod 755 "$hook_file"
+    say "✓ Configured [$PACMAN_REPO_NAME] pacman repository and Omarchy refresh hook"
+}
+
+run_omarchy_system_update() {
+    local update=(omarchy update)
+    if ! command -v omarchy >/dev/null 2>&1; then
+        update=(omarchy-update)
+    fi
+    say "Installing or updating SUPER DESKTOP requires matching system library updates."
+    say "Confirm the Omarchy system update to continue; if offered a reboot, choose Later so setup can finish."
+    "${update[@]}" </dev/tty ||
+        die "The Omarchy update did not complete. Check the updater's output above."
+}
+
+resolve_and_install_pacman_target() {
+    local mode="$1" target="$2"
+    local attempted_update=0 plan status pkg pkgs partial_upgrade
+    command -v sudo >/dev/null 2>&1 ||
+        die "sudo is required to install super-desktop-bin."
+
+    while true; do
+        partial_upgrade=0
+        if [[ "$mode" == "-S" ]]; then
+            sudo pacman -Sy --noconfirm </dev/null ||
+                die "Could not synchronize package databases."
+            set +e
+            plan="$(LC_ALL=C pacman -Sp --needed --noconfirm "$target" </dev/null 2>&1)"
+            status=$?
+            set -e
+            if ((status == 0)); then
+                pkgs="$(LC_ALL=C pacman -Sp --print-format '%n' --needed --noconfirm "$target" </dev/null 2>/dev/null || true)"
+                for pkg in $pkgs; do
+                    if [[ "$pkg" != "super-desktop-bin" ]] && pacman -Q "$pkg" >/dev/null 2>&1; then
+                        partial_upgrade=1
+                        break
+                    fi
+                done
+                if ((partial_upgrade == 0)); then
+                    say "Installing prebuilt super-desktop-bin package..."
+                    sudo pacman -S --needed --noconfirm "$target" </dev/null ||
+                        die "Could not install super-desktop-bin. See the pacman error above."
+                    say "✓ Installed super-desktop-bin"
+                    return 0
+                fi
+            fi
+        else
+            set +e
+            plan="$(LC_ALL=C pacman -Up --noconfirm "$target" </dev/null 2>&1)"
+            status=$?
+            set -e
+            if ((status == 0)); then
+                say "Installing prebuilt package $(basename "$target")..."
+                sudo pacman -U --noconfirm "$target" </dev/null ||
+                    die "Could not install $(basename "$target"). See the pacman error above."
+                say "✓ Installed $(basename "$target")"
+                return 0
+            fi
+        fi
+
+        if ((attempted_update == 0)) && {
+            ((partial_upgrade == 1)) ||
+            [[ "$plan" == *" breaks dependency "* ]] ||
+            [[ "$plan" == *"unable to satisfy dependency"* ]] ||
+            [[ "$plan" == *"could not satisfy dependencies"* ]]
+        }; then
+            run_omarchy_system_update
+            attempted_update=1
+            continue
+        fi
+
+        [[ -z "$plan" ]] || printf '%s\n' "$plan" >&2
+        die "Pacman could not resolve super-desktop-bin."
+    done
+}
+
+install_from_pacman_repo() {
+    local arch="$1"
+    import_repo_key
+    configure_pacman_repo
+    resolve_and_install_pacman_target -S "super-desktop-bin"
+}
+
+install_pinned_package() {
+    local version="$1" arch="$2"
+    local ver pkg_name base_url work want have
+    ver="${version#v}"
+    pkg_name="super-desktop-bin-${ver}-1-${arch}.pkg.tar.zst"
+    base_url="https://github.com/gladimdim/super-desktop/releases/download/$version"
+    work="$(mktemp -d)"
+
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$work/$pkg_name" "$base_url/$pkg_name" 2>/dev/null ||
+        ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$work/SHA256SUMS" "$base_url/SHA256SUMS" 2>/dev/null; then
+        rm -rf "$work"
+        return 1
+    fi
+
+    want="$(awk -v file="$pkg_name" '$2 == file || $2 == ("*" file) { print $1; exit }' "$work/SHA256SUMS")"
+    if [[ ! "$want" =~ ^[0-9a-f]{64}$ ]]; then
+        rm -rf "$work"
+        die "SHA256SUMS for $version does not contain a valid checksum for $pkg_name."
+    fi
+    have="$(sha256sum "$work/$pkg_name" | awk '{ print $1 }')"
+    if [[ "$want" != "$have" ]]; then
+        rm -rf "$work"
+        die "Checksum mismatch for $pkg_name (expected $want, got $have)."
+    fi
+
+    if [[ "$REPO_KEY_FINGERPRINT" =~ ^[0-9A-F]{40}$ ]] &&
+        curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$work/$pkg_name.sig" "$base_url/$pkg_name.sig" 2>/dev/null; then
+        import_repo_key
+    fi
+
+    resolve_and_install_pacman_target -U "$work/$pkg_name"
+    rm -rf "$work"
+    return 0
+}
+
+configure_packaged_user() {
+    local setup_bin="/usr/bin/super-desktop-setup"
+    [[ -x "$setup_bin" ]] || die "Packaged setup helper not found at $setup_bin."
+    if [[ -L "$BIN_DST" && "$(readlink "$BIN_DST" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
+        [[ -e "$BIN_DST" && ! -L "$BIN_DST" ]] ||
+        [[ -e "$APP_DST" ]]; then
+        "$setup_bin" --migrate
+    else
+        "$setup_bin"
+    fi
+}
+
+restart_packaged_daemon() {
+    if ! daemon_running; then
+        reload_hyprland
+        return
+    fi
+    if [[ -z "${WAYLAND_DISPLAY:-}" ]] || ! hyprland_reachable; then
+        warn "SUPER DESKTOP is running the previous build. Restart it from your desktop terminal: /usr/bin/super-desktop kill && /usr/bin/super-desktop toggle"
+        return
+    fi
+
+    local uid state_dir daemon_log sock
+    uid="$(id -u)"
+    state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/super-desktop"
+    daemon_log="$state_dir/daemon.log"
+    sock="${XDG_RUNTIME_DIR:-/run/user/$uid}/super-desktop.sock"
+
+    say "Restarting SUPER DESKTOP on the new package..."
+    /usr/bin/super-desktop kill >/dev/null 2>&1 || true
+    pkill -u "$uid" -f "$DAEMON_PROCESS" >/dev/null 2>&1 || true
+    pkill -u "$uid" -f "$BRIDGE_PROCESS" >/dev/null 2>&1 || true
+    pkill -u "$uid" -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
+    sleep 0.5
+    if pgrep -u "$uid" -f "$TELEGRAM_PROCESS" >/dev/null 2>&1; then
+        pkill -KILL -u "$uid" -f "$TELEGRAM_PROCESS" >/dev/null 2>&1 || true
+        sleep 0.2
+    fi
+    if [[ -S "$sock" ]] && ! daemon_running; then
+        rm -f "$sock"
+    fi
+
+    reload_hyprland
+    mkdir -p "$state_dir"
+    chmod 700 "$state_dir"
+    (umask 077 && nohup setsid /usr/bin/super-desktop daemon </dev/null >"$daemon_log" 2>&1 & disown) || true
+    for _ in $(seq 1 50); do
+        if /usr/bin/super-desktop status >/dev/null 2>&1; then
+            /usr/bin/super-desktop reload-theme >/dev/null 2>&1 || true
+            say "✓ Restarted SUPER DESKTOP daemon"
+            return
+        fi
+        sleep 0.1
+    done
+    warn "SUPER DESKTOP daemon did not answer in time. Run /usr/bin/super-desktop toggle to start it."
+}
+
+summary_packaged() {
+    local installed_ver
+    installed_ver="$(/usr/bin/super-desktop --version 2>/dev/null || echo 'super-desktop-bin')"
+    say ""
+    say "=== SUPER DESKTOP Installation Complete! ==="
+    say "Installed: $installed_ver (prebuilt package, no compilation needed)"
+    say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
+    say "Install and sign in to the AI coding CLIs you want to use separately."
+    if [[ "$RELEASE" == v* ]]; then
+        say "Pinned release $RELEASE installed from release asset."
+    else
+        say "Future updates arrive automatically through Omarchy system updates (omarchy update) or: sudo pacman -Syu super-desktop-bin"
+    fi
+    if [[ -d "$DEFAULT_DIR/.git" ]]; then
+        say "Note: your previous source checkout at $DEFAULT_DIR is no longer needed and can be removed if unused."
+    fi
 }
 
 # A running daemon (and its bridge) still runs the previous build.
@@ -704,6 +1015,30 @@ main() {
 
     say "=== Installing SUPER DESKTOP ==="
     preflight
+    resolve_release
+
+    local arch=""
+    if ! script_checkout >/dev/null 2>&1 && ((!BUILD_FROM_SOURCE)) && [[ "$RELEASE" != master ]] &&
+        arch="$(supported_binary_arch)"; then
+        if [[ "$RELEASE" == v* ]]; then
+            if install_pinned_package "$RELEASE" "$arch"; then
+                configure_packaged_user
+                restart_packaged_daemon
+                summary_packaged
+                return
+            fi
+            warn "No prebuilt package found for $RELEASE ($arch); building from source instead..."
+        elif pacman_repo_available "$arch"; then
+            install_from_pacman_repo "$arch"
+            configure_packaged_user
+            restart_packaged_daemon
+            summary_packaged
+            return
+        else
+            say "Prebuilt Pacman repository is not active for $arch yet; building from source..."
+        fi
+    fi
+
     install_packages
     ensure_rust
     prepare_source

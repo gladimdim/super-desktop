@@ -1,0 +1,81 @@
+name: Deploy Pages and Pacman repo
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'docs/**'
+      - 'packaging/arch/super-desktop.gpg'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Stage website and latest signed Pacman repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf _site
+          mkdir -p _site/repo
+          cp -a docs/. _site/
+          if [[ -f packaging/arch/super-desktop.gpg ]]; then
+            cp packaging/arch/super-desktop.gpg _site/repo/super-desktop.gpg
+          fi
+
+          release_tag="$(gh api "repos/$GH_REPO/releases?per_page=30" --jq '
+            [
+              .[] | select((.draft | not) and (.prerelease | not)) |
+              select(
+                ([.assets[].name] | index("pacman-repo-x86_64.tar.gz")) != null and
+                ([.assets[].name] | index("pacman-repo-aarch64.tar.gz")) != null
+              )
+            ][0].tag_name // empty
+          ')"
+
+          if [[ -n "$release_tag" ]]; then
+            echo "Deploying signed Pacman repo from release $release_tag"
+            work="$(mktemp -d)"
+            trap 'rm -rf "$work"' EXIT
+            gh release download "$release_tag" -R "$GH_REPO" -D "$work" \
+              -p 'pacman-repo-x86_64.tar.gz' -p 'pacman-repo-aarch64.tar.gz'
+            for arch in x86_64 aarch64; do
+              mkdir -p "_site/repo/$arch"
+              tar -xzf "$work/pacman-repo-$arch.tar.gz" -C "_site/repo/$arch"
+            done
+            if [[ -n "$(find _site/repo -type l)" ]]; then
+              echo "Error: Symlinks found in _site/repo" >&2
+              exit 1
+            fi
+          else
+            echo "No release with signed pacman-repo archives found yet; deploying website only."
+          fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

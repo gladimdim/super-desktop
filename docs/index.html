@@ -118,6 +118,7 @@
         {"@type": "Question", "name": "Can I use my agents from Android, iPhone, iPad, or SD Launcher?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The free Android APK on GitHub and the Google Play edition list every session on your PCs, send prompts, voice, photos and files, and alert when an agent finishes. SD Launcher puts the same agents on your Android home screen as pages and widgets. SUPER DESKTOP: AI Agents is on the App Store for iPhone and iPad."}},
         {"@type": "Question", "name": "Can I control SUPER DESKTOP from Telegram?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. Create your own @BotFather bot, pair one Telegram account on your PC, and launch the built-in Telegram Mini Web App (/app over private Tailscale Serve) or link a private 2-member Forum group. Your PC runs a local worker making outbound HTTPS requests to api.telegram.org with no open ports or third-party relay servers."}},
         {"@type": "Question", "name": "Is it free?", "acceptedAnswer": {"@type": "Answer", "text": "The desktop app is free and open source under GPL-3.0. The Android APK from GitHub and SD Launcher APK are free forever with every feature unlocked. Google Play and App Store editions include a 10-day usage trial and an optional one-time Pro purchase with no subscription."}},
+        {"@type": "Question", "name": "Do I need Rust or a compiler to install SUPER DESKTOP?", "acceptedAnswer": {"@type": "Answer", "text": "No. install.sh installs prebuilt GPG-signed super-desktop-bin Arch/Omarchy packages for x86_64 and aarch64 from https://superdesktop.dmytrogladkyi.com/repo/$arch (signing key fingerprint EBCB860628250D70F3C4D033304840D354676353), updated automatically via omarchy update. Set SUPER_DESKTOP_BUILD_FROM_SOURCE=1 if you want to compile from source."}},
         {"@type": "Question", "name": "Can AI agents control SUPER DESKTOP via CLI and MCP?", "acceptedAnswer": {"@type": "Answer", "text": "Yes. The super-desktop CLI exposes structured JSON commands with idempotent --request-id receipts, and super-desktop mcp serve exposes up to 88 tools over local stdio (MCP 2025-11-25 and 2025-03-26) with no network listener and granular permission switches in Settings → MCP."}}
       ]
     }
@@ -641,7 +642,7 @@
       </div>
       <div class="verify-strip">
         <span>VERIFY: <code>sha256sum -c SUPER-DESKTOP-2.3.1.apk.sha256</code> · <code>ss -tlnp | grep super-desktop</code> (:8759 TLS only)</span>
-        <span><a href="privacy.html">privacy.html</a> · <a href="privacy-ios.html">privacy-ios.html</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a></span>
+        <span><a href="repo/super-desktop.gpg">super-desktop.gpg</a> · <a href="privacy.html">privacy.html</a> · <a href="privacy-ios.html">privacy-ios.html</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a></span>
       </div>
     </div>
   </section>
@@ -657,7 +658,7 @@
       <div class="grid-3">
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>OMARCHY LINUX (v2.1.2)</h3>
-          <p>GPL-3.0 desktop overlay, tmux cards, SD Editor, QML plugins, multi-PC sync, headless boot, CLI &amp; MCP.</p>
+          <p>Prebuilt signed <code>x86_64</code> &amp; <code>aarch64</code> Pacman packages (no Rust/compilation), tmux cards, SD Editor, QML plugins, multi-PC sync, headless boot, CLI &amp; MCP.</p>
           <div class="act"><a class="btn lime" href="#install">Install</a><a href="https://github.com/gladimdim/super-desktop">Source</a></div>
         </div>
         <div class="box">
@@ -1002,6 +1003,10 @@
           <p>Yes. Pair over Wi-Fi, Tailscale, or your own VPN (WireGuard, ZeroTier, OpenVPN). Enable <strong>Settings → System launch</strong> (plus <code>loginctl enable-linger</code>) and SUPER DESKTOP restores your agents automatically on boot even with no monitor and nobody logged in.</p>
         </details>
         <details>
+          <summary>Do I need Rust or a compiler to install SUPER DESKTOP?</summary>
+          <p>No. <code>install.sh</code> installs prebuilt GPG-signed <code>super-desktop-bin</code> Arch/Omarchy packages for <code>x86_64</code> and <code>aarch64</code> from <code>https://superdesktop.dmytrogladkyi.com/repo/$arch</code> (key fingerprint <code>EBCB860628250D70F3C4D033304840D354676353</code>), updated automatically via <code>omarchy update</code>. Set <code>SUPER_DESKTOP_BUILD_FROM_SOURCE=1</code> if you want to compile from source instead.</p>
+        </details>
+        <details>
           <summary>Can AI agents control SUPER DESKTOP?</summary>
           <p>Yes. <code>super-desktop</code> provides structured JSON CLI commands with idempotent <code>--request-id</code> receipts, and <code>super-desktop mcp serve</code> exposes up to 88 tools over local stdio with granular opt-in switches in <strong>Settings → MCP</strong>.</p>
         </details>
@@ -1010,13 +1015,48 @@
   </section>
 
   <section class="pane" id="install">
-    <div class="pane-bar"><span class="path">[07] ~/install</span><span class="badge">OMARCHY LINUX · 40s TOUR</span></div>
+    <div class="pane-bar"><span class="path">[07] ~/install</span><span class="badge">PREBUILT x86_64 &amp; aarch64 · ZERO COMPILE · SIGNED PACMAN REPO</span></div>
     <div class="pane-body">
+      <div class="grid-3" style="margin-bottom:14px">
+        <div class="box">
+          <h3>// ZERO COMPILATION</h3>
+          <p>Prebuilt native binaries for <code>x86_64</code> and <code>aarch64</code> (ARM64). No Rust, <code>rustup</code>, <code>cargo</code>, or <code>base-devel</code> required.</p>
+        </div>
+        <div class="box">
+          <h3>// SIGNED PACMAN REPO</h3>
+          <p>Served from <code>superdesktop.dmytrogladkyi.com/repo/$arch</code> with Ed25519 GPG signing (<code>SigLevel = Required DatabaseRequired</code>, key fingerprint <code>EBCB860628250D70F3C4D033304840D354676353</code>).</p>
+        </div>
+        <div class="box">
+          <h3>// AUTO-UPDATES IN OMARCHY</h3>
+          <p>Registers <code>[super-desktop]</code> and an Omarchy <code>pre-refresh-pacman</code> hook so <code>omarchy update</code> (<code>pacman -Syu</code>) upgrades <code>super-desktop-bin</code> automatically.</p>
+        </div>
+      </div>
       <div class="cmd"><code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code><button type="button" data-copy="cmd-install">COPY</button></div>
+      <p style="margin:10px 0 0;color:var(--muted);font-size:13px">Verifies the GPG signing key, registers the repo and Omarchy refresh hook, installs <code>super-desktop-bin</code>, migrates any older source install, and sets up the shortcut and theme hook.</p>
       <details class="more">
-        <summary>Update, or install a specific release</summary>
-        <p>Run the same command again to update to the newest release while keeping your settings, notes, and running agents. To pin an exact version:</p>
+        <summary>Manual Pacman repository setup (without install.sh)</summary>
+        <div class="mcp-box" style="margin-top:10px">
+          <div class="mcp-bar">
+            <span>ARCH / OMARCHY PACMAN REPO SETUP</span>
+            <button type="button" data-copy="cmd-pacman-repo">COPY</button>
+          </div>
+          <pre><code id="cmd-pacman-repo">curl -fsSL https://superdesktop.dmytrogladkyi.com/repo/super-desktop.gpg -o /tmp/super-desktop.gpg
+gpg --show-keys --with-fingerprint /tmp/super-desktop.gpg   # expect EBCB 8606 2825 0D70 F3C4  D033 3048 40D3 5467 6353
+sudo pacman-key --add /tmp/super-desktop.gpg && sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
+printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
+echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
+sudo pacman -Syu super-desktop-bin && super-desktop-setup</code></pre>
+          <div class="mcp-foot">
+            <span>Migrating from an earlier <code>install.sh</code> source install? Run <code>/usr/bin/super-desktop-setup --migrate</code> instead, then restart with <code>/usr/bin/super-desktop kill &amp;&amp; /usr/bin/super-desktop toggle</code>.</span>
+          </div>
+        </div>
+      </details>
+      <details class="more">
+        <summary>Update, pin a release, or build from source</summary>
+        <p>Run <code>omarchy update</code> (or the install command again) to upgrade while keeping your settings, notes, and running agents. To install a specific release asset:</p>
         <div class="cmd"><code id="cmd-version">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_VERSION=v2.1.2 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
+        <p style="margin-top:10px">Prefer to compile from source instead of installing prebuilt binaries?</p>
+        <div class="cmd"><code id="cmd-source-build">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | SUPER_DESKTOP_BUILD_FROM_SOURCE=1 bash</code><button type="button" data-copy="cmd-source-build">COPY</button></div>
       </details>
       <div class="vid-box">
         <video controls preload="none" playsinline width="1920" height="1080" poster="video/super-desktop-trailer-poster.webp">

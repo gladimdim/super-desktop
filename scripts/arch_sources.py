@@ -3,6 +3,7 @@
 import hashlib
 import json
 from pathlib import Path
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -15,8 +16,13 @@ PREPARE_ASSETS = runpy.run_path(str(Path(__file__).with_name("arch_assets.py")))
 # Reviewed Linux dependency declarations. New terms require review before shipping.
 REVIEWED_LICENSES = {
     "MIT", "Apache-2.0", "ISC", "BSD-3-Clause", "Unicode-3.0",
+    "0BSD OR MIT OR Apache-2.0",
+    "Apache-2.0 / MIT",
     "MIT OR Apache-2.0", "Apache-2.0 OR MIT", "MIT/Apache-2.0",
-    "Apache-2.0 OR ISC OR MIT", "Apache-2.0 AND ISC", "Unlicense OR MIT",
+    "MIT OR Zlib OR Apache-2.0",
+    "Apache-2.0 OR ISC OR MIT", "Apache-2.0 AND ISC",
+    "Unlicense OR MIT", "Unlicense/MIT",
+    "Zlib",
     "Apache-2.0 WITH LLVM-exception",
     "Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT",
     "(MIT OR Apache-2.0) AND Unicode-3.0",
@@ -63,8 +69,11 @@ def dependency_notices(root, metadata):
     return "\n".join(sections), inventory
 
 
-def prepare_sources(root, destination):
+def prepare_sources(root, destination, *, arch=None, neutral_assets=False):
     """Use committed source and Cargo's checksum-verified, locked dependencies."""
+    arch = arch or platform.machine()
+    if arch not in ("x86_64", "aarch64"):
+        raise ValueError(f"Unsupported architecture: {arch}")
     destination.mkdir(parents=True)
     with tempfile.TemporaryFile() as archive:
         # Website media is not a build input and contains screenshots of vendor
@@ -73,7 +82,8 @@ def prepare_sources(root, destination):
         archive.seek(0)
         with tarfile.open(fileobj=archive) as tar:
             tar.extractall(destination, filter="data")
-    PREPARE_ASSETS(destination)
+    if neutral_assets:
+        PREPARE_ASSETS(destination)
     config = subprocess.check_output(
         ["cargo", "vendor", "--locked", "--versioned-dirs", str(destination / "vendor")],
         cwd=root, text=True,
@@ -85,23 +95,28 @@ def prepare_sources(root, destination):
     (config_dir / "config.toml").write_text(config)
     metadata = json.loads(subprocess.check_output([
         "cargo", "metadata", "--locked", "--offline", "--format-version", "1",
-        "--filter-platform", "x86_64-unknown-linux-gnu",
+        "--filter-platform", f"{arch}-unknown-linux-gnu",
     ], cwd=destination, text=True))
     notices, inventory = dependency_notices(root, metadata)
     (destination / "THIRD_PARTY_LICENSES.txt").write_text(notices)
     (destination / "DEPENDENCIES.json").write_text(json.dumps(inventory, indent=2) + "\n")
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     rustc = subprocess.check_output(["rustc", "--version"], text=True).strip()
+    artwork_notice = (
+        "Package-specific neutral artwork is recorded in assets/logos/ATTRIBUTION.md.\n"
+        if neutral_assets
+        else "Bundled toolbar logos and icons retain their original notices in assets/logos/ATTRIBUTION.md and assets/logos/LICENSES.md.\n"
+    )
     (destination / "BUILDING").write_text(
         f"SUPER DESKTOP corresponding source\nCommit: {commit}\nCompiler used: {rustc}\n\n"
-        "On Omarchy / Arch x86_64, install build prerequisites:\n"
+        f"On Omarchy / Arch {arch}, install build prerequisites:\n"
         "  sudo pacman -S --needed base-devel rust python gtk4 gtk4-layer-shell vte4 qt6-base qt6-declarative\n"
         "Build without downloading Rust dependencies:\n"
         "  cargo build --release --locked --offline --bins\n"
         "Build the QML plugin host into the same folder:\n"
         "  scripts/build-qml-host.sh release\n"
         "Cargo dependencies are included in vendor/ with their original license terms.\n"
-        "Package-specific neutral artwork is recorded in assets/logos/ATTRIBUTION.md.\n"
+        + artwork_notice +
         "The system compiler and dynamically linked system libraries are installed separately.\n"
         "See README.md for runtime dependencies, configuration and installation.\n"
     )
@@ -121,7 +136,14 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--arch", choices=("x86_64", "aarch64"), default=platform.machine())
+    parser.add_argument("--neutral-assets", action="store_true")
     args = parser.parse_args()
     if args.output.exists():
         parser.error("Use a fresh source output directory")
-    prepare_sources(Path(__file__).resolve().parents[1], args.output)
+    prepare_sources(
+        Path(__file__).resolve().parents[1],
+        args.output,
+        arch=args.arch,
+        neutral_assets=args.neutral_assets,
+    )

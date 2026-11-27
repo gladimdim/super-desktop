@@ -3,6 +3,7 @@
 set -euo pipefail
 export RELEASE_TAG="${1:?Pass the release tag}"
 output="$(realpath -m "${2:?Pass a fresh output directory}")"
+ARCH="$(uname -m)"
 python3 - <<'PY'
 import os
 import runpy
@@ -14,14 +15,14 @@ python3 -m unittest discover -s tests -p 'test_arch_packaging.py'
 env -u SD_GTK_TESTS_ON_DESKTOP cargo test --locked
 sources="$(mktemp -d)"
 trap 'rm -rf "$sources"' EXIT
-python3 scripts/arch_sources.py --output "$sources/source"
+python3 scripts/arch_sources.py --arch "$ARCH" --output "$sources/source"
 # Compile the exact source and asset manifest shipped alongside the binaries.
 (cd "$sources/source" && CARGO_TARGET_DIR="$sources/target" cargo build --release --locked --offline --bins)
 (cd "$sources/source" && CARGO_TARGET_DIR="$sources/target" SD_QML_HOST_REQUIRED=1 scripts/build-qml-host.sh release)
-python3 scripts/package-arch.py --release-tag "$RELEASE_TAG" --output "$output" --source-dir "$sources/source" --binary-dir "$sources/target/release"
+python3 scripts/package-arch.py --arch "$ARCH" --require-qml-host --release-tag "$RELEASE_TAG" --output "$output" --source-dir "$sources/source" --binary-dir "$sources/target/release"
 cp "$output"/*.tar.gz "$output/aur/"
 cd "$output/aur"
-makepkg --nodeps --nocheck --clean
+PKGEXT='.pkg.tar.zst' makepkg --nodeps --nocheck --clean
 mv ./*.pkg.tar.zst ..
 cd ..
 sha256sum ./*.pkg.tar.zst >> SHA256SUMS

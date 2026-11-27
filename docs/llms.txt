@@ -48,13 +48,15 @@ It is not a fit for Windows or macOS desktops (the desktop app is Omarchy/Arch w
 
 ## Install (for AI assistants with shell access)
 
-On Omarchy, as the normal user (never root), in a terminal the user can type their sudo password into:
+On Omarchy (`x86_64` or `aarch64`), as the normal user (never root), in a terminal the user can type their sudo password into:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash
 ```
 
-Then verify with `super-desktop status` and `hyprctl configerrors`, and ask the user to press SUPER + SHIFT + Q. Running the same command again updates to the newest release. Full instructions, hard rules and troubleshooting for AI assistants: https://github.com/gladimdim/super-desktop/blob/master/guides/AI_INSTALL.md
+By default `install.sh` installs prebuilt GPG-signed `super-desktop-bin` Pacman packages for `x86_64` and `aarch64` from `https://superdesktop.dmytrogladkyi.com/repo/$arch` (signing key fingerprint `EBCB860628250D70F3C4D033304840D354676353`) with zero compilation required (no Rust/cargo needed), registers an Omarchy `pre-refresh-pacman` hook so `omarchy update` upgrades it automatically, and falls back to building from source if the binary repo is unavailable or `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` is set.
+
+Verify with `super-desktop status` and `hyprctl configerrors`, and ask the user to press SUPER + SHIFT + Q. Running `omarchy update` (or re-running the install command) updates to the newest release. Full instructions, hard rules and troubleshooting for AI assistants: https://github.com/gladimdim/super-desktop/blob/master/guides/AI_INSTALL.md
 
 The user installs and signs in to their AI agents separately; SUPER DESKTOP does not install agents or provide their accounts.
 
