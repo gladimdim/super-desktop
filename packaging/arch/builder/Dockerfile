@@ -95,7 +95,10 @@ RUN pacman -Syu --noconfirm && \
         qt6-base \
         qt6-declarative \
         gst-plugins-good \
-        gst-libav && \
+        gst-libav \
+        ttf-liberation \
+        noto-fonts-emoji && \
+    fc-cache -f && \
     pacman -Scc --noconfirm && \
     rm -rf /var/cache/pacman/pkg/*
 

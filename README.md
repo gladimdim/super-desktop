@@ -46,6 +46,7 @@ For Arch packages, version pinning, protocol compatibility, charger sleep lock, 
 | **[Plugins (QML Surfaces)](guides/PLUGINS.md)** | Build QML surfaces with AI, discover/install community plugins, edit locally, and publish. |
 | **[Local MCP Access & CLI Quick Reference](guides/MCP_AND_CLI.md)** | Local stdio MCP server, structured CLI commands, idempotency receipts, and [complete CLI reference](CLI.md). |
 | **[For AI Assistants & Project Layout](guides/AI_INSTALL.md)** | Exact Omarchy install rules for AI assistants, troubleshooting table, and repository layout. |
+| **[Development, Signing & Releases](guides/DEVELOPMENT.md)** | Local clone builds, isolated test suite, GPG signing keys, cutting releases, and local/CI multi-arch signed Pacman package builds. |
 | **[Security](SECURITY.md)** | Security boundaries for the phone bridge, PC-to-PC sync, Telegram BYOB worker, MCP, and plugins. |
 
 ---

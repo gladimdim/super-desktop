@@ -1399,12 +1399,7 @@ fn toolbar_trims_inner() {
         bar.offer(count);
         for size in [TopBarSize::Small, TopBarSize::Medium, TopBarSize::Large] {
             paint_top_bar_size(&bar.hud, size);
-            // Shrink, enlarge, then shrink again, as with output/scale changes.
-            // Logical widths also cover scaled outputs, e.g. 1920/1.5=1280
-            // and 2560/2=1280.
-            for width in [
-                1280, 320, 800, 2560, 640, 999, 1000, 1199, 1200, 480, 3440, 1024, 1366, 1600, 320, 3440,
-            ] {
+            let mut check_width = |width: i32| {
                 bar.settle(width);
                 let needs = bar.needs();
                 assert!(needs[0] > needs[1] && needs[1] > needs[2], "each trim must save width: {needs:?}");
@@ -1419,6 +1414,21 @@ fn toolbar_trims_inner() {
                 if bar.fit.level() == 1 {
                     hint_went_first = true;
                 }
+            };
+            // Shrink, enlarge, then shrink again, as with output/scale changes.
+            // Logical widths also cover scaled outputs, e.g. 1920/1.5=1280
+            // and 2560/2=1280.
+            for width in [
+                1280, 320, 800, 2560, 640, 999, 1000, 1199, 1200, 480, 3440, 1024, 1366, 1600, 320, 3440,
+            ] {
+                check_width(width);
+            }
+            // Also probe the exact level-1 transition width regardless of host font metrics.
+            let needs = bar.needs();
+            if needs[0] > needs[1] {
+                bar.settle(1280);
+                let pad = 1280 - bar.hud.width();
+                check_width(needs[1] + pad);
             }
         }
     }
