@@ -15,8 +15,9 @@ done
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
-# Source install.sh functions without running main.
+# Source install.sh and docs/install/pacman-repo.sh functions without running main.
 sed '$d' install.sh >"$work/install_lib.sh"
+sed '$d' docs/install/pacman-repo.sh >"$work/pacman_repo_lib.sh"
 
 # Generate an ephemeral GPG key for real gpg --show-keys verification.
 export GNUPGHOME="$work/author-gnupg"
@@ -55,7 +56,7 @@ run_case() {
         mkdir -p "$HOME"
         PACMAN_CONF="$WORK_DIR/pacman-$name.conf"
         PACMAN_REPO_CONF="$WORK_DIR/pacman.d-$name/super-desktop.conf"
-        printf '[omarchy]\nServer = https://pkgs.omarchy.org/edge/$arch\n' >"$PACMAN_CONF"
+        printf '[options]\nArchitecture = auto\nDownloadUser = alpm\n\n[omarchy]\nServer = https://pkgs.omarchy.org/edge/$arch\n' >"$PACMAN_CONF"
 
         export SUPER_DESKTOP_PACMAN_CONF="$PACMAN_CONF"
         export SUPER_DESKTOP_PACMAN_REPO_CONF="$PACMAN_REPO_CONF"
@@ -151,16 +152,22 @@ case_good_repo_config() {
 }
 run_case good_repo case_good_repo_config
 
-# 4. Partial-upgrade guard triggers omarchy update when another installed package would upgrade.
+# 4. Single-repo sync + partial-upgrade guard (never runs -Syu or omarchy update).
 case_partial_upgrade_guard() {
     pacman() {
         printf 'pacman %s\n' "$*" >>"$WORK_DIR/calls-partial.log"
+        if [[ "$1" == "--config" ]]; then
+            local cfg="$2"
+            cp "$cfg" "$WORK_DIR/synced-config-partial.conf"
+            shift 2
+        fi
         case "$1" in
-        -Sy | -S) return 0 ;;
+        -Sy) return 0 ;;
+        -S) return 0 ;;
         -Sp)
             if [[ "$*" == *"--print-format %n"* ]]; then
-                if [[ -f "$WORK_DIR/updated-partial" ]]; then
-                    printf 'super-desktop-bin\n'
+                if [[ -f "$WORK_DIR/clean-partial" ]]; then
+                    printf 'vte4\nsuper-desktop-bin\n'
                 else
                     printf 'gtk4\nsuper-desktop-bin\n'
                 fi
@@ -172,19 +179,88 @@ case_partial_upgrade_guard() {
             ;;
         esac
     }
-    SHELL=/bin/bash
-    if (: </dev/tty) 2>/dev/null; then
-        resolve_and_install_pacman_target -S super-desktop-bin </dev/null
-    else
-        # Headless CI runners have no /dev/tty; allocate a PTY like install_packages.sh.
-        export -f pacman
-        export PACMAN_CONF PACMAN_REPO_CONF WORK_DIR
-        script -qefc 'bash -euo pipefail -c '\''source "$WORK_DIR/install_lib.sh"; resolve_and_install_pacman_target -S super-desktop-bin </dev/null'\''' /dev/null >/dev/null
+    # When an already-installed package (gtk4) would upgrade, fail cleanly without omarchy update or -Syu.
+    if (resolve_and_install_pacman_target -S super-desktop-bin </dev/null) 2>"$WORK_DIR/err-partial"; then
+        echo "Expected partial upgrade guard to refuse upgrading gtk4" >&2
+        exit 1
     fi
-    grep -q '^omarchy update$' "$WORK_DIR/calls-partial.log"
+    grep -q 'gtk4' "$WORK_DIR/err-partial"
+    grep -q 'does not run a full system upgrade' "$WORK_DIR/err-partial"
+    ! grep -q '^omarchy update$' "$WORK_DIR/calls-partial.log"
+    ! grep -q -- '-Syu' "$WORK_DIR/calls-partial.log"
+    # Verify single-repo sync config preserves [options] and excludes [omarchy].
+    grep -q '^DownloadUser = alpm$' "$WORK_DIR/synced-config-partial.conf"
+    grep -qxF "Include = $PACMAN_REPO_CONF" "$WORK_DIR/synced-config-partial.conf"
+    ! grep -q '^\[omarchy\]' "$WORK_DIR/synced-config-partial.conf"
+
+    # When only new dependencies (vte4) and super-desktop-bin are needed, install cleanly.
+    touch "$WORK_DIR/clean-partial"
+    resolve_and_install_pacman_target -S super-desktop-bin </dev/null
     grep -q '^sudo pacman -S --needed --noconfirm super-desktop-bin$' "$WORK_DIR/calls-partial.log"
+    ! grep -q '^omarchy update$' "$WORK_DIR/calls-partial.log"
+    ! grep -q -- '-Syu' "$WORK_DIR/calls-partial.log"
 }
 run_case partial case_partial_upgrade_guard
+
+# 4b. Standalone docs/install/pacman-repo.sh syncs only [super-desktop] and never runs -Syu.
+case_standalone_pacman_repo_script() {
+    source "$WORK_DIR/pacman_repo_lib.sh"
+    pacman() {
+        printf 'pacman %s\n' "$*" >>"$WORK_DIR/calls-standalone.log"
+        if [[ "$1" == "--config" ]]; then
+            cp "$2" "$WORK_DIR/synced-config-standalone.conf"
+            shift 2
+        fi
+        case "$1" in
+        -Sy | -S) return 0 ;;
+        -Sp)
+            if [[ -f "$WORK_DIR/standalone-conflict" ]]; then
+                echo ":: installing gstreamer (1.28.9-3) breaks dependency 'gstreamer=1.28.9-1' required by gst-plugins-bad-libs" >&2
+                return 1
+            fi
+            if [[ "$*" == *"--print-format %n"* ]]; then
+                if [[ -f "$WORK_DIR/standalone-upgrade" ]]; then
+                    printf 'gtk4\nsuper-desktop-bin\n'
+                else
+                    printf 'vte4\nsuper-desktop-bin\n'
+                fi
+            fi
+            return 0
+            ;;
+        -Q)
+            [[ "$2" == "gtk4" ]]
+            ;;
+        esac
+    }
+    configure_repo
+
+    # Conflict fails cleanly without -Syu.
+    touch "$WORK_DIR/standalone-conflict"
+    if (install_package </dev/null) 2>"$WORK_DIR/err-standalone-conflict"; then
+        echo "Expected standalone pacman-repo.sh to fail on dependency conflict" >&2
+        exit 1
+    fi
+    grep -q 'without a system upgrade' "$WORK_DIR/err-standalone-conflict"
+    rm -f "$WORK_DIR/standalone-conflict"
+
+    # Partial upgrade fails cleanly without -Syu.
+    touch "$WORK_DIR/standalone-upgrade"
+    if (install_package </dev/null) 2>"$WORK_DIR/err-standalone-upgrade"; then
+        echo "Expected standalone pacman-repo.sh to refuse upgrading gtk4" >&2
+        exit 1
+    fi
+    grep -q 'gtk4' "$WORK_DIR/err-standalone-upgrade"
+    rm -f "$WORK_DIR/standalone-upgrade"
+
+    # Clean install succeeds via pacman -S --needed without -Syu.
+    install_package </dev/null
+    grep -q '^DownloadUser = alpm$' "$WORK_DIR/synced-config-standalone.conf"
+    grep -qxF "Include = $PACMAN_REPO_CONF" "$WORK_DIR/synced-config-standalone.conf"
+    ! grep -q '^\[omarchy\]' "$WORK_DIR/synced-config-standalone.conf"
+    grep -q '^sudo pacman -S --needed --noconfirm super-desktop-bin$' "$WORK_DIR/calls-standalone.log"
+    ! grep -q -- '-Syu' "$WORK_DIR/calls-standalone.log"
+}
+run_case standalone case_standalone_pacman_repo_script
 
 # 5. Pinned release checks SHA256SUMS, aborts on mismatch, and returns 1 on 404 for fallback.
 case_pinned_install() {

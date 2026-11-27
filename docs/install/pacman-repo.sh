@@ -6,10 +6,10 @@
 #   curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-repo.sh | bash
 set -euo pipefail
 
-REPO_URL="https://superdesktop.dmytrogladkyi.com/repo"
+REPO_URL="${SUPER_DESKTOP_PACMAN_REPO_URL:-https://superdesktop.dmytrogladkyi.com/repo}"
 REPO_FPR="EBCB860628250D70F3C4D033304840D354676353"
-REPO_CONF="/etc/pacman.d/super-desktop.conf"
-PACMAN_CONF="/etc/pacman.conf"
+REPO_CONF="${SUPER_DESKTOP_PACMAN_REPO_CONF:-/etc/pacman.d/super-desktop.conf}"
+PACMAN_CONF="${SUPER_DESKTOP_PACMAN_CONF:-/etc/pacman.conf}"
 
 die() {
     printf 'Error: %s\n' "$*" >&2
@@ -94,6 +94,63 @@ EOF
     printf '✓ Configured [super-desktop] Pacman repository and Omarchy refresh hook\n'
 }
 
+sync_super_desktop_db() {
+    local work sync_conf
+    work="$(mktemp -d)"
+    sync_conf="$work/pacman-super-desktop.conf"
+    # Keep [options] from pacman.conf (Architecture, DownloadUser, GPGDir, DBPath, etc.)
+    # while excluding all other repositories so only [super-desktop] is synced.
+    if [[ -r "$PACMAN_CONF" ]]; then
+        awk '
+            /^[[:space:]]*\[/ {
+                if ($0 ~ /^[[:space:]]*\[options\][[:space:]]*$/) {
+                    in_options = 1
+                    print
+                    next
+                }
+                exit
+            }
+            in_options && /^[[:space:]]*Include[[:space:]]*=/ { next }
+            in_options { print }
+        ' "$PACMAN_CONF" >"$sync_conf"
+    fi
+    if ! grep -q '^[[:space:]]*\[options\][[:space:]]*$' "$sync_conf" 2>/dev/null; then
+        printf '[options]\nArchitecture = auto\n' >"$sync_conf"
+    fi
+    printf '\nInclude = %s\n' "$REPO_CONF" >>"$sync_conf"
+    chmod 644 "$sync_conf"
+    chmod 755 "$work"
+    if ! sudo pacman --config "$sync_conf" -Sy --noconfirm </dev/null; then
+        rm -rf "$work"
+        die "Could not synchronize the [super-desktop] package database."
+    fi
+    rm -rf "$work"
+}
+
+install_package() {
+    local plan status pkgs pkg upgraded=()
+    sync_super_desktop_db
+    set +e
+    plan="$(LC_ALL=C pacman -Sp --needed --noconfirm super-desktop-bin </dev/null 2>&1)"
+    status=$?
+    set -e
+    if ((status != 0)); then
+        [[ -z "$plan" ]] || printf '%s\n' "$plan" >&2
+        die "Could not resolve super-desktop-bin without a system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run: sudo pacman -S --needed super-desktop-bin && /usr/bin/super-desktop-setup"
+    fi
+    pkgs="$(LC_ALL=C pacman -Sp --print-format '%n' --needed --noconfirm super-desktop-bin </dev/null 2>/dev/null || true)"
+    for pkg in $pkgs; do
+        if [[ "$pkg" != "super-desktop-bin" ]] && pacman -Q "$pkg" >/dev/null 2>&1; then
+            upgraded+=("$pkg")
+        fi
+    done
+    if ((${#upgraded[@]} > 0)); then
+        die "Installing super-desktop-bin requires upgrading already-installed system packages (${upgraded[*]}). This installer does not run a full system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run: sudo pacman -S --needed super-desktop-bin && /usr/bin/super-desktop-setup"
+    fi
+    sudo pacman -S --needed --noconfirm super-desktop-bin </dev/null ||
+        die "Could not install super-desktop-bin without a system upgrade. If a mirror returned 404 for an older dependency, update your system first (omarchy update or sudo pacman -Syu), then run: sudo pacman -S --needed super-desktop-bin && /usr/bin/super-desktop-setup"
+}
+
 run_setup() {
     local bin_dst="$HOME/.local/bin/super-desktop"
     local app_dst="$HOME/.local/share/applications/super-desktop.desktop"
@@ -118,7 +175,7 @@ main() {
 
     import_key
     configure_repo
-    sudo pacman -Syu --needed --noconfirm super-desktop-bin </dev/null
+    install_package
     run_setup
     printf '✓ SUPER DESKTOP installed! Press SUPER + SHIFT + Q or run: super-desktop toggle\n'
 }

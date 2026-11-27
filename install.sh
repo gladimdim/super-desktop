@@ -9,8 +9,7 @@
 # state alone.
 #
 # In order, it:
-#   1. installs missing Arch packages, opening Omarchy's updater if an
-#      installed dependency needs a matching system update;
+#   1. installs missing Arch packages without running a full system upgrade;
 #   2. installs Rust with rustup when there is no Rust 1.92 or newer, into
 #      ~/.cargo and ~/.rustup, without editing your shell profile;
 #   3. clones the source into ~/.local/share/super-desktop/source (or uses
@@ -150,44 +149,38 @@ keep_packages() {
 }
 
 install_packages() {
-    local missing=() update=(omarchy update)
-    local needed plan attempted_update=0
-    while true; do
-        if needed="$(pacman -T "${PACKAGES[@]}")"; then
-            say "✓ System packages present"
-            break
-        elif [[ $? != 127 || -z "$needed" ]]; then
-            die "Could not check installed packages with pacman."
-        fi
-        mapfile -t missing <<<"$needed"
-        command -v sudo >/dev/null 2>&1 ||
-            die "sudo not found. Install the packages as root, then run the installer again: pacman -S --needed ${missing[*]}"
+    local missing=()
+    local needed plan status
+    if needed="$(pacman -T "${PACKAGES[@]}")"; then
+        say "✓ System packages present"
+        keep_packages
+        return
+    elif [[ $? != 127 || -z "$needed" ]]; then
+        die "Could not check installed packages with pacman."
+    fi
+    mapfile -t missing <<<"$needed"
+    command -v sudo >/dev/null 2>&1 ||
+        die "sudo not found. Install the packages as root, then run the installer again: pacman -S --needed ${missing[*]}"
 
-        # Resolve against this machine's package database before starting sudo.
-        # Pacman writes parts of a dependency diagnostic to both output streams.
-        if plan="$(LC_ALL=C pacman -Sp --needed --noconfirm "${missing[@]}" </dev/null 2>&1)"; then
-            say "Installing system packages: ${missing[*]}"
-            sudo pacman -S --needed --noconfirm "${missing[@]}" </dev/null ||
-                die "Could not install ${missing[*]}. See the pacman error above."
-            say "✓ Installed ${missing[*]}"
-            break
+    # Resolve against this machine's package database before starting sudo.
+    # Pacman writes parts of a dependency diagnostic to both output streams.
+    set +e
+    plan="$(LC_ALL=C pacman -Sp --needed --noconfirm "${missing[@]}" </dev/null 2>&1)"
+    status=$?
+    set -e
+    if ((status != 0)); then
+        printf '%s\n' "$plan" >&2
+        if [[ "$plan" == *" breaks dependency "* ]] ||
+            [[ "$plan" == *"unable to satisfy dependency"* ]] ||
+            [[ "$plan" == *"could not satisfy dependencies"* ]]; then
+            die "Pacman could not resolve ${missing[*]} without a system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run the installer again."
         fi
-        if ((attempted_update)) || [[ "$plan" != *" breaks dependency "* ]]; then
-            printf '%s\n' "$plan" >&2
-            die "Pacman could not resolve ${missing[*]}."
-        fi
-
-        # A full Omarchy update keeps version-locked packages together. Let the
-        # updater ask for confirmation on the terminal when the script is piped.
-        if ! command -v omarchy >/dev/null 2>&1; then
-            update=(omarchy-update)
-        fi
-        say "These packages need newer system libraries. Confirm the Omarchy system update to continue installing SUPER DESKTOP."
-        say "If offered a reboot, choose Later so the installation can finish."
-        "${update[@]}" </dev/tty ||
-            die "The Omarchy update did not complete. Check the updater's output above."
-        attempted_update=1
-    done
+        die "Pacman could not resolve ${missing[*]}."
+    fi
+    say "Installing system packages: ${missing[*]}"
+    sudo pacman -S --needed --noconfirm "${missing[@]}" </dev/null ||
+        die "Could not install ${missing[*]}. See the pacman error above."
+    say "✓ Installed ${missing[*]}"
     keep_packages
 }
 
@@ -766,76 +759,92 @@ EOF
     say "✓ Configured [$PACMAN_REPO_NAME] pacman repository and Omarchy refresh hook"
 }
 
-run_omarchy_system_update() {
-    local update=(omarchy update)
-    if ! command -v omarchy >/dev/null 2>&1; then
-        update=(omarchy-update)
+sync_super_desktop_db() {
+    local work sync_conf
+    work="$(mktemp -d)"
+    sync_conf="$work/pacman-super-desktop.conf"
+    # Keep [options] from pacman.conf (Architecture, DownloadUser, GPGDir, DBPath, etc.)
+    # while excluding all other repositories so only [$PACMAN_REPO_NAME] is synced.
+    if [[ -r "$PACMAN_CONF" ]]; then
+        awk '
+            /^[[:space:]]*\[/ {
+                if ($0 ~ /^[[:space:]]*\[options\][[:space:]]*$/) {
+                    in_options = 1
+                    print
+                    next
+                }
+                exit
+            }
+            in_options && /^[[:space:]]*Include[[:space:]]*=/ { next }
+            in_options { print }
+        ' "$PACMAN_CONF" >"$sync_conf"
     fi
-    say "Installing or updating SUPER DESKTOP requires matching system library updates."
-    say "Confirm the Omarchy system update to continue; if offered a reboot, choose Later so setup can finish."
-    "${update[@]}" </dev/tty ||
-        die "The Omarchy update did not complete. Check the updater's output above."
+    if ! grep -q '^[[:space:]]*\[options\][[:space:]]*$' "$sync_conf" 2>/dev/null; then
+        printf '[options]\nArchitecture = auto\n' >"$sync_conf"
+    fi
+    printf '\nInclude = %s\n' "$PACMAN_REPO_CONF" >>"$sync_conf"
+    chmod 644 "$sync_conf"
+    chmod 755 "$work"
+    if ! sudo pacman --config "$sync_conf" -Sy --noconfirm </dev/null; then
+        rm -rf "$work"
+        die "Could not synchronize the [$PACMAN_REPO_NAME] package database."
+    fi
+    rm -rf "$work"
 }
 
 resolve_and_install_pacman_target() {
     local mode="$1" target="$2"
-    local attempted_update=0 plan status pkg pkgs partial_upgrade
+    local plan status pkg pkgs upgraded=()
     command -v sudo >/dev/null 2>&1 ||
         die "sudo is required to install super-desktop-bin."
 
-    while true; do
-        partial_upgrade=0
-        if [[ "$mode" == "-S" ]]; then
-            sudo pacman -Sy --noconfirm </dev/null ||
-                die "Could not synchronize package databases."
-            set +e
-            plan="$(LC_ALL=C pacman -Sp --needed --noconfirm "$target" </dev/null 2>&1)"
-            status=$?
-            set -e
-            if ((status == 0)); then
-                pkgs="$(LC_ALL=C pacman -Sp --print-format '%n' --needed --noconfirm "$target" </dev/null 2>/dev/null || true)"
-                for pkg in $pkgs; do
-                    if [[ "$pkg" != "super-desktop-bin" ]] && pacman -Q "$pkg" >/dev/null 2>&1; then
-                        partial_upgrade=1
-                        break
-                    fi
-                done
-                if ((partial_upgrade == 0)); then
-                    say "Installing prebuilt super-desktop-bin package..."
-                    sudo pacman -S --needed --noconfirm "$target" </dev/null ||
-                        die "Could not install super-desktop-bin. See the pacman error above."
-                    say "✓ Installed super-desktop-bin"
-                    return 0
-                fi
-            fi
-        else
-            set +e
-            plan="$(LC_ALL=C pacman -Up --noconfirm "$target" </dev/null 2>&1)"
-            status=$?
-            set -e
-            if ((status == 0)); then
-                say "Installing prebuilt package $(basename "$target")..."
-                sudo pacman -U --noconfirm "$target" </dev/null ||
-                    die "Could not install $(basename "$target"). See the pacman error above."
-                say "✓ Installed $(basename "$target")"
-                return 0
-            fi
+    if [[ "$mode" == "-S" ]]; then
+        sync_super_desktop_db
+        set +e
+        plan="$(LC_ALL=C pacman -Sp --needed --noconfirm "$target" </dev/null 2>&1)"
+        status=$?
+        set -e
+        if ((status != 0)); then
+            [[ -z "$plan" ]] || printf '%s\n' "$plan" >&2
+            die "Pacman could not resolve $target without a system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run the installer again."
         fi
-
-        if ((attempted_update == 0)) && {
-            ((partial_upgrade == 1)) ||
-            [[ "$plan" == *" breaks dependency "* ]] ||
-            [[ "$plan" == *"unable to satisfy dependency"* ]] ||
-            [[ "$plan" == *"could not satisfy dependencies"* ]]
-        }; then
-            run_omarchy_system_update
-            attempted_update=1
-            continue
+        pkgs="$(LC_ALL=C pacman -Sp --print-format '%n' --needed --noconfirm "$target" </dev/null 2>/dev/null || true)"
+        for pkg in $pkgs; do
+            if [[ "$pkg" != "super-desktop-bin" ]] && pacman -Q "$pkg" >/dev/null 2>&1; then
+                upgraded+=("$pkg")
+            fi
+        done
+        if ((${#upgraded[@]} > 0)); then
+            die "Installing $target requires upgrading already-installed system packages (${upgraded[*]}). This installer does not run a full system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run the installer again."
         fi
+        say "Installing prebuilt super-desktop-bin package..."
+        sudo pacman -S --needed --noconfirm "$target" </dev/null ||
+            die "Could not install super-desktop-bin without a system upgrade. If a mirror returned 404 for an older dependency, update your system first (omarchy update or sudo pacman -Syu), then run the installer again."
+        say "✓ Installed super-desktop-bin"
+        return 0
+    fi
 
+    set +e
+    plan="$(LC_ALL=C pacman -Up --noconfirm "$target" </dev/null 2>&1)"
+    status=$?
+    set -e
+    if ((status != 0)); then
         [[ -z "$plan" ]] || printf '%s\n' "$plan" >&2
-        die "Pacman could not resolve super-desktop-bin."
+        die "Pacman could not resolve $(basename "$target") without a system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run the installer again."
+    fi
+    pkgs="$(LC_ALL=C pacman -Up --print-format '%n' --noconfirm "$target" </dev/null 2>/dev/null || true)"
+    for pkg in $pkgs; do
+        if [[ "$pkg" != "super-desktop-bin" ]] && pacman -Q "$pkg" >/dev/null 2>&1; then
+            upgraded+=("$pkg")
+        fi
     done
+    if ((${#upgraded[@]} > 0)); then
+        die "Installing $(basename "$target") requires upgrading already-installed system packages (${upgraded[*]}). This installer does not run a full system upgrade. Update your system first (omarchy update or sudo pacman -Syu), then run the installer again."
+    fi
+    say "Installing prebuilt package $(basename "$target")..."
+    sudo pacman -U --noconfirm "$target" </dev/null ||
+        die "Could not install $(basename "$target"). See the pacman error above."
+    say "✓ Installed $(basename "$target")"
 }
 
 install_from_pacman_repo() {

@@ -14,24 +14,19 @@ pacman() {
         -T)
             [[ $scenario != query-failure ]] || return 1
             [[ $scenario != present ]] || return 0
-            if [[ -f "$work/updated" ]]; then
-                [[ $scenario != supplied-by-update ]] || return 0
-                printf '%s\n' gst-plugins-good gst-libav
-            else
-                printf '%s\n' vte4 gst-plugins-good gst-libav
-            fi
+            printf '%s\n' vte4 gst-plugins-good gst-libav
             return 127
             ;;
         -Sp)
             case "$scenario" in
                 other-error) echo 'error: target not found' >&2; return 1 ;;
                 compatible|install-failure) return 0 ;;
+                conflict)
+                    echo ":: installing gstreamer (1.28.9-3) breaks dependency 'gstreamer=1.28.9-1' required by gst-plugins-bad-libs"
+                    echo 'error: failed to prepare transaction (could not satisfy dependencies)' >&2
+                    return 1
+                    ;;
             esac
-            if [[ ! -f "$work/updated" || $scenario == still-conflicted ]]; then
-                echo ":: installing gstreamer (1.28.9-3) breaks dependency 'gstreamer=1.28.9-1' required by gst-plugins-bad-libs"
-                echo 'error: failed to prepare transaction (could not satisfy dependencies)' >&2
-                return 1
-            fi
             ;;
         -Qdq) return 0 ;;
         *) return 2 ;;
@@ -43,15 +38,13 @@ sudo() {
 }
 omarchy() {
     printf '%s\n' "omarchy $*" >> "$work/commands"
-    [[ $1 == update && -t 0 && $scenario != update-failure ]] || return 1
-    touch "$work/updated"
+    return 1
 }
 export -f pacman sudo omarchy
 
 check() {
     export scenario="$1"
     local expected_status="$2" expected_commands="$3" status=0
-    rm -f "$work/updated"
     : > "$work/commands"
     SHELL=/bin/bash script -qefc 'bash < "$work/package-step"' /dev/null \
         </dev/null > "$work/output" || status=$?
@@ -65,11 +58,9 @@ check() {
 install="pacman -S --needed --noconfirm"
 check present 0 ""
 check compatible 0 "$install vte4 gst-plugins-good gst-libav"
-check conflict 0 $'omarchy update\n'"$install gst-plugins-good gst-libav"
-check supplied-by-update 0 "omarchy update"
-check still-conflicted 1 "omarchy update"
+check conflict 1 ""
 grep -q 'gstreamer=1.28.9-1' "$work/output"
-check update-failure 1 "omarchy update"
+grep -q 'without a system upgrade' "$work/output"
 check other-error 1 ""
 grep -q 'target not found' "$work/output"
 check install-failure 1 "$install vte4 gst-plugins-good gst-libav"

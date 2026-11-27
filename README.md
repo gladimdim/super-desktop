@@ -26,7 +26,7 @@ The installer sets everything up automatically:
 - registers the `[super-desktop]` Pacman repository and Omarchy refresh hook so future releases update automatically via `omarchy update` (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead);
 - configures the launcher, shortcut, autostart, and Omarchy theme integration (and migrates existing source installs cleanly).
 
-If a required library conflicts with an installed package's version requirement, confirm the Omarchy system update in the same terminal. Defer any reboot until the installer finishes.
+The installer does not run a full system upgrade. If a required library conflicts with an older installed package, run `omarchy update` (or `sudo pacman -Syu`) first and re-run the installer.
 
 Press **SUPER + SHIFT + Q** (or run `super-desktop toggle`) to open the overlay, pick a project folder, and click a harness launcher. Replay the intro anytime from **⚙ Settings → Getting started guide** or `super-desktop tour`. Package installs update via `omarchy update` (`sudo pacman -Syu super-desktop-bin`); source installs update via **⚙ Settings → Updates** or by re-running the install command.
 
