@@ -6,7 +6,7 @@
 <title>SD Launcher — Omarchy on Android</title>
 <meta name="description" content="SD Launcher combines an Omarchy-inspired Android home screen, built-in SUPER DESKTOP agent and terminal widgets, and a keyboard mode with tiled apps and workspaces. Download 1.15.0.">
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/launcher/">
-<meta name="theme-color" content="#090c12">
+<meta name="theme-color" content="#050505">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
 <meta property="og:title" content="SD Launcher — Omarchy on Android">
@@ -16,16 +16,18 @@
 <meta property="og:image:alt" content="Chrome and two Linux terminals tiled beneath SD Launcher's Omarchy-style workspace bar">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.ico">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/launcher/launcher.css?v=sd-widget-tour">
+<link rel="stylesheet" href="/assets/terminal.css">
+<link rel="stylesheet" href="/launcher/launcher.css?v=terminal">
+<script src="/assets/theme-toggle.js"></script>
 <script src="/launcher/carousel.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
-<header class="nav"><div class="wrap">
-  <a class="brand" href="/"><b aria-hidden="true">⚡</b>SUPER DESKTOP</a>
-  <nav class="nav-links" aria-label="Launcher sections"><a href="#super-desktop">SD widgets</a><a href="#desktop">Keyboard mode</a><a href="#setup">Setup</a><a href="#shortcuts">Shortcuts</a></nav>
-  <a class="btn primary" href="#download">Get the APK</a>
+<header class="wmbar"><div class="wrap">
+  <a class="wm-tag" href="/">[← SUPER DESKTOP]</a>
+  <span class="wm-path">~/launcher</span>
+  <nav class="wm-links" aria-label="Launcher sections"><a href="#super-desktop">sd-widgets</a><a href="#desktop">keyboard-mode</a><a href="#setup">setup</a><a href="#shortcuts">shortcuts</a><a class="btn lime" href="#download">Get the APK</a></nav>
+  <button type="button" class="mode-toggle" id="mode-toggle" aria-label="Switch color theme" title="Switch white / dark terminal theme">☀️</button>
 </div></header>
 <main id="main">
   <section class="hero"><div class="wrap">

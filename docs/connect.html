@@ -22,156 +22,84 @@
 <meta name="twitter:description" content="Pair the Android app with SUPER DESKTOP on your PC, over your Wi-Fi or Tailscale, step by step.">
 <meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
+<meta name="theme-color" content="#050505">
+<link rel="icon" href="favicon.ico">
+<link rel="stylesheet" href="assets/terminal.css">
+<script src="assets/theme-toggle.js"></script>
 <style>
-  html, body { overflow-x: hidden; }
-  @supports (overflow: clip) { html, body { overflow-x: clip; } }
-  :root {
-    --bg: #0b0e14;
-    --panel: #131722;
-    --panel2: #1a2030;
-    --text: #e6e9f0;
-    --muted: #9aa3b5;
-    --accent: #22d3ee;
-    --accent2: #a78bfa;
-    --border: #262e42;
-    --radius: 14px;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
-    background: radial-gradient(1200px 600px at 50% -10%, #16202f 0%, var(--bg) 60%) fixed, var(--bg);
-    color: var(--text);
-    line-height: 1.6;
-  }
-  .wrap { max-width: 1160px; margin: 0 auto; padding: 0 20px 80px; }
-  a { color: var(--accent); }
-  a:focus-visible, summary:focus-visible { outline: 3px solid var(--accent); outline-offset: 5px; }
-  .back { display: inline-block; margin-top: 24px; text-decoration: none; font-size: 15px; }
-  header.hero { text-align: center; padding: 32px 20px 8px; }
-  .bolt { font-size: 56px; }
-  h1 { font-size: 42px; margin: 8px 0 8px; letter-spacing: -1px; }
-  h1 .grad {
-    background: linear-gradient(90deg, var(--accent), var(--accent2));
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-  }
-  .tagline { font-size: 19px; color: var(--muted); max-width: 720px; margin: 0 auto; }
-  section { margin-top: 56px; scroll-margin-top: 24px; }
-  h2 { font-size: 28px; letter-spacing: -0.5px; margin-bottom: 6px; }
-  h3 { font-size: 19px; margin: 0 0 6px; }
-  .sub { color: var(--muted); margin-top: 0; }
-  .pill {
-    display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px;
-    font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase;
-    background: rgba(34, 211, 238, 0.12); color: var(--accent);
-    border: 1px solid rgba(34, 211, 238, 0.35); vertical-align: middle;
-  }
-  .pill.pc { background: rgba(167, 139, 250, 0.12); color: var(--accent2); border-color: rgba(167, 139, 250, 0.35); }
-  .kbd {
-    display: inline-block; padding: 1px 9px; border-radius: 7px;
-    background: var(--panel2); border: 1px solid var(--border);
-    border-bottom-width: 3px; font-family: ui-monospace, monospace; font-size: 14px;
-  }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-top: 18px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 18px;
-  }
-  .card p { margin: 0; color: var(--muted); font-size: 14.5px; }
-  .card h3 { font-size: 17px; }
-  .note {
-    background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--accent);
-    border-radius: 10px; padding: 14px 18px; margin-top: 16px; font-size: 15px; color: var(--muted);
-  }
-  .note strong { color: var(--text); }
-  .note.warn { border-left-color: #fbbf24; }
-  .toc { display: flex; flex-wrap: wrap; gap: 8px 18px; justify-content: center; margin-top: 20px; font-size: 15px; }
-
-  /* A step: the words, then what each device shows. */
-  .step {
-    display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: 0 18px;
-    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
-    padding: 24px; margin-top: 20px;
-  }
-  .step .num {
-    width: 44px; height: 44px; border-radius: 50%; display: grid; place-items: center;
-    font-weight: 800; font-size: 20px; color: #06121a;
-    background: linear-gradient(135deg, var(--accent), var(--accent2));
-  }
-  .step ol, .step ul { color: var(--muted); padding-left: 22px; margin: 10px 0 0; }
-  .step li { margin-bottom: 6px; }
-  .step li strong, .step p strong { color: var(--text); }
-  .step p { color: var(--muted); margin: 8px 0 0; }
-  .shots { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 18px; align-items: flex-start; }
+  .toc { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; font-size: 12.5px; }
+  .toc a { border: 1px solid var(--line); padding: 4px 10px; background: var(--box-bg); }
+  .toc a:hover { border-color: var(--lime); text-decoration: none; }
+  .shots { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; align-items: flex-start; }
   .shots figure { margin: 0; }
-  .shots .desk { flex: 1 1 420px; max-width: 560px; }
-  .shots .phone { flex: 0 1 260px; max-width: 280px; }
-  .shots a { display: block; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; background: #070a10; }
-  .shots .phone a { border-radius: 22px; }
+  .shots .desk { flex: 1 1 400px; max-width: 540px; }
+  .shots .phone { flex: 0 1 240px; max-width: 260px; }
+  .shots a { display: block; border: 1px solid var(--line); background: var(--code-bg); }
+  .shots a:hover { border-color: var(--lime); }
   .shots img { display: block; width: 100%; height: auto; }
-  figcaption { padding: 8px 2px 0; color: var(--muted); font-size: 13.5px; }
-  figcaption .pill { font-size: 10.5px; margin-right: 4px; }
-
-  table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 15px; }
-  th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-top: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: 0.4px; }
-  td { color: var(--muted); }
-  td:first-child { color: var(--text); width: 38%; }
-  td code, li code, p code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13.5px; color: var(--text); word-break: break-word; }
-  .table-wrap { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; }
-  .table-wrap table { margin: 0; }
-  .table-wrap tr:first-child th { border-top: none; }
-
-  footer { margin-top: 64px; text-align: center; color: var(--muted); font-size: 14px; }
-  footer a { color: var(--accent); }
+  figcaption { padding: 8px 2px 0; color: var(--muted); font-size: 12.5px; }
+  figcaption .pill { font-size: 10px; margin-right: 4px; }
+  h3 .pill { margin-right: 6px; }
+  td:first-child { width: 38%; }
+  .step ol.steps, main ol.steps { color: var(--muted); padding-left: 20px; margin: 12px 0 0; }
+  main ol.steps li { margin-bottom: 6px; color: var(--muted); }
   @media (max-width: 600px) {
-    .wrap { padding: 0 16px 48px; }
-    h1 { font-size: 32px; }
-    .tagline { font-size: 17px; }
-    h2 { font-size: 24px; }
-    section { margin-top: 36px; }
-    .step { grid-template-columns: minmax(0, 1fr); padding: 18px; }
-    .step .num { margin-bottom: 10px; }
     .shots .phone { flex-basis: 100%; max-width: 300px; }
     td:first-child { width: auto; }
-    figcaption .pill { font-size: 12px; }
-  }
-  @media (pointer: coarse) {
-    .toc a, .back, footer a { display: inline-flex; align-items: center; min-height: 44px; }
   }
 </style>
 </head>
 <body>
-<div class="wrap">
-
-  <a class="back" href="./">← SUPER DESKTOP</a>
-
-  <header class="hero">
-    <div class="bolt" aria-hidden="true">📱</div>
-    <h1>Connect your <span class="grad">phone</span></h1>
-    <p class="tagline">Pair the SUPER DESKTOP app on Android, iPhone or iPad with SUPER DESKTOP on your Linux PC. It takes about a minute, and you do it once: your phone then reaches your PC's sessions directly, over your own Wi-Fi or Tailscale, encrypted, with no accounts.</p>
-    <nav class="toc" aria-label="On this page">
-      <a href="#before">Before you start</a>
-      <a href="#steps">Pair in five steps</a>
-      <a href="#away">Away from home</a>
-      <a href="#manage">Manage and revoke</a>
-      <a href="#trouble">Troubleshooting</a>
+<header class="wmbar">
+  <div class="wrap">
+    <a class="wm-tag" href="./">[← SUPER DESKTOP]</a>
+    <span class="wm-path">~/connect</span>
+    <nav class="wm-links" aria-label="On this page">
+      <a href="#before">before</a>
+      <a href="#steps">5-steps</a>
+      <a href="#away">tailscale</a>
+      <a href="#manage">manage</a>
+      <a href="#trouble">troubleshooting</a>
     </nav>
-  </header>
+    <button type="button" class="mode-toggle" id="mode-toggle" aria-label="Switch color theme" title="Switch white / dark terminal theme">☀️</button>
+  </div>
+</header>
 
-  <main>
-
-  <section id="before">
-    <h2>Before you start</h2>
-    <div class="grid">
-      <div class="card"><h3>🖥️ SUPER DESKTOP on your PC</h3><p>Installed and running on your Omarchy / Hyprland PC. New here? <a href="./#install">Install it first</a>.</p></div>
-      <div class="card"><h3>📱 The app on your phone</h3><p>SUPER DESKTOP on the phone you want to pair. Android: <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk">the free APK</a> (all features, no trial) or <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>. iPhone and iPad: <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466">the App Store</a>.</p></div>
-      <div class="card"><h3>📶 One network</h3><p>Phone and PC on the same Wi-Fi, or both signed in to the same <a href="https://tailscale.com">Tailscale</a> network.</p></div>
+<main class="wrap">
+  <section class="pane focus">
+    <div class="pane-bar"><span class="path">[00] ~/connect/phone-pairing</span><span class="badge">TLS 1.3 PINNED · LAN / TAILSCALE</span></div>
+    <div class="pane-body">
+      <header class="hero">
+        <p class="eyebrow">ANDROID · IPHONE · IPAD · DIRECT PAIR</p>
+        <h1>Connect your <span class="grad">phone</span></h1>
+        <p class="tagline">Pair the SUPER DESKTOP app on Android, iPhone or iPad with SUPER DESKTOP on your Linux PC. It takes about a minute, and you do it once: your phone then reaches your PC's sessions directly, over your own Wi-Fi or Tailscale, encrypted, with no accounts.</p>
+        <nav class="toc" aria-label="On this page">
+          <a href="#before">Before you start</a>
+          <a href="#steps">Pair in five steps</a>
+          <a href="#away">Away from home</a>
+          <a href="#manage">Manage and revoke</a>
+          <a href="#trouble">Troubleshooting</a>
+        </nav>
+      </header>
     </div>
-    <div class="note"><strong>iPhone and iPad:</strong> the app is on the App Store as <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466">SUPER DESKTOP: AI Agents</a>. Pairing is these same five steps. The screenshots below are from Android; the PC side is identical.</div>
   </section>
 
-  <section id="steps">
+  <section class="pane" id="before">
+    <div class="pane-bar"><span class="path">[01] ~/before-you-start</span><span class="badge">PREREQUISITES</span></div>
+    <div class="pane-body">
+      <h2>Before you start</h2>
+    <div class="grid">
+      <div class="card"><h3>🖥️ SUPER DESKTOP on your PC</h3><p>Installed and running on your Omarchy / Hyprland PC. New here? <a href="./#install">Install it first</a>.</p></div>
+      <div class="card"><h3>📱 The app on your phone</h3><p>SUPER DESKTOP on the phone you want to pair. Android: <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk">the free APK</a> (all features, no trial) or <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a>. iPhone and iPad: <a href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">the App Store</a>.</p></div>
+      <div class="card"><h3>📶 One network</h3><p>Phone and PC on the same Wi-Fi, or both signed in to the same <a href="https://tailscale.com">Tailscale</a> network.</p></div>
+    </div>
+    <div class="note"><strong>iPhone and iPad:</strong> the app is on the App Store as <a href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">SUPER DESKTOP: AI Agents</a>. Pairing is these same five steps. The screenshots below are from Android; the PC side is identical.</div>
+    </div>
+  </section>
+
+  <section class="pane" id="steps">
+    <div class="pane-bar"><span class="path">[02] ~/pair-in-five-steps</span><span class="badge">QR + 6-DIGIT CODE</span></div>
+    <div class="pane-body">
     <h2>Pair in five steps</h2>
     <p class="sub">Steps marked <span class="pill pc">PC</span> happen on your computer, <span class="pill">Phone</span> on your phone. Click any screenshot to see it full size.</p>
 
@@ -287,28 +215,37 @@
     </div>
 
     <div class="note warn">A paired phone can <strong>operate</strong> your terminals, not just watch them. Only approve phones you own and trust, and revoke any phone you no longer use.</div>
+    </div>
   </section>
 
-  <section id="away">
+  <section class="pane" id="away">
+    <div class="pane-bar"><span class="path">[03] ~/away-from-home</span><span class="badge">TAILSCALE / VPN</span></div>
+    <div class="pane-body">
     <h2>Away from home: Tailscale</h2>
     <p class="sub">Nearby discovery and the invitation's address work on your own Wi-Fi. To reach your PC from anywhere, use <a href="https://tailscale.com">Tailscale</a>.</p>
-    <ol class="steps" style="color:var(--muted);padding-left:22px">
+    <ol class="steps">
       <li>Install Tailscale on the PC and on the phone, and sign both in to the same network.</li>
       <li>Pair as above. The Pair a phone page shows the PC's Tailscale address next to its network address.</li>
       <li>On the phone, open Settings → Connections, tap your PC's menu and choose <strong>Addresses</strong>, then pick its Tailscale address, marked <strong>recommended</strong>.</li>
     </ol>
+    </div>
   </section>
 
-  <section id="manage">
+  <section class="pane" id="manage">
+    <div class="pane-bar"><span class="path">[04] ~/manage-and-revoke</span><span class="badge">ACCESS CONTROL</span></div>
+    <div class="pane-body">
     <h2>Manage and revoke</h2>
     <div class="grid">
       <div class="card"><h3>On the PC</h3><p>Settings → Connections → <strong>Phones &amp; other devices</strong> lists every phone with access, whether it is active, and until when. <strong>Revoke</strong> cuts a phone off at once.</p></div>
       <div class="card"><h3>On the phone</h3><p>Settings → Connections → your PC's menu: <strong>Check connection</strong>, <strong>Addresses</strong>, <strong>Pair again</strong> or <strong>Remove connection</strong>. Removing it on the phone does <strong>not</strong> revoke the phone on the PC; revoke it there.</p></div>
       <div class="card"><h3>Rejected by mistake?</h3><p>Settings → Connections → <strong>Rejected devices</strong> on the PC: <strong>Remove</strong> the phone, then pair again.</p></div>
     </div>
+    </div>
   </section>
 
-  <section id="trouble">
+  <section class="pane" id="trouble">
+    <div class="pane-bar"><span class="path">[05] ~/troubleshooting</span><span class="badge">DIAGNOSTICS</span></div>
+    <div class="pane-body">
     <h2>Troubleshooting</h2>
     <p class="sub">The phone shows what went wrong under the pairing step. Find the message:</p>
     <div class="table-wrap">
@@ -325,14 +262,14 @@
       </table>
     </div>
     <div class="note">Still stuck? Open an issue on <a href="https://github.com/gladimdim/super-desktop/issues">GitHub</a> with the message you see.</div>
+    </div>
   </section>
 
-  </main>
-
   <footer>
-    <a href="./">SUPER DESKTOP</a> · <a href="./#phone">Phone linking</a> · <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a> · <a href="privacy.html">Privacy policy</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a>
+    <div class="wrap">
+      <span><a href="./">SUPER DESKTOP</a> · <a href="./#phone">Phone linking</a> · <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">Google Play</a> · <a href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">App Store</a> · <a href="privacy.html">Privacy policy</a> · <a href="https://github.com/gladimdim/super-desktop">gladimdim/super-desktop</a></span>
+    </div>
   </footer>
-
-</div>
+</main>
 </body>
 </html>

@@ -1,6 +1,6 @@
 # ⚡ SUPER DESKTOP
 
-> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)** · **iPhone and iPad: [App Store](https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466)**
+> 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)** · **iPhone and iPad: [App Store](https://apps.apple.com/app/super-desktop-ai-agents/id6818722591)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
 > Press `SUPER + SHIFT + Q` — notes and AI terminals slide in from the screen edges. Press it again — everything disappears and your normal desktop is completely clean. All sessions keep running in background tmux.

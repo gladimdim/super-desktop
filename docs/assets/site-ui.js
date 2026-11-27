@@ -17,10 +17,10 @@
       url: "https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop",
     },
     ios: {
-      img: "assets/qr-ios.svg",
+      img: "assets/qr-ios.svg?v=2",
       title: "iPhone & iPad (App Store)",
       sub: "SUPER DESKTOP: AI Agents. Keychain-pinned (no iCloud sync), local alerts.",
-      url: "https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466",
+      url: "https://apps.apple.com/app/super-desktop-ai-agents/id6818722591",
     },
     launcher: {
       img: "assets/qr-launcher.svg",

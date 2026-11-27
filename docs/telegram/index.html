@@ -6,7 +6,7 @@
 <title>Telegram Bot, Forum Topics &amp; Mini Web App — SUPER DESKTOP</title>
 <meta name="description" content="Create your own @BotFather Telegram bot, open the live Telegram Mini Web App over Tailscale Serve (live ANSI terminal, Usage, Files &amp; Previews, live Omarchy theme), and control AI agents from a private 2-member Forum Topics supergroup.">
 <link rel="canonical" href="https://superdesktop.dmytrogladkyi.com/telegram/">
-<meta name="theme-color" content="#090c12">
+<meta name="theme-color" content="#050505">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="SUPER DESKTOP">
 <meta property="og:locale" content="en_US">
@@ -20,33 +20,37 @@
 <meta property="og:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. Control harnesses from Telegram Forum Topics.">
 <meta name="twitter:card" content="summary_large_image">
 <link rel="icon" href="/favicon.ico">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/telegram/telegram.css">
+<link rel="stylesheet" href="/assets/terminal.css?v=terminal2">
+<link rel="stylesheet" href="/telegram/telegram.css?v=terminal2">
 <script>document.documentElement.className = "js";</script>
+<script src="/assets/theme-toggle.js?v=terminal2"></script>
 <script src="/telegram/preview.js" defer></script>
 </head>
 <body>
 <a class="skip-link" href="#main">Skip to content</a>
 
-<header class="nav">
+<header class="wmbar">
   <div class="wrap">
-    <a class="brand" href="/"><b aria-hidden="true">⚡</b>SUPER DESKTOP</a>
-    <nav class="nav-links" aria-label="Telegram sections">
-      <a href="#screens">Screens</a>
-      <a href="#features">What it can do</a>
-      <a href="#setup">Setup</a>
-      <a href="#mini-app">Mini Web App</a>
-      <a href="#commands">Commands</a>
-      <a href="#permissions">Permissions</a>
-      <a href="#security">Security</a>
+    <a class="wm-tag" href="/">[← SUPER DESKTOP]</a>
+    <span class="wm-path">~/telegram</span>
+    <nav class="wm-links" aria-label="Telegram sections">
+      <a href="#screens">screens</a>
+      <a href="#features">features</a>
+      <a href="#setup">setup</a>
+      <a href="#mini-app">mini-app</a>
+      <a href="#commands">commands</a>
+      <a href="#permissions">permissions</a>
+      <a href="#security">security</a>
+      <a class="btn lime" href="/#install">Install PC app</a>
     </nav>
-    <a class="btn primary" href="/#install">Install PC app</a>
+    <button type="button" class="mode-toggle" id="mode-toggle" aria-label="Switch color theme" title="Switch white / dark terminal theme">☀️</button>
   </div>
 </header>
 
-<main id="main">
-  <section class="hero">
-    <div class="wrap">
+<main id="main" class="wrap">
+  <section class="pane focus">
+    <div class="pane-bar"><span class="path">[00] ~/telegram</span><span class="badge">BYOB · FORUM TOPICS · TAILSCALE MINI APP</span></div>
+    <div class="pane-body">
       <p class="eyebrow">TELEGRAM BOT · FORUM TOPICS · MINI WEB APP</p>
       <h1>Control your agents.<br><span class="grad">Right from Telegram.</span></h1>
       <p class="product-equation">
@@ -75,8 +79,10 @@
     </div>
   </section>
 
-  <section class="guide" id="screens">
-    <p class="eyebrow">USAGE &amp; SETUP SCREENS</p>
+  <section class="pane" id="screens">
+    <div class="pane-bar"><span class="path">[01] ~/screens</span><span class="badge">FORUM TOPICS · SETTINGS</span></div>
+    <div class="pane-body">
+      <p class="eyebrow">USAGE &amp; SETUP SCREENS</p>
     <h2>What it looks like on Telegram and on your PC.</h2>
     <p class="sub">Switch between a live 2-member <strong>Forum Topics</strong> group in Telegram and the desktop <strong>Settings → Telegram</strong> screen where you pair your account and control permissions.</p>
 
@@ -325,9 +331,12 @@ test burst_window_recovers_after_tick ... ok</pre>
 
       <p class="screen-caption">Illustrative previews of the live Forum Topics workspace and the PC <strong>Settings → Telegram</strong> screen (sample session data).</p>
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="features">
+  <section class="pane" id="features">
+    <div class="pane-bar"><span class="path">[02] ~/capabilities</span><span class="badge">10 CORE CAPABILITIES</span></div>
+    <div class="pane-body">
     <p class="eyebrow">CAPABILITIES</p>
     <h2>What you can do from Telegram.</h2>
     <p class="sub">Everything runs locally inside a dedicated <code>super-desktop telegram-bot</code> child process supervised by the daemon — whether the overlay is hidden, open, or running headless.</p>
@@ -383,9 +392,12 @@ test burst_window_recovers_after_tick ... ok</pre>
         <p>Uses outbound HTTPS long-polling to <code>api.telegram.org</code>. Combine with <strong>Settings → System launch</strong> to control a PC with no display logged in.</p>
       </div>
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="setup">
+  <section class="pane" id="setup">
+    <div class="pane-bar"><span class="path">[03] ~/setup</span><span class="badge">5 STEPS · @BOTFATHER + APPROVAL</span></div>
+    <div class="pane-body">
     <p class="eyebrow">STEP BY STEP</p>
     <h2>Setup in five steps (with screenshots).</h2>
     <p class="sub">Takes about two minutes. You stay the sole owner of your bot token, your Telegram pairing, your Tailscale URL, and every permission switch.</p>
@@ -469,9 +481,12 @@ test burst_window_recovers_after_tick ... ok</pre>
         </ol>
       </div>
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="mini-app">
+  <section class="pane" id="mini-app">
+    <div class="pane-bar"><span class="path">[04] ~/mini-app</span><span class="badge">TAILSCALE SERVE · LIVE ANSI UI</span></div>
+    <div class="pane-body">
     <p class="eyebrow">OPTIONAL · PRIVATE TAILNET UI</p>
     <h2>Telegram Mini Web App via Tailscale.</h2>
     <p class="sub">Want a full Android-like experience right inside Telegram — live colored ANSI terminal over WebSocket, automatic <strong>live Omarchy theme syncing</strong> (dark &amp; light), weekly allowance meters, swipeable Quick Keys, and interactive image/PDF/code previews? Serve the embedded UI on <code>127.0.0.1:7789</code> and wrap it privately inside your own Tailscale tailnet using <code>tailscale serve</code> (never public Funnel).</p>
@@ -553,9 +568,12 @@ Steps:
     <div class="note">
       <strong>Multiple laptops &amp; Linux servers?</strong> Telegram's Bot API allows only one active poller per bot token (sharing one token across two machines causes <code>409 Conflict</code>). Simply create one <code>@BotFather</code> bot per machine (e.g. <code>@sd_laptop_bot</code> and <code>@sd_server_bot</code>) and group them — along with their Forum groups — into a single <strong>Telegram Chat Folder</strong>. Each machine runs independently with its own Tailscale Serve Mini App and its own live Omarchy theme.
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="commands">
+  <section class="pane" id="commands">
+    <div class="pane-bar"><span class="path">[05] ~/commands</span><span class="badge">BOT COMMANDS</span></div>
+    <div class="pane-body">
     <p class="eyebrow">REFERENCE</p>
     <h2>Bot commands.</h2>
     <p class="sub">In a linked Forum group, messages and commands sent inside a topic apply automatically to that topic's card. In a private 1:1 chat with your bot, use <code>/cards</code> or reply to any card alert.</p>
@@ -583,9 +601,12 @@ Steps:
         </tbody>
       </table>
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="permissions">
+  <section class="pane" id="permissions">
+    <div class="pane-bar"><span class="path">[06] ~/permissions</span><span class="badge">GRANULAR DEFAULTS</span></div>
+    <div class="pane-body">
     <p class="eyebrow">CONTROL</p>
     <h2>Permissions &amp; safe defaults.</h2>
     <p class="sub">All inspection, input, launch, close, and attachment capabilities default to <strong>Off</strong> until you explicitly turn them on in <strong>⚙ Settings → Telegram</strong>.</p>
@@ -605,9 +626,12 @@ Steps:
         </tbody>
       </table>
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="security">
+  <section class="pane" id="security">
+    <div class="pane-bar"><span class="path">[07] ~/security</span><span class="badge">BYOB TRUST MODEL</span></div>
+    <div class="pane-body">
     <p class="eyebrow">TRUST MODEL</p>
     <h2>Private control, honest limits.</h2>
     <div class="note">
@@ -616,9 +640,12 @@ Steps:
     <div class="note warn">
       <strong>Telegram Bot API is not end-to-end encrypted:</strong> Messages, images, and terminal output sent through a Telegram bot pass through Telegram's servers (and Telegram clients). Keep <strong>Redact common secrets</strong> enabled, leave unneeded switches off, and never send secrets to the chat. When you want direct device-to-device TLS with no third party at all, use the <a href="/connect.html">Android / iPhone / iPad app</a> over LAN or Tailscale. Read the full <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">Security model</a>.
     </div>
+    </div>
   </section>
 
-  <section class="guide" id="trouble">
+  <section class="pane" id="trouble">
+    <div class="pane-bar"><span class="path">[08] ~/troubleshooting</span><span class="badge">DIAGNOSTICS</span></div>
+    <div class="pane-body">
     <p class="eyebrow">HELP</p>
     <h2>Troubleshooting.</h2>
     <div class="table-wrap" tabindex="0" role="region" aria-label="Troubleshooting">
@@ -632,6 +659,7 @@ Steps:
           <tr><td>Old messages sent offline don't run</td><td>Messages older than ~2 minutes or queued before worker startup are ignored by design so stale commands never replay unexpectedly on wake.</td></tr>
         </tbody>
       </table>
+    </div>
     </div>
   </section>
 </main>

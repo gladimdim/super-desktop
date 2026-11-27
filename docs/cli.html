@@ -23,40 +23,38 @@
 <meta name="twitter:description" content="Commands and JSON results for driving SUPER DESKTOP from scripts and AI agents.">
 <meta name="twitter:image" content="https://superdesktop.dmytrogladkyi.com/media/social-card.jpg">
 <meta name="twitter:image:alt" content="SUPER DESKTOP: every AI agent, one shortcut away. The overlay with live Claude Code and Codex terminals.">
+<meta name="theme-color" content="#050505">
+<link rel="icon" href="favicon.ico">
+<link rel="stylesheet" href="assets/terminal.css">
+<script src="assets/theme-toggle.js"></script>
 <style>
-  html, body { overflow-x: hidden; }
-  @supports (overflow: clip) { html, body { overflow-x: clip; } }
-  :root { color-scheme: dark; --bg: #0b0e14; --panel: #131722; --text: #e6e9f0; --muted: #a8b2c5; --accent: #22d3ee; --border: #262e42; }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.7 system-ui, sans-serif; }
-  .wrap { max-width: 1040px; margin: auto; padding: 24px 24px 72px; }
-  .links { display: flex; flex-wrap: wrap; gap: 12px 24px; font-size: 15px; }
-  a { color: var(--accent); text-underline-offset: 3px; overflow-wrap: anywhere; }
-  a:focus-visible, [tabindex]:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
-  h1 { font-size: clamp(28px, 5vw, 42px); line-height: 1.2; margin-top: 36px; }
-  h2 { margin: 48px 0 16px; line-height: 1.3; scroll-margin-top: 20px; }
-  p, li { overflow-wrap: anywhere; }
-  code { font: .88em ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
-  pre { padding: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; }
-  pre code { white-space: pre; overflow-wrap: normal; }
-  .contents { margin-top: 28px; padding: 16px 24px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; }
-  .contents summary { cursor: pointer; font-weight: 650; }
-  .contents ul { padding-left: 20px; }
-  .table-scroll { overflow-x: auto; margin: 24px 0; }
-  table { width: 100%; border-collapse: collapse; font-size: 15px; }
-  th, td { padding: 12px; text-align: left; vertical-align: top; border: 1px solid var(--border); min-width: 110px; }
-  th { background: var(--panel); }
-  footer { margin-top: 48px; color: var(--muted); font-size: 14px; }
-  @media (max-width: 600px) { .wrap { padding: 20px 16px 48px; } body { font-size: 16px; } pre { padding: 12px; } }
-  @media (pointer: coarse) { .links a, .contents summary { display: inline-flex; align-items: center; min-height: 44px; } .contents li { margin: 6px 0; } }
+  .contents { margin-bottom: 18px; padding: 12px 16px; background: var(--box-bg); border: 1px solid var(--line); }
+  .contents summary { cursor: pointer; font-weight: 700; color: var(--lime); }
+  .contents ul { padding-left: 20px; margin: 8px 0 0; columns: 2; column-gap: 24px; }
+  .contents li { margin-bottom: 4px; font-size: 12.5px; color: var(--muted); }
+  @media (max-width: 720px) { .contents ul { columns: 1; } }
+  main h2 { margin: 34px 0 12px; padding-top: 14px; border-top: 2px solid var(--line); color: var(--lime); font-size: 20px; scroll-margin-top: 64px; }
+  main p, main li { overflow-wrap: anywhere; color: var(--muted); }
+  main li strong, main p strong { color: var(--text); }
+  th, td { min-width: 110px; }
 </style>
 </head>
-<body><div class="wrap">
-<nav class="links" aria-label="Main navigation">
-  <a href="index.html">← SUPER DESKTOP</a>
-  <a href="https://github.com/gladimdim/super-desktop/blob/master/CLI.md">Reference on GitHub</a>
-  <a href="https://raw.githubusercontent.com/gladimdim/super-desktop/master/CLI.md">Plain Markdown for agents</a>
-</nav>
+<body>
+<header class="wmbar">
+  <div class="wrap">
+    <a class="wm-tag" href="index.html">[← SUPER DESKTOP]</a>
+    <span class="wm-path">~/cli</span>
+    <nav class="wm-links" aria-label="Main navigation">
+      <a href="https://github.com/gladimdim/super-desktop/blob/master/CLI.md">CLI.md on GitHub</a>
+      <a href="https://raw.githubusercontent.com/gladimdim/super-desktop/master/CLI.md">Raw Markdown for agents</a>
+    </nav>
+    <button type="button" class="mode-toggle" id="mode-toggle" aria-label="Switch color theme" title="Switch white / dark terminal theme">☀️</button>
+  </div>
+</header>
+<div class="wrap doc">
+  <section class="pane focus">
+    <div class="pane-bar"><span class="path">[00] ~/cli/reference</span><span class="badge">CLI · JSON · STDIO MCP (88 TOOLS)</span></div>
+    <div class="pane-body">
 <details class="contents"><summary>On this page</summary><nav aria-label="Contents"><div class="toc">
 <ul>
 <li><a href="#super-desktop-cli-reference">SUPER DESKTOP CLI reference</a><ul>
@@ -2318,6 +2316,8 @@ does not change an already running daemon. Follow the <a href="https://github.co
 instructions</a> or use <code>git pull --ff-only &amp;&amp; ./rebuild.sh</code>
 from your installed source checkout. Discovery commands are read-only; updating
 and restarting the application are separate actions.</p></main>
-<footer>Command availability depends on your installed client and running daemon. Start with <code>super-desktop help agents</code>.</footer>
+    </div>
+  </section>
+<footer><div class="wrap"><span>Command availability depends on your installed client and running daemon. Start with <code>super-desktop help agents</code>.</span><nav aria-label="Footer"><a href="index.html">home</a><a href="https://github.com/gladimdim/super-desktop">github</a></nav></div></footer>
 </div></body>
 </html>

@@ -99,8 +99,8 @@
       "@id": "https://superdesktop.dmytrogladkyi.com/#ios",
       "name": "SUPER DESKTOP: AI Agents",
       "softwareVersion": "1.0",
-      "url": "https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466",
-      "installUrl": "https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466",
+      "url": "https://apps.apple.com/app/super-desktop-ai-agents/id6818722591",
+      "installUrl": "https://apps.apple.com/app/super-desktop-ai-agents/id6818722591",
       "description": "Every AI coding agent session on your PCs, on your iPhone or iPad: type prompts that run on the PC, get alerts when an agent finishes, send pictures and files. Connects directly to your own PCs with no account. A 10-day trial, then an optional one-time Pro purchase.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "iOS, iPadOS",
@@ -126,7 +126,6 @@
 }
 </script>
 <link rel="icon" href="favicon.ico">
-<link rel="stylesheet" href="assets/replica.css">
 <script>
   (function () {
     try {
@@ -319,13 +318,6 @@
   .mcp-box pre { margin: 0; padding: 14px; font-size: 12.5px; line-height: 1.5; color: var(--code-fg); overflow-x: auto; flex: 1; }
   .mcp-foot { padding: 10px 12px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 10px 16px; }
 
-  .ascii-flow {
-    background: var(--code-bg); border: 1px solid var(--line); padding: 14px; overflow-x: auto;
-    font-size: 12.5px; line-height: 1.5; color: var(--text); margin: 0 0 14px;
-  }
-  .ascii-flow .bad { color: var(--red); }
-  .ascii-flow .ok { color: var(--lime); }
-
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 10px 12px; border: 1px solid var(--line); vertical-align: top; }
   th { background: var(--pane2); color: var(--amber); }
@@ -448,7 +440,7 @@
             <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk">FREE APK (2.3.1)</a>
             <button class="btn" type="button" data-qr="apk">[QR: APK]</button>
             <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="128" height="38"></a>
-            <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466"><img src="assets/app-store-badge.svg" alt="Download on the App Store" width="122" height="38"></a>
+            <a href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591"><img src="assets/app-store-badge.svg" alt="Download on the App Store" width="122" height="38"></a>
           </div>
         </div>
         <figure class="hero-art">
@@ -465,183 +457,150 @@
     </div>
   </section>
 
-  <section class="pane">
-    <div class="pane-bar"><span class="path">[01] ~/workspace/live-demo</span><span class="badge">PRESS SHIFT+Q OR CLICK KEYS</span></div>
+  <section class="pane focus" id="install">
+    <div class="pane-bar"><span class="path">[01] ~/install-now</span><span class="badge">x86_64 · aarch64 · SIGNED PACMAN · SOURCE</span></div>
     <div class="pane-body">
-      <div class="try-hints">
-        <span data-step="reveal">Click keys</span>
-        <span data-step="launch">Launch agent</span>
-        <span data-step="prompt">Type prompt + Enter</span>
-        <span data-step="drag arrange resize">Drag or Arrange</span>
-        <span data-step="remote">Open studio-pc</span>
+      <div class="tabs" role="tablist" aria-label="Install methods">
+        <button role="tab" type="button" aria-selected="true" aria-controls="inst-auto" id="tab-inst-auto">Quick Install</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="inst-pacman" id="tab-inst-pacman">Pacman Repo</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="inst-pin" id="tab-inst-pin">Direct .pkg / Pin</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="inst-source" id="tab-inst-source">Build from Source</button>
       </div>
-      <div id="hero-stage" class="sd-stage"></div>
+
+      <div class="panel" id="inst-auto" role="tabpanel" aria-labelledby="tab-inst-auto">
+        <div class="cmd"><code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code><button type="button" data-copy="cmd-install">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px"><code>x86_64</code> &amp; <code>aarch64</code> · GPG signed · updates via <code>omarchy update</code> · <a href="https://github.com/gladimdim/super-desktop/blob/master/install.sh" target="_blank" rel="noopener">[install.sh ↗]</a></p>
+      </div>
+
+      <div class="panel" id="inst-pacman" role="tabpanel" aria-labelledby="tab-inst-pacman" hidden>
+        <div class="cmd"><code id="cmd-pacman-repo-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-repo.sh | bash</code><button type="button" data-copy="cmd-pacman-repo-sh">COPY</button></div>
+        <p style="margin:8px 0 12px;color:var(--muted);font-size:12.5px">Registers <code>[super-desktop]</code> + installs <code>super-desktop-bin</code> · <a href="install/pacman-repo.sh" target="_blank" rel="noopener">[pacman-repo.sh ↗]</a></p>
+        <div class="cmd"><code id="cmd-pacman-hook-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-hook.sh | bash</code><button type="button" data-copy="cmd-pacman-hook-sh">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">Optional Omarchy <code>pre-refresh-pacman</code> hook · <a href="install/pacman-hook.sh" target="_blank" rel="noopener">[pacman-hook.sh ↗]</a></p>
+        <details class="more">
+          <summary>Raw pacman commands</summary>
+          <div class="mcp-box" style="margin-top:10px">
+            <div class="mcp-bar">
+              <span>MANUAL PACMAN REPO SETUP</span>
+              <button type="button" data-copy="cmd-pacman-repo">COPY</button>
+            </div>
+            <pre><code id="cmd-pacman-repo">curl -fsSL https://superdesktop.dmytrogladkyi.com/repo/super-desktop.gpg -o /tmp/super-desktop.gpg
+gpg --show-keys --with-fingerprint /tmp/super-desktop.gpg
+sudo pacman-key --add /tmp/super-desktop.gpg &amp;&amp; sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
+printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
+grep -qxF 'Include = /etc/pacman.d/super-desktop.conf' /etc/pacman.conf || echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
+sudo pacman -Syu super-desktop-bin &amp;&amp; super-desktop-setup</code></pre>
+            <div class="mcp-foot">
+              <span>Upgrading from source? Run <code>/usr/bin/super-desktop-setup --migrate</code> &amp;&amp; <code>/usr/bin/super-desktop kill &amp;&amp; /usr/bin/super-desktop toggle</code>.</span>
+            </div>
+          </div>
+          <div class="mcp-box" style="margin-top:12px">
+            <div class="mcp-bar">
+              <span>OMARCHY REFRESH HOOK</span>
+              <button type="button" data-copy="cmd-pacman-hook">COPY</button>
+            </div>
+            <pre><code id="cmd-pacman-hook">mkdir -p ~/.config/omarchy/hooks/pre-refresh-pacman.d
+cat &lt;&lt;'EOF' &gt; ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop
+#!/bin/bash
+CONF=/etc/pacman.conf
+SNIPPET=/etc/pacman.d/super-desktop.conf
+MARKER="Include = $SNIPPET"
+[[ -r $SNIPPET ]] || exit 0
+grep -qxF "$MARKER" "$CONF" &amp;&amp; exit 0
+if grep -q '^\[omarchy\]' "$CONF"; then
+  sudo sed -i "0,/^\[omarchy\]/s||$MARKER\n\n[omarchy]|" "$CONF"
+else
+  printf '\n%s\n' "$MARKER" | sudo tee -a "$CONF" &gt;/dev/null
+fi
+EOF
+chmod 755 ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop</code></pre>
+          </div>
+        </details>
+      </div>
+
+      <div class="panel" id="inst-pin" role="tabpanel" aria-labelledby="tab-inst-pin" hidden>
+        <div class="cmd"><code id="cmd-direct-pkg-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | bash</code><button type="button" data-copy="cmd-direct-pkg-sh">COPY</button></div>
+        <p style="margin:8px 0 12px;color:var(--muted);font-size:12.5px">Installs latest <code>.pkg.tar.zst</code> via <code>SHA256SUMS</code> · <a href="install/direct-pkg.sh" target="_blank" rel="noopener">[direct-pkg.sh ↗]</a></p>
+        <div class="cmd"><code id="cmd-version">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | VER=2.2.0 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">Pin any binary release via <code>VER=X.Y.Z</code> · <a href="https://github.com/gladimdim/super-desktop/releases" target="_blank" rel="noopener">[Releases ↗]</a></p>
+        <details class="more">
+          <summary>Raw pacman -U</summary>
+          <div class="mcp-box" style="margin-top:10px">
+            <div class="mcp-bar">
+              <span>DIRECT pacman -U</span>
+              <button type="button" data-copy="cmd-pacman-u">COPY</button>
+            </div>
+            <pre><code id="cmd-pacman-u">ARCH=$(uname -m)
+VER=2.2.0
+sudo pacman -U "https://github.com/gladimdim/super-desktop/releases/download/v${VER}/super-desktop-bin-${VER}-1-${ARCH}.pkg.tar.zst"
+super-desktop-setup</code></pre>
+          </div>
+        </details>
+      </div>
+
+      <div class="panel" id="inst-source" role="tabpanel" aria-labelledby="tab-inst-source" hidden>
+        <div class="cmd"><code id="cmd-source-build">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/source.sh | bash</code><button type="button" data-copy="cmd-source-build">COPY</button></div>
+        <p style="margin:8px 0 12px;color:var(--muted);font-size:12.5px">Latest release from Rust source · <a href="install/source.sh" target="_blank" rel="noopener">[source.sh ↗]</a></p>
+        <div class="cmd"><code id="cmd-source-master">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/master.sh | bash</code><button type="button" data-copy="cmd-source-master">COPY</button></div>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">Track unreleased <code>master</code> commits · <a href="install/master.sh" target="_blank" rel="noopener">[master.sh ↗]</a></p>
+        <details class="more">
+          <summary>Git clone &amp; dev build</summary>
+          <div class="mcp-box" style="margin-top:10px">
+            <div class="mcp-bar">
+              <span>LOCAL CLONE</span>
+              <button type="button" data-copy="cmd-dev-clone">COPY</button>
+            </div>
+            <pre><code id="cmd-dev-clone">git clone https://github.com/gladimdim/super-desktop.git
+cd super-desktop &amp;&amp; ./install.sh
+./rebuild.sh</code></pre>
+          </div>
+        </details>
+      </div>
+
+      <div class="btn-row" style="margin-top:14px">
+        <a class="btn lime" href="https://github.com/gladimdim/super-desktop">GITHUB REPO ↗</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/tag/v2.2.0">RELEASES (v2.2.0)</a>
+        <a class="btn" href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">APP STORE (iOS) ↗</a>
+        <a class="btn" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">GOOGLE PLAY ↗</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/blob/master/guides/INSTALL.md">INSTALL GUIDE</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/blob/master/guides/DEVELOPMENT.md">DEV &amp; SIGNING</a>
+        <a class="btn" href="repo/super-desktop.gpg">GPG KEY</a>
+      </div>
+      <p style="margin:8px 0 0;color:var(--muted);font-size:11.5px">GPG FINGERPRINT: <code>EBCB860628250D70F3C4D033304840D354676353</code></p>
     </div>
   </section>
 
   <section class="pane" id="threat">
     <div class="pane-bar"><span class="path">[02] ~/threat-model</span><span class="badge">SECURITY.md RECEIPTS</span></div>
     <div class="pane-body">
-      <pre class="ascii-flow"><span class="bad">CLOUD WRAPPER:  [Phone] ──(login + prompt)──&gt; [Vendor Cloud + Stored API Keys] ──&gt; [Your PC]</span>
-<span class="ok">SUPER DESKTOP:  [Phone / iOS / SD Launcher] ══(TLS 1.3 + SHA-256 Pin :8759 · LAN / Tailscale / Your VPN)══&gt; [Your PC tmux]</span></pre>
       <div class="grid-3">
-        <div class="box has-art">
-          <div class="schem-slot" aria-hidden="true">
-            <svg viewBox="0 0 280 72" fill="none">
-              <rect x="8" y="10" width="118" height="52" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-              <text x="16" y="24" fill="#9ca3af" font-size="8.5" font-family="monospace">&gt;_ LOCAL CLI</text>
-              <circle cx="34" cy="43" r="7" stroke="#a3e635" stroke-width="1.8"/>
-              <path d="M41 43h26M60 43v6M66 43v4" stroke="#a3e635" stroke-width="1.8"/>
-              <text x="76" y="46" fill="#a3e635" font-size="8" font-family="monospace">LOCAL</text>
-              <line x1="140" y1="8" x2="140" y2="64" stroke="#3f3f46" stroke-width="1.5" stroke-dasharray="3 3"/>
-              <rect x="156" y="12" width="116" height="48" fill="#13080b" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="4 2"/>
-              <text x="214" y="30" fill="#fb7185" font-size="8.5" font-family="monospace" text-anchor="middle">SD KEY VAULT</text>
-              <text x="214" y="45" fill="#fb7185" font-size="8.5" font-family="monospace" text-anchor="middle">NONE · 0 SDK</text>
-              <line x1="162" y1="16" x2="266" y2="56" stroke="#fb7185" stroke-width="1.4"/>
-            </svg>
-          </div>
-          <div class="box-pad">
-            <h3>// NO AI KEY VAULT</h3>
-            <p>SUPER DESKTOP contains no LLM SDK and never asks for Anthropic/OpenAI/Gemini keys. It launches the CLIs already installed and signed in on your Linux PC.</p>
-          </div>
+        <div class="box">
+          <h3>// NO AI KEY VAULT</h3>
+          <p>Zero LLM SDKs; runs the signed-in CLIs already on your Linux PC.</p>
         </div>
-
-        <div class="box has-art">
-          <div class="schem-slot" aria-hidden="true">
-            <svg viewBox="0 0 280 72" fill="none">
-              <rect x="10" y="10" width="52" height="52" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="16" y="16" width="12" height="12" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="44" y="16" width="12" height="12" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="16" y="44" width="12" height="12" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="33" y="33" width="6" height="6" fill="#a3e635"/><rect x="45" y="45" width="9" height="9" fill="#a3e635"/>
-              <line x1="62" y1="36" x2="108" y2="36" stroke="#a3e635" stroke-width="1.8"/>
-              <rect x="108" y="18" width="54" height="36" fill="#0d1608" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="128" y="32" width="14" height="11" stroke="#a3e635" stroke-width="1.5"/>
-              <path d="M131 32v-4a4 4 0 0 1 8 0v4" stroke="#a3e635" stroke-width="1.5"/>
-              <line x1="162" y1="36" x2="196" y2="36" stroke="#a3e635" stroke-width="1.8"/>
-              <rect x="196" y="14" width="74" height="44" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-              <text x="233" y="32" fill="#fbbf24" font-size="11" font-family="monospace" font-weight="bold" text-anchor="middle">482·915</text>
-              <text x="233" y="48" fill="#a3e635" font-size="8" font-family="monospace" text-anchor="middle">✓ APPROVED</text>
-            </svg>
-          </div>
-          <div class="box-pad">
-            <h3>// PINNED QR + 6-DIGIT CODE</h3>
-            <p>192-bit single-use QR invite (300s TTL) pins the PC's TLS certificate SHA-256. Both screens show a 6-digit verification code. Reject blocks future asks.</p>
-          </div>
+        <div class="box">
+          <h3>// PINNED QR + 6-DIGIT CODE</h3>
+          <p>300s QR invite pins TLS SHA-256 and requires 6-digit desktop approval.</p>
         </div>
-
-        <div class="box has-art">
-          <div class="schem-slot" aria-hidden="true">
-            <svg viewBox="0 0 280 72" fill="none">
-              <rect x="16" y="10" width="176" height="52" fill="#0a1108" stroke="#a3e635" stroke-width="1.5" stroke-dasharray="5 3"/>
-              <rect x="28" y="19" width="28" height="34" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.3"/>
-              <path d="M34 28h16M34 35h16M34 42h10" stroke="#9ca3af" stroke-width="1.4"/>
-              <path d="M74 44V28M81 44V21M88 44V31M95 44V24M102 44V34" stroke="#fbbf24" stroke-width="2.4"/>
-              <circle cx="146" cy="36" r="14" stroke="#a3e635" stroke-width="1.4"/>
-              <circle cx="146" cy="36" r="6" stroke="#a3e635" stroke-width="1.4"/>
-              <text x="172" y="21" fill="#a3e635" font-size="7.5" font-family="monospace" text-anchor="end">BWRAP</text>
-              <path d="M206 20l14 6-8 10M206 52l14-6-8-10" stroke="#fb7185" stroke-width="1.5"/>
-              <text x="246" y="33" fill="#fb7185" font-size="8" font-family="monospace" text-anchor="middle">EXIF / NET</text>
-              <text x="246" y="45" fill="#fb7185" font-size="8" font-family="monospace" text-anchor="middle">BLOCKED</text>
-            </svg>
-          </div>
-          <div class="box-pad">
-            <h3>// BUBBLEWRAP &amp; EXIF STRIP</h3>
-            <p>PDF previews rasterize inside a no-network <code>bubblewrap</code> sandbox. Camera photos strip EXIF metadata. Voice clips stay in RAM and transcribe locally via <code>whisper.cpp</code>.</p>
-          </div>
+        <div class="box">
+          <h3>// TAILSCALE &amp; PRIVATE VPN</h3>
+          <p>Works over Wi-Fi, Tailscale, WireGuard, or ZeroTier with no open ports (<a href="connect.html#away">setup →</a>).</p>
         </div>
-
-        <div class="box has-art">
-          <div class="schem-slot" aria-hidden="true">
-            <svg viewBox="0 0 280 72" fill="none">
-              <rect x="10" y="12" width="76" height="48" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-              <path d="M48 21l11 4v9c0 8-5 13-11 16-6-3-11-8-11-16v-9l11-4z" stroke="#a3e635" stroke-width="1.5"/>
-              <text x="48" y="40" fill="#a3e635" font-size="7.5" font-family="monospace" text-anchor="middle">HW</text>
-              <line x1="86" y1="36" x2="108" y2="36" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="108" y="14" width="84" height="44" fill="#0b0b0b" stroke="#fbbf24" stroke-width="1.3"/>
-              <text x="150" y="33" fill="#fbbf24" font-size="8.5" font-family="monospace" text-anchor="middle">SHA-256</text>
-              <text x="150" y="47" fill="#9ca3af" font-size="8" font-family="monospace" text-anchor="middle">chmod 0600</text>
-              <rect x="206" y="16" width="64" height="40" fill="#13080b" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="3 2"/>
-              <text x="238" y="33" fill="#fb7185" font-size="7.5" font-family="monospace" text-anchor="middle">iCLOUD /</text>
-              <text x="238" y="45" fill="#fb7185" font-size="7.5" font-family="monospace" text-anchor="middle">BACKUP ✕</text>
-            </svg>
-          </div>
-          <div class="box-pad">
-            <h3>// KEYSTORE &amp; KEYCHAIN</h3>
-            <p>PC stores SHA-256 hashes (<code>0600</code>). Android keeps tokens in Keystore (backups off); iOS uses Keychain (no iCloud sync). Revoke kills live sockets at once.</p>
-          </div>
+        <div class="box">
+          <h3>// BUBBLEWRAP &amp; EXIF STRIP</h3>
+          <p>PDFs render in networkless <code>bubblewrap</code>; photos strip EXIF; voice stays local.</p>
         </div>
-
-        <div class="box has-art">
-          <div class="schem-slot" aria-hidden="true">
-            <svg viewBox="0 0 280 72" fill="none">
-              <rect x="10" y="14" width="62" height="44" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-              <text x="41" y="33" fill="#a3e635" font-size="8.5" font-family="monospace" text-anchor="middle">PEER UID</text>
-              <text x="41" y="46" fill="#9ca3af" font-size="8" font-family="monospace" text-anchor="middle">0700/0600</text>
-              <line x1="72" y1="36" x2="108" y2="36" stroke="#a3e635" stroke-width="1.8"/>
-              <rect x="108" y="16" width="84" height="40" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.3"/>
-              <text x="150" y="34" fill="#f3f4f6" font-size="8.5" font-family="monospace" text-anchor="middle">control-v1</text>
-              <text x="150" y="46" fill="#a3e635" font-size="8" font-family="monospace" text-anchor="middle">.sock (STDIO)</text>
-              <rect x="206" y="16" width="64" height="40" fill="#0b0b0b" stroke="#52525b" stroke-width="1.3"/>
-              <text x="238" y="32" fill="#9ca3af" font-size="7.5" font-family="monospace" text-anchor="middle">MUTATIONS</text>
-              <rect x="218" y="38" width="40" height="12" fill="#1f1215" stroke="#fb7185" stroke-width="1"/>
-              <text x="238" y="47" fill="#fb7185" font-size="7.5" font-family="monospace" text-anchor="middle">DEFAULT OFF</text>
-            </svg>
-          </div>
-          <div class="box-pad">
-            <h3>// OWNER-ONLY SOCKETS</h3>
-            <p>Local CLI &amp; stdio MCP use <code>0700</code>/<code>0600</code> sockets with peer UID checks. Destructive MCP actions and Telegram switches start OFF by default.</p>
-          </div>
+        <div class="box">
+          <h3>// KEYSTORE &amp; KEYCHAIN</h3>
+          <p>PC hashes tokens (<code>0600</code>); Android/iOS disable cloud backups; revoke drops sockets.</p>
         </div>
-
-        <div class="box has-art">
-          <div class="schem-slot" aria-hidden="true">
-            <svg viewBox="0 0 280 72" fill="none">
-              <rect x="10" y="14" width="64" height="44" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-              <text x="42" y="33" fill="#a3e635" font-size="8" font-family="monospace" text-anchor="middle">BYOB PC</text>
-              <text x="42" y="46" fill="#9ca3af" font-size="7.5" font-family="monospace" text-anchor="middle">0 RELAY</text>
-              <line x1="74" y1="36" x2="96" y2="36" stroke="#a3e635" stroke-width="1.5"/>
-              <rect x="96" y="18" width="68" height="36" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.3"/>
-              <text x="130" y="34" fill="#a3e635" font-size="8" font-family="monospace" text-anchor="middle">MASK ***</text>
-              <text x="130" y="46" fill="#9ca3af" font-size="7.5" font-family="monospace" text-anchor="middle">2-MBR MAX</text>
-              <line x1="164" y1="36" x2="186" y2="36" stroke="#fbbf24" stroke-width="1.5"/>
-              <rect x="186" y="14" width="84" height="44" fill="#171206" stroke="#fbbf24" stroke-width="1.3"/>
-              <text x="228" y="33" fill="#fbbf24" font-size="8" font-family="monospace" text-anchor="middle">TG BOT API</text>
-              <text x="228" y="46" fill="#fbbf24" font-size="7.5" font-family="monospace" text-anchor="middle">NOT E2EE</text>
-            </svg>
-          </div>
-          <div class="box-pad">
-            <h3>// HONEST TELEGRAM NOTE</h3>
-            <p>Optional BYOB <code>@BotFather</code> worker runs locally with zero developer relay and secret masking, while noting Telegram Bot API is not E2E encrypted (Mini Web App uses private Tailscale Serve).</p>
-          </div>
-        </div>
-      </div>
-      <div class="vpn-spotlight">
-        <div>
-          <h3>// TAILSCALE &amp; PRIVATE VPN READY — ACCESS HARNESSES ON THE GO</h3>
-          <p>Stay on your home Wi-Fi or take your harnesses anywhere: SUPER DESKTOP auto-detects <strong>Tailscale</strong> during pairing and works cleanly over any private VPN (<strong>WireGuard, ZeroTier, OpenVPN, or your own home VPN</strong>). Switch from Wi-Fi to mobile data without re-pairing, with zero public ports exposed and zero third-party relays. <a href="connect.html#away">See Tailscale setup →</a></p>
-        </div>
-        <div class="vpn-schem" aria-hidden="true">
-          <svg viewBox="0 0 420 116" fill="none">
-            <rect x="10" y="14" width="96" height="62" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-            <text x="58" y="38" fill="#f3f4f6" font-size="10" font-family="monospace" font-weight="bold" text-anchor="middle">PHONE</text>
-            <text x="58" y="54" fill="#a3e635" font-size="8.5" font-family="monospace" text-anchor="middle">5G / AWAY</text>
-            <line x1="106" y1="45" x2="310" y2="45" stroke="#a3e635" stroke-width="2.5"/>
-            <rect x="148" y="16" width="124" height="58" fill="#0b1407" stroke="#a3e635" stroke-width="1.5"/>
-            <text x="210" y="37" fill="#a3e635" font-size="9.5" font-family="monospace" font-weight="bold" text-anchor="middle">TAILSCALE / VPN</text>
-            <text x="210" y="52" fill="#d9f99d" font-size="8" font-family="monospace" text-anchor="middle">WIREGUARD · ZEROTIER</text>
-            <text x="210" y="65" fill="#9ca3af" font-size="7.5" font-family="monospace" text-anchor="middle">TLS 1.3 PINNED</text>
-            <rect x="310" y="14" width="100" height="62" fill="#0b0b0b" stroke="#a3e635" stroke-width="1.5"/>
-            <text x="360" y="38" fill="#f3f4f6" font-size="10" font-family="monospace" font-weight="bold" text-anchor="middle">YOUR PC</text>
-            <text x="360" y="54" fill="#a3e635" font-size="8.5" font-family="monospace" text-anchor="middle">PORT :8759</text>
-            <line x1="58" y1="96" x2="360" y2="96" stroke="#fb7185" stroke-width="1.2" stroke-dasharray="4 3"/>
-            <rect x="132" y="85" width="156" height="22" fill="#13080b" stroke="#fb7185" stroke-width="1"/>
-            <text x="210" y="99" fill="#fb7185" font-size="8" font-family="monospace" text-anchor="middle">✕ NO PUBLIC PORT FORWARDING</text>
-          </svg>
+        <div class="box">
+          <h3>// OWNER SOCKETS &amp; TELEGRAM</h3>
+          <p><code>0700</code>/<code>0600</code> peer-UID sockets; BYOB Telegram bot runs locally (no dev relay).</p>
         </div>
       </div>
       <div class="verify-strip">
-        <span>VERIFY: <code>sha256sum -c SUPER-DESKTOP-2.3.1.apk.sha256</code> · <code>ss -tlnp | grep super-desktop</code> (:8759 TLS only)</span>
+        <span>VERIFY: <code>ss -tlnp | grep super-desktop</code> (:8759 TLS only)</span>
         <span><a href="repo/super-desktop.gpg">super-desktop.gpg</a> · <a href="privacy.html">privacy.html</a> · <a href="privacy-ios.html">privacy-ios.html</a> · <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a></span>
       </div>
     </div>
@@ -649,21 +608,17 @@
 
   <section class="pane" id="devices">
     <span id="phone"></span>
-    <div class="pane-bar"><span class="path">[03] ~/devices/apk-play-ios-launcher</span><span class="badge">5 PLATFORMS + TELEGRAM</span></div>
+    <div class="pane-bar"><span class="path">[03] ~/devices</span><span class="badge">5 PLATFORMS + TELEGRAM</span></div>
     <div class="pane-body">
-      <figure class="eco-banner">
-        <img src="media/ecosystem-collage.webp" width="1600" height="900" loading="lazy" alt="Real Android Studio UI in a Xiaomi 17 Ultra case, real iOS Duo split screen in an unfolded iPhone Duo, real SD Launcher screen on Android, and real Omarchy Linux desktop overlay">
-        <figcaption><b>[REAL APPS IN HARDWARE // 0 ACCOUNTS]</b><span>XIAOMI 17 ULTRA (ANDROID) · iPHONE DUO (iOS) · SD LAUNCHER · OMARCHY LINUX</span></figcaption>
-      </figure>
       <div class="grid-3">
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>OMARCHY LINUX (v2.2.0)</h3>
-          <p>Prebuilt signed <code>x86_64</code> &amp; <code>aarch64</code> Pacman packages (no Rust/compilation), tmux cards, SD Editor, QML plugins, multi-PC sync, headless boot, CLI &amp; MCP.</p>
-          <div class="act"><a class="btn lime" href="#install">Install</a><a href="https://github.com/gladimdim/super-desktop">Source</a></div>
+          <p>Signed <code>x86_64</code> &amp; <code>aarch64</code> Pacman packages, tmux cards, QML plugins, CLI &amp; MCP.</p>
+          <div class="act"><a class="btn lime" href="#install">Install</a><a href="https://github.com/gladimdim/super-desktop">GitHub ↗</a></div>
         </div>
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 16V8l-9-5-9 5v8l9 5 9-5z"/><path d="M3.3 7L12 12l8.7-5M12 22V12"/></svg>ANDROID FREE APK (2.3.1)</h3>
-          <p>Free forever. No trial, no Play Billing, no Google Play required. Studio UI, voice, camera, localhost previews.</p>
+          <p>All features unlocked forever. Zero Play Billing, voice, camera, localhost previews.</p>
           <div class="act">
             <a class="btn lime" href="https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk">APK</a>
             <button class="btn" type="button" data-qr="apk">QR</button>
@@ -672,7 +627,7 @@
         </div>
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg>GOOGLE PLAY EDITION</h3>
-          <p>Automatic store updates. 0 accounts, 0 analytics. 10-day usage trial + optional one-time Pro (no subscription).</p>
+          <p>Store auto-updates. 10-day trial + optional one-time Pro.</p>
           <div class="act">
             <a href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop"><img src="assets/google-play-badge.png" alt="Get it on Google Play" width="115" height="34"></a>
             <button class="btn" type="button" data-qr="play">QR</button>
@@ -680,15 +635,16 @@
         </div>
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="2" width="12" height="20"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>IPHONE &amp; IPAD (APP STORE)</h3>
-          <p>SUPER DESKTOP: AI Agents. Keychain-pinned, widgets, Share sheet, local notifications. 10-day trial + one-time Pro.</p>
+          <p>Keychain-pinned credentials, widgets, local alerts. 10-day trial + one-time Pro.</p>
           <div class="act">
-            <a href="https://apps.apple.com/us/developer/dmytro-gladkyi/id578141466"><img src="assets/app-store-badge.svg" alt="Download on the App Store" width="110" height="34"></a>
+            <a href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591"><img src="assets/app-store-badge.svg" alt="Download on the App Store" width="110" height="34"></a>
+            <a class="btn lime" href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">App Store ↗</a>
             <button class="btn" type="button" data-qr="ios">QR</button>
           </div>
         </div>
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="8" height="18"/><rect x="13" y="3" width="8" height="8"/><rect x="13" y="13" width="8" height="8"/></svg>SD LAUNCHER (1.15.0 APK)</h3>
-          <p>Omalauncher fork with built-in agent pages, terminal &amp; usage widgets, plus optional tiling desktop &amp; Arch ARM.</p>
+          <p>Android home-screen launcher with embedded PC agent pages &amp; terminal widgets.</p>
           <div class="act">
             <a class="btn" href="https://github.com/gladimdim/omalauncher/releases/download/sd-v1.15.0/SD-Launcher-1.15.0.apk">APK</a>
             <button class="btn" type="button" data-qr="launcher">QR</button>
@@ -697,7 +653,7 @@
         </div>
         <div class="box">
           <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M22 2L11 13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>TELEGRAM BYOB &amp; MINI APP</h3>
-          <p>Your own <code>@BotFather</code> bot + 2-member Forum Topics + live ANSI Mini Web App over private Tailscale Serve.</p>
+          <p>Local <code>@BotFather</code> worker + 2-member Forum Topics + Tailscale Mini App.</p>
           <div class="act"><a class="btn" href="telegram/">/telegram/</a><a href="connect.html">/connect.html</a></div>
         </div>
       </div>
@@ -705,26 +661,57 @@
   </section>
 
   <section class="pane" id="screens">
-    <div class="pane-bar"><span class="path">[04] ~/screens/real-captures</span><span class="badge">ANDROID · LAUNCHER · iOS · LIVE</span></div>
+    <div class="pane-bar"><span class="path">[04] ~/screens</span><span class="badge">DESKTOP · ANDROID · LAUNCHER · iOS · VIDEO</span></div>
     <div class="pane-body">
-      <div class="tabs" role="tablist" aria-label="Terminal galleries">
-        <button role="tab" type="button" aria-selected="true" aria-controls="v3-android" id="v3-b-and">Android Studio</button>
+      <div class="tabs" role="tablist" aria-label="Screenshots and video">
+        <button role="tab" type="button" aria-selected="true" aria-controls="v3-desk" id="v3-b-des">Desktop</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="v3-android" id="v3-b-and">Android Studio</button>
         <button role="tab" type="button" aria-selected="false" aria-controls="v3-launcher" id="v3-b-lau">SD Launcher</button>
         <button role="tab" type="button" aria-selected="false" aria-controls="v3-ios" id="v3-b-ios">iOS / iPad</button>
-        <button role="tab" type="button" aria-selected="false" aria-controls="v3-desk" id="v3-b-des">Desktop</button>
-        <button role="tab" type="button" aria-selected="false" aria-controls="v3-live" id="v3-b-liv">Live Phone + PC</button>
-        <button role="tab" type="button" aria-selected="false" aria-controls="v3-plug" id="v3-b-plu">Plugins Demo</button>
+        <button role="tab" type="button" aria-selected="false" aria-controls="v3-video" id="v3-b-vid">Video</button>
       </div>
-      <div class="panel" id="v3-android" role="tabpanel" aria-labelledby="v3-b-and">
+
+      <div class="panel" id="v3-desk" role="tabpanel" aria-labelledby="v3-b-des">
+        <div class="car" data-carousel tabindex="0" aria-roledescription="carousel" aria-label="Desktop and SD Editor screenshots">
+          <div class="car-stage">
+            <figure class="car-slide">
+              <a class="car-media" href="screenshots/readme-overlay.webp"><img src="screenshots/readme-overlay.webp" width="1920" height="1080" alt="SUPER DESKTOP overlay over browser"></a>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>01 // DESKTOP OVERLAY</strong><span>SUPER + SHIFT + Q slides terminal cards over any window.</span></div><a class="car-open" href="screenshots/readme-overlay.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+            </figure>
+            <figure class="car-slide" hidden>
+              <a class="car-media" href="screenshots/sd-editor.webp"><img src="screenshots/sd-editor.webp" width="1240" height="760" loading="lazy" alt="SD Editor file tree and syntax highlighting"></a>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>02 // SD EDITOR</strong><span>Built-in folder tree, tabs, and syntax highlighting.</span></div><a class="car-open" href="screenshots/sd-editor.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+            </figure>
+            <figure class="car-slide" hidden>
+              <a class="car-media" href="screenshots/readme-toolbar.webp"><img src="screenshots/readme-toolbar.webp" width="1920" height="58" loading="lazy" alt="SUPER DESKTOP top bar launchers and controls"></a>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>03 // TOP BAR</strong><span>PC selector, directory field, notes, launchers, settings.</span></div><a class="car-open" href="screenshots/readme-toolbar.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+            </figure>
+          </div>
+          <div class="car-bar">
+            <div class="car-pills" role="group" aria-label="Desktop slides">
+              <button type="button" data-car-goto="0" aria-current="true">1. Overlay</button>
+              <button type="button" data-car-goto="1">2. SD Editor</button>
+              <button type="button" data-car-goto="2">3. Top Bar</button>
+            </div>
+            <div class="car-nav">
+              <button type="button" data-car-prev>[ ← PREV ]</button>
+              <span class="car-count" data-car-count aria-live="polite">01 / 03</span>
+              <button type="button" data-car-next>[ NEXT → ]</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" id="v3-android" role="tabpanel" aria-labelledby="v3-b-and" hidden>
         <div class="car" data-carousel tabindex="0" aria-roledescription="carousel" aria-label="Android Studio screenshots">
           <div class="car-stage">
             <figure class="car-slide">
               <div class="car-pair">
-                <a class="car-full" href="screenshots/android-compact-sessions.webp" aria-label="Open full Sessions screenshot"><img src="screenshots/android-compact-sessions.webp" width="648" height="1440" alt="Full Android Studio Sessions screen"></a>
-                <a class="car-detail" href="screenshots/android-session-cards-detail.webp" aria-label="Open Sessions detail crop"><img src="screenshots/android-session-cards-detail.webp" width="864" height="560" alt="Zoomed Android session cards detail"></a>
+                <a class="car-full" href="screenshots/android-compact-sessions.webp" aria-label="Open full Sessions screenshot"><img src="screenshots/android-compact-sessions.webp" width="648" height="1440" loading="lazy" alt="Full Android Studio Sessions screen"></a>
+                <a class="car-detail" href="screenshots/android-session-cards-detail.webp" aria-label="Open Sessions detail crop"><img src="screenshots/android-session-cards-detail.webp" width="864" height="560" loading="lazy" alt="Zoomed Android session cards detail"></a>
               </div>
               <div class="car-bar" style="width:100%">
-                <div class="car-meta"><strong>01 // SESSIONS LIST</strong><span>Full screen + zoomed card detail: check live status and latest prompts across paired PCs.</span></div>
+                <div class="car-meta"><strong>01 // SESSIONS LIST</strong><span>Live session status and latest prompts across paired PCs.</span></div>
                 <a class="car-open" href="screenshots/android-compact-sessions.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a>
               </div>
             </figure>
@@ -734,7 +721,7 @@
                 <a class="car-detail" href="screenshots/android-harness-picker-detail.webp" aria-label="Open New Harness detail"><img src="screenshots/android-harness-picker-detail.webp" width="864" height="560" loading="lazy" alt="Zoomed New Harness picker detail"></a>
               </div>
               <div class="car-bar" style="width:100%">
-                <div class="car-meta"><strong>02 // NEW HARNESS</strong><span>Pick a remembered project folder on your PC and launch any installed CLI harness.</span></div>
+                <div class="car-meta"><strong>02 // NEW HARNESS</strong><span>Pick a PC folder and launch any CLI harness.</span></div>
                 <a class="car-open" href="screenshots/android-harness-picker.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a>
               </div>
             </figure>
@@ -744,7 +731,7 @@
                 <a class="car-detail" href="screenshots/android-claude-terminal-detail.webp" aria-label="Open Claude Code terminal detail"><img src="screenshots/android-claude-terminal-detail.webp" width="864" height="560" loading="lazy" alt="Zoomed Claude Code terminal detail"></a>
               </div>
               <div class="car-bar" style="width:100%">
-                <div class="car-meta"><strong>03 // CLAUDE CODE TERMINAL</strong><span>Follow live ANSI terminal output, approvals, and tests running on your Linux PC.</span></div>
+                <div class="car-meta"><strong>03 // CLAUDE CODE TERMINAL</strong><span>Live ANSI output, approvals, and prompts.</span></div>
                 <a class="car-open" href="screenshots/android-claude-terminal.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a>
               </div>
             </figure>
@@ -754,7 +741,7 @@
                 <a class="car-detail" href="screenshots/android-voice-composer-detail.webp" aria-label="Open Voice Composer detail"><img src="screenshots/android-voice-composer-detail.webp" width="864" height="560" loading="lazy" alt="Zoomed Voice Composer detail"></a>
               </div>
               <div class="car-bar" style="width:100%">
-                <div class="car-meta"><strong>04 // VOICE COMPOSER</strong><span>Record audio in RAM, review before sending, and transcribe locally on your PC.</span></div>
+                <div class="car-meta"><strong>04 // VOICE COMPOSER</strong><span>Record audio in RAM and transcribe locally on PC.</span></div>
                 <a class="car-open" href="screenshots/android-voice-prompt.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a>
               </div>
             </figure>
@@ -764,7 +751,7 @@
                 <a class="car-detail" href="screenshots/android-session-files-detail.webp" aria-label="Open Files and Links detail"><img src="screenshots/android-session-files-detail.webp" width="864" height="560" loading="lazy" alt="Zoomed Files and Links detail"></a>
               </div>
               <div class="car-bar" style="width:100%">
-                <div class="car-meta"><strong>05 // FILES &amp; LINKS</strong><span>Browse workspace-bounded Markdown, images, PDFs, and private localhost tunnels.</span></div>
+                <div class="car-meta"><strong>05 // FILES &amp; LINKS</strong><span>Browse referenced files and localhost previews.</span></div>
                 <a class="car-open" href="screenshots/android-session-files.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a>
               </div>
             </figure>
@@ -774,7 +761,7 @@
                 <a class="car-detail" href="screenshots/android-markdown-preview-detail.webp" aria-label="Open Markdown Preview detail"><img src="screenshots/android-markdown-preview-detail.webp" width="864" height="560" loading="lazy" alt="Zoomed Markdown Preview detail"></a>
               </div>
               <div class="car-bar" style="width:100%">
-                <div class="car-meta"><strong>06 // MARKDOWN PREVIEW</strong><span>Read agent reports, logs, and tables rendered cleanly on your phone.</span></div>
+                <div class="car-meta"><strong>06 // MARKDOWN PREVIEW</strong><span>Rendered reports, logs, and tables on mobile.</span></div>
                 <a class="car-open" href="screenshots/android-markdown-preview.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a>
               </div>
             </figure>
@@ -802,27 +789,27 @@
           <div class="car-stage">
             <figure class="car-slide">
               <a class="car-media" href="screenshots/launcher/tiling.webp"><img src="screenshots/launcher/tiling.webp" width="1440" height="961" loading="lazy" alt="Chrome and two Linux terminals tiled in SD Launcher"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>01 // TILING DESKTOP</strong><span>Chrome and two Linux terminals tiled with Super keys.</span></div><a class="car-open" href="screenshots/launcher/tiling.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>01 // TILING DESKTOP</strong><span>Browser and Linux terminals tiled with Super keys.</span></div><a class="car-open" href="screenshots/launcher/tiling.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="screenshots/launcher/apps-trio.webp"><img src="screenshots/launcher/apps-trio.webp" width="1440" height="961" loading="lazy" alt="Chrome, SUPER DESKTOP, and YouTube tiled together"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>02 // EVERYDAY APPS TILED</strong><span>Chrome, SUPER DESKTOP, and Android apps sharing one workspace.</span></div><a class="car-open" href="screenshots/launcher/apps-trio.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>02 // EVERYDAY APPS TILED</strong><span>Android and SUPER DESKTOP sharing one workspace.</span></div><a class="car-open" href="screenshots/launcher/apps-trio.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="screenshots/launcher/embedded-harnesses.webp"><img src="screenshots/launcher/embedded-harnesses.webp" width="1440" height="961" loading="lazy" alt="Built-in SUPER DESKTOP agent list page in SD Launcher"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>03 // HOME AGENT PAGE</strong><span>Sessions grouped by paired PC directly on your Android home screen.</span></div><a class="car-open" href="screenshots/launcher/embedded-harnesses.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>03 // HOME AGENT PAGE</strong><span>Sessions grouped by PC on your Android home screen.</span></div><a class="car-open" href="screenshots/launcher/embedded-harnesses.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="screenshots/launcher/embedded-terminal.webp"><img src="screenshots/launcher/embedded-terminal.webp" width="1440" height="961" loading="lazy" alt="Live PC terminal widget embedded in SD Launcher"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>04 // LIVE TERMINAL WIDGET</strong><span>Type straight into a PC tmux session from your launcher home page.</span></div><a class="car-open" href="screenshots/launcher/embedded-terminal.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>04 // LIVE TERMINAL WIDGET</strong><span>Type into a PC tmux session from the home screen.</span></div><a class="car-open" href="screenshots/launcher/embedded-terminal.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="screenshots/launcher/embedded-usage.webp"><img src="screenshots/launcher/embedded-usage.webp" width="1440" height="961" loading="lazy" alt="Usage widget beside launcher clock"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>05 // USAGE WIDGET</strong><span>Track plan limits, tokens, and active sessions beside home widgets.</span></div><a class="car-open" href="screenshots/launcher/embedded-usage.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>05 // USAGE WIDGET</strong><span>Plan limits and active sessions beside widgets.</span></div><a class="car-open" href="screenshots/launcher/embedded-usage.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="screenshots/sd-launcher-landscape.webp"><img src="screenshots/sd-launcher-landscape.webp" width="540" height="249" loading="lazy" alt="SD Launcher landscape split view"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>06 // LANDSCAPE SPLIT VIEW</strong><span>Agent list and live Claude Code terminal side by side.</span></div><a class="car-open" href="screenshots/sd-launcher-landscape.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>06 // LANDSCAPE SPLIT VIEW</strong><span>Agent list and live terminal side by side.</span></div><a class="car-open" href="screenshots/sd-launcher-landscape.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
           </div>
           <div class="car-bar">
@@ -848,19 +835,19 @@
           <div class="car-stage">
             <figure class="car-slide">
               <a class="car-media" href="screenshots/ios-duo-split.png"><img src="screenshots/ios-duo-split.png" width="1600" height="1175" loading="lazy" alt="iOS split view preview with two Codex terminals"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>01 // iOS / iPadOS SPLIT VIEW (PREVIEW)</strong><span>Harness list beside two live Codex terminals over pinned TLS.</span></div><a class="car-open" href="screenshots/ios-duo-split.png" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>01 // iOS / iPadOS SPLIT VIEW</strong><span>Harness list beside two live Codex terminals.</span></div><a class="car-open" href="screenshots/ios-duo-split.png" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="screenshots/ios-duo-terminal.png"><img src="screenshots/ios-duo-terminal.png" width="1600" height="1175" loading="lazy" alt="iOS live terminal preview"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>02 // iOS / iPadOS LIVE TERMINAL (PREVIEW)</strong><span>Keychain-pinned credentials (no iCloud sync) and local completion alerts.</span></div><a class="car-open" href="screenshots/ios-duo-terminal.png" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>02 // iOS / iPadOS TERMINAL</strong><span>Keychain-pinned credentials and local alerts.</span></div><a class="car-open" href="screenshots/ios-duo-terminal.png" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="telegram/screenshots/miniapp-sessions.webp"><img src="telegram/screenshots/miniapp-sessions.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App Sessions list"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>03 // TELEGRAM MINI WEB APP — SESSIONS</strong><span>Optional live-themed session list served privately via Tailscale Serve.</span></div><a class="car-open" href="telegram/screenshots/miniapp-sessions.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>03 // TELEGRAM MINI APP — SESSIONS</strong><span>Private session list served via Tailscale Serve.</span></div><a class="car-open" href="telegram/screenshots/miniapp-sessions.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
             <figure class="car-slide" hidden>
               <a class="car-media" href="telegram/screenshots/miniapp-terminal.webp"><img src="telegram/screenshots/miniapp-terminal.webp" width="780" height="1688" loading="lazy" alt="Telegram Mini Web App live ANSI terminal"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>04 // TELEGRAM MINI WEB APP — ANSI TERMINAL</strong><span>Full colored WebSocket ANSI stream with swipeable Quick Keys inside Telegram.</span></div><a class="car-open" href="telegram/screenshots/miniapp-terminal.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
+              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>04 // TELEGRAM MINI APP — TERMINAL</strong><span>Live ANSI stream and quick keys in Telegram.</span></div><a class="car-open" href="telegram/screenshots/miniapp-terminal.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
             </figure>
           </div>
           <div class="car-bar">
@@ -879,72 +866,20 @@
         </div>
       </div>
 
-      <div class="panel" id="v3-desk" role="tabpanel" aria-labelledby="v3-b-des" hidden>
-        <div class="car" data-carousel tabindex="0" aria-roledescription="carousel" aria-label="Desktop and SD Editor screenshots">
-          <div class="car-stage">
-            <figure class="car-slide">
-              <a class="car-media" href="screenshots/readme-overlay.webp"><img src="screenshots/readme-overlay.webp" width="1920" height="1080" loading="lazy" alt="SUPER DESKTOP overlay over browser"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>01 // DESKTOP OVERLAY</strong><span>Press SUPER + SHIFT + Q: Claude Code and Codex cards slide over any window.</span></div><a class="car-open" href="screenshots/readme-overlay.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
-            </figure>
-            <figure class="car-slide" hidden>
-              <a class="car-media" href="screenshots/sd-editor.webp"><img src="screenshots/sd-editor.webp" width="1240" height="760" loading="lazy" alt="SD Editor file tree and syntax highlighting"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>02 // SD EDITOR</strong><span>Built-in folder tree, tabs, find &amp; replace, and syntax highlighting.</span></div><a class="car-open" href="screenshots/sd-editor.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
-            </figure>
-            <figure class="car-slide" hidden>
-              <a class="car-media" href="screenshots/readme-toolbar.webp"><img src="screenshots/readme-toolbar.webp" width="1920" height="58" loading="lazy" alt="SUPER DESKTOP top bar launchers and controls"></a>
-              <div class="car-bar" style="width:100%"><div class="car-meta"><strong>03 // TOP BAR &amp; LAUNCHERS</strong><span>PC selector, working directory, sticky notes, installed harnesses, Arrange, Settings.</span></div><a class="car-open" href="screenshots/readme-toolbar.webp" target="_blank" rel="noopener">OPEN FULL SIZE ↗</a></div>
-            </figure>
-          </div>
-          <div class="car-bar">
-            <div class="car-pills" role="group" aria-label="Desktop slides">
-              <button type="button" data-car-goto="0" aria-current="true">1. Overlay</button>
-              <button type="button" data-car-goto="1">2. SD Editor</button>
-              <button type="button" data-car-goto="2">3. Top Bar</button>
-            </div>
-            <div class="car-nav">
-              <button type="button" data-car-prev>[ ← PREV ]</button>
-              <span class="car-count" data-car-count aria-live="polite">01 / 03</span>
-              <button type="button" data-car-next>[ NEXT → ]</button>
-            </div>
-          </div>
+      <div class="panel" id="v3-video" role="tabpanel" aria-labelledby="v3-b-vid" hidden>
+        <div class="vid-box" style="margin-top:0">
+          <video controls preload="none" playsinline width="1920" height="1080" poster="video/super-desktop-trailer-poster.webp">
+            <source src="video/super-desktop-trailer.mp4" type="video/mp4">
+          </video>
         </div>
-      </div>
-
-      <div class="panel" id="v3-live" role="tabpanel" aria-labelledby="v3-b-liv" hidden>
-        <div class="phone-row"><div class="mirror"><div class="sd-stage" data-stage="mirror"></div></div><div id="phone-device"></div></div>
-      </div>
-      <div class="panel" id="v3-plug" role="tabpanel" aria-labelledby="v3-b-plu" hidden>
-        <div class="sd-stage" data-stage="try" data-pulse=".create" id="plugins-stage"></div>
       </div>
     </div>
   </section>
 
   <section class="pane" id="cli-mcp">
     <span id="cli"></span>
-    <div class="pane-bar"><span class="path">[05] ~/cli-and-mcp</span><span class="badge">100% SUPPORT · 88 MCP TOOLS · STDIO ONLY · IDEMPOTENT CLI</span></div>
+    <div class="pane-bar"><span class="path">[05] ~/cli-and-mcp</span><span class="badge">88 MCP TOOLS · STDIO ONLY · IDEMPOTENT CLI</span></div>
     <div class="pane-body">
-      <div class="mcp-head">
-        <h2>100% CLI &amp; LOCAL MCP SUPPORT — <span>LET YOUR AI AGENTS DRIVE IT TOO.</span></h2>
-        <p>Every workspace action is scriptable over structured JSON CLI and local stdio MCP (<code>2025-11-25</code> &amp; <code>2025-03-26</code>) — with zero open network ports and per-category permission switches.</p>
-      </div>
-      <div class="grid-4">
-        <div class="box">
-          <h3>// 88 LOCAL MCP TOOLS</h3>
-          <p>14 read-only metadata tools out of the box; enable terminal I/O, prompts, files, notes, layouts, SD Editor buffers, plugins, Telegram, peers, and admin in <strong>Settings → MCP</strong> (default OFF).</p>
-        </div>
-        <div class="box">
-          <h3>// ZERO NETWORK PORT</h3>
-          <p><code>super-desktop mcp serve</code> speaks strictly over local stdio and owner-only <code>0700</code>/<code>0600</code> Unix sockets with peer-UID verification.</p>
-        </div>
-        <div class="box">
-          <h3>// IDEMPOTENT RECEIPTS</h3>
-          <p><code>--request-id</code> writes to a durable 4,096-entry local journal so retrying a timed-out launch, move, or close never runs it twice.</p>
-        </div>
-        <div class="box">
-          <h3>// STRUCTURED JSON CLI</h3>
-          <p><code>schema --format json</code>, <code>capabilities</code>, <code>harness launch --prompt</code>, <code>terminal capture/follow/attach</code>, <code>terminal viewport</code>, and <code>peer</code> commands.</p>
-        </div>
-      </div>
       <div class="grid-2">
         <div class="mcp-box">
           <div class="mcp-bar">
@@ -960,18 +895,22 @@
   }
 }</code></pre>
           <div class="mcp-foot">
-            <a href="cli.html">[ FULL CLI &amp; MCP REFERENCE → ]</a>
-            <a href="https://github.com/gladimdim/super-desktop/blob/master/guides/MCP_AND_CLI.md">[ MCP &amp; CLI GUIDE ON GITHUB → ]</a>
+            <a href="cli.html">[ CLI &amp; MCP REFERENCE ↗ ]</a>
+            <a href="https://github.com/gladimdim/super-desktop/blob/master/guides/MCP_AND_CLI.md">[ MCP GUIDE ON GITHUB ↗ ]</a>
           </div>
         </div>
-        <div class="cli">
-          <div class="cli-bar"><i></i><i></i><i></i><span>interactive cli playground (try launching into [01])</span></div>
-          <div class="cli-out" id="cli-out" aria-live="polite"></div>
-          <div class="cli-cmds">
-            <button type="button" data-cmd="help">help agents</button>
-            <button type="button" data-cmd="harness">harness list</button>
-            <button type="button" data-cmd="list">terminal list</button>
-            <button type="button" data-cmd="launch">harness launch codex …</button>
+        <div class="mcp-box">
+          <div class="mcp-bar">
+            <span>COMMON CLI COMMANDS</span>
+            <button type="button" data-copy="cmd-cli-quick">COPY</button>
+          </div>
+          <pre><code id="cmd-cli-quick">super-desktop status
+super-desktop harness list
+super-desktop terminal list
+super-desktop harness launch codex --cwd ~/code/app --prompt "..."</code></pre>
+          <div class="mcp-foot">
+            <a href="cli.html">[ FULL CLI SPEC ↗ ]</a>
+            <a href="https://github.com/gladimdim/super-desktop/blob/master/CLI.md">[ CLI.md ON GITHUB ↗ ]</a>
           </div>
         </div>
       </div>
@@ -979,214 +918,29 @@
   </section>
 
   <section class="pane" id="faq">
-    <div class="pane-bar"><span class="path">[06] ~/faq</span><span class="badge">FOR PEOPLE &amp; AI ASSISTANTS</span></div>
+    <div class="pane-bar"><span class="path">[06] ~/faq</span><span class="badge">Q&amp;A</span></div>
     <div class="pane-body">
       <div class="faq">
         <details>
           <summary>What is SUPER DESKTOP?</summary>
-          <p>SUPER DESKTOP is a free, open-source (GPL-3.0) workspace for your AI coding agents on Omarchy Linux (Arch Linux with Hyprland). Press <code>SUPER + SHIFT + Q</code> and every agent you run appears in its own live terminal card. Press it again and they hide, still running in background tmux. Reach the same sessions from your other PCs, Android, iPhone, iPad, SD Launcher, or Telegram.</p>
+          <p>An open-source (GPL-3.0) Omarchy/Hyprland overlay (<code>SUPER + SHIFT + Q</code>) for background <code>tmux</code> AI agent cards, reachable from Android, iPhone, iPad, SD Launcher, and Telegram.</p>
         </details>
         <details>
           <summary>Does SUPER DESKTOP send my code, prompts, or API keys anywhere?</summary>
-          <p>No. There are no SUPER DESKTOP servers, no accounts, no API key vault, no analytics, and no tracking. Prompts, terminal output, files, and pictures travel directly between your own devices over certificate-pinned TLS 1.2/1.3 (LAN, Tailscale, or your private VPN). Your AI agents still talk to their own providers as they normally do.</p>
+          <p>No servers, accounts, key vaults, or analytics; devices communicate directly over pinned TLS 1.2/1.3 (LAN, Tailscale, or your private VPN).</p>
         </details>
         <details>
           <summary>Which AI coding agents does it support?</summary>
-          <p>Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, a plain shell, and any custom command you add.</p>
+          <p>Claude Code, Codex, OpenCode, Grok, Antigravity, Pi, Aider, Reasonix, DeepSeek, Hermes, Goose, Qwen Code, Crush, Kimi, Kiro, Cursor Agent, shells, and custom commands.</p>
         </details>
         <details>
-          <summary>Why are there both a free Android APK and paid Google Play / App Store editions?</summary>
-          <p>The <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk">GitHub Android APK</a> and <a href="https://github.com/gladimdim/omalauncher/releases/download/sd-v1.15.0/SD-Launcher-1.15.0.apk">SD Launcher APK</a> are free forever with all features unlocked and zero Play Billing. Google Play and the App Store provide store auto-updates with a 10-day trial and an optional one-time Pro purchase (never a subscription, never an account).</p>
+          <summary>Free APK vs Google Play / App Store?</summary>
+          <p>The <a href="https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk">GitHub Android APK</a> and <a href="https://github.com/gladimdim/omalauncher/releases/download/sd-v1.15.0/SD-Launcher-1.15.0.apk">SD Launcher APK</a> are free forever; store editions offer a 10-day trial + optional one-time Pro.</p>
         </details>
         <details>
-          <summary>Does it work away from home or on a headless PC?</summary>
-          <p>Yes. Pair over Wi-Fi, Tailscale, or your own VPN (WireGuard, ZeroTier, OpenVPN). Enable <strong>Settings → System launch</strong> (plus <code>loginctl enable-linger</code>) and SUPER DESKTOP restores your agents automatically on boot even with no monitor and nobody logged in.</p>
+          <summary>Do I need Rust or a compiler to install it?</summary>
+          <p>No — <code>install.sh</code> installs GPG-signed <code>super-desktop-bin</code> Pacman packages (<code>x86_64</code> / <code>aarch64</code>) updated via <code>omarchy update</code>, or compile from source with <code>SUPER_DESKTOP_BUILD_FROM_SOURCE=1</code>.</p>
         </details>
-        <details>
-          <summary>Do I need Rust or a compiler to install SUPER DESKTOP?</summary>
-          <p>No. <code>install.sh</code> installs prebuilt GPG-signed <code>super-desktop-bin</code> Arch/Omarchy packages for <code>x86_64</code> and <code>aarch64</code> from <code>https://superdesktop.dmytrogladkyi.com/repo/$arch</code> (key fingerprint <code>EBCB860628250D70F3C4D033304840D354676353</code>), updated automatically via <code>omarchy update</code>. Set <code>SUPER_DESKTOP_BUILD_FROM_SOURCE=1</code> if you want to compile from source instead.</p>
-        </details>
-        <details>
-          <summary>Can AI agents control SUPER DESKTOP?</summary>
-          <p>Yes. <code>super-desktop</code> provides structured JSON CLI commands with idempotent <code>--request-id</code> receipts, and <code>super-desktop mcp serve</code> exposes up to 88 tools over local stdio with granular opt-in switches in <strong>Settings → MCP</strong>.</p>
-        </details>
-      </div>
-    </div>
-  </section>
-
-  <section class="pane" id="install">
-    <div class="pane-bar"><span class="path">[07] ~/install</span><span class="badge">PREBUILT x86_64 &amp; aarch64 · ZERO COMPILE · SOURCE OPTION</span></div>
-    <div class="pane-body">
-      <div class="mcp-head">
-        <h2>INSTALL IN 10 SECONDS — <span>PREBUILT PACKAGES OR BUILD FROM SOURCE.</span></h2>
-        <p>Every Linux package ships native binaries (<code>super-desktop</code>, <code>super-desktop-client</code>, and <code>sd-qml-host</code>) for both <code>x86_64</code> and <code>aarch64</code> (ARM64) — signed with Ed25519 GPG key <code>EBCB860628250D70F3C4D033304840D354676353</code> (<a href="repo/super-desktop.gpg">super-desktop.gpg</a>). Pick the install variant that fits your workflow:</p>
-      </div>
-
-      <div style="overflow-x:auto;margin-bottom:16px">
-        <table>
-          <thead>
-            <tr>
-              <th>Install Method</th>
-              <th>CPU Platforms</th>
-              <th>Rust / Compiler</th>
-              <th>Updates</th>
-              <th>Best For</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><strong>1. <code>install.sh</code> (Default)</strong></td>
-              <td><code>x86_64</code>, <code>aarch64</code></td>
-              <td>None (~10s)</td>
-              <td>Automatic (<code>omarchy update</code>)</td>
-              <td>Fastest 1-command Omarchy setup</td>
-            </tr>
-            <tr>
-              <td><strong>2. Manual Pacman Repo (<code>super-desktop-bin</code>)</strong></td>
-              <td><code>x86_64</code>, <code>aarch64</code></td>
-              <td>None (~10s)</td>
-              <td>Automatic (<code>omarchy update</code> / <code>pacman -Syu</code>)</td>
-              <td>Users who skip <code>curl | bash</code></td>
-            </tr>
-            <tr>
-              <td><strong>3. Direct <code>.pkg.tar.zst</code> / Pinned Tag</strong></td>
-              <td><code>x86_64</code>, <code>aarch64</code></td>
-              <td>None (binary releases)</td>
-              <td>Manual (<code>pacman -U</code>, or add repo later)</td>
-              <td>Version pinning / offline install</td>
-            </tr>
-            <tr>
-              <td><strong>4. Build from Source (Rust / Git)</strong></td>
-              <td>Any Arch / Omarchy</td>
-              <td>Rust 1.92+ &amp; <code>base-devel</code></td>
-              <td>In-app <strong>Settings → Updates</strong> or <code>./rebuild.sh</code></td>
-              <td>Developers, <code>master</code> branch, custom patches</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="tabs" role="tablist" aria-label="Install methods">
-        <button role="tab" type="button" aria-selected="true" aria-controls="inst-auto" id="tab-inst-auto">1. Quick Install (install.sh)</button>
-        <button role="tab" type="button" aria-selected="false" aria-controls="inst-pacman" id="tab-inst-pacman">2. Manual Pacman Repo</button>
-        <button role="tab" type="button" aria-selected="false" aria-controls="inst-pin" id="tab-inst-pin">3. Direct .pkg.tar.zst / Pin Release</button>
-        <button role="tab" type="button" aria-selected="false" aria-controls="inst-source" id="tab-inst-source">4. Build from Source (Rust / Dev)</button>
-      </div>
-
-      <div class="panel" id="inst-auto" role="tabpanel" aria-labelledby="tab-inst-auto">
-        <div class="cmd"><code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code><button type="button" data-copy="cmd-install">COPY</button></div>
-        <div class="grid-3" style="margin-top:14px">
-          <div class="box">
-            <h3>// 1. VERIFIES &amp; REGISTERS</h3>
-            <p>Detects <code>x86_64</code> or <code>aarch64</code>, verifies key <code>EBCB860628250D70F3C4D033304840D354676353</code>, writes <code>/etc/pacman.d/super-desktop.conf</code>, and installs an Omarchy <code>pre-refresh-pacman</code> hook.</p>
-          </div>
-          <div class="box">
-            <h3>// 2. SAFE PACMAN INSTALL</h3>
-            <p>Guards against Arch partial library upgrades (runs <code>omarchy update</code> first if needed) and installs <code>super-desktop-bin</code> + runtime deps with zero Rust compilation.</p>
-          </div>
-          <div class="box">
-            <h3>// 3. SETUP &amp; MIGRATION</h3>
-            <p>Runs <code>super-desktop-setup</code> (or <code>--migrate</code> on earlier source installs), preserves notes/shortcuts/settings, reloads Hyprland, and restarts the daemon cleanly.</p>
-          </div>
-        </div>
-        <p style="margin:12px 0 0;color:var(--muted);font-size:13px">Want to inspect before running? Read <a href="https://github.com/gladimdim/super-desktop/blob/master/install.sh">install.sh on GitHub</a>. If the binary repo is not yet active for your architecture or release tag, <code>install.sh</code> automatically falls back to building from source.</p>
-      </div>
-
-      <div class="panel" id="inst-pacman" role="tabpanel" aria-labelledby="tab-inst-pacman" hidden>
-        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">Prefer a minimal script just for the signed Pacman repo (without the full <code>install.sh</code> wrapper)? Paste this one-liner to verify key <code>EBCB860628250D70F3C4D033304840D354676353</code>, configure <code>/etc/pacman.d/super-desktop.conf</code> + Omarchy refresh hook, install <code>super-desktop-bin</code>, and run <code>super-desktop-setup</code>:</p>
-        <div class="cmd"><code id="cmd-pacman-repo-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-repo.sh | bash</code><button type="button" data-copy="cmd-pacman-repo-sh">COPY</button></div>
-        <p style="margin:8px 0 14px;color:var(--muted);font-size:12.5px"><a href="install/pacman-repo.sh" target="_blank" rel="noopener">[VIEW pacman-repo.sh ↗]</a> · Works on both <code>x86_64</code> and <code>aarch64</code>, zero Rust/compilers required.</p>
-        <div class="cmd"><code id="cmd-pacman-hook-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/pacman-hook.sh | bash</code><button type="button" data-copy="cmd-pacman-hook-sh">COPY</button></div>
-        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px"><a href="install/pacman-hook.sh" target="_blank" rel="noopener">[VIEW pacman-hook.sh ↗]</a> · Optional standalone Omarchy <code>pre-refresh-pacman</code> hook (keeps <code>[super-desktop]</code> enabled when switching channels).</p>
-        <details class="more">
-          <summary>Or copy the raw manual commands (no curl | bash)</summary>
-          <div class="mcp-box" style="margin-top:10px">
-            <div class="mcp-bar">
-              <span>MANUAL SIGNED PACMAN REPOSITORY SETUP (IDEMPOTENT)</span>
-              <button type="button" data-copy="cmd-pacman-repo">COPY</button>
-            </div>
-            <pre><code id="cmd-pacman-repo">curl -fsSL https://superdesktop.dmytrogladkyi.com/repo/super-desktop.gpg -o /tmp/super-desktop.gpg
-gpg --show-keys --with-fingerprint /tmp/super-desktop.gpg   # expect EBCB 8606 2825 0D70 F3C4  D033 3048 40D3 5467 6353
-sudo pacman-key --add /tmp/super-desktop.gpg &amp;&amp; sudo pacman-key --lsign-key EBCB860628250D70F3C4D033304840D354676353
-printf '[super-desktop]\nSigLevel = Required DatabaseRequired\nServer = https://superdesktop.dmytrogladkyi.com/repo/$arch\n' | sudo tee /etc/pacman.d/super-desktop.conf
-grep -qxF 'Include = /etc/pacman.d/super-desktop.conf' /etc/pacman.conf || echo 'Include = /etc/pacman.d/super-desktop.conf' | sudo tee -a /etc/pacman.conf
-sudo pacman -Syu super-desktop-bin &amp;&amp; super-desktop-setup</code></pre>
-            <div class="mcp-foot">
-              <span>Migrating from an earlier source install? Run <code>/usr/bin/super-desktop-setup --migrate</code> instead, then restart: <code>/usr/bin/super-desktop kill &amp;&amp; /usr/bin/super-desktop toggle</code>.</span>
-            </div>
-          </div>
-          <div class="mcp-box" style="margin-top:12px">
-            <div class="mcp-bar">
-              <span>OPTIONAL: OMARCHY REFRESH HOOK (KEEPS REPO ACROSS CHANNEL SWITCHES)</span>
-              <button type="button" data-copy="cmd-pacman-hook">COPY</button>
-            </div>
-            <pre><code id="cmd-pacman-hook">mkdir -p ~/.config/omarchy/hooks/pre-refresh-pacman.d
-cat &lt;&lt;'EOF' &gt; ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop
-#!/bin/bash
-CONF=/etc/pacman.conf
-SNIPPET=/etc/pacman.d/super-desktop.conf
-MARKER="Include = $SNIPPET"
-[[ -r $SNIPPET ]] || exit 0
-grep -qxF "$MARKER" "$CONF" &amp;&amp; exit 0
-if grep -q '^\[omarchy\]' "$CONF"; then
-  sudo sed -i "0,/^\[omarchy\]/s||$MARKER\n\n[omarchy]|" "$CONF"
-else
-  printf '\n%s\n' "$MARKER" | sudo tee -a "$CONF" &gt;/dev/null
-fi
-EOF
-chmod 755 ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop</code></pre>
-          </div>
-        </details>
-      </div>
-
-      <div class="panel" id="inst-pin" role="tabpanel" aria-labelledby="tab-inst-pin" hidden>
-        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">Install a prebuilt <code>.pkg.tar.zst</code> directly from <a href="https://github.com/gladimdim/super-desktop/releases">GitHub Releases</a> (verified against <code>SHA256SUMS</code>, no repo added to <code>/etc/pacman.conf</code>). Adding the <code>[super-desktop]</code> repo later still upgrades it cleanly in place.</p>
-        <div class="cmd"><code id="cmd-direct-pkg-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | bash</code><button type="button" data-copy="cmd-direct-pkg-sh">COPY</button></div>
-        <p style="margin:8px 0 14px;color:var(--muted);font-size:12.5px"><a href="install/direct-pkg.sh" target="_blank" rel="noopener">[VIEW direct-pkg.sh ↗]</a> · Fetches the newest binary release for your CPU (<code>x86_64</code> or <code>aarch64</code>) and verifies <code>SHA256SUMS</code>.</p>
-        <div class="cmd"><code id="cmd-version">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | VER=2.2.0 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
-        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">Pin any exact binary release via <code>VER=X.Y.Z</code> (for older pre-binary tags like <code>v2.1.2</code>, run <code>install.sh</code> with <code>SUPER_DESKTOP_VERSION=v2.1.2</code>).</p>
-        <details class="more">
-          <summary>Or copy the raw pacman -U commands</summary>
-          <div class="mcp-box" style="margin-top:10px">
-            <div class="mcp-bar">
-              <span>DIRECT pacman -U FROM GITHUB RELEASES</span>
-              <button type="button" data-copy="cmd-pacman-u">COPY</button>
-            </div>
-            <pre><code id="cmd-pacman-u">ARCH=$(uname -m)
-VER=2.2.0   # pick any binary release on GitHub Releases
-sudo pacman -U "https://github.com/gladimdim/super-desktop/releases/download/v${VER}/super-desktop-bin-${VER}-1-${ARCH}.pkg.tar.zst"
-super-desktop-setup</code></pre>
-            <div class="mcp-foot"><span>See <a href="https://github.com/gladimdim/super-desktop/releases">GitHub Releases</a> for available versions and <code>SHA256SUMS</code>.</span></div>
-          </div>
-        </details>
-      </div>
-
-      <div class="panel" id="inst-source" role="tabpanel" aria-labelledby="tab-inst-source" hidden>
-        <p style="margin:0 0 12px;color:var(--muted);font-size:13px">Want to compile locally, track unreleased commits on <code>master</code>, or use in-app <strong>⚙ Settings → Updates</strong> rebuilds? These scripts install Rust 1.92+ via <code>rustup</code> (<code>--no-modify-path</code>) and build release binaries + <code>sd-qml-host</code> under <code>~/.local/share/super-desktop/source</code>:</p>
-        <div class="cmd"><code id="cmd-source-build">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/source.sh | bash</code><button type="button" data-copy="cmd-source-build">COPY</button></div>
-        <p style="margin:8px 0 14px;color:var(--muted);font-size:12.5px"><a href="install/source.sh" target="_blank" rel="noopener">[VIEW source.sh ↗]</a> · Compiles the latest tagged release from source instead of fetching <code>super-desktop-bin</code>.</p>
-        <div class="cmd"><code id="cmd-source-master">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/master.sh | bash</code><button type="button" data-copy="cmd-source-master">COPY</button></div>
-        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px"><a href="install/master.sh" target="_blank" rel="noopener">[VIEW master.sh ↗]</a> · Compiles and tracks unreleased commits on <code>master</code>.</p>
-        <details class="more">
-          <summary>Or clone and build manually for local development</summary>
-          <div class="mcp-box" style="margin-top:10px">
-            <div class="mcp-bar">
-              <span>LOCAL DEVELOPER CHECKOUT</span>
-              <button type="button" data-copy="cmd-dev-clone">COPY</button>
-            </div>
-            <pre><code id="cmd-dev-clone">git clone https://github.com/gladimdim/super-desktop.git
-cd super-desktop &amp;&amp; ./install.sh
-# after local edits:
-./rebuild.sh</code></pre>
-            <div class="mcp-foot"><span>Keeps your git state untouched and links <code>~/.local/bin/super-desktop</code> to your clone.</span></div>
-          </div>
-        </details>
-      </div>
-
-      <div class="vid-box">
-        <video controls preload="none" playsinline width="1920" height="1080" poster="video/super-desktop-trailer-poster.webp">
-          <source src="video/super-desktop-trailer.mp4" type="video/mp4">
-        </video>
       </div>
     </div>
   </section>
@@ -1203,6 +957,7 @@ cd super-desktop &amp;&amp; ./install.sh
       <a href="llms.txt">llms.txt</a>
       <a href="privacy.html">privacy</a>
       <a href="privacy-ios.html">privacy-ios</a>
+      <a href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">app-store</a>
       <a href="https://github.com/gladimdim/super-desktop/blob/master/SECURITY.md">SECURITY.md</a>
       <a href="https://github.com/gladimdim/super-desktop/releases">releases</a>
       <a href="https://github.com/gladimdim/super-desktop">github</a>
@@ -1211,14 +966,41 @@ cd super-desktop &amp;&amp; ./install.sh
   </div>
 </footer>
 
-<script src="assets/demo-model.js" defer></script>
-<script src="assets/demo-stage.js" defer></script>
-<script src="assets/demo-plugins.js" defer></script>
-<script src="assets/demo-phone.js" defer></script>
-<script src="assets/main.js" defer></script>
-<script src="assets/site-ui.js" defer></script>
+<script src="assets/site-ui.js?v=2" defer></script>
 <script>
   document.addEventListener("DOMContentLoaded", function () {
+    document.querySelectorAll("[role='tablist']").forEach(function (list) {
+      var tabs = Array.prototype.slice.call(list.querySelectorAll("[role='tab']"));
+      tabs.forEach(function (tab) {
+        tab.addEventListener("click", function () {
+          tabs.forEach(function (t) {
+            var on = t === tab;
+            t.setAttribute("aria-selected", String(on));
+            var panel = document.getElementById(t.getAttribute("aria-controls"));
+            if (!panel) return;
+            panel.hidden = !on;
+            var v = panel.querySelector("video");
+            if (v && !on) v.pause();
+          });
+        });
+      });
+    });
+
+    document.querySelectorAll("[data-copy]").forEach(function (btn) {
+      var orig = btn.textContent;
+      btn.addEventListener("click", async function () {
+        var target = document.getElementById(btn.dataset.copy);
+        if (!target) return;
+        try {
+          await navigator.clipboard.writeText(target.textContent);
+          btn.textContent = "Copied ✓";
+        } catch (e) {
+          btn.textContent = "Select and copy";
+        }
+        setTimeout(function () { btn.textContent = orig; }, 1800);
+      });
+    });
+
     var root = document.documentElement;
     var btn = document.getElementById("mode-toggle");
     if (!btn) return;
@@ -1228,9 +1010,6 @@ cd super-desktop &amp;&amp; ./install.sh
       btn.textContent = isLight ? "🌙" : "☀️";
       btn.setAttribute("aria-pressed", String(isLight));
       btn.title = isLight ? "Switch to dark terminal theme" : "Switch to white terminal theme";
-      if (window.SD && window.SD.store) {
-        window.SD.store.setTheme(isLight ? "latte" : "tokyo");
-      }
     }
     sync(root.dataset.mode === "light" ? "light" : "dark");
     btn.addEventListener("click", function () {
