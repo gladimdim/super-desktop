@@ -10,6 +10,16 @@ REPO_URL="${SUPER_DESKTOP_PACMAN_REPO_URL:-https://superdesktop.dmytrogladkyi.co
 REPO_FPR="EBCB860628250D70F3C4D033304840D354676353"
 REPO_CONF="${SUPER_DESKTOP_PACMAN_REPO_CONF:-/etc/pacman.d/super-desktop.conf}"
 PACMAN_CONF="${SUPER_DESKTOP_PACMAN_CONF:-/etc/pacman.conf}"
+SETUP_BIN="${SUPER_DESKTOP_SETUP_BIN:-/usr/bin/super-desktop-setup}"
+
+TEMP_DIRS=()
+cleanup() {
+    local d
+    for d in "${TEMP_DIRS[@]:-}"; do
+        [[ -z "$d" ]] || rm -rf "$d"
+    done
+}
+trap cleanup EXIT
 
 die() {
     printf 'Error: %s\n' "$*" >&2
@@ -23,32 +33,30 @@ import_key() {
     fi
     local work keyfile gpghome match
     work="$(mktemp -d)"
+    TEMP_DIRS+=("$work")
     keyfile="$work/super-desktop.gpg"
     gpghome="$work/gnupg"
     mkdir -p "$gpghome"
     chmod 700 "$gpghome"
-    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$keyfile" "$REPO_URL/super-desktop.gpg" || {
-        rm -rf "$work"
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$keyfile" "$REPO_URL/super-desktop.gpg" ||
         die "Could not download $REPO_URL/super-desktop.gpg"
-    }
     match="$(
         GNUPGHOME="$gpghome" gpg --batch --show-keys --with-colons "$keyfile" 2>/dev/null |
             awk -F: '$1 == "pub" { in_pub = 1; next } $1 == "sub" { in_pub = 0 } in_pub && $1 == "fpr" { print $10; in_pub = 0 }' |
             grep -Fx "$REPO_FPR" || true
     )"
     if [[ -z "$match" ]]; then
-        rm -rf "$work"
         die "Downloaded key does not match expected fingerprint $REPO_FPR"
     fi
     sudo pacman-key --add "$keyfile" </dev/null
     sudo pacman-key --lsign-key "$REPO_FPR" </dev/null
-    rm -rf "$work"
     printf '✓ Trusted SUPER DESKTOP signing key (%s)\n' "$REPO_FPR"
 }
 
 configure_repo() {
     local work repo_tmp conf_tmp
     work="$(mktemp -d)"
+    TEMP_DIRS+=("$work")
     repo_tmp="$work/super-desktop.conf"
     cat >"$repo_tmp" <<EOF
 [super-desktop]
@@ -72,12 +80,12 @@ EOF
         fi
         sudo install -m 644 "$conf_tmp" "$PACMAN_CONF" </dev/null
     fi
-    rm -rf "$work"
 
-    local hook_dir="$HOME/.config/omarchy/hooks/pre-refresh-pacman.d"
-    local hook_file="$hook_dir/super-desktop"
-    mkdir -p "$hook_dir"
-    cat >"$hook_file" <<'EOF'
+    if command -v omarchy >/dev/null 2>&1 || [[ -d /usr/share/omarchy || -d "$HOME/.local/share/omarchy" ]]; then
+        local hook_dir="$HOME/.config/omarchy/hooks/pre-refresh-pacman.d"
+        local hook_file="$hook_dir/super-desktop"
+        mkdir -p "$hook_dir"
+        cat >"$hook_file" <<'EOF'
 #!/bin/bash
 CONF=/etc/pacman.conf
 SNIPPET=/etc/pacman.d/super-desktop.conf
@@ -90,8 +98,11 @@ else
     printf '\n%s\n' "$MARKER" | sudo tee -a "$CONF" >/dev/null
 fi
 EOF
-    chmod 755 "$hook_file"
-    printf '✓ Configured [super-desktop] Pacman repository and Omarchy refresh hook\n'
+        chmod 755 "$hook_file"
+        printf '✓ Configured [super-desktop] Pacman repository and Omarchy refresh hook\n'
+    else
+        printf '✓ Configured [super-desktop] Pacman repository\n'
+    fi
 }
 
 sync_super_desktop_db() {
@@ -154,12 +165,40 @@ install_package() {
 run_setup() {
     local bin_dst="$HOME/.local/bin/super-desktop"
     local app_dst="$HOME/.local/share/applications/super-desktop.desktop"
-    if [[ -L "$bin_dst" && "$(readlink "$bin_dst" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
-        [[ -e "$bin_dst" && ! -L "$bin_dst" ]] ||
-        [[ -e "$app_dst" ]]; then
-        /usr/bin/super-desktop-setup --migrate
+    if [[ -f "$HOME/.config/hypr/hyprland.lua" ]]; then
+        if [[ -L "$bin_dst" && "$(readlink "$bin_dst" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
+            [[ -e "$bin_dst" && ! -L "$bin_dst" ]] ||
+            [[ -e "$app_dst" ]]; then
+            "$SETUP_BIN" --migrate
+        else
+            "$SETUP_BIN"
+        fi
+        return 0
+    fi
+
+    if [[ -L "$bin_dst" && "$(readlink "$bin_dst" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]]; then
+        mv -f "$bin_dst" "${bin_dst}.before-package"
+        mkdir -p "$(dirname "$bin_dst")"
+        ln -sf /usr/bin/super-desktop "$bin_dst"
+    fi
+    if [[ -f "$app_dst" ]] && grep -q "super-desktop" "$app_dst"; then
+        mv -f "$app_dst" "${app_dst}.before-package"
+    fi
+
+    local hypr_conf="$HOME/.config/hypr/hyprland.conf"
+    if [[ -f "$hypr_conf" ]]; then
+        if ! grep -qF "# >>> super-desktop >>>" "$hypr_conf"; then
+            [[ -e "${hypr_conf}.before-super-desktop" ]] || cp -a "$hypr_conf" "${hypr_conf}.before-super-desktop"
+            cat >>"$hypr_conf" <<'EOF'
+
+# >>> super-desktop >>>
+exec-once = super-desktop daemon
+bindr = SUPER SHIFT, Q, exec, super-desktop toggle
+# <<< super-desktop <<<
+EOF
+        fi
     else
-        /usr/bin/super-desktop-setup
+        printf 'Note: Plain Arch setup skipped Omarchy Lua hooks. Add `super-desktop daemon` and `super-desktop toggle` to your Wayland compositor config.\n'
     fi
 }
 
@@ -172,6 +211,7 @@ main() {
     command -v pacman >/dev/null 2>&1 || die "pacman not found."
     command -v gpg >/dev/null 2>&1 || die "gpg not found."
     command -v curl >/dev/null 2>&1 || die "curl not found."
+    command -v sudo >/dev/null 2>&1 || die "sudo not found."
 
     import_key
     configure_repo

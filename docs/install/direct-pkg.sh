@@ -7,8 +7,20 @@
 #   curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | VER=2.2.0 bash
 set -euo pipefail
 
-REPO_URL="https://superdesktop.dmytrogladkyi.com/repo"
+REPO_URL="${SUPER_DESKTOP_PACMAN_REPO_URL:-https://superdesktop.dmytrogladkyi.com/repo}"
+RELEASE_BASE_URL="${SUPER_DESKTOP_RELEASE_BASE_URL:-https://github.com/gladimdim/super-desktop/releases/download}"
+RELEASE_LATEST_API="${SUPER_DESKTOP_RELEASE_LATEST_API:-https://api.github.com/repos/gladimdim/super-desktop/releases/latest}"
+SETUP_BIN="${SUPER_DESKTOP_SETUP_BIN:-/usr/bin/super-desktop-setup}"
 REPO_FPR="EBCB860628250D70F3C4D033304840D354676353"
+
+TEMP_DIRS=()
+cleanup() {
+    local d
+    for d in "${TEMP_DIRS[@]:-}"; do
+        [[ -z "$d" ]] || rm -rf "$d"
+    done
+}
+trap cleanup EXIT
 
 die() {
     printf 'Error: %s\n' "$*" >&2
@@ -27,7 +39,7 @@ resolve_tag() {
     local tag
     tag="$(
         curl --proto '=https' --tlsv1.2 -fsSL --retry 3 \
-            "https://api.github.com/repos/gladimdim/super-desktop/releases/latest" |
+            "$RELEASE_LATEST_API" |
             sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
     )"
     [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
@@ -42,6 +54,7 @@ maybe_import_key() {
     command -v gpg >/dev/null 2>&1 || return 0
     local work keyfile gpghome match
     work="$(mktemp -d)"
+    TEMP_DIRS+=("$work")
     keyfile="$work/super-desktop.gpg"
     gpghome="$work/gnupg"
     mkdir -p "$gpghome"
@@ -57,7 +70,6 @@ maybe_import_key() {
             sudo pacman-key --lsign-key "$REPO_FPR" </dev/null
         fi
     fi
-    rm -rf "$work"
 }
 
 main() {
@@ -70,14 +82,16 @@ main() {
     esac
     command -v pacman >/dev/null 2>&1 || die "pacman not found."
     command -v curl >/dev/null 2>&1 || die "curl not found."
+    command -v sudo >/dev/null 2>&1 || die "sudo not found."
+    command -v sha256sum >/dev/null 2>&1 || die "sha256sum not found."
 
     tag="$(resolve_tag)"
     ver="${tag#v}"
     pkg_name="super-desktop-bin-${ver}-1-${arch}.pkg.tar.zst"
-    base_url="https://github.com/gladimdim/super-desktop/releases/download/$tag"
+    base_url="${RELEASE_BASE_URL%/}/$tag"
 
     work="$(mktemp -d)"
-    trap 'rm -rf "$work"' EXIT
+    TEMP_DIRS+=("$work")
 
     printf 'Downloading %s (%s)...\n' "$pkg_name" "$tag"
     curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$work/$pkg_name" "$base_url/$pkg_name" ||
@@ -99,12 +113,38 @@ main() {
 
     local bin_dst="$HOME/.local/bin/super-desktop"
     local app_dst="$HOME/.local/share/applications/super-desktop.desktop"
-    if [[ -L "$bin_dst" && "$(readlink "$bin_dst" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
-        [[ -e "$bin_dst" && ! -L "$bin_dst" ]] ||
-        [[ -e "$app_dst" ]]; then
-        /usr/bin/super-desktop-setup --migrate
+    if [[ -f "$HOME/.config/hypr/hyprland.lua" ]]; then
+        if [[ -L "$bin_dst" && "$(readlink "$bin_dst" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
+            [[ -e "$bin_dst" && ! -L "$bin_dst" ]] ||
+            [[ -e "$app_dst" ]]; then
+            "$SETUP_BIN" --migrate
+        else
+            "$SETUP_BIN"
+        fi
     else
-        /usr/bin/super-desktop-setup
+        if [[ -L "$bin_dst" && "$(readlink "$bin_dst" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]]; then
+            mv -f "$bin_dst" "${bin_dst}.before-package"
+            mkdir -p "$(dirname "$bin_dst")"
+            ln -sf /usr/bin/super-desktop "$bin_dst"
+        fi
+        if [[ -f "$app_dst" ]] && grep -q "super-desktop" "$app_dst"; then
+            mv -f "$app_dst" "${app_dst}.before-package"
+        fi
+        local hypr_conf="$HOME/.config/hypr/hyprland.conf"
+        if [[ -f "$hypr_conf" ]]; then
+            if ! grep -qF "# >>> super-desktop >>>" "$hypr_conf"; then
+                [[ -e "${hypr_conf}.before-super-desktop" ]] || cp -a "$hypr_conf" "${hypr_conf}.before-super-desktop"
+                cat >>"$hypr_conf" <<'EOF'
+
+# >>> super-desktop >>>
+exec-once = super-desktop daemon
+bindr = SUPER SHIFT, Q, exec, super-desktop toggle
+# <<< super-desktop <<<
+EOF
+            fi
+        else
+            printf 'Note: Plain Arch setup skipped Omarchy Lua hooks. Add `super-desktop daemon` and `super-desktop toggle` to your Wayland compositor config.\n'
+        fi
     fi
     printf '✓ Installed %s! Press SUPER + SHIFT + Q or run: super-desktop toggle\n' "$pkg_name"
 }

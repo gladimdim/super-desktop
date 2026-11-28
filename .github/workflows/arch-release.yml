@@ -177,8 +177,64 @@ jobs:
           name: release-assets
           path: release-assets/
 
-  publish-release:
+  verify-fresh-omarchy:
     needs: build-repo
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          path: src
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/checkout@v4
+        with:
+          path: tools
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: release-assets
+
+      - name: Verify all installers on fresh Omarchy ${{ matrix.arch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_archive="release-assets/pacman-repo-${{ matrix.arch }}.tar.gz"
+          if [[ -f "$repo_archive" ]]; then
+            mkdir -p "repo/${{ matrix.arch }}"
+            tar -xzf "$repo_archive" -C "repo/${{ matrix.arch }}"
+            bash tools/tests/omarchy_fresh_release_test.sh \
+              --tag "$RELEASE_TAG" \
+              --arch "${{ matrix.arch }}" \
+              --release-assets release-assets \
+              --repo-dir "repo/${{ matrix.arch }}" \
+              --src-dir src \
+              --flows all \
+              --engine docker
+          else
+            echo "pacman-repo-${{ matrix.arch }}.tar.gz not present (unsigned build); verifying source installers..."
+            bash tools/tests/omarchy_fresh_release_test.sh \
+              --tag "$RELEASE_TAG" \
+              --arch "${{ matrix.arch }}" \
+              --release-assets release-assets \
+              --src-dir src \
+              --flows source \
+              --engine docker
+          fi
+
+  publish-release:
+    needs: [build-repo, verify-fresh-omarchy]
     if: github.event_name == 'release' || inputs.publish
     runs-on: ubuntu-latest
     permissions:

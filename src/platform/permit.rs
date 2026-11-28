@@ -9,7 +9,7 @@ impl Permit {
     /// Takes a slot while fewer than `max` are taken, else `None`.
     pub fn try_acquire(counter: &'static AtomicUsize, max: usize) -> Option<Self> {
         counter
-            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
                 (n < max).then_some(n + 1)
             })
             .ok()

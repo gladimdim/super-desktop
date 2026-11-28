@@ -329,6 +329,20 @@
   }
   .tabs button[aria-selected="true"] { border-color: var(--lime); background: var(--lime); color: var(--lime-fg); }
   .panel[hidden] { display: none; }
+  .distro-bar { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .distro-detect { font-size: 12px; color: var(--amber); }
+  .distro-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+  .distro-pills button {
+    padding: 6px 10px; border: 1px solid var(--line); background: var(--bar-bg); color: var(--muted);
+    font: 700 12px/1 var(--mono); cursor: pointer;
+  }
+  .distro-pills button[aria-pressed="true"] { border-color: var(--lime); background: var(--pill-active-bg); color: var(--lime); }
+  .distro-card {
+    border: 1px solid var(--line); background: var(--box-bg); padding: 10px 12px;
+    font-size: 12.5px; color: var(--muted);
+  }
+  .distro-card b { color: var(--lime); }
+  .distro-card code { color: var(--code-fg); }
 
   /* Full-visibility Brutalist Terminal Carousels */
   .car { display: flex; flex-direction: column; gap: 10px; outline: none; }
@@ -458,7 +472,7 @@
   </section>
 
   <section class="pane focus" id="install">
-    <div class="pane-bar"><span class="path">[01] ~/install-now</span><span class="badge">x86_64 · aarch64 · SIGNED PACMAN · SOURCE</span></div>
+    <div class="pane-bar"><span class="path">[01] ~/install-now</span><span class="badge">AUTO-DETECT · x86_64 · aarch64 · PACMAN · SOURCE</span></div>
     <div class="pane-body">
       <div class="tabs" role="tablist" aria-label="Install methods">
         <button role="tab" type="button" aria-selected="true" aria-controls="inst-auto" id="tab-inst-auto">Quick Install</button>
@@ -469,7 +483,20 @@
 
       <div class="panel" id="inst-auto" role="tabpanel" aria-labelledby="tab-inst-auto">
         <div class="cmd"><code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash</code><button type="button" data-copy="cmd-install">COPY</button></div>
-        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px"><code>x86_64</code> &amp; <code>aarch64</code> · GPG signed · updates via <code>omarchy update</code> · <a href="https://github.com/gladimdim/super-desktop/blob/master/install.sh" target="_blank" rel="noopener">[install.sh ↗]</a></p>
+        <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">One command auto-detects your Linux distro and routes to signed packages or native build instructions · <a href="https://github.com/gladimdim/super-desktop/blob/master/install.sh" target="_blank" rel="noopener">[install.sh ↗]</a></p>
+        <div class="distro-bar">
+          <div class="distro-detect" id="distro-detect-note">Auto-detects Omarchy, Arch Linux, Fedora 45+, Ubuntu 26.04+, Debian sid &amp; openSUSE Tumbleweed.</div>
+          <div class="distro-pills" role="group" aria-label="Preview Linux distribution path">
+            <button type="button" data-distro="omarchy" aria-pressed="true">Omarchy</button>
+            <button type="button" data-distro="arch" aria-pressed="false">Arch Linux</button>
+            <button type="button" data-distro="fedora" aria-pressed="false">Fedora 45+</button>
+            <button type="button" data-distro="ubuntu" aria-pressed="false">Ubuntu 26.04+ / Debian sid</button>
+            <button type="button" data-distro="opensuse" aria-pressed="false">openSUSE Tumbleweed</button>
+          </div>
+          <div class="distro-card" id="distro-detail">
+            <b>Omarchy (prebuilt signed Pacman):</b> Imports GPG key, enables <code>[super-desktop]</code> + refresh hook, installs <code>super-desktop-bin</code> (no Rust compilation), configures Hyprland Lua + theme hook. Updates via <code>omarchy update</code>.
+          </div>
+        </div>
       </div>
 
       <div class="panel" id="inst-pacman" role="tabpanel" aria-labelledby="tab-inst-pacman" hidden>
@@ -1000,6 +1027,59 @@ super-desktop harness launch codex --cwd ~/code/app --prompt "..."</code></pre>
         setTimeout(function () { btn.textContent = orig; }, 1800);
       });
     });
+
+    var distroInfo = {
+      omarchy: "<b>Omarchy (prebuilt signed Pacman):</b> Imports GPG key, enables <code>[super-desktop]</code> + refresh hook, installs <code>super-desktop-bin</code> (no Rust compilation), configures Hyprland Lua + theme hook. Updates via <code>omarchy update</code>.",
+      arch: "<b>Arch Linux (prebuilt signed Pacman):</b> Imports GPG key, enables <code>[super-desktop]</code>, installs <code>super-desktop-bin</code> (no compilation). Appends <code>SUPER + SHIFT + Q</code> to <code>~/.config/hypr/hyprland.conf</code> if present, or prints Wayland compositor snippets (requires <code>wlr-layer-shell</code>: Hyprland, Sway, Niri, KDE Plasma).",
+      fedora: "<b>Fedora 45+ (dnf + source build):</b> Installs GTK 4.24+, VTE 0.84+, <code>gtk4-layer-shell</code>, Qt 6, and Rust via <code>dnf</code>, compiles release binaries + <code>sd-qml-host</code>, and sets up desktop integration. Needs a <code>wlr-layer-shell</code> Wayland compositor (Hyprland, Sway, Niri, KDE Plasma — not GNOME/X11).",
+      ubuntu: "<b>Ubuntu 26.04+ / Debian sid (apt + source build):</b> Verifies <code>libgtk-4-dev &gt;= 4.18</code>, <code>libvte-2.91-gtk4-dev &gt;= 0.84</code>, and <code>libgtk4-layer-shell-dev</code> via <code>apt</code>, installs Rust + Qt 6, and compiles release binaries. Ubuntu 24.04 LTS and Debian 13 lack GTK 4.18 / VTE 0.84.",
+      opensuse: "<b>openSUSE Tumbleweed (zypper + source build):</b> Installs GTK 4.24+, VTE 0.84+ (<code>vte-devel</code>), <code>gtk4-layer-shell</code>, Qt 6, Rust, and GTK icon/font schemas via <code>zypper</code>, then compiles release binaries. Needs a <code>wlr-layer-shell</code> Wayland compositor."
+    };
+    var distroButtons = Array.prototype.slice.call(document.querySelectorAll("[data-distro]"));
+    var distroDetail = document.getElementById("distro-detail");
+    var distroNote = document.getElementById("distro-detect-note");
+    function selectDistro(key) {
+      if (!distroInfo[key] || !distroDetail) return;
+      distroButtons.forEach(function (b) {
+        b.setAttribute("aria-pressed", String(b.dataset.distro === key));
+      });
+      distroDetail.innerHTML = distroInfo[key];
+    }
+    distroButtons.forEach(function (b) {
+      b.addEventListener("click", function () { selectDistro(b.dataset.distro); });
+    });
+    if (distroNote) {
+      var ua = navigator.userAgent || "";
+      var plat = (navigator.userAgentData && navigator.userAgentData.platform) || "";
+      var detected = "";
+      var note = "";
+      if (/Android/i.test(ua)) {
+        note = "Android browser detected — SUPER DESKTOP desktop runs on Linux; use the Google Play or free APK links below for Android.";
+      } else if (/iPhone|iPad|iPod/i.test(ua)) {
+        note = "iOS/iPadOS browser detected — SUPER DESKTOP desktop runs on Linux; use the App Store link below for iPhone and iPad.";
+      } else if (/Mac|Macintosh/i.test(ua + " " + plat)) {
+        note = "macOS browser detected — Linux install.sh routes Omarchy, Arch, Fedora, Ubuntu/Debian & openSUSE automatically.";
+      } else if (/Ubuntu/i.test(ua)) {
+        detected = "ubuntu";
+        note = "Detected Ubuntu in browser UA — install.sh auto-routes to apt (Ubuntu 26.04+ required).";
+      } else if (/Debian/i.test(ua)) {
+        detected = "ubuntu";
+        note = "Detected Debian in browser UA — install.sh auto-routes to apt (Debian sid/forky+ required).";
+      } else if (/Fedora/i.test(ua)) {
+        detected = "fedora";
+        note = "Detected Fedora in browser UA — install.sh auto-routes to dnf (Fedora 45+ required).";
+      } else if (/openSUSE|SUSE/i.test(ua)) {
+        detected = "opensuse";
+        note = "Detected openSUSE in browser UA — install.sh auto-routes to zypper (Tumbleweed).";
+      } else if (/Arch/i.test(ua)) {
+        detected = "arch";
+        note = "Detected Arch Linux in browser UA — install.sh auto-routes to signed Pacman packages.";
+      } else if (/Linux/i.test(ua + " " + plat)) {
+        note = "Linux detected — one install.sh auto-detects Omarchy, Arch, Fedora, Ubuntu/Debian & openSUSE (select a distro below to preview its path).";
+      }
+      if (detected) selectDistro(detected);
+      if (note) distroNote.textContent = note;
+    }
 
     var root = document.documentElement;
     var btn = document.getElementById("mode-toggle");

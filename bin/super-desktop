@@ -14,11 +14,21 @@ if [[ -x "$CLIENT_BIN" && -x "$SCRIPT_DIR/target/release/super-desktop" ]]; then
 fi
 
 # Ensure GTK4 Layer Shell library is preloaded if present
-LAYER_SHELL_LIB="/usr/lib/libgtk4-layer-shell.so"
-if [[ -f "$LAYER_SHELL_LIB" ]]; then
-    if [[ ":$LD_PRELOAD:" != *":$LAYER_SHELL_LIB:"* ]]; then
-        export LD_PRELOAD="$LAYER_SHELL_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
-    fi
+if [[ ":$LD_PRELOAD:" != *"libgtk4-layer-shell.so"* ]]; then
+    for LAYER_SHELL_LIB in \
+        /usr/lib/libgtk4-layer-shell.so \
+        /usr/lib/libgtk4-layer-shell.so.0 \
+        /usr/lib64/libgtk4-layer-shell.so \
+        /usr/lib64/libgtk4-layer-shell.so.0 \
+        /usr/lib/x86_64-linux-gnu/libgtk4-layer-shell.so \
+        /usr/lib/x86_64-linux-gnu/libgtk4-layer-shell.so.0 \
+        /usr/lib/aarch64-linux-gnu/libgtk4-layer-shell.so \
+        /usr/lib/aarch64-linux-gnu/libgtk4-layer-shell.so.0; do
+        if [[ -f "$LAYER_SHELL_LIB" ]]; then
+            export LD_PRELOAD="$LAYER_SHELL_LIB${LD_PRELOAD:+:$LD_PRELOAD}"
+            break
+        fi
+    done
 fi
 
 RUST_BIN="$SCRIPT_DIR/target/release/super-desktop"

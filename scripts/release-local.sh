@@ -15,6 +15,9 @@
 #   --output DIR       Output directory (default: /tmp/super-desktop-release-<tag>)
 #   --engine NAME      Container engine: podman or docker (default: auto-detect)
 #   --no-cache         Pass --no-cache when building the container image
+#   --fresh-flows SPEC Fresh Omarchy test flows: all, pacman, or source
+#                      (default: all on native arch, pacman on cross-arch)
+#   --skip-fresh-test  Skip end-to-end fresh Omarchy installer verification
 #   --upload           Upload staged assets to GitHub Release <tag> and trigger
 #                      pages.yml if both pacman-repo-*.tar.gz archives exist
 #   -h, --help         Show this help text
@@ -29,10 +32,12 @@ NO_SIGN=0
 OUTPUT=""
 ENGINE=""
 NO_CACHE=0
+FRESH_FLOWS=""
+SKIP_FRESH_TEST=0
 UPLOAD=0
 
 usage() {
-    sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while (($# > 0)); do
@@ -63,6 +68,14 @@ while (($# > 0)); do
         ;;
     --no-cache)
         NO_CACHE=1
+        shift
+        ;;
+    --fresh-flows)
+        FRESH_FLOWS="${2:?Missing value for --fresh-flows}"
+        shift 2
+        ;;
+    --skip-fresh-test)
+        SKIP_FRESH_TEST=1
         shift
         ;;
     --upload)
@@ -232,7 +245,7 @@ trap cleanup EXIT
 
 STAGE_SRC="$WORK_TMP/src"
 echo "==> Exporting exact annotated tag $TAG..."
-git clone --no-local --branch "$TAG" --depth 1 "file://$ROOT" "$STAGE_SRC" >/dev/null 2>&1
+git clone --no-local --branch "$TAG" "file://$ROOT" "$STAGE_SRC" >/dev/null 2>&1
 grep -qxF "version = \"$VER\"" "$STAGE_SRC/Cargo.toml" || {
     echo "Error: $TAG Cargo.toml version does not match $VER" >&2
     exit 1
@@ -340,6 +353,35 @@ echo "==> Writing SHA256SUMS..."
     cd "$OUTPUT/release-assets"
     sha256sum *.tar.gz *.pkg.tar.zst >SHA256SUMS
 )
+
+if ((SKIP_FRESH_TEST == 0)); then
+    for arch in "${ARCHES[@]}"; do
+        flows_for_arch="$FRESH_FLOWS"
+        if [[ -z "$flows_for_arch" ]]; then
+            if [[ "$arch" == "$HOST_ARCH" ]]; then
+                flows_for_arch="all"
+            else
+                flows_for_arch="pacman"
+            fi
+        fi
+        fresh_args=(
+            --tag "$TAG"
+            --arch "$arch"
+            --release-assets "$OUTPUT/release-assets"
+            --src-dir "$STAGE_SRC"
+            --flows "$flows_for_arch"
+            --engine "$ENGINE"
+        )
+        if ((NO_SIGN == 0)); then
+            fresh_args+=(--repo-dir "$OUTPUT/repo/$arch")
+        fi
+        if ((NO_CACHE == 1)); then
+            fresh_args+=(--no-cache)
+        fi
+        echo "==> Running fresh Omarchy installer verification ($arch, flows=$flows_for_arch)..."
+        bash "$ROOT/tests/omarchy_fresh_release_test.sh" "${fresh_args[@]}"
+    done
+fi
 
 if ((UPLOAD == 1)); then
     echo "==> Uploading release assets to $TAG..."

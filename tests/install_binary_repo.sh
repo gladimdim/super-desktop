@@ -319,4 +319,418 @@ case_pinned_install() {
 }
 run_case pinned case_pinned_install
 
+# 6. Signing key fingerprint matches across fingerprint file and all installers.
+case_fingerprint_consistency() {
+    local expected fpr_install fpr_repo fpr_direct
+    expected="$(tr -d '[:space:]' <packaging/arch/super-desktop.gpg.fingerprint)"
+    [[ "$expected" =~ ^[0-9A-F]{40}$ ]]
+    fpr_install="$(sed -n 's/^REPO_KEY_FINGERPRINT="\([^"]*\)"$/\1/p' install.sh)"
+    fpr_repo="$(sed -n 's/^REPO_FPR="\([^"]*\)"$/\1/p' docs/install/pacman-repo.sh)"
+    fpr_direct="$(sed -n 's/^REPO_FPR="\([^"]*\)"$/\1/p' docs/install/direct-pkg.sh)"
+    [[ "$fpr_install" == "$expected" ]]
+    [[ "$fpr_repo" == "$expected" ]]
+    [[ "$fpr_direct" == "$expected" ]]
+}
+case_fingerprint_consistency
+
+# 7. Standalone docs/install/direct-pkg.sh exits 0 and cleans temp dirs (no unbound work trap).
+case_standalone_direct_pkg() {
+    local expected arch mock_bin mock_home mock_tmp out
+    expected="$(tr -d '[:space:]' <packaging/arch/super-desktop.gpg.fingerprint)"
+    arch="$(uname -m)"
+    mock_bin="$WORK_DIR/direct-bin"
+    mock_home="$WORK_DIR/direct-home"
+    mock_tmp="$WORK_DIR/direct-tmp"
+    mkdir -p "$mock_bin" "$mock_home" "$mock_tmp"
+
+    local pkg_name="super-desktop-bin-2.2.0-1-${arch}.pkg.tar.zst"
+    printf 'dummy-pkg\n' >"$WORK_DIR/$pkg_name"
+    local sha
+    sha="$(sha256sum "$WORK_DIR/$pkg_name" | awk '{ print $1 }')"
+    printf '%s  %s\n' "$sha" "$pkg_name" >"$WORK_DIR/direct-SHA256SUMS"
+    printf 'sig\n' >"$WORK_DIR/$pkg_name.sig"
+    printf '{"tag_name": "v2.2.0"}\n' >"$WORK_DIR/latest.json"
+
+    cat >"$mock_bin/curl" <<EOF
+#!/usr/bin/env bash
+out=""
+url=""
+while ((\$# > 0)); do
+    case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    --proto|--retry) shift 2 ;;
+    -*) shift ;;
+    *) url="\$1"; shift ;;
+    esac
+done
+case "\$url" in
+*releases/latest) cat "$WORK_DIR/latest.json" ;;
+*.pkg.tar.zst.sig) cp "$WORK_DIR/$pkg_name.sig" "\$out" ;;
+*.pkg.tar.zst) cp "$WORK_DIR/$pkg_name" "\$out" ;;
+*SHA256SUMS) cp "$WORK_DIR/direct-SHA256SUMS" "\$out" ;;
+*super-desktop.gpg) cp "$WORK_DIR/super-desktop.gpg" "\$out" ;;
+*) exit 22 ;;
+esac
+EOF
+    cat >"$mock_bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+"$@"
+EOF
+    cat >"$mock_bin/pacman" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--config" ]]; then
+    shift 2
+fi
+case "${1:-}" in
+-Sp)
+    if [[ "$*" == *"--print-format %n"* ]]; then
+        printf 'super-desktop-bin\n'
+    fi
+    exit 0
+    ;;
+-Q)
+    exit 1
+    ;;
+*)
+    exit 0
+    ;;
+esac
+EOF
+    cat >"$mock_bin/pacman-key" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+--list-keys) exit 1 ;;
+*) exit 0 ;;
+esac
+EOF
+    cat >"$mock_bin/gpg" <<EOF
+#!/usr/bin/env bash
+printf 'pub:-:255:22:%s:1700000000:::-:::scESC::::::23::0:\n' "$expected"
+printf 'fpr:::::::::%s:\n' "$expected"
+EOF
+    cat >"$mock_bin/super-desktop-setup" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$mock_bin"/*
+
+    out="$(
+        env -i PATH="$mock_bin:/usr/bin:/bin" HOME="$mock_home" TMPDIR="$mock_tmp" \
+            SUPER_DESKTOP_SETUP_BIN="$mock_bin/super-desktop-setup" \
+            SUPER_DESKTOP_PACMAN_REPO_URL="https://example.invalid/repo" \
+            SUPER_DESKTOP_RELEASE_BASE_URL="https://example.invalid/releases/download" \
+            SUPER_DESKTOP_RELEASE_LATEST_API="https://example.invalid/releases/latest" \
+            bash docs/install/direct-pkg.sh 2>&1
+    )"
+    grep -qF "✓ Installed $pkg_name!" <<<"$out"
+    ! grep -qF "unbound variable" <<<"$out"
+    [[ -z "$(ls -A "$mock_tmp")" ]]
+
+    # Also test explicit VER=2.2.0
+    out="$(
+        env -i PATH="$mock_bin:/usr/bin:/bin" HOME="$mock_home" TMPDIR="$mock_tmp" \
+            VER=2.2.0 \
+            SUPER_DESKTOP_SETUP_BIN="$mock_bin/super-desktop-setup" \
+            SUPER_DESKTOP_PACMAN_REPO_URL="https://example.invalid/repo" \
+            SUPER_DESKTOP_RELEASE_BASE_URL="https://example.invalid/releases/download" \
+            bash docs/install/direct-pkg.sh 2>&1
+    )"
+    grep -qF "✓ Installed $pkg_name!" <<<"$out"
+    [[ -z "$(ls -A "$mock_tmp")" ]]
+}
+case_standalone_direct_pkg
+
+# 8. Standalone docs/install/pacman-repo.sh and pacman-hook.sh configure repo, clean TMPDIR, and exit 0.
+case_standalone_pacman_repo_and_hook() {
+    local expected mock_bin mock_home mock_tmp pconf rconf
+    expected="$(tr -d '[:space:]' <packaging/arch/super-desktop.gpg.fingerprint)"
+    mock_bin="$WORK_DIR/repo-bin"
+    mock_home="$WORK_DIR/repo-home"
+    mock_tmp="$WORK_DIR/repo-tmp"
+    pconf="$WORK_DIR/repo-pacman.conf"
+    rconf="$WORK_DIR/repo-pacman.d/super-desktop.conf"
+    mkdir -p "$mock_bin" "$mock_home" "$mock_tmp"
+    printf '[omarchy]\nServer = https://pkgs.omarchy.org/stable/$arch\n' >"$pconf"
+
+    cat >"$mock_bin/curl" <<EOF
+#!/usr/bin/env bash
+out=""
+while ((\$# > 0)); do
+    if [[ "\$1" == "-o" ]]; then out="\$2"; shift 2; else shift; fi
+done
+cp "$WORK_DIR/super-desktop.gpg" "\$out"
+EOF
+    cat >"$mock_bin/gpg" <<EOF
+#!/usr/bin/env bash
+printf 'pub:-:255:22:%s:1700000000:::-:::scESC::::::23::0:\n' "$expected"
+printf 'fpr:::::::::%s:\n' "$expected"
+EOF
+    cat >"$mock_bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+mkdir) mkdir -p "${@:3}" ;;
+install)
+    mkdir -p "$(dirname "$5")"
+    cp "$4" "$5"
+    chmod "$3" "$5"
+    ;;
+*) "$@" ;;
+esac
+EOF
+    cat >"$mock_bin/pacman" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--config" ]]; then
+    shift 2
+fi
+case "${1:-}" in
+-Sp)
+    if [[ "$*" == *"--print-format %n"* ]]; then
+        printf 'super-desktop-bin\n'
+    fi
+    exit 0
+    ;;
+-Q)
+    exit 1
+    ;;
+*)
+    exit 0
+    ;;
+esac
+EOF
+    cat >"$mock_bin/pacman-key" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+--list-keys) exit 1 ;;
+*) exit 0 ;;
+esac
+EOF
+    cat >"$mock_bin/super-desktop-setup" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$mock_bin"/*
+
+    env -i PATH="$mock_bin:/usr/bin:/bin" HOME="$mock_home" TMPDIR="$mock_tmp" \
+        SUPER_DESKTOP_PACMAN_CONF="$pconf" \
+        SUPER_DESKTOP_PACMAN_REPO_CONF="$rconf" \
+        SUPER_DESKTOP_PACMAN_REPO_URL="https://example.invalid/repo" \
+        SUPER_DESKTOP_SETUP_BIN="$mock_bin/super-desktop-setup" \
+        bash docs/install/pacman-repo.sh >/dev/null
+
+    [[ -f "$rconf" ]]
+    grep -qxF "Include = $rconf" "$pconf"
+    [[ -x "$mock_home/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop" ]]
+    [[ -z "$(ls -A "$mock_tmp")" ]]
+
+    rm -f "$mock_home/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop"
+    env -i PATH="/usr/bin:/bin" HOME="$mock_home" bash docs/install/pacman-hook.sh >/dev/null
+    [[ -x "$mock_home/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop" ]]
+}
+case_standalone_pacman_repo_and_hook
+
+# 9. source.sh and master.sh fail loudly when curl fails, and forward expected env vars.
+case_source_and_master_wrappers() {
+    local fail_bin pass_bin out
+    fail_bin="$WORK_DIR/wrap-fail"
+    pass_bin="$WORK_DIR/wrap-pass"
+    mkdir -p "$fail_bin" "$pass_bin"
+
+    cat >"$fail_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 22
+EOF
+    chmod +x "$fail_bin/curl"
+
+    for script in docs/install/source.sh docs/install/master.sh; do
+        if env -i PATH="$fail_bin:/usr/bin:/bin" HOME="$WORK_DIR" bash "$script" >/dev/null 2>&1; then
+            echo "Expected $script to exit non-zero when curl fails" >&2
+            exit 1
+        fi
+    done
+
+    cat >"$pass_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+cat <<'INNER'
+printf 'BUILD=%s VER=%s\n' "${SUPER_DESKTOP_BUILD_FROM_SOURCE:-}" "${SUPER_DESKTOP_VERSION:-}"
+INNER
+EOF
+    chmod +x "$pass_bin/curl"
+
+    out="$(env -i PATH="$pass_bin:/usr/bin:/bin" HOME="$WORK_DIR" bash docs/install/source.sh)"
+    [[ "$out" == "BUILD=1 VER=" ]]
+    out="$(env -i PATH="$pass_bin:/usr/bin:/bin" HOME="$WORK_DIR" bash docs/install/master.sh)"
+    [[ "$out" == "BUILD= VER=master" ]]
+}
+case_source_and_master_wrappers
+
+# 10. detect_distro routes Omarchy, plain Arch, Fedora, Ubuntu, Debian, and openSUSE cleanly.
+case_detect_distro_routing() {
+    local osrel mock_bin
+    for spec in \
+        "omarchy:omarchy:Omarchy::pacman:omarchy:1" \
+        "arch:arch:Arch Linux::pacman:arch:0" \
+        "fedora:fedora:Fedora Linux 45::dnf:fedora:0" \
+        "ubuntu:ubuntu:Ubuntu 26.04.1 LTS:debian:apt-get:debian:0" \
+        "debian:debian:Debian GNU/Linux forky/sid::apt-get:debian:0" \
+        "opensuse:opensuse-tumbleweed:openSUSE Tumbleweed:opensuse suse:zypper:opensuse:0"; do
+        IFS=':' read -r case_id os_id pretty like pm want_fam want_omarchy <<<"$spec"
+        osrel="$WORK_DIR/os-release-$case_id"
+        mock_bin="$WORK_DIR/pm-$case_id"
+        mkdir -p "$mock_bin"
+        cat >"$osrel" <<EOF
+ID=$os_id
+ID_LIKE="$like"
+PRETTY_NAME="$pretty"
+EOF
+        printf '#!/bin/sh\nexit 0\n' >"$mock_bin/$pm"
+        chmod +x "$mock_bin/$pm"
+        if [[ "$case_id" == "omarchy" ]]; then
+            printf '#!/bin/sh\nexit 0\n' >"$mock_bin/omarchy"
+            chmod +x "$mock_bin/omarchy"
+        fi
+        local force_flag=1
+        [[ "$case_id" == "omarchy" ]] && force_flag=0
+        out="$(
+            env -i PATH="$mock_bin:/usr/bin:/bin" HOME="$WORK_DIR/home-$case_id" \
+                SUPER_DESKTOP_OS_RELEASE="$osrel" \
+                SUPER_DESKTOP_FORCE_NO_OMARCHY="$force_flag" \
+                bash -euo pipefail -c '
+                    source "$1"
+                    detect_distro >/dev/null
+                    printf "%s:%s\n" "$DISTRO_FAMILY" "$IS_OMARCHY"
+                ' _ "$WORK_DIR/install_lib.sh"
+        )"
+        [[ "$out" == "$want_fam:$want_omarchy" ]] || {
+            echo "Unexpected detect_distro for $case_id: got '$out', expected '$want_fam:$want_omarchy'" >&2
+            exit 1
+        }
+    done
+}
+case_detect_distro_routing
+
+# 11. configure_non_omarchy_compositor updates hyprland.conf idempotently or preserves absence.
+case_non_omarchy_compositor() {
+    local home_with="$WORK_DIR/home-hyprconf" home_without="$WORK_DIR/home-nohypr"
+    mkdir -p "$home_with/.config/hypr" "$home_without"
+    printf 'monitor=,preferred,auto,1\n' >"$home_with/.config/hypr/hyprland.conf"
+
+    HOME="$home_with" bash -euo pipefail -c '
+        source "$1"
+        configure_non_omarchy_compositor "/usr/bin/super-desktop" >/dev/null
+        configure_non_omarchy_compositor "/usr/bin/super-desktop" >/dev/null
+        test "$NON_OMARCHY_NEEDS_BINDING" -eq 0
+    ' _ "$WORK_DIR/install_lib.sh"
+    [[ -f "$home_with/.config/hypr/hyprland.conf.before-super-desktop" ]]
+    [[ "$(grep -cF '# >>> super-desktop >>>' "$home_with/.config/hypr/hyprland.conf")" -eq 1 ]]
+    grep -qF 'exec-once = /usr/bin/super-desktop daemon' "$home_with/.config/hypr/hyprland.conf"
+    grep -qF 'bindr = SUPER SHIFT, Q, exec, /usr/bin/super-desktop toggle' "$home_with/.config/hypr/hyprland.conf"
+
+    HOME="$home_without" bash -euo pipefail -c '
+        source "$1"
+        configure_non_omarchy_compositor "/usr/bin/super-desktop" >/dev/null
+        test "$NON_OMARCHY_NEEDS_BINDING" -eq 1
+    ' _ "$WORK_DIR/install_lib.sh"
+    [[ ! -e "$home_without/.config/hypr/hyprland.conf" ]]
+}
+case_non_omarchy_compositor
+
+# 12. Plain Arch pacman-repo.sh and direct-pkg.sh exit 0 cleanly when hyprland.lua is absent.
+case_plain_arch_standalone_scripts() {
+    local expected mock_bin mock_home pconf rconf
+    expected="$(tr -d '[:space:]' <packaging/arch/super-desktop.gpg.fingerprint)"
+    mock_bin="$WORK_DIR/plain-arch-bin"
+    mock_home="$WORK_DIR/plain-arch-home"
+    pconf="$WORK_DIR/plain-pacman.conf"
+    rconf="$WORK_DIR/plain-pacman.d/super-desktop.conf"
+    mkdir -p "$mock_bin" "$mock_home"
+    printf '[core]\nInclude = /etc/pacman.d/mirrorlist\n' >"$pconf"
+
+    local arch pkg_name sha
+    arch="$(uname -m)"
+    pkg_name="super-desktop-bin-2.2.0-1-${arch}.pkg.tar.zst"
+    printf 'dummy-pkg\n' >"$WORK_DIR/$pkg_name"
+    sha="$(sha256sum "$WORK_DIR/$pkg_name" | awk '{ print $1 }')"
+    printf '%s  %s\n' "$sha" "$pkg_name" >"$WORK_DIR/plain-SHA256SUMS"
+    printf 'sig\n' >"$WORK_DIR/$pkg_name.sig"
+
+    cat >"$mock_bin/curl" <<EOF
+#!/usr/bin/env bash
+out=""
+url=""
+while ((\$# > 0)); do
+    case "\$1" in
+    -o) out="\$2"; shift 2 ;;
+    --proto|--retry) shift 2 ;;
+    -*) shift ;;
+    *) url="\$1"; shift ;;
+    esac
+done
+case "\$url" in
+*.pkg.tar.zst.sig) cp "$WORK_DIR/$pkg_name.sig" "\$out" ;;
+*.pkg.tar.zst) cp "$WORK_DIR/$pkg_name" "\$out" ;;
+*SHA256SUMS) cp "$WORK_DIR/plain-SHA256SUMS" "\$out" ;;
+*super-desktop.gpg) cp "$WORK_DIR/super-desktop.gpg" "\$out" ;;
+*) exit 22 ;;
+esac
+EOF
+    cat >"$mock_bin/gpg" <<EOF
+#!/usr/bin/env bash
+printf 'pub:-:255:22:%s:1700000000:::-:::scESC::::::23::0:\n' "$expected"
+printf 'fpr:::::::::%s:\n' "$expected"
+EOF
+    cat >"$mock_bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+case "$1" in
+mkdir) mkdir -p "${@:3}" ;;
+install)
+    mkdir -p "$(dirname "$5")"
+    cp "$4" "$5"
+    chmod "$3" "$5"
+    ;;
+*) "$@" ;;
+esac
+EOF
+    cat >"$mock_bin/pacman" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "--config" ]]; then
+    shift 2
+fi
+case "${1:-}" in
+-Sp)
+    if [[ "$*" == *"--print-format %n"* ]]; then
+        printf 'super-desktop-bin\n'
+    fi
+    exit 0
+    ;;
+-Q)
+    exit 1
+    ;;
+*)
+    exit 0
+    ;;
+esac
+EOF
+    cat >"$mock_bin/pacman-key" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+--list-keys) exit 1 ;;
+*) exit 0 ;;
+esac
+EOF
+    chmod +x "$mock_bin"/*
+
+    env -i PATH="$mock_bin:/usr/bin:/bin" HOME="$mock_home" \
+        SUPER_DESKTOP_PACMAN_CONF="$pconf" \
+        SUPER_DESKTOP_PACMAN_REPO_CONF="$rconf" \
+        SUPER_DESKTOP_PACMAN_REPO_URL="https://example.invalid/repo" \
+        bash docs/install/pacman-repo.sh >/dev/null
+
+    env -i PATH="$mock_bin:/usr/bin:/bin" HOME="$mock_home" \
+        VER=2.2.0 \
+        SUPER_DESKTOP_PACMAN_REPO_URL="https://example.invalid/repo" \
+        SUPER_DESKTOP_RELEASE_BASE_URL="https://example.invalid/releases/download" \
+        bash docs/install/direct-pkg.sh >/dev/null
+}
+case_plain_arch_standalone_scripts
+
 echo "Installer binary and repo checks passed."

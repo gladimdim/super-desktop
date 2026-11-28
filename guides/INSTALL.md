@@ -25,9 +25,12 @@ and leaves its git state alone; update it with `git pull && ./rebuild.sh`.
 Running the one-line command later moves the clone your install runs from to
 the newest release, unless it has local changes or commits of its own.
 
-## Package installations
+## Package installations & Linux distro support
 
-SUPER DESKTOP provides prebuilt, GPG-signed Arch/Omarchy binary packages (`super-desktop-bin`) for both **`x86_64`** and **`aarch64`** — no Rust toolchain, `cargo`, or C/C++ compilation required. Running `install.sh` sets up the repository and installs `super-desktop-bin` automatically (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead).
+`install.sh` auto-detects **Omarchy**, **Arch Linux**, **Fedora 45+**, **Ubuntu 26.04+ / Debian `sid`**, and **openSUSE Tumbleweed**:
+
+- **Omarchy & Arch Linux:** Provides prebuilt, GPG-signed Pacman binary packages (`super-desktop-bin`) for both **`x86_64`** and **`aarch64`** — no Rust toolchain, `cargo`, or C/C++ compilation required. Running `install.sh` sets up the repository and installs `super-desktop-bin` automatically (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead).
+- **Fedora 45+, Ubuntu 26.04+ / Debian `sid`, and openSUSE Tumbleweed:** `install.sh` installs build and runtime dependencies via `dnf`, `apt`, or `zypper` (verifying `gtk4 >= 4.18`, `vte-2.91-gtk4 >= 0.84`, and `gtk4-layer-shell` — Ubuntu 24.04 LTS and Debian 13 are rejected early with clear version diagnostics), builds release binaries + `sd-qml-host`, and configures `~/.config/hypr/hyprland.conf` if present or prints instructions for Sway, Niri, or other `wlr-layer-shell` Wayland compositors (GNOME/Mutter and X11 are not supported).
 
 One-line signed repository setup (without the full `install.sh` wrapper):
 

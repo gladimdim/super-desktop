@@ -1,9 +1,9 @@
 name: Arch packaging checks
 on:
   push:
-    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'install.sh', 'docs/install/**', 'packaging/**', 'scripts/*arch*', 'scripts/build-pacman-repo.sh', 'scripts/init-pacman-key.sh', 'scripts/publish-aur.sh', 'scripts/release-local.sh', 'tests/install_packages.sh', 'tests/install_binary_repo.sh', 'tests/pacman_repo_smoke.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml', '.github/workflows/pages.yml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'install.sh', 'docs/install/**', 'packaging/**', 'scripts/*arch*', 'scripts/build-pacman-repo.sh', 'scripts/init-pacman-key.sh', 'scripts/publish-aur.sh', 'scripts/release-local.sh', 'tests/install_packages.sh', 'tests/install_binary_repo.sh', 'tests/pacman_repo_smoke.sh', 'tests/omarchy_fresh_release_test.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml', '.github/workflows/pages.yml']
   pull_request:
-    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'install.sh', 'docs/install/**', 'packaging/**', 'scripts/*arch*', 'scripts/build-pacman-repo.sh', 'scripts/init-pacman-key.sh', 'scripts/publish-aur.sh', 'scripts/release-local.sh', 'tests/install_packages.sh', 'tests/install_binary_repo.sh', 'tests/pacman_repo_smoke.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml', '.github/workflows/pages.yml']
+    paths: ['Cargo.toml', 'Cargo.lock', 'LICENSE', 'install.sh', 'docs/install/**', 'packaging/**', 'scripts/*arch*', 'scripts/build-pacman-repo.sh', 'scripts/init-pacman-key.sh', 'scripts/publish-aur.sh', 'scripts/release-local.sh', 'tests/install_packages.sh', 'tests/install_binary_repo.sh', 'tests/pacman_repo_smoke.sh', 'tests/omarchy_fresh_release_test.sh', 'tests/test_arch_packaging.py', '.github/workflows/arch-*.yml', '.github/workflows/pages.yml']
 permissions:
   contents: read
 jobs:
@@ -16,4 +16,4 @@ jobs:
       - run: python3 -m unittest discover -s tests -p 'test_arch_packaging.py'
       - run: bash tests/install_packages.sh
       - run: bash tests/install_binary_repo.sh
-      - run: bash -n install.sh docs/install/*.sh scripts/build-arch-release.sh scripts/build-pacman-repo.sh scripts/init-pacman-key.sh scripts/publish-aur.sh scripts/release-local.sh packaging/arch/super-desktop-bin.install packaging/arch/builder/pacstrap-docker
+      - run: bash -n install.sh docs/install/*.sh scripts/build-arch-release.sh scripts/build-pacman-repo.sh scripts/init-pacman-key.sh scripts/publish-aur.sh scripts/release-local.sh tests/omarchy_fresh_release_test.sh packaging/arch/super-desktop-bin.install packaging/arch/builder/pacstrap-docker

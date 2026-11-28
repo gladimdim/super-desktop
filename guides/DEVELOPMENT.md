@@ -57,7 +57,10 @@ python3 -m unittest discover -s tests -p 'test_arch_packaging.py'
 bash tests/install_packages.sh
 bash tests/install_binary_repo.sh
 bash tests/pacman_repo_smoke.sh
+bash tests/omarchy_fresh_release_test.sh --head --arch x86_64 --flows all
 ```
+
+`tests/omarchy_fresh_release_test.sh` builds SUPER DESKTOP from scratch inside `packaging/arch/builder`, builds a fresh Omarchy `stable` container image (`packaging/arch/omarchy-fresh/Dockerfile` with no pre-installed SUPER DESKTOP or extra runtime dependencies), and verifies all six installer paths (`install.sh` Pacman repo + idempotency + `pre-refresh-pacman` hook + `pacman -Syu` + Broadway smoke, `pacman-repo.sh` + `pacman-hook.sh`, `direct-pkg.sh`, `install.sh` pinned release, `source.sh` + migration to `super-desktop-bin`, and `master.sh`).
 
 ---
 
@@ -130,6 +133,7 @@ gh workflow run arch-release.yml --ref master -f tag=vX.Y.Z -f publish=true
 What CI runs:
 - `build`: builds cleanly on native `ubuntu-latest` (`x86_64`) and native `ubuntu-24.04-arm` (`aarch64`), runs the full test suite + `package_tests::packaged_desktop_lifecycle`, and produces `super-desktop-bin-X.Y.Z-1-<arch>.pkg.tar.zst`, `super-desktop-X.Y.Z-linux-<arch>.tar.gz`, and `super-desktop-X.Y.Z-source.tar.gz`.
 - `build-repo`: imports `PACMAN_GPG_PRIVATE_KEY`, checks fingerprint equality against `packaging/arch/super-desktop.gpg.fingerprint`, runs `scripts/build-pacman-repo.sh` for both architectures, generates `SHA256SUMS`, and archives `pacman-repo-{x86_64,aarch64}.tar.gz`.
+- `verify-fresh-omarchy`: runs `tests/omarchy_fresh_release_test.sh --flows all` on both native `x86_64` and `aarch64` fresh Omarchy `stable` containers before publishing release assets.
 - `publish-release`: attaches all immutable assets (without `--clobber`) to GitHub Release `vX.Y.Z`.
 - `deploy-pages`: triggers `.github/workflows/pages.yml` to publish `docs/` plus `/repo/{x86_64,aarch64}` to GitHub Pages.
 
@@ -170,7 +174,8 @@ What `scripts/release-local.sh` does:
 2. Builds `packaging/arch/builder` per target platform (`linux/amd64`, `linux/arm64`) with rootless `podman` (or `--engine docker`).
 3. Runs `scripts/build-arch-release.sh` and `cargo test --locked package_tests::packaged_desktop_lifecycle -- --ignored` as unprivileged `builder` inside the container, then restores container `/out` ownership back to UID 0 so artifacts belong cleanly to your host user.
 4. Imports your signing key into an ephemeral `mktemp -d` `GNUPGHOME`, verifies the 40-character fingerprint matches `packaging/arch/super-desktop.gpg.fingerprint`, runs `scripts/build-pacman-repo.sh` for each arch, and writes `SHA256SUMS`.
-5. With `--upload`, checks for existing assets (never `--clobber`s), uploads all assets to GitHub Release `vX.Y.Z`, and dispatches `pages.yml` on `master` once both `pacman-repo-x86_64.tar.gz` and `pacman-repo-aarch64.tar.gz` exist on the release.
+5. Runs `tests/omarchy_fresh_release_test.sh` against the built assets and signed repos (defaulting to `--flows all` on native arch and `--flows pacman` on cross-arch QEMU; override with `--fresh-flows` or bypass with `--skip-fresh-test`).
+6. With `--upload`, checks for existing assets (never `--clobber`s), uploads all assets to GitHub Release `vX.Y.Z`, and dispatches `pages.yml` on `master` once both `pacman-repo-x86_64.tar.gz` and `pacman-repo-aarch64.tar.gz` exist on the release.
 
 ---
 

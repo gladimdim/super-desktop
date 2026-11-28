@@ -1,5 +1,13 @@
 # ⚡ SUPER DESKTOP
 
+[![Install checks](https://img.shields.io/github/actions/workflow/status/gladimdim/super-desktop/arch-packaging-check.yml?branch=master&style=flat-square&labelColor=111111&logo=githubactions&logoColor=a3e635&label=install%20checks)](https://github.com/gladimdim/super-desktop/actions/workflows/arch-packaging-check.yml)
+[![Omarchy](https://img.shields.io/badge/Omarchy-prebuilt%20pacman-a3e635?style=flat-square&labelColor=111111&logo=linux&logoColor=a3e635)](#quick-install)
+[![Arch Linux](https://img.shields.io/badge/Arch%20Linux-prebuilt%20pacman-1793D1?style=flat-square&labelColor=111111&logo=archlinux&logoColor=1793D1)](#quick-install)
+[![Fedora 45](https://img.shields.io/badge/Fedora%2045-source%20build-51A2DA?style=flat-square&labelColor=111111&logo=fedora&logoColor=51A2DA)](#quick-install)
+[![Ubuntu 26.04 LTS](https://img.shields.io/badge/Ubuntu%2026.04%20LTS-source%20build-E95420?style=flat-square&labelColor=111111&logo=ubuntu&logoColor=E95420)](#quick-install)
+[![Debian Sid](https://img.shields.io/badge/Debian%20Sid-source%20build-A81D33?style=flat-square&labelColor=111111&logo=debian&logoColor=A81D33)](#quick-install)
+[![openSUSE Tumbleweed](https://img.shields.io/badge/openSUSE%20Tumbleweed-source%20build-73BA25?style=flat-square&labelColor=111111&logo=opensuse&logoColor=73BA25)](#quick-install)
+
 > 🌐 **Website: [superdesktop.dmytrogladkyi.com](https://superdesktop.dmytrogladkyi.com/)** · 📱 **[Free Android APK](https://github.com/gladimdim/super-desktop/releases/download/v2.1.2/SUPER-DESKTOP-2.3.1.apk)** · **Android app: [SUPER DESKTOP on Google Play](https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop)** · **iPhone and iPad: [App Store](https://apps.apple.com/app/super-desktop-ai-agents/id6818722591)**
 >
 > **A hidden overlay workspace for Hyprland / Omarchy with sticky notes and mini AI-terminal windows.**
@@ -15,16 +23,19 @@
 
 ## Quick Install
 
-On an **Omarchy desktop**, open a terminal and run this command as your normal user (not with `sudo`):
+On **Omarchy** or any compatible **Linux** desktop (`x86_64` / `aarch64`), open a terminal and run this command as your normal user (not with `sudo`):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gladimdim/super-desktop/master/install.sh | bash
 ```
 
-The installer sets everything up automatically:
-- installs the prebuilt GPG-signed `super-desktop-bin` package for `x86_64` or `aarch64` from `https://superdesktop.dmytrogladkyi.com/repo/$arch` (no Rust, `cargo`, or compilation needed) along with its Arch runtime packages (`GTK 4`, `gtk4-layer-shell`, `VTE`, `Qt Quick`, `tmux`, `wl-clipboard`, `libnotify`, `sqlite`, `avahi`, `bubblewrap`, `poppler`, and GStreamer codecs);
-- registers the `[super-desktop]` Pacman repository and Omarchy refresh hook so future releases update automatically via `omarchy update` (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile from source instead);
-- configures the launcher, shortcut, autostart, and Omarchy theme integration (and migrates existing source installs cleanly).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/distro-support-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/assets/distro-support-light.svg">
+  <img src="docs/assets/distro-support-dark.svg" width="880" alt="Verified install matrix across Omarchy, Arch Linux, Fedora 45, Ubuntu 26.04 LTS, Debian Sid, and openSUSE Tumbleweed">
+</picture>
+
+`install.sh` auto-detects your distro — installing the GPG-signed `super-desktop-bin` Pacman package on **Omarchy / Arch** (set `SUPER_DESKTOP_BUILD_FROM_SOURCE=1` to compile instead) or building from source with native dependencies on **Fedora 45+, Ubuntu 26.04+, Debian Sid, and openSUSE Tumbleweed**.
 
 The installer does not run a full system upgrade. If a required library conflicts with an older installed package, run `omarchy update` (or `sudo pacman -Syu`) first and re-run the installer.
 

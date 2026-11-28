@@ -5,8 +5,32 @@
 use std::path::Path;
 use std::process::Command;
 
-/// The library the client preloads for the layer-shell overlay.
+/// The primary Arch/generic path the client preloads for the layer-shell overlay.
 pub const LAYER_SHELL_LIBRARY: &str = "/usr/lib/libgtk4-layer-shell.so";
+
+const LAYER_SHELL_CANDIDATES: &[&str] = &[
+    LAYER_SHELL_LIBRARY,
+    "/usr/lib/libgtk4-layer-shell.so.0",
+    "/usr/lib64/libgtk4-layer-shell.so",
+    "/usr/lib64/libgtk4-layer-shell.so.0",
+    "/usr/lib/x86_64-linux-gnu/libgtk4-layer-shell.so",
+    "/usr/lib/x86_64-linux-gnu/libgtk4-layer-shell.so.0",
+    "/usr/lib/aarch64-linux-gnu/libgtk4-layer-shell.so",
+    "/usr/lib/aarch64-linux-gnu/libgtk4-layer-shell.so.0",
+];
+
+/// Return the first existing layer-shell shared library path from `candidates`.
+pub fn find_layer_shell_library_in<'a>(candidates: &[&'a str]) -> Option<&'a str> {
+    candidates
+        .iter()
+        .copied()
+        .find(|candidate| Path::new(candidate).exists())
+}
+
+/// Return the first existing layer-shell shared library path on this system.
+pub fn find_layer_shell_library() -> Option<&'static str> {
+    find_layer_shell_library_in(LAYER_SHELL_CANDIDATES)
+}
 
 fn is_layer_shell(entry: &str) -> bool {
     Path::new(entry)
@@ -51,17 +75,17 @@ pub fn strip_from_process_env() {
 /// daemon (cold start from `toggle`/`show`, or the client delegating to the
 /// application). An inherited exact entry is left as it is.
 pub fn preload_layer_shell(command: &mut Command) {
-    if !Path::new(LAYER_SHELL_LIBRARY).exists() {
+    let Some(library) = find_layer_shell_library() else {
         return;
-    }
+    };
     let current = std::env::var("LD_PRELOAD").unwrap_or_default();
-    if current.split([':', ' ']).any(|entry| entry == LAYER_SHELL_LIBRARY) {
+    if current.split([':', ' ']).any(is_layer_shell) {
         return;
     }
     let value = if current.is_empty() {
-        LAYER_SHELL_LIBRARY.to_string()
+        library.to_string()
     } else {
-        format!("{LAYER_SHELL_LIBRARY}:{current}")
+        format!("{library}:{current}")
     };
     command.env("LD_PRELOAD", value);
 }
@@ -90,5 +114,36 @@ mod tests {
         assert_eq!(strip_layer_shell("/opt/libmine.so"), None);
         assert_eq!(strip_layer_shell("/opt/libgtk4-layer-shell-extra.so"), None);
         assert_eq!(strip_layer_shell(""), None);
+    }
+
+    #[test]
+    fn finds_first_existing_layer_shell_candidate_across_multiarch_dirs() {
+        let dir = std::env::temp_dir().join(format!("sd-preload-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib64 = dir.join("usr/lib64");
+        let gnu = dir.join("usr/lib/x86_64-linux-gnu");
+        std::fs::create_dir_all(&lib64).unwrap();
+        std::fs::create_dir_all(&gnu).unwrap();
+
+        let missing = dir.join("usr/lib/libgtk4-layer-shell.so");
+        let fedora_lib = lib64.join("libgtk4-layer-shell.so.0");
+        let debian_lib = gnu.join("libgtk4-layer-shell.so.0");
+        std::fs::write(&fedora_lib, b"").unwrap();
+        std::fs::write(&debian_lib, b"").unwrap();
+
+        let m_str = missing.to_string_lossy();
+        let f_str = fedora_lib.to_string_lossy();
+        let d_str = debian_lib.to_string_lossy();
+        assert_eq!(
+            find_layer_shell_library_in(&[&m_str, &f_str, &d_str]),
+            Some(f_str.as_ref())
+        );
+        assert_eq!(
+            find_layer_shell_library_in(&[&m_str, &d_str]),
+            Some(d_str.as_ref())
+        );
+        assert_eq!(find_layer_shell_library_in(&[&m_str]), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

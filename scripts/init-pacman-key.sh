@@ -75,16 +75,20 @@ if ! grep -q '^REPO_KEY_FINGERPRINT=' "$INSTALL_SH"; then
     echo "Error: REPO_KEY_FINGERPRINT= line not found in $INSTALL_SH" >&2
     exit 1
 fi
-python3 - "$INSTALL_SH" "$FPR" <<'PY'
+python3 - "$INSTALL_SH" "$ROOT/docs/install/pacman-repo.sh" "$ROOT/docs/install/direct-pkg.sh" "$FPR" <<'PY'
 import re, sys
 from pathlib import Path
-path = Path(sys.argv[1])
-fpr = sys.argv[2]
-text = path.read_text()
-updated, count = re.subn(r'^REPO_KEY_FINGERPRINT=".*"$', f'REPO_KEY_FINGERPRINT="{fpr}"', text, count=1, flags=re.M)
-if count != 1:
-    raise SystemExit("Failed to update REPO_KEY_FINGERPRINT in install.sh")
-path.write_text(updated)
+install_sh, pacman_repo_sh, direct_pkg_sh, fpr = (Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4])
+for path, var in (
+    (install_sh, "REPO_KEY_FINGERPRINT"),
+    (pacman_repo_sh, "REPO_FPR"),
+    (direct_pkg_sh, "REPO_FPR"),
+):
+    text = path.read_text()
+    updated, count = re.subn(rf'^{var}=".*"$', f'{var}="{fpr}"', text, count=1, flags=re.M)
+    if count != 1:
+        raise SystemExit(f"Failed to update {var} in {path}")
+    path.write_text(updated)
 PY
 
 mkdir -p "$BACKUP_DIR"

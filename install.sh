@@ -57,6 +57,7 @@ RELEASES_URL="https://github.com/gladimdim/super-desktop/releases"
 DEFAULT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-desktop/source"
 
 PACMAN_REPO_URL="${SUPER_DESKTOP_PACMAN_REPO_URL:-https://superdesktop.dmytrogladkyi.com/repo}"
+RELEASE_BASE_URL="${SUPER_DESKTOP_RELEASE_BASE_URL:-https://github.com/gladimdim/super-desktop/releases/download}"
 REPO_KEY_FINGERPRINT="EBCB860628250D70F3C4D033304840D354676353"
 PACMAN_REPO_NAME="super-desktop"
 PACMAN_REPO_CONF="${SUPER_DESKTOP_PACMAN_REPO_CONF:-/etc/pacman.d/super-desktop.conf}"
@@ -65,6 +66,14 @@ BUILD_FROM_SOURCE="${SUPER_DESKTOP_BUILD_FROM_SOURCE:-0}"
 
 # The oldest Rust that builds the locked dependencies (gtk4 0.11).
 MIN_RUST="1.92"
+MIN_GTK4="4.18"
+MIN_VTE4="0.84"
+
+OS_RELEASE_FILE="${SUPER_DESKTOP_OS_RELEASE:-/etc/os-release}"
+DISTRO_FAMILY="omarchy"
+DISTRO_NAME="Omarchy"
+IS_OMARCHY=1
+NON_OMARCHY_NEEDS_BINDING=0
 
 # The build needs a C compiler, GTK 4, gtk4-layer-shell and VTE, and Qt Quick
 # for the plugin host. At run time the app uses tmux
@@ -97,7 +106,7 @@ die() {
 
 usage() {
     cat <<EOF
-Install or update SUPER DESKTOP on Omarchy:
+Install or update SUPER DESKTOP on Linux (auto-detects Omarchy, Arch, Fedora, Ubuntu/Debian, and openSUSE):
 
   $INSTALL_COMMAND
 
@@ -120,17 +129,86 @@ A specific release, for example the one that matches an older phone app:
 EOF
 }
 
+os_release_field() {
+    local key="$1" k v
+    [[ -r "$OS_RELEASE_FILE" ]] || return 0
+    while IFS='=' read -r k v || [[ -n "$k" ]]; do
+        [[ "$k" == "$key" ]] || continue
+        v="${v%$'\r'}"
+        if [[ "$v" == \"*\" || "$v" == \'*\' ]]; then
+            v="${v:1:${#v}-2}"
+        fi
+        printf '%s\n' "$v"
+        return 0
+    done <"$OS_RELEASE_FILE"
+}
+
+detect_distro() {
+    local os_id os_id_like pretty has_omarchy=0
+    os_id="$(os_release_field ID | tr '[:upper:]' '[:lower:]')"
+    os_id_like="$(os_release_field ID_LIKE | tr '[:upper:]' '[:lower:]')"
+    pretty="$(os_release_field PRETTY_NAME)"
+
+    if [[ "${SUPER_DESKTOP_FORCE_NO_OMARCHY:-0}" != "1" ]] && {
+        command -v omarchy >/dev/null 2>&1 ||
+            [[ -d /usr/share/omarchy || -d "$HOME/.local/share/omarchy" || "$os_id" == "omarchy" ]]
+    }; then
+        has_omarchy=1
+    fi
+
+    if ((has_omarchy)) && command -v pacman >/dev/null 2>&1; then
+        DISTRO_FAMILY="omarchy"
+        DISTRO_NAME="${pretty:-Omarchy}"
+        IS_OMARCHY=1
+    elif [[ "$os_id" == "arch" || " $os_id_like " == *" arch "* ]]; then
+        command -v pacman >/dev/null 2>&1 || die "Arch-based distribution detected, but pacman was not found."
+        DISTRO_FAMILY="arch"
+        DISTRO_NAME="${pretty:-Arch Linux}"
+        IS_OMARCHY=0
+    elif [[ "$os_id" == "fedora" || " $os_id_like " == *" fedora "* ]]; then
+        command -v dnf >/dev/null 2>&1 || die "Fedora-based distribution detected, but dnf was not found."
+        DISTRO_FAMILY="fedora"
+        DISTRO_NAME="${pretty:-Fedora}"
+        IS_OMARCHY=0
+    elif [[ "$os_id" == "ubuntu" || "$os_id" == "debian" || "$os_id" == "pop" || "$os_id" == "linuxmint" || "$os_id" == "neon" || "$os_id" == "elementary" || "$os_id" == "zorin" || " $os_id_like " == *" debian "* || " $os_id_like " == *" ubuntu "* ]]; then
+        command -v apt-get >/dev/null 2>&1 || die "Debian/Ubuntu-based distribution detected, but apt-get was not found."
+        DISTRO_FAMILY="debian"
+        DISTRO_NAME="${pretty:-Debian/Ubuntu}"
+        IS_OMARCHY=0
+    elif [[ "$os_id" == opensuse* || "$os_id" == "sles" || " $os_id_like " == *" suse "* ]]; then
+        command -v zypper >/dev/null 2>&1 || die "openSUSE-based distribution detected, but zypper was not found."
+        DISTRO_FAMILY="opensuse"
+        DISTRO_NAME="${pretty:-openSUSE}"
+        IS_OMARCHY=0
+    elif command -v pacman >/dev/null 2>&1; then
+        DISTRO_FAMILY="arch"
+        DISTRO_NAME="${pretty:-Arch Linux}"
+        IS_OMARCHY=0
+    elif command -v dnf >/dev/null 2>&1; then
+        DISTRO_FAMILY="fedora"
+        DISTRO_NAME="${pretty:-Fedora}"
+        IS_OMARCHY=0
+    elif command -v apt-get >/dev/null 2>&1; then
+        DISTRO_FAMILY="debian"
+        DISTRO_NAME="${pretty:-Debian/Ubuntu}"
+        IS_OMARCHY=0
+    elif command -v zypper >/dev/null 2>&1; then
+        DISTRO_FAMILY="opensuse"
+        DISTRO_NAME="${pretty:-openSUSE}"
+        IS_OMARCHY=0
+    else
+        die "Unsupported Linux distribution (${pretty:-unknown}). Supported: Omarchy, Arch Linux, Fedora 45+, Ubuntu 26.04+, Debian sid, openSUSE Tumbleweed (needs GTK4 >= $MIN_GTK4, VTE4 >= $MIN_VTE4, gtk4-layer-shell, Qt6, Rust >= $MIN_RUST)."
+    fi
+
+    say "Detected Linux distribution: $DISTRO_NAME ($DISTRO_FAMILY)"
+}
+
 preflight() {
-    [[ "$(uname -s)" == Linux ]] || die "SUPER DESKTOP runs on Omarchy (Arch Linux with Hyprland)."
+    [[ "$(uname -s)" == Linux ]] || die "SUPER DESKTOP runs on Linux (Omarchy, Arch, Fedora 45+, Ubuntu 26.04+, Debian sid, openSUSE Tumbleweed)."
     if ((EUID == 0)); then
         die "Run the installer as your normal user, not as root or with sudo. It asks for your password when it installs packages."
     fi
-    command -v pacman >/dev/null 2>&1 ||
-        die "pacman not found. SUPER DESKTOP needs Omarchy (Arch Linux with Hyprland)."
-    if ! command -v omarchy >/dev/null 2>&1 &&
-        [[ ! -d /usr/share/omarchy && ! -d "$HOME/.local/share/omarchy" ]]; then
-        die "Omarchy not found. SUPER DESKTOP uses Omarchy's Hyprland configuration and themes."
-    fi
+    detect_distro
 }
 
 # A package that arrived as another program's dependency is removed together
@@ -148,7 +226,7 @@ keep_packages() {
     fi
 }
 
-install_packages() {
+install_packages_pacman() {
     local missing=()
     local needed plan status
     if needed="$(pacman -T "${PACKAGES[@]}")"; then
@@ -182,6 +260,103 @@ install_packages() {
         die "Could not install ${missing[*]}. See the pacman error above."
     say "✓ Installed ${missing[*]}"
     keep_packages
+}
+
+strip_pkg_version() {
+    local ver="${1#*:}"
+    printf '%s\n' "${ver%%[-+~]*}"
+}
+
+check_native_libs() {
+    command -v pkg-config >/dev/null 2>&1 || die "pkg-config is required to verify GTK4/VTE4 development libraries."
+    local gtk_ver vte_ver
+    gtk_ver="$(pkg-config --modversion gtk4 2>/dev/null || true)"
+    vte_ver="$(pkg-config --modversion vte-2.91-gtk4 2>/dev/null || true)"
+    [[ -n "$gtk_ver" ]] && version_at_least "$(strip_pkg_version "$gtk_ver")" "$MIN_GTK4" ||
+        die "$DISTRO_NAME provides GTK4 ${gtk_ver:-missing}, but SUPER DESKTOP requires gtk4 >= $MIN_GTK4."
+    [[ -n "$vte_ver" ]] && version_at_least "$(strip_pkg_version "$vte_ver")" "$MIN_VTE4" ||
+        die "$DISTRO_NAME provides vte-2.91-gtk4 ${vte_ver:-missing}, but SUPER DESKTOP requires vte-2.91-gtk4 >= $MIN_VTE4."
+    pkg-config --exists gtk4-layer-shell-0 2>/dev/null ||
+        die "$DISTRO_NAME is missing gtk4-layer-shell-0 development files."
+    say "✓ Native libraries ready (gtk4 $gtk_ver, vte-2.91-gtk4 $vte_ver, gtk4-layer-shell)"
+}
+
+install_packages_fedora() {
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to install Fedora packages."
+    local pkgs=(
+        gcc gcc-c++ make pkgconf-pkg-config git curl rust cargo
+        gtk4-devel gtk4-layer-shell-devel vte291-gtk4-devel
+        qt6-qtbase-devel qt6-qtdeclarative-devel
+        tmux wl-clipboard libnotify sqlite avahi bubblewrap poppler
+        gstreamer1-plugins-good
+    )
+    say "Installing Fedora build & runtime packages via dnf..."
+    sudo dnf install -y "${pkgs[@]}" </dev/null ||
+        die "Could not install Fedora packages via dnf."
+    sudo dnf install -y gstreamer1-plugin-libav </dev/null >/dev/null 2>&1 ||
+        warn "Optional GStreamer libav plugin (gstreamer1-plugin-libav) could not be installed; video previews may need RPM Fusion."
+    check_native_libs
+}
+
+apt_candidate_version() {
+    LC_ALL=C apt-cache policy "$1" 2>/dev/null | awk '/Candidate:/ { print $2; exit }'
+}
+
+install_packages_debian() {
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to install Debian/Ubuntu packages."
+    say "Updating apt package index..."
+    sudo apt-get update -qq </dev/null ||
+        die "Could not update apt package lists."
+
+    local gtk_cand vte_cand ls_cand
+    gtk_cand="$(apt_candidate_version libgtk-4-dev)"
+    vte_cand="$(apt_candidate_version libvte-2.91-gtk4-dev)"
+    ls_cand="$(apt_candidate_version libgtk4-layer-shell-dev)"
+
+    if [[ -z "$gtk_cand" || "$gtk_cand" == "(none)" ]] || ! version_at_least "$(strip_pkg_version "$gtk_cand")" "$MIN_GTK4" ||
+        [[ -z "$vte_cand" || "$vte_cand" == "(none)" ]] || ! version_at_least "$(strip_pkg_version "$vte_cand")" "$MIN_VTE4" ||
+        [[ -z "$ls_cand" || "$ls_cand" == "(none)" ]]; then
+        die "$DISTRO_NAME repositories do not meet SUPER DESKTOP's minimum library versions (found libgtk-4-dev=${gtk_cand:-missing}, libvte-2.91-gtk4-dev=${vte_cand:-missing}, libgtk4-layer-shell-dev=${ls_cand:-missing}; requires gtk4 >= $MIN_GTK4, vte-2.91-gtk4 >= $MIN_VTE4, gtk4-layer-shell). Supported Debian/Ubuntu releases: Ubuntu 26.04 LTS+ and Debian sid/forky+."
+    fi
+
+    local pkgs=(
+        build-essential pkg-config git curl rustc cargo
+        libgtk-4-dev libvte-2.91-gtk4-dev libgtk4-layer-shell-dev
+        qt6-base-dev qt6-declarative-dev qmake6
+        tmux wl-clipboard libnotify-bin sqlite3 avahi-daemon bubblewrap poppler-utils
+        gstreamer1.0-plugins-good gstreamer1.0-libav adwaita-icon-theme
+    )
+    say "Installing Debian/Ubuntu build & runtime packages via apt-get..."
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}" </dev/null ||
+        die "Could not install Debian/Ubuntu packages via apt-get."
+    check_native_libs
+}
+
+install_packages_opensuse() {
+    command -v sudo >/dev/null 2>&1 || die "sudo is required to install openSUSE packages."
+    local pkgs=(
+        gcc gcc-c++ make pkgconf-pkg-config gawk git curl rust cargo
+        gtk4-devel gtk4-layer-shell-devel vte-devel
+        qt6-base-devel qt6-declarative-devel
+        tmux wl-clipboard libnotify-tools sqlite3 avahi bubblewrap poppler-tools
+        gstreamer-plugins-good adwaita-icon-theme liberation-fonts gsettings-desktop-schemas
+    )
+    say "Installing openSUSE build & runtime packages via zypper..."
+    sudo zypper --non-interactive install "${pkgs[@]}" </dev/null ||
+        die "Could not install openSUSE packages via zypper."
+    sudo zypper --non-interactive install gstreamer-plugins-libav </dev/null >/dev/null 2>&1 ||
+        warn "Optional GStreamer libav plugin (gstreamer-plugins-libav) could not be installed."
+    check_native_libs
+}
+
+install_packages() {
+    case "$DISTRO_FAMILY" in
+    omarchy | arch) install_packages_pacman ;;
+    fedora) install_packages_fedora ;;
+    debian) install_packages_debian ;;
+    opensuse) install_packages_opensuse ;;
+    *) die "Unsupported distribution family: $DISTRO_FAMILY" ;;
+    esac
 }
 
 rust_version() {
@@ -511,39 +686,40 @@ configure() {
     }' "$SRC/super-desktop.desktop" >"$APP_DST"
     say "✓ Installed desktop entry to $APP_DST"
 
-    # 3. Add the overlay's toggle binding to ~/.config/hypr/bindings.lua.
-    #
-    # Everything between the two markers below belongs to the app: the
-    # overlay's ⚙ Settings panel rewrites this block when the user records
-    # another shortcut, and finds it again by the markers. src/shortcut.rs
-    # holds the same two strings (MANAGED_BEGIN/MANAGED_END) — change them in
-    # both places or in neither.
-    local bind_marker='-- >>> super-desktop shortcut (managed by the overlay settings) >>>'
-    mkdir -p "$(dirname "$BINDINGS_LUA")"
-    touch "$BINDINGS_LUA"
-    # -e: the marker starts with "--", which grep would read as an option.
-    if ! grep -qF -e "$bind_marker" "$BINDINGS_LUA"; then
-        # Older runs appended loose o.bind(...) lines together with the
-        # hl.unbind(...) lines that cleared the way for them. Drop those
-        # first: otherwise a re-run leaves two blocks fighting over the same
-        # shortcut (and the unbinds, which can outlive their bind, would keep
-        # an unused key dead).
-        if grep -qF "super-desktop toggle" "$BINDINGS_LUA"; then
-            local bindings_tmp
-            bindings_tmp="$(mktemp)"
-            grep -v -F \
-                -e "super-desktop toggle" \
-                -e '-- SUPER DESKTOP: Sticky notes and AI agent terminal overlay' \
-                -e 'hl.unbind("SUPER + SHIFT + q")' \
-                -e 'hl.unbind("SUPER + SHIFT + Cyrillic_shorti")' \
-                -e 'hl.unbind("SUPER + SHIFT + Cyrillic_SHORTI")' \
-                -e 'hl.unbind("SUPER + SHIFT + code:24")' \
-                "$BINDINGS_LUA" >"$bindings_tmp" || true
-            cat "$bindings_tmp" >"$BINDINGS_LUA" # in place: keeps mode and owner
-            rm -f "$bindings_tmp"
-            say "✓ Migrated the loose super-desktop bind lines in $BINDINGS_LUA"
-        fi
-        cat >>"$BINDINGS_LUA" <<'EOF'
+    if ((IS_OMARCHY == 1)) || [[ -f "$HYPRLAND_LUA" ]]; then
+        # 3. Add the overlay's toggle binding to ~/.config/hypr/bindings.lua.
+        #
+        # Everything between the two markers below belongs to the app: the
+        # overlay's ⚙ Settings panel rewrites this block when the user records
+        # another shortcut, and finds it again by the markers. src/shortcut.rs
+        # holds the same two strings (MANAGED_BEGIN/MANAGED_END) — change them in
+        # both places or in neither.
+        local bind_marker='-- >>> super-desktop shortcut (managed by the overlay settings) >>>'
+        mkdir -p "$(dirname "$BINDINGS_LUA")"
+        touch "$BINDINGS_LUA"
+        # -e: the marker starts with "--", which grep would read as an option.
+        if ! grep -qF -e "$bind_marker" "$BINDINGS_LUA"; then
+            # Older runs appended loose o.bind(...) lines together with the
+            # hl.unbind(...) lines that cleared the way for them. Drop those
+            # first: otherwise a re-run leaves two blocks fighting over the same
+            # shortcut (and the unbinds, which can outlive their bind, would keep
+            # an unused key dead).
+            if grep -qF "super-desktop toggle" "$BINDINGS_LUA"; then
+                local bindings_tmp
+                bindings_tmp="$(mktemp)"
+                grep -v -F \
+                    -e "super-desktop toggle" \
+                    -e '-- SUPER DESKTOP: Sticky notes and AI agent terminal overlay' \
+                    -e 'hl.unbind("SUPER + SHIFT + q")' \
+                    -e 'hl.unbind("SUPER + SHIFT + Cyrillic_shorti")' \
+                    -e 'hl.unbind("SUPER + SHIFT + Cyrillic_SHORTI")' \
+                    -e 'hl.unbind("SUPER + SHIFT + code:24")' \
+                    "$BINDINGS_LUA" >"$bindings_tmp" || true
+                cat "$bindings_tmp" >"$BINDINGS_LUA" # in place: keeps mode and owner
+                rm -f "$bindings_tmp"
+                say "✓ Migrated the loose super-desktop bind lines in $BINDINGS_LUA"
+            fi
+            cat >>"$BINDINGS_LUA" <<'EOF'
 
 -- >>> super-desktop shortcut (managed by the overlay settings) >>>
 -- Set in the overlay: ⚙ Settings → Keyboard shortcut.
@@ -556,55 +732,55 @@ o.bind("SUPER + SHIFT + code:24", "Super Desktop", hl.dsp.no_op())
 o.bind("SUPER + SHIFT + code:24", "Super Desktop", "super-desktop toggle", { release = true })
 -- <<< super-desktop shortcut <<<
 EOF
-        say "✓ Added the SUPER + SHIFT + Q binding to $BINDINGS_LUA"
-    else
-        say "✓ Hyprland keybinding already present in $BINDINGS_LUA"
-    fi
+            say "✓ Added the SUPER + SHIFT + Q binding to $BINDINGS_LUA"
+        else
+            say "✓ Hyprland keybinding already present in $BINDINGS_LUA"
+        fi
 
-    # 3b. Keep the daemon warm so the shortcut does not have to spawn it.
-    # `daemon` (not `start`) comes up hidden: the overlay is only built on the
-    # first toggle, but the process, GTK and the IPC socket are already there.
-    # Omarchy loads autostart.lua from hyprland.lua; an older install put the
-    # line in bindings.lua, which still counts.
-    local autostart_lua="$HOME/.config/hypr/autostart.lua"
-    if grep -qs "super-desktop daemon" "$BINDINGS_LUA" "$autostart_lua"; then
-        say "✓ Warm daemon autostart already present"
-    else
-        mkdir -p "$(dirname "$autostart_lua")"
-        printf '\n-- SUPER DESKTOP: start the daemon (and its harnesses and phone bridge) at login.\no.exec_on_start("super-desktop daemon")\n' >>"$autostart_lua"
-        say "✓ Added warm daemon autostart to $autostart_lua"
-    fi
+        # 3b. Keep the daemon warm so the shortcut does not have to spawn it.
+        # `daemon` (not `start`) comes up hidden: the overlay is only built on the
+        # first toggle, but the process, GTK and the IPC socket are already there.
+        # Omarchy loads autostart.lua from hyprland.lua; an older install put the
+        # line in bindings.lua, which still counts.
+        local autostart_lua="$HOME/.config/hypr/autostart.lua"
+        if grep -qs "super-desktop daemon" "$BINDINGS_LUA" "$autostart_lua"; then
+            say "✓ Warm daemon autostart already present"
+        else
+            mkdir -p "$(dirname "$autostart_lua")"
+            printf '\n-- SUPER DESKTOP: start the daemon (and its harnesses and phone bridge) at login.\no.exec_on_start("super-desktop daemon")\n' >>"$autostart_lua"
+            say "✓ Added warm daemon autostart to $autostart_lua"
+        fi
 
-    # 4. Add Layer Rule for blur effect to ~/.config/hypr/hyprland.lua.
-    # The overlay animates its own slide. Without no_anim Hyprland also fades
-    # the layer (Omarchy: ~180ms in, ~140ms more after the unmap), on every
-    # toggle.
-    local layer_rule_old='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })'
-    local layer_rule='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })'
-    mkdir -p "$(dirname "$HYPRLAND_LUA")"
-    touch "$HYPRLAND_LUA"
-    if grep -qxF "$layer_rule_old" "$HYPRLAND_LUA"; then
-        # Only the exact line this script used to write; a customized rule is kept.
-        local migrated
-        migrated="$(awk -v old="$layer_rule_old" -v new="$layer_rule" '$0 == old { print new; next } { print }' "$HYPRLAND_LUA")"
-        printf '%s\n' "$migrated" >"$HYPRLAND_LUA"
-        say "✓ Turned off Hyprland's layer fade for the overlay in $HYPRLAND_LUA"
-    elif ! grep -q "super-desktop" "$HYPRLAND_LUA"; then
-        {
-            echo ""
-            echo "-- Super Desktop overlay blur effect"
-            echo "$layer_rule"
-        } >>"$HYPRLAND_LUA"
-        say "✓ Added layer rule to $HYPRLAND_LUA"
-    else
-        say "✓ Hyprland layer rule already present in $HYPRLAND_LUA"
-    fi
+        # 4. Add Layer Rule for blur effect to ~/.config/hypr/hyprland.lua.
+        # The overlay animates its own slide. Without no_anim Hyprland also fades
+        # the layer (Omarchy: ~180ms in, ~140ms more after the unmap), on every
+        # toggle.
+        local layer_rule_old='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true })'
+        local layer_rule='hl.layer_rule({ match = { namespace = "super-desktop" }, blur = true, no_anim = true, animation = "none" })'
+        mkdir -p "$(dirname "$HYPRLAND_LUA")"
+        touch "$HYPRLAND_LUA"
+        if grep -qxF "$layer_rule_old" "$HYPRLAND_LUA"; then
+            # Only the exact line this script used to write; a customized rule is kept.
+            local migrated
+            migrated="$(awk -v old="$layer_rule_old" -v new="$layer_rule" '$0 == old { print new; next } { print }' "$HYPRLAND_LUA")"
+            printf '%s\n' "$migrated" >"$HYPRLAND_LUA"
+            say "✓ Turned off Hyprland's layer fade for the overlay in $HYPRLAND_LUA"
+        elif ! grep -q "super-desktop" "$HYPRLAND_LUA"; then
+            {
+                echo ""
+                echo "-- Super Desktop overlay blur effect"
+                echo "$layer_rule"
+            } >>"$HYPRLAND_LUA"
+            say "✓ Added layer rule to $HYPRLAND_LUA"
+        else
+            say "✓ Hyprland layer rule already present in $HYPRLAND_LUA"
+        fi
 
-    # 5. Install Omarchy theme-set hook for instant theme synchronization.
-    local hook_dir="$HOME/.config/omarchy/hooks/theme-set.d"
-    local hook_file="$hook_dir/super-desktop"
-    mkdir -p "$hook_dir"
-    cat <<'EOF' >"$hook_file"
+        # 5. Install Omarchy theme-set hook for instant theme synchronization.
+        local hook_dir="$HOME/.config/omarchy/hooks/theme-set.d"
+        local hook_file="$hook_dir/super-desktop"
+        mkdir -p "$hook_dir"
+        cat <<'EOF' >"$hook_file"
 #!/usr/bin/env bash
 BIN="$HOME/.local/bin/super-desktop"
 if [[ -x "$BIN" ]]; then
@@ -613,8 +789,11 @@ elif command -v super-desktop >/dev/null 2>&1; then
     super-desktop reload-theme >/dev/null 2>&1 || true
 fi
 EOF
-    chmod 700 "$hook_file"
-    say "✓ Installed Omarchy theme hook to $hook_file"
+        chmod 700 "$hook_file"
+        say "✓ Installed Omarchy theme hook to $hook_file"
+    else
+        configure_non_omarchy_compositor "$BIN_DST"
+    fi
 }
 
 hyprland_reachable() {
@@ -739,10 +918,11 @@ EOF
     fi
     rm -rf "$work"
 
-    local hook_dir="$HOME/.config/omarchy/hooks/pre-refresh-pacman.d"
-    local hook_file="$hook_dir/super-desktop"
-    mkdir -p "$hook_dir"
-    cat >"$hook_file" <<EOF
+    if ((IS_OMARCHY == 1)); then
+        local hook_dir="$HOME/.config/omarchy/hooks/pre-refresh-pacman.d"
+        local hook_file="$hook_dir/super-desktop"
+        mkdir -p "$hook_dir"
+        cat >"$hook_file" <<EOF
 #!/bin/bash
 CONF=$PACMAN_CONF
 SNIPPET=$PACMAN_REPO_CONF
@@ -755,8 +935,11 @@ else
     printf '\n%s\n' "\$MARKER" | sudo tee -a "\$CONF" >/dev/null
 fi
 EOF
-    chmod 755 "$hook_file"
-    say "✓ Configured [$PACMAN_REPO_NAME] pacman repository and Omarchy refresh hook"
+        chmod 755 "$hook_file"
+        say "✓ Configured [$PACMAN_REPO_NAME] pacman repository and Omarchy refresh hook"
+    else
+        say "✓ Configured [$PACMAN_REPO_NAME] pacman repository"
+    fi
 }
 
 sync_super_desktop_db() {
@@ -859,7 +1042,7 @@ install_pinned_package() {
     local ver pkg_name base_url work want have
     ver="${version#v}"
     pkg_name="super-desktop-bin-${ver}-1-${arch}.pkg.tar.zst"
-    base_url="https://github.com/gladimdim/super-desktop/releases/download/$version"
+    base_url="${RELEASE_BASE_URL%/}/$version"
     work="$(mktemp -d)"
 
     if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$work/$pkg_name" "$base_url/$pkg_name" 2>/dev/null ||
@@ -889,15 +1072,84 @@ install_pinned_package() {
     return 0
 }
 
-configure_packaged_user() {
-    local setup_bin="/usr/bin/super-desktop-setup"
-    [[ -x "$setup_bin" ]] || die "Packaged setup helper not found at $setup_bin."
-    if [[ -L "$BIN_DST" && "$(readlink "$BIN_DST" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
-        [[ -e "$BIN_DST" && ! -L "$BIN_DST" ]] ||
-        [[ -e "$APP_DST" ]]; then
-        "$setup_bin" --migrate
+print_compositor_instructions() {
+    local bin_cmd="$1"
+    say ""
+    say "Wayland compositor setup (requires a wlr-layer-shell compositor such as Hyprland, Sway, Niri, or KDE Plasma; GNOME/Mutter and X11 are not supported):"
+    say "  Hyprland (~/.config/hypr/hyprland.conf):"
+    say "    exec-once = $bin_cmd daemon"
+    say "    bindr = SUPER SHIFT, Q, exec, $bin_cmd toggle"
+    say "  Sway (~/.config/sway/config):"
+    say "    exec $bin_cmd daemon"
+    say "    bindsym \$mod+Shift+q exec $bin_cmd toggle"
+    say "  Niri (~/.config/niri/config.kdl):"
+    say "    spawn-at-startup \"$bin_cmd\" \"daemon\""
+    say "    binds { Mod+Shift+Q { spawn \"$bin_cmd\" \"toggle\"; } }"
+}
+
+configure_non_omarchy_compositor() {
+    local bin_cmd="$1"
+    local hypr_conf="$HOME/.config/hypr/hyprland.conf"
+    if [[ -f "$hypr_conf" ]]; then
+        if ! grep -qF "# >>> super-desktop >>>" "$hypr_conf"; then
+            if [[ ! -e "${hypr_conf}.before-super-desktop" ]]; then
+                cp -a "$hypr_conf" "${hypr_conf}.before-super-desktop"
+                say "✓ Backed up $hypr_conf to ${hypr_conf}.before-super-desktop"
+            fi
+            cat >>"$hypr_conf" <<EOF
+
+# >>> super-desktop >>>
+exec-once = $bin_cmd daemon
+bindr = SUPER SHIFT, Q, exec, $bin_cmd toggle
+# <<< super-desktop <<<
+EOF
+            say "✓ Added daemon autostart and SUPER + SHIFT + Q toggle binding to $hypr_conf"
+        else
+            say "✓ Hyprland binding already present in $hypr_conf"
+        fi
     else
-        "$setup_bin"
+        NON_OMARCHY_NEEDS_BINDING=1
+    fi
+}
+
+configure_non_omarchy_desktop() {
+    local bin_cmd="$1" is_packaged="${2:-0}"
+    if ((is_packaged)); then
+        if [[ -L "$BIN_DST" && "$(readlink "$BIN_DST" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]]; then
+            local target
+            target="$(readlink -f "$BIN_DST" 2>/dev/null || true)"
+            case "$target" in
+            */target/release/super-desktop-client | */target/release/super-desktop | */bin/super-desktop)
+                mv -f "$BIN_DST" "${BIN_DST}.before-package"
+                mkdir -p "$(dirname "$BIN_DST")"
+                ln -sf /usr/bin/super-desktop "$BIN_DST"
+                say "✓ Migrated $BIN_DST -> /usr/bin/super-desktop"
+                ;;
+            *)
+                warn "Custom launcher left untouched at $BIN_DST"
+                ;;
+            esac
+        fi
+        if [[ -f "$APP_DST" ]] && grep -q "super-desktop" "$APP_DST"; then
+            mv -f "$APP_DST" "${APP_DST}.before-package"
+        fi
+    fi
+    configure_non_omarchy_compositor "$bin_cmd"
+}
+
+configure_packaged_user() {
+    if ((IS_OMARCHY == 1)) || [[ -f "$HYPRLAND_LUA" ]]; then
+        local setup_bin="${SUPER_DESKTOP_SETUP_BIN:-/usr/bin/super-desktop-setup}"
+        [[ -x "$setup_bin" ]] || die "Packaged setup helper not found at $setup_bin."
+        if [[ -L "$BIN_DST" && "$(readlink "$BIN_DST" 2>/dev/null || true)" != "/usr/bin/super-desktop" ]] ||
+            [[ -e "$BIN_DST" && ! -L "$BIN_DST" ]] ||
+            [[ -e "$APP_DST" ]]; then
+            "$setup_bin" --migrate
+        else
+            "$setup_bin"
+        fi
+    else
+        configure_non_omarchy_desktop "/usr/bin/super-desktop" 1
     fi
 }
 
@@ -952,12 +1204,21 @@ summary_packaged() {
     say ""
     say "=== SUPER DESKTOP Installation Complete! ==="
     say "Installed: $installed_ver (prebuilt package, no compilation needed)"
-    say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
+    if ((IS_OMARCHY == 1)) || [[ -f "$HYPRLAND_LUA" ]]; then
+        say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
+    else
+        say "Run: super-desktop toggle"
+    fi
     say "Install and sign in to the AI coding CLIs you want to use separately."
     if [[ "$RELEASE" == v* ]]; then
         say "Pinned release $RELEASE installed from release asset."
-    else
+    elif ((IS_OMARCHY == 1)); then
         say "Future updates arrive automatically through Omarchy system updates (omarchy update) or: sudo pacman -Syu super-desktop-bin"
+    else
+        say "Future updates arrive via: sudo pacman -Syu super-desktop-bin"
+    fi
+    if ((NON_OMARCHY_NEEDS_BINDING)); then
+        print_compositor_instructions "super-desktop"
     fi
     if [[ -d "$DEFAULT_DIR/.git" ]]; then
         say "Note: your previous source checkout at $DEFAULT_DIR is no longer needed and can be removed if unused."
@@ -983,7 +1244,11 @@ restart_or_reload() {
 summary() {
     say ""
     say "=== SUPER DESKTOP Installation Complete! ==="
-    say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
+    if ((IS_OMARCHY == 1)) || [[ -f "$HYPRLAND_LUA" ]]; then
+        say "Press SUPER + SHIFT + Q (or the shortcut you recorded in ⚙ Settings) to toggle your workspace, or run: super-desktop toggle"
+    else
+        say "Run: $BIN_DST toggle"
+    fi
     say "Install and sign in to the AI coding CLIs you want to use separately."
     say "Source: $SRC (keep it: the installed command runs the binaries built there)"
     local pinned channel
@@ -1006,6 +1271,9 @@ summary() {
     *":$HOME/.local/bin:"*) ;;
     *) warn "$HOME/.local/bin is not on your PATH, so the 'super-desktop' command is only reachable as $BIN_DST." ;;
     esac
+    if ((NON_OMARCHY_NEEDS_BINDING)); then
+        print_compositor_instructions "$BIN_DST"
+    fi
 }
 
 main() {
@@ -1027,7 +1295,8 @@ main() {
     resolve_release
 
     local arch=""
-    if ! script_checkout >/dev/null 2>&1 && ((!BUILD_FROM_SOURCE)) && [[ "$RELEASE" != master ]] &&
+    if [[ "$DISTRO_FAMILY" == "omarchy" || "$DISTRO_FAMILY" == "arch" ]] &&
+        ! script_checkout >/dev/null 2>&1 && ((!BUILD_FROM_SOURCE)) && [[ "$RELEASE" != master ]] &&
         arch="$(supported_binary_arch)"; then
         if [[ "$RELEASE" == v* ]]; then
             if install_pinned_package "$RELEASE" "$arch"; then

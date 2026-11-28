@@ -811,9 +811,9 @@ mod tests {
         }
         agree.emit_clicked();
         crate::gtk_test::pump_until("the fork", || install::source(&places, "clock").is_some_and(|r| r["forked"] == true));
+        crate::gtk_test::pump_until("the note", || labels("plugin-card-meta").iter().any(|t| t.contains("No AI agent")));
         assert!(install::approved(&places, "clock"));
         assert!(places.plugins.join("clock/.claude/skills/super-desktop-plugin/SKILL.md").is_file());
-        crate::gtk_test::pump_until("the note", || labels("plugin-card-meta").iter().any(|t| t.contains("No AI agent")));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

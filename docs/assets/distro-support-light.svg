@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 364" width="880" height="364" role="img" aria-labelledby="distro-title distro-desc">
+  <title id="distro-title">SUPER DESKTOP verified Linux distro install matrix (light theme)</title>
+  <desc id="distro-desc">Six Linux distributions verified from scratch with install.sh: Omarchy and Arch Linux use prebuilt pacman packages; Fedora 45, Ubuntu 26.04 LTS, Debian Sid, and openSUSE Tumbleweed build from source with native dependencies. Ubuntu 24.04 LTS and Debian 13 trixie are rejected early because GTK4 is below 4.18 or VTE4 is below 0.84.</desc>
+  <defs>
+    <style>
+      .mono { font-family: ui-monospace, 'JetBrains Mono', 'DejaVu Sans Mono', Menlo, Consolas, monospace; }
+      .hdr { font-size: 12px; font-weight: 700; letter-spacing: 0.4px; }
+      .name { font-size: 14px; font-weight: 700; fill: #0f1115; }
+      .sub { font-size: 11.5px; fill: #4b5563; }
+      .pill { font-size: 11px; font-weight: 700; letter-spacing: 0.4px; }
+      .foot { font-size: 11.5px; }
+    </style>
+  </defs>
+
+  <!-- Outer frame -->
+  <rect x="0" y="0" width="880" height="364" fill="#ffffff"/>
+  <rect x="1" y="1" width="878" height="362" fill="none" stroke="#15803d" stroke-width="2"/>
+
+  <!-- Top pane header -->
+  <rect x="2" y="2" width="876" height="40" fill="#e9e9e2"/>
+  <line x1="2" y1="42" x2="878" y2="42" stroke="#15803d" stroke-width="2"/>
+  <text x="20" y="26" class="mono hdr" fill="#15803d">[INSTALL.SH] AUTO-DETECTED LINUX DISTROS</text>
+  <text x="860" y="26" class="mono hdr" fill="#b45309" text-anchor="end">VERIFIED FROM SCRATCH &#183; 6 DISTROS</text>
+
+  <!-- Row 1, Col 1: Omarchy -->
+  <g transform="translate(20, 58)">
+    <rect x="0" y="0" width="412" height="70" fill="#fafaf7" stroke="#18181b" stroke-width="1"/>
+    <rect x="0" y="0" width="4" height="70" fill="#15803d"/>
+    <text x="18" y="27" class="mono name">Omarchy</text>
+    <rect x="302" y="11" width="98" height="22" fill="#15803d"/>
+    <text x="351" y="26" class="mono pill" fill="#ffffff" text-anchor="middle">&#10003; PREBUILT</text>
+    <text x="18" y="52" class="mono sub">pacman &#183; prebuilt super-desktop-bin + Omarchy hooks</text>
+  </g>
+
+  <!-- Row 1, Col 2: Arch Linux -->
+  <g transform="translate(448, 58)">
+    <rect x="0" y="0" width="412" height="70" fill="#fafaf7" stroke="#18181b" stroke-width="1"/>
+    <rect x="0" y="0" width="4" height="70" fill="#1793D1"/>
+    <text x="18" y="27" class="mono name">Arch Linux</text>
+    <rect x="302" y="11" width="98" height="22" fill="#15803d"/>
+    <text x="351" y="26" class="mono pill" fill="#ffffff" text-anchor="middle">&#10003; PREBUILT</text>
+    <text x="18" y="52" class="mono sub">pacman &#183; prebuilt super-desktop-bin</text>
+  </g>
+
+  <!-- Row 2, Col 1: Fedora 45 -->
+  <g transform="translate(20, 140)">
+    <rect x="0" y="0" width="412" height="70" fill="#fafaf7" stroke="#18181b" stroke-width="1"/>
+    <rect x="0" y="0" width="4" height="70" fill="#51A2DA"/>
+    <text x="18" y="27" class="mono name">Fedora 45</text>
+    <rect x="302" y="11" width="98" height="22" fill="rgba(21, 128, 61, 0.12)" stroke="#15803d" stroke-width="1"/>
+    <text x="351" y="26" class="mono pill" fill="#15803d" text-anchor="middle">&#10003; PASS</text>
+    <text x="18" y="52" class="mono sub">dnf &#183; native deps + source build</text>
+  </g>
+
+  <!-- Row 2, Col 2: Ubuntu 26.04 LTS -->
+  <g transform="translate(448, 140)">
+    <rect x="0" y="0" width="412" height="70" fill="#fafaf7" stroke="#18181b" stroke-width="1"/>
+    <rect x="0" y="0" width="4" height="70" fill="#E95420"/>
+    <text x="18" y="27" class="mono name">Ubuntu 26.04 LTS</text>
+    <rect x="302" y="11" width="98" height="22" fill="rgba(21, 128, 61, 0.12)" stroke="#15803d" stroke-width="1"/>
+    <text x="351" y="26" class="mono pill" fill="#15803d" text-anchor="middle">&#10003; PASS</text>
+    <text x="18" y="52" class="mono sub">apt &#183; native deps + source build</text>
+  </g>
+
+  <!-- Row 3, Col 1: Debian Sid -->
+  <g transform="translate(20, 222)">
+    <rect x="0" y="0" width="412" height="70" fill="#fafaf7" stroke="#18181b" stroke-width="1"/>
+    <rect x="0" y="0" width="4" height="70" fill="#A81D33"/>
+    <text x="18" y="27" class="mono name">Debian Sid</text>
+    <rect x="302" y="11" width="98" height="22" fill="rgba(21, 128, 61, 0.12)" stroke="#15803d" stroke-width="1"/>
+    <text x="351" y="26" class="mono pill" fill="#15803d" text-anchor="middle">&#10003; PASS</text>
+    <text x="18" y="52" class="mono sub">apt &#183; native deps + source build</text>
+  </g>
+
+  <!-- Row 3, Col 2: openSUSE Tumbleweed -->
+  <g transform="translate(448, 222)">
+    <rect x="0" y="0" width="412" height="70" fill="#fafaf7" stroke="#18181b" stroke-width="1"/>
+    <rect x="0" y="0" width="4" height="70" fill="#73BA25"/>
+    <text x="18" y="27" class="mono name">openSUSE Tumbleweed</text>
+    <rect x="302" y="11" width="98" height="22" fill="rgba(21, 128, 61, 0.12)" stroke="#15803d" stroke-width="1"/>
+    <text x="351" y="26" class="mono pill" fill="#15803d" text-anchor="middle">&#10003; PASS</text>
+    <text x="18" y="52" class="mono sub">zypper &#183; native deps + source build</text>
+  </g>
+
+  <!-- Footer -->
+  <line x1="2" y1="306" x2="878" y2="306" stroke="#18181b" stroke-width="1"/>
+  <rect x="20" y="315" width="132" height="20" fill="rgba(190, 18, 60, 0.10)" stroke="#be123c" stroke-width="1"/>
+  <text x="86" y="329" class="mono pill" fill="#be123c" text-anchor="middle">&#10005; REJECTED EARLY</text>
+  <text x="164" y="329" class="mono foot" fill="#0f1115">Ubuntu 24.04 LTS &#183; Debian 13 (trixie) &#8212; GTK4 &lt; 4.18 / VTE4 &lt; 0.84</text>
+  <text x="20" y="351" class="mono foot" fill="#4b5563">Wayland wlr-layer-shell (Hyprland &#183; Sway &#183; Niri &#183; KDE Plasma) &#183; x86_64 &amp; aarch64 &#183; No GNOME / X11</text>
+</svg>
