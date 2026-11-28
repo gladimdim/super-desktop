@@ -255,7 +255,10 @@ mod tests {
         let nonce = crate::control::new_request(crate::control::Command::Status {})
             .unwrap()
             .request_id;
-        let root = std::env::temp_dir().join(format!("sd-mcp-settings-{nonce}"));
+        let temp_root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap_or_else(|_| std::env::temp_dir());
+        let root = temp_root.join(format!("sd-mcp-settings-{nonce}"));
         let path = root.join("mcp.json");
         assert_eq!(load_at(&path).unwrap(), Config::default());
         let config = Config {

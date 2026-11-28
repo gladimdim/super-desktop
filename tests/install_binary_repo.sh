@@ -449,7 +449,8 @@ case_standalone_pacman_repo_and_hook() {
     mock_tmp="$WORK_DIR/repo-tmp"
     pconf="$WORK_DIR/repo-pacman.conf"
     rconf="$WORK_DIR/repo-pacman.d/super-desktop.conf"
-    mkdir -p "$mock_bin" "$mock_home" "$mock_tmp"
+    mkdir -p "$mock_bin" "$mock_home/.local/share/omarchy" "$mock_home/.config/hypr" "$mock_tmp"
+    touch "$mock_home/.config/hypr/hyprland.lua"
     printf '[omarchy]\nServer = https://pkgs.omarchy.org/stable/$arch\n' >"$pconf"
 
     cat >"$mock_bin/curl" <<EOF
