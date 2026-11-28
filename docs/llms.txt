@@ -8,7 +8,7 @@ Free Android APK: https://github.com/gladimdim/super-desktop/releases/download/v
 Google Play edition: https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop
 iPhone and iPad (App Store, listed as SUPER DESKTOP: AI Agents): https://apps.apple.com/app/super-desktop-ai-agents/id6818722591
 Author: Dmytro Gladkyi (independent developer)
-Current desktop release: 2.2.0
+Current desktop release: 2.2.1
 
 SUPER DESKTOP 2.1.0 ships the Telegram Mini Web App over Tailscale with live Omarchy theme syncing, spam-free Forum Topics with instant Done output reports, terminal relaunch, and speech transcription endpoints. Android 2.3.0 (21) and SD Launcher 1.15.0 (121) add approval quick keys, harness-aware composer shortcuts, error-state cues, and terminal Relaunch (fresh or resume) for PC 2.1.0+.
 

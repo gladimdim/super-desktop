@@ -54,7 +54,7 @@
       "applicationCategory": "DeveloperApplication",
       "applicationSubCategory": "AI coding agent workspace",
       "operatingSystem": "Linux (Omarchy, Arch Linux with Hyprland)",
-      "softwareVersion": "2.2.0",
+      "softwareVersion": "2.2.1",
       "license": "https://www.gnu.org/licenses/gpl-3.0.html",
       "isAccessibleForFree": true,
       "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
@@ -420,7 +420,7 @@
 <body>
 <header class="wmbar">
   <div class="wrap">
-    <span class="wm-tag">[SUPER DESKTOP v2.2.0]</span>
+    <span class="wm-tag">[SUPER DESKTOP v2.2.1]</span>
     <div class="wm-stat">
       <span>ACCOUNT: <b style="color:var(--red)">❌ NONE</b></span>
       <span>API_KEYS: <b style="color:var(--red)">❌ NEVER TOUCHED</b></span>
@@ -548,7 +548,7 @@ chmod 755 ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop</code></pre
       <div class="panel" id="inst-pin" role="tabpanel" aria-labelledby="tab-inst-pin" hidden>
         <div class="cmd"><code id="cmd-direct-pkg-sh">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | bash</code><button type="button" data-copy="cmd-direct-pkg-sh">COPY</button></div>
         <p style="margin:8px 0 12px;color:var(--muted);font-size:12.5px">Installs latest <code>.pkg.tar.zst</code> via <code>SHA256SUMS</code> · <a href="install/direct-pkg.sh" target="_blank" rel="noopener">[direct-pkg.sh ↗]</a></p>
-        <div class="cmd"><code id="cmd-version">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | VER=2.2.0 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
+        <div class="cmd"><code id="cmd-version">curl -fsSL https://superdesktop.dmytrogladkyi.com/install/direct-pkg.sh | VER=2.2.1 bash</code><button type="button" data-copy="cmd-version">COPY</button></div>
         <p style="margin:8px 0 0;color:var(--muted);font-size:12.5px">Pin any binary release via <code>VER=X.Y.Z</code> · <a href="https://github.com/gladimdim/super-desktop/releases" target="_blank" rel="noopener">[Releases ↗]</a></p>
         <details class="more">
           <summary>Raw pacman -U</summary>
@@ -558,7 +558,7 @@ chmod 755 ~/.config/omarchy/hooks/pre-refresh-pacman.d/super-desktop</code></pre
               <button type="button" data-copy="cmd-pacman-u">COPY</button>
             </div>
             <pre><code id="cmd-pacman-u">ARCH=$(uname -m)
-VER=2.2.0
+VER=2.2.1
 sudo pacman -U "https://github.com/gladimdim/super-desktop/releases/download/v${VER}/super-desktop-bin-${VER}-1-${ARCH}.pkg.tar.zst"
 super-desktop-setup</code></pre>
           </div>
@@ -586,7 +586,7 @@ cd super-desktop &amp;&amp; ./install.sh
 
       <div class="btn-row" style="margin-top:14px">
         <a class="btn lime" href="https://github.com/gladimdim/super-desktop">GITHUB REPO ↗</a>
-        <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/tag/v2.2.0">RELEASES (v2.2.0)</a>
+        <a class="btn" href="https://github.com/gladimdim/super-desktop/releases/tag/v2.2.1">RELEASES (v2.2.1)</a>
         <a class="btn" href="https://apps.apple.com/app/super-desktop-ai-agents/id6818722591">APP STORE (iOS) ↗</a>
         <a class="btn" href="https://play.google.com/store/apps/details?id=com.gladimdim.superdesktop">GOOGLE PLAY ↗</a>
         <a class="btn" href="https://github.com/gladimdim/super-desktop/blob/master/guides/INSTALL.md">INSTALL GUIDE</a>
@@ -639,7 +639,7 @@ cd super-desktop &amp;&amp; ./install.sh
     <div class="pane-body">
       <div class="grid-3">
         <div class="box">
-          <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>OMARCHY LINUX (v2.2.0)</h3>
+          <h3><svg class="dev-ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="2" y="3" width="20" height="14"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>OMARCHY LINUX (v2.2.1)</h3>
           <p>Signed <code>x86_64</code> &amp; <code>aarch64</code> Pacman packages, tmux cards, QML plugins, CLI &amp; MCP.</p>
           <div class="act"><a class="btn lime" href="#install">Install</a><a href="https://github.com/gladimdim/super-desktop">GitHub ↗</a></div>
         </div>
